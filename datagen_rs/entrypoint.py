@@ -60,12 +60,17 @@ def detect_cpu_quota() -> int:
 
 # Peak-RSS model, mirrored from lakebench.config.autosizer (a unit test keeps
 # the two copies equal): per worker thread about MULT x the output file size;
-# node 0 on the financial path also builds the full world at about 575 B per
-# entity (111,111 entities per scale unit).
-PER_THREAD_FILE_MULTIPLIER = {"financial": 4.8, "customer360": 3.0}
-WORLD_BYTES_PER_ENTITY_NODE0 = 650
+# EVERY financial node builds per-entity structures at about 420 B per entity and
+# node 0 also builds the full world at about 600 B per entity (111,111 entities
+# per scale unit). Re-fit for LB-199 (2026-09-29): the per-thread term was
+# under-fit (4.8 -> 8.0) and the worker per-entity term was missing, so scale-100
+# node-0 OOMKilled at the old default. See autosizer.py for the measurement basis.
+PER_THREAD_FILE_MULTIPLIER = {"financial": 8.0, "customer360": 3.0}
+WORLD_BYTES_PER_ENTITY_NODE0 = 600
+# Per-entity structures on EVERY financial node (src/screening.rs::build etc).
+WORKER_ENTITY_BYTES = {"financial": 420}
 ENTITIES_PER_SCALE = 111_111
-BASE_GIB = {"financial": 1.7, "customer360": 0.3}
+BASE_GIB = {"financial": 1.5, "customer360": 0.3}
 HEADROOM = 1.25
 
 
@@ -89,11 +94,13 @@ def max_threads_for_memory(
 ) -> int:
     """Largest thread count whose estimated peak RSS fits the memory limit."""
     gib = limit_bytes / 2**30
+    entities = ENTITIES_PER_SCALE * scale
+    worker_scale = entities * WORKER_ENTITY_BYTES.get(schema, 0) / 2**30
     world = 0.0
     if schema == "financial" and is_node0:
-        world = ENTITIES_PER_SCALE * scale * WORLD_BYTES_PER_ENTITY_NODE0 / 2**30
+        world = entities * WORLD_BYTES_PER_ENTITY_NODE0 / 2**30
     per_thread = (file_size_mb / 1024.0) * PER_THREAD_FILE_MULTIPLIER.get(schema, 3.0)
-    budget = gib / HEADROOM - world - BASE_GIB.get(schema, 0.3)
+    budget = gib / HEADROOM - world - worker_scale - BASE_GIB.get(schema, 0.3)
     return max(1, int(budget // per_thread)) if per_thread > 0 else 1
 
 

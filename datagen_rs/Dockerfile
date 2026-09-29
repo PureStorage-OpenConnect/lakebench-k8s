@@ -3,7 +3,9 @@
 # that carries the binary beside a thin entrypoint which runs it and uploads
 # the output to S3, matching the datagen K8s Job contract.
 
-FROM rust:1.98.1-bookworm AS build
+# Digest-pinned for freeze reproducibility: a version-only tag could pull a
+# patched toolchain on rebuild and emit a different binary (LB-199 review).
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src

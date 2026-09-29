@@ -98,15 +98,33 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
 # binary at 64 MB and 512 MB files, 1 and 8 threads (2026-09-24): each worker
 # thread holds about 4.8x the output file size for financial (row vectors,
 # sorted copies, the Arrow batch, writer buffers) and about 3.0x for c360; a
-# pod carries a fixed ~1.7 GiB (financial) or ~0.3 GiB (c360); node 0 builds
-# the full financial world at about 650 B per entity (measured scale 1-100:
-# node-0 peak 3.54, 4.66, 7.62, 10.69 GiB at scale 1, 10, 50, 100). The same
-# coefficients are used by datagen_rs/entrypoint.py to cap threads, so the
-# two never disagree.
-DATAGEN_PER_THREAD_FILE_MULTIPLIER = {"financial": 4.8, "customer360": 3.0}
-DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 = 650
+# pod carries a fixed ~1.5 GiB (financial) or ~0.3 GiB (c360). Two terms scale
+# with entity count (111,111 per scale unit): EVERY financial node builds
+# per-entity structures (watchlist/external counterparties from screening.rs,
+# plus related population state) at about 420 B per entity, and node 0 ALSO
+# builds the full financial world at about 600 B per entity.
+#
+# LB-199 re-fit 2026-09-29 from a measurement matrix (local podman cgroup
+# high-watermark, anchored to two authoritative cluster working-set points
+# s100/8t/128: worker 12.23, node-0 18.18 GiB). The old model under-fit the
+# per-thread term (4.8; measured slope ~7.1 at 4-8 threads rising to ~8.0 at
+# 8-16 threads) AND omitted the worker per-entity term entirely (~407 B/ent
+# measured), so scale-100 node-0 OOMKilled at the 17Gi default. The per-thread
+# term keeps a touch of margin (8.0) to cover the slightly super-linear 16-thread
+# slope; the world/worker/base terms sit near the measured mean and the 1.25
+# HEADROOM carries the safety margin (not stacked coefficient round-ups). The
+# same coefficients cap threads in datagen_rs/entrypoint.py, kept equal by
+# tests/test_datagen_template_entrypoint_contract.py. All datagen pods take the
+# node-0 request (the busiest pod), so workers are over-provisioned by the world
+# term they never build -- an Indexed Job has one pod template.
+DATAGEN_PER_THREAD_FILE_MULTIPLIER = {"financial": 8.0, "customer360": 3.0}
+DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 = 600
+# Per-entity structures built on EVERY financial node. c360 has no screening
+# track; its scale-dependent loyalty lookup is 2 B/customer (negligible) and
+# runtime-guarded (customer360.rs), so it needs no term here.
+DATAGEN_WORKER_ENTITY_BYTES = {"financial": 420}
 DATAGEN_ENTITIES_PER_SCALE = 111_111
-DATAGEN_BASE_GIB = {"financial": 1.7, "customer360": 0.3}
+DATAGEN_BASE_GIB = {"financial": 1.5, "customer360": 0.3}
 DATAGEN_HEADROOM = 1.25
 
 
@@ -120,12 +138,20 @@ def _parse_size_mb(size: str) -> float:
 
 
 def datagen_memory_gib(schema: str, scale: float, threads: int, file_size_mb: float) -> float:
-    """Estimated peak RSS in GiB for the busiest datagen pod (node 0)."""
+    """Estimated peak RSS in GiB for the busiest datagen pod (node 0).
+
+    Sizes the pod REQUEST to node 0, the busiest pod, which carries the base
+    overhead, the per-thread file buffers, the per-node screening structures,
+    and (node 0 only) the full financial world.
+    """
+    entities = DATAGEN_ENTITIES_PER_SCALE * scale
     per_thread = (file_size_mb / 1024.0) * DATAGEN_PER_THREAD_FILE_MULTIPLIER.get(schema, 3.0)
+    worker_scale = entities * DATAGEN_WORKER_ENTITY_BYTES.get(schema, 0) / 2**30
     world = 0.0
     if schema == "financial":
-        world = DATAGEN_ENTITIES_PER_SCALE * scale * DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 / 2**30
-    return (world + threads * per_thread + DATAGEN_BASE_GIB.get(schema, 0.3)) * DATAGEN_HEADROOM
+        world = entities * DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 / 2**30
+    base = DATAGEN_BASE_GIB.get(schema, 0.3)
+    return (world + worker_scale + threads * per_thread + base) * DATAGEN_HEADROOM
 
 
 def _datagen_memory_default(config: LakebenchConfig, cpu: str) -> str:
