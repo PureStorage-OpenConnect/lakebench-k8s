@@ -625,6 +625,25 @@ def _print_comparison_table(comparison: dict) -> None:
     table.add_column(name_b, justify="right")
     table.add_column("Delta", justify="right")
 
+    from lakebench.reports.formatter import (
+        DELTA_TOKEN_A_FASTER,
+        DELTA_TOKEN_B_FASTER,
+        DELTA_TOKEN_OVERLAP,
+        DELTA_TOKEN_WITHHELD,
+        delta_token,
+    )
+
+    # WCAG 1.4.1: pass/fail and winner/loser are not encoded by colour alone.
+    # Each delta cell carries an ASCII glyph and a text token next to the
+    # percentage; a screen-reader or a copy-paste of the text still shows
+    # which side won, without relying on the red/green pill.
+    _TOKEN_GLYPH = {
+        DELTA_TOKEN_A_FASTER: "<",
+        DELTA_TOKEN_B_FASTER: ">",
+        DELTA_TOKEN_OVERLAP: "=",
+        DELTA_TOKEN_WITHHELD: "x",
+        "capped": "!",
+    }
     for row in comparison["metrics"]:
         val_a = row["config_a"]
         val_b = row["config_b"]
@@ -637,20 +656,29 @@ def _print_comparison_table(comparison: dict) -> None:
             and val_a != 0
         ):
             pct = ((val_b - val_a) / abs(val_a)) * 100
-            if abs(pct) < _NOISE_FLOOR_PCT or _is_neutral(row["metric"]):
+            within_noise = abs(pct) < _NOISE_FLOOR_PCT or _is_neutral(row["metric"])
+            token = delta_token(
+                higher_is_better=_higher_is_better(row["metric"]),
+                pct=pct,
+                within_noise=within_noise,
+            )
+            glyph = _TOKEN_GLYPH.get(token, "=")
+            if within_noise:
                 # Measured spread on an idle host is ~1%. Colouring a smaller
                 # difference green or red claims a result the run cannot
                 # support, and neutral scores have no better direction.
-                delta = f"[dim]{pct:+.1f}%[/dim]"
+                delta = f"[dim]{glyph} {token} {pct:+.1f}%[/dim]"
             else:
                 better = "green" if _higher_is_better(row["metric"]) == (pct > 0) else "red"
-                delta = f"[{better}]{pct:+.1f}%[/{better}]"
+                delta = f"[{better}]{glyph} {token} {pct:+.1f}%[/{better}]"
 
         if row.get("not_comparable"):
+            token = DELTA_TOKEN_WITHHELD
+            glyph = _TOKEN_GLYPH[token]
             delta = (
-                "[yellow]not established[/yellow]"
+                f"[yellow]{glyph} {token} not established[/yellow]"
                 if verdict == "not_established"
-                else "[red]not comparable[/red]"
+                else f"[red]{glyph} {token} not comparable[/red]"
             )
         table.add_row(
             row["metric"],
