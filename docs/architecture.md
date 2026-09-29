@@ -193,7 +193,7 @@ them causes OOM kills or disk-full failures at scale.
 |---|---|---|---|---|
 | `bronze-verify` | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial) |
 | `silver-build` | 4 | 48g | 12g | 300Gi |
-| `gold-finalize` | 4 | 32g | 8g | 100Gi |
+| `gold-finalize` | 4 | 32g | 8g | 300Gi |
 
 The financial workload's bronze-verify trips a CTAS fallback in
 `bronze_verify_financial.py` above scale 5 (Iceberg `add_files` cannot

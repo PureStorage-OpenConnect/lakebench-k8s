@@ -69,7 +69,7 @@ Reference resource profiles:
 |---|---|---|---|---|
 | bronze-verify | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial, LB-118) |
 | silver-build | 4 | 48g | 12g | 300Gi |
-| gold-finalize | 4 | 32g | 8g | 100Gi |
+| gold-finalize | 4 | 32g | 8g | 300Gi |
 
 ---
 

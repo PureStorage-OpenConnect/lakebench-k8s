@@ -237,7 +237,7 @@ user-configurable. They live in
 |---|---|---|---|---|---|---|
 | `bronze-verify` | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial) | 4g | 4g |
 | `silver-build` | 4 | 48g | 12g | 300Gi | 24g | 32g |
-| `gold-finalize` | 4 | 32g | 8g | 100Gi | 24g | 32g |
+| `gold-finalize` | 4 | 32g | 8g | 300Gi | 24g | 32g |
 
 For financial workloads (LB-118) `bronze-verify` also overrides executor
 memory (4g -> 8g), overhead (2g -> 12g), `executors_per_100_scale` (4 -> 8)

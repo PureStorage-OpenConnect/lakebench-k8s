@@ -16,6 +16,21 @@ from .engine import DeploymentResult, DeploymentStatus
 
 logger = logging.getLogger(__name__)
 
+
+def _pod_owned_by_job(pod, job_uid: str) -> bool:
+    """True when ``pod`` is controlled by the Job with ``job_uid`` (LB-200).
+
+    Scopes datagen progress to the current job incarnation so a prior
+    generation's stale pod (same name/label, still Terminating) cannot be
+    counted. Kubernetes stamps each Job pod with an owner reference to its
+    Job; match on that uid.
+    """
+    for ref in getattr(pod.metadata, "owner_references", None) or []:
+        if getattr(ref, "kind", None) == "Job" and getattr(ref, "uid", None) == job_uid:
+            return True
+    return False
+
+
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
 
@@ -567,6 +582,12 @@ class DatagenDeployer:
             succeeded = status.succeeded or 0
             failed = status.failed or 0
             active = status.active or 0
+            # LB-200: scope progress to the CURRENT job's pods. A re-generate
+            # reuses the name/label, so a prior job's OOMKilled pod (still
+            # Terminating) would otherwise be scanned and false-abort the new,
+            # healthy generation. Pods carry the owning Job's uid in an owner
+            # reference; keep only pods owned by this job incarnation.
+            job_uid = job.metadata.uid if job.metadata else None
 
             # Get pod logs for progress
             pods = core_v1.list_namespaced_pod(
@@ -580,6 +601,8 @@ class DatagenDeployer:
             crash_details: dict[str, str] = {}
             pending_pods: list[str] = []
             for pod in pods.items:
+                if job_uid and not _pod_owned_by_job(pod, job_uid):
+                    continue  # a stale pod from a previous generation
                 pod_name = pod.metadata.name
                 pod_info = {
                     "name": pod_name,
