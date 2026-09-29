@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 #
 #   bronze-verify:  2 cores,  6g total (4g + 2g overhead),  50Gi Portworx PVC
 #   silver-build:   4 cores, 60g total (48g + 12g overhead), 150Gi Portworx PVC
-#   gold-finalize:  4 cores, 40g total (32g + 8g overhead),  100Gi Portworx PVC
+#   gold-finalize:  4 cores, 40g total (32g + 8g overhead),  300Gi Portworx PVC
 #
 # The silver job is the bottleneck -- at scale 100 (~1TB) it requests
 # 19 executors × 60g = ~1.14 TB RAM + 19 × 150Gi = 2.85 TB scratch PVC.
