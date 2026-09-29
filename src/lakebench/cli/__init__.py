@@ -1803,6 +1803,12 @@ def report(
     if output_path is not None and not render:
         print_error("--output requires --render")
         raise typer.Exit(2)
+    # --force only makes sense with --output: the default timestamped path
+    # is collision-free in practice, so --force there is a no-op that only
+    # confuses the caller. Matches the help text.
+    if force and output_path is None:
+        print_error("--force requires --output (the default timestamped path is collision-free)")
+        raise typer.Exit(2)
 
     if render:
         try:
@@ -1814,7 +1820,12 @@ def report(
             )
         except FileExistsError as e:
             print_error(str(e))
-            print_info("Pass --force to overwrite the file at --output.")
+            # Only mention --output in the hint when the user actually set it;
+            # the default timestamped path never collides in practice.
+            if output_path is not None:
+                print_info("Pass --force to overwrite the file at --output.")
+            else:
+                print_info("Retry in a moment; the timestamp will differ.")
             raise typer.Exit(1)  # noqa: B904
         except ValueError as e:
             print_error(str(e))
