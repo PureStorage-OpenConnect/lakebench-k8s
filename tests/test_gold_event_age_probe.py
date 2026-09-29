@@ -16,8 +16,34 @@ from unittest.mock import MagicMock
 import pytest
 
 from lakebench.benchmark.result import QueryExecutorResult
-from lakebench.cli._sustained import _run_benchmark_round, gold_event_age_sql
+from lakebench.cli._sustained import (
+    _run_benchmark_round,
+    gold_event_age_sql,
+    gold_event_age_target,
+)
 from lakebench.modules.query_engines.spark_thrift.executor import SparkThriftExecutor
+
+
+def test_target_is_alert_ts_on_alerts_for_financial():
+    # Financial reads gold.alerts.alert_ts, not daily_dashboards, so an
+    # empty-alert window records nothing instead of a baseline age (LB-185 sibling).
+    assert gold_event_age_target("financial", "gold.dash", "gold.alerts") == (
+        "gold.alerts",
+        "alert_ts",
+    )
+
+
+def test_target_is_interaction_date_for_c360():
+    assert gold_event_age_target("customer360", "gold.dash", "gold.alerts") == (
+        "gold.dash",
+        "interaction_date",
+    )
+
+
+def test_alert_ts_column_flows_into_the_sql():
+    sql = gold_event_age_sql("trino", "lakehouse.gold.alerts", "alert_ts")
+    assert "date_diff('second', CAST(MAX(alert_ts) AS TIMESTAMP), current_timestamp)" in sql
+    assert sql.endswith("FROM lakehouse.gold.alerts")
 
 
 def test_spark_thrift_gets_spark_sql_after_adapt_query():
@@ -82,3 +108,53 @@ def test_round_sends_the_spark_form_to_thrift():
     assert len(sent) == 1 and "date_diff" not in sent[0].lower()
     recorded = collector.record_benchmark_round.call_args.args[0]
     assert recorded.round_meta.gold_event_age_seconds == 54805675
+
+
+def test_financial_round_probes_alert_ts_on_gold_alerts():
+    sent: list[str] = []
+
+    class _FakeExec:
+        def engine_name(self):
+            return "trino"
+
+        def flush_cache(self):
+            pass
+
+        def adapt_query(self, sql):
+            return sql
+
+        def execute_query(self, sql, timeout=300):
+            sent.append(sql)
+            return QueryExecutorResult(
+                sql=sql,
+                engine="trino",
+                duration_seconds=0.1,
+                rows_returned=1,
+                raw_output="age\n42",
+            )
+
+    runner = MagicMock(executor=_FakeExec(), catalog="lakehouse", gold_table="gold.dash")
+    runner._extra_tables = {"gold_alerts": "gold.alerts"}
+    runner.config.architecture.workload.schema_type.value = "financial"
+    runner.run_power.return_value = SimpleNamespace(
+        queries=[],
+        mode="power",
+        cache="hot",
+        scale=1,
+        qph=100.0,
+        total_seconds=1.0,
+        iterations=1,
+        engine="trino",
+    )
+    _run_benchmark_round(
+        cfg=MagicMock(),
+        bench_runner=runner,
+        collector=MagicMock(),
+        console=MagicMock(),
+        round_index=1,
+        j=MagicMock(),
+        k8s=None,
+    )
+    probe = sent[0]
+    assert "MAX(alert_ts)" in probe
+    assert probe.endswith("FROM lakehouse.gold.alerts")

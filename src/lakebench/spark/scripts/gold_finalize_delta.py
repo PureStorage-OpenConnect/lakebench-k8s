@@ -22,6 +22,7 @@ from common import (
     get_daily_kpi_aggregations,
     log,
     log_c360_check,
+    log_job_metrics,
     set_utc_session,
     write_delta_table,
 )
@@ -390,12 +391,16 @@ log(f"Strategy: {strategy.value}")
 log(f"KPI records: {kpi_count:,}")
 log(f"Table: {gold_tbl}")
 log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
-log("=== JOB METRICS: gold-finalize ===")
-log(f"input_size_gb: {silver_size_gb:.3f}")
-log(f"estimated_rows: {silver_count}")
-log(f"output_rows: {kpi_count}")
-log(f"elapsed_seconds: {total_time:.1f}")
-log("=" * 60)
+# log_job_metrics writes the JOB METRICS block (input_rows aliases estimated_rows
+# in the collector) and pushes the stage gauges to the Pushgateway, so the Delta
+# c360 gold adapter reaches the live dashboard like the Iceberg adapter (Gate 3 obs).
+log_job_metrics(
+    "gold-finalize",
+    input_size_gb=silver_size_gb,
+    input_rows=silver_count,
+    output_rows=kpi_count,
+    elapsed_seconds=total_time,
+)
 # Expected-result facts (reporting only, D6), after the timing above.
 log_c360_check(spark, silver_tbl, gold_tbl)
 spark.stop()
