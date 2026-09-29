@@ -1585,8 +1585,31 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
     return health
 
 
-def gold_event_age_sql(engine: str, fq_gold: str) -> str:
-    """Seconds from gold's newest event date to now, in *engine*'s dialect.
+def gold_event_age_target(
+    schema_type: str, gold_table: str, gold_alerts_table: str
+) -> tuple[str, str]:
+    """The (table, event-time column) the event-age probe reads for a workload.
+
+    Financial reads ``gold.alerts.alert_ts``; every other workload reads its
+    gold table's ``interaction_date``. Financial's ``daily_dashboards`` carries
+    a baseline row the detection rules fill every tick, so its newest date is
+    never empty even in a window that produced no alerts; reading it would report
+    a freshness age for a window that detected nothing. The probe reads alerts
+    instead, so an empty-alert window yields MAX(alert_ts) = NULL and the caller
+    records nothing (UNRECORDED) rather than back-filling from the baseline.
+    """
+    if schema_type == "financial":
+        return gold_alerts_table, "alert_ts"
+    return gold_table, "interaction_date"
+
+
+def gold_event_age_sql(engine: str, fq_gold: str, ts_column: str = "interaction_date") -> str:
+    """Seconds from gold's newest event time to now, in *engine*'s dialect.
+
+    ``ts_column`` is the gold table's event-time column: ``interaction_date``
+    for c360's dashboards, ``alert_ts`` for financial's alerts. When the table
+    holds no rows for the window (an empty-alert financial tick), MAX(...) is
+    NULL and the probe returns NULL, which the caller leaves as UNRECORDED.
 
     Trino and DuckDB take ``date_diff('second', start, end)``. Spark SQL has
     no string-unit form: Spark Thrift rejected it on every round with
@@ -1594,7 +1617,7 @@ def gold_event_age_sql(engine: str, fq_gold: str) -> str:
     rewrites the 'day' form. Spark gets the difference of unix_timestamp
     values, which is whole seconds like date_diff.
     """
-    newest = "CAST(MAX(interaction_date) AS TIMESTAMP)"
+    newest = f"CAST(MAX({ts_column}) AS TIMESTAMP)"
     if engine == "spark-thrift":
         expr = f"CAST(unix_timestamp(current_timestamp()) - unix_timestamp({newest}) AS BIGINT)"
     else:
@@ -1650,8 +1673,13 @@ def _run_benchmark_round(
     try:
         catalog = bench_runner.catalog
         gold_table = bench_runner.gold_table
+        target_table, ts_column = gold_event_age_target(
+            bench_runner.config.architecture.workload.schema_type.value,
+            gold_table,
+            bench_runner._extra_tables["gold_alerts"],
+        )
         freshness_sql = gold_event_age_sql(
-            bench_runner.executor.engine_name(), f"{catalog}.{gold_table}"
+            bench_runner.executor.engine_name(), f"{catalog}.{target_table}", ts_column
         )
         freshness_sql = bench_runner.executor.adapt_query(freshness_sql)
         freshness_result = bench_runner.executor.execute_query(freshness_sql, timeout=30)
