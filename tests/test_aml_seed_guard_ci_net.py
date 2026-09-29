@@ -1,8 +1,10 @@
-"""CI regression net for the AML seed guards (CLAUDE.md invariant 1).
+"""CI regression net for the AML seed guards.
 
-Held-out AML data must never be used during development. Two guards keep
-this true and both must exist. This test greps the source tree so an
-accidental removal of either guard fails CI with a clear message.
+Held-out AML data must never be used during development. The held-out
+invariant is stated in ``docs/DESIGN.md``; the seed protocol lives at
+``docs/internal/aml-protocol.md``. Two guards keep the invariant true
+and both must exist. This test greps the source tree so an accidental
+removal of either guard fails CI with a clear message.
 
 Guard 1 -- load-time refusal. ``check_seed()`` is defined in
 ``src/lakebench/config/datagen_seed.py`` and is called (via
@@ -22,8 +24,8 @@ The render-time backstop stops a spent or role-tagged seed from being
 re-used even when the load-time check has been bypassed (mutating the
 Pydantic model after construction, or synthesising a raw manifest).
 
-Removing any of these sites voids invariant 1. Any change to this file
-requires an owner decision and a matching update to
+Removing any of these sites voids the held-out invariant. Any change
+to this file requires an owner decision and a matching update to
 ``docs/internal/aml-protocol.md``.
 """
 
@@ -37,11 +39,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src" / "lakebench"
 
 _INVARIANT_HINT = (
-    "AML seed guard removed. CLAUDE.md section 4 invariant 1 (held-out "
-    "AML data is never used during development) requires both a load-time "
-    "refusal in config/datagen_seed.py + config/schema.py and a render-time "
-    "re-check at every deploy site (deploy/datagen.py and "
-    "modules/pipeline_engines/spark/job.py). See docs/internal/aml-protocol.md."
+    "AML seed guard removed. The held-out AML invariant (docs/DESIGN.md; "
+    "seed protocol in docs/internal/aml-protocol.md) requires both a "
+    "load-time refusal in config/datagen_seed.py + config/schema.py and "
+    "a render-time re-check at every deploy site (deploy/datagen.py and "
+    "modules/pipeline_engines/spark/job.py)."
 )
 
 # Sites the CI net guards. Each entry pairs a source file with the substrings
