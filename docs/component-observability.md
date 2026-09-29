@@ -20,7 +20,9 @@ observability:
 ```
 
 `observability.reports` has no effect and is removed in v1.7: every run writes
-`report.html` into its run directory, and `lakebench report` regenerates it.
+`report.html` into its run directory once, and `lakebench report --render`
+writes a fresh copy to `lakebench-output/reports/` without overwriting the
+delivered file.
 
 `s3_metrics_enabled` and `spark_metrics_enabled` exist in the schema but nothing reads
 them; setting either prints a warning. The Spark and Trino PodMonitors are applied
@@ -102,14 +104,25 @@ After a benchmark run completes, the `PlatformCollector` queries the in-cluster 
 
 ## Reports
 
-The `lakebench report` command generates an HTML report from collected metrics. Reports are written into the per-run directory as `report.html`.
+Every run delivers an HTML report to its run directory as `report.html`. That
+file is the shareable artifact and is written once, at the end of the run.
+The `lakebench report` command reads saved metrics and either prints a summary
+or, with `--render`, writes a fresh timestamped HTML file to
+`lakebench-output/reports/report-<run-id>-<ts>.html` without touching the
+delivered `report.html`.
 
 ```bash
-# Generate report for the latest run
+# Print the summary for the latest run (does not touch report.html)
 lakebench report
 
-# Generate report for a specific run
+# Print the summary for a specific run
 lakebench report --run <run-id>
+
+# Regenerate a fresh HTML report (new file under lakebench-output/reports/)
+lakebench report --run <run-id> --render
+
+# Overwrite a specific pre-existing HTML at a caller-chosen path
+lakebench report --run <run-id> --render --output my.html --force
 
 # List available runs
 lakebench report --list

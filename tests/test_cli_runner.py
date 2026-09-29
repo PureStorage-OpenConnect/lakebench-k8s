@@ -400,14 +400,17 @@ class TestReportSummary:
         assert "silver" in result.output
         assert "Time to Value" in result.output
 
-    def test_summary_without_flag_no_scores(self, tmp_path):
+    def test_default_report_prints_summary_and_does_not_regenerate(self, tmp_path):
+        # A2c: bare ``report`` prints the summary from saved metrics and
+        # does not regenerate HTML. The "Report Rendered" panel is only
+        # shown by ``--render``.
         metrics_dir = self._seed_run(tmp_path)
         result = runner.invoke(
             app, ["report", "--metrics", str(metrics_dir), "--run", "summary-test"]
         )
         assert result.exit_code == 0
-        assert "Report Generated" in result.output
-        assert "Benchmark Summary" not in result.output
+        assert "Report Rendered" not in result.output
+        assert "Benchmark Summary" in result.output
 
 
 # =============================================================================

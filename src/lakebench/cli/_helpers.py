@@ -175,11 +175,22 @@ def write_run_report(metrics_storage, run_id: str) -> Path | None:
     still saved metrics for diagnosis, and the report is how they are read.
     Report rendering never changes the run's outcome; a failure here is
     printed as a warning and returns None.
+
+    This is the one and only in-place delivery of ``<run_dir>/report.html``.
+    ``ReportGenerator.generate_report`` refuses to write that path unless a
+    caller passes it as ``output_path`` (see ``reports/generator.py``); this
+    helper is that caller. ``force=True`` covers the edge case of a saved
+    run that already has a ``report.html`` from an earlier attempt: the
+    delivery is idempotent for the same run id.
     """
     try:
         from lakebench.reports import ReportGenerator
 
-        path = ReportGenerator(metrics_storage.metrics_dir).generate_report(run_id)
+        run_dir = metrics_storage.run_dir(run_id)
+        delivered = run_dir / "report.html"
+        path = ReportGenerator(metrics_storage.metrics_dir).generate_report(
+            run_id, output_path=delivered, force=True
+        )
     except Exception as e:  # noqa: BLE001 -- the report must not fail the run
         print_warning(f"Could not write report.html for run {run_id}: {e}")
         return None

@@ -821,7 +821,10 @@ tracked files had uncommitted changes. Container image versions are in
 
 ### HTML Reports
 
-Generate a report from the latest run:
+Every `lakebench run` delivers `lakebench-output/runs/run-<id>/report.html`
+once, at the end of the run. That file is the shareable artifact.
+
+Print the summary of the latest run (does not modify `report.html`):
 
 ```bash
 lakebench report
@@ -833,16 +836,24 @@ List all available runs:
 lakebench report --list
 ```
 
-Generate a report for a specific run:
+Print the summary for a specific run:
 
 ```bash
 lakebench report --run 20260201-143052-a1b2c3
 ```
 
-Reports are written to `lakebench-output/runs/run-<id>/report.html`. The HTML
-report includes summary cards (total time, QpH, time-to-value, pipeline
-throughput), a pipeline scorecard stage matrix, a per-query breakdown of the
-query engine benchmark, and the configuration snapshot.
+Regenerate the HTML from saved metrics. This never overwrites the
+delivered file; it writes a fresh copy under `lakebench-output/reports/`
+with a UTC timestamp in the name:
+
+```bash
+lakebench report --run 20260201-143052-a1b2c3 --render
+# writes lakebench-output/reports/report-20260201-143052-a1b2c3-<UTC>.html
+```
+
+The HTML report includes summary cards (total time, QpH, time-to-value,
+pipeline throughput), a pipeline scorecard stage matrix, a per-query
+breakdown of the query engine benchmark, and the configuration snapshot.
 
 ### Viewing Results on the Command Line
 
@@ -854,13 +865,13 @@ lakebench results --format json        # JSON output
 lakebench results --run <id>           # specific run
 ```
 
-Use `lakebench report --summary` to print key scores directly in the terminal
-without opening the HTML report:
+Use `lakebench report` (no flags) to print key scores directly in the terminal
+without opening or regenerating the HTML report:
 
 ```bash
-lakebench report --summary                        # latest run
-lakebench report --summary --run <id>             # specific run
-lakebench report --summary --metrics <dir>        # custom metrics dir
+lakebench report                              # latest run
+lakebench report --run <id>                   # specific run
+lakebench report --metrics <dir>              # custom metrics dir
 ```
 
 The summary output includes a per-stage table (elapsed time, data volume,
