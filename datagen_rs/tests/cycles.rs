@@ -814,6 +814,76 @@ fn full_corpus_row_multiset_is_node_count_invariant() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// LB-204 coverage: the only code path that reads `typ_by_file` to decide cycle
+/// membership (the `my_files` filter's cycles>1 branch) fires only when BOTH
+/// --cycles>1 and --total-nodes>1. The typ_by_file prune retains a file's payload
+/// only on its owning node, so a prune that dropped an owned file's rows, or a
+/// cycle filter that read a pruned file, would corrupt the corpus in exactly this
+/// combination and nowhere else. Assert the union over (cycle x node) is the
+/// one-shot corpus, byte-for-byte at the row-multiset level.
+#[test]
+fn cycles_and_nodes_together_union_to_the_one_shot_corpus() {
+    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-cyc-node-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let one = tmp.join("one");
+    let split = tmp.join("split");
+    run_at(
+        &one,
+        NODE_SCALE,
+        &["--threads", "3", "--total-nodes", "1", "--node-id", "0"],
+    );
+    // 2 cycles x 2 nodes. Node 0 writes the reference zones (once for party/
+    // account, once per cycle for the manifest); node 1 writes only bronze.
+    for c in 0..2 {
+        for n in 0..2 {
+            run_at(
+                &split,
+                NODE_SCALE,
+                &[
+                    "--threads",
+                    "3",
+                    "--total-nodes",
+                    "2",
+                    "--node-id",
+                    &n.to_string(),
+                    "--cycle",
+                    &c.to_string(),
+                    "--cycles",
+                    "2",
+                ],
+            );
+        }
+    }
+    // Cycle 1 actually produced bronze (so the cycles>1 my_files path fired).
+    let bronze = files(&split, "bronze/pacs008", "part-");
+    assert!(
+        bronze
+            .iter()
+            .any(|p| p.to_string_lossy().contains("part-c001-")),
+        "cycle 1 wrote no bronze -- the cycle>1 x node>1 path did not fire"
+    );
+    // One manifest per cycle, single-writer reference zones.
+    assert_eq!(files(&split, "manifest", "manifest").len(), 2);
+    assert_eq!(files(&split, "bronze", "party").len(), 1);
+    assert_eq!(files(&split, "bronze", "account").len(), 1);
+
+    let ms_one = corpus_multiset(&one);
+    let ms_split = corpus_multiset(&split);
+    assert_eq!(
+        ms_one.len(),
+        ms_split.len(),
+        "corpus row count differs: one-shot {} vs cycles x nodes {}",
+        ms_one.len(),
+        ms_split.len()
+    );
+    assert!(
+        ms_one == ms_split,
+        "full-corpus row multiset differs between one-shot and cycles x nodes"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The freeze-void razor's edges (LB-204 REVISION 2): total_activity feeds
 /// crr_score/crr_tier in party.parquet, and inst_uids feeds participant_uetrs
 /// in manifest.parquet -- both frozen. A byte-level (not just row-multiset)
