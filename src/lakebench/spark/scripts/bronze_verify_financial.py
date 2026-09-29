@@ -25,9 +25,9 @@ from common import (
     path_size_gb,
     write_bronze_data_clock,
 )
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, current_timestamp
-from pyspark.sql.functions import max as max_
+
+# pyspark is imported lazily inside the functions that use it (as common.py
+# does), so this module can be imported for unit tests without pyspark present.
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 # datagen_rs is the only shipping datagen after the Python generator was
@@ -215,6 +215,8 @@ def register_manifest(spark) -> bool:
 
 def _continuous_reset(spark, df):
     """Drop the stream-written tables and create an empty bronze table."""
+    from pyspark.sql.functions import current_timestamp
+
     # Bronze: plain DROP, never PURGE. After a batch run it may hold
     # add_files-registered datagen files, and PURGE would delete the corpus
     # the stream is about to read. The table's own directory (data files a
@@ -265,26 +267,38 @@ def _continuous_reset(spark, df):
 
 
 def _drop_owned_table(spark, table):
-    """DROP ... PURGE a table whose files only it owns.
+    """DROP a table whose files only it owns; PURGE only when that is proven.
 
-    Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which
-    the bootstrap does not do; fall back to a plain DROP and delete the
-    table's own directory, as common.reset_stream_tables does for c360. Only
-    a directory named after the table and disjoint from the raw datagen path:
-    never a namespace or warehouse root that other tables share.
+    LB-188: PURGE deletes every file the table metadata references, wherever it
+    sits, so it runs only for a table whose location is its own directory
+    (named after the table, or Iceberg's ``name-<suffix>`` unique-location form)
+    and disjoint from the raw datagen landing zone. A table whose location is
+    unreadable, shared (a namespace or warehouse root), or overlaps the datagen
+    path is dropped catalog-only and its files are kept.
+
+    Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which the
+    bootstrap does not do; there we fall back to a plain DROP and delete the
+    table's own directory, as common.reset_stream_tables does for c360.
     """
     fq = f"{CATALOG}.{table}"
+    loc = _table_location(spark, fq)
+    name = table.rsplit(".", 1)[-1]
+    last = loc.rstrip("/").rsplit("/", 1)[-1] if loc else ""
+    named = bool(loc) and (last == name or last.startswith(name + "-"))
+    raw = _norm(BRONZE_URI + PACS_PREFIX)
+    overlaps_raw = bool(loc) and (raw.startswith(_norm(loc)) or _norm(loc).startswith(raw))
+    if not named or overlaps_raw:
+        if loc:
+            log(f"Continuous reset: {fq} location {loc} not its own dir; catalog-only DROP")
+        spark.sql(f"DROP TABLE IF EXISTS {fq}")
+        return
     try:
         spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
         return
     except Exception as e:  # noqa: BLE001
         log(f"Continuous reset: PURGE of {fq} refused ({one_line(e)}); plain DROP")
-    loc = _table_location(spark, fq)
     spark.sql(f"DROP TABLE IF EXISTS {fq}")
-    if loc and loc.rstrip("/").rsplit("/", 1)[-1] == table.rsplit(".", 1)[-1]:
-        _delete_dir_if_disjoint(spark, loc, BRONZE_URI + PACS_PREFIX)
-    elif loc:
-        log(f"Continuous reset: kept {loc}; it is not named after {table}")
+    _delete_dir_if_disjoint(spark, loc, BRONZE_URI + PACS_PREFIX)
 
 
 def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
@@ -304,6 +318,10 @@ def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
 
 
 def main() -> None:
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col
+    from pyspark.sql.functions import max as max_
+
     spark = SparkSession.builder.appName("lb-bronze-verify-financial").getOrCreate()
     # Hive does not pre-create namespaces the way the Polaris bootstrap does.
     ensure_namespaces(spark, CATALOG, (BRONZE_TABLE,))
