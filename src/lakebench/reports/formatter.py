@@ -36,10 +36,20 @@ def _cap_short_name(cap_line: str) -> str:
     The bound lines carry the reason (``bronze-verify: executor cap 28
     (scale asks for 40)``); the cap name we surface is the label the
     reader can grep for in the code (``_MAX_EXECUTORS_SAFE=28``,
-    ``concurrent executor budget``, ``w1_max_vertices``, etc.)."""
+    ``concurrent executor budget``, ``w1_max_vertices``, etc.).
+
+    Job profiles cap executors at different values (10, 20, 28), so the
+    surfaced number must come from the line, not a hardcoded value; a
+    wrong cap number would mislabel which cap held the run and breach
+    invariant 6.
+    """
+    import re as _re
+
     text = str(cap_line)
     if "executor cap" in text:
-        return "_MAX_EXECUTORS_SAFE=28"
+        m = _re.search(r"executor cap\s+(\d+)", text)
+        cap = m.group(1) if m else "?"
+        return f"_MAX_EXECUTORS_SAFE={cap}"
     if "concurrent executor budget" in text:
         return "concurrent executor budget"
     if "TM max_alerts_per_customer" in text:
@@ -138,12 +148,12 @@ def confidence_chip(n_runs: int | None, spread: float | None = None) -> str:
     8%). None means unknown; a high-confidence claim needs it below 10%.
     """
     n = int(n_runs or 1)
-    if n <= 1:
+    if n < 3:
+        # Invariant 7: never claim replication from fewer than 3
+        # independent runs. n=1 and n=2 both render as single_run.
         return "single_run"
     if n >= 5 and spread is not None and spread < 0.10:
         return "high"
-    if n >= 3:
-        return f"replicated_n={n}"
     return f"replicated_n={n}"
 
 

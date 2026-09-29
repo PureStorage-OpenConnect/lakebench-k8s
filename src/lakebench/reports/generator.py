@@ -1204,10 +1204,14 @@ class ReportGenerator:
         from lakebench.reports.formatter import (
             confidence_chip_html,
             n_runs_of,
-            qph_samples_of,
         )
 
-        _n_runs = n_runs_of(metrics) or qph_samples_of(metrics) or 1
+        # Confidence chip counts INDEPENDENT runs only (invariant 7). Do
+        # NOT fall back to qph_samples_of(metrics): that value includes
+        # in-stream benchmark rounds within one continuous run, so a
+        # sustained run with 5 rounds would render replicated_n=5 and
+        # claim replication from within-run variation.
+        _n_runs = n_runs_of(metrics) or 1
         _confidence_chip = confidence_chip_html(_n_runs, spread=None)
 
         # "Read this first" panel + provenance label.

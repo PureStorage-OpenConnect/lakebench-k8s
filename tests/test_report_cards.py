@@ -216,6 +216,7 @@ def _metrics_with_experiment(
     bound: list[str] | None = None,
     qph: float = 47.5,
     n_iterations: int = 3,
+    n_runs: int = 1,
     corpus_role: str = "evaluation",
 ) -> tuple[MetricsStorage, PipelineMetrics]:
     from lakebench.metrics.collector import BenchmarkMetrics
@@ -263,6 +264,10 @@ def _metrics_with_experiment(
         "system": "cluster",
         "support": {"state": "unverified", "basis": "test-fixture"},
         "results": {"fingerprints": {"q1": "aa" * 16}},
+        # repetitions.runs counts INDEPENDENT runs behind the record; the
+        # confidence chip must never claim replication from in-stream
+        # rounds (benchmark_iterations), which are within one run.
+        "repetitions": {"runs": n_runs},
     }
     m.config_snapshot = {
         "scale": 1.0,
@@ -349,14 +354,32 @@ class TestReadFirstPanel:
 
 class TestConfidenceChipOnBadge:
     def test_single_run_chip_when_n_is_one(self, tmp_path):
-        storage, m = _metrics_with_experiment(tmp_path, n_iterations=1)
+        storage, m = _metrics_with_experiment(tmp_path, n_runs=1)
         html = ReportGenerator(storage.metrics_dir)._generate_html(m, None)
         assert "single_run" in html
 
     def test_replicated_chip_when_n_is_three(self, tmp_path):
-        storage, m = _metrics_with_experiment(tmp_path, n_iterations=3)
+        storage, m = _metrics_with_experiment(tmp_path, n_runs=3)
         html = ReportGenerator(storage.metrics_dir)._generate_html(m, None)
         assert "replicated_n=3" in html
+
+    def test_in_stream_rounds_do_not_count_as_replication(self, tmp_path):
+        # Invariant 7: n_iterations is in-stream benchmark rounds within one
+        # continuous run and must NOT be counted as replication. A sustained
+        # run with 5 rounds gets single_run on the badge until independent
+        # runs are recorded.
+        storage, m = _metrics_with_experiment(tmp_path, n_iterations=5, n_runs=1)
+        html = ReportGenerator(storage.metrics_dir)._generate_html(m, None)
+        assert "single_run" in html
+        assert "replicated_n=5" not in html
+
+    def test_two_runs_still_reads_single_run(self, tmp_path):
+        # Invariant 7: never claim replication from fewer than 3 independent
+        # runs. n=2 renders as single_run, not replicated_n=2.
+        storage, m = _metrics_with_experiment(tmp_path, n_runs=2)
+        html = ReportGenerator(storage.metrics_dir)._generate_html(m, None)
+        assert "single_run" in html
+        assert "replicated_n=2" not in html
 
     def test_high_chip_needs_five_and_low_spread(self):
         # Direct helper test (the full HTML path does not have live spread
