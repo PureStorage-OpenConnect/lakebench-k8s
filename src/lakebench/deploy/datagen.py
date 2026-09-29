@@ -161,6 +161,15 @@ class DatagenDeployer:
 
         Divides the configured date range evenly across cycles.
         Non-overlapping, chronologically ordered.  Last cycle gets remainder.
+
+        The chronological, non-overlapping property is load-bearing for the c360
+        gold non-degeneracy gate (gold_finalize*.py gold_date_coverage_problem):
+        the INCREMENTAL strategy recomputes silver dates >= the gold watermark
+        and keeps older gold rows, so it covers every date only while each
+        cycle's dates are >= the prior cycle's. If this window ever admits
+        overlapping, backfilled or late-arriving dates, the gate would turn a
+        legitimate pre-watermark gap into a hard run failure -- update the gate
+        (recompute the affected dates) alongside any such change here.
         """
         start = datetime.strptime(timestamp_start or "2024-01-01", "%Y-%m-%d")
         end = datetime.strptime(timestamp_end or "2025-12-31", "%Y-%m-%d")
