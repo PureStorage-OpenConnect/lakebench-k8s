@@ -30,7 +30,7 @@ class TestCheckSccAssignmentReadsRoleBindingFirst:
         namespaced RoleBinding. The verifier must find it."""
         verifier = SecurityVerifier(k8s=Mock())
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(context, cmd, **kwargs):
             if "rolebinding" in cmd:
                 # subjects listed one per "ns/sa" token, space separated
                 return _make(cmd_stdout="myns/lakebench-spark-runner ")
@@ -39,7 +39,7 @@ class TestCheckSccAssignmentReadsRoleBindingFirst:
                 return _make(cmd_stdout="[]")
             return _make(cmd_returncode=1)
 
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=fake_run):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
             status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
         assert status.assigned is True
         assert "RoleBinding" in status.message
@@ -50,14 +50,14 @@ class TestCheckSccAssignmentReadsRoleBindingFirst:
         parses tokens one per line and matches exactly."""
         verifier = SecurityVerifier(k8s=Mock())
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(context, cmd, **kwargs):
             if "rolebinding" in cmd:
                 return _make(cmd_returncode=1, cmd_stderr="not found")
             if "scc" in cmd:
                 return _make(cmd_stdout="system:serviceaccount:myns:lakebench-spark-runner\n")
             return _make(cmd_returncode=1)
 
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=fake_run):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
             status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
         assert status.assigned is True
         assert "legacy" in status.message.lower()
@@ -65,14 +65,14 @@ class TestCheckSccAssignmentReadsRoleBindingFirst:
     def test_unassigned_when_neither_mechanism_grants(self):
         verifier = SecurityVerifier(k8s=Mock())
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(context, cmd, **kwargs):
             if "rolebinding" in cmd:
                 return _make(cmd_returncode=1, cmd_stderr="not found")
             if "scc" in cmd:
                 return _make(cmd_stdout="[]")
             return _make(cmd_returncode=1)
 
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=fake_run):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
             status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
         assert status.assigned is False
         assert "not assigned" in status.message
@@ -82,7 +82,7 @@ class TestCheckSccAssignmentReadsRoleBindingFirst:
         satisfy the check -- namespace is part of the grant identity."""
         verifier = SecurityVerifier(k8s=Mock())
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(context, cmd, **kwargs):
             if "rolebinding" in cmd:
                 # subject in otherns, not myns
                 return _make(cmd_stdout="otherns/lakebench-spark-runner ")
@@ -90,13 +90,13 @@ class TestCheckSccAssignmentReadsRoleBindingFirst:
                 return _make(cmd_stdout="[]")
             return _make(cmd_returncode=1)
 
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=fake_run):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
             status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
         assert status.assigned is False
 
     def test_oc_missing_reports_actionable_message(self):
         verifier = SecurityVerifier(k8s=Mock())
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=FileNotFoundError("oc")):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=FileNotFoundError("oc")):
             status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
         assert status.assigned is False
         assert "oc" in status.message
@@ -124,7 +124,7 @@ class TestScvUsersFieldExactMatch:
     def test_exact_match_wins(self):
         verifier = SecurityVerifier(k8s=Mock())
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(context, cmd, **kwargs):
             if "rolebinding" in cmd:
                 return _make(cmd_returncode=1)
             if "scc" in cmd:
@@ -136,7 +136,7 @@ class TestScvUsersFieldExactMatch:
                 )
             return _make(cmd_returncode=1)
 
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=fake_run):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
             status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
         assert status.assigned is True
 
@@ -146,14 +146,14 @@ class TestScvUsersFieldExactMatch:
         returned True and reported a grant that didn't exist."""
         verifier = SecurityVerifier(k8s=Mock())
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(context, cmd, **kwargs):
             if "rolebinding" in cmd:
                 return _make(cmd_returncode=1)
             if "scc" in cmd:
                 return _make(cmd_stdout="system:serviceaccount:myns:lakebench-spark-runner-v2\n")
             return _make(cmd_returncode=1)
 
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=fake_run):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
             status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
         assert status.assigned is False, (
             "an SCC granting only the -v2 SA must not report the base name as granted"
@@ -162,13 +162,13 @@ class TestScvUsersFieldExactMatch:
     def test_empty_users_returns_false(self):
         verifier = SecurityVerifier(k8s=Mock())
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(context, cmd, **kwargs):
             if "rolebinding" in cmd:
                 return _make(cmd_returncode=1)
             if "scc" in cmd:
                 return _make(cmd_stdout="")
             return _make(cmd_returncode=1)
 
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=fake_run):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
             status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
         assert status.assigned is False

@@ -136,7 +136,6 @@ class HiveDeployer:
         for i, op in enumerate(self._INSTALL_ORDER):
             chart = f"oci://oci.stackable.tech/sdp-charts/{op}"
             cmd = [
-                "helm",
                 "install",
                 op,
                 chart,
@@ -150,7 +149,10 @@ class HiveDeployer:
 
             logger.info("Installing Stackable %s (v%s)...", op, version)
             try:
-                result = subprocess.run(
+                from lakebench.k8s import pinned_helm
+
+                result = pinned_helm(
+                    self.config,
                     cmd,
                     capture_output=True,
                     text=True,

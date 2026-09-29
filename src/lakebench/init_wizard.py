@@ -41,6 +41,8 @@ class WizardState:
     scale: float = 10
     mode: str = "batch"
     cycles: int = 1
+    # Workload schema: 'customer360' or 'financial' (AML)
+    workload_schema: str = "customer360"
     # Filled during review
     config_yaml: str = ""
 
@@ -133,7 +135,7 @@ def _step_header(console: Console, step: int, total: int, title: str) -> None:
 
 def step_identity(console: Console, state: WizardState) -> bool:
     """Collect deployment name and namespace. Returns False to go back."""
-    _step_header(console, 1, 5, "Deployment Identity")
+    _step_header(console, 1, 6, "Deployment Identity")
 
     result = _prompt(
         console,
@@ -167,7 +169,7 @@ def step_recipe(console: Console, state: WizardState) -> bool:
     """Select architecture recipe. Returns False to go back."""
     from lakebench.config.recipes import RECIPE_DESCRIPTIONS
 
-    _step_header(console, 2, 5, "Architecture Recipe")
+    _step_header(console, 2, 6, "Architecture Recipe")
     console.print()
 
     table = Table(show_header=True, header_style="bold", expand=False, padding=(0, 2))
@@ -203,7 +205,7 @@ def step_recipe(console: Console, state: WizardState) -> bool:
 
 def step_storage(console: Console, state: WizardState) -> bool:
     """Collect S3 credentials and optionally validate connectivity."""
-    _step_header(console, 3, 5, "Object Storage (S3)")
+    _step_header(console, 3, 6, "Object Storage (S3)")
 
     console.print()
     console.print("  [dim]Examples:[/dim]")
@@ -272,17 +274,82 @@ def _test_s3(console: Console, state: WizardState) -> None:
             secret_key=state.secret_key,
             region=state.region,
         )
-        if result.get("reachable"):
+        # OK only when endpoint reachable AND credentials validated. Reading
+        # buckets requires both; endpoint-only success with a bad key would
+        # otherwise print OK and "Found 0 bucket(s)" (buckets stays None),
+        # hiding a real credential error until deploy.
+        if result.get("overall_success"):
             console.print("[green]OK[/green]")
-            bucket_count = result.get("bucket_count", "?")
+            buckets = result.get("buckets")
+            bucket_count = len(buckets) if buckets is not None else "?"
             console.print(f"  [dim]Found {bucket_count} existing bucket(s)[/dim]")
         else:
-            err = result.get("error", "unknown error")
+            if not result.get("endpoint_reachable"):
+                err = result.get("endpoint_message") or "endpoint unreachable"
+            else:
+                err = result.get("credentials_message") or "credentials invalid"
             console.print(f"[yellow]WARN[/yellow] {err}")
             console.print("  [dim]You can continue and fix credentials later[/dim]")
     except Exception as e:
         console.print(f"[yellow]WARN[/yellow] {e}")
         console.print("  [dim]Connectivity test failed -- you can continue and fix later[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Step 3.5: Workload schema (customer360 vs financial/AML)
+# ---------------------------------------------------------------------------
+
+
+def step_workload_schema(console: Console, state: WizardState) -> bool:
+    """Select workload schema. Returns False to go back.
+
+    Cross-checks against ``state.recipe`` (the segment already picked)
+    and refuses a combination the schema will refuse at load time. The
+    ``financial`` workload runs on ``iceberg`` only; a ``hive-delta-*``
+    or similar delta recipe combined with financial produces a config
+    ``lakebench config validate`` rejects.
+    """
+    _step_header(console, 4, 6, "Workload Schema")
+    console.print()
+    console.print("  [bold]Workload:[/bold]")
+    console.print("    [cyan]1[/cyan]. customer360   Customer 360 (interactions, ~10 GB / unit)")
+    console.print("    [cyan]2[/cyan]. financial     Financial / AML (pacs.008, ~8.4 GB / unit)")
+    console.print()
+
+    # Infer the table format from the recipe name (second slot in
+    # <catalog>-<table_format>-<pipeline_engine>-<query_engine>) so the
+    # cross-check can refuse without loading the full schema module.
+    recipe_table_format: str | None = None
+    if state.recipe and state.recipe != "default":
+        parts = state.recipe.split("-")
+        if len(parts) >= 2:
+            recipe_table_format = parts[1]
+
+    while True:
+        current_default = 1 if state.workload_schema == "customer360" else 2
+        result = _prompt_int(console, "Workload", default=current_default, min_val=1, max_val=2)
+        if isinstance(result, _BackSentinel):
+            return False
+        picked = "customer360" if result == 1 else "financial"
+
+        # financial requires iceberg (schema.py WORKLOAD_TABLE_FORMATS).
+        # A hive-delta-* recipe here would write a config that fails at
+        # `config validate`. Re-prompt rather than emit an invalid file.
+        if (
+            picked == "financial"
+            and recipe_table_format is not None
+            and recipe_table_format != "iceberg"
+        ):
+            console.print(
+                f"  [red]The financial workload runs on iceberg only, but the "
+                f"selected recipe uses {recipe_table_format}.[/red] Pick a "
+                "*-iceberg-* recipe first, or choose customer360."
+            )
+            continue
+
+        state.workload_schema = picked
+        console.print(f"  [green]Selected:[/green] {state.workload_schema}")
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +359,7 @@ def _test_s3(console: Console, state: WizardState) -> None:
 
 def step_workload(console: Console, state: WizardState) -> bool:
     """Configure scale, pipeline mode, and cycles."""
-    _step_header(console, 4, 5, "Workload Profile")
+    _step_header(console, 5, 6, "Workload Profile")
 
     console.print()
     scale_table = Table(show_header=True, header_style="bold", expand=False, padding=(0, 2))
@@ -355,7 +422,7 @@ def step_workload(console: Console, state: WizardState) -> bool:
 
 def step_review(console: Console, state: WizardState) -> bool:
     """Show config preview and confirm."""
-    _step_header(console, 5, 5, "Review Configuration")
+    _step_header(console, 6, 6, "Review Configuration")
 
     # Build summary table
     console.print()
@@ -370,6 +437,7 @@ def step_review(console: Console, state: WizardState) -> bool:
     summary.add_row("S3 Access Key", state.access_key or "[red]not set[/red]")
     summary.add_row("S3 Secret Key", "***" if state.secret_key else "[red]not set[/red]")
     summary.add_row("Region", state.region)
+    summary.add_row("Workload", state.workload_schema or "customer360")
     summary.add_row("Scale", f"{state.scale} (~{state.scale * 10} GB)")
     summary.add_row("Mode", state.mode)
     if state.mode == "batch" and state.cycles > 1:
@@ -381,7 +449,17 @@ def step_review(console: Console, state: WizardState) -> bool:
     state.config_yaml = _build_config_yaml(state)
 
     console.print()
-    syntax = Syntax(state.config_yaml, "yaml", theme="monokai", line_numbers=False)
+    # Redact the secret in the review panel so the on-screen preview does
+    # not leak the value the summary above already masked with ***. The
+    # unredacted YAML is written to disk in the next step; only the
+    # in-terminal preview is masked.
+    if state.secret_key:
+        preview = state.config_yaml.replace(
+            f'secret_key: "{state.secret_key}"', 'secret_key: "***"'
+        )
+    else:
+        preview = state.config_yaml
+    syntax = Syntax(preview, "yaml", theme="monokai", line_numbers=False)
     console.print(
         Panel(syntax, title="Generated Configuration", border_style="green", expand=False)
     )
@@ -416,7 +494,20 @@ def _build_config_yaml(state: WizardState) -> str:
     content = content.replace('namespace: ""', f'namespace: "{ns}"', 1)
 
     if state.region and state.region != "us-east-1":
-        content = content.replace('# region: "us-east-1"', f'region: "{state.region}"')
+        # The template's commented default is `# region: us-east-1` (no quotes);
+        # write the region unquoted to match.
+        content = content.replace("# region: us-east-1", f"region: {state.region}")
+
+    # Workload schema: uncomment the commented `# schema: customer360` line
+    # under the top-level `workload:` block. The AML/financial workload is
+    # explicit; customer360 is written explicitly too so users see what was
+    # picked rather than relying on a comment.
+    if state.workload_schema:
+        content = re.sub(
+            r"# schema: customer360\s*# customer360 \| financial",
+            f"schema: {state.workload_schema}    # customer360 | financial",
+            content,
+        )
 
     # Pipeline mode and cycles
     mode_line = "mode: batch"
@@ -450,7 +541,14 @@ def step_quick_scale(console: Console, state: WizardState) -> bool:
     return True
 
 
-STEPS_ADVANCED = [step_identity, step_recipe, step_storage, step_workload, step_review]
+STEPS_ADVANCED = [
+    step_identity,
+    step_recipe,
+    step_storage,
+    step_workload_schema,
+    step_workload,
+    step_review,
+]
 STEPS_QUICK = [step_storage, step_quick_scale, step_review]
 
 # Backward compat alias
@@ -462,9 +560,9 @@ def run_wizard(console: Console, advanced: bool = False) -> WizardState | None:
 
     Args:
         console: Rich console for output.
-        advanced: If True, run full 5-step wizard (identity, recipe,
-            storage, workload, review). If False (default), run quick
-            mode (storage + review only -- 4 questions).
+        advanced: If True, run full 6-step wizard (identity, recipe,
+            storage, workload schema, workload profile, review). If False
+            (default), run quick mode (storage + review only -- 4 questions).
 
     Returns the completed WizardState, or None if the user aborts (Ctrl+C).
     """

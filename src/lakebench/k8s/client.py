@@ -997,16 +997,21 @@ class K8sClient:
         """
         ns = namespace or self.namespace
 
-        # Use kubectl exec as it's more reliable for exec operations
-        cmd = ["kubectl", "exec", name, "-n", ns]
+        # Use kubectl exec as it's more reliable for exec operations.
+        # Route through the pinned helper so this client's context (from
+        # the loaded config, not the ambient current-context) is applied.
+        from lakebench.k8s._pinned import pinned_kubectl
+
+        args = ["exec", name, "-n", ns]
         if container:
-            cmd.extend(["-c", container])
-        cmd.append("--")
-        cmd.extend(command)
+            args.extend(["-c", container])
+        args.append("--")
+        args.extend(command)
 
         try:
-            result = subprocess.run(
-                cmd,
+            result = pinned_kubectl(
+                self.context_name or None,
+                args,
                 capture_output=True,
                 text=True,
                 timeout=timeout,

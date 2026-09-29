@@ -253,11 +253,12 @@ def doctor(
     """Read-only preflight report for Category 2/3/4 shared cluster state."""
     from lakebench.deploy.cluster_lock import read_cluster_lock
 
-    core_v1 = _get_core_v1()
-
     cfg = None
+    kube_ctx: str | None = None
     if config_file is not None or file_option is not None:
         cfg = _load_cfg(config_file, file_option)
+        kube_ctx = cfg.platform.kubernetes.context or None
+    core_v1 = _get_core_v1(context=kube_ctx)
 
     console.print(Panel("lakebench admin doctor", expand=False))
 
@@ -417,7 +418,11 @@ def install_scratch_storage_class(
 
     cfg = _load_cfg(config_file, file_option)
     scratch = cfg.platform.storage.scratch
-    core_v1 = _get_core_v1()
+    # Pin every K8s call to the configured context (LB-070 class:
+    # cluster-scoped StorageClass write on a stale KUBECONFIG hits the
+    # wrong cluster). StorageV1Api reuses whatever context the SDK
+    # loaded in _get_core_v1(context=...).
+    core_v1 = _get_core_v1(context=cfg.platform.kubernetes.context or None)
 
     from kubernetes import client as k8s_client
     from kubernetes.client.exceptions import ApiException
@@ -531,18 +536,23 @@ def install_spark_operator(
     )
     from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
-    core_v1 = _get_core_v1()
-
+    # Load cfg first so the K8s client and the operator manager both pin
+    # the configured context. Without this, a stale KUBECONFIG plus a
+    # `--file prod.yaml` invocation would helm-upgrade the shared spark-
+    # operator release on the wrong cluster (LB-070 class).
     ns = operator_namespace
     v = version
+    kube_ctx: str | None = None
     if config_file is not None or file_option is not None:
         cfg = _load_cfg(config_file, file_option)
         ns = cfg.platform.compute.spark.operator.namespace or ns
         v = v or cfg.platform.compute.spark.operator.version
+        kube_ctx = cfg.platform.kubernetes.context or None
+    core_v1 = _get_core_v1(context=kube_ctx)
 
     try:
         with cluster_lock(core_v1, timeout=600):
-            mgr = SparkOperatorManager(namespace=ns, version=v)
+            mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
             ok = mgr.install(version=v, tmp_size=controller_tmp_size)
     except ClusterLockHeld as e:
         print_error(str(e))
@@ -622,7 +632,15 @@ def migrate_deployment(
         stamp_namespace,
     )
 
-    core_v1 = _get_core_v1()
+    # Load cfg first so the K8s client pins the configured context; a
+    # stale KUBECONFIG plus a `migrate-deployment ns --file prod.yaml`
+    # would otherwise stamp the wrong cluster's namespace.
+    cfg = None
+    kube_ctx: str | None = None
+    if config_file is not None or file_option is not None:
+        cfg = _load_cfg(config_file, file_option)
+        kube_ctx = cfg.platform.kubernetes.context or None
+    core_v1 = _get_core_v1(context=kube_ctx)
 
     # Namespace must exist.
     try:
@@ -644,9 +662,8 @@ def migrate_deployment(
         return
 
     # Deployment identity to stamp.
-    if config_file is not None or file_option is not None:
-        cfg = _load_cfg(config_file, file_option)
-        identity = build_identity_from_config(cfg, context=cfg.platform.kubernetes.context or None)
+    if cfg is not None:
+        identity = build_identity_from_config(cfg, context=kube_ctx)
         expected_name = identity.name
         expected_api = api_server or identity.api_server
         committed = identity.committed_sha
@@ -1028,7 +1045,10 @@ def reclaim_bucket(
 
     cfg = _load_cfg(config_file, file_option)
     s3_cfg = cfg.platform.storage.s3
-    core_v1 = _get_core_v1()
+    # Pin the K8s client to the configured context so reclaim-bucket
+    # can only list this cluster's lakebench deployments, not the
+    # ambient KUBECONFIG's.
+    core_v1 = _get_core_v1(context=cfg.platform.kubernetes.context or None)
 
     s3 = S3Client(
         endpoint=s3_cfg.endpoint,

@@ -239,12 +239,20 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 | `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting; `0` computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
+| `--regenerate` | | `false` | Empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 2) so existing datagen output is never overwritten silently. |
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
 may take hours. Without `--yes`, the command prompts for confirmation before
 submitting jobs. The Rust generator has no checkpoint-resume; an interrupted
 run is re-run from the start.
+
+**Exit codes**: `0` on success, `1` on generic failure, `2` when bronze is
+non-empty and `--regenerate` was not passed, `5` when datagen exceeds its
+wait budget (`--timeout`); in that case the datagen Job and any leftover
+streaming SparkApplication consuming the trickle are stopped before exit.
+Only the initial-pass datagen is guarded by this exit code; per-cycle
+datagen inside a multi-cycle run reports its own timeout independently.
 
 ### run
 
@@ -261,6 +269,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
 | `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
 | `--skip-generate` | | `false` | Skip datagen even with `--generate` |
+| `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 2) so existing datagen output is never overwritten silently. No effect without `--generate`. |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace |
 | `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
@@ -528,8 +537,12 @@ Use `--render` to regenerate a fresh HTML report at
 delivered file.
 
 ```
-lakebench report [OPTIONS]
+lakebench report [CONFIG_FILE] [OPTIONS]
 ```
+
+The optional `CONFIG_FILE` scopes the default-summary lookup to that
+deployment. On a shared `lakebench-output` tree it prevents `report
+other.yaml` from picking up another deployment's latest run.
 
 | Flag | Short | Default | Description |
 |---|---|---|---|

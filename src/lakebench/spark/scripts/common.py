@@ -2195,6 +2195,25 @@ def c360_check_facts(silver_df, gold_df):
     return {"version": 1, "silver": c360_silver_facts(silver_df), "gold": c360_gold_facts(gold_df)}
 
 
+def gold_date_coverage_problem(gold_rows: int, distinct_silver_dates: int) -> str | None:
+    """Non-degeneracy check for c360 gold (invariant 3): the daily-KPI gold table
+    must hold exactly one row per distinct silver ``interaction_date``.
+
+    Returns an error string when they differ, None when they match. Pure, so it
+    is unit-tested without Spark. Holds for every strategy: a full rebuild writes
+    one KPI row per date, and the incremental strategy's watermark-inclusive
+    recompute plus the kept older rows also cover every date. A mismatch means
+    gold dropped or duplicated dates and the run must fail rather than report a
+    degenerate gold as success (LB batch runs once passed with 0 rows, LB-044).
+    """
+    if gold_rows != distinct_silver_dates:
+        return (
+            f"gold has {gold_rows} KPI row(s) but silver has {distinct_silver_dates} "
+            "distinct interaction_date bucket(s)"
+        )
+    return None
+
+
 def log_c360_check(spark, silver_tbl, gold_tbl):
     """Log the ``[c360-check] {json}`` line after gold is written.
 

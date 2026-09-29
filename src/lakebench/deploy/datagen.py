@@ -32,7 +32,25 @@ def _pod_owned_by_job(pod, job_uid: str) -> bool:
 
 
 if TYPE_CHECKING:
+    from lakebench.config import LakebenchConfig
+
     from .engine import DeploymentEngine
+
+
+def bronze_datagen_prefix(config: LakebenchConfig) -> str:
+    """Return the S3 prefix under bronze where datagen writes.
+
+    Kept in one place so the deployer, the CLI's ``--regenerate`` guard and
+    tests all read the same mapping. Financial (AML) datagen writes under
+    ``pacs008/`` on the C360 default ``customer/interactions/`` template
+    (see ``_build_datagen_context``); every other schema writes under
+    ``bronze.path_template`` unchanged.
+    """
+    schema_value = config.architecture.workload.schema_type.value
+    path_prefix = config.architecture.pipeline.medallion.bronze.path_template
+    if schema_value == "financial" and path_prefix == "customer/interactions":
+        path_prefix = "pacs008"
+    return path_prefix
 
 
 class DatagenDeployer:
@@ -57,7 +75,6 @@ class DatagenDeployer:
         cfg = self.config
         workload = cfg.architecture.workload
         datagen = workload.datagen
-        medallion = cfg.architecture.pipeline.medallion
 
         # Derive dimensions from scale factor
         dims = cfg.get_scale_dimensions()
@@ -78,9 +95,7 @@ class DatagenDeployer:
         # (LB_FINANCIAL_BRONZE_PREFIX default). Keeps the datagen upload and
         # bronze_verify_financial.py pointed at the same S3 location.
         schema_value = workload.schema_type.value
-        path_prefix = medallion.bronze.path_template
-        if schema_value == "financial" and path_prefix == "customer/interactions":
-            path_prefix = "pacs008"
+        path_prefix = bronze_datagen_prefix(cfg)
 
         context = dict(self.context)  # Copy base context
         context.update(
@@ -176,6 +191,15 @@ class DatagenDeployer:
 
         Divides the configured date range evenly across cycles.
         Non-overlapping, chronologically ordered.  Last cycle gets remainder.
+
+        The chronological, non-overlapping property is load-bearing for the c360
+        gold non-degeneracy gate (gold_finalize*.py gold_date_coverage_problem):
+        the INCREMENTAL strategy recomputes silver dates >= the gold watermark
+        and keeps older gold rows, so it covers every date only while each
+        cycle's dates are >= the prior cycle's. If this window ever admits
+        overlapping, backfilled or late-arriving dates, the gate would turn a
+        legitimate pre-watermark gap into a hard run failure -- update the gate
+        (recompute the affected dates) alongside any such change here.
         """
         start = datetime.strptime(timestamp_start or "2024-01-01", "%Y-%m-%d")
         end = datetime.strptime(timestamp_end or "2025-12-31", "%Y-%m-%d")
@@ -426,19 +450,27 @@ class DatagenDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _delete_existing_job(self, namespace: str) -> None:
-        """Delete existing datagen job if present."""
+    def _delete_existing_job(self, namespace: str, *, request_timeout: int | None = None) -> None:
+        """Delete existing datagen job if present.
+
+        ``request_timeout`` caps the API call so a caller invoked because
+        the K8s API itself hung (datagen timeout handler) does not block
+        indefinitely on the delete.
+        """
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
 
         batch_v1 = k8s_client.BatchV1Api()
 
         try:
-            batch_v1.delete_namespaced_job(
-                name="lakebench-datagen",
-                namespace=namespace,
-                body=k8s_client.V1DeleteOptions(propagation_policy="Background"),
-            )
+            kwargs: dict = {
+                "name": "lakebench-datagen",
+                "namespace": namespace,
+                "body": k8s_client.V1DeleteOptions(propagation_policy="Background"),
+            }
+            if request_timeout is not None:
+                kwargs["_request_timeout"] = request_timeout
+            batch_v1.delete_namespaced_job(**kwargs)
             # Wait for job to be deleted
             time.sleep(2)
         except ApiException as e:

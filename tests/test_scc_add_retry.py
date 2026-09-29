@@ -36,7 +36,7 @@ class TestSccAddRetry:
     def test_add_succeeds_on_first_attempt(self):
         v = self._make_verifier()
         v._SCC_ADD_BACKOFF_SECONDS = 0
-        with patch("lakebench.k8s.security.subprocess.run") as run:
+        with patch("lakebench.k8s.security.pinned_oc") as run:
             run.side_effect = [
                 _mock_completed(0),  # add-scc-to-user
                 # jsonpath output lists "<ns>/<name> <ns>/<name>" for each SA subject
@@ -50,7 +50,7 @@ class TestSccAddRetry:
         wasn't in the RoleBinding subjects when we verified. Retry."""
         v = self._make_verifier()
         v._SCC_ADD_BACKOFF_SECONDS = 0
-        with patch("lakebench.k8s.security.subprocess.run") as run:
+        with patch("lakebench.k8s.security.pinned_oc") as run:
             run.side_effect = [
                 _mock_completed(0),  # add attempt 1
                 _mock_completed(0, stdout="other/sa "),  # verify: not landed
@@ -62,7 +62,7 @@ class TestSccAddRetry:
     def test_add_gives_up_after_max_attempts(self):
         v = self._make_verifier()
         v._SCC_ADD_BACKOFF_SECONDS = 0
-        with patch("lakebench.k8s.security.subprocess.run") as run:
+        with patch("lakebench.k8s.security.pinned_oc") as run:
             run.side_effect = [_mock_completed(0), _mock_completed(0, stdout="")] * 10
             assert v._add_scc("anyuid", "lakebench-spark-runner", "v12-t01") is False
         # 4 adds + 4 verifies = 8 calls (default _SCC_ADD_MAX_ATTEMPTS = 4)
@@ -72,7 +72,7 @@ class TestSccAddRetry:
         """If the add command itself raises but a later attempt lands, succeed."""
         v = self._make_verifier()
         v._SCC_ADD_BACKOFF_SECONDS = 0
-        with patch("lakebench.k8s.security.subprocess.run") as run:
+        with patch("lakebench.k8s.security.pinned_oc") as run:
             run.side_effect = [
                 RuntimeError("transient"),  # add attempt 1 raises
                 _mock_completed(0, stdout=""),  # verify: not landed
@@ -83,7 +83,7 @@ class TestSccAddRetry:
 
     def test_verify_returns_false_on_bad_returncode(self):
         v = self._make_verifier()
-        with patch("lakebench.k8s.security.subprocess.run") as run:
+        with patch("lakebench.k8s.security.pinned_oc") as run:
             run.return_value = _mock_completed(1, stderr="not found")
             assert (
                 v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01") is False
@@ -91,7 +91,7 @@ class TestSccAddRetry:
 
     def test_verify_returns_false_on_exception(self):
         v = self._make_verifier()
-        with patch("lakebench.k8s.security.subprocess.run", side_effect=RuntimeError("boom")):
+        with patch("lakebench.k8s.security.pinned_oc", side_effect=RuntimeError("boom")):
             assert (
                 v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01") is False
             )
@@ -100,7 +100,7 @@ class TestSccAddRetry:
         """`v12-t01/spark` must not match when the binding only lists
         `v12-t02/spark`. jsonpath output is space-separated ns/name tokens."""
         v = self._make_verifier()
-        with patch("lakebench.k8s.security.subprocess.run") as run:
+        with patch("lakebench.k8s.security.pinned_oc") as run:
             run.return_value = _mock_completed(0, stdout="v12-t02/lakebench-spark-runner other/sa ")
             assert (
                 v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01") is False

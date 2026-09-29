@@ -46,7 +46,14 @@ from lakebench.config import (
 from lakebench.config.schema import is_continuous_mode
 from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
-from lakebench.k8s import K8sConnectionError, PlatformType, SecurityVerifier, get_k8s_client
+from lakebench.k8s import (
+    K8sConnectionError,
+    PlatformType,
+    SecurityVerifier,
+    get_k8s_client,
+    pinned_kubectl,
+    pinned_kubectl_popen,
+)
 from lakebench.s3 import test_s3_connectivity
 
 if TYPE_CHECKING:
@@ -316,6 +323,14 @@ def init(
             help="Architecture recipe (e.g. hive-iceberg-spark-trino, default)",
         ),
     ] = "",
+    workload: Annotated[
+        str,
+        typer.Option(
+            "--workload",
+            "-w",
+            help="Workload schema (customer360 | financial). Default is customer360.",
+        ),
+    ] = "",
     interactive: Annotated[
         bool,
         typer.Option(
@@ -378,7 +393,7 @@ def init(
     if local:
         # 10 is the cluster default and would ask a laptop for ~100 GB. Only
         # override it when the user did not pick a scale themselves.
-        _write_local_config(output, name, 0.1 if scale == 10 else scale)
+        _write_local_config(output, name, 0.1 if scale == 10 else scale, workload_schema=workload)
         return
 
     # Detect whether user passed substantive flags -- if so, skip wizard
@@ -391,13 +406,15 @@ def init(
 
     if interactive and not has_flags and is_tty:
         # Wizard mode
-        from lakebench.init_wizard import run_wizard
+        from lakebench.init_wizard import _build_config_yaml, run_wizard
 
         result = run_wizard(console, advanced=advanced)
         if result is None:
             raise typer.Exit(0)
 
-        # Apply any CLI flag overrides onto wizard state
+        # Apply any CLI flag overrides onto wizard state. Rebuild the YAML
+        # after applying overrides so flags actually reach the written file
+        # (the wizard's step_review built config_yaml from pre-override state).
         if name != "my-lakehouse":
             result.name = name
         if namespace:
@@ -406,6 +423,9 @@ def init(
             result.recipe = recipe
         if scale != 10:
             result.scale = scale
+        if workload:
+            result.workload_schema = workload
+        result.config_yaml = _build_config_yaml(result)
 
         # Confirm write
         import typer as _typer
@@ -444,6 +464,12 @@ def init(
         config_content = config_content.replace('secret_key: ""', f'secret_key: "{secret_key}"')
     if namespace:
         config_content = config_content.replace('namespace: ""', f'namespace: "{namespace}"', 1)
+    if workload:
+        config_content = re.sub(
+            r"# schema: customer360\s*# customer360 \| financial",
+            f"schema: {workload}    # customer360 | financial",
+            config_content,
+        )
 
     output.write_text(config_content)
     print_success(f"Created configuration file: {output}")
@@ -476,13 +502,14 @@ _LOCAL_CONFIG_TEMPLATE = """\
 name: {name}
 recipe: hive-iceberg-spark-duckdb
 
-architecture:
-  workload:
-    datagen:
-      # 1 unit is roughly 10 GB of bronze, so {scale} is about {approx_gb:.1f} GB.
-      # Local mode is sized for 1 and below; larger scales still run but a
-      # single JVM shuffling that much on one host takes a long time.
-      scale: {scale}
+# Workload lives at the top level (D12 workload move). The deprecated
+# architecture.workload block still loads but emits a warning.
+workload:{schema_line}
+  datagen:
+    # 1 unit is roughly 10 GB of bronze, so {scale} is about {approx_gb:.1f} GB.
+    # Local mode is sized for 1 and below; larger scales still run but a
+    # single JVM shuffling that much on one host takes a long time.
+    scale: {scale}
 
 platform:
   storage:
@@ -499,18 +526,22 @@ platform:
 """
 
 
-def _write_local_config(output: Path, name: str, scale: float) -> None:
+def _write_local_config(output: Path, name: str, scale: float, workload_schema: str = "") -> None:
     """Write a ready-to-run local mode config."""
     if name == "my-lakehouse":
         name = "local-lakehouse"
 
     prefix = "".join(c if c.isalnum() or c == "-" else "-" for c in name).strip("-").lower()
+    # When the user picked a workload, emit `schema:` under `workload:`; the
+    # bare `workload:` block otherwise falls back to the customer360 default.
+    schema_line = f"\n  schema: {workload_schema}" if workload_schema else ""
     content = _LOCAL_CONFIG_TEMPLATE.format(
         output=output,
         name=name,
         scale=scale,
         approx_gb=scale * 10.0,
         prefix=prefix or "lakebench",
+        schema_line=schema_line,
     )
     output.write_text(content)
 
@@ -1682,6 +1713,16 @@ def info(
 
 @app.command()
 def report(
+    config_file: Annotated[
+        Path | None,
+        typer.Argument(
+            help=(
+                "Path to configuration YAML file. When given, the "
+                "'latest run' lookup is scoped to this deployment so a "
+                "parallel deployment's newer run is not reported by mistake."
+            ),
+        ),
+    ] = None,
     metrics_dir: Annotated[
         Path,
         typer.Option(
@@ -1760,6 +1801,18 @@ def report(
 
     storage = MetricsStorage(metrics_dir)
 
+    # Scope the "latest run" lookup to a specific deployment when a config
+    # file is given. Under parallel deployments the shared runs/ tree can
+    # have another deployment's newer record on top; without scoping,
+    # `report` would display it (SP-2 owns the durable deployment_id fix).
+    deployment_name: str | None = None
+    if config_file is not None:
+        try:
+            deployment_name = load_config(config_file).name
+        except ConfigError as e:
+            print_error(f"Config error: {e}")
+            raise typer.Exit(1)  # noqa: B904
+
     # List runs mode
     if list_runs:
         runs = storage.list_runs()
@@ -1817,6 +1870,7 @@ def report(
                 run_id,
                 output_path=output_path,
                 force=force,
+                deployment_name=deployment_name,
             )
         except FileExistsError as e:
             print_error(str(e))
@@ -1835,7 +1889,11 @@ def report(
         # Also print the summary when asked; keep the default quiet so
         # scripts that watch stdout for the path have a clean output.
         if summary:
-            resolved = storage.load_run(run_id) if run_id else storage.get_latest_run()
+            resolved = (
+                storage.load_run(run_id)
+                if run_id
+                else storage.get_latest_run_for_deployment(deployment_name)
+            )
             if resolved:
                 _print_report_summary(resolved)
 
@@ -1851,7 +1909,11 @@ def report(
         return
 
     # Default action: print the summary; do not regenerate the HTML.
-    metrics = storage.load_run(run_id) if run_id else storage.get_latest_run()
+    metrics = (
+        storage.load_run(run_id)
+        if run_id
+        else storage.get_latest_run_for_deployment(deployment_name)
+    )
     if metrics is None:
         print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
         print_info("Use 'lakebench report --list' to see available runs")
@@ -1916,8 +1978,10 @@ def results(
     as a column with consistent metrics as rows. Use --format json or
     --format csv for machine-readable output.
 
-    Accepts an optional config file argument (ignored, for command-line
-    consistency with other lakebench commands).
+    Accepts an optional config file argument. When provided, scopes the
+    default-summary lookup to that deployment (so ``results other.yaml``
+    on a shared lakebench-output tree does not read another deployment's
+    latest run).
     """
     if format_short_f is not None:
         warn_deprecated_short_f("--format / -o")
@@ -1933,10 +1997,20 @@ def results(
 
     storage = MetricsStorage(metrics_dir)
 
+    # Scope the "latest run" lookup to a specific deployment when the
+    # optional config file was given (see ``report`` for the same pattern).
+    deployment_name: str | None = None
+    if config_file is not None:
+        try:
+            deployment_name = load_config(config_file).name
+        except ConfigError as e:
+            print_error(f"Config error: {e}")
+            raise typer.Exit(1)  # noqa: B904
+
     if run_id:
         metrics = storage.load_run(run_id)
     else:
-        metrics = storage.get_latest_run()
+        metrics = storage.get_latest_run_for_deployment(deployment_name)
 
     if metrics is None:
         print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
@@ -2114,9 +2188,9 @@ def logs(
         f"Fetching logs for [bold]{component}[/bold] in namespace [bold]{namespace}[/bold]"
     )
 
-    # Build kubectl logs command
+    # Build kubectl logs args (the "kubectl" itself is added by the pinned
+    # helper along with --context=<configured>).
     cmd = [
-        "kubectl",
         "logs",
         "-l",
         label_selector,
@@ -2132,7 +2206,8 @@ def logs(
     try:
         if follow:
             # Stream logs
-            process = subprocess.Popen(
+            process = pinned_kubectl_popen(
+                cfg,
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -2147,7 +2222,8 @@ def logs(
                 print_info("\nLog streaming stopped")
         else:
             # One-shot log fetch
-            result = subprocess.run(
+            result = pinned_kubectl(
+                cfg,
                 cmd,
                 capture_output=True,
                 text=True,

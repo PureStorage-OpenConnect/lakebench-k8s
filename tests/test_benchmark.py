@@ -660,12 +660,17 @@ class TestTrinoExecutorFormatAwareness:
             namespace="test-ns", catalog_name="lakehouse", table_format="iceberg"
         )
         executor._pod = "trino-coordinator-0"  # skip pod discovery
-        with patch("lakebench.modules.query_engines.trino.executor.subprocess") as mock_sub:
-            mock_sub.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        # The executor now routes kubectl through lakebench.k8s._pinned,
+        # so the mock lives on the helper module.
+        with (
+            patch("lakebench.modules.query_engines.trino.executor.pinned_kubectl") as pk,
+            patch("lakebench.modules.query_engines.trino.executor.subprocess") as mock_sub,
+        ):
+            pk.return_value = MagicMock(returncode=0, stdout="", stderr="")
             mock_sub.TimeoutExpired = TimeoutError
             mock_sub.SubprocessError = Exception
             executor.flush_cache()
-            mock_sub.run.assert_called_once()
+            pk.assert_called_once()
 
 
 class TestDuckDBExecutorFormatAwareness:

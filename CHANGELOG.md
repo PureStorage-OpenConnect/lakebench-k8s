@@ -515,6 +515,14 @@ with 1.6; the first section lists why.
 - **Per-file coverage floors** on the scoring, metrics and detection code
   (`scripts/check_coverage.py`), run in CI, plus a gitleaks tree scan.
 - **Root `--version` / `-V` flag.**
+- **`--regenerate` on `run --generate` and `generate` (A4).** A non-empty
+  bronze prefix is now refused by the CLI unless `--regenerate` is passed
+  (exit 2 with the prefix, object count and size named); with the flag, the
+  whole bronze bucket is emptied via `S3Client.empty_bucket()` (which also
+  aborts dangling multipart uploads on FlashBlade) before datagen submits.
+  Before, `lakebench generate` and `run --generate` deployed datagen
+  straight onto whatever was in bronze and the deployer's LB-185 clear
+  covered only buckets this deployment recorded creating.
 
 ### Changed
 - **Datagen: the Python image is retired; the Rust image serves both
@@ -580,6 +588,15 @@ with 1.6; the first section lists why.
   per-corpus watchlist).
 
 ### Fixed
+- **Datagen timeout on `run --generate` no longer prints "Datagen
+  completed" (A4).** The wait loop's timeout fell through to a success line
+  even when the datagen Job was still running; the follow-up pipeline
+  stages then built on a partial bronze (invariant 3). The run now exits
+  with a distinct code (`4`), stops the datagen Job so it stops writing,
+  and deletes any leftover streaming SparkApplication
+  (`bronze-ingest`, `silver-stream`, `gold-refresh`) that was consuming
+  the trickle so the timed-out generate does not leave orphan compute
+  behind.
 - **Spark Thrift `s3://` table locations** map to S3A, so Polaris orphan
   removal can open them, and the Thrift server sets `fs.s3a.endpoint.region`
   like the Spark jobs (LB-052). A failed orphan removal is no longer stamped

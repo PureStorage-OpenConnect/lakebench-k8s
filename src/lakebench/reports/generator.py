@@ -74,6 +74,31 @@ def _post_qph_caveat(pb) -> str:
     return "; ".join(parts)
 
 
+_STAGE_TO_JOB_TYPES = {
+    "bronze": ("bronze-verify", "bronze-ingest"),
+    "silver": ("silver-build", "silver-stream"),
+    "gold": ("gold-finalize", "gold-refresh"),
+}
+
+
+def _stage_matches_cap(stage_name: str, caps_bound: list[str]) -> bool:
+    """Whether any cap in *caps_bound* names *stage_name*'s job type.
+
+    The bound lines carry the job type (``bronze-verify: executor cap 28``);
+    a stage row only gets a BOUNDED tag when a cap that bound that stage
+    is in the list, so a gold stage does not wear a bronze cap's tag.
+    """
+    if not caps_bound:
+        return False
+    job_types = _STAGE_TO_JOB_TYPES.get(stage_name, ())
+    for cap in caps_bound:
+        text = str(cap)
+        for jt in job_types:
+            if jt in text:
+                return True
+    return False
+
+
 def _qph_stop_warning(metrics) -> str:
     """Warning on a headline QpH measured after a stopped maintenance or with
     streams live."""
@@ -139,6 +164,7 @@ class ReportGenerator:
         output_path: Path | str | None = None,
         *,
         force: bool = False,
+        deployment_name: str | None = None,
     ) -> Path:
         """Generate an HTML report.
 
@@ -154,6 +180,11 @@ class ReportGenerator:
                 Without ``force``, an existing target raises
                 ``FileExistsError`` so the delivered artifact cannot be
                 mutated by mistake.
+            deployment_name: When ``run_id`` is not supplied, scope the
+                "latest run" lookup to this deployment so a parallel
+                deployment's newer run is not rendered by mistake. ``None``
+                keeps the unscoped behaviour for callers that do not know
+                the deployment (SP-2 owns the deployment_id follow-up).
 
         Returns:
             Path to the written HTML file.
@@ -168,7 +199,7 @@ class ReportGenerator:
             if not metrics:
                 raise ValueError(f"Run not found: {run_id}")
         else:
-            metrics = self.storage.get_latest_run()
+            metrics = self.storage.get_latest_run_for_deployment(deployment_name)
             if not metrics:
                 raise ValueError("No runs found")
 
@@ -243,6 +274,93 @@ class ReportGenerator:
         if metrics.pipeline_benchmark:
             return metrics.pipeline_benchmark.pipeline_mode in ("sustained", "continuous")
         return bool(metrics.streaming)
+
+    @staticmethod
+    def _bound_with_cap_names(bound: list[str]) -> str:
+        """Bound rows with the cap name in [brackets] next to each entry.
+
+        The tooltip reader in the HTML report is code inside a <code> tag,
+        so the cap name goes as plain text ([_MAX_EXECUTORS_SAFE=28],
+        [w1_max_vertices], ...) rather than a span; the reader sees both
+        the reason and the constant name in one row.
+        """
+        from lakebench.reports.formatter import _cap_short_name
+
+        return "; ".join(f"{b} [{_cap_short_name(b)}]" for b in bound)
+
+    def _generate_read_first_panel(
+        self,
+        metrics: PipelineMetrics,
+        *,
+        passed: bool,
+        warnings: list[str],
+        fail_reasons: list[str],
+        n_runs: int,
+    ) -> str:
+        """Dense header panel: verdict, headline, corpus label, n, limits count, digest.
+
+        Small and dense so it sits above the identity strip without pushing
+        the score cards below the fold. Its five fields carry what a reader
+        should know before reading a single card: whether the run passed,
+        why in one sentence, the corpus it ran against, the number of
+        independent samples, how many Lakebench caps were in effect during
+        the run, and the record's identity digest for cross-referencing.
+        """
+        from lakebench.reports.formatter import caps_bound_from
+
+        e = _html_escape
+        exp = metrics.experiment_block() or {}
+        corpus = exp.get("corpus") or {}
+        corpus_role = corpus.get("corpus_role") or "none"
+        corpus_id = corpus.get("id") or "unknown"
+        scale = corpus.get("scale")
+        corpus_label = f"{corpus_role} (id {corpus_id[:12]}, scale {scale})"
+
+        caps_bound = caps_bound_from(metrics)
+        n_limits = len(caps_bound)
+
+        if passed and not warnings:
+            verdict_word = "PASSED"
+            verdict_color = "var(--success)"
+        elif passed and warnings:
+            verdict_word = "WARNING"
+            verdict_color = "var(--warning)"
+        else:
+            verdict_word = "FAILED"
+            verdict_color = "var(--danger)"
+
+        if fail_reasons:
+            headline = fail_reasons[0]
+        elif warnings:
+            headline = warnings[0]
+        else:
+            mode = "sustained" if self._is_sustained(metrics) else "batch"
+            headline = f"{mode} pipeline completed, all gates passed"
+
+        # Identity digest: a short hash of the experiment identity so two
+        # runs of the same experiment print the same digest.
+        try:
+            from lakebench.metrics.experiment import identity_hash
+
+            record_digest = identity_hash(exp) if exp else "unresolved"
+        except Exception:  # noqa: BLE001
+            record_digest = "unresolved"
+
+        return f"""
+        <section class="read-first" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid {verdict_color};">
+            <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
+                Read this first
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+                <div><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style="color: {verdict_color};">{verdict_word}</strong></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> {e(headline)}</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> <code class="mono">{e(corpus_label)}</code></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">n:</span> {int(n_runs)}</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Limits present:</span> {n_limits}</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Record digest:</span> <code class="mono">{e(record_digest)}</code></div>
+            </div>
+        </section>
+        """
 
     def _generate_run_context(self, metrics: PipelineMetrics) -> str:
         """Generate a one-line run context banner below the header."""
@@ -1087,6 +1205,30 @@ class ReportGenerator:
             _badge_text = "FAILED"
             _badge_tip = "; ".join(fail_reasons)
 
+        # Confidence chip next to the verdict badge: n=1 -> single_run,
+        # n>=3 -> replicated_n=N, n>=5 with sub-10% spread -> high.
+        from lakebench.reports.formatter import (
+            confidence_chip_html,
+            n_runs_of,
+        )
+
+        # Confidence chip counts INDEPENDENT runs only (invariant 7). Do
+        # NOT fall back to qph_samples_of(metrics): that value includes
+        # in-stream benchmark rounds within one continuous run, so a
+        # sustained run with 5 rounds would render replicated_n=5 and
+        # claim replication from within-run variation.
+        _n_runs = n_runs_of(metrics) or 1
+        _confidence_chip = confidence_chip_html(_n_runs, spread=None)
+
+        # "Read this first" panel + provenance label.
+        _read_first_html = self._generate_read_first_panel(
+            metrics,
+            passed=overall_passed,
+            warnings=warnings,
+            fail_reasons=fail_reasons,
+            n_runs=_n_runs,
+        )
+
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1290,6 +1432,9 @@ class ReportGenerator:
 </head>
 <body>
     <div class="container">
+        <div class="provenance-label" style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem;">
+            internal benchmark, single-owner recorded
+        </div>
         <header>
             <h1>Lakebench Scorecard</h1>
             <div class="subtitle">
@@ -1298,9 +1443,12 @@ class ReportGenerator:
                 <span class="status {_badge_cls}" title="{_badge_tip}">
                     {_badge_text}
                 </span>
+                {_confidence_chip}
             </div>
             {"" if overall_passed and not warnings else '<div style="margin-top: 0.5rem; font-size: 0.8rem; color: ' + ("var(--danger)" if not overall_passed else "var(--warning)") + ';">' + "; ".join(fail_reasons or warnings) + "</div>"}
         </header>
+
+        {_read_first_html}
 
         {run_context_html}
 
@@ -1361,6 +1509,12 @@ class ReportGenerator:
         Five primary cards (the scores users compare across runs) plus a
         smaller metadata row with contextual info.
         """
+        from lakebench.reports.formatter import (
+            caps_bound_from,
+            format_measurement,
+            support_state_of,
+        )
+
         total_time = metrics.total_elapsed_seconds
         pb = metrics.pipeline_benchmark
         throughput = pb.sustained_throughput_rps if pb else 0.0
@@ -1368,8 +1522,12 @@ class ReportGenerator:
         efficiency = pb.compute_efficiency_gb_per_core_hour if pb else 0.0
         core_hours = pb.total_core_hours if pb else 0.0
 
+        caps_bound = caps_bound_from(metrics)
+        support_state = support_state_of(metrics)
+
         qph: float | None = None
         qph_note = ""
+        qph_n_samples: int | None = None
         if pb and pb.benchmark_rounds:
             round_qphs = [r.qph for r in pb.benchmark_rounds if r.qph > 0]
             if round_qphs:
@@ -1377,9 +1535,11 @@ class ReportGenerator:
 
                 qph = statistics.median(round_qphs)
                 qph_note = f"median of {len(round_qphs)} rounds"
+                qph_n_samples = len(round_qphs)
         elif metrics.benchmark and metrics.benchmark.qph > 0:
             qph = metrics.benchmark.qph
             qph_note = "single benchmark"
+            qph_n_samples = 1
 
         freshness_val: float | None = None
         freshness_hint = "worst-case gold staleness during streaming window"
@@ -1393,9 +1553,25 @@ class ReportGenerator:
         freshness_display = f"{freshness_val:.1f}s" if freshness_val is not None else "N/A"
         if freshness_val is None:
             freshness_hint = "insufficient gold cycles to measure"
-        qph_display = f"{qph:,.1f}" if qph is not None else "N/A"
+        qph_raw = f"{qph:,.1f}" if qph is not None else "N/A"
+        qph_display = format_measurement(
+            qph_raw,
+            "",
+            caps_bound=caps_bound if qph is not None else None,
+            n_runs=qph_n_samples if qph is not None else None,
+            support_state=support_state if qph is not None else None,
+        )
         if qph is None:
             qph_note = "no benchmark rounds completed"
+
+        throughput_raw = f"{throughput:,.0f} rows/s"
+        throughput_display = format_measurement(
+            throughput_raw,
+            "",
+            caps_bound=caps_bound if throughput > 0 else None,
+            n_runs=1 if throughput > 0 else None,
+            support_state=support_state if throughput > 0 else None,
+        )
 
         # Derived context values for hint line 2
         freshness_hint2 = (
@@ -1429,7 +1605,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Sustained Throughput</div>
-                <div class="card-value">{throughput:,.0f} rows/s</div>
+                <div class="card-value">{throughput_display}</div>
                 <div class="card-hint">rows entering bronze per second</div>
                 <div class="card-hint2">{throughput_hint2}</div>
             </div>
@@ -1466,10 +1642,18 @@ class ReportGenerator:
         smaller metadata row with contextual info.  When pipeline_benchmark
         is absent (old data), falls back to a simple layout.
         """
+        from lakebench.reports.formatter import (
+            caps_bound_from,
+            format_measurement,
+            support_state_of,
+        )
+
         pb = metrics.pipeline_benchmark
         total_time = metrics.total_elapsed_seconds
         job_count = len(metrics.jobs)
         successful = sum(1 for j in metrics.jobs if j.success)
+        caps_bound = caps_bound_from(metrics)
+        support_state = support_state_of(metrics)
 
         if not pb:
             # Fallback for old metrics without pipeline_benchmark
@@ -1500,8 +1684,16 @@ class ReportGenerator:
 
         # QpH from pipeline benchmark or standalone benchmark
         qph = pb.query_benchmark.qph if pb.query_benchmark else 0.0
+        qph_n: int | None = None
         if qph == 0.0 and metrics.benchmark:
             qph = metrics.benchmark.qph
+        # Samples: benchmark iterations if a standalone benchmark ran, else
+        # unknown for a pipeline_benchmark record (kept as n=1 as a floor so
+        # the user is not told the value is repeated when it may not be).
+        if metrics.benchmark is not None:
+            qph_n = int(getattr(metrics.benchmark, "iterations", 0) or 0) or 1
+        elif qph > 0:
+            qph_n = 1
 
         scale_warning = (
             ' <span style="color: var(--danger);">INCOMPLETE</span>'
@@ -1520,6 +1712,20 @@ class ReportGenerator:
             if qph > 0
             else "&#8593; higher is better"
         )
+        qph_display = format_measurement(
+            f"{qph:,.1f}" if qph > 0 else "N/A",
+            "",
+            caps_bound=caps_bound if qph > 0 else None,
+            n_runs=qph_n if qph > 0 else None,
+            support_state=support_state if qph > 0 else None,
+        )
+        pipeline_throughput_display = format_measurement(
+            f"{pb.pipeline_throughput_gb_per_second:.3f} GB/s",
+            "",
+            caps_bound=caps_bound if pb.pipeline_throughput_gb_per_second > 0 else None,
+            n_runs=1 if pb.pipeline_throughput_gb_per_second > 0 else None,
+            support_state=support_state if pb.pipeline_throughput_gb_per_second > 0 else None,
+        )
 
         return f"""
         <div class="cards">
@@ -1531,7 +1737,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Pipeline Throughput</div>
-                <div class="card-value">{pb.pipeline_throughput_gb_per_second:.3f} GB/s</div>
+                <div class="card-value">{pipeline_throughput_display}</div>
                 <div class="card-delta" style="color: var(--text-muted);">
                     {pb.total_data_processed_gb:.1f} GB total
                 </div>
@@ -1546,7 +1752,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">QpH</div>
-                <div class="card-value">{qph:,.1f}{_qph_stop_warning(metrics)}</div>
+                <div class="card-value">{qph_display}{_qph_stop_warning(metrics)}</div>
                 <div class="card-hint">queries per hour -- higher is better</div>
                 <div class="card-hint2">{qph_hint2}</div>
             </div>
@@ -1639,6 +1845,8 @@ class ReportGenerator:
         Returns:
             HTML string (empty if no streaming metrics recorded)
         """
+        from lakebench.reports.formatter import caps_bound_from, format_measurement
+
         if not metrics.streaming:
             return ""
 
@@ -1653,6 +1861,8 @@ class ReportGenerator:
             for st in metrics.pipeline_benchmark.stages:
                 stage_map[st.stage_name] = st
 
+        caps_bound = caps_bound_from(metrics)
+
         rows = []
         total_rows = 0
         total_cpu_sec = 0.0
@@ -1663,7 +1873,17 @@ class ReportGenerator:
             status_text = "Pass" if s.success else "Fail"
             total_rows += s.total_rows_processed
 
-            throughput = f"{s.throughput_rps:,.0f} rows/s" if s.throughput_rps > 0 else "-"
+            if s.throughput_rps > 0:
+                stage_name = _JOB_TYPE_TO_STAGE.get(s.job_type, "")
+                stage_bound = caps_bound if _stage_matches_cap(stage_name, caps_bound) else []
+                throughput = format_measurement(
+                    f"{s.throughput_rps:,.0f} rows/s",
+                    "",
+                    caps_bound=stage_bound,
+                    n_runs=1,
+                )
+            else:
+                throughput = "-"
             freshness = f"{s.freshness_seconds:.0f}s" if s.freshness_seconds else "-"
 
             # Compute columns from stage metrics
@@ -1812,6 +2032,12 @@ class ReportGenerator:
         Returns:
             HTML string (empty if no benchmark)
         """
+        from lakebench.reports.formatter import (
+            caps_bound_from,
+            format_measurement,
+            support_state_of,
+        )
+
         if not metrics.benchmark:
             return ""
 
@@ -1819,11 +2045,18 @@ class ReportGenerator:
         mode_label = b.mode
         if b.streams > 1:
             mode_label += f", {b.streams} streams"
+        qph_display = format_measurement(
+            f"{b.qph:.1f}",
+            "",
+            caps_bound=caps_bound_from(metrics),
+            n_runs=int(getattr(b, "iterations", 0) or 0) or 1,
+            support_state=support_state_of(metrics),
+        )
 
         return f"""
             <div class="card">
                 <div class="card-label">QpH ({b.cache})</div>
-                <div class="card-value">{b.qph:.1f}{_qph_stop_warning(metrics)}</div>
+                <div class="card-value">{qph_display}{_qph_stop_warning(metrics)}</div>
                 <div class="card-delta" style="color: var(--text-muted);">
                     {mode_label}, scale {b.scale}
                 </div>
@@ -2099,6 +2332,12 @@ class ReportGenerator:
         _generate_sustained_detail_cards() instead -- this method is
         only called from _generate_batch_summary().
         """
+        from lakebench.reports.formatter import (
+            caps_bound_from,
+            format_measurement,
+            support_state_of,
+        )
+
         pb = metrics.pipeline_benchmark
         if not pb:
             return ""
@@ -2108,6 +2347,15 @@ class ReportGenerator:
             if 0 < pb.scale_ratio < 0.95
             else ""
         )
+        caps_bound = caps_bound_from(metrics)
+        support_state = support_state_of(metrics)
+        throughput_display = format_measurement(
+            f"{pb.pipeline_throughput_gb_per_second:.3f} GB/s",
+            "",
+            caps_bound=caps_bound if pb.pipeline_throughput_gb_per_second > 0 else None,
+            n_runs=1 if pb.pipeline_throughput_gb_per_second > 0 else None,
+            support_state=support_state if pb.pipeline_throughput_gb_per_second > 0 else None,
+        )
         return f"""
             <div class="card">
                 <div class="card-label">Time to Value</div>
@@ -2116,7 +2364,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Pipeline Throughput</div>
-                <div class="card-value">{pb.pipeline_throughput_gb_per_second:.3f} GB/s</div>
+                <div class="card-value">{throughput_display}</div>
                 <div class="card-delta" style="color: var(--text-muted);">
                     {pb.total_data_processed_gb:.1f} GB total
                 </div>
@@ -2136,12 +2384,15 @@ class ReportGenerator:
 
     def _generate_pipeline_benchmark_section(self, metrics: PipelineMetrics) -> str:
         """Generate the pipeline benchmark stage matrix section."""
+        from lakebench.reports.formatter import caps_bound_from, format_measurement
+
         pb = metrics.pipeline_benchmark
         if not pb or not pb.stages:
             return ""
 
         rows = []
         is_sustained = self._is_sustained(metrics)
+        caps_bound = caps_bound_from(metrics)
 
         for stage in pb.stages:
             status_class = "status-success" if stage.success else "status-failed"
@@ -2156,11 +2407,18 @@ class ReportGenerator:
                 if stage.throughput_gb_per_second > 0
                 else "-"
             )
-            rows_s = (
-                f"{stage.throughput_rows_per_second:,.0f}"
-                if stage.throughput_rows_per_second > 0
-                else "-"
-            )
+            # Per-stage rows/s goes through the shared formatter so a capped
+            # stage carries its BOUNDED BY tag next to the throughput cell.
+            if stage.throughput_rows_per_second > 0:
+                stage_bound = caps_bound if _stage_matches_cap(stage.stage_name, caps_bound) else []
+                rows_s = format_measurement(
+                    f"{stage.throughput_rows_per_second:,.0f}",
+                    "",
+                    caps_bound=stage_bound,
+                    n_runs=1,
+                )
+            else:
+                rows_s = "-"
             execs = str(stage.executor_count) if stage.executor_count > 0 else "-"
             cores = str(stage.executor_cores) if stage.executor_cores > 0 else "-"
             mem = f"{stage.executor_memory_gb:.0f}" if stage.executor_memory_gb > 0 else "-"
@@ -2479,7 +2737,10 @@ class ReportGenerator:
             ("Stages executed", ", ".join(st.get("executed") or []) or "none"),
             ("Stages skipped or failed", ", ".join(st.get("skipped") or []) or "none"),
             ("Executor caps hit (Lakebench limit)", ", ".join(caps_hit) or "none"),
-            ("Lakebench limits that bound the run", "; ".join(lim.get("bound") or []) or "none"),
+            (
+                "Lakebench limits that bound the run",
+                self._bound_with_cap_names(lim.get("bound") or []) or "none",
+            ),
             (
                 "Auto-sizing cuts (Lakebench limit)",
                 "; ".join(lim.get("autosize_cuts") or []) or "none",

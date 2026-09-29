@@ -43,7 +43,7 @@ def compare(
     ] = None,
     output_format: Annotated[
         str,
-        typer.Option("--format", help="Output format: table, json, csv, html"),
+        typer.Option("--format", help="Output format: table, json, csv"),
     ] = "table",
     skip_benchmark: Annotated[
         bool,
@@ -78,6 +78,38 @@ def compare(
     """
     from lakebench.config import ConfigError
 
+    # --scale here would rewrite only the in-memory configs; the subprocess
+    # `run` invocations reload from disk and would benchmark at whatever the
+    # file says, contradicting the displayed plan. The option stays parked
+    # until it is wired end-to-end. Refuse loudly rather than silently mislead.
+    if scale is not None:
+        console.print(
+            "[red]--scale is not supported by `compare`.[/red] Edit "
+            "architecture.workload.datagen.scale in each config file so the "
+            "subprocess runs see the scale you asked for."
+        )
+        raise typer.Exit(2)
+
+    # Unknown --format used to silently fall back to JSON via
+    # _save_comparison's else branch. `report --render` is the HTML path;
+    # `compare` writes JSON, CSV, or the terminal table. Any other value
+    # (including typos like 'htlm') is refused loudly.
+    _SUPPORTED_FORMATS = {"table", "json", "csv"}
+    _requested_format = output_format.lower()
+    if _requested_format == "html":
+        console.print(
+            "[red]--format html is not supported by `compare`.[/red] Use "
+            "`lakebench report --render` to build an HTML report from a run's "
+            "metrics.json (or --format json / --format csv here)."
+        )
+        raise typer.Exit(2)
+    if _requested_format not in _SUPPORTED_FORMATS:
+        console.print(
+            f"[red]--format {output_format!r} is not supported.[/red] "
+            f"Use one of: {', '.join(sorted(_SUPPORTED_FORMATS))}."
+        )
+        raise typer.Exit(2)
+
     # Load both configs
     try:
         cfg_a = load_config(config_a)
@@ -85,11 +117,6 @@ def compare(
     except ConfigError as e:
         console.print(f"[red]Config error: {e}[/red]")
         raise typer.Exit(1) from None
-
-    # Apply scale override
-    if scale is not None:
-        cfg_a.architecture.workload.datagen.scale = scale
-        cfg_b.architecture.workload.datagen.scale = scale
 
     # Different workloads, corpora, seeds, scales or modes are different
     # experiments; say so before hours are spent running them. The runs still
@@ -158,6 +185,17 @@ def compare(
     console.print(f"[bold]== Running configuration B: {cfg_b.name} ==[/bold]")
     metrics_b = _run_single(config_b, timeout, skip_benchmark, keep, local, generate)
 
+    # Destroy failures were captured by _run_single; surface them before
+    # building the comparison so they cannot be hidden by a nice-looking
+    # table, and set exit non-zero regardless of the comparison verdict.
+    destroy_failures: list[str] = []
+    for label, m in (("A", metrics_a), ("B", metrics_b)):
+        if isinstance(m, dict):
+            err = m.pop("_destroy_error", None)
+            if err:
+                console.print(f"[red]Destroy for run {label} failed: {err}[/red]")
+                destroy_failures.append(label)
+
     # Build comparison
     comparison = _build_comparison(cfg_a.name, metrics_a, cfg_b.name, metrics_b)
 
@@ -176,6 +214,15 @@ def compare(
     with open(compare_dir / "comparison.json", "w") as f:
         json.dump(comparison, f, indent=2)
     console.print(f"\n[dim]Comparison saved to {compare_dir}[/dim]")
+    if destroy_failures:
+        # A destroy failure leaves cluster or bucket state behind that the
+        # next run of the same config will collide with; surfacing this via
+        # exit code is what a UAT script or CI job will actually notice.
+        console.print(
+            f"[red]compare: destroy failed for {', '.join(destroy_failures)}; "
+            "see messages above.[/red]"
+        )
+        raise typer.Exit(1)
     if (
         comparison.get("verdict", "not_comparable" if comparison.get("comparable") is False else "")
         == "not_comparable"
@@ -299,11 +346,30 @@ def _run_single(
             # Without --remove-data the buckets survive, and the next run of a
             # config with the same bucket names would read stale data.
             destroy_cmd += ["--local", "--remove-data"]
-        subprocess.run(
-            destroy_cmd,
-            capture_output=True,
-            timeout=600,
-        )
+        try:
+            destroy_result = subprocess.run(
+                destroy_cmd,
+                capture_output=True,
+                timeout=600,
+            )
+            if destroy_result.returncode != 0:
+                # Surface it: a silent destroy failure leaves an orphan
+                # namespace (or bucket) that a later comparison will collide
+                # with. The metrics are still returned so the comparison can
+                # be built, but the compare exits non-zero at the end.
+                stderr = destroy_result.stderr or b""
+                if isinstance(stderr, bytes):
+                    stderr_text = stderr.decode(errors="replace")
+                else:
+                    stderr_text = str(stderr)
+                metrics = dict(metrics) if isinstance(metrics, dict) else {"error": str(metrics)}
+                metrics["_destroy_error"] = (
+                    f"destroy exited {destroy_result.returncode}: "
+                    f"{stderr_text.strip()[:800] or 'no stderr'}"
+                )
+        except subprocess.TimeoutExpired:
+            metrics = dict(metrics) if isinstance(metrics, dict) else {"error": str(metrics)}
+            metrics["_destroy_error"] = "destroy timed out after 600s"
 
     return metrics
 
@@ -494,6 +560,19 @@ def _build_comparison(
             warnings.append(policy_problem)
 
     warnings.extend(result_notes)
+
+    # Caps that bound each side, from the experiment block. Delta rendering
+    # uses these to render `capped` instead of a bogus winner when a
+    # Lakebench cap held either run.
+    def _caps_of(m: dict) -> list[str]:
+        exp = experiment_of(m) or {}
+        limits = exp.get("limits", {}) or {}
+        bound = limits.get("bound", []) or []
+        return list(bound) if isinstance(bound, list) else []
+
+    caps_bound_a = _caps_of(metrics_a)
+    caps_bound_b = _caps_of(metrics_b)
+
     return {
         "timestamp": datetime.now().isoformat(),
         "verdict": verdict,
@@ -504,6 +583,8 @@ def _build_comparison(
         "like_for_like": comparable and not conditions,
         "condition_differences": conditions,
         "support": {"config_a": support_of(metrics_a), "config_b": support_of(metrics_b)},
+        "caps_bound_a": caps_bound_a,
+        "caps_bound_b": caps_bound_b,
         "refusals": {"provenance": provenance_refusals, "results": result_refusals},
         "warnings": warnings,
         "config_a": {
@@ -625,6 +706,32 @@ def _print_comparison_table(comparison: dict) -> None:
     table.add_column(name_b, justify="right")
     table.add_column("Delta", justify="right")
 
+    from lakebench.reports.formatter import (
+        DELTA_TOKEN_A_FASTER,
+        DELTA_TOKEN_B_FASTER,
+        DELTA_TOKEN_CAPPED,
+        DELTA_TOKEN_OVERLAP,
+        DELTA_TOKEN_WITHHELD,
+        delta_token,
+    )
+
+    # WCAG 1.4.1: pass/fail and winner/loser are not encoded by colour alone.
+    # Each delta cell carries an ASCII glyph and a text token next to the
+    # percentage; a screen-reader or a copy-paste of the text still shows
+    # which side won, without relying on the red/green pill.
+    _TOKEN_GLYPH = {
+        DELTA_TOKEN_A_FASTER: "<",
+        DELTA_TOKEN_B_FASTER: ">",
+        DELTA_TOKEN_OVERLAP: "=",
+        DELTA_TOKEN_WITHHELD: "x",
+        DELTA_TOKEN_CAPPED: "!",
+    }
+    # A Lakebench cap on either side makes the comparison unsafe to
+    # attribute; the token pipes that through to the delta rendering so
+    # the caller sees "capped" instead of a bogus winner.
+    _capped_either_side = bool(comparison.get("caps_bound_a")) or bool(
+        comparison.get("caps_bound_b")
+    )
     for row in comparison["metrics"]:
         val_a = row["config_a"]
         val_b = row["config_b"]
@@ -637,20 +744,34 @@ def _print_comparison_table(comparison: dict) -> None:
             and val_a != 0
         ):
             pct = ((val_b - val_a) / abs(val_a)) * 100
-            if abs(pct) < _NOISE_FLOOR_PCT or _is_neutral(row["metric"]):
+            within_noise = abs(pct) < _NOISE_FLOOR_PCT or _is_neutral(row["metric"])
+            token = delta_token(
+                higher_is_better=_higher_is_better(row["metric"]),
+                pct=pct,
+                within_noise=within_noise,
+                capped=_capped_either_side,
+            )
+            glyph = _TOKEN_GLYPH.get(token, "=")
+            if token == DELTA_TOKEN_CAPPED:
+                # A capped delta is not attributable; render as yellow so
+                # the reader does not read the number as a win.
+                delta = f"[yellow]{glyph} {token} {pct:+.1f}%[/yellow]"
+            elif within_noise:
                 # Measured spread on an idle host is ~1%. Colouring a smaller
                 # difference green or red claims a result the run cannot
                 # support, and neutral scores have no better direction.
-                delta = f"[dim]{pct:+.1f}%[/dim]"
+                delta = f"[dim]{glyph} {token} {pct:+.1f}%[/dim]"
             else:
                 better = "green" if _higher_is_better(row["metric"]) == (pct > 0) else "red"
-                delta = f"[{better}]{pct:+.1f}%[/{better}]"
+                delta = f"[{better}]{glyph} {token} {pct:+.1f}%[/{better}]"
 
         if row.get("not_comparable"):
+            token = DELTA_TOKEN_WITHHELD
+            glyph = _TOKEN_GLYPH[token]
             delta = (
-                "[yellow]not established[/yellow]"
+                f"[yellow]{glyph} {token} not established[/yellow]"
                 if verdict == "not_established"
-                else "[red]not comparable[/red]"
+                else f"[red]{glyph} {token} not comparable[/red]"
             )
         table.add_row(
             row["metric"],

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from lakebench.k8s import PlatformType, SecurityVerifier
+from lakebench.k8s import PlatformType, SecurityVerifier, pinned_helm, pinned_kubectl
 
 from .engine import DeploymentResult, DeploymentStatus
 
@@ -58,15 +58,19 @@ _PROMETHEUS_READY_TIMEOUT_S = 600
 _READY_JSONPATH = '{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\\n"}{end}'
 
 
-def _wait_for_prometheus(namespace: str, timeout_s: int = _PROMETHEUS_READY_TIMEOUT_S) -> str:
+def _wait_for_prometheus(
+    namespace: str,
+    timeout_s: int = _PROMETHEUS_READY_TIMEOUT_S,
+    context: str | None = None,
+) -> str:
     """Wait until a Prometheus pod of the release is Ready; '' when it is, else why not."""
     deadline = time.time() + timeout_s
     last = ""
     while True:
         try:
-            r = subprocess.run(
+            r = pinned_kubectl(
+                context,
                 [
-                    "kubectl",
                     "get",
                     "pods",
                     "-n",
@@ -97,12 +101,14 @@ class ObservabilityLookupError(RuntimeError):
     """The cluster's Helm releases could not be listed."""
 
 
-def find_observability_release() -> str | None:
+def find_observability_release(context: str | None = None) -> str | None:
     """Namespace of the cluster's observability release, or None if there is none."""
-    return find_observability_release_status()[0]
+    return find_observability_release_status(context)[0]
 
 
-def find_observability_release_status() -> tuple[str | None, str]:
+def find_observability_release_status(
+    context: str | None = None,
+) -> tuple[str | None, str]:
     """(namespace, helm status) of the cluster's observability release.
 
     Any release of that name counts, whatever its status, so a failed or
@@ -115,9 +121,9 @@ def find_observability_release_status() -> tuple[str | None, str]:
     import json
 
     try:
-        result = subprocess.run(
+        result = pinned_helm(
+            context,
             [
-                "helm",
                 "list",
                 "--all-namespaces",
                 "--all",
@@ -153,7 +159,11 @@ def find_observability_release_status() -> tuple[str | None, str]:
     return ns, by_ns[ns]
 
 
-def _find_helm_service(namespace: str, app_label: str) -> str | None:
+def _find_helm_service(
+    namespace: str,
+    app_label: str,
+    context: str | None = None,
+) -> str | None:
     """Find a Helm-managed service by its app label.
 
     The kube-prometheus-stack chart truncates service names based on
@@ -183,11 +193,9 @@ def _find_helm_service(namespace: str, app_label: str) -> str | None:
 
     # Attempt 2: kubectl fallback
     try:
-        import subprocess
-
-        result = subprocess.run(
+        result = pinned_kubectl(
+            context,
             [
-                "kubectl",
                 "get",
                 "svc",
                 "-n",
@@ -244,6 +252,10 @@ class ObservabilityDeployer:
         self.renderer = engine.renderer
         self.context = engine.context
 
+    def _kube_context(self) -> str | None:
+        """Return the configured kubeconfig context, or None to use current."""
+        return self.config.platform.kubernetes.context or None
+
     def deploy(self) -> DeploymentResult:
         """Deploy the observability stack.
 
@@ -292,7 +304,7 @@ class ObservabilityDeployer:
             # install does not stall other deployments' lease holders.
             release_ns = (result.details or {}).get("release_namespace")
             if result.status == DeploymentStatus.SUCCESS and release_ns:
-                problem = _wait_for_prometheus(release_ns)
+                problem = _wait_for_prometheus(release_ns, context=self._kube_context())
                 if problem:
                     return DeploymentResult(
                         component="observability",
@@ -321,7 +333,7 @@ class ObservabilityDeployer:
     def _deploy_locked(self, namespace: str, start: float) -> DeploymentResult:
         """Install the shared stack if absent, then apply this deployment's monitors."""
         try:
-            existing_ns, status = find_observability_release_status()
+            existing_ns, status = find_observability_release_status(self._kube_context())
         except ObservabilityLookupError as e:
             return DeploymentResult(
                 component="observability",
@@ -393,7 +405,6 @@ class ObservabilityDeployer:
         # release exists, and 'helm install' fails rather than modifying one
         # that appeared since the check.
         cmd = [
-            "helm",
             "install",
             HELM_RELEASE_NAME,
             HELM_CHART,
@@ -418,7 +429,8 @@ class ObservabilityDeployer:
             openshift_values_file = self._write_openshift_values_file()
             cmd.extend(["-f", openshift_values_file])
 
-        result = subprocess.run(
+        result = pinned_helm(
+            self._kube_context(),
             cmd,
             capture_output=True,
             text=True,
@@ -453,8 +465,10 @@ class ObservabilityDeployer:
         self._apply_podmonitor_templates(namespace)
         self._apply_dashboard()
 
-        prom_svc = _find_helm_service(release_ns, "kube-prometheus-stack-prometheus")
-        grafana_svc = _find_helm_service(release_ns, "grafana")
+        prom_svc = _find_helm_service(
+            release_ns, "kube-prometheus-stack-prometheus", context=self._kube_context()
+        )
+        grafana_svc = _find_helm_service(release_ns, "grafana", context=self._kube_context())
         prom_url = (
             f"http://{prom_svc}.{release_ns}.svc:9090"
             if prom_svc
@@ -519,9 +533,9 @@ class ObservabilityDeployer:
             )
 
         try:
-            listed = subprocess.run(
+            listed = pinned_helm(
+                self._kube_context(),
                 [
-                    "helm",
                     "list",
                     "--namespace",
                     namespace,
@@ -559,8 +573,9 @@ class ObservabilityDeployer:
                 )
 
             # A pre-v1.6 release in this deployment's own namespace.
-            result = subprocess.run(
-                ["helm", "uninstall", HELM_RELEASE_NAME, "--namespace", namespace],
+            result = pinned_helm(
+                self._kube_context(),
+                ["uninstall", HELM_RELEASE_NAME, "--namespace", namespace],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -652,9 +667,10 @@ class ObservabilityDeployer:
 
     def _add_helm_repo(self) -> None:
         """Add the prometheus-community Helm repo if not present."""
-        subprocess.run(
+        ctx = self._kube_context()
+        pinned_helm(
+            ctx,
             [
-                "helm",
                 "repo",
                 "add",
                 "prometheus-community",
@@ -664,8 +680,9 @@ class ObservabilityDeployer:
             text=True,
             timeout=30,
         )
-        subprocess.run(
-            ["helm", "repo", "update"],
+        pinned_helm(
+            ctx,
+            ["repo", "update"],
             capture_output=True,
             text=True,
             timeout=60,

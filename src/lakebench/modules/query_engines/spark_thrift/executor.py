@@ -17,6 +17,7 @@ from lakebench.benchmark.fingerprint import (
     unusable,
 )
 from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
+from lakebench.k8s import pinned_kubectl
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,15 @@ def _drop_terminal_newline(text: str) -> str:
 class SparkThriftExecutor:
     """Executes queries via ``kubectl exec`` into beeline on the Spark Thrift Server."""
 
-    def __init__(self, namespace: str, catalog_name: str):
+    def __init__(
+        self,
+        namespace: str,
+        catalog_name: str,
+        kube_context: str | None = None,
+    ):
         self.namespace = namespace
         self.catalog_name = catalog_name
+        self.kube_context = kube_context or None
         self._pod: str | None = None
 
     def engine_name(self) -> str:
@@ -66,9 +73,9 @@ class SparkThriftExecutor:
         """Find the Spark Thrift Server driver pod."""
         if self._pod:
             return self._pod
-        result = subprocess.run(
+        result = pinned_kubectl(
+            self.kube_context,
             [
-                "kubectl",
                 "get",
                 "pods",
                 "-n",
@@ -88,9 +95,15 @@ class SparkThriftExecutor:
         self._pod = pod
         return pod
 
+    def _kubectl_prefix(self) -> list[str]:
+        """The ``kubectl`` argv prefix with the configured context pinned."""
+        if self.kube_context:
+            return ["kubectl", "--context", self.kube_context]
+        return ["kubectl"]
+
     def _beeline_cmd(self, pod: str, sql: str) -> list[str]:
         return [
-            "kubectl",
+            *self._kubectl_prefix(),
             "exec",
             pod,
             "-c",
