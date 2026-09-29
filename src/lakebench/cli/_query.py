@@ -492,11 +492,15 @@ def query(
         success=True,
     )
 
-    # Try to append to latest run's metrics
+    # Try to append to latest run's metrics.
+    # Scope by deployment name so a parallel deployment's newer run cannot
+    # be mistaken for this deployment's latest and rewritten with our
+    # queries (SP-2 owns deployment_id; this is the interim name-scoped
+    # lookup).
     from lakebench.metrics import MetricsStorage
 
     storage = MetricsStorage()
-    latest_run = storage.get_latest_run()
+    latest_run = storage.get_latest_run_for_deployment(cfg.name)
     if latest_run:
         latest_run.queries.append(query_metrics)
         storage.save_run(latest_run)
@@ -732,9 +736,12 @@ def benchmark(
             _display_power_results(run_result)
         primary_result = run_result
 
-    # Save to latest metrics if available
+    # Save to latest metrics if available. Scope by deployment name so a
+    # parallel deployment's newer run cannot be rewritten with this
+    # benchmark's metrics (SP-2 owns deployment_id; this is the interim
+    # name-scoped lookup).
     storage = MetricsStorage()
-    latest_run = storage.get_latest_run()
+    latest_run = storage.get_latest_run_for_deployment(cfg.name)
     if latest_run:
         bench_metrics = BenchmarkMetrics(
             mode=primary_result.mode,

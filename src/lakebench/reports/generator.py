@@ -139,6 +139,7 @@ class ReportGenerator:
         output_path: Path | str | None = None,
         *,
         force: bool = False,
+        deployment_name: str | None = None,
     ) -> Path:
         """Generate an HTML report.
 
@@ -154,6 +155,11 @@ class ReportGenerator:
                 Without ``force``, an existing target raises
                 ``FileExistsError`` so the delivered artifact cannot be
                 mutated by mistake.
+            deployment_name: When ``run_id`` is not supplied, scope the
+                "latest run" lookup to this deployment so a parallel
+                deployment's newer run is not rendered by mistake. ``None``
+                keeps the unscoped behaviour for callers that do not know
+                the deployment (SP-2 owns the deployment_id follow-up).
 
         Returns:
             Path to the written HTML file.
@@ -168,7 +174,7 @@ class ReportGenerator:
             if not metrics:
                 raise ValueError(f"Run not found: {run_id}")
         else:
-            metrics = self.storage.get_latest_run()
+            metrics = self.storage.get_latest_run_for_deployment(deployment_name)
             if not metrics:
                 raise ValueError("No runs found")
 

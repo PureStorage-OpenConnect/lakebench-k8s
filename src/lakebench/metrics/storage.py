@@ -432,6 +432,48 @@ class MetricsStorage:
 
         return self.load_run(runs[0]["run_id"])
 
+    def get_latest_run_for_deployment(self, deployment_name: str | None) -> PipelineMetrics | None:
+        """Newest run whose ``deployment_name`` matches *deployment_name*.
+
+        Parallel deployments share a single lakebench-output tree, so an
+        unscoped ``get_latest_run()`` reads whichever deployment happened to
+        finish last -- a callsite that then rewrites the record corrupts
+        another deployment's history (SP-2 owns the deployment_id fix; this
+        helper is the interim scope-by-name path).
+
+        Legacy records recorded before v1.6 did not persist deployment_name.
+        When the scoped lookup finds no exact match, this method falls back
+        to the newest record with no recorded deployment name so those old
+        runs stay accessible under best-effort matching. Records for a
+        DIFFERENT named deployment are never returned, so a caller that
+        rewrites the returned record cannot cross into another deployment's
+        data.
+
+        With ``deployment_name`` empty or ``None`` this reduces to
+        :meth:`get_latest_run` (no scoping requested).
+
+        Args:
+            deployment_name: The deployment to scope by, or ``None`` for the
+                unscoped latest.
+
+        Returns:
+            The scoped PipelineMetrics, or ``None`` if nothing matches.
+        """
+        if not deployment_name:
+            return self.get_latest_run()
+
+        legacy_fallback_id: str | None = None
+        for info in self.list_runs():
+            recorded = info.get("deployment_name")
+            if recorded == deployment_name:
+                return self.load_run(info["run_id"])
+            if not recorded and legacy_fallback_id is None:
+                legacy_fallback_id = info.get("run_id")
+
+        if legacy_fallback_id is not None:
+            return self.load_run(legacy_fallback_id)
+        return None
+
     def _iter_metrics_files(self):
         """Yield all metrics JSON file paths (new + legacy layouts)."""
         # New layout: per-run directories
