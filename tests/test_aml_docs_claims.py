@@ -48,16 +48,32 @@ def test_run_flow_docs_do_not_claim_a_reference_cross_check() -> None:
     the run cross-checks recall against the reference detector are
     what tier-3 item 26 flagged.
     """
-    forbidden = "cross-checked"
+    import re
+
+    # Reject any tense: cross-check / cross-checks / cross-checked /
+    # cross-checking / crosschecks / cross checks etc. Kept to a
+    # single-line window (no DOTALL, no paragraph crossing) so the
+    # negation phrase "does not cross-check recall against a model"
+    # (the correct wording used in the docs today) does not match.
+    # And skip if the immediately preceding words are a negation.
+    verb = re.compile(
+        r"(?<!not\s)(?<!does\snot\s)(?<!doesn't\s)"
+        r"cross[-\s]?check(?:s|ed|ing)?\s+recall",
+        re.IGNORECASE,
+    )
     getting_started = _read(DOCS / "getting-started.md")
     readme = _read(REPO_ROOT / "README.md")
-    assert forbidden not in getting_started, (
-        "getting-started.md must not claim `lakebench run` cross-checks recall "
-        "against a reference detector; the run does not invoke it"
-    )
-    assert forbidden not in readme, (
-        "README.md must not claim `lakebench run` cross-checks recall against a reference detector"
-    )
+    for name, text in (("getting-started.md", getting_started), ("README.md", readme)):
+        for m in verb.finditer(text):
+            # Grab the enclosing sentence and skip if it is a negation.
+            start = max(0, m.start() - 40)
+            snippet = text[start : m.end()].lower()
+            if "does not" in snippet or "doesn't" in snippet or "no cross" in snippet:
+                continue
+            raise AssertionError(
+                f"{name} still claims `lakebench run` cross-checks recall "
+                f"(match: {text[m.start() : m.end() + 40]!r})"
+            )
     # And it must still describe the reference detector as a separate
     # command, so a reader does not conclude it does not exist.
     assert "reference-score" in getting_started, (
