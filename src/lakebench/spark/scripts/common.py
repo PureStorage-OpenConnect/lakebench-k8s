@@ -892,7 +892,13 @@ def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
             n = _delete_children(spark, location, keep=("metadata", "_delta_log"))
             log(f"Continuous reset: deleted {n} data entries under {location}")
         how = "DROP"
-        if iceberg:
+        # LB-188: PURGE deletes every file the table metadata references,
+        # wherever it sits, so it runs only for a table whose directory this
+        # deployment owns. A table whose location is unreadable or outside this
+        # deployment is dropped catalog-only (its files kept), matching the
+        # "kept ..." log above; an owned table's files are already removed by
+        # the _delete_children and location delete around this drop.
+        if iceberg and owned:
             try:
                 spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
                 how = "DROP PURGE"

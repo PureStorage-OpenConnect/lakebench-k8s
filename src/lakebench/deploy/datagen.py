@@ -224,6 +224,11 @@ class DatagenDeployer:
 
             self._delete_existing_job(namespace)
 
+            # Cycle 0 is a fresh write: clear stale files a prior generate left,
+            # after the previous job is gone so nothing writes mid-clear. Append
+            # cycles (n > 0) keep the earlier cycles' files (LB-185).
+            self._clear_bronze_prefix_if_fresh(cycle_index, context["datagen_path_prefix"])
+
             for template_name in self.TEMPLATES:
                 yaml_content = self.renderer.render(template_name, context)
                 manifest = yaml.safe_load(yaml_content)
@@ -255,6 +260,102 @@ class DatagenDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
+    def _bronze_bucket_is_owned(self, bucket: str) -> bool:
+        """True only when this deployment's namespace records creating ``bucket``.
+
+        The clear below is destructive, so it must respect the same ownership
+        model as destroy and clean: on FlashBlade bucket tagging is unsupported
+        (LB-088), so the namespace's created-buckets record is the authoritative
+        proof of ownership. Fail-safe: any uncertainty (record unreadable,
+        namespace absent, bucket not listed) returns False, so a generate into a
+        shared, adopted or foreign bronze bucket never deletes another
+        deployment's data (invariant 4). `lakebench generate` calls the deployer
+        directly and never runs the deploy engine's bucket-ownership guard, so
+        this check is the only thing standing between the clear and foreign data.
+        """
+        try:
+            from kubernetes import client as k8s_client
+
+            from lakebench.deploy.ownership import read_created_buckets
+
+            core_v1 = k8s_client.CoreV1Api()
+            namespace = self.config.get_namespace()
+            return bucket in read_created_buckets(core_v1, namespace)
+        except Exception as e:  # noqa: BLE001
+            logger.info(
+                "LB-185: could not confirm this deployment created %s (%s); not clearing it",
+                bucket,
+                e,
+            )
+            return False
+
+    def _clear_bronze_prefix_if_fresh(self, cycle_index: int, path_prefix: str) -> None:
+        """Clear stale datagen files before a fresh generate (LB-185).
+
+        A re-generate into a reused bronze bucket must not inherit part-* files
+        a larger earlier generate left behind: they share the ``part-NNNNNN``
+        naming, so the bronze read cannot tell them apart and silver over-counts
+        (a smaller generate over a larger one's leftovers). Clear the workload's
+        bronze prefix before cycle 0 writes; append cycles (n > 0) keep the
+        earlier cycles' files. Skipped when the operator manages the bucket
+        (``create_buckets`` false) or when this deployment cannot prove it
+        created the bucket (invariant 4). Scoped to the datagen prefix via
+        ``delete_prefix``, which refuses an empty or root prefix.
+
+        For an owned bucket the clear MUST succeed: a half-cleared prefix leaves
+        stale files that silver over-counts, the exact LB-185 bug, so a clearing
+        failure raises and fails the generate rather than proceeding with a PASS
+        on wrong data (invariant 3).
+        """
+        if cycle_index != 0:
+            return
+        s3_cfg = self.config.platform.storage.s3
+        if not s3_cfg.create_buckets:
+            logger.info(
+                "LB-185: create_buckets is false; leaving the bronze prefix for "
+                "the operator to manage"
+            )
+            return
+        prefix = path_prefix.strip("/")
+        if not prefix:
+            logger.warning("LB-185: datagen path prefix is empty; not clearing the bronze bucket")
+            return
+        bucket = s3_cfg.buckets.bronze
+        if not self._bronze_bucket_is_owned(bucket):
+            logger.info(
+                "LB-185: %s is not recorded as created by this deployment; not clearing it "
+                "(a re-generate into a reused bucket may inherit stale files)",
+                bucket,
+            )
+            return
+        # Owned: the prefix must be empty before datagen writes. Any failure
+        # propagates so deploy()/deploy_cycle() report FAILED rather than
+        # generating over a half-cleared prefix.
+        from lakebench.s3 import S3Client
+
+        s3 = S3Client(
+            endpoint=s3_cfg.endpoint,
+            access_key=s3_cfg.access_key,
+            secret_key=s3_cfg.secret_key,
+            region=s3_cfg.region,
+            path_style=s3_cfg.path_style,
+            ca_cert=s3_cfg.ca_cert,
+            verify_ssl=s3_cfg.verify_ssl,
+        )
+        if s3._init_error:
+            raise RuntimeError(
+                f"LB-185: cannot clear the bronze prefix s3://{bucket}/{prefix} before a "
+                f"fresh generate: {s3._init_error}"
+            )
+        n = s3.delete_prefix(bucket, prefix)
+        if n:
+            logger.info(
+                "LB-185: cleared %d stale object(s) under s3://%s/%s before a fresh generate",
+                n,
+                bucket,
+                prefix,
+            )
+
     def deploy(self) -> DeploymentResult:
         """Deploy the datagen job.
 
@@ -276,6 +377,11 @@ class DatagenDeployer:
             context = self._build_datagen_context()
 
             self._delete_existing_job(namespace)
+
+            # A single-cycle generate is a fresh write: clear stale files after
+            # the previous job is gone, so nothing writes into the prefix
+            # mid-clear.
+            self._clear_bronze_prefix_if_fresh(0, context["datagen_path_prefix"])
 
             # Render and apply job template
             for template_name in self.TEMPLATES:
