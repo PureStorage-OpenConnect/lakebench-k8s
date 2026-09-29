@@ -53,6 +53,11 @@ def _run(cfg=None, fps=None, fleet=None):
         ],
     )
     run.datagen_fleet = fleet
+    # A2b wiring: compare and perf_gate now refuse a run whose verdict is
+    # FAILED. Mark the synthetic collector as successful so its computed
+    # verdict is PASSED; these tests exercise the comparability ladder,
+    # not the failed-run refusal path.
+    run.success = True
     return run
 
 

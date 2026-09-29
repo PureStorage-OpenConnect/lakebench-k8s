@@ -2337,5 +2337,20 @@
       }
     },
     "mode": "continuous"
+  },
+  "verdict": {
+    "status": "FAILED",
+    "reasons": [
+      "Gold freshness 1,271s (63% of run duration -- gold was stale for most of the run)"
+    ],
+    "gates": {
+      "pipeline": "PASS",
+      "benchmark": "PASS"
+    },
+    "qualifiers": {
+      "pipeline_mode": "sustained",
+      "n_streaming_stages": 3,
+      "n_benchmark_queries": 8
+    }
   }
 }

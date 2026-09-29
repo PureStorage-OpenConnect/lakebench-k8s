@@ -143,104 +143,37 @@ class ReportGenerator:
         """Compute whether the run should be considered a pass.
 
         Returns (passed, fail_reasons, warnings) where:
-        - passed: True if no failures
+        - passed: True if the run's verdict is PASSED (v1.6) or the record
+          has no verdict block and ``success`` is True (legacy v1.5)
         - fail_reasons: list of failure messages
         - warnings: list of anomaly messages (run passed but has caveats)
 
-        Checks:
-        - Pipeline completed without crash
-        - Sustained: ingest_ratio >= 0.95 (pipeline kept pace with datagen)
-        - Batch: scale_ratio >= 0.95 (all expected data was processed)
-        - All jobs / streaming stages succeeded
-        - No failed benchmark queries
+        The badge share the fail-reason and warning rules with
+        ``metrics.verdict.compute_verdict`` via ``compute_badge_status``.
+        The pass/fail bit itself is taken from the run's verdict when one
+        was computed (OD-6: ``success == (verdict.status == "PASSED")``),
+        so the badge and the wired readers agree on the same outcome.
         """
-        reasons: list[str] = []
-        warnings: list[str] = []
+        from lakebench.metrics.verdict import compute_badge_status, compute_verdict
 
-        if metrics.benchmark_error:
-            reasons.append(f"Benchmark did not complete ({metrics.benchmark_error}); no QpH")
-        elif not metrics.success:
-            reasons.append("Pipeline crashed or was interrupted")
+        _, reasons, warnings = compute_badge_status(metrics)
 
-        pb = metrics.pipeline_benchmark
-        is_sustained = self._is_sustained(metrics)
+        # Take the pass/fail bit from the run's verdict so the badge
+        # agrees with every other reader wired in A2b (CLI list, perf
+        # gate, compare all read verdict.status). Reasons stay from the
+        # badge helper so the tooltip still names what went wrong.
+        # Warnings are amber-badge only and never flip the pass/fail bit.
+        verdict = compute_verdict(metrics)
+        passed = verdict.status == "PASSED"
 
-        # Data completeness
-        if pb:
-            if is_sustained and pb.ingest_ratio is None:
-                warnings.append("Ingest ratio unmeasurable (datagen row count unknown)")
-            elif (
-                is_sustained
-                and pb.ingest_ratio is not None
-                and pb.ingest_ratio < 0.95
-                and pb.intake_limit == "trickle_rate"
-                and pb.pipeline_saturated is False
-            ):
-                # The configured trickle bounded intake and the pipeline kept
-                # pace with it (LB-156): a caveat on the ratio, not a failure.
-                warnings.append(pb.trickle_note() or "Intake held to the trickle rate")
-            elif (
-                is_sustained
-                and pb.ingest_ratio is not None
-                and pb.ingest_ratio < 0.95
-                and pb.intake_limit == "trickle_rate"
-                and pb.pipeline_saturated is None
-            ):
-                warnings.append(
-                    f"Ingest ratio {pb.ingest_ratio:.2f}: intake held to the trickle rate, "
-                    "but silver's pace was not measured, so saturation is unknown"
-                )
-            elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio < 0.95:
-                cause = (
-                    "intake held to the trickle rate, silver did not keep pace"
-                    if pb.intake_limit == "trickle_rate"
-                    else "pipeline saturated"
-                )
-                reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 ({cause})")
-            elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio > 1.05:
-                warnings.append(
-                    f"Ingest ratio {pb.ingest_ratio:.2f} > 1.05 (gold re-reads exceed input)"
-                )
-            if not is_sustained and 0 < pb.scale_ratio < 0.95:
-                reasons.append(f"Scale ratio {pb.scale_ratio:.1%} < 95% (incomplete data)")
+        # If the verdict is FAILED but the badge helper found no reason,
+        # surface the verdict reasons so the tooltip is not empty. This
+        # only happens when a gate outside the badge rules (for example
+        # ``c360``) failed the verdict.
+        if not passed and not reasons:
+            reasons = list(verdict.reasons) or ["Verdict FAILED"]
 
-        # Freshness -- sustained mode only
-        if is_sustained and pb and pb.data_freshness_seconds is not None:
-            run_dur = metrics.total_elapsed_seconds or 1.0
-            freshness_pct = pb.data_freshness_seconds / run_dur
-            if freshness_pct > 0.5:
-                reasons.append(
-                    f"Gold freshness {pb.data_freshness_seconds:,.0f}s "
-                    f"({freshness_pct:.0%} of run duration -- gold was stale for most of the run)"
-                )
-
-        if is_sustained and pb and pb.corpus_drained:
-            warnings.append(
-                "Corpus fully ingested before the window ended: freshness covers only gold "
-                "cycles that saw new data, and rows/s is a lower bound set by corpus size (LB-145)"
-            )
-
-        # Job / streaming success
-        if is_sustained and metrics.streaming:
-            failed = [s.job_name for s in metrics.streaming if not s.success]
-            if failed:
-                reasons.append(f"Streaming jobs failed: {', '.join(failed)}")
-        elif metrics.jobs:
-            failed = [j.job_name for j in metrics.jobs if not j.success]
-            if failed:
-                reasons.append(f"Batch jobs failed: {', '.join(failed)}")
-
-        # Benchmark query failures
-        if metrics.benchmark and metrics.benchmark.queries:
-            n_failed = sum(
-                1
-                for q in metrics.benchmark.queries
-                if isinstance(q, dict) and not q.get("success", True)
-            )
-            if n_failed:
-                reasons.append(f"{n_failed} benchmark queries failed")
-
-        return (len(reasons) == 0, reasons, warnings)
+        return (passed, reasons, warnings)
 
     def _is_sustained(self, metrics: PipelineMetrics) -> bool:
         """Return True if this run used the sustained/streaming pipeline.
