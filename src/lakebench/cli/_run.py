@@ -14,8 +14,10 @@ from rich.panel import Panel
 
 from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
+    EXIT_DATAGEN_TIMEOUT,
     _journal_safe,
     console,
+    enforce_bronze_regenerate,
     journal_open,
     print_error,
     print_info,
@@ -544,6 +546,55 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
 # not from this poll; it bounds how long lakebench takes to notice a stage has
 # ended, which sits inside time to value between stages. Was 15 s.
 _STAGE_POLL_S = 5
+
+
+def _handle_datagen_timeout(
+    *,
+    datagen_deployer,
+    job_manager,
+    namespace: str,
+    timeout_s: int,
+    elapsed_s: float,
+) -> None:
+    """A4 (v1.6): fail the run and stop orphaned compute after a datagen timeout.
+
+    Before this branch the wait loop just fell through to a "Datagen
+    completed" success line even when the timeout had expired: the datagen
+    Job was still running (burning pod resources), any streaming Spark
+    application consuming the trickle was still running, and the follow-up
+    pipeline stages would build on a partial bronze (invariant 3). The fix:
+    delete the datagen Job so it stops writing, delete each streaming
+    SparkApplication that was consuming the trickle so it stops reading,
+    then exit with a distinct code (``EXIT_DATAGEN_TIMEOUT``) so wrapper
+    scripts can tell a timeout apart from other datagen failures.
+    """
+    from lakebench.cli._sustained import _STREAM_APPS
+
+    print_error(
+        f"Datagen exceeded the {timeout_s}s wait budget "
+        f"(elapsed ~{elapsed_s:.0f}s). Invariant 3: exit 0 is not a pass; "
+        "failing the run rather than proceeding on a partial bronze."
+    )
+    # A hung K8s API can itself be the reason for the wait-budget timeout.
+    # Cap each cleanup call at 15 s so the handler always reaches the
+    # ``raise typer.Exit`` below rather than blocking indefinitely.
+    _CLEANUP_TIMEOUT_S = 15
+    try:
+        datagen_deployer._delete_existing_job(namespace, request_timeout=_CLEANUP_TIMEOUT_S)
+    except Exception as e:  # noqa: BLE001 -- best-effort cleanup
+        logger.warning("Failed to delete datagen Job on timeout: %s", e)
+    else:
+        print_info("Stopped datagen Job.")
+    for app in _STREAM_APPS:
+        try:
+            job_manager._delete_job(app, request_timeout=_CLEANUP_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 -- best-effort cleanup
+            logger.warning("Failed to delete leftover SparkApplication %s on timeout: %s", app, e)
+    print_info(
+        "Deleted any leftover SparkApplication that was consuming the trickle "
+        f"(bronze-ingest, silver-stream, gold-refresh) in namespace {namespace}."
+    )
+    raise typer.Exit(EXIT_DATAGEN_TIMEOUT)
 
 
 def _submission_failure_reporter(stage_name: str, journal):
@@ -1522,6 +1573,18 @@ def run(
             help="Assume data already exists in bronze bucket",
         ),
     ] = False,
+    regenerate: Annotated[
+        bool,
+        typer.Option(
+            "--regenerate",
+            help=(
+                "With --generate: empty the bronze bucket before generating. "
+                "Without this flag, a non-empty bronze prefix is refused "
+                "(exit 2) so existing datagen output is never overwritten "
+                "silently. No effect without --generate."
+            ),
+        ),
+    ] = False,
     skip_maintenance: Annotated[
         bool,
         typer.Option(
@@ -1745,7 +1808,13 @@ def run(
 
         print_info("--generate-only: deploying and generating data...")
         _deploy_cmd(config_file=config_file, yes=yes)
-        _generate_cmd(config_file=config_file, wait=True, timeout=timeout or 14400, yes=yes)
+        _generate_cmd(
+            config_file=config_file,
+            wait=True,
+            timeout=timeout or 14400,
+            yes=yes,
+            regenerate=regenerate,
+        )
         return
 
     # -- Phase 1/7: Prerequisites ------------------------------------------------
@@ -1865,6 +1934,11 @@ def run(
         collector.current_run.maintenance_policy_id = skipped_policy_id()
 
     pipeline_success = True
+    # A4 (v1.6): the finally block below rewrites the exit code to 1 when
+    # pipeline_success is False, which clobbers any distinct code the try
+    # block raised (e.g. EXIT_DATAGEN_TIMEOUT). Any specific code is
+    # written here first so the finally can honour it.
+    _pipeline_exit_code = 1
     _datagen_elapsed = 0.0
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
@@ -1944,6 +2018,11 @@ def run(
 
                 from lakebench.deploy import DatagenDeployer, DeploymentEngine
 
+                # A4 (v1.6): CLI-level bronze safety. Refuse a non-empty
+                # bronze prefix unless --regenerate was passed; with the
+                # flag, empty the bronze bucket first.
+                enforce_bronze_regenerate(cfg, regenerate)
+
                 dg_engine = DeploymentEngine(cfg)
                 datagen_deployer = DatagenDeployer(dg_engine)
                 datagen_deployer.deploy()
@@ -1953,6 +2032,7 @@ def run(
                 _initial = datagen_deployer.get_progress()
                 _total_pods = _initial.get("completions", 1)
 
+                _dg_timed_out = True  # set False on any break out of the loop
                 with Progress(
                     SpinnerColumn(),
                     TextColumn("[progress.description]{task.description}"),
@@ -1971,6 +2051,7 @@ def run(
                                 print_error(_dg_prog["error"])
                                 raise typer.Exit(1)
                             _dg_bar.update(_dg_task, completed=_total_pods)
+                            _dg_timed_out = False
                             break
                         if _dg_prog.get("oom_pods"):
                             _dg_bar.stop()
@@ -1978,6 +2059,27 @@ def run(
                             raise typer.Exit(1)
                         _dg_bar.update(_dg_task, completed=_dg_prog.get("succeeded", 0))
                         _time.sleep(15)
+
+                # A4 (v1.6): if the wait budget ran out we must NOT print
+                # "Datagen completed" -- the pods are still running, and the
+                # follow-up pipeline stages would build on partial bronze
+                # (invariant 3). Report a distinct exit code, stop the
+                # datagen Job so it stops burning pods, and kill any
+                # SparkApplication that was consuming the trickle from a
+                # prior/concurrent run so the timed-out generate does not
+                # leave orphan compute behind.
+                if _dg_timed_out:
+                    _datagen_elapsed = (datetime.now() - datagen_start).total_seconds()
+                    # Preserve the timeout code past the finally block below.
+                    _pipeline_exit_code = EXIT_DATAGEN_TIMEOUT
+                    pipeline_success = False
+                    _handle_datagen_timeout(
+                        datagen_deployer=datagen_deployer,
+                        job_manager=job_manager,
+                        namespace=cfg.get_namespace(),
+                        timeout_s=timeout,
+                        elapsed_s=_datagen_elapsed,
+                    )
 
                 datagen_end = datetime.now()
                 _datagen_elapsed = (datagen_end - datagen_start).total_seconds()
@@ -2007,6 +2109,17 @@ def run(
                     # denominator (LB-044 pattern).
                 except Exception as e:
                     logger.warning("Could not measure bronze bucket size: %s", e)
+            except typer.Exit as e:
+                # A4 (v1.6): _handle_datagen_timeout, the OOM / error
+                # branches above and enforce_bronze_regenerate raise their
+                # own typer.Exit with a specific code (2 for the regenerate
+                # refusal, EXIT_DATAGEN_TIMEOUT for a wait-budget timeout).
+                # Do not swallow it into a generic Exit(1) -- carry the
+                # code through the finally block so wrappers can tell them
+                # apart from other failures.
+                pipeline_success = False
+                _pipeline_exit_code = e.exit_code or _pipeline_exit_code
+                raise
             except Exception as e:
                 print_error(f"Datagen failed: {e}")
                 pipeline_success = False
@@ -3083,5 +3196,8 @@ def run(
         _journal_safe(j.end_command, success=pipeline_success)
         if not pipeline_success:
             # Metrics are saved above for diagnosis; the exit code must still
-            # say the run did not succeed.
-            raise typer.Exit(1)
+            # say the run did not succeed. A4 (v1.6): honour a specific code
+            # (e.g. EXIT_DATAGEN_TIMEOUT) that the try block set before
+            # raising, so wrappers can tell datagen timeout apart from
+            # generic failure.
+            raise typer.Exit(_pipeline_exit_code)

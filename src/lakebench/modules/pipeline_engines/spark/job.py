@@ -1602,11 +1602,14 @@ class SparkJobManager:
             message=f"Failed to submit after retries: {last_exc}",
         )
 
-    def _delete_job(self, job_name: str) -> None:
+    def _delete_job(self, job_name: str, *, request_timeout: int | None = None) -> None:
         """Delete existing Spark job if present.
 
         Args:
             job_name: Name of job to delete
+            request_timeout: Optional cap on the K8s API call. Used by the
+                datagen-timeout cleanup path so a hung API does not block
+                the cleanup indefinitely.
         """
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
@@ -1614,13 +1617,16 @@ class SparkJobManager:
         custom_api = k8s_client.CustomObjectsApi()
 
         try:
-            custom_api.delete_namespaced_custom_object(
-                group="sparkoperator.k8s.io",
-                version="v1beta2",
-                namespace=self.namespace,
-                plural="sparkapplications",
-                name=job_name,
-            )
+            kwargs: dict = {
+                "group": "sparkoperator.k8s.io",
+                "version": "v1beta2",
+                "namespace": self.namespace,
+                "plural": "sparkapplications",
+                "name": job_name,
+            }
+            if request_timeout is not None:
+                kwargs["_request_timeout"] = request_timeout
+            custom_api.delete_namespaced_custom_object(**kwargs)
             # Wait for deletion
             time.sleep(2)
         except ApiException as e:
