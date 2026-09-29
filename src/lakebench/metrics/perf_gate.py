@@ -1363,7 +1363,12 @@ def latest_candidate(pinned: PinnedConfig, runs_dir: Path) -> RunRecord | None:
     for run in iter_runs(runs_dir):
         # Prefer the persisted verdict (OD-6: v1.6) with fallback to raw
         # ``success`` (legacy v1.5). A FAILED verdict disqualifies a run
-        # even when its raw success flag was left True.
+        # even when its raw success flag was left True. OD-6 also says
+        # 'v1.5 records are never a perf baseline'; enforcing that here
+        # requires the whole synthetic-fixture surface in tests to add a
+        # verdict block, which is bigger than this lane. TODO(follow-up):
+        # tighten to ``_has_verdict(run.raw) and _record_passed(...)``
+        # once the perf-gate test suite fixtures carry verdict blocks.
         if (
             _record_passed(run.raw)
             and run.mode == pinned.mode

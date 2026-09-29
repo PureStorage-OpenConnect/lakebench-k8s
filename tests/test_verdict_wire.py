@@ -479,6 +479,29 @@ class TestFixturesReadFailed:
             assert has_verdict(r), "fixture invariant: verdict block present (A2b wire-in)"
             assert verdict_status(r) == "FAILED"
 
+    def test_persisted_verdict_matches_fresh_compute(
+        self, fixture_records: list[dict[str, Any]]
+    ) -> None:
+        """Persisted fixture verdict blocks must match what compute_verdict
+        would produce today. Catches silent drift when the badge rules or
+        compute_verdict changes but the static fixtures are not regenerated.
+        """
+        from lakebench.metrics.verdict import compute_verdict
+
+        for r in fixture_records:
+            storage = MetricsStorage.__new__(MetricsStorage)
+            m = storage._dict_to_metrics(r)
+            fresh = compute_verdict(m).to_dict()
+            persisted = r["verdict"]
+            assert fresh["status"] == persisted["status"], (
+                f"verdict drift for {r.get('run_id')}: "
+                f"persisted status={persisted['status']!r}, "
+                f"fresh status={fresh['status']!r}. "
+                "Regenerate the fixture verdict block or fix the drift."
+            )
+            if fresh["status"] == "FAILED":
+                assert fresh["reasons"], "FAILED verdict must carry reasons"
+
     def test_badge_reads_failed(self, fixture_records: list[dict[str, Any]]) -> None:
         from lakebench.reports.generator import ReportGenerator
 

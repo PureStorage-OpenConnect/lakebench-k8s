@@ -770,11 +770,19 @@ class MetricsStorage:
                     continue
                 seen_ids.add(rid)
 
+                from lakebench.metrics.verdict import passed as _record_passed
+                from lakebench.metrics.verdict import verdict_status as _verdict_status
+
                 row: dict[str, Any] = {
                     "run_id": data.get("run_id"),
                     "deployment_name": data.get("deployment_name"),
                     "start_time": data.get("start_time"),
-                    "success": data.get("success"),
+                    # OD-6: 'success' now reflects the verdict when a v1.6
+                    # record has one, falling back to raw success for
+                    # legacy v1.5 exports. verdict_status is added so a
+                    # downstream reader can tell PASSED from REFUSED etc.
+                    "success": _record_passed(data),
+                    "verdict_status": _verdict_status(data),
                     "total_elapsed_seconds": data.get("total_elapsed_seconds"),
                     "job_count": len(data.get("jobs", [])),
                     "scale": data.get("config_snapshot", {}).get("scale"),
