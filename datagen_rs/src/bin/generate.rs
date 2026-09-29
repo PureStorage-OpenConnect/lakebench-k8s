@@ -537,6 +537,19 @@ fn pacs008_main() {
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
+    // LB-204 memory: every pod schedules the whole typology/screening set (RNG
+    // order, inst_uids and the manifest depend on the complete schedule), but a
+    // pod only ever *emits* the files it owns (`fid % total_nodes == node_id`,
+    // and only in --mode all/bronze). Keep the full per-file COUNT -- n_typ_total
+    // feeds base-row indexing and must be identical on every pod -- but store the
+    // row PAYLOAD only for owned files. Resident typ memory becomes ~1/N of the
+    // corpus per pod instead of the whole corpus on every pod. Byte-identical:
+    // typ_by_file is only ever read for owned files (the node filter precedes
+    // every read), so dropping non-owned payloads changes no emitted byte.
+    let mut typ_counts: Vec<i64> = vec![0; total_files as usize];
+    let keep_typ = |fid: usize| -> bool {
+        do_bronze && (total_nodes <= 1 || (fid as i64) % total_nodes == node_id)
+    };
     // Instance-id -> list of uids for the rows emitted for that instance.
     // Populated at typology-scheduling time so it's deterministic (both
     // bronze and reference pods build the identical map from the same
@@ -632,14 +645,17 @@ fn pacs008_main() {
             *last = last.max(m);
             let fid = ((m * total_files as f64) as i64).clamp(0, total_files - 1) as usize;
             let uid = typology_uid(inst.seed, row_idx);
-            typ_by_file[fid].push(TypRow {
-                orig: r.orig,
-                bene: r.bene,
-                ts_us: r.ts_us,
-                amount,
-                ccy,
-                uid,
-            });
+            typ_counts[fid] += 1;
+            if keep_typ(fid) {
+                typ_by_file[fid].push(TypRow {
+                    orig: r.orig,
+                    bene: r.bene,
+                    ts_us: r.ts_us,
+                    amount,
+                    ccy,
+                    uid,
+                });
+            }
             inst_uids.entry(inst.id.clone()).or_default().push(uid);
         }
     }
@@ -659,7 +675,7 @@ fn pacs008_main() {
     // (which depends on codec and file size). Row i sits at calendar mass
     // (i + jitter) / n_base_total; file fid holds the contiguous rows whose
     // mass falls in [fid/F, (fid+1)/F).
-    let n_typ_total: i64 = typ_by_file.iter().map(|v| v.len() as i64).sum();
+    let n_typ_total: i64 = typ_counts.iter().sum();
     let n_base_all: u64 = (total_txns - n_typ_total).max(0) as u64;
     // D2: part of the baseline is scheduled (steady per-account cadences,
     // regular.rs); the random rows below are the rest. n_base_total is the
@@ -778,14 +794,18 @@ fn pacs008_main() {
             let m = gcal.mass_at(r.ts_us);
             let last = inst_last_mass.entry(pl.inst.id.clone()).or_insert(m);
             *last = last.max(m);
-            typ_by_file[file_of(r.ts_us) as usize].push(TypRow {
-                orig: r.orig,
-                bene: r.bene,
-                ts_us: r.ts_us,
-                amount: screen_amount(uid, r.orig),
-                ccy: w.ccy(r.orig as usize),
-                uid,
-            });
+            let fid = file_of(r.ts_us) as usize;
+            typ_counts[fid] += 1;
+            if keep_typ(fid) {
+                typ_by_file[fid].push(TypRow {
+                    orig: r.orig,
+                    bene: r.bene,
+                    ts_us: r.ts_us,
+                    amount: screen_amount(uid, r.orig),
+                    ccy: w.ccy(r.orig as usize),
+                    uid,
+                });
+            }
             inst_uids.entry(pl.inst.id.clone()).or_default().push(uid);
             n_screen_rows += 1;
         }
@@ -800,14 +820,18 @@ fn pacs008_main() {
         let k = neg_idx.entry(r.bene).or_insert(0);
         let uid = datagen_rs::screening::screen_uid(!(r.bene as i64), *k);
         *k += 1;
-        typ_by_file[file_of(r.ts_us) as usize].push(TypRow {
-            orig: r.orig,
-            bene: r.bene,
-            ts_us: r.ts_us,
-            amount: screen_amount(uid, r.orig),
-            ccy: w.ccy(r.orig as usize),
-            uid,
-        });
+        let fid = file_of(r.ts_us) as usize;
+        typ_counts[fid] += 1;
+        if keep_typ(fid) {
+            typ_by_file[fid].push(TypRow {
+                orig: r.orig,
+                bene: r.bene,
+                ts_us: r.ts_us,
+                amount: screen_amount(uid, r.orig),
+                ccy: w.ccy(r.orig as usize),
+                uid,
+            });
+        }
         n_screen_rows += 1;
     }
     // screen_rows is on top of total_txns (tests/cycles.rs parses it).
