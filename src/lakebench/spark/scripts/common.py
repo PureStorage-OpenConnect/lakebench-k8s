@@ -1020,10 +1020,15 @@ def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seco
 def _push_stage_metrics(job, input_size_gb, input_rows, output_rows, elapsed_seconds, extra):
     """Best-effort push of bronze/silver/gold stage metrics to the per-deployment
     Pushgateway for live Grafana visibility. No-op when LB_PUSHGATEWAY_URL is
-    unset (observability off). Driver-only, called once per stage (batch) or per
-    tick (continuous) -- not a hot path -- with a short timeout; all errors are
-    swallowed so a push can never affect the pipeline. metrics.json stays the
-    authoritative artifact.
+    unset (observability off). Driver-only. metrics.json stays the authoritative
+    artifact.
+
+    The payload is built on the caller thread (cheap, no I/O), but the network
+    PUT runs fire-and-forget on a daemon thread. In continuous mode this is
+    called from the streaming micro-batch thread per tick, and urllib's timeout
+    does not bound DNS resolution (getaddrinfo) -- an off-thread push ensures a
+    slow or unresolvable gateway can never stall the streaming trigger. All
+    errors are swallowed.
     """
     import os
 
@@ -1031,8 +1036,6 @@ def _push_stage_metrics(job, input_size_gb, input_rows, output_rows, elapsed_sec
     if not url:
         return
     try:
-        import urllib.request
-
         run_id = os.environ.get("LB_RUN_ID", "").strip() or "unknown"
         stage = str(job).replace("/", "_")
         lines = [
@@ -1053,16 +1056,27 @@ def _push_stage_metrics(job, input_size_gb, input_rows, output_rows, elapsed_sec
                 table = key[len("silver_") : -len("_rows")]
                 lines.append(f'lakebench_silver_table_rows{{table="{table}"}} {float(value)}')
         body = "\n".join(lines) + "\n"
-        path = f"/metrics/job/spark_stage/stage/{stage}/run_id/{run_id}"
-        req = urllib.request.Request(
-            url.rstrip("/") + path,
-            data=body.encode(),
-            method="PUT",
-            headers={"Content-Type": "text/plain"},
-        )
-        urllib.request.urlopen(req, timeout=2).close()  # noqa: S310 (in-cluster http)
+        target = url.rstrip("/") + f"/metrics/job/spark_stage/stage/{stage}/run_id/{run_id}"
+
+        def _send():
+            try:
+                import urllib.request
+
+                req = urllib.request.Request(
+                    target,
+                    data=body.encode(),
+                    method="PUT",
+                    headers={"Content-Type": "text/plain"},
+                )
+                urllib.request.urlopen(req, timeout=2).close()  # noqa: S310 (in-cluster http)
+            except Exception:
+                pass  # best-effort; the JOB METRICS log block is authoritative
+
+        import threading
+
+        threading.Thread(target=_send, daemon=True).start()
     except Exception:
-        pass  # best-effort; the JOB METRICS log block is authoritative
+        pass  # never let observability affect the stage
 
 
 def stream_batch_lines(batch_id, rows, seconds, table):
