@@ -63,6 +63,21 @@ def common(monkeypatch):
 def financial(monkeypatch):
     if _SCRIPTS not in sys.path:
         sys.path.insert(0, _SCRIPTS)
+    # bronze_verify_financial reads these into module constants (CATALOG,
+    # BRONZE_URI, PACS_PREFIX) at import time. Clear anything a prior test in
+    # the full suite leaked so the re-import uses the declared defaults these
+    # assertions expect (a leaked LB_ICEBERG_CATALOG once turned every
+    # lakehouse.* assertion into ice.*).
+    for var in (
+        "LB_ICEBERG_CATALOG",
+        "LB_CATALOG_TYPE",
+        "LB_BRONZE_URI",
+        "LB_FINANCIAL_BRONZE_PREFIX",
+        "LB_FINANCIAL_PACS_PATH",
+        "LB_FINANCIAL_SILVER_TRANSACTIONS",
+        "LB_FINANCIAL_BRONZE_TABLE",
+    ):
+        monkeypatch.delenv(var, raising=False)
     sys.modules.pop("common", None)
     sys.modules.pop("bronze_verify_financial", None)
     mod = importlib.import_module("bronze_verify_financial")
