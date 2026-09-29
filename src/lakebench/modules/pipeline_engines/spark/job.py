@@ -87,7 +87,12 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "executor_cores": 4,
         "executor_memory": "32g",
         "executor_memory_overhead": "8g",
-        "scratch_size": "100Gi",
+        # LB-201: 100Gi filled to 88-92% at scale 100 and spilled
+        # "No space left on device" in a skewed detection sort (stage 184),
+        # losing 5 tasks (recovered, but marginal). Raised to 300Gi, matching
+        # the proven silver-build scratch, so the spill-heavy detection DAG
+        # has headroom at scale 100. Portworx px-csi-scratch is thin-provisioned.
+        "scratch_size": "300Gi",
         "base_executors": 4,  # scale <= 10
         "executors_per_100_scale": 8,  # add 8 per 100 scale units
         "max_executors": _MAX_EXECUTORS_SAFE,
