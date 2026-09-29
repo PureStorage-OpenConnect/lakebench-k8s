@@ -43,7 +43,7 @@ def compare(
     ] = None,
     output_format: Annotated[
         str,
-        typer.Option("--format", help="Output format: table, json, csv, html"),
+        typer.Option("--format", help="Output format: table, json, csv"),
     ] = "table",
     skip_benchmark: Annotated[
         bool,
@@ -90,13 +90,23 @@ def compare(
         )
         raise typer.Exit(2)
 
-    # --format html silently fell back to JSON. `report --render` is the HTML
-    # path; `compare` writes JSON, CSV, or the terminal table.
-    if output_format.lower() == "html":
+    # Unknown --format used to silently fall back to JSON via
+    # _save_comparison's else branch. `report --render` is the HTML path;
+    # `compare` writes JSON, CSV, or the terminal table. Any other value
+    # (including typos like 'htlm') is refused loudly.
+    _SUPPORTED_FORMATS = {"table", "json", "csv"}
+    _requested_format = output_format.lower()
+    if _requested_format == "html":
         console.print(
             "[red]--format html is not supported by `compare`.[/red] Use "
             "`lakebench report --render` to build an HTML report from a run's "
             "metrics.json (or --format json / --format csv here)."
+        )
+        raise typer.Exit(2)
+    if _requested_format not in _SUPPORTED_FORMATS:
+        console.print(
+            f"[red]--format {output_format!r} is not supported.[/red] "
+            f"Use one of: {', '.join(sorted(_SUPPORTED_FORMATS))}."
         )
         raise typer.Exit(2)
 
