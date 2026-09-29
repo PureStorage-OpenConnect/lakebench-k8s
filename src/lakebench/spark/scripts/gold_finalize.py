@@ -19,6 +19,7 @@ from common import (
     METADATA_PREVIOUS_VERSIONS_MAX,
     env,
     get_daily_kpi_aggregations,
+    gold_date_coverage_problem,
     log,
     log_c360_check,
     log_job_metrics,
@@ -336,6 +337,17 @@ else:
     log(f"ERROR: Unknown strategy {strategy}")
     spark.stop()
     sys.exit(1)
+
+# Non-degeneracy gate (invariant 3): gold must hold one KPI row per distinct
+# silver interaction_date, else the run did not produce a valid gold.
+_gold_rows = spark.table(gold_tbl).count()
+_distinct_dates = spark.table(silver_tbl).select("interaction_date").distinct().count()
+_gate = gold_date_coverage_problem(_gold_rows, _distinct_dates)
+if _gate:
+    log(f"ERROR: gold non-degeneracy gate FAILED ({strategy.value}): {_gate}")
+    spark.stop()
+    sys.exit(1)
+log(f"Gold non-degeneracy gate PASSED: {_gold_rows} gold rows == {_distinct_dates} silver dates")
 
 total_time = time.time() - start_time
 
