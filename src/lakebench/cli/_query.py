@@ -720,7 +720,10 @@ def benchmark(
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
-    # Handle composite (returns tuple) vs single result
+    # Handle composite (returns tuple) vs single result. Track the
+    # throughput half separately so the composite qph=0 gate below can
+    # inspect it without indexing back into the union.
+    composite_throughput_qph: float | None = None
     if isinstance(run_result, tuple):
         power_result, throughput_result, composite_result = run_result
         _display_power_results(power_result)
@@ -731,12 +734,52 @@ def benchmark(
             f"and throughput {throughput_result.qph:.1f})"
         )
         primary_result = composite_result
+        composite_throughput_qph = throughput_result.qph
     else:
         if run_result.mode == "throughput":
             _display_throughput_results(run_result)
         else:
             _display_power_results(run_result)
         primary_result = run_result
+
+    # Benchmark gate (invariant 3: exit 0 is not a pass). Mirrors what
+    # `run` applies via _benchmark_gate_problems: any query failure
+    # outside the known-upstream allowlist, any zero-row query not
+    # declared allow_empty, and the empty-set / all-failed case all fail
+    # the run. Also refuse when composite mode's throughput half
+    # produced qph=0 (the LB-044 shape: power passes, throughput is
+    # empty, composite headline is 0.0 but exit was previously 0).
+    from lakebench.cli._run import _benchmark_gate_problems
+
+    total_queries = len(primary_result.queries)
+    succeeded = [q for q in primary_result.queries if bool(getattr(q, "success", False))]
+    gate_problems: list[str] = []
+    if total_queries == 0 or not succeeded:
+        reason = (
+            "the query set was empty"
+            if total_queries == 0
+            else f"0 of {total_queries} queries succeeded"
+        )
+        gate_problems.append(
+            f"Benchmark produced no query results ({reason}); "
+            "QpH over the rest is not a valid score."
+        )
+    else:
+        gate_problems.extend(_benchmark_gate_problems(cfg, primary_result.queries))
+        if composite_throughput_qph is not None and composite_throughput_qph <= 0:
+            gate_problems.append(
+                f"Composite throughput half produced qph={composite_throughput_qph}; "
+                "composite QpH is not a valid score."
+            )
+    if gate_problems:
+        for problem in gate_problems:
+            print_error(problem)
+        _journal_safe(
+            j.end_command,
+            success=False,
+            message="benchmark gate failed: " + "; ".join(gate_problems),
+        )
+        raise typer.Exit(1)
 
     # Save to latest metrics if available. Scope by deployment name so a
     # parallel deployment's newer run cannot be rewritten with this

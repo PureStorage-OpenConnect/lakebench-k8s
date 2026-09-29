@@ -43,7 +43,7 @@ def compare(
     ] = None,
     output_format: Annotated[
         str,
-        typer.Option("--format", help="Output format: table, json, csv, html"),
+        typer.Option("--format", help="Output format: table, json, csv"),
     ] = "table",
     skip_benchmark: Annotated[
         bool,
@@ -78,6 +78,38 @@ def compare(
     """
     from lakebench.config import ConfigError
 
+    # --scale here would rewrite only the in-memory configs; the subprocess
+    # `run` invocations reload from disk and would benchmark at whatever the
+    # file says, contradicting the displayed plan. The option stays parked
+    # until it is wired end-to-end. Refuse loudly rather than silently mislead.
+    if scale is not None:
+        console.print(
+            "[red]--scale is not supported by `compare`.[/red] Edit "
+            "architecture.workload.datagen.scale in each config file so the "
+            "subprocess runs see the scale you asked for."
+        )
+        raise typer.Exit(2)
+
+    # Unknown --format used to silently fall back to JSON via
+    # _save_comparison's else branch. `report --render` is the HTML path;
+    # `compare` writes JSON, CSV, or the terminal table. Any other value
+    # (including typos like 'htlm') is refused loudly.
+    _SUPPORTED_FORMATS = {"table", "json", "csv"}
+    _requested_format = output_format.lower()
+    if _requested_format == "html":
+        console.print(
+            "[red]--format html is not supported by `compare`.[/red] Use "
+            "`lakebench report --render` to build an HTML report from a run's "
+            "metrics.json (or --format json / --format csv here)."
+        )
+        raise typer.Exit(2)
+    if _requested_format not in _SUPPORTED_FORMATS:
+        console.print(
+            f"[red]--format {output_format!r} is not supported.[/red] "
+            f"Use one of: {', '.join(sorted(_SUPPORTED_FORMATS))}."
+        )
+        raise typer.Exit(2)
+
     # Load both configs
     try:
         cfg_a = load_config(config_a)
@@ -85,11 +117,6 @@ def compare(
     except ConfigError as e:
         console.print(f"[red]Config error: {e}[/red]")
         raise typer.Exit(1) from None
-
-    # Apply scale override
-    if scale is not None:
-        cfg_a.architecture.workload.datagen.scale = scale
-        cfg_b.architecture.workload.datagen.scale = scale
 
     # Different workloads, corpora, seeds, scales or modes are different
     # experiments; say so before hours are spent running them. The runs still
@@ -158,6 +185,17 @@ def compare(
     console.print(f"[bold]== Running configuration B: {cfg_b.name} ==[/bold]")
     metrics_b = _run_single(config_b, timeout, skip_benchmark, keep, local, generate)
 
+    # Destroy failures were captured by _run_single; surface them before
+    # building the comparison so they cannot be hidden by a nice-looking
+    # table, and set exit non-zero regardless of the comparison verdict.
+    destroy_failures: list[str] = []
+    for label, m in (("A", metrics_a), ("B", metrics_b)):
+        if isinstance(m, dict):
+            err = m.pop("_destroy_error", None)
+            if err:
+                console.print(f"[red]Destroy for run {label} failed: {err}[/red]")
+                destroy_failures.append(label)
+
     # Build comparison
     comparison = _build_comparison(cfg_a.name, metrics_a, cfg_b.name, metrics_b)
 
@@ -176,6 +214,15 @@ def compare(
     with open(compare_dir / "comparison.json", "w") as f:
         json.dump(comparison, f, indent=2)
     console.print(f"\n[dim]Comparison saved to {compare_dir}[/dim]")
+    if destroy_failures:
+        # A destroy failure leaves cluster or bucket state behind that the
+        # next run of the same config will collide with; surfacing this via
+        # exit code is what a UAT script or CI job will actually notice.
+        console.print(
+            f"[red]compare: destroy failed for {', '.join(destroy_failures)}; "
+            "see messages above.[/red]"
+        )
+        raise typer.Exit(1)
     if (
         comparison.get("verdict", "not_comparable" if comparison.get("comparable") is False else "")
         == "not_comparable"
@@ -299,11 +346,30 @@ def _run_single(
             # Without --remove-data the buckets survive, and the next run of a
             # config with the same bucket names would read stale data.
             destroy_cmd += ["--local", "--remove-data"]
-        subprocess.run(
-            destroy_cmd,
-            capture_output=True,
-            timeout=600,
-        )
+        try:
+            destroy_result = subprocess.run(
+                destroy_cmd,
+                capture_output=True,
+                timeout=600,
+            )
+            if destroy_result.returncode != 0:
+                # Surface it: a silent destroy failure leaves an orphan
+                # namespace (or bucket) that a later comparison will collide
+                # with. The metrics are still returned so the comparison can
+                # be built, but the compare exits non-zero at the end.
+                stderr = destroy_result.stderr or b""
+                if isinstance(stderr, bytes):
+                    stderr_text = stderr.decode(errors="replace")
+                else:
+                    stderr_text = str(stderr)
+                metrics = dict(metrics) if isinstance(metrics, dict) else {"error": str(metrics)}
+                metrics["_destroy_error"] = (
+                    f"destroy exited {destroy_result.returncode}: "
+                    f"{stderr_text.strip()[:800] or 'no stderr'}"
+                )
+        except subprocess.TimeoutExpired:
+            metrics = dict(metrics) if isinstance(metrics, dict) else {"error": str(metrics)}
+            metrics["_destroy_error"] = "destroy timed out after 600s"
 
     return metrics
 
