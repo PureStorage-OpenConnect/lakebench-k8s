@@ -758,9 +758,29 @@ fn full_corpus_row_multiset_is_node_count_invariant() {
         );
     }
 
-    // The two-node run really sharded the bronze zone across both nodes.
+    // The two-node run really sharded the bronze zone across both nodes: file
+    // fid is `part-{fid:06}.parquet`, and node n writes fids with fid % 2 == n.
+    // Require at least one even-fid shard (node 0) AND one odd-fid shard (node
+    // 1), so a degenerate "node 0 writes everything, node 1 writes nothing" bug
+    // cannot pass this test.
     let bronze_two = files(&two, "bronze/pacs008", "part-");
+    let fid_parity = |p: &PathBuf, want: i64| -> bool {
+        let n = p.file_name().unwrap().to_string_lossy();
+        n.strip_prefix("part-")
+            .and_then(|s| s.strip_suffix(".parquet"))
+            .and_then(|s| s.parse::<i64>().ok())
+            .map(|fid| fid % 2 == want)
+            .unwrap_or(false)
+    };
     assert!(bronze_two.len() > 1, "two-node run did not shard bronze");
+    assert!(
+        bronze_two.iter().any(|p| fid_parity(p, 0)),
+        "no node-0 (even-fid) bronze shard in the two-node run"
+    );
+    assert!(
+        bronze_two.iter().any(|p| fid_parity(p, 1)),
+        "no node-1 (odd-fid) bronze shard: the two-node split did not fire"
+    );
     // Reference tables are single-writer: exactly one of each in both runs.
     assert_eq!(files(&two, "bronze", "party").len(), 1);
     assert_eq!(files(&two, "manifest", "manifest").len(), 1);
