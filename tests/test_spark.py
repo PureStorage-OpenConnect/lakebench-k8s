@@ -2161,3 +2161,23 @@ class TestReferencePyDeps:
         m = self._mgr()._build_manifest(JobType.GOLD_FINALIZE)
         drv = m["spec"]["driver"]["template"]["spec"]
         assert "install-pydeps" not in {c["name"] for c in drv["initContainers"]}
+
+
+class TestSparkDriverPushgatewayEnv:
+    """Gate 2: the Spark driver gets LB_PUSHGATEWAY_URL + LB_RUN_ID only when
+    observability + the pushgateway are enabled (drives common.py stage push)."""
+
+    def test_env_has_pushgateway_when_enabled(self):
+        config = _make_config(observability={"enabled": True})
+        mgr = SparkJobManager(config, _mock_k8s())
+        env = mgr._build_env_vars(JobType.SILVER_BUILD)
+        by_name = {e["name"]: e.get("value") for e in env}
+        assert by_name["LB_PUSHGATEWAY_URL"].startswith("http://lakebench-pushgateway.")
+        assert by_name["LB_PUSHGATEWAY_URL"].endswith(".svc:9091")
+        assert "LB_RUN_ID" in by_name
+
+    def test_env_omits_pushgateway_when_disabled(self):
+        config = _make_config()  # observability defaults off
+        mgr = SparkJobManager(config, _mock_k8s())
+        names = {e["name"] for e in mgr._build_env_vars(JobType.SILVER_BUILD)}
+        assert "LB_PUSHGATEWAY_URL" not in names
