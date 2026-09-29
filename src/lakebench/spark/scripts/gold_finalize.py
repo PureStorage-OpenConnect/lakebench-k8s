@@ -21,6 +21,7 @@ from common import (
     get_daily_kpi_aggregations,
     log,
     log_c360_check,
+    log_job_metrics,
     set_utc_session,
 )
 from pyspark.sql import SparkSession
@@ -357,12 +358,17 @@ log(f"Strategy: {strategy.value}")
 log(f"KPI records: {kpi_count:,}")
 log(f"Table: {gold_tbl}")
 log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
-log("=== JOB METRICS: gold-finalize ===")
-log(f"input_size_gb: {silver_size_gb:.3f}")
-log(f"estimated_rows: {silver_count}")
-log(f"output_rows: {kpi_count}")
-log(f"elapsed_seconds: {total_time:.1f}")
-log("=" * 60)
+# log_job_metrics both writes the JOB METRICS block (input_rows aliases
+# estimated_rows in the collector, collector.py:2778) and pushes the stage
+# gauges to the Pushgateway, so c360 gold now reaches the live dashboard like
+# silver and AML gold already do (Gate 3 observability).
+log_job_metrics(
+    "gold-finalize",
+    input_size_gb=silver_size_gb,
+    input_rows=silver_count,
+    output_rows=kpi_count,
+    elapsed_seconds=total_time,
+)
 # Expected-result facts (reporting only, D6), after the timing above.
 log_c360_check(spark, silver_tbl, gold_tbl)
 spark.stop()
