@@ -5,6 +5,7 @@ Handles detection and installation of the Kubeflow Spark Operator.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import subprocess
@@ -175,6 +176,30 @@ class SparkOperatorManager:
             ]
         # "" means keep the stored /tmp volume (an unbounded one) untouched.
         return args + (controller_tmp_helm_set_args(tmp_size) if tmp_size else [])
+
+    @staticmethod
+    def _watch_list_hash(namespaces: list[str] | None) -> str:
+        """Content hash of a watch list.
+
+        Order-independent so a re-read that returns the same set in a
+        different order compares equal. ``None`` means "watch all" and
+        gets a distinct sentinel so no concrete list ever collides with
+        it. Whitespace is trimmed and empty entries are dropped so a
+        stray "" or " ns " does not falsely differ from "ns".
+
+        Used by the add/remove watch-list paths to short-circuit
+        ``helm upgrade`` when the current spec already matches the
+        desired one -- a helm upgrade against the shared release is
+        every deploy's slowest step and every parallel destroy's
+        largest contention point, so skipping when nothing changed is
+        both a correctness win (no chance to lose the race) and a wall
+        clock win.
+        """
+        if namespaces is None:
+            return "sha256:watch-all"
+        cleaned = sorted({n.strip() for n in namespaces if n and n.strip()})
+        digest = hashlib.sha256("\n".join(cleaned).encode("utf-8")).hexdigest()
+        return f"sha256:{digest}"
 
     def _watch_list_pin(self) -> list[str]:
         """``--version``/backfill args for a watch-list-only ``helm upgrade``.
@@ -833,6 +858,21 @@ class SparkOperatorManager:
             # widen the operator's scope to the whole cluster.
             ns_set = ",".join(remaining) if remaining else "default"
 
+            # LB-ux-safety C2: skip the helm upgrade when the desired
+            # list already matches the current one. The remove path
+            # already short-circuits when the namespace is absent
+            # above; this catches the case where the desired list
+            # collapses to the same effective content (chart-default
+            # "default" fallback) as what is already there.
+            desired = remaining or ["default"]
+            if self._watch_list_hash(desired) == self._watch_list_hash(watched):
+                logger.info(
+                    "Spark Operator watch list already omits '%s' (%s); skipping helm upgrade",
+                    namespace,
+                    desired,
+                )
+                return True
+
             cmd = [
                 "helm",
                 "upgrade",
@@ -1087,8 +1127,17 @@ class SparkOperatorManager:
             # lease and it's broken, or (b) we can't tell whether
             # someone else is mutating the same state. Either way,
             # refuse rather than paper over.
+            #
+            # LB-ux-safety C2: "timed out" used to fall through to
+            # "unlocked" here. That is exactly the case where another
+            # holder is likely doing something with the shared watch
+            # list, so proceeding unlocked would silently overwrite
+            # their edit. Failing closed refuses the request instead.
+            # "Connection refused" and DNS-resolution failures remain
+            # unlocked: those are workstation-with-no-cluster, where
+            # there is no other writer to race by definition.
             msg = str(e).lower()
-            if "connection refused" in msg or "not resolve" in msg or "timed out" in msg:
+            if "connection refused" in msg or "not resolve" in msg:
                 logger.warning(
                     "spark-operator watch-list: cluster unreachable, proceeding unlocked: %s",
                     e,
@@ -1100,17 +1149,27 @@ class SparkOperatorManager:
             )
             return None, "refuse"
         except Exception as e:  # noqa: BLE001
-            # urllib3 transport errors on a broken kubeconfig look like
-            # workstation-no-cluster: proceed unlocked. Anything else
-            # that reaches here (Python-level bug in the lease
-            # implementation) also fails safe as unlocked, but only
-            # because the ClusterLockError branch above catches the
-            # cases where refusal is the right call.
+            # urllib3 transport errors on a broken kubeconfig with no
+            # reachable API server (ConnectionError, MaxRetryError, DNS
+            # resolution failures) look like workstation-no-cluster:
+            # proceed unlocked because there is no other writer.
+            # Anything else -- including a bare timeout while the API
+            # server is reachable -- refuses: we cannot tell whether
+            # someone else is holding the lease and about to write the
+            # watch list, and papering over that is the exact race F5
+            # exists to close.
+            msg = str(e).lower()
+            if "connection refused" in msg or "not resolve" in msg or "no route to host" in msg:
+                logger.warning(
+                    "spark-operator watch-list: cluster unreachable, proceeding unlocked: %s",
+                    e,
+                )
+                return None, "unlocked"
             logger.warning(
-                "spark-operator watch-list: proceeding unlocked (lease unavailable: %s)",
+                "spark-operator watch-list: lease unavailable, refusing: %s",
                 e,
             )
-            return None, "unlocked"
+            return None, "refuse"
 
     def _add_namespace_to_watch_impl(self, namespace: str, _retry_on_eviction: bool = True) -> bool:
         """Non-lease-gated body of ``_add_namespace_to_watch``.
@@ -1154,6 +1213,25 @@ class SparkOperatorManager:
             # Filter out stale namespaces that no longer exist on the cluster
             live_namespaces = self._filter_existing_namespaces(watched)
             new_list = live_namespaces + [namespace]
+
+            # LB-ux-safety C2: if the desired list already matches the
+            # current one, skip helm upgrade entirely -- and the
+            # operator restart that would otherwise follow. The chart
+            # is rendered from stored values plus --set, so an
+            # "upgrade" with no change still churns the release
+            # history, still takes the release-level lock, still
+            # rolls the controller pods, and still contends with every
+            # other parallel deploy. Compare by content hash so a
+            # reordered read (kubectl ordering is not stable) is
+            # treated as equal.
+            if self._watch_list_hash(new_list) == self._watch_list_hash(watched):
+                logger.info(
+                    "Spark Operator watch list already includes '%s' (%s); skipping helm upgrade",
+                    namespace,
+                    new_list,
+                )
+                return True
+
             ns_set = ",".join(new_list)
 
             cmd = [
