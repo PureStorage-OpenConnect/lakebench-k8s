@@ -301,7 +301,14 @@ def _test_s3(console: Console, state: WizardState) -> None:
 
 
 def step_workload_schema(console: Console, state: WizardState) -> bool:
-    """Select workload schema. Returns False to go back."""
+    """Select workload schema. Returns False to go back.
+
+    Cross-checks against ``state.recipe`` (the segment already picked)
+    and refuses a combination the schema will refuse at load time. The
+    ``financial`` workload runs on ``iceberg`` only; a ``hive-delta-*``
+    or similar delta recipe combined with financial produces a config
+    ``lakebench config validate`` rejects.
+    """
     _step_header(console, 4, 6, "Workload Schema")
     console.print()
     console.print("  [bold]Workload:[/bold]")
@@ -309,13 +316,40 @@ def step_workload_schema(console: Console, state: WizardState) -> bool:
     console.print("    [cyan]2[/cyan]. financial     Financial / AML (pacs.008, ~8.4 GB / unit)")
     console.print()
 
-    current_default = 1 if state.workload_schema == "customer360" else 2
-    result = _prompt_int(console, "Workload", default=current_default, min_val=1, max_val=2)
-    if isinstance(result, _BackSentinel):
-        return False
-    state.workload_schema = "customer360" if result == 1 else "financial"
-    console.print(f"  [green]Selected:[/green] {state.workload_schema}")
-    return True
+    # Infer the table format from the recipe name (second slot in
+    # <catalog>-<table_format>-<pipeline_engine>-<query_engine>) so the
+    # cross-check can refuse without loading the full schema module.
+    recipe_table_format: str | None = None
+    if state.recipe and state.recipe != "default":
+        parts = state.recipe.split("-")
+        if len(parts) >= 2:
+            recipe_table_format = parts[1]
+
+    while True:
+        current_default = 1 if state.workload_schema == "customer360" else 2
+        result = _prompt_int(console, "Workload", default=current_default, min_val=1, max_val=2)
+        if isinstance(result, _BackSentinel):
+            return False
+        picked = "customer360" if result == 1 else "financial"
+
+        # financial requires iceberg (schema.py WORKLOAD_TABLE_FORMATS).
+        # A hive-delta-* recipe here would write a config that fails at
+        # `config validate`. Re-prompt rather than emit an invalid file.
+        if (
+            picked == "financial"
+            and recipe_table_format is not None
+            and recipe_table_format != "iceberg"
+        ):
+            console.print(
+                f"  [red]The financial workload runs on iceberg only, but the "
+                f"selected recipe uses {recipe_table_format}.[/red] Pick a "
+                "*-iceberg-* recipe first, or choose customer360."
+            )
+            continue
+
+        state.workload_schema = picked
+        console.print(f"  [green]Selected:[/green] {state.workload_schema}")
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +449,15 @@ def step_review(console: Console, state: WizardState) -> bool:
     state.config_yaml = _build_config_yaml(state)
 
     console.print()
-    syntax = Syntax(state.config_yaml, "yaml", theme="monokai", line_numbers=False)
+    # Redact the secret in the review panel so the on-screen preview does
+    # not leak the value the summary above already masked with ***. The
+    # unredacted YAML is written to disk in the next step; only the
+    # in-terminal preview is masked.
+    if state.secret_key:
+        preview = state.config_yaml.replace(f'secret_key: "{state.secret_key}"', 'secret_key: "***"')
+    else:
+        preview = state.config_yaml
+    syntax = Syntax(preview, "yaml", theme="monokai", line_numbers=False)
     console.print(
         Panel(syntax, title="Generated Configuration", border_style="green", expand=False)
     )
