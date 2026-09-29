@@ -54,8 +54,13 @@ architecture:
   catalog:
     type: polaris
     polaris:
-      # LB-090: each install must set its own OAuth2 secret. Generate with:
+      # Required. Each install must set its own OAuth2 client secret (LB-090):
+      # `deploy`, `run` and `destroy` each reload the config, so they must
+      # agree on the same value. Generate one with
       #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+      # then export it as LAKEBENCH_POLARIS_CLIENT_SECRET before running any
+      # lakebench command. The env-var pattern avoids committing the secret
+      # by accident and matches the other polaris-*.yaml examples.
       client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
 
   pipeline:

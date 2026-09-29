@@ -262,6 +262,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
 | `--skip-generate` | | `false` | Skip datagen even with `--generate` |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
+| `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace |
 | `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
 | `--deploy-only` | | `false` | Deploy infrastructure and exit |
 | `--generate-only` | | `false` | Deploy + generate data and exit |
@@ -303,7 +304,8 @@ lakebench stop [CONFIG_FILE]
 ```
 
 Deletes the continuous-mode SparkApplications (`bronze-ingest`, `silver-stream`,
-`gold-refresh`) from the cluster. No flags required.
+`gold-refresh`) from the cluster. `--file` / `-f` is the only option, and
+points at the config the same way it does on the other commands.
 
 ### benchmark
 

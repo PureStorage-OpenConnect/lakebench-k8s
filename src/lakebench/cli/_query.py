@@ -364,7 +364,7 @@ def query(
         console.print(table)
         print_info("Usage: lakebench query <config> --example <name>")
         print_info('Usage: lakebench query <config> --sql "SELECT ..."')
-        print_info("Usage: lakebench query <config> --file query.sql")
+        print_info("Usage: lakebench query <config> --sql-file query.sql")
         print_info("Usage: lakebench query <config> --interactive")
         return
 

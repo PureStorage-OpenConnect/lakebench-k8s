@@ -302,6 +302,25 @@ This section walks through a complete deploy-generate-run cycle at **scale 1**
 (approximately 10 GB of generated data). Scale 1 is small enough to finish in
 minutes on most clusters while still exercising every stage of the pipeline.
 
+### First-day workflow at a glance
+
+On a fresh cluster the shortest path is four commands. The two flags on
+`run` are load-bearing: `--yes` lets `run` deploy the namespace and
+components when they do not exist yet (without it `run` refuses and asks
+you to run `lakebench deploy` first), and `--generate` populates the
+bronze bucket before the pipeline (without it, `run` executes against an
+empty bronze).
+
+```bash
+lakebench init                                  # writes lakebench.yaml
+lakebench run lakebench.yaml --generate --yes   # deploy + generate + pipeline + benchmark
+lakebench results lakebench.yaml                # print the scorecard
+lakebench destroy lakebench.yaml --yes          # tear down what this deployment owns
+```
+
+The step-by-step below walks the same path with the intermediate checks
+(`config validate`, `status`) for a first-time cluster.
+
 ### 1. Generate a configuration file
 
 ```bash
@@ -556,6 +575,29 @@ lakebench query lakebench.yaml --sql "SELECT count(*) FROM lakehouse.gold.custom
 ```
 
 ---
+
+## Local Mode (no cluster)
+
+For a laptop try-out without Kubernetes, `lakebench init --local` writes a
+podman/docker config that runs against a Garage container on `localhost`:
+
+```bash
+lakebench init --local --scale 1
+lakebench deploy lakebench.yaml --local
+lakebench run lakebench.yaml --local --generate --yes
+lakebench destroy lakebench.yaml --local
+```
+
+`--generate` populates bronze on the first local run. Subsequent runs
+against the same `--workdir` reuse the existing bronze corpus, so
+`--generate` is only needed again after `destroy --remove-data`, after
+`clean bronze`, or when the scale factor changes. Without `--generate`
+the pipeline runs against whatever bronze the workdir already holds; an
+empty workdir gives an empty pipeline.
+
+Local mode is Iceberg-only and Customer 360 batch only. AML configs and
+continuous mode are refused with an actionable error; see
+[Compatibility Matrix](compatibility-matrix.md).
 
 ## Scaling Up
 
