@@ -738,6 +738,29 @@ def benchmark(
             _display_power_results(run_result)
         primary_result = run_result
 
+    # Empty-query-set gate. QpH computed over zero successful queries is not
+    # a valid score (invariant 3: exit 0 is not a pass). `run` fails the
+    # whole run in this shape via _benchmark_gate_problems; the standalone
+    # `benchmark` command was still exiting 0 with a printed QpH of 0.0.
+    total_queries = len(primary_result.queries)
+    succeeded = [q for q in primary_result.queries if bool(getattr(q, "success", False))]
+    if total_queries == 0 or not succeeded:
+        reason = (
+            "the query set was empty"
+            if total_queries == 0
+            else f"0 of {total_queries} queries succeeded"
+        )
+        print_error(
+            f"Benchmark produced no query results ({reason}); "
+            "QpH over the rest is not a valid score."
+        )
+        _journal_safe(
+            j.end_command,
+            success=False,
+            message=f"benchmark produced no query results ({reason})",
+        )
+        raise typer.Exit(1)
+
     # Save to latest metrics if available. Scope by deployment name so a
     # parallel deployment's newer run cannot be rewritten with this
     # benchmark's metrics (SP-2 owns deployment_id; this is the interim
