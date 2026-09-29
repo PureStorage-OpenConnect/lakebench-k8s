@@ -22,6 +22,7 @@ from lakebench.k8s import K8sConnectionError, get_k8s_client
 from ._helpers import (
     _journal_safe,
     console,
+    enforce_bronze_regenerate,
     journal_open,
     print_error,
     print_info,
@@ -75,6 +76,17 @@ def generate(
             "--yes",
             "-y",
             help="Skip confirmation prompt",
+        ),
+    ] = False,
+    regenerate: Annotated[
+        bool,
+        typer.Option(
+            "--regenerate",
+            help=(
+                "Empty the bronze bucket before generating. Without this "
+                "flag, a non-empty bronze prefix is refused (exit 2) so "
+                "existing datagen output is never overwritten silently."
+            ),
         ),
     ] = False,
 ) -> None:
@@ -201,6 +213,10 @@ def generate(
             os.environ["LB_RUN_ID"] = (
                 _dt.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
             )
+
+        # A4 (v1.6): refuse to over-write an existing bronze prefix unless
+        # --regenerate was passed; with --regenerate, empty the bucket first.
+        enforce_bronze_regenerate(cfg, regenerate)
 
         engine = DeploymentEngine(cfg)
         datagen = DatagenDeployer(engine)

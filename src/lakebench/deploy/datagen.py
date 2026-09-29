@@ -17,7 +17,25 @@ from .engine import DeploymentResult, DeploymentStatus
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from lakebench.config import LakebenchConfig
+
     from .engine import DeploymentEngine
+
+
+def bronze_datagen_prefix(config: LakebenchConfig) -> str:
+    """Return the S3 prefix under bronze where datagen writes.
+
+    Kept in one place so the deployer, the CLI's ``--regenerate`` guard and
+    tests all read the same mapping. Financial (AML) datagen writes under
+    ``pacs008/`` on the C360 default ``customer/interactions/`` template
+    (see ``_build_datagen_context``); every other schema writes under
+    ``bronze.path_template`` unchanged.
+    """
+    schema_value = config.architecture.workload.schema_type.value
+    path_prefix = config.architecture.pipeline.medallion.bronze.path_template
+    if schema_value == "financial" and path_prefix == "customer/interactions":
+        path_prefix = "pacs008"
+    return path_prefix
 
 
 class DatagenDeployer:
@@ -42,7 +60,6 @@ class DatagenDeployer:
         cfg = self.config
         workload = cfg.architecture.workload
         datagen = workload.datagen
-        medallion = cfg.architecture.pipeline.medallion
 
         # Derive dimensions from scale factor
         dims = cfg.get_scale_dimensions()
@@ -63,9 +80,7 @@ class DatagenDeployer:
         # (LB_FINANCIAL_BRONZE_PREFIX default). Keeps the datagen upload and
         # bronze_verify_financial.py pointed at the same S3 location.
         schema_value = workload.schema_type.value
-        path_prefix = medallion.bronze.path_template
-        if schema_value == "financial" and path_prefix == "customer/interactions":
-            path_prefix = "pacs008"
+        path_prefix = bronze_datagen_prefix(cfg)
 
         context = dict(self.context)  # Copy base context
         context.update(
