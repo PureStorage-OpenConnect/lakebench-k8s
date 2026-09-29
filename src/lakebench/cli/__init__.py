@@ -1703,7 +1703,38 @@ def report(
         typer.Option(
             "--list",
             "-l",
-            help="List available runs instead of generating report",
+            help="List available runs instead of reporting on one",
+        ),
+    ] = False,
+    render: Annotated[
+        bool,
+        typer.Option(
+            "--render",
+            help=(
+                "Regenerate HTML. Writes a fresh timestamped file at "
+                "lakebench-output/reports/report-<run_id>-<ts>.html without "
+                "touching the delivered run-<id>/report.html."
+            ),
+        ),
+    ] = False,
+    output_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            help=(
+                "Explicit output path for --render. Refuses to overwrite an "
+                "existing file at this path unless --force is also given."
+            ),
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Allow --render to overwrite an existing file at --output. "
+                "Requires both --render and --output."
+            ),
         ),
     ] = False,
     summary: Annotated[
@@ -1711,14 +1742,18 @@ def report(
         typer.Option(
             "--summary",
             "-s",
-            help="Print key scores to the terminal (with or without HTML generation)",
+            help="Also print the key scores when rendering (default action already prints them).",
         ),
     ] = False,
 ) -> None:
-    """Generate benchmark report from collected metrics.
+    """Report on a saved benchmark run.
 
-    Creates an HTML report inside the per-run directory.
-    Use --summary to print key scores to the terminal.
+    Default behaviour is to print the summary of the requested run (or the
+    latest one) and point at the delivered ``run-<id>/report.html`` without
+    modifying it. Pass ``--render`` to regenerate a fresh HTML file; the
+    output goes to ``lakebench-output/reports/report-<run_id>-<ts>.html`` so
+    the delivered artifact is never rewritten silently. Pass ``--list`` to
+    show all saved runs.
     """
     from lakebench.metrics import MetricsStorage
     from lakebench.reports import ReportGenerator
@@ -1760,34 +1795,82 @@ def report(
         console.print(table)
         return
 
-    # Generate report
-    try:
-        generator = ReportGenerator(metrics_dir)
-        report_path = generator.generate_report(run_id)
-    except ValueError as e:
-        print_error(str(e))
-        print_info("Use 'lakebench report --list' to see available runs")
-        raise typer.Exit(1)  # noqa: B904
+    # Guard rails on the option combinations. --force and --output only
+    # make sense with --render: they are opt-ins to a regenerate action.
+    if force and not render:
+        print_error("--force requires --render")
+        raise typer.Exit(2)
+    if output_path is not None and not render:
+        print_error("--output requires --render")
+        raise typer.Exit(2)
+    # --force only makes sense with --output: the default timestamped path
+    # is collision-free in practice, so --force there is a no-op that only
+    # confuses the caller. Matches the help text.
+    if force and output_path is None:
+        print_error("--force requires --output (the default timestamped path is collision-free)")
+        raise typer.Exit(2)
 
-    # Print summary to terminal
-    if summary:
-        resolved_id = run_id
-        if not resolved_id:
-            # Extract run ID from report path (run-<id>/report.html)
-            resolved_id = report_path.parent.name.removeprefix("run-")
-        metrics = storage.load_run(resolved_id)
-        if metrics:
-            _print_report_summary(metrics)
+    if render:
+        try:
+            generator = ReportGenerator(metrics_dir)
+            report_path = generator.generate_report(
+                run_id,
+                output_path=output_path,
+                force=force,
+            )
+        except FileExistsError as e:
+            print_error(str(e))
+            # Only mention --output in the hint when the user actually set it;
+            # the default timestamped path never collides in practice.
+            if output_path is not None:
+                print_info("Pass --force to overwrite the file at --output.")
+            else:
+                print_info("Retry in a moment; the timestamp will differ.")
+            raise typer.Exit(1)  # noqa: B904
+        except ValueError as e:
+            print_error(str(e))
+            print_info("Use 'lakebench report --list' to see available runs")
+            raise typer.Exit(1)  # noqa: B904
 
-    console.print(
-        Panel(
-            f"[green]Report generated successfully![/green]\n\n"
-            f"Output: {report_path}\n\n"
-            + ("[dim]Scores printed above.[/dim]" if summary else "Open in browser to view."),
-            title="Report Generated",
-            expand=False,
+        # Also print the summary when asked; keep the default quiet so
+        # scripts that watch stdout for the path have a clean output.
+        if summary:
+            resolved = storage.load_run(run_id) if run_id else storage.get_latest_run()
+            if resolved:
+                _print_report_summary(resolved)
+
+        console.print(
+            Panel(
+                f"[green]Report rendered[/green]\n\n"
+                f"Output: {report_path}\n\n"
+                f"The delivered run directory report.html is unchanged.",
+                title="Report Rendered",
+                expand=False,
+            )
         )
-    )
+        return
+
+    # Default action: print the summary; do not regenerate the HTML.
+    metrics = storage.load_run(run_id) if run_id else storage.get_latest_run()
+    if metrics is None:
+        print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
+        print_info("Use 'lakebench report --list' to see available runs")
+        raise typer.Exit(1)
+
+    _print_report_summary(metrics)
+
+    delivered = storage.run_dir(metrics.run_id) / "report.html"
+    if delivered.exists():
+        console.print(f"[dim]Delivered report: {delivered}[/dim]")
+        console.print(
+            "[dim]Run 'lakebench report --render' to write a fresh HTML "
+            "at lakebench-output/reports/.[/dim]"
+        )
+    else:
+        console.print(
+            f"[dim]No delivered report at {delivered}. "
+            "Run 'lakebench report --render' to generate one.[/dim]"
+        )
 
 
 @app.command()

@@ -7,9 +7,18 @@ under a unified output tree::
       runs/
         run-20260204-210211-abc123/
           metrics.json
-          report.html          # written by ReportGenerator
+          report.html          # delivered once by write_run_report
         run-20260204-220000-def456/
           metrics.json
+      reports/
+        report-20260204-210211-abc123-20260205-091401.html
+                                # rendered by `lakebench report --render`
+
+The per-run ``report.html`` is the delivered artifact and is written once,
+at the end of the run, by :func:`lakebench.cli._helpers.write_run_report`.
+Regenerating the HTML from saved metrics goes to a timestamped file under
+``lakebench-output/reports/`` (see :mod:`lakebench.reports.generator`) so
+the delivered artifact cannot be mutated in place by a later CLI call.
 
 Legacy flat layout (``run-{id}.json`` files in a single directory) is
 transparently supported for reading: :meth:`load_run` and :meth:`list_runs`

@@ -521,7 +521,11 @@ everything else succeeded but the namespace was still terminating at
 
 ### report
 
-Generate an HTML benchmark report from collected metrics.
+Read a saved benchmark run. The default action prints the summary and
+points at the delivered `run-<id>/report.html` without modifying it.
+Use `--render` to regenerate a fresh HTML report at
+`lakebench-output/reports/report-<run_id>-<ts>.html` without touching the
+delivered file.
 
 ```
 lakebench report [OPTIONS]
@@ -531,8 +535,11 @@ lakebench report [OPTIONS]
 |---|---|---|---|
 | `--metrics` | `-m` | `./lakebench-output/runs` | Directory containing run subdirectories |
 | `--run` | `-r` | latest | Specific run ID to report on |
-| `--summary` | `-s` | `false` | Print key scores to the terminal without opening the HTML report |
-| `--list` | `-l` | `false` | List available runs instead of generating report |
+| `--list` | `-l` | `false` | List available runs instead of reporting on one |
+| `--render` |  | `false` | Regenerate HTML to `lakebench-output/reports/report-<run_id>-<ts>.html`. Never rewrites the delivered `report.html` in the run directory. |
+| `--output` |  | (unset) | Explicit output path for `--render`. Refuses to overwrite an existing file unless `--force` is also given. |
+| `--force` |  | `false` | Allow `--render` to overwrite an existing file at `--output`. Requires both `--render` and `--output`. |
+| `--summary` | `-s` | `false` | With `--render`, also print the summary. Without `--render`, the summary is already printed. |
 
 ### results
 
@@ -662,8 +669,8 @@ lakebench init --interactive          # create config
 lakebench config validate             # check connectivity
 lakebench deploy --yes                # deploy infrastructure
 lakebench generate --timeout 14400    # generate data (large scales need hours)
-lakebench run --timeout 7200          # run pipeline + benchmark
-lakebench report                      # generate HTML report
+lakebench run --timeout 7200          # run pipeline + benchmark, delivers report.html
+lakebench report                      # print the summary of the delivered report
 lakebench destroy --force             # tear down everything
 ```
 

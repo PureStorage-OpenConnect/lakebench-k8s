@@ -1,19 +1,26 @@
 """Report generation for Lakebench.
 
-Creates HTML reports from pipeline metrics.  Reports are written into the
-per-run directory managed by :class:`MetricsStorage`::
+The *delivered* HTML report is written into the per-run directory managed by
+:class:`MetricsStorage`, once, at the end of a benchmark run::
 
     lakebench-output/runs/run-<id>/report.html
 
-The *output_dir* parameter is accepted for backward compatibility but is
-only used as a fallback when a report is generated without a matching run
-directory.
+That file is the artifact operators reference and share; it is never
+rewritten in place by a later ``lakebench report`` invocation. Regenerating
+the HTML from saved metrics writes a fresh file at::
+
+    lakebench-output/reports/report-<run_id>-<UTC-timestamp>.html
+
+To rewrite the delivered ``report.html`` (or any other pre-existing path),
+the caller must both name the target explicitly via ``output_path`` and pass
+``force=True``. The ``output_dir`` constructor argument is accepted for
+backward compatibility and only shifts the default scratch directory.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape as _html_escape
 from pathlib import Path
 
@@ -21,6 +28,10 @@ from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
 
 logger = logging.getLogger(__name__)
+
+# Subdirectory (relative to ``metrics_dir``'s parent) where the timestamped
+# rendered reports land when no explicit ``output_path`` is supplied.
+_DEFAULT_REPORTS_SUBDIR = "reports"
 
 
 def _format_duration_ms(ms: float | None) -> str:
@@ -101,19 +112,55 @@ class ReportGenerator:
             self.storage = MetricsStorage()
         self._fallback_output_dir = Path(output_dir) if output_dir else None
 
+    def _default_reports_dir(self) -> Path:
+        """Directory where timestamped scratch renders land by default.
+
+        Prefers the ``output_dir`` passed to the constructor (legacy) and
+        falls back to ``<metrics_dir>/../reports/``.
+        """
+        if self._fallback_output_dir is not None:
+            return self._fallback_output_dir
+        return self.storage.metrics_dir.parent / _DEFAULT_REPORTS_SUBDIR
+
+    def _timestamped_report_path(self, run_id: str) -> Path:
+        """Compute the default timestamped scratch path for *run_id*.
+
+        Timestamp is UTC ``YYYYMMDD-HHMMSS``. Second-granularity: two
+        renders inside the same wall-clock second land on the same path
+        and the second refuses unless ``force=True`` (see the module
+        docstring).
+        """
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        return self._default_reports_dir() / f"report-{run_id}-{ts}.html"
+
     def generate_report(
         self,
         run_id: str | None = None,
+        output_path: Path | str | None = None,
+        *,
+        force: bool = False,
     ) -> Path:
         """Generate an HTML report.
 
-        The report is written into the per-run directory as ``report.html``.
-
         Args:
-            run_id: Run ID to report on (default: latest)
+            run_id: Run ID to report on (default: latest).
+            output_path: Where to write the HTML.
+                ``None`` (default) writes to a timestamped scratch file at
+                ``<metrics_dir>/../reports/report-<run_id>-<ts>.html``; the
+                delivered ``<run_dir>/report.html`` is never touched under
+                this default. To rewrite the delivered artifact the caller
+                must name that path explicitly and pass ``force=True``.
+            force: If True, overwrite an existing file at the target path.
+                Without ``force``, an existing target raises
+                ``FileExistsError`` so the delivered artifact cannot be
+                mutated by mistake.
 
         Returns:
-            Path to generated report
+            Path to the written HTML file.
+
+        Raises:
+            ValueError: run not found or no runs saved.
+            FileExistsError: target path already exists and ``force`` is False.
         """
         # Load metrics
         if run_id:
@@ -125,17 +172,29 @@ class ReportGenerator:
             if not metrics:
                 raise ValueError("No runs found")
 
+        # Resolve target path. Without an explicit override the caller is
+        # asking for a fresh timestamped scratch render, so the delivered
+        # per-run ``report.html`` is not a candidate.
+        if output_path is None:
+            target = self._timestamped_report_path(metrics.run_id)
+        else:
+            target = Path(output_path)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        if target.exists() and not force:
+            raise FileExistsError(
+                f"Refusing to overwrite existing report at {target}. "
+                "Pass force=True (CLI: --force) to overwrite."
+            )
+
         # Generate HTML (pass platform_metrics if present in the run data)
         html = self._generate_html(metrics, platform_metrics=metrics.platform_metrics)
 
-        # Write into the per-run directory
-        run_dir = self.storage.run_dir(metrics.run_id)
-        filepath = run_dir / "report.html"
+        target.write_text(html)
+        logger.info(f"Generated report: {target}")
 
-        filepath.write_text(html)
-        logger.info(f"Generated report: {filepath}")
-
-        return filepath
+        return target
 
     def _compute_overall_status(
         self, metrics: PipelineMetrics

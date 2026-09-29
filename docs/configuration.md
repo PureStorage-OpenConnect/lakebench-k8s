@@ -609,7 +609,7 @@ added at runtime.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `observability.reports.*` | block | | **No effect; removed in v1.7.** Every run writes `report.html` into its run directory; `lakebench report` regenerates it. A non-default value prints a warning. |
+| `observability.reports.*` | block | | **No effect; removed in v1.7.** Every run writes `report.html` into its run directory once; `lakebench report --render` writes a fresh copy to `lakebench-output/reports/` without overwriting the delivered file. A non-default value prints a warning. |
 
 ### Spark Configuration Overrides
 

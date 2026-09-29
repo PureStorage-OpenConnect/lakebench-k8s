@@ -2016,7 +2016,8 @@ class ObservabilityConfig(ConfigModel):
     _dead_fields: ClassVar[dict[str, str]] = {
         "reports": (
             "Every run writes report.html into its run directory under "
-            "lakebench-output/runs; 'lakebench report' regenerates it."
+            "lakebench-output/runs; 'lakebench report --render' writes a "
+            "fresh copy to lakebench-output/reports/ without overwriting."
         ),
     }
 
