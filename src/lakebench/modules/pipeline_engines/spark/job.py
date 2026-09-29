@@ -6,6 +6,7 @@ Handles SparkApplication submission and lifecycle.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -2694,6 +2695,21 @@ class SparkJobManager:
             {"name": "LB_SILVER_TABLE", "value": cfg.architecture.tables.silver},
             {"name": "LB_GOLD_TABLE", "value": cfg.architecture.tables.gold},
         ]
+
+        # Live observability: point the Spark driver at the per-deployment
+        # Pushgateway so bronze/silver/gold stage metrics show live in Grafana.
+        # Best-effort -- common.py:log_job_metrics no-ops when the env is unset.
+        # LB_RUN_ID is shared with datagen via the orchestrator process env so a
+        # run correlates across stages.
+        obs = cfg.observability
+        if obs.enabled and obs.pushgateway_enabled:
+            env.append(
+                {
+                    "name": "LB_PUSHGATEWAY_URL",
+                    "value": f"http://lakebench-pushgateway.{self.namespace}.svc:9091",
+                }
+            )
+            env.append({"name": "LB_RUN_ID", "value": os.environ.get("LB_RUN_ID", "")})
 
         # C2 (silver-plan): silver jobs always carry LB_DATA_CLOCK so a rerun
         # scores recency reproducibly, and a greenfield deployment never

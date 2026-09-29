@@ -1011,6 +1011,72 @@ def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seco
         else:
             log(f"{key}: {value}")
     log("=" * 60)
+    # Emit-then-push: the log block above is the authoritative metrics.json
+    # source and is always written first. The push is best-effort live-view
+    # observability and never affects the stage.
+    _push_stage_metrics(job, input_size_gb, input_rows, output_rows, elapsed_seconds, extra)
+
+
+def _push_stage_metrics(job, input_size_gb, input_rows, output_rows, elapsed_seconds, extra):
+    """Best-effort push of bronze/silver/gold stage metrics to the per-deployment
+    Pushgateway for live Grafana visibility. No-op when LB_PUSHGATEWAY_URL is
+    unset (observability off). Driver-only. metrics.json stays the authoritative
+    artifact.
+
+    The payload is built on the caller thread (cheap, no I/O), but the network
+    PUT runs fire-and-forget on a daemon thread. In continuous mode this is
+    called from the streaming micro-batch thread per tick, and urllib's timeout
+    does not bound DNS resolution (getaddrinfo) -- an off-thread push ensures a
+    slow or unresolvable gateway can never stall the streaming trigger. All
+    errors are swallowed.
+    """
+    import os
+
+    url = os.environ.get("LB_PUSHGATEWAY_URL", "").strip()
+    if not url:
+        return
+    try:
+        run_id = os.environ.get("LB_RUN_ID", "").strip() or "unknown"
+        stage = str(job).replace("/", "_")
+        lines = [
+            f"lakebench_stage_input_rows {float(input_rows)}",
+            f"lakebench_stage_output_rows {float(output_rows)}",
+            f"lakebench_stage_input_size_gb {float(input_size_gb)}",
+            f"lakebench_stage_elapsed_seconds {float(elapsed_seconds)}",
+        ]
+        for key, value in extra.items():
+            # Per-silver-table row counts (silver_<table>_rows) become a labeled
+            # gauge so one panel shows every table.
+            if (
+                key.startswith("silver_")
+                and key.endswith("_rows")
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ):
+                table = key[len("silver_") : -len("_rows")]
+                lines.append(f'lakebench_silver_table_rows{{table="{table}"}} {float(value)}')
+        body = "\n".join(lines) + "\n"
+        target = url.rstrip("/") + f"/metrics/job/spark_stage/stage/{stage}/run_id/{run_id}"
+
+        def _send():
+            try:
+                import urllib.request
+
+                req = urllib.request.Request(
+                    target,
+                    data=body.encode(),
+                    method="PUT",
+                    headers={"Content-Type": "text/plain"},
+                )
+                urllib.request.urlopen(req, timeout=2).close()  # noqa: S310 (in-cluster http)
+            except Exception:
+                pass  # best-effort; the JOB METRICS log block is authoritative
+
+        import threading
+
+        threading.Thread(target=_send, daemon=True).start()
+    except Exception:
+        pass  # never let observability affect the stage
 
 
 def stream_batch_lines(batch_id, rows, seconds, table):
