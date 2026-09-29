@@ -7,7 +7,7 @@
 #          Spark RBAC, Spark Thrift Server.
 #
 # Requirements:
-#   - Polaris minimum version: 1.3.0-incubating (earlier versions have STS bug)
+#   - Polaris minimum version: 1.6.0 (earlier versions have STS bug)
 #   - FlashBlade / non-AWS S3: credential subscoping disabled automatically
 
 name: polaris-iceberg-thrift
@@ -16,8 +16,8 @@ recipe: polaris-iceberg-spark-thrift
 images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
-  polaris: apache/polaris:1.3.0-incubating
-  polaris_admin_tool: apache/polaris-admin-tool:1.3.0-incubating
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
   pull_policy: Always
 
 platform:

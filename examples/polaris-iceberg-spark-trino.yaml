@@ -7,7 +7,7 @@
 #          Spark RBAC, Trino (coordinator + workers).
 #
 # Requirements:
-#   - Polaris minimum version: 1.3.0-incubating (earlier versions have STS bug)
+#   - Polaris minimum version: 1.6.0 (earlier versions have STS bug)
 #   - FlashBlade / non-AWS S3: the deployer bootstraps each catalog with
 #     `stsUnavailable: true` and `pathStyleAccess: true` in the storage
 #     config. No server-wide feature flag is required or supported.
@@ -19,8 +19,8 @@ recipe: polaris-iceberg-spark-trino
 images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
-  polaris: apache/polaris:1.3.0-incubating
-  polaris_admin_tool: apache/polaris-admin-tool:1.3.0-incubating
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
   trino: trinodb/trino:483
   pull_policy: Always
 
