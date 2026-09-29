@@ -27,9 +27,11 @@ DEFAULT_CONFIG = "lakebench.yaml"
 EXIT_DECLINED = 3
 
 # Exit code when datagen exceeds its wait budget (A4, v1.6). Distinct from
-# 1 (generic failure) so wrapper scripts can tell a timed-out generate from
-# other datagen errors, and from 2 (usage/refusal) / 3 (declined prompt).
-EXIT_DATAGEN_TIMEOUT = 4
+# 1 (generic failure), 2 (usage/refusal), 3 (declined prompt) and 4
+# (EXIT_NAMESPACE_STILL_TERMINATING in cli/_destroy.py). A wrapper that
+# retries on 4 must not retry on this; a wrapper that watches for 5 must
+# not treat it as namespace-still-terminating.
+EXIT_DATAGEN_TIMEOUT = 5
 
 # ANSI escape code stripper for log output
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -229,9 +231,18 @@ def enforce_bronze_regenerate(cfg, regenerate: bool) -> None:
             "data."
         )
         raise typer.Exit(2)
+    # empty_bucket does NOT accept a Prefix filter today (LB-185's helper
+    # aborts multipart uploads across the bucket to catch FlashBlade
+    # ghosts, so the wipe is bucket-wide). Anything else the bronze bucket
+    # holds (streaming checkpoints, previous-run scratch, a co-tenant that
+    # shares this bucket via a distinct path_template) goes with it.
+    # Prefix-scoped regenerate is a follow-up.
     print_info(
-        f"--regenerate: emptying s3://{bucket} before datagen "
-        f"({object_count} object(s) under {prefix})"
+        f"--regenerate: emptying the ENTIRE bucket s3://{bucket} before "
+        f"datagen. Datagen prefix {prefix!r} has {object_count} object(s); "
+        "any other prefixes in the same bucket (streaming checkpoints, "
+        "previous-run scratch, or a co-tenant sharing this bucket) will "
+        "also be removed."
     )
     try:
         deleted = s3.empty_bucket(bucket)

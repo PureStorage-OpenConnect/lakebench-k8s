@@ -116,10 +116,15 @@ class TestHandleDatagenTimeout:
                 timeout_s=1200,
                 elapsed_s=1201.0,
             )
-        deployer._delete_existing_job.assert_called_once_with("ns-a4")
-        # Every stream app that could be consuming the trickle is deleted.
+        # Cleanup calls pass a request_timeout so a hung K8s API cannot
+        # block the exit indefinitely.
+        deployer._delete_existing_job.assert_called_once_with("ns-a4", request_timeout=15)
+        # Every stream app that could be consuming the trickle is deleted,
+        # each with the same request_timeout cap.
         deleted = [call.args[0] for call in job_manager._delete_job.call_args_list]
         assert set(deleted) == set(_STREAM_APPS)
+        for call in job_manager._delete_job.call_args_list:
+            assert call.kwargs.get("request_timeout") == 15
 
     def test_cleanup_errors_do_not_prevent_exit(self) -> None:
         # Best-effort cleanup: a failure deleting the Job or a SparkApplication
@@ -347,7 +352,7 @@ class _FakeDatagenDeployer:
     def __init__(self, engine: object) -> None:
         self.engine = engine
         self.deploy_calls = 0
-        self.delete_calls: list[str] = []
+        self.delete_calls: list[tuple[str, int | None]] = []
         self.progress_polls = 0
 
     def deploy(self):
@@ -362,8 +367,8 @@ class _FakeDatagenDeployer:
         # Always running: never finishes so the wait loop must time out.
         return {"running": True, "succeeded": 0, "completions": 4}
 
-    def _delete_existing_job(self, namespace: str) -> None:
-        self.delete_calls.append(namespace)
+    def _delete_existing_job(self, namespace: str, *, request_timeout: int | None = None) -> None:
+        self.delete_calls.append((namespace, request_timeout))
 
 
 class TestRunGenerateTimeout:

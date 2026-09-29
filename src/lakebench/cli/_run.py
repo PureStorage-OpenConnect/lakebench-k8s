@@ -575,15 +575,19 @@ def _handle_datagen_timeout(
         f"(elapsed ~{elapsed_s:.0f}s). Invariant 3: exit 0 is not a pass; "
         "failing the run rather than proceeding on a partial bronze."
     )
+    # A hung K8s API can itself be the reason for the wait-budget timeout.
+    # Cap each cleanup call at 15 s so the handler always reaches the
+    # ``raise typer.Exit`` below rather than blocking indefinitely.
+    _CLEANUP_TIMEOUT_S = 15
     try:
-        datagen_deployer._delete_existing_job(namespace)
+        datagen_deployer._delete_existing_job(namespace, request_timeout=_CLEANUP_TIMEOUT_S)
     except Exception as e:  # noqa: BLE001 -- best-effort cleanup
         logger.warning("Failed to delete datagen Job on timeout: %s", e)
     else:
         print_info("Stopped datagen Job.")
     for app in _STREAM_APPS:
         try:
-            job_manager._delete_job(app)
+            job_manager._delete_job(app, request_timeout=_CLEANUP_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 -- best-effort cleanup
             logger.warning("Failed to delete leftover SparkApplication %s on timeout: %s", app, e)
     print_info(

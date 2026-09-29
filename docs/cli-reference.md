@@ -248,9 +248,11 @@ submitting jobs. The Rust generator has no checkpoint-resume; an interrupted
 run is re-run from the start.
 
 **Exit codes**: `0` on success, `1` on generic failure, `2` when bronze is
-non-empty and `--regenerate` was not passed, `4` when datagen exceeds its
+non-empty and `--regenerate` was not passed, `5` when datagen exceeds its
 wait budget (`--timeout`); in that case the datagen Job and any leftover
 streaming SparkApplication consuming the trickle are stopped before exit.
+Only the initial-pass datagen is guarded by this exit code; per-cycle
+datagen inside a multi-cycle run reports its own timeout independently.
 
 ### run
 

@@ -426,19 +426,29 @@ class DatagenDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _delete_existing_job(self, namespace: str) -> None:
-        """Delete existing datagen job if present."""
+    def _delete_existing_job(
+        self, namespace: str, *, request_timeout: int | None = None
+    ) -> None:
+        """Delete existing datagen job if present.
+
+        ``request_timeout`` caps the API call so a caller invoked because
+        the K8s API itself hung (datagen timeout handler) does not block
+        indefinitely on the delete.
+        """
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
 
         batch_v1 = k8s_client.BatchV1Api()
 
         try:
-            batch_v1.delete_namespaced_job(
-                name="lakebench-datagen",
-                namespace=namespace,
-                body=k8s_client.V1DeleteOptions(propagation_policy="Background"),
-            )
+            kwargs: dict = {
+                "name": "lakebench-datagen",
+                "namespace": namespace,
+                "body": k8s_client.V1DeleteOptions(propagation_policy="Background"),
+            }
+            if request_timeout is not None:
+                kwargs["_request_timeout"] = request_timeout
+            batch_v1.delete_namespaced_job(**kwargs)
             # Wait for job to be deleted
             time.sleep(2)
         except ApiException as e:
