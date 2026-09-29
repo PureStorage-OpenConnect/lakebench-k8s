@@ -274,13 +274,21 @@ class ImagesConfig(ConfigModel):
     # --delivery-mode {batch|continuous} MpuWriter switch with continuous
     # as the Rust binary default, and the #52 registered_looks_open freeze
     # wiring.
-    # Pushed digest:
-    # sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6
+    # 9382420 adds the live-metrics Pushgateway push (datagen_rs/src/push.rs).
+    # Output-neutral: MODEL_VERSION stays datagen-v2-rs-0.3 and the seed-43
+    # byte-compare + c360_output_is_pinned/screening/robustness pins hold, so it
+    # belongs to the same freeze under a new tag. This is the FUNCTIONAL default;
+    # it is DISQUALIFIED from generating any D8 / A6 / registered-look /
+    # calibration corpus -- those runs pass an explicit frozen digest via
+    # --generator-image (aml-protocol.md), never this default.
+    # Pushed digest (9382420):
+    # sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2
     # Prior tags:
+    #   b6f2905 (sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6)
     #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
     #   0a83acd (sha256:acdf3925...)
     #   7c24641 (sha256:c5a6bc80...)
-    datagen: str = "docker.io/sillidata/lb-datagen:b6f2905"
+    datagen: str = "docker.io/sillidata/lb-datagen:9382420"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
