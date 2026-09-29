@@ -461,7 +461,13 @@ _LOCAL_CONFIG_TEMPLATE = """\
 # `deploy --local` starts a Garage container and mints its own keys.
 #
 #   lakebench deploy {output} --local
-#   lakebench run {output} --local
+#   lakebench run {output} --local --generate --yes
+#
+# The first `run --local` needs `--generate` to write bronze into the
+# local Garage bucket; without it the pipeline runs against an empty
+# bronze. On a later run against the same workdir the bronze corpus is
+# reused, so `--generate` is only needed again when the workdir was
+# cleared or the scale changed.
 #
 # Local mode is Iceberg-only. DuckDB cannot read Delta on a non-AWS S3
 # endpoint, so a Delta config here would fail at query time.
@@ -513,7 +519,8 @@ def _write_local_config(output: Path, name: str, scale: float) -> None:
     console.print()
     console.print("  Next:")
     console.print(f"    [bold]lakebench deploy {output} --local[/bold]")
-    console.print(f"    [bold]lakebench run {output} --local[/bold]")
+    console.print(f"    [bold]lakebench run {output} --local --generate --yes[/bold]")
+    console.print("  (--generate populates bronze on the first local run.)")
 
 
 def can_edit_operator_release(operator_namespace: str) -> bool | None:

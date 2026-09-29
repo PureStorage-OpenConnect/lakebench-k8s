@@ -54,9 +54,15 @@ architecture:
   catalog:
     type: polaris
     polaris:
-      # LB-090: each install must set its own OAuth2 secret. Generate with:
+      # Required. Each install must set its own OAuth2 client secret (LB-090):
+      # `deploy`, `run` and `destroy` each reload the config, so they must
+      # agree on the same value. Generate one with
       #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+      # then either paste it below in place of the placeholder, or export
+      # LAKEBENCH_POLARIS_CLIENT_SECRET and use ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+      # here. The placeholder itself is not a working secret and Polaris
+      # OAuth2 will refuse it at first use.
+      client_secret: "<REPLACE_WITH_POLARIS_CLIENT_SECRET>"
 
   pipeline:
     mode: batch
