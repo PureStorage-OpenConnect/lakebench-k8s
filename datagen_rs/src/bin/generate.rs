@@ -4,6 +4,12 @@
 //! file is built into an in-memory `Vec<u8>` and PUT directly to S3, so the
 //! local filesystem is never used as a staging buffer.
 
+// mimalloc: glibc malloc fragments under the per-thread file builders and
+// grows RSS for the whole run (cluster, scale 100: pod 0 14.5 -> 7.2 GiB,
+// workers 10.8 -> 6.8 GiB with byte-identical output). LB-204.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
