@@ -749,7 +749,11 @@ workload:
     ## Row content is byte-identical across modes at fixed seed. CPU/memory
     ## are sized by scale via the autosizer independently of mode, and any
     ## cpu/memory you set are honoured.
-    parallelism: 1                 # Number of datagen pods
+    # parallelism: 8                # Number of datagen pods. Left commented so
+                                    # the autosizer picks a value from cluster
+                                    # capacity (scale > 50 scales up beyond the
+                                    # default; small scales cap down). Set an
+                                    # explicit integer to pin it.
     # file_size: 64mb
     # dirty_data_ratio: 0.08         # customer360 only; financial ignores it
     # generators: 0                # Per-pod generator threads (0 = auto: follow pod CPU)

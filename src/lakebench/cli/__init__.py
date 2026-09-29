@@ -316,6 +316,14 @@ def init(
             help="Architecture recipe (e.g. hive-iceberg-spark-trino, default)",
         ),
     ] = "",
+    workload: Annotated[
+        str,
+        typer.Option(
+            "--workload",
+            "-w",
+            help="Workload schema (customer360 | financial). Default is customer360.",
+        ),
+    ] = "",
     interactive: Annotated[
         bool,
         typer.Option(
@@ -378,7 +386,7 @@ def init(
     if local:
         # 10 is the cluster default and would ask a laptop for ~100 GB. Only
         # override it when the user did not pick a scale themselves.
-        _write_local_config(output, name, 0.1 if scale == 10 else scale)
+        _write_local_config(output, name, 0.1 if scale == 10 else scale, workload_schema=workload)
         return
 
     # Detect whether user passed substantive flags -- if so, skip wizard
@@ -391,13 +399,15 @@ def init(
 
     if interactive and not has_flags and is_tty:
         # Wizard mode
-        from lakebench.init_wizard import run_wizard
+        from lakebench.init_wizard import _build_config_yaml, run_wizard
 
         result = run_wizard(console, advanced=advanced)
         if result is None:
             raise typer.Exit(0)
 
-        # Apply any CLI flag overrides onto wizard state
+        # Apply any CLI flag overrides onto wizard state. Rebuild the YAML
+        # after applying overrides so flags actually reach the written file
+        # (the wizard's step_review built config_yaml from pre-override state).
         if name != "my-lakehouse":
             result.name = name
         if namespace:
@@ -406,6 +416,9 @@ def init(
             result.recipe = recipe
         if scale != 10:
             result.scale = scale
+        if workload:
+            result.workload_schema = workload
+        result.config_yaml = _build_config_yaml(result)
 
         # Confirm write
         import typer as _typer
@@ -444,6 +457,12 @@ def init(
         config_content = config_content.replace('secret_key: ""', f'secret_key: "{secret_key}"')
     if namespace:
         config_content = config_content.replace('namespace: ""', f'namespace: "{namespace}"', 1)
+    if workload:
+        config_content = re.sub(
+            r"# schema: customer360\s*# customer360 \| financial",
+            f"schema: {workload}    # customer360 | financial",
+            config_content,
+        )
 
     output.write_text(config_content)
     print_success(f"Created configuration file: {output}")
@@ -476,13 +495,14 @@ _LOCAL_CONFIG_TEMPLATE = """\
 name: {name}
 recipe: hive-iceberg-spark-duckdb
 
-architecture:
-  workload:
-    datagen:
-      # 1 unit is roughly 10 GB of bronze, so {scale} is about {approx_gb:.1f} GB.
-      # Local mode is sized for 1 and below; larger scales still run but a
-      # single JVM shuffling that much on one host takes a long time.
-      scale: {scale}
+# Workload lives at the top level (D12 workload move). The deprecated
+# architecture.workload block still loads but emits a warning.
+workload:{schema_line}
+  datagen:
+    # 1 unit is roughly 10 GB of bronze, so {scale} is about {approx_gb:.1f} GB.
+    # Local mode is sized for 1 and below; larger scales still run but a
+    # single JVM shuffling that much on one host takes a long time.
+    scale: {scale}
 
 platform:
   storage:
@@ -499,18 +519,22 @@ platform:
 """
 
 
-def _write_local_config(output: Path, name: str, scale: float) -> None:
+def _write_local_config(output: Path, name: str, scale: float, workload_schema: str = "") -> None:
     """Write a ready-to-run local mode config."""
     if name == "my-lakehouse":
         name = "local-lakehouse"
 
     prefix = "".join(c if c.isalnum() or c == "-" else "-" for c in name).strip("-").lower()
+    # When the user picked a workload, emit `schema:` under `workload:`; the
+    # bare `workload:` block otherwise falls back to the customer360 default.
+    schema_line = f"\n  schema: {workload_schema}" if workload_schema else ""
     content = _LOCAL_CONFIG_TEMPLATE.format(
         output=output,
         name=name,
         scale=scale,
         approx_gb=scale * 10.0,
         prefix=prefix or "lakebench",
+        schema_line=schema_line,
     )
     output.write_text(content)
 
