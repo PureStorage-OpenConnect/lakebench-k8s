@@ -23,6 +23,20 @@ use std::time::Duration;
 /// stalls the pod; the write path is off the generation hot path regardless.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Sets the flag to true on drop -- including during a panic unwind -- so a
+/// reporter thread watching the flag always terminates even if the generation
+/// body panics. Without this, a panic in the scoped par_iter would never reach
+/// the explicit "done" store, the reporter would loop forever, and thread::scope
+/// would block joining it (turning a fast-failing generation error, e.g. ENOSPC
+/// or an S3 error, into a hung pod).
+pub struct StopGuard<'a>(pub &'a std::sync::atomic::AtomicBool);
+
+impl Drop for StopGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The configured Pushgateway base URL, or None when observability is off
 /// (env unset/empty). Callers no-op on None.
 pub fn gateway_url() -> Option<String> {
@@ -246,6 +260,52 @@ mod tests {
         assert_eq!(
             p,
             "/metrics/job/datagen/node_id/3/schema/financial/run_id/run-1"
+        );
+    }
+
+    #[test]
+    fn stop_guard_sets_flag_on_drop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = AtomicBool::new(false);
+        {
+            let _g = StopGuard(&flag);
+        }
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn scoped_reporter_does_not_hang_when_body_panics() {
+        // Regression: a panic in the scoped generation body must still let a
+        // flag-watching reporter thread terminate, so thread::scope returns
+        // instead of blocking forever joining the reporter.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        let done = AtomicBool::new(false);
+        let started = Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::thread::scope(|s| {
+                let done_ref = &done;
+                s.spawn(move || {
+                    // Mimics report_progress: loop until the flag is set.
+                    while !done_ref.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                });
+                let _stop = StopGuard(&done);
+                panic!("generation blew up");
+            });
+        }));
+        assert!(
+            result.is_err(),
+            "the panic should propagate out of the scope"
+        );
+        assert!(
+            done.load(Ordering::Relaxed),
+            "the guard must have set the flag"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "scope must not hang joining the reporter"
         );
     }
 
