@@ -222,6 +222,10 @@ class DatagenDeployer:
             target_tb = (dims.approx_bronze_gb / total_cycles) / 1024.0
             context["datagen_target_tb"] = f"{target_tb:.6f}"
 
+            # Cycle 0 is a fresh write: clear stale files a prior generate left.
+            # Append cycles (n > 0) keep the earlier cycles' files (LB-185).
+            self._clear_bronze_prefix_if_fresh(cycle_index, context["datagen_path_prefix"])
+
             self._delete_existing_job(namespace)
 
             for template_name in self.TEMPLATES:
@@ -255,6 +259,69 @@ class DatagenDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
+    def _clear_bronze_prefix_if_fresh(self, cycle_index: int, path_prefix: str) -> None:
+        """Clear stale datagen files before a fresh generate (LB-185).
+
+        A re-generate into a reused bronze bucket must not inherit part-* files
+        a larger earlier generate left behind: they share the ``part-NNNNNN``
+        naming, so the bronze read cannot tell them apart and silver over-counts
+        (a smaller generate over a larger one's leftovers). Clear the workload's
+        bronze prefix before cycle 0 writes; append cycles (n > 0) keep the
+        earlier cycles' files. Skipped when the operator manages the bucket
+        (``create_buckets`` false); scoped to the datagen prefix via
+        ``delete_prefix``, which refuses an empty or root prefix. Best-effort:
+        a clearing failure warns and continues rather than blocking generation.
+        """
+        if cycle_index != 0:
+            return
+        s3_cfg = self.config.platform.storage.s3
+        if not s3_cfg.create_buckets:
+            logger.info(
+                "LB-185: create_buckets is false; leaving the bronze prefix for "
+                "the operator to manage"
+            )
+            return
+        prefix = path_prefix.strip("/")
+        if not prefix:
+            logger.warning("LB-185: datagen path prefix is empty; not clearing the bronze bucket")
+            return
+        bucket = s3_cfg.buckets.bronze
+        try:
+            from lakebench.s3 import S3Client
+
+            s3 = S3Client(
+                endpoint=s3_cfg.endpoint,
+                access_key=s3_cfg.access_key,
+                secret_key=s3_cfg.secret_key,
+                region=s3_cfg.region,
+                path_style=s3_cfg.path_style,
+                ca_cert=s3_cfg.ca_cert,
+                verify_ssl=s3_cfg.verify_ssl,
+            )
+            if s3._init_error:
+                logger.warning(
+                    "LB-185: bronze prefix not cleared (%s); a re-generate into a "
+                    "reused bucket may inherit stale files",
+                    s3._init_error,
+                )
+                return
+            n = s3.delete_prefix(bucket, prefix)
+            if n:
+                logger.info(
+                    "LB-185: cleared %d stale object(s) under s3://%s/%s before a fresh generate",
+                    n,
+                    bucket,
+                    prefix,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "LB-185: could not clear the bronze prefix under s3://%s/%s (%s); a "
+                "re-generate into a reused bucket may inherit stale files",
+                bucket,
+                prefix,
+                e,
+            )
+
     def deploy(self) -> DeploymentResult:
         """Deploy the datagen job.
 
@@ -274,6 +341,9 @@ class DatagenDeployer:
 
         try:
             context = self._build_datagen_context()
+
+            # A single-cycle generate is a fresh write: clear stale files first.
+            self._clear_bronze_prefix_if_fresh(0, context["datagen_path_prefix"])
 
             self._delete_existing_job(namespace)
 
