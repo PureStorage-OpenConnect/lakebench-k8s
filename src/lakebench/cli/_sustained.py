@@ -33,7 +33,12 @@ from lakebench.cli._helpers import (
 )
 from lakebench.config.schema import is_continuous_mode
 from lakebench.journal import CommandName, EventType
-from lakebench.k8s import K8sConnectionError, get_k8s_client
+from lakebench.k8s import (
+    K8sConnectionError,
+    get_k8s_client,
+    pinned_kubectl,
+    pinned_kubectl_popen,
+)
 from lakebench.metrics.continuous_window import parse_events, utc_naive
 
 logger = logging.getLogger(__name__)
@@ -557,7 +562,7 @@ def _run_c360_continuous_reset(job_manager, monitor, console, *, timeout_seconds
     return True
 
 
-def _find_prometheus_svc(namespace: str) -> str | None:
+def _find_prometheus_svc(namespace: str, context: str | None = None) -> str | None:
     """Find the Prometheus service name in the given namespace.
 
     The kube-prometheus-stack Helm chart truncates the service name based on
@@ -587,9 +592,9 @@ def _find_prometheus_svc(namespace: str) -> str | None:
 
     # Attempt 2: kubectl fallback
     try:
-        result = subprocess.run(
+        result = pinned_kubectl(
+            context,
             [
-                "kubectl",
                 "get",
                 "svc",
                 "-n",
@@ -632,13 +637,14 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
         from lakebench.observability.platform_collector import PlatformCollector
 
         namespace = cfg.get_namespace()
+        ctx = cfg.platform.kubernetes.context or None
         # The stack is shared and lives in its own namespace; metrics are
         # still filtered to this deployment's namespace below.
         try:
-            prom_ns = find_observability_release() or namespace
+            prom_ns = find_observability_release(ctx) or namespace
         except ObservabilityLookupError:
             prom_ns = namespace
-        svc_name = _find_prometheus_svc(prom_ns)
+        svc_name = _find_prometheus_svc(prom_ns, context=ctx)
         if not svc_name:
             console.print("  [yellow]Could not find Prometheus service[/yellow]")
             return
@@ -655,9 +661,9 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
             import socket
 
             local_port = _find_free_port()
-            pf_proc = subprocess.Popen(
+            pf_proc = pinned_kubectl_popen(
+                ctx,
                 [
-                    "kubectl",
                     "port-forward",
                     f"svc/{svc_name}",
                     f"{local_port}:9090",
@@ -1433,11 +1439,9 @@ def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:
 
     # Determine expected worker count from Trino StatefulSet replica count
     try:
-        import subprocess as _sp
-
-        result = _sp.run(
+        result = pinned_kubectl(
+            cfg,
             [
-                "kubectl",
                 "get",
                 "statefulset",
                 "lakebench-trino-worker",

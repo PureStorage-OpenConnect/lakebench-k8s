@@ -18,6 +18,7 @@ from lakebench.benchmark.fingerprint import (
     unusable,
 )
 from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
+from lakebench.k8s import pinned_kubectl
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +43,17 @@ def server_run_time_limit(timeout: int) -> int:
 class TrinoExecutor:
     """Executes queries via ``kubectl exec`` into the Trino CLI."""
 
-    def __init__(self, namespace: str, catalog_name: str, table_format: str = "iceberg"):
+    def __init__(
+        self,
+        namespace: str,
+        catalog_name: str,
+        table_format: str = "iceberg",
+        kube_context: str | None = None,
+    ):
         self.namespace = namespace
         self.catalog_name = catalog_name
         self.table_format = table_format
+        self.kube_context = kube_context or None
         self._pod: str | None = None
 
     def engine_name(self) -> str:
@@ -55,9 +63,9 @@ class TrinoExecutor:
         """Find the Trino coordinator pod."""
         if self._pod:
             return self._pod
-        result = subprocess.run(
+        result = pinned_kubectl(
+            self.kube_context,
             [
-                "kubectl",
                 "get",
                 "pods",
                 "-n",
@@ -77,9 +85,15 @@ class TrinoExecutor:
         self._pod = pod
         return pod
 
+    def _kubectl_prefix(self) -> list[str]:
+        """The ``kubectl`` argv prefix with the configured context pinned."""
+        if self.kube_context:
+            return ["kubectl", "--context", self.kube_context]
+        return ["kubectl"]
+
     def _exec_cmd(self, pod: str, *trino_args: str) -> list[str]:
         return [
-            "kubectl",
+            *self._kubectl_prefix(),
             "exec",
             pod,
             "-c",
@@ -252,9 +266,9 @@ class TrinoExecutor:
             return
         try:
             pod = self._discover_pod()
-            subprocess.run(
+            pinned_kubectl(
+                self.kube_context,
                 [
-                    "kubectl",
                     "exec",
                     pod,
                     "-c",

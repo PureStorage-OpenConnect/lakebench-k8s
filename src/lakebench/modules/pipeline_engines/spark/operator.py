@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from lakebench.k8s import pinned_helm, pinned_kubectl, pinned_oc
 from lakebench.modules.pipeline_engines.spark.operator_scratch import (
     DEFAULT_CONTROLLER_TMP_SIZE,
     TmpVolume,
@@ -224,7 +225,12 @@ class SparkOperatorManager:
         self.kube_context = kube_context or None
 
     def _with_context(self, cmd: list[str]) -> list[str]:
-        """Add the configured kube context to a helm/kubectl/oc command."""
+        """Add the configured kube context to a helm/kubectl/oc command.
+
+        Retained for tests that exercise the flag placement directly.
+        Callers go through :meth:`_run`, which routes each tool through
+        the pinned helper in :mod:`lakebench.k8s._pinned`.
+        """
         if not self.kube_context or not cmd:
             return cmd
         if cmd[0] == "helm":
@@ -234,8 +240,27 @@ class SparkOperatorManager:
         return cmd
 
     def _run(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
-        """subprocess.run with the configured kube context applied."""
-        return subprocess.run(self._with_context(cmd), **kwargs)
+        """Run a kubectl/helm/oc command through the pinned helpers.
+
+        Every subprocess site in this module goes through here so that a
+        stale ambient kube-context can never touch the wrong cluster.
+        The lint in ``tests/test_pinned_kubectl_helper.py`` whitelists
+        exactly this method (plus the helpers themselves).
+        """
+        if not cmd:
+            raise ValueError("empty command")
+        tool = cmd[0]
+        args = list(cmd[1:])
+        ctx = self.kube_context
+        if tool == "kubectl":
+            return pinned_kubectl(ctx, args, **kwargs)
+        if tool == "helm":
+            return pinned_helm(ctx, args, **kwargs)
+        if tool == "oc":
+            return pinned_oc(ctx, args, **kwargs)
+        # A non-cluster tool (e.g. ``python`` in a debug branch) has no
+        # kube context to pin, so fall back to a plain subprocess.run.
+        return subprocess.run(cmd, **kwargs)  # noqa: S603
 
     def check_status(self) -> OperatorStatus:
         """Check if Spark Operator is installed and ready.

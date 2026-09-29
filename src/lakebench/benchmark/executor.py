@@ -57,17 +57,27 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
     ns = namespace or config.get_namespace()
     engine_type = config.architecture.query_engine.type.value
     table_format = config.architecture.table_format.type.value
+    kube_context = config.platform.kubernetes.context or None
 
     if engine_type == "trino":
         catalog = config.architecture.query_engine.trino.catalog_name
-        return TrinoExecutor(namespace=ns, catalog_name=catalog, table_format=table_format)
+        return TrinoExecutor(
+            namespace=ns,
+            catalog_name=catalog,
+            table_format=table_format,
+            kube_context=kube_context,
+        )
     elif engine_type == "spark-thrift":
         catalog_type = config.architecture.catalog.type.value
         if table_format == "delta" and catalog_type != "unity":
             catalog = "spark_catalog"
         else:
             catalog = config.architecture.query_engine.spark_thrift.catalog_name
-        return SparkThriftExecutor(namespace=ns, catalog_name=catalog)
+        return SparkThriftExecutor(
+            namespace=ns,
+            catalog_name=catalog,
+            kube_context=kube_context,
+        )
     elif engine_type == "duckdb":
         s3 = config.platform.storage.s3
         catalog = config.architecture.query_engine.duckdb.catalog_name
@@ -106,6 +116,7 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
             },
             table_format=table_format,
             catalog_type=catalog_type,
+            kube_context=kube_context,
         )
     elif engine_type == "none":
         raise ValueError("Cannot run queries without a query engine (type=none)")

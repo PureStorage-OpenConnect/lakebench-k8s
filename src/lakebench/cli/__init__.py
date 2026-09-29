@@ -46,7 +46,14 @@ from lakebench.config import (
 from lakebench.config.schema import is_continuous_mode
 from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
-from lakebench.k8s import K8sConnectionError, PlatformType, SecurityVerifier, get_k8s_client
+from lakebench.k8s import (
+    K8sConnectionError,
+    PlatformType,
+    SecurityVerifier,
+    get_k8s_client,
+    pinned_kubectl,
+    pinned_kubectl_popen,
+)
 from lakebench.s3 import test_s3_connectivity
 
 if TYPE_CHECKING:
@@ -2181,9 +2188,9 @@ def logs(
         f"Fetching logs for [bold]{component}[/bold] in namespace [bold]{namespace}[/bold]"
     )
 
-    # Build kubectl logs command
+    # Build kubectl logs args (the "kubectl" itself is added by the pinned
+    # helper along with --context=<configured>).
     cmd = [
-        "kubectl",
         "logs",
         "-l",
         label_selector,
@@ -2199,7 +2206,8 @@ def logs(
     try:
         if follow:
             # Stream logs
-            process = subprocess.Popen(
+            process = pinned_kubectl_popen(
+                cfg,
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -2214,7 +2222,8 @@ def logs(
                 print_info("\nLog streaming stopped")
         else:
             # One-shot log fetch
-            result = subprocess.run(
+            result = pinned_kubectl(
+                cfg,
                 cmd,
                 capture_output=True,
                 text=True,
