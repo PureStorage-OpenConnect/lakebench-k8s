@@ -689,7 +689,9 @@ def test_install_waits_for_prometheus_after_the_lease_and_fails_if_not_ready(_lo
 
     order = []
     _lock.return_value.__exit__.side_effect = lambda *a: order.append("lease released")
-    _lock.wait.side_effect = lambda ns: order.append(f"wait {ns}") or "not Ready after 600s"
+    # The wait helper now accepts a `context=` kwarg (LB-ux-safety C1: every
+    # kubectl invocation must pin the configured kube-context).
+    _lock.wait.side_effect = lambda ns, **_kw: order.append(f"wait {ns}") or "not Ready after 600s"
 
     def fake_run(cmd, **kw):
         if cmd[:2] == ["helm", "list"]:

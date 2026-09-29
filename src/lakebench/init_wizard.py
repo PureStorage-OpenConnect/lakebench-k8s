@@ -454,7 +454,9 @@ def step_review(console: Console, state: WizardState) -> bool:
     # unredacted YAML is written to disk in the next step; only the
     # in-terminal preview is masked.
     if state.secret_key:
-        preview = state.config_yaml.replace(f'secret_key: "{state.secret_key}"', 'secret_key: "***"')
+        preview = state.config_yaml.replace(
+            f'secret_key: "{state.secret_key}"', 'secret_key: "***"'
+        )
     else:
         preview = state.config_yaml
     syntax = Syntax(preview, "yaml", theme="monokai", line_numbers=False)

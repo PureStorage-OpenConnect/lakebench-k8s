@@ -68,9 +68,7 @@ _GUARD_DEF_FILE = _SRC / "config" / "datagen_seed.py"
 _LOAD_SITE_FILE = _SRC / "config" / "schema.py"
 
 
-_EXACT_HELPER_NAMES: frozenset[str] = frozenset(
-    {"check_seed", "resolve_seed", "config_seed"}
-)
+_EXACT_HELPER_NAMES: frozenset[str] = frozenset({"check_seed", "resolve_seed", "config_seed"})
 
 
 def _read(path: Path) -> str:
@@ -136,8 +134,7 @@ def test_load_time_guard_has_a_caller_in_workload_validator():
     """
     module = _parse(_LOAD_SITE_FILE)
     assert _has_call_to(module, _EXACT_HELPER_NAMES), (
-        f"{_LOAD_SITE_FILE} no longer calls the AML seed guard at load time. "
-        f"{_INVARIANT_HINT}"
+        f"{_LOAD_SITE_FILE} no longer calls the AML seed guard at load time. {_INVARIANT_HINT}"
     )
 
 

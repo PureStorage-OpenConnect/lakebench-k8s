@@ -435,9 +435,7 @@ class DatagenDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _delete_existing_job(
-        self, namespace: str, *, request_timeout: int | None = None
-    ) -> None:
+    def _delete_existing_job(self, namespace: str, *, request_timeout: int | None = None) -> None:
         """Delete existing datagen job if present.
 
         ``request_timeout`` caps the API call so a caller invoked because

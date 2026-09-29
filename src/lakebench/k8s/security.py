@@ -7,13 +7,13 @@ appropriate security requirements are met before deployment.
 from __future__ import annotations
 
 import logging
-import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
 from lakebench._constants import SPARK_SERVICE_ACCOUNT
+from lakebench.k8s._pinned import pinned_oc
 
 if TYPE_CHECKING:
     from lakebench.k8s import K8sClient
@@ -88,6 +88,12 @@ class SecurityVerifier:
         self.k8s = k8s
         self._platform: PlatformType | None = None
         self._platform_version: str = ""
+
+    @property
+    def _kube_context(self) -> str | None:
+        """The client's kube-context, or None to use the current context."""
+        k8s = getattr(self, "k8s", None)
+        return getattr(k8s, "context_name", "") or None
 
     def detect_platform(self) -> PlatformType:
         """Detect Kubernetes platform type.
@@ -328,9 +334,9 @@ class SecurityVerifier:
         stay parallel with ``_scc_binding_has_subject``.
         """
         try:
-            result = subprocess.run(
+            result = pinned_oc(
+                self._kube_context,
                 [
-                    "oc",
                     "get",
                     "scc",
                     scc_name,
@@ -445,9 +451,9 @@ class SecurityVerifier:
 
         for attempt in range(1, self._SCC_ADD_MAX_ATTEMPTS + 1):
             try:
-                result = subprocess.run(
+                result = pinned_oc(
+                    self._kube_context,
                     [
-                        "oc",
                         "adm",
                         "policy",
                         "add-scc-to-user",
@@ -508,9 +514,9 @@ class SecurityVerifier:
         error surface.
         """
         try:
-            result = subprocess.run(
+            result = pinned_oc(
+                self._kube_context,
                 [
-                    "oc",
                     "get",
                     "rolebinding",
                     f"system:openshift:scc:{scc_name}",

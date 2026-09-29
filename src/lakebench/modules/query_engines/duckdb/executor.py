@@ -15,6 +15,7 @@ from pathlib import Path
 
 from lakebench.benchmark.fingerprint import last_json_line, unusable
 from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
+from lakebench.k8s import pinned_kubectl
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ class DuckDBExecutor:
         table_names: dict[str, str] | None = None,
         table_format: str = "iceberg",
         catalog_type: str = "hive",
+        kube_context: str | None = None,
     ):
         self.namespace = namespace
         self.catalog_name = catalog_name
@@ -94,18 +96,25 @@ class DuckDBExecutor:
         self.s3_path_style = s3_path_style
         self.s3_buckets = s3_buckets or {}
         self.table_names = table_names or {}
+        self.kube_context = kube_context or None
         self._pod: str | None = None
 
     def engine_name(self) -> str:
         return "duckdb"
 
+    def _kubectl_prefix(self) -> list[str]:
+        """The ``kubectl`` argv prefix with the configured context pinned."""
+        if self.kube_context:
+            return ["kubectl", "--context", self.kube_context]
+        return ["kubectl"]
+
     def _discover_pod(self) -> str:
         """Find the DuckDB pod."""
         if self._pod:
             return self._pod
-        result = subprocess.run(
+        result = pinned_kubectl(
+            self.kube_context,
             [
-                "kubectl",
                 "get",
                 "pods",
                 "-n",
@@ -168,7 +177,7 @@ class DuckDBExecutor:
         pod = self._discover_pod()
         script = self._build_python_script(sql, timeout=timeout)
         cmd = [
-            "kubectl",
+            *self._kubectl_prefix(),
             "exec",
             pod,
             "-n",
@@ -245,10 +254,20 @@ class DuckDBExecutor:
         script = self._build_python_script(
             sql, timeout=timeout, result_statement=fingerprint_statement(approx_columns)
         )
-        cmd = ["kubectl", "exec", pod, "-n", self.namespace, "--", "python", "-c", script]
+        cmd = [
+            *self._kubectl_prefix(),
+            "exec",
+            pod,
+            "-n",
+            self.namespace,
+            "--",
+            "python",
+            "-c",
+            script,
+        ]
         start = time.monotonic()
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # noqa: S603
         except subprocess.TimeoutExpired:
             error = f"fingerprint query timed out ({timeout}s)"
             return _fp_result(sql, start, unusable("error", error, "duckdb"), error)
