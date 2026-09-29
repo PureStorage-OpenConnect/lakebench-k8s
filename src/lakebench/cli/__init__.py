@@ -1682,6 +1682,16 @@ def info(
 
 @app.command()
 def report(
+    config_file: Annotated[
+        Path | None,
+        typer.Argument(
+            help=(
+                "Path to configuration YAML file. When given, the "
+                "'latest run' lookup is scoped to this deployment so a "
+                "parallel deployment's newer run is not reported by mistake."
+            ),
+        ),
+    ] = None,
     metrics_dir: Annotated[
         Path,
         typer.Option(
@@ -1760,6 +1770,18 @@ def report(
 
     storage = MetricsStorage(metrics_dir)
 
+    # Scope the "latest run" lookup to a specific deployment when a config
+    # file is given. Under parallel deployments the shared runs/ tree can
+    # have another deployment's newer record on top; without scoping,
+    # `report` would display it (SP-2 owns the durable deployment_id fix).
+    deployment_name: str | None = None
+    if config_file is not None:
+        try:
+            deployment_name = load_config(config_file).name
+        except ConfigError as e:
+            print_error(f"Config error: {e}")
+            raise typer.Exit(1)  # noqa: B904
+
     # List runs mode
     if list_runs:
         runs = storage.list_runs()
@@ -1817,6 +1839,7 @@ def report(
                 run_id,
                 output_path=output_path,
                 force=force,
+                deployment_name=deployment_name,
             )
         except FileExistsError as e:
             print_error(str(e))
@@ -1835,7 +1858,11 @@ def report(
         # Also print the summary when asked; keep the default quiet so
         # scripts that watch stdout for the path have a clean output.
         if summary:
-            resolved = storage.load_run(run_id) if run_id else storage.get_latest_run()
+            resolved = (
+                storage.load_run(run_id)
+                if run_id
+                else storage.get_latest_run_for_deployment(deployment_name)
+            )
             if resolved:
                 _print_report_summary(resolved)
 
@@ -1851,7 +1878,11 @@ def report(
         return
 
     # Default action: print the summary; do not regenerate the HTML.
-    metrics = storage.load_run(run_id) if run_id else storage.get_latest_run()
+    metrics = (
+        storage.load_run(run_id)
+        if run_id
+        else storage.get_latest_run_for_deployment(deployment_name)
+    )
     if metrics is None:
         print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
         print_info("Use 'lakebench report --list' to see available runs")
@@ -1916,8 +1947,10 @@ def results(
     as a column with consistent metrics as rows. Use --format json or
     --format csv for machine-readable output.
 
-    Accepts an optional config file argument (ignored, for command-line
-    consistency with other lakebench commands).
+    Accepts an optional config file argument. When provided, scopes the
+    default-summary lookup to that deployment (so ``results other.yaml``
+    on a shared lakebench-output tree does not read another deployment's
+    latest run).
     """
     if format_short_f is not None:
         warn_deprecated_short_f("--format / -o")
@@ -1933,10 +1966,20 @@ def results(
 
     storage = MetricsStorage(metrics_dir)
 
+    # Scope the "latest run" lookup to a specific deployment when the
+    # optional config file was given (see ``report`` for the same pattern).
+    deployment_name: str | None = None
+    if config_file is not None:
+        try:
+            deployment_name = load_config(config_file).name
+        except ConfigError as e:
+            print_error(f"Config error: {e}")
+            raise typer.Exit(1)  # noqa: B904
+
     if run_id:
         metrics = storage.load_run(run_id)
     else:
-        metrics = storage.get_latest_run()
+        metrics = storage.get_latest_run_for_deployment(deployment_name)
 
     if metrics is None:
         print_error("No run found" + (f" with ID {run_id}" if run_id else ""))

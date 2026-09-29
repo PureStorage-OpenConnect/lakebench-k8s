@@ -199,6 +199,12 @@ def test_results_json_is_parseable_stdout(monkeypatch, tmp_path, args):
         def get_latest_run(self):
             return types.SimpleNamespace(pipeline_benchmark=pb)
 
+        def get_latest_run_for_deployment(self, _deployment_name):
+            # ``results`` now scopes the "latest run" lookup by
+            # deployment_name (SP-1 interim fix). The unscoped path (no
+            # config file) still lands here with ``_deployment_name`` None.
+            return self.get_latest_run()
+
     monkeypatch.setattr(metrics_pkg, "MetricsStorage", FakeStorage)
     result = runner.invoke(app, ["results", "-m", str(tmp_path), *args])
     assert result.exit_code == 0, result.output

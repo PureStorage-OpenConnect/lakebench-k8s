@@ -432,6 +432,64 @@ class MetricsStorage:
 
         return self.load_run(runs[0]["run_id"])
 
+    def get_latest_run_for_deployment(
+        self, deployment_name: str | None, *, writable: bool = False
+    ) -> PipelineMetrics | None:
+        """Newest run whose ``deployment_name`` matches *deployment_name*.
+
+        Parallel deployments share a single lakebench-output tree, so an
+        unscoped ``get_latest_run()`` reads whichever deployment happened to
+        finish last -- a callsite that then rewrites the record corrupts
+        another deployment's history (SP-2 owns the deployment_id fix; this
+        helper is the interim scope-by-name path).
+
+        Legacy records recorded before v1.6 did not persist deployment_name.
+        For READ callers (``writable=False``), when no exact match is found
+        this method falls back to the newest record with no recorded
+        deployment name so those old runs stay accessible under best-effort
+        matching. Records for a DIFFERENT named deployment are never
+        returned.
+
+        For WRITE callers (``writable=True``), the legacy fallback is
+        DISABLED and this method returns ``None`` when no exact match
+        exists. Without the disable, ``lakebench query dep-new.yaml`` on a
+        machine with only pre-v1.6 legacy records would pick the newest
+        legacy record (from any deployment) and rewrite it, silently
+        corrupting another deployment's history -- the very defect this
+        helper is meant to prevent. The write callsites in
+        ``cli/_query.py`` pass ``writable=True``.
+
+        With ``deployment_name`` empty or ``None`` this reduces to
+        :meth:`get_latest_run` (no scoping requested).
+
+        Args:
+            deployment_name: The deployment to scope by, or ``None`` for the
+                unscoped latest.
+            writable: If ``True``, disable the legacy fallback (write path).
+
+        Returns:
+            The scoped PipelineMetrics, or ``None`` if nothing matches.
+        """
+        if not deployment_name:
+            return self.get_latest_run()
+
+        legacy_fallback_id: str | None = None
+        for info in self.list_runs():
+            recorded = info.get("deployment_name")
+            if recorded == deployment_name:
+                return self.load_run(info["run_id"])
+            if not recorded and legacy_fallback_id is None:
+                legacy_fallback_id = info.get("run_id")
+
+        if writable:
+            # Write path: never touch a legacy record; return None so the
+            # caller can create a fresh scoped record instead of rewriting
+            # someone else's history.
+            return None
+        if legacy_fallback_id is not None:
+            return self.load_run(legacy_fallback_id)
+        return None
+
     def _iter_metrics_files(self):
         """Yield all metrics JSON file paths (new + legacy layouts)."""
         # New layout: per-run directories
