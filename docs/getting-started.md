@@ -692,11 +692,18 @@ workload:
 
 ### Financial crime (AML)
 
-pacs.008 wire-message pipeline with nine detection rules (W1-W8 and W17) scoring against
-planted AML typologies. The scorecard reports per-rule recall, precision,
-and pattern-span (a datagen window-width property, not detection latency),
-joined against a scikit-learn reference detector so a
-rule cannot read high recall from a label proxy without being caught.
+pacs.008 wire-message pipeline with nine detection rules (W1-W8 and
+W17) scoring against planted AML typologies. `lakebench run` scores
+per-rule recall and precision inline after gold-finalize by joining
+`gold.alerts` against the datagen manifest on transaction UETRs
+(`spark/scripts/score_financial.py`); it does not run the reference
+detector, so the run itself does not cross-check recall against a
+model. Pattern-span (a datagen window-width property, not detection
+latency) is reported for context. A separate command,
+`lakebench financial reference-score`, submits the pre-registered
+fidelity gate over silver and writes a per-typology reference-model
+report; that job is invoked on its own, and the gate report says
+whether the corpus was on the calibration seed or a held-out one.
 
 ```yaml
 workload:
@@ -706,17 +713,25 @@ workload:
 ```
 
 A worked example ships at [`examples/polaris-iceberg-spark-financial.yaml`](../examples/polaris-iceberg-spark-financial.yaml).
-The full loop is `deploy -> generate -> run -> financial score`:
+The full loop is `deploy -> generate -> run`; `financial score` is an
+optional re-score after a rule change or replay:
 
 ```bash
 lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
 lakebench generate examples/polaris-iceberg-spark-financial.yaml --wait
 lakebench run      examples/polaris-iceberg-spark-financial.yaml
+
+# Optional re-score. Path prefix is pacs008/ under the default template.
 lakebench financial score \
     examples/polaris-iceberg-spark-financial.yaml \
-    --manifest s3://<bronze-bucket>/manifest/manifest.parquet \
-    --output   s3://<bronze-bucket>/scores/recall.parquet
+    --manifest s3a://<bronze-bucket>/pacs008/manifest/manifest.parquet \
+    --output   s3a://<gold-bucket>/scoring/rescore/recall.parquet
 ```
+
+The manifest path only labels cycle 0. On a multi-cycle corpus
+(`architecture.pipeline.cycles > 1`) later cycles land at
+`pacs008/manifest/manifest-cNNN.parquet`, and this command scores
+only the manifest URI you pass it.
 
 Two additional operator subcommands cover the retention scenarios:
 
@@ -731,9 +746,18 @@ The AML precision numbers on this benchmark are not a claim about a
 production ops-queue false-positive rate -- the datagen has one baseline
 distribution and roughly a dozen planted typology shapes, and the rules
 were tuned against it. Use them for stack comparison and regression
-detection. See [AML Scoring](aml-scoring.md) for the full explanation
-of what the metrics measure, the leakage gate, the reference detector,
-and the current untargeted typologies.
+detection.
+
+`workload.datagen.seed = 43` is the calibration corpus the generator,
+the rule thresholds and the reference features were tuned against, and
+it is the default when `seed` is unset for `financial`. Recall and
+precision from a seed-43 run are in-sample. Numbers meant for
+comparison with other stacks should cite the seed and, when it is 43,
+say so.
+
+See [AML Scoring](aml-scoring.md) for the full explanation
+of what the metrics measure, the band leakage report, the reference
+detector, and the current untargeted typologies.
 
 ---
 

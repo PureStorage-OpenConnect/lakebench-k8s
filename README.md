@@ -38,9 +38,13 @@ schema flag routes datagen and the pipeline scripts.
   Nine detection rules, including a fuzzy sanctions and PEP screen against
   a synthetic, dated watchlist, are scored for recall and precision against
   planted typologies (structuring, round-tripping, layering, dormant
-  reactivation, high-risk corridors and others). A pre-registered reference
-  model and a leakage check guard against a rule reading high recall from a
-  label proxy. Iceberg recipes only. `workload.schema: financial`. See
+  reactivation, high-risk corridors and others) by
+  `spark/scripts/score_financial.py`, which `lakebench run` invokes
+  inline. A pre-registered reference model (the fidelity gate) and a
+  band leakage report ship separately as `lakebench financial
+  reference-score`; they diagnose whether a rule could read high recall
+  from a label proxy, and they are not run by `lakebench run`. Iceberg
+  recipes only. `workload.schema: financial`. See
   [AML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/aml-scoring.md)
   for what precision and recall measure here vs what an AML ops team
   cares about.

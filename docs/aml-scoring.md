@@ -11,32 +11,45 @@ to run one end-to-end.
 ## What you get on the scorecard
 
 The two headline numbers are per-typology **recall** and per-rule
-**precision** against the planted typology set. Both are computed by the
-Spark job
+**precision** against the planted typology set. The authoritative
+runtime path that produces both is the Spark job
 [`src/lakebench/spark/scripts/score_financial.py`](../src/lakebench/spark/scripts/score_financial.py),
 which a batch `lakebench run` submits after gold-finalize
-(`lakebench financial score` reruns it on demand). It joins `gold.alerts`
-against the datagen manifest (with the default path template,
-`s3a://<bronze>/pacs008/manifest/manifest*.parquet`) on transaction UETRs
-and writes `recall.parquet` and a `recall.json` summary under
-`s3a://<gold>/scoring/<run_id>/`. Recall counts only alerts from a
-typology's designated rules; alerts from other rules are reported
-separately as `incidental_recall`, and the `random` control typology's
-incidental recall is the chance floor. Precision is reported per rule as
-the share of its alerts touching no payment of its target typology
-(`fp_rate_by_rule`) and as transaction-level precision
-(`txn_precision_by_rule`).
+(`lakebench financial score` reruns it on demand). It joins
+`gold.alerts` against the datagen manifest on transaction UETRs, with
+no time window, and writes `recall.parquet` and a `recall.json`
+summary under `s3a://<gold>/scoring/<run_id>/`. The manifest URI is
+passed in on the command line; the default path template is
+`s3a://<bronze>/pacs008/manifest/manifest*.parquet`, and `lakebench
+run` derives the URI from that template. Recall counts only alerts
+from a typology's designated rules; alerts from other rules are
+reported separately as `incidental_recall`, and the `random` control
+typology's incidental recall is the chance floor. Precision is
+reported per rule as the share of its alerts touching no payment of
+its target typology (`fp_rate_by_rule` in `recall.json`, shown as the
+scorecard's **Off-target** column, alerts by alert id, not by payment)
+and as transaction-level precision (`txn_precision_by_rule`, shown as
+**Txn precision**, weighted by payments). A single overall rate is
+shown in the scorecard footer as **Overall off-target rate** with the
+total alert count beside it. None of these are a production ops-queue
+false-positive rate; see the caveat section below.
 
 [`src/lakebench/benchmark/aml_queries.py`](../src/lakebench/benchmark/aml_queries.py)
 holds the rule-to-typology mapping (`RULE_TARGETS`, `UNMAPPED_TYPOLOGIES`)
-and Trino SQL templates for per-rule detect, precision, recall and
-**pattern-span** queries plus four aggregates, among them
-`aggregate_typology_coverage` (does at least one W-rule fire on each
-planted typology) and `aggregate_reference_vs_rule` (rule recall beside the
-reference model's per-typology row in `reference_metrics.parquet`). No CLI
-command runs these templates in v1.6; they are for ad-hoc inspection.
-Pattern-span is a description of the injected data, not a platform
-measurement -- see the metric-trust caveats below before quoting it.
+and a separate catalogue of Trino SQL templates for per-rule detect,
+precision, recall and **pattern-span** queries plus four aggregates,
+among them `aggregate_typology_coverage` (does at least one W-rule
+fire on each planted typology) and `aggregate_reference_vs_rule`
+(rule recall beside the reference model's per-typology row in
+`reference_metrics.parquet`). Those SQL templates use a 7-day window
+and are called only from the unit tests
+(`load_aml_queries`); no CLI command executes them, and they do NOT
+produce the published recall or precision. If a doc, script or memo
+cites a 7-day-window recall figure, it is wrong: the shipped numbers
+come from `score_financial.py` and carry no window at all. Pattern-span
+is a description of the injected data, not a platform measurement,
+and the runtime scorer does not compute it -- see the metric-trust
+caveats below before quoting it.
 
 The rule set:
 
@@ -122,7 +135,7 @@ untestable rather than zero.
 
 ### How three behavioural typologies are planted (v1.5 realism rework)
 
-The D0 v2 reference-model check found `micro_structuring` and
+The reference-model calibration check found `micro_structuring` and
 `dormant_reactivation` too easy for the reference model and
 `corridor_high_risk` just under the band floor. Each was planted in a
 shape real cases do not have. The planting changed; the features did
@@ -132,8 +145,8 @@ moves as a consequence and is reported, not targeted.
 
 | Typology | Before | Now | Why |
 |---|---|---|---|
-| `micro_structuring` | 8 distinct senders each paid the collector once within 3 days, every amount in `[0.95, 0.9999]` of the reporting threshold | A crew of 3 to 8 depositors (some deposit more than once) pays the collector 8 times over 3 to 21 days. 3 to 8 of the payments are structured; the rest are the depositors' own ordinary amounts. Structured amounts sit `threshold x 0.4 x (1 - sqrt(u))` below the threshold: a triangular density highest at the threshold and finite there, always under it, with no step at W2's 90% band floor, and about 44% inside W2's band | Structurers reuse a few people ("smurfing") and run campaigns over weeks so no single day shows the pattern; the FFIEC BSA/AML manual describes both "just under" amounts and varied amounts meant to avoid an obvious pattern. The old shape made the band fraction plus the counterparty count a two-feature label (D0 v2 pair AP 0.641) |
-| `dormant_reactivation` | Dormancy log-uniform 60 to 365 days, then 4 sends within 2 days | Dormancy log-uniform 45 to 365 days; two thirds of the reactivations are sudden (2 days), one third is the account coming back into use over 4 to 10 days (kept short so few reactivations straddle a month boundary, where the monthly unit would see the burst without its gap). Amounts stay the account's own draws (LB-138) | A 60-day floor put every episode beyond almost any natural quiet spell; an account sending about once a month goes 45 days without a send about one time in five, so the short end now overlaps normal gaps. Not every reactivation is a single burst |
+| `micro_structuring` | 8 distinct senders each paid the collector once within 3 days, every amount in `[0.95, 0.9999]` of the reporting threshold | A crew of 3 to 8 depositors (some deposit more than once) pays the collector 8 times over 3 to 21 days. 3 to 8 of the payments are structured; the rest are the depositors' own ordinary amounts. Structured amounts sit `threshold x 0.4 x (1 - sqrt(u))` below the threshold: a triangular density highest at the threshold and finite there, always under it, with no step at W2's 90% band floor, and about 44% inside W2's band | Structurers reuse a few people ("smurfing") and run campaigns over weeks so no single day shows the pattern; the FFIEC BSA/AML manual describes both "just under" amounts and varied amounts meant to avoid an obvious pattern. The old shape made the band fraction plus the counterparty count a two-feature label (the calibration pair reached average precision 0.641 against the reference model, which is exactly the shortcut the leakage caps forbid) |
+| `dormant_reactivation` | Dormancy log-uniform 60 to 365 days, then 4 sends within 2 days | Dormancy log-uniform 45 to 365 days; two thirds of the reactivations are sudden (2 days), one third is the account coming back into use over 4 to 10 days (kept short so few reactivations straddle a month boundary, where the monthly unit would see the burst without its gap). Amounts stay the account's own draws | A 60-day floor put every episode beyond almost any natural quiet spell; an account sending about once a month goes 45 days without a send about one time in five, so the short end now overlaps normal gaps. Not every reactivation is a single burst |
 | `corridor_high_risk` | One payment between two residents of the higher-risk pool | A run of 2 to 4 payments from the subject to one counterparty in the pool over 2 to 5 weeks, amounts from the sender's own distribution | W7's "corridors to high-risk jurisdictions" is about where an account's money goes; one payment among dozens cannot show that. The typology spends the same total rows as before, so density (D11) is unchanged. A run over weeks often crosses a month boundary (about 38% of runs split their payments across two months); the monthly unit labels the last month and excludes the earlier one, so a split run shows fewer corridor payments in its labelled month. That is the unit seeing a real flow, not a planting choice |
 
 The three typologies draw their amounts from an instance-keyed stream,
@@ -147,14 +160,15 @@ Measured against the old generator at seed 7777, scale 0.05: 301 of 302
 other-typology instances identical (the other gained a row a dormancy
 window used to drop) and 99.94% of baseline rows identical.
 
-### Baseline timing: scheduled and bursty senders (D2)
+### Baseline timing: scheduled and bursty senders
 
 Every baseline send used to be an independent activity-weighted draw of its
 originator, so each account sent as a memoryless process on the calendar and
-its gap CV sat near 1 (D0 v2: 0.004% of the cohort below 0.5, 58% above
-1.0; the pre-registered D2 target is at least 15% on each side). Real
-payment behaviour is a mixture: some accounts pay mostly on a steady cadence
-(standing orders, bills, payroll and supplier runs) and others are bursty.
+its gap coefficient of variation sat near 1 (in the calibration cohort,
+0.004% of accounts below 0.5, 58% above 1.0; the pre-registered target is
+at least 15% on each side). Real payment behaviour is a mixture: some
+accounts pay mostly on a steady cadence (standing orders, bills, payroll
+and supplier runs) and others are bursty.
 
 `datagen_rs/src/regular.rs` makes 30% of accounts "scheduled": 75 to 95% of
 the account's expected sends follow a steady cadence (one payment every 1/K
@@ -170,7 +184,8 @@ draw as a random row) are unchanged, as are every typology's rows and the
 corpus row count. A dormant account's cadence stops during its dormancy.
 Scheduled events are computed per file from (seed, uid), so memory stays
 O(accounts) at any scale and files still depend only on (seed, file).
-Parameters are self-chosen; the D2 anchor is still pending a citation.
+Parameters are self-chosen; the primary source for the mixture split is
+still pending a citation.
 
 ## Why benchmark precision is not the FP rate ops teams care about
 
@@ -214,41 +229,48 @@ labelled data from the bank.
 
 AML shipped with a standing risk: a rule tuned tightly against the
 same distribution the datagen plants will read high recall even when it
-has learned nothing generalisable. The audit that motivated
-[PR-A](../CHANGELOG.md) called this "distribution checks do not prove
-semantics -- must run a reference detector and a leakage check." Both
-now ship.
+has learned nothing generalisable. Two independent checks address this
+risk: a legacy band-density report and the pre-registered fidelity
+gate (the reference detector).
 
-### Leakage gate
+### Band leakage report (legacy, non-failing)
 
-`score_financial_reference.py` emits `leakage_report.parquet` before it
-trains anything. For each currency's structuring band -- the amount
-range immediately below the reporting threshold that
-`micro_structuring` plants into -- it counts baseline transactions and
-typology transactions inside that band and reports the ratio
-`baseline / typology`.
+`score_financial_reference.py` emits `leakage_report.parquet` before the
+fidelity gate runs. For each currency it counts baseline transactions
+and typology transactions inside a narrow `[95%, 99.99%]` window of
+the reporting threshold (`structuring_band` in
+`datagen_rs/src/amounts.rs`) and reports the ratio
+`baseline / typology`. That narrow window is the shape the original
+`micro_structuring` planting emitted every payment into; the current
+generator draws structured amounts across a wider `[60%, 100%)` range
+of the threshold (`STRUCTURED_MAX_DEPTH = 0.4`,
+`structuring_amount`), so most planted rows now fall outside the
+window and the report's ratios are looser than they were.
 
 | Verdict | Meaning |
 |---|---|
-| `pass` | baseline density is at least 10 % of typology density in this band -- the band is not a label proxy. |
-| `leaking` | ratio below 10 % -- the band effectively IS the label. Any rule that just filters on it will read 100 % recall. |
+| `pass` | baseline density is at least 10 % of typology density in this narrow band. |
+| `leaking` | ratio below 10 % in this narrow band. Any rule that filters just on it would read high recall from a label indicator. |
 | `no_typology` | no typology rows in this band -- carries no leakage claim on its own. |
 
-`overall_pass` is true only when at least one band scored and no band
-came back `leaking`. An all-`no_typology` report is a datagen
-regression, not a clean pass, and the gate refuses to treat it as one.
+The report's `overall_pass` flag is written into
+`aml_gate_report.json` as `band_leakage_overall_pass` and its rows land
+in `leakage_report.parquet`. Neither value fails the reference-score
+job: only the fidelity gate's own verdict (`error` or `empty_frame`, or
+a `counts_only` mismatch, at `score_financial_reference.py:685-691`)
+raises `SystemExit`. The band report is a diagnostic on the historical
+shape, kept for backward compatibility; the pre-registered leakage
+caps that actually gate a corpus live in the fidelity gate below.
 
 The threshold ships at 10 % (`DEFAULT_LEAKAGE_RATIO`), tunable via the
-Python API's `threshold_ratio` argument. A `leaking` verdict must be
-resolved by broadening the baseline distribution or narrowing the
-typology's band, not by lowering the threshold; the threshold's job is
-to make ratio drift visible, not to hide it.
+Python API's `threshold_ratio` argument.
 
-The historical example: the datagen originally emitted every USD
-`micro_structuring` transaction in the `[9500, 9999]` range while the
-baseline log-normal produced essentially none. A rule reading "amount
-between 9000 and 10000" reported 100 % recall and 99 % precision. The
-gate now catches that shape and fails the run.
+The historical example this report catches: the datagen originally
+emitted every USD `micro_structuring` transaction in the `[9500, 9999]`
+range while the baseline log-normal produced essentially none. A rule
+reading "amount between 9000 and 10000" reported 100 % recall and 99 %
+precision. The current wider planting range dilutes the ratio but the
+report still shows it.
 
 ### Reference detector (the pre-registered fidelity gate)
 
@@ -301,13 +323,26 @@ rules for when the one-shot evaluation and robustness runs may be taken are
 fixed in `src/lakebench/spark/data/aml/aml_preregistration.json`. Maintainers:
 the full protocol is `docs/internal/aml-protocol.md` in the source repository.
 
+**Seed 43 is the calibration corpus.** If you leave
+`workload.datagen.seed` unset for a `financial` config, or you set it
+to 43 explicitly, you are running against the seed the generator, the
+rule thresholds and the reference features were tuned against. Recall
+and precision numbers from a seed-43 run are in-sample: they say what
+the pipeline does on the corpus it was developed on, not what it does
+on a corpus it has never seen. The held-out evaluation and robustness
+seeds are pre-registered in `aml_preregistration.json` and are refused
+at config load unless `workload.datagen.corpus_role` declares the
+matching role, so accidentally scoring against them is not possible.
+Numbers you publish for comparison with other stacks should cite the
+seed the run used and, when it is 43, say so.
+
 ## Metric-trust caveats
 
-Marcus's roleplay pass flagged three places where the scorecard names
-suggest more than they measure. They apply to the whole pipeline
-benchmark, not AML specifically. `compute_efficiency_gb_per_core_hour`
-shows up in every AML run; the other two only appear in continuous
-mode, and the shipped AML example is batch mode.
+Three places on the scorecard where the metric name suggests more
+than the number measures. They apply to the whole pipeline benchmark,
+not AML specifically. `compute_efficiency_gb_per_core_hour` shows up
+in every AML run; the other two only appear in continuous mode, and
+the shipped AML example is batch mode.
 
 - **`compute_efficiency_gb_per_core_hour`** is `GB / core_hours
   REQUESTED`, not `/ core_hours utilised`. A pod that requests 8 cores
@@ -403,8 +438,11 @@ Two operator-facing subcommands cover the retention-workload scenarios:
   default it writes to the config's gold alerts table with an `_replay`
   suffix, first deleting that rule's rows there, so the batch run's
   `gold.alerts` is never touched; `--output-alerts` names another table. The
-  W8 verification scenario in the working spec asserts against a 60-month
-  replay's wall-clock budget.
+  historical-replay workload's verification scenario asserts against a
+  60-month replay's wall-clock budget. In the internal workload
+  catalogue that scenario is workload id W8, which is unrelated to
+  detection rule W8_dormant_reactivation and is never a rule id passed
+  to `--rule`.
 - **`lakebench financial reproduce CONFIG --alert-id <id>`** takes a single alert
   from `gold.alerts` and reproduces it against the historical snapshot the
   original rule ran on. Small, bounded work; used as a
@@ -434,11 +472,11 @@ the user.
   the dormancy gap signature). The leakage gate still runs, but a
   detector can still score on such a shortcut where no hard negative
   exists to punish it. Planned for v1.7.
-- **AML continuous per-rule recall is not scored (LB-168).** Stopping the
+- **AML continuous per-rule recall is not scored.** Stopping the
   streams can interrupt a gold-refresh tick and leave rule statuses
   `pending`; post-run scoring refuses them, and the report says "Recall is
   not scored in continuous mode". Batch recall is unaffected. Target v1.7.
-- **Stream restarts longer than 1 h are not safe (LB-176).** Continuous
+- **Stream restarts longer than 1 h are not safe.** Continuous
   Iceberg snapshot expiry is floored at 1 h while streams are live. A
   bronze-ingest driver down for longer can replay a batch and append
   duplicates, and a silver stream down for longer may resume from an
@@ -462,7 +500,7 @@ the user.
 ## The transaction-monitoring operations layer
 
 After detection, the gold stage runs the work a bank's TM operation does
-with the alerts (`spark/scripts/tm_operations.py`, GOALS P10). One reporting
+with the alerts (`spark/scripts/tm_operations.py`). One reporting
 institution monitors its own customers (`silver.entities.is_customer`);
 everyone else is a counterparty. The unit of work is the business day: an
 alert is generated the day after its last payment, and the queue is replayed
@@ -555,12 +593,12 @@ is waiting on a case pending filing); no review is credited to an
 already-determined case; decided history is unchanged from the previous
 cycle.
 
-**The P10 verdict is separate from detection.** `fail` (the layer ran and an
-invariant is violated) fails the run. `not_run` (no manifest, a layer error,
-a continuous window that ended before the manifest was ready) says why and
-leaves detection scoring alone. `unknown` means no driver log was captured
-for some cycle, or an invariant could not be checked (the raw source files
-failed to list).
+**The operations verdict is separate from detection.** `fail` (the layer
+ran and an invariant is violated) fails the run. `not_run` (no manifest,
+a layer error, a continuous window that ended before the manifest was
+ready) says why and leaves detection scoring alone. `unknown` means no
+driver log was captured for some cycle, or an invariant could not be
+checked (the raw source files failed to list).
 `disabled` skips the gate. The verdict is kept in `metrics.json` as
 `tm_operations` and heads the report section.
 

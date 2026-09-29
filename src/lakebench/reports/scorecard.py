@@ -259,7 +259,7 @@ class FinancialScorecardBlock:
                 '<div style="margin-top: 0.5rem; color: var(--text-muted); '
                 'font-size: 0.8125rem;">'
                 f"Total alerts: <strong>{total_alerts:,}</strong> | "
-                f"False-positive rate (alerts touching no planted txn): <strong>{fp_str}</strong>"
+                f"Overall off-target rate (alerts touching no planted txn): <strong>{fp_str}</strong>"
                 + "</div>"
             )
 
@@ -284,7 +284,7 @@ class FinancialScorecardBlock:
                         <th title="Fraction of planted instances detected by this rule">Recall</th>
                         <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance</th>
                         <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>
-                        <th title="Share of this rule's alerts that touch none of its target typology's txns">FP</th>
+                        <th title="Share of this rule's alerts that touch none of its target typology's txns. NOT a production ops-queue false-positive rate; see docs/aml-scoring.md.">Off-target</th>
                         <th title="Share of the txns in this rule's alerts that are planted target txns">Txn precision</th>
                         <th>Status</th>
                     </tr>
