@@ -170,7 +170,7 @@ class TestFinancialDetailScorecard:
         assert "micro_structuring" in w2_row
         assert "83.0%" in w2_row
         assert "<td>12</td>" in w2_row
-        assert "False-positive rate" in html
+        assert "Overall off-target rate" in html
 
     def test_multi_cycle_alert_counts_last_cycle_wins(self):
         # gold_finalize re-detects over the whole cumulative silver each cycle

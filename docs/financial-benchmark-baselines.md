@@ -29,7 +29,7 @@ its run id.
 - **Recall.** Fraction of scheduled typology instances the workload
   detected. Computed inline by a batch `lakebench run` (the
   `score_financial.py` job after gold-finalize); `lakebench financial score`
-  is an optional re-score. Not scored in continuous mode in v1.6 (LB-168).
+  is an optional re-score. Not scored in continuous mode in v1.6.
 - **Cores used.** Peak executor cores requested by a single batch job
   (the batch jobs run sequentially), or the sum across the three
   concurrent stream jobs in continuous mode.
