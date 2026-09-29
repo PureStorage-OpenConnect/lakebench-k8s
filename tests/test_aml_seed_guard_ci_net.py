@@ -31,6 +31,7 @@ to this file requires an owner decision and a matching update to
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -67,22 +68,59 @@ _GUARD_DEF_FILE = _SRC / "config" / "datagen_seed.py"
 _LOAD_SITE_FILE = _SRC / "config" / "schema.py"
 
 
+_EXACT_HELPER_NAMES: frozenset[str] = frozenset(
+    {"check_seed", "resolve_seed", "config_seed"}
+)
+
+
 def _read(path: Path) -> str:
     assert path.is_file(), f"{path} missing. {_INVARIANT_HINT}"
     return path.read_text(encoding="utf-8")
 
 
+def _parse(path: Path) -> ast.Module:
+    return ast.parse(_read(path), filename=str(path))
+
+
+def _has_function_def(module: ast.Module, name: str) -> bool:
+    """True when the module defines a top-level or nested `def name(...)`.
+
+    AST-based so a comment `# def name(` does not pass, and a rename to
+    `_name` or `name_v2` does not pass either. Enforces the exact name.
+    """
+    for node in ast.walk(module):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return True
+    return False
+
+
+def _has_call_to(module: ast.Module, names: frozenset[str]) -> bool:
+    """True when the module contains a `Call` whose function is one of `names`.
+
+    Matches bare calls (`check_seed(...)`), attribute calls
+    (`datagen_seed.check_seed(...)`), and via-alias imports where the
+    alias resolves at read-time. Comments and docstrings are ignored
+    because AST does not lift them to `Call` nodes; a substring match
+    would have missed this.
+    """
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in names:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in names:
+            return True
+    return False
+
+
 def test_check_seed_is_defined_in_datagen_seed_module():
-    """Guard 1 body: ``check_seed`` (or the current spelling) is defined."""
-    text = _read(_GUARD_DEF_FILE)
-    # ``def check_seed(`` proves the load-time guard function still exists.
-    # If it is renamed, update this expectation AND the load-time caller in
-    # config/schema.py; do not delete it.
-    assert "def check_seed(" in text, (
+    """Guard 1 body: `check_seed` and `resolve_seed` are defined."""
+    module = _parse(_GUARD_DEF_FILE)
+    assert _has_function_def(module, "check_seed"), (
         f"{_GUARD_DEF_FILE} no longer defines check_seed(). {_INVARIANT_HINT}"
     )
-    # The render-time helper the two deploy sites reach for lives here too.
-    assert "def resolve_seed(" in text, (
+    assert _has_function_def(module, "resolve_seed"), (
         f"{_GUARD_DEF_FILE} no longer defines resolve_seed(). {_INVARIANT_HINT}"
     )
 
@@ -91,17 +129,15 @@ def test_load_time_guard_has_a_caller_in_workload_validator():
     """Guard 1 caller: the WorkloadConfig validator invokes the guard.
 
     A defined guard function with no caller is a dormant guard. The
-    WorkloadConfig Pydantic model runs ``resolve_seed`` (which calls
-    ``check_seed``) in a ``model_validator(mode="after")`` so an unsafe
-    config is refused before any deploy step runs.
+    WorkloadConfig Pydantic model calls `resolve_seed` (which calls
+    `check_seed`) in a `model_validator(mode="after")` so an unsafe
+    config is refused before any deploy step runs. AST-based so a
+    commented-out or docstring-mentioned call does not satisfy the net.
     """
-    text = _read(_LOAD_SITE_FILE)
-    assert "from lakebench.config.datagen_seed import" in text and (
-        "resolve_seed" in text or "check_seed" in text
-    ), f"{_LOAD_SITE_FILE} no longer imports the AML seed guard. {_INVARIANT_HINT}"
-    # The caller pattern the WorkloadConfig validator uses today.
-    assert "resolve_seed(" in text or "check_seed(" in text, (
-        f"{_LOAD_SITE_FILE} no longer calls the AML seed guard at load time. {_INVARIANT_HINT}"
+    module = _parse(_LOAD_SITE_FILE)
+    assert _has_call_to(module, _EXACT_HELPER_NAMES), (
+        f"{_LOAD_SITE_FILE} no longer calls the AML seed guard at load time. "
+        f"{_INVARIANT_HINT}"
     )
 
 
@@ -113,10 +149,17 @@ def test_load_time_guard_has_a_caller_in_workload_validator():
 def test_render_time_guard_present_at_deploy_site(
     path: Path, needles: tuple[str, ...], label: str
 ) -> None:
-    """Guard 2 sites: each render site materialises the seed via the guard."""
-    text = _read(path)
-    if not any(n in text for n in needles):
+    """Guard 2 sites: each render site materialises the seed via the guard.
+
+    AST-based (`needles` is retained for the human-readable failure
+    message only): a comment `# config_seed(...)` no longer satisfies
+    the net, and a rename to `_config_seed` or `resolve_seed_v2` does
+    not either. Removing the real call always fails.
+    """
+    module = _parse(path)
+    if not _has_call_to(module, _EXACT_HELPER_NAMES):
         pytest.fail(
             f"Render-time AML seed guard missing at {path} ({label}). "
-            f"Expected one of {needles}. {_INVARIANT_HINT}"
+            f"Expected a call to one of {sorted(_EXACT_HELPER_NAMES)}. "
+            f"{_INVARIANT_HINT}"
         )
