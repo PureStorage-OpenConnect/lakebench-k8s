@@ -54,6 +54,54 @@ class TestBenchmarkQueries:
             q.name = "modified"
 
 
+class TestBenchmarkQueriesByDomain:
+    """Tests for the schema-keyed dispatch introduced in ENG-2C.4.6-7."""
+
+    def test_customer360_dispatch_matches_legacy_alias(self):
+        from lakebench.benchmark.queries import (
+            BENCHMARK_QUERIES,
+            get_benchmark_queries,
+        )
+        from lakebench.config.schema import WorkloadSchema
+
+        assert get_benchmark_queries(WorkloadSchema.CUSTOMER360) == BENCHMARK_QUERIES
+
+    def test_financial_dispatch_returns_authored_query_set(self):
+        """Financial queries were authored in the fraud-aml hardening pass
+        (FQ1..FQ8). The set is non-empty and covers each query_class the
+        Customer 360 benchmark exercises so per-class averages stay
+        meaningful when compared across schemas."""
+        from lakebench.benchmark.queries import get_benchmark_queries
+        from lakebench.config.schema import WorkloadSchema
+
+        queries = get_benchmark_queries(WorkloadSchema.FINANCIAL)
+        # FQ1-FQ8 plus the four P10 stage-9 investigator queries.
+        assert len(queries) == 12, f"expected 12 financial queries, got {len(queries)}"
+        classes = {q.query_class for q in queries}
+        for expected in (
+            "scan",
+            "filter_prune",
+            "aggregation",
+            "analytics",
+            "operational",
+            "investigator",
+        ):
+            assert expected in classes, f"financial queries missing class {expected}"
+        # Sanity: every SQL template references at least one financial-only
+        # table placeholder OR the shared {silver_table}/{gold_table}.
+        for q in queries:
+            assert "{catalog}" in q.sql, f"{q.name} missing catalog placeholder"
+
+    def test_custom_dispatch_falls_back_to_customer360(self):
+        from lakebench.benchmark.queries import (
+            BENCHMARK_QUERIES,
+            get_benchmark_queries,
+        )
+        from lakebench.config.schema import WorkloadSchema
+
+        assert get_benchmark_queries(WorkloadSchema.CUSTOM) == BENCHMARK_QUERIES
+
+
 # ---------------------------------------------------------------------------
 # QueryResult
 # ---------------------------------------------------------------------------
@@ -156,6 +204,7 @@ class TestBenchmarkResult:
             total_seconds=16.0,
             qph=1800.0,
             iterations=1,
+            engine="trino",
         )
         d = br.to_dict()
         assert d["benchmark_type"] == "trino_query"
@@ -207,6 +256,7 @@ class TestBenchmarkMetricsIntegration:
                 }
             ],
             iterations=1,
+            engine="trino",
         )
         d = bm.to_dict()
         assert d["benchmark_type"] == "trino_query"
@@ -228,6 +278,7 @@ class TestBenchmarkMetricsIntegration:
                 qph=820.4,
                 total_seconds=43.88,
                 queries=[],
+                engine="trino",
             ),
         )
         d = pm.to_dict()
@@ -609,12 +660,17 @@ class TestTrinoExecutorFormatAwareness:
             namespace="test-ns", catalog_name="lakehouse", table_format="iceberg"
         )
         executor._pod = "trino-coordinator-0"  # skip pod discovery
-        with patch("lakebench.modules.query_engines.trino.executor.subprocess") as mock_sub:
-            mock_sub.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        # The executor now routes kubectl through lakebench.k8s._pinned,
+        # so the mock lives on the helper module.
+        with (
+            patch("lakebench.modules.query_engines.trino.executor.pinned_kubectl") as pk,
+            patch("lakebench.modules.query_engines.trino.executor.subprocess") as mock_sub,
+        ):
+            pk.return_value = MagicMock(returncode=0, stdout="", stderr="")
             mock_sub.TimeoutExpired = TimeoutError
             mock_sub.SubprocessError = Exception
             executor.flush_cache()
-            mock_sub.run.assert_called_once()
+            pk.assert_called_once()
 
 
 class TestDuckDBExecutorFormatAwareness:

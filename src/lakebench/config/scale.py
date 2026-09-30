@@ -81,17 +81,18 @@ class TrinoGuidance:
 class DatagenGuidance:
     """Datagen resource recommendation for a given scale.
 
-    Proven defaults:
-    - batch mode: 1 generator, 1 uploader, 4 CPU / 4Gi per pod
-    - continuous mode: 8 generators, 2 uploaders, 8 CPU / 24Gi per pod
+    Proven defaults (updated 2026-09-20 after Rust c360 port perf sweep):
+    - batch mode: 1 generator, 4 CPU / 4Gi per pod
+    - continuous mode: 8 generators, 8 CPU / 8Gi per pod
+      (Rust generator uses <2 GiB per pod; 8 GiB gives 4x safety headroom.
+      Was 24 GiB for the Python image with per-worker process overhead.)
     """
 
     parallelism: int
     cpu: str
     memory: str
-    mode: str = "batch"  # "batch" or "sustained"
+    mode: str = "batch"
     generators: int = 1  # per-pod generator processes
-    uploaders: int = 1  # per-pod uploader threads
 
 
 @dataclass(frozen=True)
@@ -194,22 +195,35 @@ def iot_dimensions(scale: float) -> ScaleDimensions:
 
 
 def financial_dimensions(scale: float) -> ScaleDimensions:
-    """Map scale factor to Financial transactions domain dimensions (future).
+    """Map scale factor to Financial (AML) domain dimensions.
 
-    Scale 1 -> 500K accounts x 12 months @ 4 txns/account/month, ~10 GB
+    Mirrors what datagen_rs writes (``world::dimensions``): 111,111 entities
+    per scale unit, 4 transactions per entity per month, over a 60-month
+    corpus (the entrypoint's ``--corpus-months`` default).
+
+    Scale 1   -> 111K entities, ~26.7M txns, ~8.4 GB pacs.008
+    Scale 10  -> 1.1M entities, ~267M txns,  ~84 GB
+    Scale 100 -> 11M entities,  ~2.7B txns,  ~840 GB
+
+    ``approx_bronze_gb`` is measured, not estimated: scale 1 with the default
+    64 MB files wrote 26,666,639 rows in 8.37 GB of pacs.008 Parquet
+    (2026-09-24). It feeds ``scale_ratio``, so a flat 10 GB/scale guess made
+    every complete AML run read as 84% "incomplete". The reference tables
+    (party, account) and the manifest are excluded, as bronze-verify
+    measures only the pacs.008 tree.
     """
-    accounts = _entity_count(scale, 500_000)
-    txns_per_account_per_month = 4
-    months = 12
-    approx_rows = accounts * txns_per_account_per_month * months
+    entities = _entity_count(scale, 111_111)
+    txns_per_entity_per_month = 4
+    months = 60
+    approx_rows = entities * txns_per_entity_per_month * months
 
     return ScaleDimensions(
         scale=scale,
-        customers=accounts,  # "customers" = accounts in financial context
-        events_per_customer=txns_per_account_per_month * months,
-        date_range_days=365,
+        customers=entities,  # "customers" = entities in the financial context
+        events_per_customer=txns_per_entity_per_month * months,
+        date_range_days=1826,
         approx_rows=approx_rows,
-        approx_bronze_gb=scale * 10.0,
+        approx_bronze_gb=scale * 8.4,
     )
 
 
@@ -316,7 +330,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
     Derives recommended resources from scale factor using four tiers.
     Datagen mode selection:
     - scale <= 10 (~100 GB): batch mode (1 generator, low resources)
-    - scale > 10: continuous mode (8 generators + 2 uploaders, high resources)
+    - scale > 10: continuous mode (8 generators, high resources)
 
     Args:
         scale: Scale factor (>= 1)
@@ -326,11 +340,13 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
     """
     spark = compute_guidance(scale)
 
-    # Datagen: CPU and memory are hard-locked per mode (MVP sizing):
+    # Datagen: CPU and memory are hard-locked per mode. Sizing updated
+    # 2026-09-20 after the Rust c360 port perf sweep:
     #   batch:      4 CPU, 4Gi per pod, 1 generator, 1 uploader
-    #   continuous: 8 CPU, 24Gi per pod, 8 generators, 2 uploaders
-    # Observed peak at scale 100: ~18.4Gi with spikes above 20Gi.
-    # 24Gi provides ~30% headroom above steady-state peak.
+    #   continuous: 8 CPU, 8Gi per pod, 8 generators
+    # Measured Rust-image steady-state peak: ~1.5-2 GiB per pod. 8 GiB gives
+    # ~4x safety headroom. The pre-Rust-port sizing was 24 GiB, calibrated for
+    # the Python image's per-worker process overhead.
     # Scaling is done by parallelism (number of pods), not per-pod resources.
 
     if scale <= SCALE_TIER_MINIMAL:
@@ -348,7 +364,6 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             memory="4Gi",
             mode="batch",
             generators=1,
-            uploaders=1,
         )
     elif scale <= SCALE_TIER_BALANCED:
         # Balanced: ~60-500 GB
@@ -360,16 +375,14 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
                 memory="4Gi",
                 mode="batch",
                 generators=1,
-                uploaders=1,
             )
         else:
             datagen = DatagenGuidance(
                 parallelism=max(4, int(scale // 5)),
                 cpu="8",
-                memory="24Gi",
-                mode="sustained",
+                memory="8Gi",
+                mode="continuous",
                 generators=8,
-                uploaders=2,
             )
         trino = TrinoGuidance(
             worker_replicas=2,
@@ -379,14 +392,13 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             coordinator_memory="8Gi",
         )
     elif scale <= SCALE_TIER_PERFORMANCE:
-        # Performance: ~510 GB - 5 TB, sustained mode
+        # Performance: ~510 GB - 5 TB, continuous mode
         datagen = DatagenGuidance(
             parallelism=max(8, int(scale // 10)),
             cpu="8",
-            memory="24Gi",
-            mode="sustained",
+            memory="8Gi",
+            mode="continuous",
             generators=8,
-            uploaders=2,
         )
         trino = TrinoGuidance(
             worker_replicas=max(4, int(scale // 25)),
@@ -396,14 +408,13 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             coordinator_memory="16Gi",
         )
     else:
-        # Extreme: > 5 TB, sustained mode
+        # Extreme: > 5 TB, continuous mode
         datagen = DatagenGuidance(
             parallelism=max(16, int(scale // 30)),
             cpu="8",
-            memory="24Gi",
-            mode="sustained",
+            memory="8Gi",
+            mode="continuous",
             generators=8,
-            uploaders=2,
         )
         trino = TrinoGuidance(
             worker_replicas=max(10, int(scale // 50)),

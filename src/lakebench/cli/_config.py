@@ -94,7 +94,9 @@ def config_show(
             (
                 "scale",
                 str(cfg.architecture.workload.datagen.scale),
-                _source(raw, "scale", raw_keys, "architecture.workload.datagen.scale"),
+                _source(raw, "scale", raw_keys, "workload.datagen.scale")
+                if "workload.datagen.scale" in raw_keys
+                else _source(raw, "scale", raw_keys, "architecture.workload.datagen.scale"),
             ),
             (
                 "spark_image",
@@ -102,6 +104,43 @@ def config_show(
                 _source(raw, "spark_image", raw_keys, "images.spark"),
             ),
         ]
+
+        # Peak requested resources from compute_peak_requirements(), the
+        # same figure run's capacity preflight checks. Auto-sizing first, as
+        # info and run do, so the co-resident request matches theirs.
+        from lakebench.cli import info_peak_request
+        from lakebench.config.autosizer import resolve_auto_sizing
+
+        resolve_auto_sizing(cfg)
+        from lakebench.config.schema import PipelineMode
+
+        sustained = cfg.architecture.pipeline.mode == PipelineMode.SUSTAINED
+        peak, co_cores, co_gb, co_label = info_peak_request(
+            cfg, cfg.architecture.workload.datagen.scale, sustained
+        )
+        fields.append(
+            (
+                "peak_requested",
+                f"{peak.cpu_cores + co_cores} cores / {peak.memory_gb + co_gb} GB memory / "
+                f"{peak.scratch_gb} GB scratch",
+                f"derived: {peak.driving_job} + {co_label}",
+            )
+        )
+        from lakebench.config.support import support_state_for_config
+
+        support = support_state_for_config(cfg)
+        fields.append(
+            (
+                "support",
+                f"{support['state']} ({support['workload']} x "
+                f"{support.get('recipe') or 'no recipe'} x {support['mode']})",
+                support["basis"],
+            )
+        )
+        if support.get("mode_note"):
+            fields.append(("mode_note", support["mode_note"], "workload x mode"))
+        if support.get("scale_note"):
+            fields.append(("scale_note", support["scale_note"], "datagen scale band"))
 
         table = Table(show_header=True, header_style="bold")
         table.add_column("Field", style="cyan")
@@ -270,6 +309,8 @@ def config_storage(
         path_style=s3.path_style,
         existing_bucket=fallback,
         allow_create_bucket=full,
+        ca_cert=s3.ca_cert,
+        verify_ssl=s3.verify_ssl,
     )
 
     table = Table(show_header=True, header_style="bold")
@@ -328,13 +369,15 @@ def config_recommend(
     from lakebench.config import load_config
 
     # Extract pipeline mode from config to pass to recommend
+    schema: str | None = None
     try:
         cfg = load_config(config_file)
         mode = cfg.architecture.pipeline.mode.value
+        schema = cfg.architecture.workload.schema_type.value
     except Exception:
         mode = None
 
-    _recommend(mode=mode)
+    _recommend(mode=mode, schema_type=schema)
 
 
 @config_app.command("recipes")
@@ -378,10 +421,18 @@ def config_recipes(
         console.print("[yellow]No recipes match.[/yellow]")
         return
 
+    from lakebench.config.support import MODES, support_matrix, workloads
+
+    states = {(r["recipe"], r["workload"], r["mode"]): r["state"] for r in support_matrix()}
+    cols = [(wl, m) for wl in workloads() for m in MODES]
+    short = {"customer360": "C360", "financial": "AML"}
+
     table = Table(show_header=True, header_style="bold", box=None)
     table.add_column("Recipe", style="cyan", no_wrap=True)
     table.add_column("Choose when")
     table.add_column("Local", justify="center")
+    for wl, m in cols:
+        table.add_column(f"{short.get(wl, wl)} {m}")
 
     for recipe_name in names:
         note = get_recipe_note(recipe_name)
@@ -389,14 +440,24 @@ def config_recipes(
             recipe_name,
             note.when if note else RECIPE_DESCRIPTIONS.get(recipe_name, ""),
             "[green]yes[/green]" if note and note.runs_locally else "[dim]no[/dim]",
+            *(_state_markup(states[(recipe_name, wl, m)]) for wl, m in cols),
         )
 
     console.print()
     console.print(table)
     console.print()
+    console.print(
+        "[dim]Support: supported = validated on the release tree; unverified = valid, "
+        "not release-validated; unsupported = refused at config load.[/dim]"
+    )
     console.print("[dim]lakebench config recipes <name> for caveats and detail.[/dim]")
     if not local:
         console.print("[dim]lakebench config recipes --local for what runs on a laptop.[/dim]")
+
+
+def _state_markup(state: str) -> str:
+    color = {"supported": "green", "unverified": "yellow", "unsupported": "red"}.get(state, "dim")
+    return f"[{color}]{state}[/{color}]"
 
 
 def _print_recipe_detail(name: str) -> None:
@@ -421,6 +482,21 @@ def _print_recipe_detail(name: str) -> None:
 
     console.print()
     console.print(Panel("\n".join(lines), expand=False))
+
+    from rich.markup import escape
+
+    from lakebench.config.support import WORKLOAD_LABELS, support_matrix
+
+    real = name if name != "default" else "hive-iceberg-spark-trino"
+    console.print()
+    console.print("[bold]Support[/bold]")
+    for row in support_matrix():
+        if row["recipe"] != real:
+            continue
+        label = WORKLOAD_LABELS.get(row["workload"], row["workload"])
+        console.print(
+            f"  {label} {row['mode']}: {_state_markup(row['state'])} -- {escape(row['basis'])}"
+        )
 
     if note and note.caveats:
         console.print()

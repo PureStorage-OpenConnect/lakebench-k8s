@@ -5,7 +5,7 @@ Uses a rate source with foreachBatch to periodically read the full Silver
 Iceberg table, compute daily KPI aggregations, and overwrite the Gold table.
 Each cycle produces a complete, consistent Gold snapshot.
 
-This is the sustained-pipeline equivalent of gold_finalize.py. Where
+This is the continuous-pipeline equivalent of gold_finalize.py. Where
 gold_finalize runs once as a batch job, gold_refresh re-aggregates on
 a timer (default every 5 minutes) so the Gold layer stays fresh.
 
@@ -18,7 +18,16 @@ Environment variables (set by job.py):
 
 import time
 
-from common import env, get_daily_kpi_aggregations, log
+from common import (
+    METADATA_DELETE_AFTER_COMMIT,
+    METADATA_PREVIOUS_VERSIONS_MAX,
+    await_stream,
+    env,
+    get_daily_kpi_aggregations,
+    log,
+    set_utc_session,
+    table_exists,
+)
 from pyspark.sql import SparkSession
 
 # ---------------------------------------------------------------------------
@@ -37,6 +46,7 @@ gold_tbl = f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard'
 # Spark session
 # ---------------------------------------------------------------------------
 spark = SparkSession.builder.appName("lb-gold-refresh").getOrCreate()
+set_utc_session(spark)
 
 log("=" * 60)
 log("Gold Refresh (Periodic Re-aggregation)")
@@ -59,7 +69,10 @@ except Exception as e:
 
 # Track refresh cycles and incremental state
 _refresh_count = 0
+_read_failures = 0  # consecutive cycles whose silver lookup errored
+_MAX_READ_FAILURES = 5
 _last_max_date = None  # Track last-seen max interaction_date for incremental reads
+_last_silver_max_ts = None  # newest silver_processing_timestamp seen last cycle (LB-145)
 _incremental = env("LB_GOLD_INCREMENTAL", "false").lower() == "true"
 
 if _incremental:
@@ -77,18 +90,33 @@ def refresh_gold(trigger_df, batch_id):
     read and merged into Gold. In full mode, the entire Silver table is
     re-aggregated and Gold is overwritten.
     """
-    global _refresh_count, _last_max_date
+    global _refresh_count, _last_max_date, _read_failures, _last_silver_max_ts
     _refresh_count += 1
     cycle_start = time.time()
 
     log(f"Refresh cycle {_refresh_count} (batch {batch_id})")
 
-    # Read current Silver table
+    # Read current Silver table. Not-found means "not ready yet". Any other
+    # catalog error skips this cycle (a transient metastore hiccup should not
+    # cost a driver restart), but _MAX_READ_FAILURES in a row fail the stream
+    # instead of leaving gold stale for the whole run.
     try:
-        silver_df = spark.table(silver_tbl)
-    except Exception as e:
-        log(f"Cycle {_refresh_count}: Silver table not ready yet: {e}")
+        ready = table_exists(spark, silver_tbl)
+    except Exception as e:  # noqa: BLE001
+        _read_failures += 1
+        log(
+            f"Cycle {_refresh_count}: Silver table unreadable "
+            f"({_read_failures}/{_MAX_READ_FAILURES}): {e}"
+        )
+        if _read_failures >= _MAX_READ_FAILURES:
+            raise
         return
+    _read_failures = 0
+    if not ready:
+        log(f"Cycle {_refresh_count}: Silver table not ready yet")
+        return
+    silver_df = spark.table(silver_tbl)
+    silver_all = silver_df  # unfiltered, for the freshness/idle check
 
     # Incremental: only read partitions newer than what we last processed
     if _incremental and _last_max_date is not None:
@@ -145,6 +173,8 @@ def refresh_gold(trigger_df, batch_id):
                 .writeTo(gold_tbl)
                 .tableProperty("write.format.default", "parquet")
                 .tableProperty("write.parquet.compression-codec", "snappy")
+                .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+                .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
                 .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
                 .createOrReplace()
             )
@@ -154,6 +184,8 @@ def refresh_gold(trigger_df, batch_id):
                 daily_kpis_consolidated.writeTo(gold_tbl)
                 .tableProperty("write.format.default", "parquet")
                 .tableProperty("write.parquet.compression-codec", "snappy")
+                .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+                .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
                 .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
                 .createOrReplace()
             )
@@ -163,23 +195,37 @@ def refresh_gold(trigger_df, batch_id):
             daily_kpis_consolidated.writeTo(gold_tbl)
             .tableProperty("write.format.default", "parquet")
             .tableProperty("write.parquet.compression-codec", "snappy")
+            .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+            .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
             .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
             .createOrReplace()
         )
 
-    # Compute data freshness: how old is the most recent Silver data
+    # Compute data freshness: how old is the most recent Silver data.
+    # A cycle whose newest silver row is the same as the previous cycle's saw
+    # no new data, so its value only measures wall-clock since silver last
+    # moved. It is tagged "(silver idle)". The collector drops only the
+    # trailing idle run, and only when the corpus was fully ingested and
+    # committed (a drained finite corpus, LB-145); an idle stretch that new
+    # data later ends is a stall and keeps its staleness.
     try:
         from pyspark.sql.functions import col, current_timestamp
         from pyspark.sql.functions import max as max_
 
-        freshness_row = silver_df.agg(
+        # Whole table, not the incremental slice: late rows whose event dates
+        # fall before _last_max_date still move silver and must not read idle.
+        freshness_row = silver_all.agg(
+            max_(col("silver_processing_timestamp")).alias("newest_ts"),
             (
                 current_timestamp().cast("long")
                 - max_(col("silver_processing_timestamp")).cast("long")
-            ).alias("freshness_s")
+            ).alias("freshness_s"),
         ).collect()[0]
         freshness = freshness_row.freshness_s or 0
-        log(f"Cycle {_refresh_count}: data freshness {freshness:.0f}s")
+        idle = _last_silver_max_ts is not None and freshness_row.newest_ts == _last_silver_max_ts
+        _last_silver_max_ts = freshness_row.newest_ts
+        suffix = " (silver idle)" if idle else ""
+        log(f"Cycle {_refresh_count}: data freshness {freshness:.0f}s{suffix}")
     except Exception as e:
         log(f"Cycle {_refresh_count}: could not compute freshness: {e}")
 
@@ -205,6 +251,6 @@ query = (
 )
 
 log("Streaming query started, awaiting termination...")
-query.awaitTermination()
+await_stream(spark, query)
 
 spark.stop()

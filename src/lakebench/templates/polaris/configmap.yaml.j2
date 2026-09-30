@@ -14,10 +14,11 @@ metadata:
     app.kubernetes.io/managed-by: lakebench
 data:
   application.properties: |
-    # FlashBlade S3: stsUnavailable=true on the catalog handles STS skip.
-    # DO NOT set SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true -- it drops
-    # endpoint + pathStyleAccess config from the StorageAccessConfig, causing
-    # server-side S3FileIO to default to s3.amazonaws.com (see BUG-P10).
+    # FlashBlade S3: stsUnavailable=true on each catalog handles STS skip.
+    # No server-wide credential-subscoping override is added or supported;
+    # any such override drops endpoint + pathStyleAccess from the
+    # StorageAccessConfig and forces server-side S3FileIO to fall back to
+    # s3.amazonaws.com (see BUG-P10).
     #
     # Server-side S3 credentials (for FileIO metadata validation).
     # These are used by the AwsCredentialsStorageIntegration when

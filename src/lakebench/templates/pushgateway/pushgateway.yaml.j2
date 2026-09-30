@@ -1,0 +1,111 @@
+{# Per-deployment Prometheus Pushgateway (ownership category 1).            #}
+{# Datagen pods and the Spark driver push batch-job metrics here; the shared #}
+{# Prometheus scrapes it via podmonitor-pushgateway.yaml.j2. Lives in the    #}
+{# deployment namespace and is torn down with it by `lakebench destroy`.     #}
+{# Best-effort LIVE view only -- metrics.json stays the source of truth.     #}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lakebench-pushgateway
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: pushgateway
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {% if pushgateway_storage_class | default('px-csi-scratch') %}
+  storageClassName: {{ pushgateway_storage_class | default('px-csi-scratch') }}
+  {% endif %}
+  resources:
+    requests:
+      storage: {{ pushgateway_storage | default('1Gi') }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakebench-pushgateway
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: pushgateway
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: the PVC is ReadWriteOnce, so a second pod
+  # cannot mount it while the old one drains.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lakebench
+      app.kubernetes.io/component: pushgateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/component: pushgateway
+    spec:
+      {% if not openshift_mode | default(false) %}
+      # Vanilla k8s has no automatic fsGroup: make the RWO volume group-writable
+      # by the image's nobody (65534) so --persistence.file can be created. On
+      # OpenShift the restricted-v2 SCC assigns an fsGroup + arbitrary UID (same
+      # as the Helm Prometheus writing its Portworx PVC), so no explicit context.
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+      {% endif %}
+      containers:
+        - name: pushgateway
+          image: {{ pushgateway_image | default('prom/pushgateway:v1.11.1') }}
+          args:
+            # Persist so a pod restart does not drop a completed stage's final
+            # push before Prometheus scrapes it (best-effort; see design doc).
+            - --persistence.file=/pushgateway/data/state
+            - --persistence.interval=30s
+          ports:
+            - name: metrics
+              containerPort: 9091
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9091
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9091
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: state
+              mountPath: /pushgateway/data
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: lakebench-pushgateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakebench-pushgateway
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: pushgateway
+spec:
+  selector:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: pushgateway
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: 9091

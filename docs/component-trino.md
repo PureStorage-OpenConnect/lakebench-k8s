@@ -2,18 +2,20 @@
 
 ## Overview
 
-Trino is the default query engine in a Lakebench recipe. It executes the benchmark query suite against Iceberg tables in the gold layer and serves as the ad-hoc SQL interface for exploring data across all medallion layers. Lakebench connects Trino to whichever catalog the recipe specifies -- Hive Metastore or Apache Polaris REST catalog -- so that every Iceberg table registered during the pipeline run is immediately queryable.
+Trino is the default query engine in a Lakebench recipe. It executes the benchmark query suite against Iceberg or Delta tables in the gold layer and serves as the ad-hoc SQL interface for exploring data across all medallion layers. Lakebench connects Trino to whichever catalog the recipe specifies -- Hive Metastore or Apache Polaris REST catalog -- so that every table registered during the pipeline run is immediately queryable. Delta runs with Hive only.
 
 When `architecture.query_engine.type` is set to `trino` (the default), Lakebench deploys Trino automatically during `lakebench deploy` and tears it down during `lakebench destroy`.
+
+Before removing Trino, destroy clears the pipeline tables from the catalog with `CALL <catalog>.system.unregister_table(...)`, not `DROP TABLE`, for Iceberg and Delta. (On Polaris, when the namespace is deleted with it, no statement is run: the catalog's only state is its PostgreSQL database, which goes with the namespace.) Unregistering removes only the catalog entry; a Trino `DROP TABLE` would also delete data files, including datagen files registered in place. Table files are removed only by the bucket step, and only from buckets the deployment owns.
 
 ## Architecture
 
 Lakebench deploys Trino as two Kubernetes workloads:
 
 - **Coordinator** -- a single-replica `Deployment` (`lakebench-trino-coordinator`). Handles query planning, scheduling, and the HTTP endpoint on port 8080.
-- **Workers** -- a `StatefulSet` (`lakebench-trino-worker`) with configurable replica count. Each worker gets a PVC for spill-to-disk storage, allowing large queries to exceed available memory.
+- **Workers** -- a `StatefulSet` (`lakebench-trino-worker`) with configurable replica count. Spill-to-disk goes to an `emptyDir` volume by default; when `trino.worker.storage_class` is set, each worker gets a PVC from that class instead.
 
-A `Service` named `lakebench-trino` exposes the coordinator at `lakebench-trino.<namespace>.svc.cluster.local:8080`.
+A `Service` named `lakebench-trino` exposes the coordinator at `lakebench-trino.<namespace>.svc.cluster.local:8080`; a headless `Service`, `lakebench-trino-worker`, gives the worker StatefulSet stable pod DNS.
 
 ### Init containers
 
@@ -63,10 +65,10 @@ architecture:
 | `images.trino` | `trinodb/trino:483` | Container image for coordinator and workers. |
 | `query_engine.type` | `trino` | Set to `trino` to deploy Trino. Other values skip Trino deployment. |
 | `trino.coordinator.cpu` | `"2"` | CPU request and limit for the coordinator pod. |
-| `trino.coordinator.memory` | `"8Gi"` | Memory request and limit for the coordinator pod. Also sets JVM `-Xmx`. |
+| `trino.coordinator.memory` | `"8Gi"` | Memory request and limit for the coordinator pod. JVM `-Xmx` is 80% of this limit, leaving room for non-heap memory. |
 | `trino.worker.replicas` | `2` | Number of worker pods. Set to `0` for coordinator-only mode (dev/debug). |
 | `trino.worker.cpu` | `"4"` | CPU request and limit per worker pod. |
-| `trino.worker.memory` | `"16Gi"` | Memory request and limit per worker pod. Also sets JVM `-Xmx`. |
+| `trino.worker.memory` | `"16Gi"` | Memory request and limit per worker pod. JVM `-Xmx` is 80% of this limit, leaving room for non-heap memory. |
 | `trino.worker.spill_enabled` | `true` | Enable spill-to-disk when queries exceed memory. |
 | `trino.worker.spill_max_per_node` | `"40Gi"` | Maximum spill data written per worker before the query fails. |
 | `trino.worker.storage` | `"50Gi"` | PVC size for each worker (used for spill and data directory). |
@@ -120,21 +122,42 @@ The `PRINCIPAL_ROLE:ALL` scope grants Trino the permissions it needs to read and
 
 ## Sizing Guidance
 
-Worker sizing depends on query complexity, data volume, and concurrency:
+When `trino.worker.replicas`, `cpu` and `memory` are left at their defaults, the autosizer sets them from the scale factor (`full_compute_guidance()` in `config/scale.py`). Explicit values are kept.
 
-| Scale factor | Approximate data | Recommended workers | Worker memory | Notes |
+| Scale factor | Workers | Worker memory | Coordinator memory |
+|---|---|---|---|
+| 1-5 | 1 | 8Gi | 4Gi |
+| 6-50 | 2 | 16Gi | 8Gi |
+| 51-500 | max(4, scale / 25) | 48Gi | 16Gi |
+| 501+ | max(10, scale / 50) | 64Gi | 16Gi |
+
+### Query memory limits
+
+lakebench sets Trino's memory properties from the deployed heaps and worker count (`trino_memory_properties()` in `deploy/engine.py`). Trino's own defaults do not follow the cluster: `query.max-memory` is a flat 20GB, so before this change four 48Gi workers at AML scale 100 still failed FQ3 with `Query exceeded distributed user memory limit of 20GB` while about 107 GB of memory pool sat unused.
+
+| Property | Value | Scale 1 | Scale 10 | Scale 100 |
 |---|---|---|---|---|
-| 10 (~100 GB) | ~100 GB bronze | 1-2 | 8-16Gi | Minimal setup, suitable for development |
-| 100 (~1 TB) | ~1 TB bronze | 2 | 16Gi | Default config handles the 8-query benchmark |
-| 500+ (~5 TB+) | 5+ TB bronze | 4-8 | 32Gi | Increase replicas before increasing per-worker memory |
+| Worker `-Xmx` | 80% of the pod limit | 6553m | 13107m | 39321m |
+| `query.max-memory-per-node` | 35% of that node's heap | 2293MB | 4587MB | 13762MB |
+| `memory.heap-headroom-per-node` | 30% of that node's heap (Trino's default) | 1965MB | 3932MB | 11796MB |
+| `query.max-memory` | workers x worker per-node | 2293MB | 9174MB | 55048MB |
+| `query.max-total-memory` | Trino's default, 2 x `query.max-memory` | 4586MB | 18348MB | 110096MB |
+
+The per-node values shown are the worker's; the coordinator gets the same fractions of its own heap. Per-node plus headroom is 65% of the heap, inside Trino's startup check (the two may not exceed the heap). The node's memory pool is heap minus headroom, 70% of the heap, so two queries at the per-node cap fit a node at once. That matters for throughput and composite runs (several streams), though with nothing spare: a third concurrent stream at the cap, or untracked allocations past the headroom, still block. When a pool fills, Trino blocks queries and only after `query.low-memory-killer.delay` (5 minutes, longer than the 300 s client timeout) kills the largest, so a blocked stream reads as a timeout. A power run (one query at a time) still gets 17% more per node than Trino's 30% default. `query.max-total-memory` is left at Trino's default, which here is about the physical pool across the workers; pinning it to exactly that pool would let a coordinator reservation plus full revocable use on the workers trip it.
+
+At every autosized scale the new cluster cap is higher than the old effective cap, which was the smaller of 20GB and workers x 30% of the heap (scale 1: 1.9 GB to 2.2 GB; scale 10: 7.7 GB to 9.0 GB; scale 100: 20 GB to 53.8 GB). The values are fixed at deploy time; changing the worker count by hand afterwards does not update them.
+
+### Query timeouts
+
+The benchmark gives each query a client timeout (300 s, or 900 s for the financial workload). Killing the local `kubectl exec` on timeout does not stop the `trino` CLI or its query in the pod; before this was handled, a timed-out query kept holding worker memory and slowed every later query. The executor now passes `--session query_max_run_time=<timeout - 5>s`, so Trino fails the query just before the client gives up, and on a client timeout it also cancels anything still running under the query's unique `--source` tag with `system.runtime.kill_query`. There is deliberately no cluster-wide `query.max-execution-time`: Iceberg and Delta maintenance also runs through the Trino CLI and can legitimately take longer than any benchmark query. The same session limit applies to `lakebench query`: its default `--timeout` is 120 s, so a long ad-hoc statement (a manual `OPTIMIZE`, say) is now ended by Trino at 115 s instead of running on in the pod after the client gave up; pass a larger `--timeout` for such statements.
 
 General principles:
 
-- **Scale out before scaling up.** Adding worker replicas distributes query fragments across more nodes and is more effective than increasing memory on fewer workers.
-- **Spill storage is your safety net.** With `spill_enabled: true` (the default), queries that exceed worker memory spill intermediate data to disk rather than failing with OOM. Keep `spill_max_per_node` at or below the PVC `storage` size.
+- **Scale out before scaling up.** Adding worker replicas distributes query fragments across more nodes and raises `query.max-memory` with them.
+- **Spill does not cover every query.** With `spill_enabled: true` (the default), joins, `ORDER BY`, window functions and plain aggregations can spill to disk. Spilled state is revocable memory, which does not count toward `query.max-memory`. An aggregate that is still `DISTINCT` (or has an `ORDER BY` inside it) in the final plan, and the `MarkDistinct` operator, cannot spill in Trino 483, so their hash tables stay in user memory and hit the limits above. Whether a query keeps that shape depends on the plan: the optimizer can rewrite a `DISTINCT` aggregate into a spillable `GROUP BY` (the `pre_aggregate` distinct-aggregation strategy, chosen from statistics under the default `automatic`). AML FQ3 (`COUNT(DISTINCT target_entity_id)` alongside `SUM`s, grouped by entity) is a candidate for the non-spillable shape; check with `EXPLAIN`. Keep `spill_max_per_node` at or below the worker's spill volume size (the PVC `storage` size when a storage class is set).
 - **Coordinator sizing is modest.** The coordinator does not process data. The defaults of 2 CPU / 8Gi are sufficient for most workloads.
 
-**Recipes using Trino:** Standard, Polaris.
+**Recipes using Trino:** `hive-iceberg-spark-trino` (the default), `polaris-iceberg-spark-trino`, `hive-delta-spark-trino`.
 See the [Recipes Guide](recipes.md) for all combinations.
 
 ## See Also

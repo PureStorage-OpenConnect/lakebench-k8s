@@ -186,6 +186,19 @@ class TestFormatVersionResolution:
         assert hadoop_version == "3.4.2"
         assert aws_sdk == "1.12.720"
 
+    def test_hadoop_aws_compat_covers_every_supported_spark_minor(self):
+        """LB-069-shape gate: adding a Spark minor to _SUPPORTED_SPARK_VERSIONS
+        without adding a matching _HADOOP_AWS_COMPAT pin would silently pair
+        it with a wrong SDK. The import-time check in job.py already fires,
+        this test documents the invariant so a reviewer sees it explicitly."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _HADOOP_AWS_COMPAT,
+            _SUPPORTED_SPARK_VERSIONS,
+        )
+
+        missing = set(_SUPPORTED_SPARK_VERSIONS) - set(_HADOOP_AWS_COMPAT)
+        assert not missing, f"Spark minors {sorted(missing)} lack a _HADOOP_AWS_COMPAT entry."
+
 
 class TestVersionConditionalResources:
     """Tests for version-conditional driver_memory and maxResultSize."""
@@ -200,7 +213,7 @@ class TestVersionConditionalResources:
 
     def test_driver_memory_spark3_silver(self):
         """Spark 3 silver-build uses 24g driver (smaller jar payload)."""
-        m = self._build("apache/spark:3.5.4-python3", JobType.SILVER_BUILD)
+        m = self._build("apache/spark:3.5.9-java17-python3", JobType.SILVER_BUILD)
         assert m["spec"]["driver"]["memory"] == "24g"
 
     def test_driver_memory_spark4_silver(self):
@@ -210,7 +223,7 @@ class TestVersionConditionalResources:
 
     def test_driver_memory_spark3_gold(self):
         """Spark 3 gold-finalize uses 24g driver."""
-        m = self._build("apache/spark:3.5.4-python3", JobType.GOLD_FINALIZE)
+        m = self._build("apache/spark:3.5.9-java17-python3", JobType.GOLD_FINALIZE)
         assert m["spec"]["driver"]["memory"] == "24g"
 
     def test_driver_memory_spark4_gold(self):
@@ -220,13 +233,13 @@ class TestVersionConditionalResources:
 
     def test_driver_memory_bronze_unchanged(self):
         """Bronze driver memory is the same for both versions."""
-        m3 = self._build("apache/spark:3.5.4-python3", JobType.BRONZE_VERIFY)
+        m3 = self._build("apache/spark:3.5.9-java17-python3", JobType.BRONZE_VERIFY)
         m4 = self._build("apache/spark:4.0.2-python3", JobType.BRONZE_VERIFY)
         assert m3["spec"]["driver"]["memory"] == m4["spec"]["driver"]["memory"]
 
     def test_max_result_size_spark3(self):
         """Spark 3 uses floor=4g formula for maxResultSize."""
-        m = self._build("apache/spark:3.5.4-python3", JobType.SILVER_BUILD)
+        m = self._build("apache/spark:3.5.9-java17-python3", JobType.SILVER_BUILD)
         conf = m["spec"]["sparkConf"]
         # Default scale=100 -> 12 executors -> max(4, 12//3) = 4g
         assert conf["spark.driver.maxResultSize"] == "4g"
@@ -262,17 +275,15 @@ class TestPipelineRename:
             assert len(deprecation_msgs) >= 1
             assert "processing" in str(deprecation_msgs[0].message).lower()
 
-    def test_pipeline_takes_precedence(self):
-        """When both 'processing' and 'pipeline' are present, pipeline wins."""
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            cfg = _make_config(
+    def test_processing_and_pipeline_together_is_refused(self):
+        """Both spellings at once is an error; dropping one silently lost settings."""
+        with pytest.raises(ValueError, match="processing.*pipeline"):
+            _make_config(
                 architecture={
                     "processing": {"pattern": "streaming"},
                     "pipeline": {"pattern": "medallion"},
                 }
             )
-            assert cfg.architecture.pipeline.pattern.value == "medallion"
 
 
 # ===========================================================================
@@ -294,7 +305,7 @@ class TestRecipeSystem:
         """User explicit values win over recipe defaults."""
         cfg = _make_config(
             recipe="hive-iceberg-spark-trino",
-            images={"spark": "my-registry/spark:3.5.3-python3"},
+            images={"spark": "my-registry/spark:3.5.3-java17-python3"},
         )
         # User override wins
         assert "3.5.3" in cfg.images.spark

@@ -5,9 +5,12 @@ e-commerce customer interaction dataset. The data is written as Snappy-compresse
 Apache Parquet files directly to the S3 bronze bucket, where it serves as the
 input for the medallion pipeline (bronze -> silver -> gold).
 
-The generator (`datagen/generate.py`) produces deterministic, reproducible output
-seeded per file. Each file contains approximately 122,000 rows at the default
-512 MB file size, with ~4.1 KB per row after Snappy compression.
+The generator (`datagen_rs/src/customer360.rs`, Rust) produces deterministic,
+reproducible output seeded per (seed, file_id). File sizing is codec-conditional
+via `customer360_bytes_per_row_default` in `datagen_rs/src/writer.rs`: at the
+default `DG_COMPRESSION=snappy` a 64 MB file holds ~15,500 rows (~4.3 KB per row
+compressed); at `DG_COMPRESSION=zstd` the same file holds ~30,000 rows (~2.2 KB
+per row).
 
 ## Column Reference
 
@@ -19,7 +22,7 @@ metadata.
 |---|--------|------|-------------|----------------|
 | 1 | `id` | int64 | Monotonically increasing row identifier | `0`, `122000`, `244000` |
 | 2 | `row_id` | int64 | Global row identifier (same as `id`) | `0`, `122000`, `244000` |
-| 3 | `event_timestamp` | timestamp(us) | Timestamp of the interaction event within a configurable date range | `2024-06-15 14:32:07.123456` |
+| 3 | `event_timestamp` | timestamp(us, UTC) | Timestamp of the interaction event within a configurable date range | `2024-06-15 14:32:07.123456` |
 | 4 | `event_id` | string | UUID v4 uniquely identifying the event | `a3f1b2c4-d5e6-4f78-9a0b-1c2d3e4f5678` |
 | 5 | `session_id` | string | UUID v4 identifying the user session | `b7c8d9e0-f1a2-4b3c-8d4e-5f6a7b8c9d0e` |
 | 6 | `customer_id` | int64 | Zipf-distributed customer identifier (see Realism Features) | `42`, `1337`, `499999` |
@@ -61,20 +64,26 @@ metadata.
 
 > **Note:** The column count in the table above is 41 rows because `id` and
 > `row_id` are two distinct columns that carry the same value, and every column
-> in the Arrow schema is listed individually. The PyArrow schema definition in
-> `generate.py` defines exactly 41 fields.
+> in the Arrow schema is listed individually. The Arrow schema definition
+> (`customer360_schema()` in `datagen_rs/src/schema.rs`) defines exactly 41
+> fields.
 
 ## Realism Features
 
 The generator implements seven realism features designed to produce data that
 exercises real-world data engineering challenges in the silver cleaning layer.
 
-### 1. Zipf-Distributed Customer IDs
+### 1. Skewed Customer IDs
 
-Customer IDs follow a Zipf distribution (alpha=1.5) rather than uniform random.
-This produces power-law activity where a small number of "whale" customers
-generate a disproportionate share of events, matching real retail behavior.
-The maximum customer ID is configurable (default: 500,000).
+Customer IDs follow a truncated Zipf distribution rather than uniform random:
+the 500 most active IDs receive 40% of sessions, with a Zipf shape of 1.2
+inside that set, and the remaining sessions are spread uniformly over the ID
+space. This produces power-law activity where a small number of "whale"
+customers generate a disproportionate share of events without one ID
+dominating every aggregate (the top ID gets about 10%). Every row in a
+session carries that session's customer. The ID space is derived from the
+scale factor (100,000 customers per scale unit) unless
+`customer360.unique_customers` overrides it.
 
 ### 2. Weighted Interaction Types
 
@@ -102,8 +111,13 @@ real-world semantics:
 
 ### 4. Dirty Data Corruption
 
-Approximately 8% of rows (configurable via `dirty_data_ratio`) receive
-corruption across multiple fields:
+Corruption is source-aware. Each row's probability of corruption is
+`dirty_data_ratio` (default 0.08) multiplied by a per-source rate for its
+`data_source` (`primary_system` 0.005, `legacy_import` 0.35, `manual_entry`
+0.15, `third_party_api` 0.05), sampled independently for each corrupted
+field. The aggregate share of dirty rows is therefore much smaller than
+`dirty_data_ratio` itself and varies with the data-source mix. Corruption
+covers these fields:
 
 - **Emails:** Six corruption modes -- missing `@`, ALL CAPS, leading/trailing
   whitespace, double `@@`, missing TLD, `@` replaced with `.at.`.
@@ -170,16 +184,16 @@ Each row is tagged with a `data_source` indicating its origin system:
 
 Data is written as Snappy-compressed Parquet files to the configured S3 bronze
 bucket under the path prefix `customer/interactions/`. Files are named by
-worker index: `part-000000.parquet`, `part-000001.parquet`, and so on.
+file ID: `part-000000.parquet`, `part-000001.parquet`, and so on (a
+multi-cycle batch run adds the cycle, `part-c001-000000.parquet`).
 
 When running as a Kubernetes Indexed Job, each pod receives a
 `JOB_COMPLETION_INDEX` that determines which file IDs it generates. Files are
 interleaved across nodes (file `N` goes to node `N % total_nodes`), ensuring
 even distribution regardless of pod count.
 
-The generator supports checkpoint-resume: completed file IDs are persisted to a
-JSON checkpoint file, and interrupted runs can resume without regenerating
-already-uploaded files.
+The Rust generator does not implement checkpoint-resume: an interrupted run
+starts again from the beginning.
 
 ## Scale Factor
 
@@ -187,9 +201,12 @@ Data volume is controlled by the `scale` parameter in the Lakebench
 configuration. One scale unit produces approximately 10 GB of on-disk bronze
 data. Common scale factors:
 
-| Scale | Approximate Bronze Size | Total Files (at 512 MB) |
+| Scale | Approximate Bronze Size | Total Files (at the default 64 MB) |
 |-------|------------------------|------------------------|
-| 1 | ~10 GB | ~20 |
-| 10 | ~100 GB | ~200 |
-| 100 | ~1 TB | ~2,048 |
-| 1000 | ~10 TB | ~20,480 |
+| 1 | ~10 GB | ~160 |
+| 10 | ~100 GB | ~1,600 |
+| 100 | ~1 TB | ~16,000 |
+
+Scale is banded: Customer 360 is supported to 300 and refused above 600, AML
+supported to 300 and refused above 800 (see
+[Data Generation](data-generation.md#scale-factor-and-data-volume)).

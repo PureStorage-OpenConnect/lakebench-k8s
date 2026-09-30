@@ -454,6 +454,363 @@ class TestMetricsStorage:
         assert loaded.queries[0].query_name == "rfm"
         assert loaded.queries[0].elapsed_seconds == 3.42
 
+    def test_save_and_load_financial_scoring_and_detection_fields(self, tmp_path):
+        """LB-123: financial_scoring AND the JobMetrics detection dicts must
+        survive save -> load. The report is always rendered from the disk
+        reload, so a field dropped here shows the scorecard zero alerts /
+        no recall even though the live run had them."""
+        storage = MetricsStorage(tmp_path / "metrics")
+        now = datetime.now()
+        metrics = PipelineMetrics(
+            run_id="aml-001",
+            deployment_name="test",
+            start_time=now,
+            success=True,
+            jobs=[
+                JobMetrics(
+                    job_name="lakebench-gold-finalize",
+                    job_type="gold-finalize",
+                    success=True,
+                    alerts_by_rule={"W2_structuring": 12, "W3_round_tripping": 5},
+                    rules_skipped={"W1_connected_components": "vertex-cap"},
+                    rule_errors={"W7_cross_border_high_risk": "boom"},
+                ),
+            ],
+            financial_scoring={
+                "typologies": [
+                    {
+                        "typology_type": "micro_structuring",
+                        "recall": 0.83,
+                        "instance_count": 6,
+                        "detection_status": "scored",
+                    }
+                ],
+                "total_alerts": 17,
+                "fp_alerts": 2,
+                "fp_rate": 0.1176,
+                "run_id": "aml-001",
+            },
+        )
+        storage.save_run(metrics)
+        loaded = storage.load_run("aml-001")
+        assert loaded is not None
+        # financial_scoring round-trips.
+        assert loaded.financial_scoring is not None
+        assert loaded.financial_scoring["typologies"][0]["recall"] == 0.83
+        assert loaded.financial_scoring["total_alerts"] == 17
+        # JobMetrics detection dicts round-trip (the HIGH finding: previously
+        # serialized but dropped on load).
+        job = loaded.jobs[0]
+        assert job.alerts_by_rule == {"W2_structuring": 12, "W3_round_tripping": 5}
+        assert job.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        assert job.rule_errors == {"W7_cross_border_high_risk": "boom"}
+
+    def test_apply_parsed_job_metrics_carries_all_fields(self):
+        """LB-123: the cluster run copies parsed driver-log fields onto the
+        stage JobMetrics via _apply_parsed_job_metrics. This is the exact site
+        whose omission dropped the detection dicts. Assert every data +
+        detection field transfers, so dropping any copy line fails here."""
+        from lakebench.cli._run import _apply_parsed_job_metrics
+
+        parsed = JobMetrics(
+            job_name="p",
+            job_type="gold-finalize",
+            input_size_gb=1.5,
+            output_size_gb=2.5,
+            input_rows=100,
+            output_rows=200,
+            throughput_gb_per_second=0.3,
+            throughput_rows_per_second=40.0,
+            alerts_by_rule={"W2_structuring": 12},
+            rule_errors={"W7_cross_border_high_risk": "boom"},
+            rules_skipped={"W1_connected_components": "vertex-cap"},
+            silver_tables={"silver_transactions_rows": 26671846, "silver_entities_rows": 113713},
+            extra_metrics={"data_clock_source": "datagen_timestamp_end"},
+        )
+        target = JobMetrics(job_name="lakebench-gold-finalize", job_type="gold-finalize")
+        _apply_parsed_job_metrics(target, parsed)
+        assert target.input_size_gb == 1.5
+        assert target.output_size_gb == 2.5
+        assert target.input_rows == 100
+        assert target.output_rows == 200
+        assert target.throughput_gb_per_second == 0.3
+        assert target.throughput_rows_per_second == 40.0
+        assert target.alerts_by_rule == {"W2_structuring": 12}
+        assert target.rule_errors == {"W7_cross_border_high_risk": "boom"}
+        assert target.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        # A2 (silver-plan): live-validated regression -- lb-silver-live-v16 batch
+        # driver-log had silver_transactions_rows etc. but metrics.json showed
+        # silver_tables={} because the hand-copy here omitted them. Same shape
+        # as the LB-123 detection-dict defect the docstring warns about.
+        assert target.silver_tables == {
+            "silver_transactions_rows": 26671846,
+            "silver_entities_rows": 113713,
+        }
+        assert target.extra_metrics == {"data_clock_source": "datagen_timestamp_end"}
+
+    def test_storage_roundtrip_class_level_no_field_drops(self, tmp_path):
+        """Class-level guarantee on the STORAGE READ path. Adversarial-review
+        finding (2026-09-28): the write side (asdict) auto-includes every
+        dataclass field, but the read side (_data_to_metrics) hand-listed
+        ctor kwargs and silently dropped silver_tables + extra_metrics on
+        reload. Users of `lakebench report --regenerate` and any downstream
+        consumer of load_run saw empty dicts even though metrics.json on
+        disk was correct.
+
+        This test writes a JobMetrics + StreamingJobMetrics with EVERY
+        field populated by a distinctive probe value, round-trips through
+        save_run/load_run, and asserts the loaded values match the
+        pre-write values. Adding a new field to either dataclass without
+        updating _dataclass_from_dict cannot silently drop it any more.
+        """
+        import dataclasses
+
+        from lakebench.metrics import MetricsCollector
+
+        # Build a probe with a distinctive non-default value for every
+        # parser/data field. Cluster-owned fields also get probe values
+        # so we prove they survive round-trip.
+        def _probe_value(f: dataclasses.Field):
+            base = hash(f.name) & 0xFFFF
+            # Read the default so we can pick a distinctive but shape-
+            # compatible probe value. Positional fields (no default at
+            # all) get treated as string-shape.
+            if f.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+                default = f.default_factory()  # type: ignore[misc]
+            elif f.default is not dataclasses.MISSING:
+                default = f.default
+            else:
+                default = None
+            if isinstance(default, dict):
+                return {f.name + "_k": base}
+            if isinstance(default, list):
+                return [f.name + "_item"]
+            if isinstance(default, bool):
+                return True
+            if isinstance(default, int) and not isinstance(default, bool):
+                return base
+            if isinstance(default, float):
+                return float(base)
+            # str / None / positional -- use a string probe. JSON-safe.
+            return f.name + "_probe"
+
+        job = JobMetrics(job_name="probe-job", job_type="silver-build")
+        for f in dataclasses.fields(JobMetrics):
+            if f.name in ("start_time", "end_time"):
+                continue  # datetime probing handled below
+            setattr(job, f.name, _probe_value(f))
+        job.start_time = datetime(2026, 9, 28, 15, 0, 0)
+        job.end_time = datetime(2026, 9, 28, 15, 1, 0)
+
+        stream = StreamingJobMetrics(job_name="probe-stream", job_type="silver-stream")
+        for f in dataclasses.fields(StreamingJobMetrics):
+            setattr(stream, f.name, _probe_value(f))
+
+        run = PipelineMetrics(
+            run_id="probe-roundtrip",
+            deployment_name="probe",
+            start_time=datetime(2026, 9, 28, 14, 0, 0),
+            jobs=[job],
+            streaming=[stream],
+        )
+        storage = MetricsStorage(tmp_path / "runs")
+        collector = MetricsCollector()
+        collector.current_run = run
+        path = storage.save_run(run)
+        assert path is not None
+
+        loaded = storage.load_run("probe-roundtrip")
+        assert loaded is not None
+        assert len(loaded.jobs) == 1
+        assert len(loaded.streaming) == 1
+        lj = loaded.jobs[0]
+        ls = loaded.streaming[0]
+
+        # Every JobMetrics field survives the round-trip.
+        for f in dataclasses.fields(JobMetrics):
+            if f.name in ("start_time", "end_time"):
+                assert getattr(lj, f.name) == getattr(job, f.name), (
+                    f"JobMetrics.{f.name} lost through save_run/load_run"
+                )
+                continue
+            assert getattr(lj, f.name) == getattr(job, f.name), (
+                f"JobMetrics.{f.name} lost through save_run/load_run; "
+                f"either write (asdict) or read (_dataclass_from_dict) "
+                f"dropped it. This is the LB-123 defect shape -- fix the "
+                f"missing side."
+            )
+
+        # Every StreamingJobMetrics field survives.
+        for f in dataclasses.fields(StreamingJobMetrics):
+            assert getattr(ls, f.name) == getattr(stream, f.name), (
+                f"StreamingJobMetrics.{f.name} lost through save_run/load_run"
+            )
+
+    def test_apply_parsed_job_metrics_class_level_no_field_drops(self):
+        """Class-level guarantee: EVERY JobMetrics field is either declared
+        cluster-owned (never overwritten by parsed) or auto-copied from
+        parsed. Adding a new field to JobMetrics without categorising it
+        would slip through the existing per-field test above; this test
+        forces the choice.
+
+        Three live-caught defects (LB-123 detection dicts, silver-plan r3
+        silver_tables at 87feefd, silver-plan r3 streaming extra_metrics
+        at e31514d) were three instances of the same drift. This test
+        makes a fourth instance impossible without a new field escaping
+        both the cluster-owned set and the auto-copy.
+        """
+        import dataclasses
+
+        from lakebench.cli._run import (
+            _CLUSTER_OWNED_JOB_METRICS_FIELDS,
+            _apply_parsed_job_metrics,
+        )
+
+        # A distinctive value per JobMetrics field, so we can tell "auto-copy
+        # actually ran" from "default value happens to equal the parsed
+        # default". Every field name in JobMetrics must appear in one of
+        # the two branches; a new field forces a test update, which forces
+        # the categorisation decision.
+        parser_owned_probe = {
+            "input_size_gb": 3.14,
+            "output_size_gb": 6.28,
+            "input_rows": 111,
+            "output_rows": 222,
+            "throughput_gb_per_second": 0.5,
+            "throughput_rows_per_second": 50.0,
+            "alerts_by_rule": {"R": 7},
+            "rule_errors": {"R": "e"},
+            "rules_skipped": {"R": "s"},
+            "tm_invariants": {"1": {"x": {"status": "ok", "detail": "d"}}},
+            "tm_ops": {"k": "v"},
+            "tm_status": {"1": {"status": "ok", "reason": "r"}},
+            "c360_check": {"passed": 3},
+            "c360_bronze": {"rows": 4},
+            "silver_tables": {"silver_x_rows": 5},
+            "extra_metrics": {"data_clock_source": "z"},
+        }
+
+        parsed = JobMetrics(job_name="p", job_type="silver-build", **parser_owned_probe)
+        target = JobMetrics(job_name="t", job_type="silver-build")
+        _apply_parsed_job_metrics(target, parsed)
+
+        # Every parser-owned probe value must land on the target.
+        for name, value in parser_owned_probe.items():
+            assert getattr(target, name) == value, (
+                f"field {name!r} was not carried by _apply_parsed_job_metrics; "
+                f"either add it to _CLUSTER_OWNED_JOB_METRICS_FIELDS or "
+                f"extend the auto-copy path"
+            )
+
+        # Every JobMetrics field is either cluster-owned or parser-owned.
+        # A new field that is neither would slip past both this test and
+        # the field-by-field test above; force the author to categorise.
+        all_fields = {f.name for f in dataclasses.fields(JobMetrics)}
+        parser_owned = set(parser_owned_probe)
+        uncategorised = all_fields - _CLUSTER_OWNED_JOB_METRICS_FIELDS - parser_owned
+        assert not uncategorised, (
+            f"JobMetrics fields not categorised: {sorted(uncategorised)}. "
+            f"Add each to _CLUSTER_OWNED_JOB_METRICS_FIELDS (cluster path "
+            f"sets it authoritatively, parsed value ignored) or extend "
+            f"parser_owned_probe in this test (auto-copied from parsed)."
+        )
+
+        # H2 guard (2026-09-28 adversarial-review): _CLUSTER_OWNED accepts
+        # arbitrary strings, so a typo like "cpu_seconds_requesteed" would
+        # silently make the real field parser-owned and overwrite the
+        # cluster's authoritative value on every run. Require every name
+        # in the frozenset to be a real JobMetrics field.
+        misspelt = _CLUSTER_OWNED_JOB_METRICS_FIELDS - all_fields
+        assert not misspelt, (
+            f"_CLUSTER_OWNED_JOB_METRICS_FIELDS contains names not on "
+            f"JobMetrics: {sorted(misspelt)}. A typo here silently disables "
+            f"the cluster-owned guard for the real field it was meant to "
+            f"cover."
+        )
+
+        # H1 guard (2026-09-28 adversarial-review): dataclasses.fields()
+        # skips any class attribute without a PEP 526 annotation. A lane
+        # that added `reference_model_scores = field(default_factory=dict)`
+        # WITHOUT a type annotation would slip past both the auto-copy in
+        # _apply_parsed_job_metrics AND this test's `all_fields` set. Guard
+        # by asserting the public attribute surface of JobMetrics equals
+        # the dataclass field set. Attributes starting with `_` and
+        # methods are allowed off the field set; everything else must be
+        # annotated so `fields()` sees it.
+        public_attrs = {
+            name
+            for name in vars(JobMetrics)
+            if not name.startswith("_") and not callable(getattr(JobMetrics, name))
+        }
+        # Dataclass fields set defaults on the class; those show up in
+        # vars(). But a field WITH an annotation is also in all_fields.
+        # An unannotated attribute would appear in public_attrs and NOT
+        # in all_fields. That is the drift shape we refuse.
+        unannotated = public_attrs - all_fields
+        assert not unannotated, (
+            f"JobMetrics has public class attributes not seen by "
+            f"dataclasses.fields(): {sorted(unannotated)}. Add a type "
+            f"annotation so the field is real, or make the attribute "
+            f"private (leading underscore) if it is not part of the "
+            f"metrics surface. Without an annotation, "
+            f"_apply_parsed_job_metrics silently drops it."
+        )
+
+    def test_detection_dicts_parse_record_and_roundtrip(self, tmp_path):
+        """LB-123 re-review F1 guard: the detection dicts must survive the
+        FULL cluster path shape -- parse_driver_logs (the only producer) ->
+        JobMetrics fields the cluster run copies -> save_run -> load_run.
+        The old suite injected dicts straight into JobMetrics, hiding that
+        the cluster run never copied parse_driver_logs' detection fields."""
+        from lakebench.metrics import MetricsCollector
+
+        logs = (
+            "[detection] W2_structuring: alerts=12 elapsed=3.1s\n"
+            "[detection] W3_round_tripping: alerts=5 elapsed=2.0s\n"
+            "[detection] W1_connected_components: skipped=vertex-cap "
+            "detail=vertices=111111 max=100 elapsed=3.5s\n"
+        )
+        parsed = MetricsCollector().parse_driver_logs(logs, "gold-finalize")
+        # Source of truth populates the three dicts.
+        assert parsed.alerts_by_rule == {"W2_structuring": 12, "W3_round_tripping": 5}
+        assert parsed.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        assert "W1_connected_components" not in parsed.alerts_by_rule
+
+        # Mirror the cluster run copy (_run.py) onto a fresh JobMetrics, then
+        # round-trip through storage.
+        storage = MetricsStorage(tmp_path / "metrics")
+        job = JobMetrics(
+            job_name="lakebench-gold-finalize",
+            job_type="gold-finalize",
+            success=True,
+            alerts_by_rule=parsed.alerts_by_rule,
+            rule_errors=parsed.rule_errors,
+            rules_skipped=parsed.rules_skipped,
+        )
+        metrics = PipelineMetrics(
+            run_id="det-001",
+            deployment_name="test",
+            start_time=datetime.now(),
+            jobs=[job],
+        )
+        storage.save_run(metrics)
+        loaded = storage.load_run("det-001")
+        assert loaded.jobs[0].alerts_by_rule == {"W2_structuring": 12, "W3_round_tripping": 5}
+        assert loaded.jobs[0].rules_skipped == {"W1_connected_components": "vertex-cap"}
+
+    def test_save_and_load_without_financial_scoring(self, tmp_path):
+        """Backward compat: a run without financial_scoring loads as None."""
+        storage = MetricsStorage(tmp_path / "metrics")
+        metrics = PipelineMetrics(
+            run_id="no-fs-001",
+            deployment_name="test",
+            start_time=datetime.now(),
+        )
+        storage.save_run(metrics)
+        loaded = storage.load_run("no-fs-001")
+        assert loaded is not None
+        assert loaded.financial_scoring is None
+
     def test_save_and_load_with_platform_metrics(self, tmp_path):
         storage = MetricsStorage(tmp_path / "metrics")
         now = datetime.now()
@@ -978,7 +1335,7 @@ class TestSustainedReport:
                 compute_efficiency_gb_per_core_hour=0.42,
                 total_rows_processed=23_400_000,
                 total_elapsed_seconds=1800.0,
-                query_time_freshness_seconds=22.0,
+                query_time_event_age_seconds=22.0,
             ),
             config_snapshot={
                 "name": "cont-deploy",
@@ -1180,6 +1537,111 @@ class TestStreamingLogParsing:
         assert metrics.job_type == "silver-stream"
         assert metrics.total_batches == 2
         assert metrics.total_rows_processed == 350_000
+
+    def test_parse_streaming_logs_captures_per_batch_silver_labels(self):
+        """D-full-simple + E1 + I7 labels emitted per micro-batch land in
+        StreamingJobMetrics.extra_metrics. Live validation on
+        lb-silver-live-v16c showed these labels in driver logs but the
+        narrow silver_stream_scale_(cap|admission) regex would have
+        dropped them, so metrics.json would ship without the per-batch
+        parity_mode / dim_merge_elapsed / kyc_refresh evidence."""
+        c = MetricsCollector()
+        logs = """
+[lb] 2026-09-28T15:54:53.883921 - silver_stream_scale_cap: measured_up_to_scale_10
+[lb] 2026-09-28T15:54:53.883921 - silver_stream_scale_admission: ok
+[lb] 2026-09-28T15:55:13.041566 - [batch 0] 189335 txns
+[lb] 2026-09-28T15:56:14.522310 - silver_statements_parity_mode: strict_monotone
+[lb] 2026-09-28T15:56:14.522514 - silver_statements_late_arrivals_this_batch: 0
+[lb] 2026-09-28T15:56:14.522514 - silver_statements_batch_id: 0
+[lb] 2026-09-28T15:55:53.790921 - dim_merge_elapsed_ms_entities: 12345
+[lb] 2026-09-28T15:55:53.790921 - dim_merge_elapsed_ms_accounts: 6789
+[lb] 2026-09-28T15:55:25.028644 - kyc_refreshed_at: 1717029325
+[lb] 2026-09-28T15:55:25.028644 - kyc_refresh_kind: initial
+"""
+        metrics = c.parse_streaming_logs(logs, "silver-stream")
+        e = metrics.extra_metrics
+        assert e.get("silver_stream_scale_cap") == "measured_up_to_scale_10"
+        assert e.get("silver_stream_scale_admission") == "ok"
+        assert e.get("silver_statements_parity_mode") == "strict_monotone"
+        assert e.get("silver_statements_late_arrivals_this_batch") == "0"
+        assert e.get("silver_statements_batch_id") == "0"
+        assert e.get("dim_merge_elapsed_ms_entities") == "12345"
+        assert e.get("dim_merge_elapsed_ms_accounts") == "6789"
+        assert e.get("kyc_refreshed_at") == "1717029325"
+        assert e.get("kyc_refresh_kind") == "initial"
+
+    def test_parse_streaming_logs_captures_new_labels_under_accepted_prefixes(self):
+        """Class-level guarantee: any new label under an accepted prefix
+        family (silver_/dim_merge_/kyc_/data_clock_) is picked up without
+        editing the regex. Two live-caught omissions in silver-plan r3
+        (silver_tables adapter + narrow streaming regex) were both the
+        same shape: a hand-enumerated list drifting behind the code that
+        emits into it. A hypothetical future label with any of these
+        prefixes must land in extra_metrics with no code change here."""
+        c = MetricsCollector()
+        logs = """
+[lb] 2026-09-28T15:00:00.000000 - silver_frobnicate_rows: 42
+[lb] 2026-09-28T15:00:00.000000 - silver_stream_backpressure_ms: 137
+[lb] 2026-09-28T15:00:00.000000 - dim_merge_conflicts: 3
+[lb] 2026-09-28T15:00:00.000000 - kyc_pending_refreshes: 11
+[lb] 2026-09-28T15:00:00.000000 - data_clock_skew_ms: -250
+26/09/28 15:00:00 INFO SparkContext: unrelated_something: should_not_match
+"""
+        metrics = c.parse_streaming_logs(logs, "silver-stream")
+        e = metrics.extra_metrics
+        assert e.get("silver_frobnicate_rows") == "42"
+        assert e.get("silver_stream_backpressure_ms") == "137"
+        assert e.get("dim_merge_conflicts") == "3"
+        assert e.get("kyc_pending_refreshes") == "11"
+        assert e.get("data_clock_skew_ms") == "-250"
+        # Spark's own log lines never match; they carry the timestamp
+        # prefix before any word, so the anchored regex ignores them.
+        assert "unrelated_something" not in e
+
+    def test_parse_streaming_logs_rejects_multi_label_per_line(self):
+        """Reviewer-caught (2026-09-28): pre-fix, greedy `\\S.*` value
+        pattern silently swallowed the second label on lines like
+        `silver_statements_parity_mode: X silver_statements_late_arrivals_this_batch: Y`.
+        The four emitter sites in silver_stream_financial.py have been
+        split to one-per-line, and the regex value pattern (single token,
+        `\\S+\\s*$`) refuses to swallow. A multi-label line now matches
+        the regex NOT AT ALL -- so both labels are dropped, but LOUDLY:
+        the user notices the intended metric is missing rather than
+        seeing a garbage value they might trust. Loud loss is better
+        than silent corruption.
+        """
+        c = MetricsCollector()
+        logs = (
+            "[lb] 2026-09-28T15:00:00 - silver_statements_parity_mode: "
+            "strict_monotone silver_statements_late_arrivals_this_batch: 0\n"
+        )
+        metrics = c.parse_streaming_logs(logs, "silver-stream")
+        e = metrics.extra_metrics
+        # The whole line is refused: neither label lands. That is the
+        # loud failure mode; a regression in the emitter now shows up
+        # as a missing metric rather than a garbage-valued metric.
+        assert "silver_statements_parity_mode" not in e
+        assert "silver_statements_late_arrivals_this_batch" not in e
+
+    def test_parse_streaming_logs_rejects_uppercase_and_hyphen_keys(self):
+        """Design choice locked in (2026-09-28 adversarial-review):
+        key tail is lowercase snake_case ([a-z0-9_]+). An emitter that
+        used `silver_TxScale` or `dim_merge_ok-count` would fail the
+        prefix-family match and never land, by design -- lane-specific
+        typos should not become metric names. This test documents that
+        so the rejection is intentional, not accidental."""
+        c = MetricsCollector()
+        logs = (
+            "[lb] 2026-09-28T15:00:00 - silver_TxScale: 5\n"
+            "[lb] 2026-09-28T15:00:00 - dim_merge_ok-count: 3\n"
+            "[lb] 2026-09-28T15:00:00 - silver_valid_lowercase: 7\n"
+        )
+        metrics = c.parse_streaming_logs(logs, "silver-stream")
+        e = metrics.extra_metrics
+        assert "silver_TxScale" not in e
+        assert "dim_merge_ok-count" not in e
+        # Only the strictly-lowercase key is captured.
+        assert e.get("silver_valid_lowercase") == "7"
 
     def test_parse_streaming_logs_gold(self):
         c = MetricsCollector()
@@ -1518,6 +1980,110 @@ class TestDriverLogParsingWithLbPrefix:
         assert metrics.elapsed_seconds == pytest.approx(22.5)
 
 
+class TestDetectionRulesMetrics:
+    """LB-116: per-rule AML alert counts surfaced from the driver log
+    into JobMetrics.alerts_by_rule / rule_errors so a metrics parser
+    sees one row per rule attempted, not a single total."""
+
+    def test_parse_success_rules(self):
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
+[lb] 2026-09-22T10:00:16 - [detection] W3_round_tripping: alerts=42 prior=42 elapsed=8.9s
+[lb] 2026-09-22T10:00:25 - [detection] W1_connected_components: alerts=17 prior=17 elapsed=120.4s
+[lb] 2026-09-22T10:02:26 - [detection] total alerts written: 1293
+"""
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == {
+            "W2_structuring": 1234,
+            "W3_round_tripping": 42,
+            "W1_connected_components": 17,
+        }
+        assert metrics.rule_errors == {}
+
+    def test_parse_crashed_rule(self):
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
+[lb] 2026-09-22T10:00:16 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: silver.entities not found elapsed=0.4s
+"""
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule["W2_structuring"] == 1234
+        assert metrics.alerts_by_rule["W7_cross_border_high_risk"] == 0
+        assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
+        assert "silver.entities not found" in metrics.rule_errors["W7_cross_border_high_risk"]
+
+    def test_c360_gold_finalize_has_empty_rule_metrics(self):
+        """c360 gold-finalize emits no [detection] lines; the fields
+        default to empty dicts, not None."""
+        c = MetricsCollector()
+        logs = "[lb] 2026-09-22T10:00:00 - ordinary gold-finalize output"
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == {}
+        assert metrics.rule_errors == {}
+        assert metrics.rules_skipped == {}
+
+    def test_parse_skipped_rule_is_third_state(self):
+        """LB-119: a structural skip (W1 above vertex cap) is recorded in
+        rules_skipped and kept OUT of alerts_by_rule, so a skip is never
+        read as a 0-alert / 0-recall result. The other rules on the same
+        run still parse normally."""
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
+[lb] 2026-09-22T10:00:16 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=50000000 max=8000000 (raise financial.w1_max_vertices to run W1 at this scale) elapsed=0.6s
+[lb] 2026-09-22T10:00:20 - [detection] total alerts written: 1234
+"""
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == {"W2_structuring": 1234}
+        assert "W1_connected_components" not in metrics.alerts_by_rule
+        assert metrics.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        assert metrics.rule_errors == {}
+
+    def test_skip_and_error_and_success_coexist(self):
+        """All three detection outcomes on one run parse into their own
+        maps without cross-contamination."""
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=10 prior=0 elapsed=1.0s
+[lb] 2026-09-22T10:00:01 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=9000000 max=8000000 elapsed=0.2s
+[lb] 2026-09-22T10:00:02 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: boom elapsed=0.4s
+"""
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == {"W2_structuring": 10, "W7_cross_border_high_risk": 0}
+        assert metrics.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
+
+    def test_alerts_by_rule_serialised_in_to_dict(self):
+        c = MetricsCollector()
+        logs = (
+            "[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=42 prior=0 elapsed=1.0s"
+        )
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        d = metrics.to_dict()
+        assert d["alerts_by_rule"] == {"W2_structuring": 42}
+        assert d["rule_errors"] == {}
+
+    def test_error_message_containing_elapsed_or_prior_not_truncated(self):
+        """Adversarial-review finding (silent corruption): a non-greedy
+        error slurp that stopped at the first ``prior=`` or ``elapsed=``
+        substring inside the error message would silently truncate the
+        recorded error. Anchor on trailing ``elapsed=Ns`` (the guaranteed
+        last token) instead."""
+        c = MetricsCollector()
+        logs = (
+            "[lb] 2026-09-22T10:00:00 - [detection] W7_cross_border_high_risk: alerts=0 "
+            "error=RuntimeError: expected prior=42 rows and elapsed=0.1s per shard elapsed=0.9s\n"
+        )
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule["W7_cross_border_high_risk"] == 0
+        recorded = metrics.rule_errors["W7_cross_border_high_risk"]
+        # The inline exception text must survive; only the trailing
+        # ``elapsed=0.9s`` terminator is stripped.
+        assert "expected prior=42 rows" in recorded
+        assert "elapsed=0.1s per shard" in recorded
+
+
 # ---------------------------------------------------------------------------
 # Phase 1+2: Streaming timing and freshness parsing
 # ---------------------------------------------------------------------------
@@ -1576,14 +2142,14 @@ class TestStreamingTimingAndFreshness:
         assert metrics.micro_batch_duration_ms == pytest.approx(10850.0, abs=1.0)
 
     def test_no_freshness_when_absent(self):
-        """Freshness stays 0 when no freshness lines present."""
+        """Freshness is absent (None), not 0, when no freshness line is present."""
         c = MetricsCollector()
         logs = """\
 [lb] 2026-02-01T12:00:01.000Z - Cycle 1: aggregating 150,000 Silver records
 [lb] 2026-02-01T12:00:08.000Z - Cycle 1: refreshed ice.gold.dashboard in 8.2s (30 KPI records)
 """
         metrics = c.parse_streaming_logs(logs, "gold-refresh")
-        assert metrics.freshness_seconds == 0.0
+        assert metrics.freshness_seconds is None
 
 
 # ---------------------------------------------------------------------------
@@ -1642,7 +2208,8 @@ class TestBuildConfigSnapshot:
         assert "spark" in snapshot["images"]
         assert snapshot["trino"]["worker"]["replicas"] == 2  # default
         assert snapshot["sustained"]["run_duration"] == 1800  # default
-        assert snapshot["sustained"]["max_files_per_trigger"] == 50  # default
+        # Default is auto: the snapshot records the value a run would use.
+        assert snapshot["sustained"]["max_files_per_trigger"] >= 1
         assert snapshot["sustained"]["bronze_target_file_size_mb"] == 512
         assert snapshot["sustained"]["silver_target_file_size_mb"] == 512
         assert snapshot["sustained"]["gold_target_file_size_mb"] == 128
@@ -2471,6 +3038,66 @@ class TestBuildPipelineBenchmark:
 
         assert pb.stages[0].stage_name != "datagen"
 
+    def test_empty_fleet_dict_does_not_append_zero_stage(self):
+        """A fleet with pods_reported=0 (all pods failed to emit) is still
+        a truthy dict; the datagen stage must NOT be appended, otherwise
+        core-hour aggregation double-counts a zero-length stage."""
+        run = self._make_run()
+        empty_fleet = {
+            "schema": "customer360",
+            "pods_expected": 8,
+            "pods_reported": 0,
+            "pods_missing": 8,
+            "data_quality": "empty",
+            "total_bytes_written": 0,
+            "total_files_written": 0,
+            "total_rows_written": 0,
+            "aggregate_mbps": 0.0,
+            "wall_elapsed_max_s": 0.0,
+            "wall_elapsed_min_s": 0.0,
+            "cores_total": 0.0,
+            "cpu_seconds_total": 0.0,
+            "cpu_hr_per_tb": None,
+            "phase_pct": {"build_batch": 0, "encode_parquet": 0, "s3_put": 0},
+            "phase_p50_s": {"build_batch": 0, "encode_parquet": 0, "s3_put": 0},
+            "phase_p95_s": {"build_batch": 0, "encode_parquet": 0, "s3_put": 0},
+            "worst_pod_elapsed_s": 0.0,
+            "best_pod_elapsed_s": 0.0,
+            "per_pod": [],
+        }
+        pb = build_pipeline_benchmark(run, datagen_elapsed=0.0, datagen_fleet=empty_fleet)
+        stage_names = [s.stage_name for s in pb.stages]
+        assert "datagen" not in stage_names
+
+    def test_fleet_enriches_datagen_stage_with_executors(self):
+        run = self._make_run()
+        fleet = {
+            "schema": "customer360",
+            "pods_expected": 4,
+            "pods_reported": 4,
+            "pods_missing": 0,
+            "data_quality": "complete",
+            "total_bytes_written": 100_000_000_000,
+            "total_files_written": 200,
+            "total_rows_written": 40_000_000,
+            "aggregate_mbps": 833.0,
+            "wall_elapsed_max_s": 120.0,
+            "wall_elapsed_min_s": 118.0,
+            "cores_total": 32.0,  # 4 pods * 8 cores
+            "cpu_seconds_total": 3840.0,
+            "cpu_hr_per_tb": 10.66,
+            "phase_pct": {"build_batch": 55, "encode_parquet": 40, "s3_put": 5},
+            "phase_p50_s": {"build_batch": 200, "encode_parquet": 150, "s3_put": 15},
+            "phase_p95_s": {"build_batch": 220, "encode_parquet": 165, "s3_put": 20},
+            "worst_pod_elapsed_s": 120.0,
+            "best_pod_elapsed_s": 118.0,
+            "per_pod": [],
+        }
+        pb = build_pipeline_benchmark(run, datagen_elapsed=120.0, datagen_fleet=fleet)
+        dg = next(s for s in pb.stages if s.stage_name == "datagen")
+        assert dg.executor_count == 4
+        assert dg.executor_cores == 8  # 32 / 4
+
     def test_pipeline_mode_detection(self):
         run = self._make_run()
         pb = build_pipeline_benchmark(run)
@@ -3176,7 +3803,7 @@ class TestBenchmarkRoundMeta:
         meta = BenchmarkRoundMeta(round_index=1)
         assert meta.round_index == 1
         assert meta.timestamp is None
-        assert meta.gold_freshness_seconds == 0.0
+        assert meta.gold_event_age_seconds is None  # unmeasured, not 0
         assert meta.q9_contention_observed is False
         assert meta.q9_retry_used is False
 
@@ -3185,14 +3812,14 @@ class TestBenchmarkRoundMeta:
         meta = BenchmarkRoundMeta(
             round_index=3,
             timestamp=now,
-            gold_freshness_seconds=42.5,
+            gold_event_age_seconds=42.5,
             q9_contention_observed=True,
             q9_retry_used=True,
         )
         d = meta.to_dict()
         assert d["round_index"] == 3
         assert d["timestamp"] == now.isoformat()
-        assert d["gold_freshness_seconds"] == 42.5
+        assert d["gold_event_age_seconds"] == 42.5
         assert d["q9_contention_observed"] is True
         assert d["q9_retry_used"] is True
 
@@ -3224,7 +3851,7 @@ class TestBenchmarkMetricsRoundMeta:
         meta = BenchmarkRoundMeta(
             round_index=2,
             timestamp=now,
-            gold_freshness_seconds=38.0,
+            gold_event_age_seconds=38.0,
         )
         bm = BenchmarkMetrics(
             mode="power",
@@ -3237,7 +3864,7 @@ class TestBenchmarkMetricsRoundMeta:
         d = bm.to_dict()
         assert "round_meta" in d
         assert d["round_meta"]["round_index"] == 2
-        assert d["round_meta"]["gold_freshness_seconds"] == 38.0
+        assert d["round_meta"]["gold_event_age_seconds"] == 38.0
 
 
 # ---------------------------------------------------------------------------
@@ -3260,7 +3887,7 @@ class TestAggregateBenchmarkRounds:
         meta = BenchmarkRoundMeta(
             round_index=round_index,
             timestamp=datetime.now(),
-            gold_freshness_seconds=freshness,
+            gold_event_age_seconds=freshness,
         )
         return BenchmarkMetrics(
             mode="power",
@@ -3427,7 +4054,7 @@ class TestRecordBenchmarkRound:
 
 
 # ---------------------------------------------------------------------------
-# PipelineBenchmark with benchmark_rounds and query_time_freshness
+# PipelineBenchmark with benchmark_rounds and query_time_event_age
 # ---------------------------------------------------------------------------
 
 
@@ -3441,7 +4068,7 @@ class TestPipelineBenchmarkRounds:
             meta = BenchmarkRoundMeta(
                 round_index=i + 1,
                 timestamp=now + timedelta(seconds=300 * (i + 1)),
-                gold_freshness_seconds=30.0 + i * 10,  # 30, 40, 50
+                gold_event_age_seconds=30.0 + i * 10,  # 30, 40, 50
             )
             rounds.append(
                 BenchmarkMetrics(
@@ -3500,11 +4127,11 @@ class TestPipelineBenchmarkRounds:
         pb = build_pipeline_benchmark(run)
         assert len(pb.benchmark_rounds) == 3
 
-    def test_query_time_freshness_computed(self):
+    def test_query_time_event_age_computed(self):
         run = self._make_streaming_run_with_rounds()
         pb = build_pipeline_benchmark(run)
         # Freshness values: 30, 40, 50 -- median = 40
-        assert pb.query_time_freshness_seconds == pytest.approx(40.0)
+        assert pb.query_time_event_age_seconds == pytest.approx(40.0)
 
     def test_scores_dict_with_rounds(self):
         run = self._make_streaming_run_with_rounds()
@@ -3517,7 +4144,7 @@ class TestPipelineBenchmarkRounds:
         assert scores["in_stream_composite_qph"] == 225.0
         assert "post_stream_qph" not in scores
         assert scores["benchmark_rounds_count"] == 3
-        assert scores["query_time_freshness_seconds"] == pytest.approx(40.0)
+        assert scores["query_time_event_age_seconds"] == pytest.approx(40.0)
 
     def test_to_dict_includes_rounds(self):
         run = self._make_streaming_run_with_rounds()
@@ -3870,10 +4497,10 @@ class TestBenchmarkRoundMetaTableHealth:
 
     def test_health_defaults(self):
         meta = BenchmarkRoundMeta(round_index=1)
-        assert meta.silver_data_file_count == 0
-        assert meta.silver_snapshot_count == 0
-        assert meta.gold_data_file_count == 0
-        assert meta.gold_snapshot_count == 0
+        assert meta.silver_data_file_count is None
+        assert meta.silver_snapshot_count is None
+        assert meta.gold_data_file_count is None
+        assert meta.gold_snapshot_count is None
 
     def test_health_to_dict(self):
         meta = BenchmarkRoundMeta(

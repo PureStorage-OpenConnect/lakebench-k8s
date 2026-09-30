@@ -1,0 +1,64 @@
+# Manual datagen Job for local characterisation runs.
+# Requires the `lakebench-s3-credentials` Secret in the target namespace
+# (created by `lakebench deploy`), or create it by hand:
+#   kubectl -n <ns> create secret generic lakebench-s3-credentials \
+#     --from-literal=accessKey=... --from-literal=secretKey=...
+# Without it the pod sits in CreateContainerConfigError, which does not
+# count against backoffLimit; activeDeadlineSeconds bounds that.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: datagen-rs-s1
+  namespace: fraud-aml-uat
+spec:
+  completionMode: Indexed
+  completions: 4
+  parallelism: 4
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: datagen-rs
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: generate
+          image: docker.io/sillidata/lb-datagen-rs:latest
+          imagePullPolicy: Always
+          args:
+            - "--schema"
+            - "financial"
+            - "--seed"
+            - "43"
+            - "--scale"
+            - "1"
+            - "--total-nodes"
+            - "4"
+            - "--bucket"
+            - "fraud-aml-uat-bronze"
+            - "--prefix"
+            - "datagen-v2-rs-s1"
+          env:
+            - name: S3_ENDPOINT
+              value: "http://10.0.1.50:80"
+            - name: AWS_REGION
+              value: "us-east-1"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: secretKey
+          resources:
+            requests:
+              cpu: "8"
+              memory: "4Gi"
+            limits:
+              cpu: "16"
+              memory: "8Gi"

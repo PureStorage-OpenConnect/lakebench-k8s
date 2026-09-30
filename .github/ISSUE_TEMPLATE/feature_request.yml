@@ -1,0 +1,19 @@
+name: Feature request
+description: A recipe component, workload, measurement or command lakebench does not have yet.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to measure or do
+      description: The question you want lakebench to answer, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead

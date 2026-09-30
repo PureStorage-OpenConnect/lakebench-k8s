@@ -2,7 +2,7 @@
 
 ## Overview
 
-PostgreSQL serves as the relational metadata backend for Lakebench. Both Hive Metastore and Apache Polaris persist their catalog metadata (table definitions, partition info, Iceberg snapshots) in PostgreSQL. Lakebench deploys PostgreSQL as a Kubernetes StatefulSet with a PersistentVolumeClaim for durable storage, ensuring metadata survives pod restarts and node failures.
+PostgreSQL serves as the relational metadata backend for Lakebench. Hive Metastore, Apache Polaris and Unity Catalog persist their catalog metadata (table definitions, partition info, Iceberg snapshots) in PostgreSQL. Lakebench deploys PostgreSQL as a Kubernetes StatefulSet with a PersistentVolumeClaim for durable storage, ensuring metadata survives pod restarts and node failures.
 
 The deployer (`src/lakebench/deploy/postgres.py`) renders three Kubernetes manifests from Jinja2 templates -- a ServiceAccount, a StatefulSet, and a headless Service -- then waits for the pod to pass `pg_isready` health checks before returning.
 
@@ -41,19 +41,19 @@ The StorageClass you choose for PostgreSQL directly affects metadata durability:
 
 Lakebench deploys infrastructure in a fixed sequence defined in the deployment engine (`src/lakebench/deploy/engine.py`):
 
-1. Namespace, Secrets
-2. Scratch StorageClass
+1. Namespace, Secrets, S3 buckets
+2. Scratch StorageClass check (verify only; a cluster admin installs it with `lakebench admin install-scratch-storage-class`)
 3. **PostgreSQL** (StatefulSet + Service)
-4. Catalog service (Hive Metastore or Polaris)
-5. Query engine (Trino)
-6. Spark RBAC
-7. Monitoring stack (if enabled)
+4. Catalog service (Hive Metastore or Polaris), then Spark RBAC, then Unity Catalog when that is the catalog
+5. Spark Operator check and watch-list entry
+6. Query engine (Trino, Spark Thrift Server or DuckDB)
+7. Observability stack (if enabled)
 
-PostgreSQL is deployed third, immediately after namespace setup and scratch StorageClass creation, because both Hive Metastore and Polaris depend on a running PostgreSQL instance before they can start. The deployer waits for two readiness signals before proceeding: the StatefulSet reports all replicas ready, and a `pg_isready` probe against the `hive` database on pod `lakebench-postgres-0` succeeds.
+PostgreSQL is deployed after namespace, secret and bucket setup and the scratch StorageClass check, because every catalog service depends on a running PostgreSQL instance before they can start. The deployer waits for two readiness signals before proceeding: the StatefulSet reports all replicas ready, and a `pg_isready` probe against the `hive` database on pod `lakebench-postgres-0` succeeds.
 
 ## Credentials
 
-PostgreSQL credentials are auto-generated during deployment and stored in a Kubernetes Secret in the target namespace. Downstream components (Hive, Polaris) receive the JDBC connection string via template rendering. The default database name is `hive` and the default user is `hive`. The internal service DNS name follows the pattern:
+PostgreSQL credentials are not generated per deployment: the `lakebench-postgres-secret` Secret in the target namespace is rendered from fixed template defaults (user `hive`, database `hive`, and a fixed password) and none of them is configurable. Downstream components (Hive, Polaris, Unity) receive the JDBC connection string via template rendering; Polaris and Unity use their own `polaris` and `unity` databases on the same instance. The internal service DNS name follows the pattern:
 
 ```
 lakebench-postgres.<namespace>.svc.cluster.local:5432
@@ -61,7 +61,7 @@ lakebench-postgres.<namespace>.svc.cluster.local:5432
 
 ## Teardown
 
-During `lakebench destroy`, PostgreSQL is torn down in reverse deployment order -- after the catalog service and query engine have been removed, but before the namespace itself is deleted. The PVC is deleted along with the StatefulSet, so all metadata is permanently removed.
+During `lakebench destroy`, PostgreSQL is torn down in reverse deployment order -- after the catalog service and query engine have been removed, but before the namespace itself is deleted. The StatefulSet and Service are deleted by name, but the data PVC (`data-lakebench-postgres-0`, from the volumeClaimTemplate) does not carry the `app.kubernetes.io/component=postgres` label that the PVC cleanup selects on, so it is removed only when the namespace is deleted. With `platform.kubernetes.create_namespace: false` the namespace is kept and the PVC, with its catalog metadata, survives into the next deploy.
 
 ## See Also
 

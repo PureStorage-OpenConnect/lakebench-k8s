@@ -6,7 +6,7 @@ Iceberg's DataFrameWriterV2.
 
 Automatically selects the optimal processing strategy based on data size:
 - SIMPLE: < 100GB, standard processing
-- STREAMING: >= 100GB, direct write, no shuffle (column transforms only)
+- STREAMING: >= 100GB, single pass, rows clustered by day before the write
 - SALTED: High skew (>100x) on small datasets, salt hot keys
 """
 
@@ -18,24 +18,30 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from common import apply_silver_transformations, env, log, write_delta_table
-from delta.tables import DeltaTable
+from common import (
+    SilverAbort,
+    apply_silver_transformations_anchored,
+    assert_progress,
+    c360_bronze_path,
+    cluster_by_partition,
+    delta_batch_txn_options,
+    env,
+    files_added_by_last_commit,
+    log,
+    path_size_gb_strict,
+    resolve_data_clock,
+    sample_key_profile,
+    set_utc_session,
+    table_exists,
+    write_delta_table,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    approx_count_distinct,
-    avg,
     col,
-    concat_ws,
-    floor,
-    lit,
-    rand,
     to_date,
-    udf,
-    when,
 )
 from pyspark.sql.functions import max as max_
 from pyspark.sql.functions import min as min_
-from pyspark.sql.types import BooleanType
 
 # ============================================================
 # STRATEGY FRAMEWORK
@@ -46,7 +52,7 @@ class SilverStrategy(Enum):
     """Transform strategy for silver layer, selected based on data profile."""
 
     SIMPLE = "simple"
-    STREAMING = "streaming"  # Was BROADCAST - no shuffle, direct write
+    STREAMING = "streaming"  # Was BROADCAST - single pass, no intermediate counts
     SALTED = "salted"
 
 
@@ -65,38 +71,32 @@ class DataProfile:
     hot_keys: list[str] | None = field(default=None)
 
 
+# Rows actually counted during the build (the profile only estimates them).
+_COUNTED: dict[str, int] = {}
+
+
 def get_path_size_gb(spark, path: str) -> float:
-    """Get size of a path in GB using Hadoop FileSystem API."""
-    try:
-        sc = spark.sparkContext
-        hadoop_conf = sc._jsc.hadoopConfiguration()
-        uri = sc._jvm.java.net.URI(path)
-        fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(uri, hadoop_conf)
-        hadoop_path = sc._jvm.org.apache.hadoop.fs.Path(path)
+    """Size of a path or glob in GB (common.path_size_gb_strict).
 
-        if fs.exists(hadoop_path):
-            status = fs.getContentSummary(hadoop_path)
-            return status.getLength() / (1024**3)
-        return 0.0
-    except Exception as e:
-        log(f"Warning: Could not get path size for {path}: {e}")
-        return 0.0
+    A6 (silver-plan): the strict variant re-raises listing errors so an S3
+    outage cannot silently look like an empty bronze path.
+    """
+    return path_size_gb_strict(spark, path)
 
 
-def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
+def profile_bronze_data(spark, txn_path: str) -> DataProfile:
     """Lightweight profiling - no shuffles, no full scans, uses filesystem metadata.
 
     This replaces the expensive profiling that caused OOM at 1TB+ scale.
     Key changes:
     - Use filesystem API for size (no Spark scan)
     - Estimate row count from size (no count())
-    - Use approx_count_distinct on sample (no distinct().count() shuffle)
+    - Estimate distinct customers from the sample's frequency profile (Chao1)
     - Single aggregation pass on sample for all stats
     """
     log("Profiling Bronze data (lightweight)...")
 
-    txn_path = bronze_path + "customer/interactions/"
-
+    # txn_path: the files this build reads (common.c360_bronze_path).
     # 1. Get size from filesystem (no Spark scan)
     txn_size_gb = get_path_size_gb(spark, txn_path)
     log(f"  Size from filesystem: {txn_size_gb:.1f} GB")
@@ -104,25 +104,31 @@ def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
     # 2. Read schema only - lazy, no data scan
     transactions = spark.read.parquet(txn_path)
 
-    # 3. Estimate row count from size (avoid full count)
-    # ~4KB per row based on schema analysis of customer/interactions data
-    estimated_row_count = int(txn_size_gb * 1024 * 1024 * 1024 / 4096)
-    log(f"  Estimated rows: {estimated_row_count:,}")
+    # 3. Sample sizing needs an approximate row count; see silver_build.py
+    # for the A5 rationale for dropping the published `estimated_rows`.
+    sample_estimate = int(txn_size_gb * 250_000)
 
-    # 4. Use approx_count_distinct on SAMPLE (no shuffle, no full scan)
-    # Sample fraction: 0.1% or enough for 10M rows, whichever is smaller
-    sample_fraction = min(0.001, 10_000_000 / max(estimated_row_count, 1))
-    sample_df = transactions.sample(sample_fraction)
+    # 4. Sample: 0.1% or enough for 10M rows, whichever is smaller
+    sample_fraction = min(0.001, 10_000_000 / max(sample_estimate, 1))
+    # G3: seed the sampler so re-runs at the same LB_SEED produce identical
+    # profile numbers. LB_SEED is exported by job.py:_build_env_vars alongside
+    # LB_DATA_CLOCK; the default of 0 keeps the historical behaviour when the
+    # env var is not set.
+    sample_seed = int(os.getenv("LB_SEED", "0"))
+    sample_df = transactions.sample(sample_fraction, seed=sample_seed)
 
-    # Single aggregation pass for all stats
     sample_stats = sample_df.agg(
-        approx_count_distinct("customer_id").alias("approx_customers"),
         min_(to_date(col("event_timestamp"))).alias("min_date"),
         max_(to_date(col("event_timestamp"))).alias("max_date"),
     ).collect()[0]
 
-    # Scale up approximate customer count
-    approx_customer_count = int(sample_stats.approx_customers / sample_fraction)
+    # Customers and skew from the sample's per-customer counts. The distinct
+    # count is not scaled by 1 / sample_fraction: that treated every sampled
+    # customer as unique to the sample and reported 14.7M customers at
+    # scale 10, where there are 1M (LB-144).
+    approx_customer_count, skew_factor = sample_key_profile(
+        sample_df, "customer_id", sample_estimate
+    )
     min_date = sample_stats.min_date
     max_date = sample_stats.max_date
     date_range_days = (max_date - min_date).days if min_date and max_date else 1
@@ -130,21 +136,11 @@ def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
     log(f"  Approx customers: {approx_customer_count:,}")
     log(f"  Date range: {min_date} to {max_date} ({date_range_days} days)")
 
-    # 5. Skew detection from sample (small local shuffle, not full data)
-    key_stats = (
-        sample_df.groupBy("customer_id")
-        .count()
-        .agg(max_("count").alias("max_count"), avg("count").alias("avg_count"))
-        .collect()[0]
-    )
-    max_count = key_stats.max_count or 1
-    avg_count = key_stats.avg_count or 1
-    skew_factor = max_count / max(avg_count, 1)
     log(f"  Skew factor: {skew_factor:.1f}")
 
     profile = DataProfile(
         total_size_gb=txn_size_gb,
-        transaction_count=estimated_row_count,  # Estimated, not counted
+        transaction_count=0,  # A5: no longer estimated; bronze_rows is counted downstream.
         customer_count=approx_customer_count,
         customers_size_gb=0.0,
         skew_factor=skew_factor,
@@ -159,12 +155,20 @@ def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
 
 
 def get_strategy_override(spark) -> SilverStrategy | None:
-    """Check for user-specified strategy override."""
+    """Check for user-specified strategy override.
+
+    G1: SALTED is deferred to v1.7 (see plan Block J). Accepting it silently
+    dispatched to SIMPLE while metrics claimed `Strategy: salted`, violating
+    invariant 5 (published evidence identifies what produced it). Refuse
+    at parse time before any log line names the strategy.
+    """
     override = spark.conf.get("spark.lb.silver.strategy", None)
     if override is None:
         override = os.environ.get("LB_SILVER_STRATEGY", None)
 
     if override and override.lower() != "auto":
+        if override.lower() == SilverStrategy.SALTED.value:
+            raise SilverAbort("SALTED strategy is deferred to v1.7; see plan Block J")
         try:
             return SilverStrategy(override.lower())
         except ValueError:
@@ -194,17 +198,14 @@ def select_silver_strategy(profile: DataProfile) -> SilverStrategy:
     These are skew-agnostic -- each row is processed independently regardless
     of its customer_id distribution.
 
-    SALTED is only used for SIMPLE-range datasets (<100GB) with extreme skew,
-    where the count() and hash distribution write could be affected.
+    SALTED is never auto-selected (retired, see the dispatch below). It was
+    picked for any small dataset with skew over 100x, which the Zipf
+    customer distribution always has.
     """
-    # STREAMING for all datasets >= 100 GB -- single pass, no shuffle.
-    # Column transforms are row-independent; Delta handles file layout.
+    # STREAMING for all datasets >= 100 GB -- single pass, one shuffle to
+    # cluster rows by day before the write (cluster_silver).
     if profile.total_size_gb >= 100:
         return SilverStrategy.STREAMING
-
-    # Small datasets: check skew for SALTED vs SIMPLE
-    if profile.skew_factor > 100:
-        return SilverStrategy.SALTED
 
     return SilverStrategy.SIMPLE
 
@@ -258,8 +259,8 @@ def apply_dynamic_config(spark, profile: DataProfile):
 # ============================================================
 # TRANSFORMATION LOGIC
 # ============================================================
-# apply_silver_transformations() is imported from common.py
-# (shared between batch silver_build.py and streaming silver_stream.py)
+# apply_silver_transformations_anchored() is imported from common.py
+# (shared between batch silver_build.py and continuous silver_stream.py)
 
 # ============================================================
 # STRATEGY IMPLEMENTATIONS
@@ -267,17 +268,8 @@ def apply_dynamic_config(spark, profile: DataProfile):
 
 
 def _table_exists(spark, table_name: str) -> bool:
-    """Check if a Delta table exists."""
-    try:
-        return DeltaTable.isDeltaTable(spark, table_name)
-    except Exception:
-        # isDeltaTable may not work with catalog-qualified names;
-        # fall back to trying to read the table
-        try:
-            spark.table(table_name)
-            return True
-        except Exception:
-            return False
+    """Check if a catalog table exists (see common.table_exists)."""
+    return table_exists(spark, table_name)
 
 
 def _delta_write_props() -> dict[str, str]:
@@ -288,22 +280,75 @@ def _delta_write_props() -> dict[str, str]:
     }
 
 
-def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
-    """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
+def rows_added_by_last_commit(spark, silver_tbl):
+    """Rows the table's latest Delta commit wrote (this cycle's write).
+
+    Commit metadata only; returns None when the metric is missing.
+
+    A4 (silver-plan): the previous fallback ``spark.table(silver_tbl).count()``
+    returned the cumulative table row count, which masked a zero-write cycle
+    in incremental mode (LB-044 class). Callers now treat None as "unknown"
+    and refuse to publish it as ``output_rows``.
+    """
+    try:
+        r = spark.sql(f"DESCRIBE HISTORY {silver_tbl} LIMIT 1").collect()
+        n = (r[0]["operationMetrics"] or {}).get("numOutputRows") if r else None
+        if n is not None:
+            return int(n)
+    except Exception as e:  # noqa: BLE001
+        log(f"Warning: commit metrics unavailable ({e}); output_rows will be unknown")
+    return None
+
+
+def cluster_silver(spark, silver_df):
+    """Cluster silver rows by interaction_date before the Delta write.
+
+    Without it every write task put a file into almost every day's partition
+    (tasks x days files). spark.lb.silver.distribution_mode=none skips it,
+    matching the Iceberg silver override.
+    """
+    dist_mode = spark.conf.get("spark.lb.silver.distribution_mode", "hash")
+    log(f"Silver write distribution: {dist_mode} (clustered by interaction_date unless none)")
+    return cluster_by_partition(spark, silver_df, ["interaction_date"], dist_mode)
+
+
+def log_silver_files(spark, silver_tbl):
+    """Log how many data files this build's commit wrote."""
+    n = files_added_by_last_commit(spark, silver_tbl)
+    if n is not None:
+        log(f"Silver data files written by this commit: {n:,}")
+
+
+def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0, rebuild_epoch=0):
+    """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB.
+
+    B1: every append carries a (txnAppId, txnVersion) via
+    ``delta_batch_txn_options`` so Delta short-circuits a re-submission of
+    the same (rebuild_epoch, cycle) at the transaction log. The full
+    rebuild (cycle 0, non-append) does not use it: overwriteSchema/writes-
+    from-scratch semantically defeat idempotency-on-a-committed-log.
+    """
     log("Executing SIMPLE strategy...")
 
-    df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
+    df_bronze = spark.read.parquet(source)
     bronze_count = df_bronze.count()
     log(f"Bronze records: {bronze_count:,}")
+    _COUNTED["bronze_rows"] = bronze_count
+    # C1 (silver-plan): strict=True; C2 always exports LB_DATA_CLOCK.
+    anchor = resolve_data_clock(df_bronze, strict=True)
 
-    silver_df = apply_silver_transformations(df_bronze)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
     silver_count = silver_df.count()
+    silver_df = cluster_silver(spark, silver_df)
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
-    if incremental and _table_exists(spark, silver_tbl):
-        log("Appending to existing table (incremental mode)")
-        write_delta_table(spark, silver_df, silver_tbl, silver_bucket, mode="append")
+    if appending:
+        log(f"Appending to existing table (incremental mode, cycle={cycle})")
+        txn_opts = delta_batch_txn_options("lb-silver-build", rebuild_epoch, cycle)
+        write_delta_table(
+            spark, silver_df, silver_tbl, silver_bucket, mode="append", options=txn_opts
+        )
     else:
         table_exists = _table_exists(spark, silver_tbl)
         write_mode = "overwrite" if table_exists else "append"
@@ -319,34 +364,48 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
             options=opts,
         )
 
+    log_silver_files(spark, silver_tbl)
     return silver_count
 
 
-def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incremental=False):
-    """STREAMING strategy: Direct write, no shuffle, single pass. For >= 100GB.
+def silver_streaming(
+    spark, source, silver_tbl, catalog, profile, appending=False, cycle=0, rebuild_epoch=0
+):
+    """STREAMING strategy: single pass, no intermediate counts. For >= 100GB.
 
-    Key insight: Column transformations don't require data redistribution.
-    - No repartition() - avoid shuffle that caused OOM at 1TB+
-    - No intermediate count() - avoid extra data passes
-    - overwriteSchema=true: Delta equivalent of distribution-mode=none
-      (no extra sort/shuffle imposed by the writer)
-    - Let AQE handle partition coalescing, Delta handle file sizing
+    - No repartition(N) and no intermediate count(): one pass over bronze
+    - One shuffle, REBALANCE by interaction_date (cluster_silver), the
+      Delta counterpart of Iceberg silver's distribution-mode=hash: without
+      it each task writes a file into every day it holds (tasks x days
+      files). spark.lb.silver.distribution_mode=none restores the direct
+      write.
     """
-    log("Executing STREAMING strategy (no shuffle, single pass)...")
-    log(
-        f"Input size: {profile.total_size_gb:.1f} GB (estimated {profile.transaction_count:,} rows)"
-    )
+    log("Executing STREAMING strategy (single pass)...")
+    log(f"Input size: {profile.total_size_gb:.1f} GB")
 
-    df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
+    df_bronze = spark.read.parquet(source)
+
+    # A5 (silver-plan): count bronze rows before the transform so the metrics
+    # block emits a real `bronze_rows` for STREAMING, matching SIMPLE.
+    bronze_count = df_bronze.count()
+    log(f"Bronze records: {bronze_count:,}")
+    _COUNTED["bronze_rows"] = bronze_count
+
+    # C1: strict=True; C2 always exports LB_DATA_CLOCK in silver env bundles.
+    anchor = resolve_data_clock(df_bronze, strict=True)
 
     # Apply transformations - all column operations, no joins
-    silver_df = apply_silver_transformations(df_bronze)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
+    silver_df = cluster_silver(spark, silver_df)
 
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
-    if incremental and _table_exists(spark, silver_tbl):
-        log("Appending to existing table (incremental mode)")
-        write_delta_table(spark, silver_df, silver_tbl, silver_bucket, mode="append")
+    if appending:
+        log(f"Appending to existing table (incremental mode, cycle={cycle})")
+        txn_opts = delta_batch_txn_options("lb-silver-build", rebuild_epoch, cycle)
+        write_delta_table(
+            spark, silver_df, silver_tbl, silver_bucket, mode="append", options=txn_opts
+        )
     else:
         table_exists = _table_exists(spark, silver_tbl)
         write_mode = "overwrite" if table_exists else "append"
@@ -362,63 +421,13 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
             options=opts,
         )
 
-    silver_count = spark.table(silver_tbl).count()
-    log(f"Wrote {silver_count:,} records")
-
-    return silver_count
-
-
-def silver_salted(spark, bronze_uri, silver_tbl, catalog, profile):
-    """SALTED strategy: Salt hot keys for skewed data. For skew > 100x."""
-    log("Executing SALTED strategy...")
-    log(f"Hot keys detected: {len(profile.hot_keys)}")
-
-    SALT_BUCKETS = 10
-
-    df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
-    bronze_count = df_bronze.count()
-    log(f"Bronze records: {bronze_count:,}")
-
-    # Broadcast hot keys for UDF
-    hot_keys_set = set(profile.hot_keys)
-    hot_keys_bc = spark.sparkContext.broadcast(hot_keys_set)
-
-    @udf(BooleanType())
-    def is_hot_key(customer_id):
-        return customer_id in hot_keys_bc.value
-
-    # Add salt to hot customer IDs
-    df_salted = df_bronze.withColumn(
-        "salt",
-        when(is_hot_key(col("customer_id")), floor(rand() * SALT_BUCKETS).cast("string")).otherwise(
-            lit("0")
-        ),
-    ).withColumn("salted_customer_id", concat_ws("_", col("customer_id"), col("salt")))
-
-    # Apply transformations
-    silver_df = apply_silver_transformations(df_salted).drop("salt", "salted_customer_id")
-
-    # Repartition to balance load
-    output_partitions = calculate_output_partitions(profile.total_size_gb)
-    silver_df = silver_df.repartition(output_partitions, "customer_id")
-
-    silver_count = silver_df.count()
-
-    log(f"Writing {silver_count:,} records to {silver_tbl}")
-    silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
-    table_exists = _table_exists(spark, silver_tbl)
-    write_mode = "overwrite" if table_exists else "append"
-    opts = {"overwriteSchema": "true", "compression": "snappy"}
-    opts.update(_delta_write_props())
-    write_delta_table(
-        spark,
-        silver_df,
-        silver_tbl,
-        silver_bucket,
-        mode=write_mode,
-        partition_cols=["interaction_date"],
-        options=opts,
+    silver_count = rows_added_by_last_commit(spark, silver_tbl)
+    log(
+        f"Wrote {silver_count:,} records"
+        if silver_count is not None
+        else "Wrote unknown records (commit metrics unavailable)"
     )
+    log_silver_files(spark, silver_tbl)
 
     return silver_count
 
@@ -436,6 +445,7 @@ log("Customer 360 Silver Build (Delta) - Adaptive Transformation Pipeline")
 log("=" * 60)
 
 spark = SparkSession.builder.appName("lb-silver-build-delta").getOrCreate()
+set_utc_session(spark)
 
 # Check for legacy shuffle partition override
 shuffle_override = os.getenv("LB_SILVER_SHUFFLE_PARTITIONS")
@@ -456,10 +466,53 @@ import time  # noqa: E402
 
 start_time = time.time()
 
+silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
+log(f"Target table: {silver_tbl}")
+
+# Incremental mode: append to existing table instead of overwriting.
+# Controlled by LB_SILVER_INCREMENTAL env var set by lakebench for
+# batch cycles 2+ in multi-cycle runs.
+incremental_mode = os.environ.get("LB_SILVER_INCREMENTAL", "false").lower() == "true"
+if incremental_mode:
+    log("INCREMENTAL MODE: will append to existing table")
+
+# B1: cycle number (0-based) and rebuild epoch (bumped by --force-rebuild
+# via the lakebench-silver-state ConfigMap). Both are threaded into
+# delta_batch_txn_options so Delta short-circuits duplicate commits at the
+# transaction log for the same (rebuild_epoch, cycle).
+_cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
+_rebuild_epoch = int(os.environ.get("LB_REBUILD_EPOCH", "0"))
+
+# Cycles 2+ of a multi-cycle run append only their own bronze files; a full
+# build reads every file. Profile, size and read the same path.
+appending = incremental_mode and _table_exists(spark, silver_tbl)
+bronze_source = c360_bronze_path(bronze_uri, appending)
+log(f"Bronze source: {bronze_source}")
+
+# B1 full-rebuild epoch guard: cycle 0 with an already-populated silver
+# table is an unintended rebuild that would drop rows this deployment has
+# already written. --force-rebuild (LB_FORCE_REBUILD=1) opts in explicitly,
+# and job.py bumps LB_REBUILD_EPOCH before submitting so downstream idempotency
+# keys move to a new namespace. Without it, refuse.
+_force_rebuild = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
+if not appending and _table_exists(spark, silver_tbl):
+    try:
+        _has_rows = spark.table(silver_tbl).limit(1).count() > 0
+    except Exception:  # noqa: BLE001
+        _has_rows = False
+    if _has_rows and not _force_rebuild:
+        raise SilverAbort(
+            f"silver-build: refusing full rebuild of populated {silver_tbl}; "
+            "re-run with --force-rebuild to opt in"
+        )
+
 # Check for size override first (skip profiling entirely for faster startup)
 size_override = get_size_override(spark)
 if size_override and size_override > 0:
     log(f"Using size override: {size_override:.1f} GB (skipping profiling)")
+    # G2: label the emitted input_size_gb as an operator override so
+    # downstream reports never present it as a measured value (invariant 5).
+    input_size_gb_source = "operator_override"
     # Create minimal profile with overridden size
     profile = DataProfile(
         total_size_gb=size_override,
@@ -473,9 +526,13 @@ if size_override and size_override > 0:
         hot_keys=[],
     )
 else:
-    profile = profile_bronze_data(spark, bronze_uri)
+    input_size_gb_source = "filesystem"
+    profile = profile_bronze_data(spark, bronze_source)
 
-if profile.transaction_count == 0:
+# A5/A6 (silver-plan): the size comes from path_size_gb_strict, which
+# raises on listing failures rather than returning 0.0 on error; a zero size
+# now really means empty bronze.
+if profile.total_size_gb == 0 and size_override is None:
     log("ERROR: Bronze dataset is empty - run Bronze job first")
     spark.stop()
     sys.exit(1)
@@ -483,27 +540,34 @@ if profile.transaction_count == 0:
 strategy = determine_silver_strategy(spark, profile)
 apply_dynamic_config(spark, profile)
 
-silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
-log(f"Target table: {silver_tbl}")
-
-# Incremental mode: append to existing table instead of overwriting.
-# Controlled by LB_SILVER_INCREMENTAL env var set by lakebench for
-# batch cycles 2+ in multi-cycle runs.
-incremental_mode = os.environ.get("LB_SILVER_INCREMENTAL", "false").lower() == "true"
-if incremental_mode:
-    log("INCREMENTAL MODE: will append to existing table")
 
 # Execute selected strategy
 if strategy == SilverStrategy.SIMPLE:
     silver_count = silver_simple(
-        spark, bronze_uri, silver_tbl, catalog, incremental=incremental_mode
+        spark,
+        bronze_source,
+        silver_tbl,
+        catalog,
+        appending=appending,
+        cycle=_cycle,
+        rebuild_epoch=_rebuild_epoch,
     )
 elif strategy == SilverStrategy.STREAMING:
     silver_count = silver_streaming(
-        spark, bronze_uri, silver_tbl, catalog, profile, incremental=incremental_mode
+        spark,
+        bronze_source,
+        silver_tbl,
+        catalog,
+        profile,
+        appending=appending,
+        cycle=_cycle,
+        rebuild_epoch=_rebuild_epoch,
     )
 elif strategy == SilverStrategy.SALTED:
-    silver_count = silver_salted(spark, bronze_uri, silver_tbl, catalog, profile)
+    # G1: SALTED is deferred to v1.7 (plan Block J). `get_strategy_override`
+    # refuses the override at parse time; this branch is a defense-in-depth
+    # trap if any future auto-selector reaches SALTED.
+    raise SilverAbort("SALTED strategy is deferred to v1.7; see plan Block J")
 else:
     log(f"ERROR: Unknown strategy {strategy}")
     spark.stop()
@@ -515,14 +579,36 @@ log("=" * 60)
 log("Customer 360 Silver Build (Delta) COMPLETED")
 log("=" * 60)
 log(f"Strategy: {strategy.value}")
-log(f"Records written: {silver_count:,}")
+log(f"Records written: {silver_count if silver_count is not None else 'unknown'}")
 log(f"Table: {silver_tbl}")
 log("Partitioned by: interaction_date")
 log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
 log("=== JOB METRICS: silver-build ===")
 log(f"input_size_gb: {profile.total_size_gb:.3f}")
-log(f"estimated_rows: {profile.transaction_count}")
-log(f"output_rows: {silver_count}")
+# G2: source label so a downstream reader can tell an operator-asserted
+# size from a filesystem-measured one (invariant 5).
+log(f"input_size_gb_source: {input_size_gb_source}")
+# C2 (silver-plan): label which rung of the resolution ladder produced
+# LB_DATA_CLOCK.
+log(f"data_clock_source: {env('LB_DATA_CLOCK_SOURCE', 'unknown')}")
+# A5 (silver-plan): unify on `bronze_rows` across SIMPLE and STREAMING; the
+# earlier `estimated_rows` emission is dropped.
+log(f"bronze_rows: {_COUNTED.get('bronze_rows', 'unknown')}")
+# A4 (silver-plan): output_rows is `unknown` when the commit-metrics
+# fallback fired; the LB-044 gate below then refuses the run rather than
+# publishing a cumulative table count as this cycle's output.
+if silver_count is None:
+    log("output_rows: unknown")
+else:
+    log(f"output_rows: {silver_count}")
 log(f"elapsed_seconds: {total_time:.1f}")
 log("=" * 60)
+# A4 (silver-plan): see silver_build.py for the rationale.
+if silver_count is None:
+    spark.stop()
+    raise SilverAbort(
+        "silver-build: output_rows unknown (commit metrics unavailable); refusing exit-0 pass"
+    )
+# A1: LB-044 gate; see silver_build.py for the rationale.
+assert_progress(silver_count, "silver-build")
 spark.stop()

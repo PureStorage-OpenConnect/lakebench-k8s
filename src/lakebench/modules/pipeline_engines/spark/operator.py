@@ -5,17 +5,57 @@ Handles detection and installation of the Kubeflow Spark Operator.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from lakebench.k8s import pinned_helm, pinned_kubectl, pinned_oc
+from lakebench.modules.pipeline_engines.spark.operator_scratch import (
+    DEFAULT_CONTROLLER_TMP_SIZE,
+    TmpVolume,
+    tmp_volume,
+)
+from lakebench.modules.pipeline_engines.spark.operator_scratch import (
+    helm_set_args as controller_tmp_helm_set_args,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class _DeploymentReadError(Exception):
     """Raised when the controller deployment spec cannot be read."""
+
+
+# How long a watch-list mutation waits for the cluster lease. A holder keeps it
+# across a helm upgrade, two rollout waits (120 s each) and a verify, so up to
+# about 5 minutes; a 30 s acquire made concurrent deploys and destroys fail
+# instead of queueing, which parallel UAT hit.
+_WATCH_LIST_LOCK_TIMEOUT_S = 600
+
+
+class _WatchListReadError(Exception):
+    """The operator's watch list could not be read.
+
+    Distinct from "watches nothing": callers that treated a failed read as an
+    empty list would report a strict remove as done without checking it (the
+    namespace is then deleted while still watched, crash-looping the operator
+    for every tenant), or overwrite the list with only their own namespace.
+    """
+
+
+class WatchListMutationError(RuntimeError):
+    """Raised when a strict watch-list mutation fails.
+
+    Destroy paths raise this rather than warning so a crash-looping
+    operator is reported to the user explicitly, not swallowed as a
+    successful destroy. The message names ``admin repair-operator`` for
+    recovery.
+    """
 
 
 @dataclass
@@ -31,6 +71,23 @@ class OperatorStatus:
     watched_namespaces: list[str] | None = None  # None = watches all
 
 
+def watch_list_fix_hint() -> str:
+    """User-facing remedy for a namespace missing from ``spark.jobNamespaces``.
+
+    Never suggests a raw ``helm upgrade --reuse-values``: that bypasses the
+    ``lakebench-cluster-lock`` lease (category 4 shared state) and a user
+    who copies it with a stale list overwrites other deployments' entries.
+    ``lakebench deploy`` adds the namespace under the lease.
+    """
+    return (
+        "Fix: re-run 'lakebench deploy <config>'; it adds the namespace to "
+        "the watch list under the lakebench-cluster-lock lease. If the lease "
+        "is held, check 'lakebench admin status'. If the watch list carries "
+        "entries for deleted namespaces, run 'lakebench admin repair-operator' "
+        "first. Do not edit spark.jobNamespaces with helm directly."
+    )
+
+
 class SparkOperatorManager:
     """Manages Spark Operator installation and status."""
 
@@ -40,6 +97,7 @@ class SparkOperatorManager:
     HELM_CHART_NAME = "spark-operator/spark-operator"
     HELM_RELEASE_NAME = "spark-operator"
     DEFAULT_NAMESPACE = "spark-operator"
+    CONTROLLER_DEPLOYMENT = "spark-operator-controller"
 
     # ``spark.jobNamespaces`` is shared cluster state, so concurrent deploys
     # contend for it.  Helm rejects an upgrade while another is in flight;
@@ -96,16 +154,69 @@ class SparkOperatorManager:
     # every comma must be backslash-escaped.
     _JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT = r"0.5\,1\,2\,4\,8\,16\,32\,64\,128\,256"
 
-    def _reuse_values_backfill(self) -> list[str]:
-        """``--set`` args to append whenever an upgrade also pins a version.
+    def _reuse_values_backfill(
+        self, version: str | None, tmp_size: str = DEFAULT_CONTROLLER_TMP_SIZE
+    ) -> list[str]:
+        """``--set`` args for an admin ``--reuse-values`` upgrade of the release.
 
-        Only needed when ``target_version`` is set -- an unpinned upgrade
-        tracks whatever chart is already installed, so there is no version
-        jump for ``--reuse-values`` to be caught out by.
+        The latency buckets are only needed when the upgrade pins a version
+        (a jump from a pre-2.5.0 release). The controller /tmp size is set
+        every time: a release installed before lakebench sized it has no
+        ``controller.volumes`` in its stored values, so ``--reuse-values``
+        would keep the chart's 1Gi (see operator_scratch). The watch-list
+        edits do not call this; their ``--reuse-values`` carries the size
+        forward once an admin install or repair has stored it.
         """
-        if not self.target_version:
+        args: list[str] = []
+        if version:
+            args += [
+                "--set",
+                "prometheus.metrics.jobSubmitLatencyBuckets="
+                f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
+            ]
+        # "" means keep the stored /tmp volume (an unbounded one) untouched.
+        return args + (controller_tmp_helm_set_args(tmp_size) if tmp_size else [])
+
+    @staticmethod
+    def _watch_list_hash(namespaces: list[str] | None) -> str:
+        """Content hash of a watch list.
+
+        Order-independent so a re-read that returns the same set in a
+        different order compares equal. ``None`` means "watch all" and
+        gets a distinct sentinel so no concrete list ever collides with
+        it. Whitespace is trimmed and empty entries are dropped so a
+        stray "" or " ns " does not falsely differ from "ns".
+
+        Used by the add/remove watch-list paths to short-circuit
+        ``helm upgrade`` when the current spec already matches the
+        desired one -- a helm upgrade against the shared release is
+        every deploy's slowest step and every parallel destroy's
+        largest contention point, so skipping when nothing changed is
+        both a correctness win (no chance to lose the race) and a wall
+        clock win.
+        """
+        if namespaces is None:
+            return "sha256:watch-all"
+        cleaned = sorted({n.strip() for n in namespaces if n and n.strip()})
+        digest = hashlib.sha256("\n".join(cleaned).encode("utf-8")).hexdigest()
+        return f"sha256:{digest}"
+
+    def _watch_list_pin(self) -> list[str]:
+        """``--version``/backfill args for a watch-list-only ``helm upgrade``.
+
+        Adding or removing a namespace must not change the shared operator's
+        chart. Without ``--version`` Helm resolves whatever the local repo
+        serves (a silent upgrade for every deployment on the cluster); with
+        the config's version a developer's older pin would downgrade an
+        admin's newer install. So pin the installed release's chart when
+        check_status() has read it, and fall back to the configured version.
+        """
+        pin = self._installed_version or self.target_version
+        if not pin:
             return []
         return [
+            "--version",
+            pin,
             "--set",
             f"prometheus.metrics.jobSubmitLatencyBuckets={self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
         ]
@@ -115,6 +226,7 @@ class SparkOperatorManager:
         namespace: str | None = None,
         version: str | None = None,
         job_namespace: str | None = None,
+        kube_context: str | None = None,
     ):
         """Initialize Spark Operator manager.
 
@@ -127,7 +239,53 @@ class SparkOperatorManager:
         """
         self.namespace = namespace or self.DEFAULT_NAMESPACE
         self.target_version = version  # Version to install if not present
+        # Chart version of the running release, cached by check_status().
+        # Watch-list edits pin it so adding or removing a namespace never
+        # moves the shared operator to another chart (see _watch_list_pin).
+        self._installed_version: str | None = None
         self.job_namespace = job_namespace
+        # The config's kubeconfig context. helm and kubectl otherwise use the
+        # ambient current context, so a stale or different current context
+        # would read (and change) another cluster's operator.
+        self.kube_context = kube_context or None
+
+    def _with_context(self, cmd: list[str]) -> list[str]:
+        """Add the configured kube context to a helm/kubectl/oc command.
+
+        Retained for tests that exercise the flag placement directly.
+        Callers go through :meth:`_run`, which routes each tool through
+        the pinned helper in :mod:`lakebench.k8s._pinned`.
+        """
+        if not self.kube_context or not cmd:
+            return cmd
+        if cmd[0] == "helm":
+            return [cmd[0], "--kube-context", self.kube_context, *cmd[1:]]
+        if cmd[0] in ("kubectl", "oc"):
+            return [cmd[0], "--context", self.kube_context, *cmd[1:]]
+        return cmd
+
+    def _run(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        """Run a kubectl/helm/oc command through the pinned helpers.
+
+        Every subprocess site in this module goes through here so that a
+        stale ambient kube-context can never touch the wrong cluster.
+        The lint in ``tests/test_pinned_kubectl_helper.py`` whitelists
+        exactly this method (plus the helpers themselves).
+        """
+        if not cmd:
+            raise ValueError("empty command")
+        tool = cmd[0]
+        args = list(cmd[1:])
+        ctx = self.kube_context
+        if tool == "kubectl":
+            return pinned_kubectl(ctx, args, **kwargs)
+        if tool == "helm":
+            return pinned_helm(ctx, args, **kwargs)
+        if tool == "oc":
+            return pinned_oc(ctx, args, **kwargs)
+        # A non-cluster tool (e.g. ``python`` in a debug branch) has no
+        # kube context to pin, so fall back to a plain subprocess.run.
+        return subprocess.run(cmd, **kwargs)  # noqa: S603
 
     def check_status(self) -> OperatorStatus:
         """Check if Spark Operator is installed and ready.
@@ -137,7 +295,7 @@ class SparkOperatorManager:
         """
         try:
             # Check if CRD exists
-            result = subprocess.run(
+            result = self._run(
                 ["kubectl", "get", "crd", "sparkapplications.sparkoperator.k8s.io"],
                 capture_output=True,
                 text=True,
@@ -153,7 +311,7 @@ class SparkOperatorManager:
                 )
 
             # Check if operator deployment exists
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "get",
@@ -191,7 +349,7 @@ class SparkOperatorManager:
             operator_ns = parts[0] if parts else self.namespace
 
             # Check if operator is ready
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "get",
@@ -212,6 +370,8 @@ class SparkOperatorManager:
 
             # Get version from Helm release if possible
             version = self._get_helm_version()
+            if version:
+                self._installed_version = version
 
             # Check namespace watching -- use the deployment spec args as
             # ground truth, NOT Helm values (which can be out of sync after
@@ -223,7 +383,11 @@ class SparkOperatorManager:
                     watched = self._get_active_namespaces(operator_ns)
                 except _DeploymentReadError:
                     # Could not read deployment spec, fall back to Helm values
-                    watched = self._get_watched_namespaces()
+                    try:
+                        watched = self._get_watched_namespaces()
+                    except _WatchListReadError as e:
+                        logger.warning("Spark Operator watch list unreadable: %s", e)
+                        watched = []  # reported below as "could not determine"
                 if watched is None:
                     # Watches all namespaces (empty or unset)
                     watching_namespace = True
@@ -264,32 +428,39 @@ class SparkOperatorManager:
             )
 
     def _get_helm_version(self) -> str | None:
-        """Get Spark Operator version from Helm release.
+        """Chart version of this manager's Spark Operator release, or None.
 
-        Returns:
-            Version string or None if not found
+        Looks only in ``self.namespace`` and matches the release name
+        exactly: the watch-list edits pin ``--version`` to this value, so a
+        look-alike release elsewhere (``my-spark-operator``) must never be
+        read. A chart string that does not end in a version yields None,
+        and callers fall back to the configured version.
         """
+        import json
+        import re
+
         try:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "helm",
                     "list",
-                    "-A",
+                    "-n",
+                    self.namespace,
                     "-f",
-                    "spark-operator",
+                    f"^{self.HELM_RELEASE_NAME}$",
                     "-o",
                     "json",
                 ],
                 capture_output=True,
                 text=True,
             )
-
-            if result.returncode == 0:
-                import json
-
-                releases = json.loads(result.stdout)
-                if releases:
-                    return releases[0].get("chart", "").replace("spark-operator-", "")
+            if result.returncode != 0:
+                return None
+            for rel in json.loads(result.stdout) or []:
+                if rel.get("name") != self.HELM_RELEASE_NAME:
+                    continue
+                m = re.search(r"-(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)$", rel.get("chart", ""))
+                return m.group(1) if m else None
             return None
         except Exception:
             return None
@@ -310,7 +481,7 @@ class SparkOperatorManager:
         """
         ns = operator_ns or self.namespace
         try:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "get",
@@ -352,6 +523,33 @@ class SparkOperatorManager:
         except Exception as e:
             raise _DeploymentReadError(str(e)) from e
 
+    def _no_release_watch_list(self) -> list[str]:
+        """Answer for "helm has no release": [] only if no operator runs.
+
+        A controller Deployment can exist without this Helm release (OLM, a
+        different release name). Its watch list cannot be read or changed
+        through Helm, so that case, and an unanswerable check, raise rather
+        than report "nothing watched".
+        """
+        probe = self._run(
+            ["kubectl", "get", "deployment", "spark-operator-controller", "-n", self.namespace],
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0:
+            raise _WatchListReadError(
+                f"Helm release {self.HELM_RELEASE_NAME!r} not found in {self.namespace!r}, "
+                "but a spark-operator-controller Deployment exists there; the "
+                "operator is managed outside this Helm release, so lakebench "
+                "cannot read or change its watch list."
+            )
+        if "notfound" in (probe.stderr or "").lower().replace(" ", ""):
+            return []
+        raise _WatchListReadError(
+            f"could not confirm whether a Spark Operator runs in {self.namespace!r}: "
+            f"{(probe.stderr or '').strip()}"
+        )
+
     def _get_watched_namespaces(self) -> list[str] | None:
         """Get the namespaces the Spark Operator is configured to watch.
 
@@ -359,14 +557,18 @@ class SparkOperatorManager:
         ``spark.jobNamespaces`` to ``["default"]``, NOT "all namespaces").
 
         Returns:
-            List of namespace strings if jobNamespaces is set,
-            None if the operator watches all namespaces (empty list),
-            or empty list ``[]`` if Helm values could not be retrieved.
+            List of namespace strings if jobNamespaces is set, None if the
+            operator watches all namespaces, or ``[]`` if the Helm release
+            does not exist (no operator, so nothing is watched).
+
+        Raises:
+            _WatchListReadError: the values could not be read for any other
+                reason (helm missing, RBAC, unparseable output).
         """
         try:
             import json
 
-            result = subprocess.run(
+            result = self._run(
                 [
                     "helm",
                     "get",
@@ -383,8 +585,15 @@ class SparkOperatorManager:
             )
 
             if result.returncode != 0:
-                logger.debug("Could not get Helm values: %s", result.stderr)
-                return []
+                # helm prints "Error: release: not found" (older versions
+                # omit the colon). No release means no operator, so nothing
+                # is watched; that is a real answer, not a read failure.
+                if re.search(r"release:? not found", (result.stderr or "").lower()):
+                    return self._no_release_watch_list()
+                raise _WatchListReadError(
+                    f"helm get values {self.HELM_RELEASE_NAME} failed: "
+                    f"{(result.stderr or '').strip()}"
+                )
 
             values = json.loads(result.stdout)
             ns_value = values.get("spark", {}).get("jobNamespaces", None)
@@ -400,9 +609,60 @@ class SparkOperatorManager:
                 return filtered if filtered else None
             return None  # Unknown type -- assume watches all
 
+        except _WatchListReadError:
+            raise
         except Exception as e:
-            logger.debug("Error reading Helm values: %s", e)
-            return []
+            raise _WatchListReadError(f"error reading Helm values: {e}") from e
+
+    # Delays before each namespace read in _namespace_is_terminating (s).
+    _NS_READ_BACKOFF = (0.0, 0.5, 1.5)
+
+    def _namespace_is_terminating(self, namespace: str) -> bool:
+        """True unless the namespace provably exists and is not being deleted.
+
+        Gone counts as terminating: a destroy can finish deleting the
+        namespace while a deploy waits for the lease, and adding a namespace
+        that does not exist crash-loops the operator for every deployment.
+        Any read failure (429, 5xx, transport, no client) also refuses: under
+        API throttling a "probably fine" add is exactly the crash-loop route.
+        """
+        from kubernetes.client.rest import ApiException
+
+        ns = None
+        for attempt, delay in enumerate(self._NS_READ_BACKOFF, start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                from kubernetes import client as k8s_client
+
+                ns = k8s_client.CoreV1Api().read_namespace(namespace)
+                break
+            except ApiException as e:
+                if e.status == 404:
+                    return True
+                logger.warning(
+                    "Could not read namespace %s before adding it (attempt %d): %s",
+                    namespace,
+                    attempt,
+                    e,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Could not read namespace %s before adding it (attempt %d): %s",
+                    namespace,
+                    attempt,
+                    e,
+                )
+        if ns is None:
+            # A transient 429/5xx is retried above; a persistent one refuses.
+            return True
+        meta = getattr(ns, "metadata", None)
+        ts = getattr(meta, "deletion_timestamp", None)
+        # The client deserialises it as a datetime; anything else (absent,
+        # or a test double) is not proof of deletion.
+        import datetime as _dt
+
+        return isinstance(ts, (_dt.datetime, str)) and bool(ts)
 
     def _filter_existing_namespaces(self, namespaces: list[str]) -> list[str]:
         """Return only namespaces that exist on the cluster.
@@ -446,12 +706,39 @@ class SparkOperatorManager:
         Returns:
             True if the RBAC was successfully recreated.
         """
-        watched = self._get_watched_namespaces()
+        # The remove-then-re-add is a read-modify-write of the shared
+        # watch list, so the whole sequence runs under one lease: an
+        # unlocked step 1 writing a list read before a concurrent add
+        # would drop that deployment's namespace.
+        lease_cm, mode = self._acquire_watch_lease()
+        try:
+            if mode == "refuse":
+                logger.error(
+                    "spark-operator watch-list: refusing to recreate RBAC for %r -- "
+                    "cluster lease is held or lease RBAC denied",
+                    namespace,
+                )
+                return False
+            return self._recreate_namespace_rbac_impl(namespace)
+        finally:
+            if lease_cm is not None:
+                try:
+                    lease_cm.__exit__(None, None, None)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("spark-operator watch-list: lease release failed: %s", e)
+
+    def _recreate_namespace_rbac_impl(self, namespace: str) -> bool:
+        """Body of ``recreate_namespace_rbac``; caller holds the lease."""
+        try:
+            watched = self._get_watched_namespaces()
+        except _WatchListReadError as e:
+            logger.error("Cannot recreate RBAC for %s: %s", namespace, e)
+            return False
         if watched is None:
             return True
         if namespace not in watched:
             # Not in the watch list -- delegate to normal add flow
-            return self._add_namespace_to_watch(namespace)
+            return self._add_namespace_to_watch_impl(namespace)
 
         # Step 1: Remove the namespace so Helm deletes the Role/RoleBinding
         without_ns = [ns for ns in watched if ns != namespace]
@@ -467,19 +754,19 @@ class SparkOperatorManager:
             "--set",
             f"spark.jobNamespaces={{{ns_set_without}}}",
         ]
-        # No --version here, so Helm resolves whatever chart the repo now
-        # serves while --reuse-values still only carries forward the
-        # release's *stored* values -- the same gap _reuse_values_backfill()
-        # exists for, just without a target_version to gate on. Always
-        # backfill here since there is no unversioned-and-safe case.
+        # Pin the installed chart (see _watch_list_pin). With no version
+        # known, Helm resolves whatever the repo serves while --reuse-values
+        # carries forward only the stored values, so backfill regardless.
+        pin = self._watch_list_pin()
         cmd.extend(
-            [
+            pin
+            or [
                 "--set",
                 f"prometheus.metrics.jobSubmitLatencyBuckets="
                 f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
             ]
         )
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(
                 "helm upgrade (remove namespace) failed: %s",
@@ -493,9 +780,16 @@ class SparkOperatorManager:
         )
 
         # Step 2: Re-add the namespace -- Helm will create fresh RBAC
-        return self._add_namespace_to_watch(namespace)
+        return self._add_namespace_to_watch_impl(namespace)
 
-    def remove_namespace_from_watch(self, namespace: str) -> bool:
+    def remove_namespace_from_watch(
+        self,
+        namespace: str,
+        *,
+        strict: bool = False,
+        precondition: Callable[[], None] | None = None,
+        then: Callable[[], None] | None = None,
+    ) -> bool:
         """Drop a namespace from the operator's watch list before deleting it.
 
         A watched namespace that does not exist is not a harmless leftover:
@@ -511,12 +805,46 @@ class SparkOperatorManager:
 
         Args:
             namespace: The namespace about to be deleted.
+            strict: When True, the call is lease-gated against the
+                cluster-wide ``lakebench-cluster-lock`` (serialises
+                parallel destroys mutating the shared watch list) and
+                any failure raises ``WatchListMutationError`` instead of
+                returning False. Destroy paths use strict=True; older
+                internal callers keep the historical bool contract.
+            precondition: Called right before the watch list is read and
+                changed; with ``strict`` it runs while the cluster lease is
+                held. Raising aborts the call with the watch list untouched
+                and the exception propagates unchanged. Destroy uses it to
+                re-check the namespace UID inside the lease, so a same-named
+                redeploy (whose watch-list add takes the same lease) can never
+                have its entry removed by a slow destroy of the old one.
+            then: Called after a successful removal, still under the lease
+                with ``strict``. Destroy issues the namespace delete here, so
+                a concurrent deploy's add (same lease) sees the namespace
+                Terminating and refuses instead of re-adding it.
 
         Returns:
             True if the watch list no longer contains the namespace.
         """
+        if strict:
+            return self._remove_namespace_from_watch_locked(namespace, precondition, then)
+        if precondition is not None:
+            precondition()
+        ok = self._remove_namespace_from_watch_unlocked(namespace)
+        if ok and then is not None:
+            then()
+        return ok
+
+    def _remove_namespace_from_watch_unlocked(self, namespace: str) -> bool:
+        """Historical non-strict body: read, drop, helm upgrade, retry."""
         for attempt in range(self._HELM_CONFLICT_RETRIES):
-            watched = self._get_watched_namespaces()
+            try:
+                watched = self._get_watched_namespaces()
+            except _WatchListReadError as e:
+                # Cannot prove the namespace is gone from the list. Reporting
+                # success here would let destroy delete a watched namespace.
+                logger.error("Cannot remove %s from the watch list: %s", namespace, e)
+                return False
             if watched is None:
                 # Watches all namespaces -- nothing namespace-specific to drop.
                 return True
@@ -530,6 +858,21 @@ class SparkOperatorManager:
             # widen the operator's scope to the whole cluster.
             ns_set = ",".join(remaining) if remaining else "default"
 
+            # LB-ux-safety C2: skip the helm upgrade when the desired
+            # list already matches the current one. The remove path
+            # already short-circuits when the namespace is absent
+            # above; this catches the case where the desired list
+            # collapses to the same effective content (chart-default
+            # "default" fallback) as what is already there.
+            desired = remaining or ["default"]
+            if self._watch_list_hash(desired) == self._watch_list_hash(watched):
+                logger.info(
+                    "Spark Operator watch list already omits '%s' (%s); skipping helm upgrade",
+                    namespace,
+                    desired,
+                )
+                return True
+
             cmd = [
                 "helm",
                 "upgrade",
@@ -541,12 +884,10 @@ class SparkOperatorManager:
                 "--set",
                 f"spark.jobNamespaces={{{ns_set}}}",
             ]
-            if self.target_version:
-                cmd.extend(["--version", self.target_version])
-                cmd.extend(self._reuse_values_backfill())
+            cmd.extend(self._watch_list_pin())
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                result = self._run(cmd, capture_output=True, text=True)
             except FileNotFoundError:
                 logger.warning("helm not found on PATH -- cannot remove namespace from watch")
                 return False
@@ -585,6 +926,85 @@ class SparkOperatorManager:
 
         return False
 
+    def _remove_namespace_from_watch_locked(
+        self,
+        namespace: str,
+        precondition: Callable[[], None] | None = None,
+        then: Callable[[], None] | None = None,
+    ) -> bool:
+        """Strict variant of ``remove_namespace_from_watch``.
+
+        Acquires the cluster-wide lease so parallel destroys cannot race
+        the same Helm upgrade, then delegates to the non-strict helper.
+        Failure raises ``WatchListMutationError`` naming
+        ``admin repair-operator`` as the recovery path. Success returns
+        True to match the non-strict contract callers already expect.
+        """
+        from kubernetes import client as _kclient
+        from kubernetes.client.exceptions import ApiException
+
+        from lakebench.deploy.cluster_lock import (
+            ClusterLockError,
+            ClusterLockHeld,
+            cluster_lock,
+        )
+
+        try:
+            core_v1 = _kclient.CoreV1Api()
+        except Exception as e:  # noqa: BLE001
+            raise WatchListMutationError(
+                f"cannot open Kubernetes client to acquire cluster lock: {e}. "
+                "The operator's watch list was NOT modified; run "
+                "`lakebench admin repair-operator` after the cluster is reachable."
+            ) from e
+
+        try:
+            with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S):
+                if precondition is not None:
+                    precondition()
+                ok = self._remove_namespace_from_watch_impl(namespace)
+                if ok and then is not None:
+                    then()
+        except ClusterLockHeld as e:
+            raise WatchListMutationError(
+                f"another lakebench process holds the cluster lock ({e.holder}); "
+                "wait for it or run `lakebench admin release-lock --expired-only`. "
+                "The operator's watch list was NOT modified."
+            ) from e
+        except ClusterLockError as e:
+            raise WatchListMutationError(
+                f"could not acquire cluster lock: {e}. The operator's watch "
+                "list was NOT modified; run `lakebench admin repair-operator` "
+                "after clearing the underlying issue."
+            ) from e
+        except ApiException as e:
+            raise WatchListMutationError(
+                f"Kubernetes API error while acquiring cluster lock: {e}. "
+                "The operator's watch list was NOT modified; run "
+                "`lakebench admin repair-operator` after the cluster is reachable."
+            ) from e
+
+        if not ok:
+            raise WatchListMutationError(
+                f"failed to remove namespace '{namespace}' from the Spark "
+                "Operator watch list. The operator may crash-loop on the "
+                "stale entry, which would break SparkApplication reconciliation "
+                "for every namespace on the cluster. Run "
+                "`lakebench admin repair-operator` to reconcile the watch "
+                "list against live namespaces."
+            )
+        return True
+
+    def _remove_namespace_from_watch_impl(self, namespace: str) -> bool:
+        """Non-strict watch-list drop reused by ``_locked``.
+
+        Kept as a thin re-entry into the historical implementation to
+        avoid duplicating the retry/backoff logic. Returns False on
+        failure so the ``_locked`` wrapper can raise with a specific
+        error message.
+        """
+        return self._remove_namespace_from_watch_unlocked(namespace)
+
     @classmethod
     def _is_helm_conflict(cls, stderr: str) -> bool:
         """Return True when Helm stderr indicates contention, not misconfig.
@@ -611,6 +1031,16 @@ class SparkOperatorManager:
         failure or as a lost update.  Both are handled by re-reading the list
         and retrying rather than by assuming the first read is still valid.
 
+        ADR-F5: this method is lease-gated (symmetric with the strict
+        remove path). Without the lease a concurrent strict destroy of
+        namespace Y racing this add of namespace X can produce a
+        watch-list that includes Y even after Y's destroy dropped it --
+        Y then gets deleted, and the operator crash-loops on the stale
+        entry the add path re-introduced. The lease is best-effort: on
+        infrastructure failure (workstation with no cluster, unit
+        tests) we log-warn and proceed unlocked; production always has
+        access to the lease namespace.
+
         Args:
             namespace: The namespace to add.
             _retry_on_eviction: Internal. Allows exactly one re-add when a
@@ -618,7 +1048,137 @@ class SparkOperatorManager:
                 upgrade. Bounded to one to avoid two deploys ping-ponging.
 
         Returns:
-            True if helm upgrade succeeded.
+            True if helm upgrade succeeded. False if the shared cluster
+            lease is held by another process (real contention) or the
+            lease infrastructure denied RBAC access -- in both cases,
+            proceeding unlocked would reopen the exact race F5 closes,
+            so we refuse rather than press on.
+        """
+        # ADR-F5b: distinguish lease-infra-genuinely-absent (workstation
+        # without a cluster, unit tests) from real contention. The
+        # first case is safe to proceed unlocked -- there is no other
+        # writer to race with. The second case must NOT proceed
+        # unlocked; if we did, a concurrent strict destroy holding the
+        # lease could drop namespace Y while our unlocked add of X
+        # writes back a list that still contains Y, and the ns delete
+        # that follows crashes the operator globally.
+        lease_cm, mode = self._acquire_watch_lease()
+        try:
+            if mode == "refuse":
+                logger.error(
+                    "spark-operator watch-list: refusing to add %r -- cluster "
+                    "lease is held (concurrent destroy) or lease RBAC denied. "
+                    "Retry when the holder releases; if the operator was left "
+                    "inconsistent by a prior failure, run "
+                    "`lakebench admin repair-operator`.",
+                    namespace,
+                )
+                return False
+            return self._add_namespace_to_watch_impl(namespace, _retry_on_eviction)
+        finally:
+            if lease_cm is not None:
+                try:
+                    lease_cm.__exit__(None, None, None)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("spark-operator watch-list: lease release failed: %s", e)
+
+    def _acquire_watch_lease(self):
+        """Return (lease_ctx | None, mode).
+
+        - mode == "locked":   we hold the lease; lease_ctx is the entered
+          context to __exit__ later.
+        - mode == "unlocked": there is no cluster to acquire against (no
+          kubeconfig, or connection refused). Safe to proceed -- no other
+          writer can be racing us. lease_ctx is None.
+        - mode == "refuse":   the lease is held by another process or the
+          API denied access. lease_ctx is None. Caller must NOT proceed.
+        """
+        if getattr(self, "_bypass_cluster_lock", False):
+            return None, "unlocked"
+
+        from kubernetes import client as _kclient
+
+        from lakebench.deploy.cluster_lock import (
+            ClusterLockError,
+            ClusterLockHeld,
+            cluster_lock,
+        )
+
+        try:
+            core_v1 = _kclient.CoreV1Api()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "spark-operator watch-list: no k8s client, proceeding unlocked: %s",
+                e,
+            )
+            return None, "unlocked"
+
+        lease_cm = cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S)
+        try:
+            lease_cm.__enter__()
+            return lease_cm, "locked"
+        except ClusterLockHeld as e:
+            logger.warning("spark-operator watch-list: lease held by %s", e.holder)
+            return None, "refuse"
+        except ClusterLockError as e:
+            # RBAC denial, API failure managing the lease namespace,
+            # unreachable cluster with a *loaded* kubeconfig -- any of
+            # these mean either (a) production integrity requires the
+            # lease and it's broken, or (b) we can't tell whether
+            # someone else is mutating the same state. Either way,
+            # refuse rather than paper over.
+            #
+            # LB-ux-safety C2: "timed out" used to fall through to
+            # "unlocked" here. That is exactly the case where another
+            # holder is likely doing something with the shared watch
+            # list, so proceeding unlocked would silently overwrite
+            # their edit. Failing closed refuses the request instead.
+            # "Connection refused" and DNS-resolution failures remain
+            # unlocked: those are workstation-with-no-cluster, where
+            # there is no other writer to race by definition.
+            msg = str(e).lower()
+            if "connection refused" in msg or "not resolve" in msg:
+                logger.warning(
+                    "spark-operator watch-list: cluster unreachable, proceeding unlocked: %s",
+                    e,
+                )
+                return None, "unlocked"
+            logger.warning(
+                "spark-operator watch-list: lease acquire failed, refusing: %s",
+                e,
+            )
+            return None, "refuse"
+        except Exception as e:  # noqa: BLE001
+            # urllib3 transport errors on a broken kubeconfig with no
+            # reachable API server (ConnectionError, MaxRetryError, DNS
+            # resolution failures) look like workstation-no-cluster:
+            # proceed unlocked because there is no other writer.
+            # Anything else -- including a bare timeout while the API
+            # server is reachable -- refuses: we cannot tell whether
+            # someone else is holding the lease and about to write the
+            # watch list, and papering over that is the exact race F5
+            # exists to close.
+            msg = str(e).lower()
+            if "connection refused" in msg or "not resolve" in msg or "no route to host" in msg:
+                logger.warning(
+                    "spark-operator watch-list: cluster unreachable, proceeding unlocked: %s",
+                    e,
+                )
+                return None, "unlocked"
+            logger.warning(
+                "spark-operator watch-list: lease unavailable, refusing: %s",
+                e,
+            )
+            return None, "refuse"
+
+    def _add_namespace_to_watch_impl(self, namespace: str, _retry_on_eviction: bool = True) -> bool:
+        """Non-lease-gated body of ``_add_namespace_to_watch``.
+
+        Split out so ADR-F5's lease acquisition wraps only the mutation
+        loop, and existing test callers that patch the mutation body
+        keep working. Callers on the deploy path must go through
+        ``_add_namespace_to_watch`` (which lease-gates); this variant is
+        internal.
         """
         new_list: list[str] = []
 
@@ -626,16 +1186,52 @@ class SparkOperatorManager:
             # Re-read on every attempt.  A retry exists precisely because
             # another writer may have changed the list since the last read,
             # so reusing the earlier value would re-introduce the lost update.
-            watched = self._get_watched_namespaces()
+            try:
+                watched = self._get_watched_namespaces()
+            except _WatchListReadError as e:
+                # Writing [namespace] now would drop every other deployment's
+                # namespace from the list.
+                logger.error("Cannot add %s to the watch list: %s", namespace, e)
+                return False
             if watched is None:
                 # Already watches all namespaces
                 return True
             if namespace in watched:
                 return True
+            if self._namespace_is_terminating(namespace):
+                # A destroy dropped it from the list and deleted it (both
+                # under this lease). Re-adding it would leave the operator
+                # watching a namespace about to vanish, which crash-loops it
+                # for every deployment on the cluster.
+                logger.error(
+                    "Refusing to add %s to the watch list: the namespace is being deleted, "
+                    "gone, or could not be read",
+                    namespace,
+                )
+                return False
 
             # Filter out stale namespaces that no longer exist on the cluster
             live_namespaces = self._filter_existing_namespaces(watched)
             new_list = live_namespaces + [namespace]
+
+            # LB-ux-safety C2: if the desired list already matches the
+            # current one, skip helm upgrade entirely -- and the
+            # operator restart that would otherwise follow. The chart
+            # is rendered from stored values plus --set, so an
+            # "upgrade" with no change still churns the release
+            # history, still takes the release-level lock, still
+            # rolls the controller pods, and still contends with every
+            # other parallel deploy. Compare by content hash so a
+            # reordered read (kubectl ordering is not stable) is
+            # treated as equal.
+            if self._watch_list_hash(new_list) == self._watch_list_hash(watched):
+                logger.info(
+                    "Spark Operator watch list already includes '%s' (%s); skipping helm upgrade",
+                    namespace,
+                    new_list,
+                )
+                return True
+
             ns_set = ",".join(new_list)
 
             cmd = [
@@ -653,12 +1249,10 @@ class SparkOperatorManager:
             # so omitting this lets Helm re-resolve to whatever the repo now
             # serves.  A namespace add would then silently upgrade the
             # operator out from under a pinned config.
-            if self.target_version:
-                cmd.extend(["--version", self.target_version])
-                cmd.extend(self._reuse_values_backfill())
+            cmd.extend(self._watch_list_pin())
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                result = self._run(cmd, capture_output=True, text=True)
             except FileNotFoundError:
                 logger.error("helm not found on PATH -- cannot add namespace")
                 return False
@@ -728,7 +1322,8 @@ class SparkOperatorManager:
                     "successful upgrade -- a concurrent deploy overwrote it. Re-adding.",
                     namespace,
                 )
-                return self._add_namespace_to_watch(namespace, _retry_on_eviction=False)
+                # We already hold the cluster lease; do not re-acquire.
+                return self._add_namespace_to_watch_impl(namespace, _retry_on_eviction=False)
             logger.error(
                 "Operator restarted but deployment spec does not include namespace '%s'",
                 namespace,
@@ -750,7 +1345,7 @@ class SparkOperatorManager:
         deployments = ["spark-operator-controller", "spark-operator-webhook"]
 
         for deploy in deployments:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "rollout",
@@ -769,7 +1364,7 @@ class SparkOperatorManager:
         logger.info("Restarting Spark Operator deployments to apply namespace changes")
 
         for deploy in deployments:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "rollout",
@@ -833,10 +1428,9 @@ class SparkOperatorManager:
         )
         return False
 
-    @staticmethod
-    def _is_openshift() -> bool:
+    def _is_openshift(self) -> bool:
         """Detect whether we are running on an OpenShift cluster."""
-        result = subprocess.run(
+        result = self._run(
             ["kubectl", "api-resources", "--api-group=security.openshift.io"],
             capture_output=True,
             text=True,
@@ -851,7 +1445,7 @@ class SparkOperatorManager:
         pods to start.
         """
         for sa in ("spark-operator-controller", "spark-operator-webhook"):
-            subprocess.run(
+            self._run(
                 [
                     "oc",
                     "adm",
@@ -888,7 +1482,7 @@ class SparkOperatorManager:
         patch_json = json.dumps(patch)
 
         for deploy in ("spark-operator-controller", "spark-operator-webhook"):
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "patch",
@@ -907,12 +1501,236 @@ class SparkOperatorManager:
             else:
                 logger.info("Patched %s for OpenShift compatibility", deploy)
 
+    def _release_exists(self) -> bool | None:
+        """Whether this manager's Helm release exists; None when unreadable."""
+        try:
+            result = self._run(
+                ["helm", "status", self.HELM_RELEASE_NAME, "-n", self.namespace],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            return None
+        if result.returncode == 0:
+            return True
+        if re.search(r"release:? not found", (result.stderr or "").lower()):
+            return False
+        return None
+
+    def _controller_deployment(self) -> dict[str, Any]:
+        """The controller Deployment as JSON; raises _DeploymentReadError."""
+        import json
+
+        try:
+            result = self._run(
+                [
+                    "kubectl",
+                    "get",
+                    "deployment",
+                    self.CONTROLLER_DEPLOYMENT,
+                    "-n",
+                    self.namespace,
+                    "-o",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            raise _DeploymentReadError(f"kubectl not found: {e}") from e
+        if result.returncode != 0:
+            raise _DeploymentReadError((result.stderr or "").strip() or "kubectl get failed")
+        try:
+            return dict(json.loads(result.stdout))
+        except ValueError as e:
+            raise _DeploymentReadError(f"unparseable deployment JSON: {e}") from e
+
+    def _stored_controller_volumes(self) -> list[Any]:
+        """``controller.volumes`` in the release's user-supplied values.
+
+        Raises _DeploymentReadError when the values cannot be read.
+        """
+        import json
+
+        try:
+            result = self._run(
+                [
+                    "helm",
+                    "get",
+                    "values",
+                    self.HELM_RELEASE_NAME,
+                    "-n",
+                    self.namespace,
+                    "-o",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            raise _DeploymentReadError(f"helm not found: {e}") from e
+        if result.returncode != 0:
+            raise _DeploymentReadError((result.stderr or "").strip() or "helm get values failed")
+        text = (result.stdout or "").strip()
+        try:
+            values = json.loads(text) if text else {}
+        except ValueError as e:
+            raise _DeploymentReadError(f"unparseable helm values: {e}") from e
+        vols = ((values or {}).get("controller") or {}).get("volumes") or []
+        return list(vols) if isinstance(vols, list) else []
+
+    def _upgrade_tmp_size(self, requested: str | None) -> str | None:
+        """The size an upgrade of the existing release should set, or None to refuse.
+
+        Helm replaces lists wholesale, so writing controller.volumes[0] would
+        drop any other stored controller volume and leave its mount dangling
+        (a failed release). Refused then. An unrequested upgrade never lowers
+        a larger size an admin set earlier.
+        """
+        from lakebench.modules.pipeline_engines.spark.operator_scratch import parse_quantity
+
+        try:
+            stored = self._stored_controller_volumes()
+        except _DeploymentReadError as e:
+            logger.error("Cannot read the release's stored controller volumes: %s", e)
+            return None
+        others = [v for v in stored if not isinstance(v, dict) or v.get("name") != "tmp"]
+        if others:
+            logger.error(
+                "The release stores controller volumes besides 'tmp' (%s); setting the /tmp "
+                "size would drop them. Resize by hand with the full controller.volumes list.",
+                others,
+            )
+            return None
+        size = requested or DEFAULT_CONTROLLER_TMP_SIZE
+        if requested is None:
+            try:
+                current = self.controller_tmp_volume()
+            except _DeploymentReadError:
+                current = None
+            stored_tmp = [v for v in stored if isinstance(v, dict) and v.get("name") == "tmp"]
+            if (
+                stored_tmp
+                and isinstance(stored_tmp[0].get("emptyDir"), dict)
+                and not stored_tmp[0]["emptyDir"].get("sizeLimit")
+            ):
+                # The release itself stores an unbounded /tmp (a hand patch of
+                # the Deployment alone would be reverted by the upgrade, so
+                # only the stored values count): keep it.
+                return ""
+            cur = current.limit_bytes if current is not None else None
+            if current is not None and cur is not None and cur > (parse_quantity(size) or 0):
+                size = str(current.size_limit)
+        return size
+
+    def controller_tmp_volume(self) -> TmpVolume:
+        """The controller's /tmp volume; raises _DeploymentReadError."""
+        return tmp_volume(self._controller_deployment())
+
+    def _wait_for_rollout(self, timeout_s: int = 180) -> bool:
+        """Wait for both operator Deployments to finish rolling out."""
+        for deploy in (self.CONTROLLER_DEPLOYMENT, "spark-operator-webhook"):
+            result = self._run(
+                [
+                    "kubectl",
+                    "rollout",
+                    "status",
+                    f"deployment/{deploy}",
+                    "-n",
+                    self.namespace,
+                    f"--timeout={timeout_s}s",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                logger.error("Rollout of %s did not complete: %s", deploy, result.stderr)
+                return False
+        return True
+
+    def _verify_tmp_size(self, tmp_size: str) -> bool:
+        """True when the controller spec carries a /tmp at least *tmp_size*."""
+        from lakebench.modules.pipeline_engines.spark.operator_scratch import parse_quantity
+
+        try:
+            vol = self.controller_tmp_volume()
+        except _DeploymentReadError as e:
+            logger.error("Cannot read the controller /tmp volume after the upgrade: %s", e)
+            return False
+        want = parse_quantity(tmp_size) or 0
+        if vol.found and vol.is_empty_dir and vol.size_limit is None:
+            return True  # unbounded emptyDir
+        if not tmp_size:
+            logger.error(
+                "Controller /tmp is %s after the upgrade; the release stores an unbounded one",
+                vol.size_limit if vol.found else "missing",
+            )
+            return False
+        got = vol.limit_bytes
+        if not vol.found or got is None or got < want:
+            logger.error(
+                "Controller /tmp volume is %s after the upgrade, wanted sizeLimit %s",
+                vol.size_limit if vol.found else "missing",
+                tmp_size,
+            )
+            return False
+        logger.info("Controller /tmp emptyDir sizeLimit is %s", vol.size_limit)
+        return True
+
+    def apply_controller_tmp_size(self, tmp_size: str | None = None) -> bool:
+        """Resize the controller's /tmp emptyDir on the installed release.
+
+        The caller must hold the ``lakebench-cluster-lock`` lease (admin
+        repair-operator does). ``--reuse-values`` keeps the watch list and
+        every other stored value, and the installed chart version is pinned
+        so the resize never upgrades the operator. Rolls the controller.
+        """
+        pin = self._get_helm_version()
+        if not pin:
+            # Without --version Helm would move the shared release to the
+            # repo's latest chart (gotcha 3b); the config's pin may differ
+            # from what is installed.
+            logger.error(
+                "Cannot read the installed chart version; not resizing the controller /tmp"
+            )
+            return False
+        size = self._upgrade_tmp_size(tmp_size)
+        if size is None:
+            return False
+        tmp_size = size
+        cmd = [
+            "helm",
+            "upgrade",
+            self.HELM_RELEASE_NAME,
+            self.HELM_CHART_NAME,
+            "-n",
+            self.namespace,
+            "--reuse-values",
+        ]
+        cmd += ["--version", pin]
+        cmd += self._reuse_values_backfill(pin, tmp_size)
+        try:
+            result = self._run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            logger.error("helm not found on PATH -- cannot resize the controller /tmp")
+            return False
+        if result.returncode != 0:
+            logger.error("helm upgrade failed resizing the controller /tmp: %s", result.stderr)
+            return False
+        if self._is_openshift():
+            self._assign_openshift_scc()
+            self._patch_openshift_deployments()
+        if not self._wait_for_rollout():
+            return False
+        return self._verify_tmp_size(tmp_size)
+
     def install(
         self,
         version: str | None = None,
         values: dict[str, Any] | None = None,
+        tmp_size: str | None = None,
     ) -> bool:
-        """Install Spark Operator via Helm.
+        """Install or upgrade the Spark Operator via Helm.
 
         On OpenShift, automatically:
         - Uses webhook port 9443 (non-root can't bind 443)
@@ -921,14 +1739,35 @@ class SparkOperatorManager:
           (the Helm chart hardcodes these and they can't be overridden
           via values due to deep merge behavior)
 
+        An existing release is upgraded with ``--reuse-values`` and the
+        backfill, never re-installed from defaults: a plain ``upgrade
+        --install`` resets ``spark.jobNamespaces`` to the chart's
+        ``["default"]`` and unwatches every tenant. With no version given it
+        stays on the installed chart. The controller's /tmp emptyDir is
+        sized to *tmp_size* on both paths (operator_scratch).
+
         Args:
-            version: Specific chart version (default: latest)
+            version: Chart version (default: the manager's target version,
+                then the installed chart, then the repo's latest)
             values: Custom Helm values
+            tmp_size: Controller /tmp emptyDir sizeLimit (default 8Gi; an
+                upgrade without it keeps a larger size already set)
 
         Returns:
             True if installation succeeded
         """
         logger.info(f"Installing Spark Operator to namespace {self.namespace}")
+        version = version or self.target_version
+
+        exists = self._release_exists()
+        if exists is None:
+            logger.error(
+                "Cannot tell whether Helm release %s exists in %s; refusing to install "
+                "over it (a fresh install would reset the watch list)",
+                self.HELM_RELEASE_NAME,
+                self.namespace,
+            )
+            return False
 
         is_openshift = self._is_openshift()
         if is_openshift:
@@ -936,13 +1775,13 @@ class SparkOperatorManager:
 
         try:
             # Add Helm repo
-            subprocess.run(
+            self._run(
                 ["helm", "repo", "add", self.HELM_REPO_NAME, self.HELM_REPO_URL],
                 capture_output=True,
                 check=True,
             )
 
-            subprocess.run(
+            self._run(
                 ["helm", "repo", "update"],
                 capture_output=True,
                 check=True,
@@ -968,12 +1807,31 @@ class SparkOperatorManager:
                 f"webhook.port={webhook_port}",
             ]
 
-            # Tell the operator which namespace(s) to watch for SparkApplications
-            if self.job_namespace:
-                cmd.extend(["--set", f"spark.jobNamespaces={{{self.job_namespace}}}"])
-
-            if version:
-                cmd.extend(["--version", version])
+            if exists:
+                # Keep the stored values (the watch list above all) and the
+                # installed chart unless a version was asked for.
+                pin = version or self._get_helm_version()
+                if not pin:
+                    logger.error(
+                        "Cannot read the installed chart version and none was given; "
+                        "refusing an unpinned upgrade of the shared operator"
+                    )
+                    return False
+                size = self._upgrade_tmp_size(tmp_size)
+                if size is None:
+                    return False
+                tmp_size = size
+                cmd.append("--reuse-values")
+                cmd.extend(["--version", pin])
+                cmd.extend(self._reuse_values_backfill(pin, tmp_size))
+            else:
+                # Tell the operator which namespace(s) to watch
+                if self.job_namespace:
+                    cmd.extend(["--set", f"spark.jobNamespaces={{{self.job_namespace}}}"])
+                if version:
+                    cmd.extend(["--version", version])
+                tmp_size = tmp_size or DEFAULT_CONTROLLER_TMP_SIZE
+                cmd.extend(controller_tmp_helm_set_args(tmp_size))
 
             # Add custom values
             if values:
@@ -981,7 +1839,7 @@ class SparkOperatorManager:
                     cmd.extend(["--set", f"{key}={value}"])
 
             # Run install
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = self._run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
                 logger.error(f"Helm install failed: {result.stderr}")
@@ -993,8 +1851,13 @@ class SparkOperatorManager:
                 self._assign_openshift_scc()
                 self._patch_openshift_deployments()
 
-            # Wait for operator to be ready
-            return self._wait_for_ready(timeout=120)
+            # readyReplicas alone can still count the old pod during an
+            # upgrade; wait for the new ReplicaSets.
+            if exists and not self._wait_for_rollout():
+                return False
+            if not self._wait_for_ready(timeout=120):
+                return False
+            return self._verify_tmp_size(tmp_size)
 
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logger.error(f"Failed to install Spark Operator: {e}")
@@ -1021,7 +1884,7 @@ class SparkOperatorManager:
         logger.error(f"Spark Operator not ready after {timeout}s")
         return False
 
-    def ensure_installed(self) -> OperatorStatus:
+    def ensure_installed(self, _after_wait: bool = False) -> OperatorStatus:
         """Ensure Spark Operator is installed and ready.
 
         If not installed, installs it automatically.
@@ -1066,23 +1929,48 @@ class SparkOperatorManager:
                     message="Failed to install Spark Operator",
                 )
 
-        # CRD exists but operator not ready, try reinstall
-        logger.info("Spark Operator not ready, attempting reinstall...")
-        if self.install():
-            return self.check_status()
-
+        # CRD exists but the operator is not ready. With a release in place
+        # this is usually a controller restart (an eviction, a watch-list
+        # rollout): wait for it. Upgrading here would mutate the shared
+        # operator outside the cluster lease and pin it to this tenant's
+        # config version, so an existing release is left to the admin
+        # commands.
+        exists = self._release_exists()
+        if exists is False:
+            logger.info("Spark Operator release missing, installing...")
+            if self.install(version=self.target_version):
+                return self.check_status()
+            return status
+        logger.info("Spark Operator not ready, waiting for it to recover...")
+        if self._wait_for_ready(timeout=120):
+            status = self.check_status()
+            if (
+                not _after_wait
+                and status.ready
+                and self.job_namespace
+                and status.watching_namespace is False
+            ):
+                # The ready branch above adds the namespace under the lease;
+                # at most once, so a flapping controller cannot recurse.
+                return self.ensure_installed(_after_wait=True)
+            return status
+        status.message = (
+            f"{status.message}. lakebench does not reinstall a shared operator from "
+            "deploy; a cluster admin can run 'lakebench admin doctor' and "
+            "'lakebench admin repair-operator'."
+        )
         return status
 
     def ensure_namespace_watched(self, *, can_heal: bool = False) -> OperatorStatus:
         """Ensure the Spark Operator watches the target namespace.
 
         When ``can_heal`` is True and the operator is not watching the target
-        namespace, attempts to add it via ``helm upgrade --reuse-values``.
-        When False, returns status with the exact fix command for the user.
+        namespace, adds it under the cluster lease (``_add_namespace_to_watch``).
+        When False, or when the add fails, returns status with a remedy that
+        routes through ``lakebench deploy`` (see ``watch_list_fix_hint``).
 
         Args:
-            can_heal: If True, attempt to fix via helm upgrade.
-                Should be True when ``install=True`` in config.
+            can_heal: If True, attempt to add the namespace under the lease.
 
         Returns:
             OperatorStatus reflecting the namespace watching state.
@@ -1107,21 +1995,13 @@ class SparkOperatorManager:
             )
             if self._add_namespace_to_watch(self.job_namespace):
                 return self.check_status()
-            # Heal failed -- fall through to provide fix command
+            # Heal failed -- fall through to provide the remedy
 
         existing = status.watched_namespaces or []
-        new_list = ",".join(existing + [self.job_namespace])
-        fix_cmd = (
-            f"helm upgrade {self.HELM_RELEASE_NAME} {self.HELM_CHART_NAME} "
-            f"-n {self.namespace} --reuse-values "
-            f"--set 'spark.jobNamespaces={{{new_list}}}' "
-            f"--set 'prometheus.metrics.jobSubmitLatencyBuckets="
-            f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}'"
-        )
         status.message = (
             f"Spark Operator does not watch namespace '{self.job_namespace}'. "
             f"Currently watching: {existing}. "
             f"SparkApplications will not be reconciled.\n"
-            f"Fix with:\n  {fix_cmd}"
+            f"{watch_list_fix_hint()}"
         )
         return status

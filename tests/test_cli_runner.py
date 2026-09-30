@@ -400,14 +400,17 @@ class TestReportSummary:
         assert "silver" in result.output
         assert "Time to Value" in result.output
 
-    def test_summary_without_flag_no_scores(self, tmp_path):
+    def test_default_report_prints_summary_and_does_not_regenerate(self, tmp_path):
+        # A2c: bare ``report`` prints the summary from saved metrics and
+        # does not regenerate HTML. The "Report Rendered" panel is only
+        # shown by ``--render``.
         metrics_dir = self._seed_run(tmp_path)
         result = runner.invoke(
             app, ["report", "--metrics", str(metrics_dir), "--run", "summary-test"]
         )
         assert result.exit_code == 0
-        assert "Report Generated" in result.output
-        assert "Benchmark Summary" not in result.output
+        assert "Report Rendered" not in result.output
+        assert "Benchmark Summary" in result.output
 
 
 # =============================================================================
@@ -519,7 +522,7 @@ class TestInitWizard:
         assert state.mode == "batch"
         assert state.cycles == 3
 
-    def test_step_workload_sustained(self):
+    def test_step_workload_continuous(self):
         from unittest.mock import patch
 
         from rich.console import Console
@@ -529,12 +532,12 @@ class TestInitWizard:
         state = WizardState()
         console = Console(quiet=True)
 
-        # Scale=10, mode=sustained(2) -- no cycles prompt for sustained
+        # Scale=10, mode=continuous(2) -- no cycles prompt for continuous
         with patch("typer.prompt", side_effect=["10", "2"]):
             ok = step_workload(console, state)
 
         assert ok is True
-        assert state.mode == "sustained"
+        assert state.mode == "continuous"
         assert state.cycles == 1
 
     def test_step_review(self):
@@ -556,18 +559,19 @@ class TestInitWizard:
         assert state.config_yaml != ""
         assert "test-lake" in state.config_yaml
 
-    def test_build_config_yaml_sustained(self):
+    def test_build_config_yaml_continuous(self):
         from lakebench.init_wizard import WizardState, _build_config_yaml
 
         state = WizardState(
             name="stream-lake",
-            mode="sustained",
+            mode="continuous",
             endpoint="http://s3:80",
             access_key="a",
             secret_key="b",
         )
         yaml = _build_config_yaml(state)
-        assert "mode: sustained" in yaml
+        assert "mode: continuous" in yaml
+        assert "mode: sustained" not in yaml
 
     def test_build_config_yaml_cycles(self):
         from lakebench.init_wizard import WizardState, _build_config_yaml

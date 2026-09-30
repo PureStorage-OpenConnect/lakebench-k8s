@@ -149,7 +149,10 @@ class TestTimeoutNamesTheState:
         with (
             patch.object(SparkJobMonitor, "_get_driver_logs", return_value=""),
             patch("time.sleep"),
-            patch("time.time", side_effect=[0, 0, 1, 9999, 9999]),
+            # One poll at t=0..1, then past the timeout. A clock function
+            # rather than a fixed list: the loop reads the time more than
+            # once per poll (read duration, stall bookkeeping).
+            patch("time.time", side_effect=lambda _t=iter([0, 0, 1, 1, 1]): next(_t, 9999)),
         ):
             result = monitor.wait_for_completion("j", timeout_seconds=60)
 

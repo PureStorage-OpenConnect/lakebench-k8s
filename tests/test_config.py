@@ -178,25 +178,6 @@ class TestLakebenchConfig:
         )
         assert config.platform.storage.s3.verify_ssl is False
 
-    def test_quality_distribution_validation(self):
-        """Test that quality distribution must sum to 1.0."""
-        with pytest.raises(ValueError, match="must sum to 1.0"):
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "workload": {
-                        "customer360": {
-                            "quality_distribution": {
-                                "clean": 0.5,
-                                "duplicate_suspected": 0.1,
-                                "incomplete": 0.1,
-                                "format_inconsistent": 0.1,
-                            }
-                        }
-                    }
-                },
-            )
-
     def test_dirty_data_ratio_validation(self):
         """Test dirty data ratio must be 0-1."""
         with pytest.raises(ValueError, match="between 0 and 1"):
@@ -367,9 +348,9 @@ class TestScaleConfig:
         assert config.architecture.workload.datagen.memory == "16Gi"
 
     def test_datagen_image_default(self):
-        """Default datagen image uses :latest tag."""
+        """Default datagen image pins the v1.6 AML generator-freeze commit."""
         config = LakebenchConfig(name="test")
-        assert config.images.datagen == "docker.io/sillidata/lb-datagen:latest"
+        assert config.images.datagen == "docker.io/sillidata/lb-datagen:1.6.0"
 
     def test_datagen_mode_defaults_auto(self):
         """Datagen mode defaults to 'auto'."""
@@ -394,11 +375,10 @@ class TestScaleConfig:
         )
         assert config.architecture.workload.datagen.mode.value == "continuous"
 
-    def test_datagen_generators_uploaders_defaults(self):
-        """Datagen generators/uploaders default to 0 (auto-resolved)."""
+    def test_datagen_generators_default(self):
+        """Datagen generators defaults to 0 (auto-resolved from pod CPU)."""
         config = LakebenchConfig(name="test")
         assert config.architecture.workload.datagen.generators == 0
-        assert config.architecture.workload.datagen.uploaders == 0
 
 
 class TestPipelineModeConfig:
@@ -412,12 +392,13 @@ class TestPipelineModeConfig:
         assert config.architecture.pipeline.mode == PipelineMode.BATCH
 
     def test_pipeline_mode_sustained(self):
-        """Pipeline mode can be set to 'sustained'."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"pipeline": {"mode": "sustained"}},
-        )
-        assert config.architecture.pipeline.mode.value == "sustained"
+        """'sustained' still loads, as the deprecated alias of 'continuous'."""
+        with pytest.warns(DeprecationWarning):
+            config = LakebenchConfig(
+                name="test",
+                architecture={"pipeline": {"mode": "sustained"}},
+            )
+        assert config.architecture.pipeline.mode.value == "continuous"
 
     def test_pipeline_mode_invalid_rejected(self):
         """Invalid pipeline mode is rejected by Pydantic."""
@@ -441,10 +422,20 @@ class TestScratchStorageConfig:
         assert scratch.storage_class == "px-csi-scratch"
         assert scratch.size == "100Gi"
 
-    def test_scratch_create_sc_field(self):
-        """create_storage_class defaults to True."""
-        config = LakebenchConfig(name="test")
-        assert config.platform.storage.scratch.create_storage_class is True
+    def test_scratch_legacy_create_sc_field_ignored(self):
+        """create_storage_class is a legacy field.
+
+        StorageClass is Category 2 shared infrastructure; lakebench no
+        longer creates it. Config models reject unknown keys, but this one
+        is listed in ScratchStorageConfig._removed_keys, so YAML that still
+        carries it loads with a DeprecationWarning and the field is dropped.
+        """
+        with pytest.warns(DeprecationWarning, match="create_storage_class"):
+            config = LakebenchConfig(
+                name="test",
+                platform={"storage": {"scratch": {"create_storage_class": False}}},
+            )
+        assert not hasattr(config.platform.storage.scratch, "create_storage_class")
 
     def test_scratch_override(self):
         """Override scratch config values."""
@@ -456,7 +447,6 @@ class TestScratchStorageConfig:
                         "enabled": True,
                         "storage_class": "my-sc",
                         "size": "200Gi",
-                        "create_storage_class": False,
                     }
                 }
             },
@@ -465,7 +455,6 @@ class TestScratchStorageConfig:
         assert scratch.enabled is True
         assert scratch.storage_class == "my-sc"
         assert scratch.size == "200Gi"
-        assert scratch.create_storage_class is False
 
     def test_scratch_provisioner_default(self):
         """BUG-001: Default scratch provisioner is Portworx."""
@@ -727,6 +716,114 @@ class TestComponentValidation:
         assert config.architecture.catalog.polaris.resources.cpu == "1"
         assert config.architecture.catalog.polaris.resources.memory == "2Gi"
 
+    def test_polaris_without_secret_loads_but_deploy_rejects(self):
+        """LB-090: config load succeeds so `lakebench validate` / `info`
+        can inspect a Polaris config even before a secret is set. The
+        deploy-time gate (`require_polaris_client_secret`) is what
+        refuses the empty value. This split matters: auto-generating at
+        load time would give `deploy` and `run` different secrets on
+        independent CLI invocations, breaking OAuth2. A hardcoded
+        default (pre-LB-090) would share one secret across every install.
+        """
+        from lakebench.config.schema import (
+            PolarisClientSecretMissing,
+            require_polaris_client_secret,
+        )
+
+        cfg = LakebenchConfig(
+            name="a",
+            architecture={
+                "catalog": {"type": "polaris"},
+                "table_format": {"type": "iceberg"},
+                "query_engine": {"type": "trino"},
+            },
+        )
+        # Load succeeds -- validate/info work.
+        assert cfg.architecture.catalog.polaris.client_secret == ""
+        # Deploy-time gate refuses with an actionable message.
+        with pytest.raises(PolarisClientSecretMissing, match="polaris.client_secret is required"):
+            require_polaris_client_secret(cfg)
+
+    def test_polaris_missing_secret_error_names_generator_command(self):
+        from lakebench.config.schema import (
+            PolarisClientSecretMissing,
+            require_polaris_client_secret,
+        )
+
+        cfg = LakebenchConfig(
+            name="a",
+            architecture={
+                "catalog": {"type": "polaris"},
+                "table_format": {"type": "iceberg"},
+                "query_engine": {"type": "trino"},
+            },
+        )
+        try:
+            require_polaris_client_secret(cfg)
+        except PolarisClientSecretMissing as e:
+            assert "token_urlsafe" in str(e), "error must show the user how to generate a secret"
+        else:
+            pytest.fail("expected PolarisClientSecretMissing")
+
+    def test_polaris_supplied_secret_survives_reload(self):
+        """The LB-090 core invariant: two independent loads of the same
+        config produce the same secret, so `deploy` and `run` never
+        diverge."""
+        from lakebench.config.schema import require_polaris_client_secret
+
+        args = {
+            "name": "a",
+            "architecture": {
+                "catalog": {
+                    "type": "polaris",
+                    "polaris": {"client_secret": "user-supplied-value"},
+                },
+                "table_format": {"type": "iceberg"},
+                "query_engine": {"type": "trino"},
+            },
+        }
+        cfg_a = LakebenchConfig(**args)
+        cfg_b = LakebenchConfig(**args)
+        assert require_polaris_client_secret(cfg_a) == "user-supplied-value"
+        assert require_polaris_client_secret(cfg_a) == require_polaris_client_secret(cfg_b)
+
+    def test_polaris_hardcoded_default_removed(self):
+        """The pre-LB-090 shared default must not slip back in."""
+        cfg = LakebenchConfig(
+            name="a",
+            architecture={
+                "catalog": {
+                    "type": "polaris",
+                    "polaris": {"client_secret": "user-supplied-value"},
+                },
+                "table_format": {"type": "iceberg"},
+                "query_engine": {"type": "trino"},
+            },
+        )
+        assert cfg.architecture.catalog.polaris.client_secret != "lakebench-polaris-secret-2024"
+
+    def test_hive_catalog_does_not_need_polaris_secret(self):
+        """A Hive deploy must not be blocked by the Polaris gate. This is
+        the reason the check lives at consumer sites, not in a load-time
+        validator that would fire for every catalog type."""
+        cfg = LakebenchConfig(
+            name="a",
+            architecture={
+                "catalog": {"type": "hive"},
+                "table_format": {"type": "iceberg"},
+                "query_engine": {"type": "trino"},
+            },
+        )
+        assert cfg.architecture.catalog.polaris.client_secret == ""
+
+    def test_polaris_client_secret_constant_deleted(self):
+        """The pre-LB-090 shared default `POLARIS_CLIENT_SECRET` constant
+        must stay deleted from `_constants.py` -- it was a shared secret
+        for every install and a re-import would silently reintroduce it."""
+        from lakebench import _constants
+
+        assert not hasattr(_constants, "POLARIS_CLIENT_SECRET")
+
     def test_unity_iceberg_rejected(self):
         """unity + iceberg is not a supported combination (Unity is Delta-only)."""
         with pytest.raises(ValueError, match="Unsupported component combination"):
@@ -781,14 +878,19 @@ class TestComponentValidation:
 class TestRecipeName:
     """Tests for recipe name derivation."""
 
-    def test_recipe_customer360_batch(self):
-        """Default recipe is customer360-batch (scale <= 10, mode auto -> batch)."""
+    def test_recipe_customer360_auto_defaults_continuous(self):
+        """Default recipe is customer360-continuous.
+
+        Post-D-wave (2026-09-28), DatagenMode.AUTO resolves to CONTINUOUS
+        unconditionally (owner D18). The pre-v1.6 scale-threshold behaviour
+        (auto -> batch at scale <= 10) is gone.
+        """
         from lakebench.config.autosizer import _resolve_datagen_mode
 
         config = LakebenchConfig(name="test")
         mode = _resolve_datagen_mode(config)
         recipe = f"{config.architecture.workload.schema_type.value}-{mode}"
-        assert recipe == "customer360-batch"
+        assert recipe == "customer360-continuous"
 
     def test_recipe_customer360_continuous(self):
         """Scale > 10 with auto mode -> customer360-continuous."""
@@ -821,7 +923,7 @@ class TestSustainedThroughputConfig:
     def test_defaults(self):
         config = LakebenchConfig(name="test")
         c = config.architecture.pipeline.sustained
-        assert c.max_files_per_trigger == 50
+        assert c.max_files_per_trigger is None  # auto: resolved per run
         assert c.bronze_target_file_size_mb == 512
         assert c.silver_target_file_size_mb == 512
         assert c.gold_target_file_size_mb == 128
@@ -1043,7 +1145,9 @@ class TestSustainedRetentionConfig:
     def test_defaults(self):
         config = LakebenchConfig(name="test")
         c = config.architecture.pipeline.sustained
-        assert c.retention_interval == 1800
+        # Unset: derived from run_duration at run start (1800 / 3).
+        assert c.retention_interval is None
+        assert c.effective_retention_interval() == 600
         assert c.retention_threshold == "30m"
 
     def test_custom_values(self):
@@ -1107,7 +1211,7 @@ class TestBenchmarkConfig:
         assert b.mode.value == "power"
         assert b.streams == 4
         assert b.cache == "hot"
-        assert b.iterations == 1
+        assert b.iterations == 3
 
     def test_yaml_parse(self, tmp_path):
         yaml_content = """
@@ -1253,8 +1357,9 @@ class TestSustainedCompactionConfig:
         config = LakebenchConfig(name="test")
         c = config.architecture.pipeline.sustained
         assert c.compaction_enabled is True
-        # Default compaction_interval=0 resolves to 2x retention_interval
-        assert c.compaction_interval == c.retention_interval * 2
+        # Default compaction_interval=0 resolves to 2x the effective retention_interval
+        assert c.compaction_interval == 0
+        assert c.effective_compaction_interval() == 2 * c.effective_retention_interval()
 
     def test_compaction_disabled(self):
         config = LakebenchConfig(
@@ -1286,4 +1391,53 @@ class TestSustainedCompactionConfig:
                 },
             },
         )
-        assert config.architecture.pipeline.sustained.compaction_interval == 1200
+        assert config.architecture.pipeline.sustained.effective_compaction_interval() == 1200
+
+
+class TestFinancialW1MaxVertices:
+    """LB-119/LB-120: the W1 connected-components vertex cap is a config
+    field so the graph detector runs at scale 10 by default and can be
+    raised for larger scales without a code edit."""
+
+    def test_default_is_above_scale_10_vertex_count(self):
+        from lakebench.config.schema import WorkloadConfig
+
+        wc = WorkloadConfig()
+        # Scale 10 is ~5M accounts (~5M vertices); the default must clear it
+        # so W1 does not skip out of the box at scale 10.
+        assert wc.w1_max_vertices >= 5_000_000
+
+    def test_rejects_zero(self):
+        from pydantic import ValidationError
+
+        from lakebench.config.schema import WorkloadConfig
+
+        with pytest.raises(ValidationError):
+            WorkloadConfig(w1_max_vertices=0)
+
+    def test_rejects_above_ceiling(self):
+        from pydantic import ValidationError
+
+        from lakebench.config.schema import WorkloadConfig
+
+        with pytest.raises(ValidationError):
+            WorkloadConfig(w1_max_vertices=200_000_001)
+
+    def test_accepts_raised_value(self):
+        from lakebench.config.schema import WorkloadConfig
+
+        wc = WorkloadConfig(w1_max_vertices=60_000_000)
+        assert wc.w1_max_vertices == 60_000_000
+
+
+def test_job_injects_w1_max_vertices_env():
+    """job.py must inject LB_FINANCIAL_W1_MAX_VERTICES for financial so
+    gold_finalize can thread the configured cap into W1."""
+    from pathlib import Path
+
+    p = Path(__file__).resolve().parents[1] / (
+        "src/lakebench/modules/pipeline_engines/spark/job.py"
+    )
+    body = p.read_text()
+    assert "LB_FINANCIAL_W1_MAX_VERTICES" in body
+    assert "cfg.architecture.workload.w1_max_vertices" in body

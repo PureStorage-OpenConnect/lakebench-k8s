@@ -13,6 +13,7 @@ import yaml
 
 from lakebench.k8s import (
     WaitStatus,
+    pinned_oc,
     wait_for_postgres_ready,
     wait_for_statefulset_ready,
 )
@@ -143,15 +144,14 @@ class PostgresDeployer:
             namespace: Namespace where the service account exists
         """
         import logging
-        import subprocess
 
         logger = logging.getLogger(__name__)
 
         # Use oc command to add SCC (requires cluster-admin or appropriate RBAC)
         try:
-            result = subprocess.run(
+            result = pinned_oc(
+                self.config,
                 [
-                    "oc",
                     "adm",
                     "policy",
                     "add-scc-to-user",

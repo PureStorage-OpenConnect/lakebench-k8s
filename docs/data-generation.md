@@ -16,28 +16,36 @@ displays a progress bar showing pod completions and elapsed time.
 
 ## Scale Factor and Data Volume
 
-The `architecture.workload.datagen.scale` field in your config controls how
-much data is generated. One scale unit produces approximately 10 GB of
-on-disk bronze Parquet data.
+The `workload.datagen.scale` field in your config controls how
+much data is generated. For the Customer360 schema, one scale unit produces
+approximately 10 GB of on-disk bronze Parquet data.
 
 | Scale | Bronze Size | Customers (Customer360) | Approximate Rows | Typical Time |
 |---|---|---|---|---|
 | 1 | ~10 GB | 100,000 | 2.4 M | Minutes |
 | 10 | ~100 GB | 1,000,000 | 24 M | 15--30 min |
 | 100 | ~1 TB | 10,000,000 | 240 M | 1--3 hours |
-| 1000 | ~10 TB | 100,000,000 | 2.4 B | 6--12+ hours |
 
-These values assume the Customer360 workload schema (the default). Other
-schemas (IoT, Financial) produce equivalent data volumes at the same scale
-factor but with different domain entities.
+Datagen scale is banded per workload. Customer 360 is supported up to scale
+300 and unverified up to 600; AML (financial) is supported up to 300 and
+unverified up to 800. Above the ceiling `deploy` and `generate` refuse the
+config, because a datagen pod would exceed the 16 GiB per-pod memory cap
+(a Lakebench-imposed cap); in the unverified range they warn. The run's
+support state records the band.
+
+These values assume the Customer360 workload schema (the default). The
+financial (AML) schema has 111,111 entities and about 26.7 M transactions per
+scale unit. Its size estimate (`src/lakebench/config/scale.py`) is about
+8.4 GB of pacs.008 Parquet per scale unit, measured on the pre-freeze
+generator; v1.6 has no size measurements on the frozen generator (deferred
+to v1.7).
 
 Set the scale in your config file:
 
 ```yaml
-architecture:
-  workload:
-    datagen:
-      scale: 100    # ~1 TB of bronze data
+workload:
+  datagen:
+    scale: 100    # ~1 TB of bronze data
 ```
 
 ## Command Flags
@@ -45,9 +53,8 @@ architecture:
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--wait` | `-w` | `true` | Wait for data generation to complete |
-| `--timeout` | `-t` | `7200` | Timeout in seconds when waiting |
+| `--timeout` | `-t` | `0` | Timeout in seconds when waiting. `0` auto-computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--resume` | | `false` | Resume from checkpoint if a previous generation was interrupted |
 
 Without `--yes`, the command prompts for confirmation before submitting
 the datagen job. Use `--yes` for scripts and CI/CD pipelines.
@@ -60,22 +67,10 @@ Generate and wait (default behavior):
 lakebench generate my-config.yaml
 ```
 
-Submit the job and return immediately without waiting:
-
-```bash
-lakebench generate my-config.yaml --no-wait
-```
-
 Generate with a longer timeout for large scales:
 
 ```bash
 lakebench generate my-config.yaml --timeout 14400
-```
-
-Resume an interrupted generation:
-
-```bash
-lakebench generate my-config.yaml --resume
 ```
 
 ## How It Works
@@ -90,28 +85,96 @@ with `parallelism` set from the config (default: 4). Each pod in the Job:
    (Customer360 by default).
 3. Writes files directly to S3 at the path
    `s3://<bronze-bucket>/<path_template>/` (default path template:
-   `customer/interactions`).
+   `customer/interactions`; the financial schema writes under `pacs008`).
 4. Reports completion status back to Kubernetes.
 
-The datagen mode (`auto`, `batch`, or `continuous`) determines per-pod resource
-allocation:
+The datagen mode (`auto`, `batch`, or `continuous`) is the S3 delivery
+pattern, not a content or resource tier. Row content is byte-for-byte
+identical across modes at a fixed seed. `batch` buffers each Parquet file
+in memory and issues one S3 PUT per file; `continuous` uploads each file
+via S3 multipart as row-groups close, so files arrive progressively rather
+than in bursts. `auto` resolves to `continuous` at every scale (owner D18,
+2026-09-28); the pre-v1.6 scale-threshold behaviour was removed in v1.6.
+Pod CPU and memory are sized by scale via the autosizer, independently of
+delivery mode.
 
-- **batch** (scale <= 10, or explicit): 1 generator process, 1 uploader thread
-  per pod. Low resource profile (4 CPU, 4Gi memory). Best for small datasets.
-- **continuous** (scale > 10, or explicit): 8 generator processes, 2 uploader
-  threads per pod. Higher resource profile (8 CPU, 24Gi memory). Best for large
-  datasets where sustained throughput matters.
-- **auto** (default): Selects batch or continuous based on scale factor.
+### Delivery mode vs pipeline mode
 
-### Resource Allocation by Mode
+Two independent config fields spell their values `batch` / `continuous`.
+Content is set by seed, S3 layout by delivery mode, and stage graph by
+pipeline mode. The two mode fields do not constrain each other.
 
-CPU and memory are hard-locked per mode and cannot be overridden in the config.
-The autosizer always sets them to the mode-correct values.
+| Concern | Config field | Type | What it controls |
+|---|---|---|---|
+| S3 delivery layout | `workload.datagen.mode` | `DatagenMode` | How the corpus lands in S3: `batch` = one PUT per Parquet file; `continuous` = S3 multipart upload as row-groups close. Row content is byte-identical at a fixed seed. |
+| Stage graph | `architecture.pipeline.mode` | `PipelineMode` | How the medallion stages run: `batch` = sequential (bronze -> silver -> gold once); `continuous` = concurrent jobs over a corpus that keeps arriving. `sustained` is a deprecated alias for `continuous`. |
 
-| Mode | CPU/pod | Memory/pod | Generators/pod | Uploaders/pod | Trigger |
-|------|--------:|-----------:|:--------------:|:-------------:|---------|
-| batch | 4 | 4Gi | 1 | 1 | scale <= 10 (auto) |
-| continuous | 8 | 24Gi | 8 | 2 | scale > 10 (auto) |
+The composition `datagen.mode: batch` with `pipeline.mode: continuous` is
+a valid config: all bronze files land in one burst, then the continuous
+pipeline trickle-reads them. Lakebench does not use `streaming` as a mode
+name; the continuous pipeline uses Spark Structured Streaming internally,
+but the operator-facing name is `continuous`.
+
+### 2026-09-28: default delivery mode changed to continuous
+
+The default for `datagen.mode: auto` moved from `batch` (at scale <= 10)
+to `continuous` (at every scale). Same-seed corpora remain byte-identical;
+only the S3 upload pattern changed. If a run depended on batch-style
+bursty uploads (bandwidth ceilings, RSS profile), set `mode: batch`
+explicitly. Measured 2026-09-28: `continuous` is faster than `batch` at
+scale 1 for `customer360` (upload-generation overlap) and 10-16% slower
+at scale 10 because per-file multipart overhead grows with file count.
+Choose the mode from file count and network profile rather than accepting
+the default.
+
+### `--delivery-mode` (internal render arg)
+
+`deploy/datagen.py` translates `datagen.mode` into a `--delivery-mode`
+argv on the datagen container (see `templates/datagen/job.yaml.j2`).
+Operators do not set it directly; it appears in rendered Job manifests
+as an aid when troubleshooting a job. The container entrypoint accepts
+`auto`, `batch` and `continuous`, maps `auto` to `continuous`, and passes
+the result to the Rust binary, which accepts only `batch` or `continuous`.
+A rendered manifest can be replayed by hand through the entrypoint.
+
+### Per-pod resources
+
+The autosizer sizes datagen pods the same way in both modes, and honours
+values you set in the config:
+
+| Field | When unset | When set |
+|---|---|---|
+| `cpu` | `8` | Used as given |
+| `memory` | Derived from the measured peak RSS for the schema, scale, thread count at the fixed 64mb file size, at least `4Gi` | Used as given |
+| `generators` | `0` (auto): one generator thread per pod CPU | Used as the thread count |
+
+| `memory` default at 8 CPU | Scale 1 | Scale 100 | Scale 300 | Scale 800 |
+|---|---|---|---|---|
+| AML (financial) | 7Gi | 8Gi | 10Gi | 16Gi |
+| Customer 360 | 4Gi | 4Gi | 4Gi | 4Gi |
+
+A datagen pod never requests more than 16Gi. If the CPU you set would need
+more, the request stays at 16Gi and each pod runs fewer generator threads;
+the autosizer says so. The entrypoint also lowers the thread count if a
+memory limit you set cannot hold that many threads, rather than risk an
+OOMKill. Above scale 100, AML datagen runs at least 8 pods: each pod holds
+typology rows only for the files it writes, so fewer pods means more memory
+per pod.
+
+### Scale limits
+
+Every datagen pod holds the whole population's state, so per-pod memory grows
+with scale whatever the pod count. Each workload has a scale band, measured on
+the cluster at 8 CPU per pod with the 16Gi cap:
+
+| Workload | Supported (measured) | Unverified (modelled to fit) | Refused |
+|---|---|---|---|
+| AML (financial) | up to 300 | above 300, up to 800 | above 800 |
+| Customer 360 | up to 300 | above 300, up to 600 | above 600 |
+
+An unverified scale runs with a warning and is recorded as unverified in the
+run's support state. A refused scale stops `deploy`, `generate` and `run`
+before anything starts.
 
 The number of datagen pods (parallelism) also scales with the scale factor:
 
@@ -147,61 +210,58 @@ Check pod logs for a specific worker:
 kubectl logs -n <namespace> -l job-name=lakebench-datagen --tail=50
 ```
 
-Check how much data has been written to S3:
-
-```bash
-lakebench info my-config.yaml
-```
-
 ## Re-running Data Generation
 
-Data generation is idempotent in the sense that re-running it overwrites
-existing data in the bronze bucket. If you need fresh data:
+`lakebench generate` (and `run --generate`) refuses to write into a bronze
+prefix that already holds data: it exits 2 and names the prefix, so an
+existing corpus is never overwritten by accident. To regenerate, pass
+`--regenerate`, which empties the whole bronze bucket (and aborts dangling
+multipart uploads) before datagen starts:
 
-1. Run `lakebench generate` again. New files will be written alongside or
-   overwriting existing data in the bronze bucket.
-2. If you want a clean slate, empty the bronze bucket first:
+```bash
+lakebench generate my-config.yaml --wait --regenerate
+```
 
-   ```bash
-   lakebench clean bronze my-config.yaml --force
-   lakebench generate my-config.yaml
-   ```
+To keep the existing corpus instead, run the pipeline with `run
+--skip-generate`, or without `--generate`.
+
+The deployer also clears the datagen prefix before the first cycle when
+this deployment created the bronze bucket (LB-185), so a smaller generate
+never inherits a larger earlier generate's `part-*` files. It does not
+touch a bucket it did not create or one with `create_buckets: false`; for
+those, empty the bronze data yourself (`lakebench clean bronze
+my-config.yaml`) or use `--regenerate`.
 
 ## Configuration Options
 
 The full set of datagen-related configuration fields:
 
 ```yaml
-architecture:
-  workload:
-    schema: customer360          # Workload schema: customer360, iot, financial
-    datagen:
-      scale: 10                  # Abstract scale factor (1 unit ~ 10 GB)
-      mode: auto                 # auto | batch | continuous
-      parallelism: 4             # Number of parallel Kubernetes pods
-      file_size: 512mb           # Target Parquet file size
-      dirty_data_ratio: 0.08     # Fraction of intentionally dirty records
-      cpu: "2"                   # CPU request per pod
-      memory: 4Gi                # Memory request per pod
-      generators: 0              # Per-pod generator processes (0 = auto)
-      uploaders: 0               # Per-pod uploader threads (0 = auto)
-      # Timestamp range -- affects Iceberg partition count.
-      # Silver partitions by interaction_date (from event_timestamp).
-      # Sustained mode: use a narrow range (days/weeks) to avoid
-      # small-file proliferation across many date partitions.
-      # Batch mode: wider ranges are fine (single compaction pass).
-      # See docs/configuration.md#timestamp-range-impact for details.
-      timestamp_start: null      # Start date for timestamps (ISO format)
-      timestamp_end: null        # End date for timestamps (ISO format)
-      checkpoint:
-        enabled: true
-        path: ".lakebench_checkpoint.json"
+workload:
+  schema: customer360          # Workload schema: customer360 or financial
+  datagen:
+    scale: 10                  # Abstract scale factor (1 unit ~ 10 GB)
+    mode: auto                 # auto | batch | continuous
+    parallelism: 4             # Parallel Kubernetes pods (autosizer sizes it when unset)
+    file_size: 64mb            # Fixed; the only accepted value
+    dirty_data_ratio: 0.08     # Fraction of intentionally dirty records
+    cpu: "8"                   # CPU per pod (autosizer default when unset)
+    memory: 4Gi                # Memory per pod (autosizer derives it when unset)
+    generators: 0              # Per-pod generator threads (0 = follow pod CPU)
+    # Timestamp range -- affects Iceberg partition count.
+    # Silver partitions by interaction_date (from event_timestamp).
+    # Continuous mode: use a narrow range (days/weeks) to avoid
+    # small-file proliferation across many date partitions.
+    # Batch mode: wider ranges are fine (single compaction pass).
+    # See docs/configuration.md#timestamp-range-impact for details.
+    timestamp_start: null      # Start date for timestamps (ISO format)
+    timestamp_end: null        # End date for timestamps (ISO format, exclusive)
 ```
 
 The `dirty_data_ratio` field controls the fraction of records that contain
 intentional quality issues (duplicates, missing fields, format inconsistencies).
 This exercises the bronze-verify and silver-build data quality logic during
-pipeline execution.
+pipeline execution. The generator applies it to the customer360 schema only.
 
 ## Custom Datagen Images
 
@@ -213,11 +273,15 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:latest`) is built from the `datagen/`
-directory in this repository. To build and push a custom image:
+The default image (`docker.io/sillidata/lb-datagen:1.6.0`, digest
+`sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a`,
+generator version `datagen-v2-rs-0.3`; output-identical to the v1.6 AML
+generator freeze but not the registered-look image, see
+`docs/internal/aml-protocol.md`) is built from the `datagen_rs/` directory in this repository. To build and push a custom
+image:
 
 ```bash
-cd datagen/
+cd datagen_rs/
 podman build -t my-registry/my-datagen:latest .
 podman push my-registry/my-datagen:latest
 ```
@@ -233,17 +297,34 @@ different domain dimensions:
 | Schema | Entity | Events | Description |
 |---|---|---|---|
 | `customer360` | Customers | Interactions (purchase, browse, support) | Default. Multi-channel customer analytics. |
-| `iot` | Sensors | Readings (1/min, 30 days) | IoT telemetry pipeline. |
-| `financial` | Accounts | Transactions (4/month, 12 months) | Financial transaction processing. |
+| `financial` | Entities (parties and their accounts) | pacs.008 transactions (4 per entity per month, 60 months) | AML transaction monitoring. |
 
 Set the schema in your config:
 
 ```yaml
-architecture:
-  workload:
-    schema: customer360
+workload:
+  schema: customer360
 ```
 
-All schemas produce approximately 10 GB of bronze data per scale unit. The
-domain dimensions (number of entities, events per entity, date range) vary
-by schema.
+Customer360 produces approximately 10 GB of bronze data per scale unit;
+financial is estimated at about 8.4 GB (pre-freeze measurement, see above).
+The domain dimensions (number of entities, events per entity, date range)
+vary by schema and are defined in `src/lakebench/config/scale.py`; the Arrow
+schemas are in `datagen_rs/src/schema.rs`. `schema: custom` is rejected at
+config load, and there is no IoT schema.
+
+### Financial bronze layout
+
+With the default path template the financial prefix is `pacs008/`, and
+under `s3://<bronze-bucket>/pacs008/` the generator writes:
+
+| Key | Contents |
+|---|---|
+| `bronze/pacs008/part-NNNNNN.parquet` | pacs.008 payment messages |
+| `bronze/party.parquet` | party master: identity, address, customer flag, customer type, CRR score and tier (no sanctions, PEP or initial risk columns) |
+| `bronze/account.parquet` | account master: IBAN, holder, bank, currency, dates, balance |
+| `bronze/watchlist.parquet` | synthetic dated sanctions and PEP lists |
+| `manifest/manifest.parquet` | planted typology ground truth used for scoring |
+
+Cycles after the first in a multi-cycle run add a cycle suffix
+(`part-cNNN-NNNNNN.parquet`, `manifest-cNNN.parquet`).

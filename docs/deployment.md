@@ -36,41 +36,59 @@ The deployment engine follows this fixed sequence:
    from the config values (or references an existing secret via `secret_ref`).
    When `s3.ca_cert` is set, also creates a CA certificate secret for HTTPS
    endpoints (used by all components for TLS verification).
-3. **Scratch StorageClass** -- Creates a Portworx `repl=1` StorageClass for Spark
-   shuffle volumes. Skipped if `platform.storage.scratch.enabled` is false.
-   Non-fatal if creation fails (may need cluster-admin).
-4. **PostgreSQL** -- Deploys a PostgreSQL StatefulSet as the metadata backend for
+3. **S3 buckets** -- Creates the bronze, silver and gold buckets, or adopts
+   existing ones, and records which buckets this deployment created.
+4. **Scratch StorageClass** -- Verifies that the scratch StorageClass for Spark
+   shuffle volumes exists. Deploy never creates it: it is shared cluster-scoped
+   infrastructure. If it is missing, deploy stops and points to
+   `lakebench admin install-scratch-storage-class`, which a cluster admin runs
+   once. Skipped if `platform.storage.scratch.enabled` is false.
+5. **PostgreSQL** -- Deploys a PostgreSQL StatefulSet as the metadata backend for
    the catalog service.
-5. **Hive Metastore or Polaris** -- Deploys the catalog selected by
+6. **Hive Metastore or Polaris** -- Deploys the catalog selected by
    `architecture.catalog.type`. If `hive`, deploys a Stackable HiveCluster CRD.
    If `polaris`, deploys an Apache Polaris REST catalog Deployment. The
    non-selected catalog is automatically skipped.
-6. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
-   (StatefulSet) with the Iceberg connector configured to point at the catalog.
-   Skipped if `architecture.query_engine.type` is `none`.
 7. **Spark RBAC** -- Creates the ServiceAccount, Role, and RoleBinding for Spark
    job submission. On OpenShift, also binds the `anyuid` SCC to the service
    account.
+8. **Unity Catalog** -- Skipped unless `architecture.catalog.type` is `unity`.
+   No shipped recipe uses Unity.
+9. **Spark Operator** -- Checks that the shared Spark Operator is running and
+   watches the deployment namespace. If the namespace is not watched, deploy
+   adds it to `spark.jobNamespaces` with `helm upgrade`, under the
+   `lakebench-cluster-lock` lease so concurrent deploys do not overwrite each
+   other. With `platform.compute.spark.operator.install: true`, deploy also
+   installs the operator when it is missing; with `install: false` (the
+   default), a missing or broken operator fails the deploy.
+10. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
+    (StatefulSet) with the connector configured to point at the catalog.
+    Skipped unless `architecture.query_engine.type` is `trino`.
+11. **Spark Thrift Server** -- Deployed when the query engine is `spark-thrift`.
+12. **DuckDB** -- Deployed when the query engine is `duckdb`.
+13. **Observability** -- Only when `observability.enabled` is true or the
+    `--include-observability` flag is used. Prometheus and Grafana come from
+    one shared `kube-prometheus-stack` release in the `lakebench-observability`
+    namespace. Deploy installs it only if no such release exists on the
+    cluster, never modifies an existing one, and applies this deployment's
+    PodMonitors and dashboard in its own namespace. Destroy never uninstalls
+    the shared release.
 
-> Before running Spark jobs, Lakebench checks that the Spark Operator is
-> watching the target namespace. If `spark.operator.install: true`, it
-> auto-adds the namespace and restarts the operator. If `install: false`
-> (the default), it reports the fix command. Run `lakebench validate`
-> to check this before deploying.
-
-8. **Prometheus** -- Deploys Prometheus for metrics collection. Only deployed when
-   `observability.enabled` is true or the `--include-observability`
-   flag is used.
-9. **Grafana** -- Deploys Grafana with pre-configured dashboards. Same activation
-   conditions as Prometheus.
+Run `lakebench validate` to check the operator and StorageClass before
+deploying.
 
 ### Command Flags
 
 | Flag | Short | Description |
 |---|---|---|
+| `--file` | `-f` | Config file (alternative to the positional argument) |
 | `--dry-run` | | Show what would be deployed without making changes |
 | `--include-observability` | | Deploy Prometheus and Grafana monitoring stack |
 | `--yes` | `-y` | Skip the confirmation prompt |
+| `--timeout` | `-t` | Global deployment timeout in seconds, checked between steps (default 3600, `0` = no timeout) |
+| `--local` | | Deploy locally with podman or docker instead of Kubernetes |
+| `--workdir` | | Host directory for local mode state (default `~/.lakebench/local/<name>`) |
+| `--force-legacy` | | Claim ownership of a pre-1.5 namespace or untagged bucket without tag proof. Use only for resources you have confirmed are yours |
 
 ### Examples
 
@@ -106,11 +124,14 @@ After deploying, verify that all components are healthy:
 lakebench status my-config.yaml
 ```
 
-This queries the Kubernetes API and displays a table of component statuses
-(PostgreSQL, Hive Metastore, Trino coordinator, Prometheus, Grafana) with
-replica counts and readiness indicators.
+This queries the Kubernetes API and displays a table of the deployment's
+components (PostgreSQL, the configured catalog and query engine) with replica
+counts and readiness indicators, and the datagen job's progress while it
+runs.
 
-You can also check status by namespace without a config file:
+You can also check status by namespace without a config file; the table
+then lists every component lakebench can deploy, plus the shared Prometheus
+and Grafana:
 
 ```bash
 lakebench status --namespace my-lakehouse
@@ -118,17 +139,13 @@ lakebench status --namespace my-lakehouse
 
 ## Accessing Monitoring (Observability Stack)
 
-When deployed with `--include-observability`, Prometheus and Grafana are
-accessible within the cluster:
-
-- Grafana: `http://lakebench-grafana.<namespace>.svc:3000` (default credentials: `admin` / `lakebench`)
-- Prometheus: `http://lakebench-prometheus.<namespace>.svc:9090`
-
-For local access, use port-forwarding:
+When deployed with `--include-observability`, Prometheus and Grafana run in
+the shared `lakebench-observability` namespace (Grafana credentials:
+`admin` / `lakebench`). The chart shortens service names, so list them:
 
 ```bash
-kubectl port-forward svc/lakebench-grafana 3000:3000 -n <namespace>
-kubectl port-forward svc/lakebench-prometheus 9090:9090 -n <namespace>
+kubectl get svc -n lakebench-observability -l release=lakebench-observability
+kubectl port-forward -n lakebench-observability svc/<grafana service> 3000:80
 ```
 
 Pre-configured dashboards include Spark job metrics, Trino query performance,
@@ -147,32 +164,71 @@ irreversible. Without `--force`, you will be prompted for confirmation.
 
 The destroy engine follows a specific sequence to ensure clean removal:
 
-1. **SparkApplications** -- Deletes all running and completed Spark jobs.
-2. **Spark pods** -- Force-deletes any orphaned driver and executor pods.
-3. **Datagen jobs** -- Deletes Kubernetes batch Jobs and pods from data generation.
-4. **Iceberg maintenance** -- Runs `expire_snapshots` and `remove_orphan_files`
-   on all tables via the deployed query engine (Trino or Spark Thrift Server).
-   Skipped when the engine is DuckDB (read-only) or `none`.
-5. **Drop tables** -- Drops all Iceberg tables (`bronze`, `silver`, `gold`) via
-   the query engine.
-6. **S3 buckets** -- Empties all three S3 buckets, including aborting incomplete
-   multipart uploads.
-7. **Grafana** -- Removes the Grafana Deployment and ConfigMaps.
-8. **Prometheus** -- Removes the Prometheus StatefulSet and PVCs.
-9. **Trino** -- Removes the coordinator Deployment, worker StatefulSet, PVCs,
-   Services, and ConfigMaps.
-10. **Hive/Polaris** -- Removes the HiveCluster CRD or Polaris Deployment.
-11. **PostgreSQL** -- Removes the StatefulSet, Service, and PVCs.
-12. **RBAC and Secrets** -- Removes the Spark ServiceAccount, Role, RoleBinding,
-    and all Secrets.
-13. **Scratch StorageClass** -- Removes the cluster-scoped StorageClass (best-effort).
-14. **Namespace** -- Deletes the Kubernetes namespace.
+1. **Ownership check** -- Refuses to continue if the namespace carries
+   another deployment's identity annotations, targets a different cluster, or
+   has no lakebench annotations at all (unless `--force-legacy`).
+2. **SparkApplications** -- Deletes all running and completed Spark jobs.
+3. **Spark pods** -- Force-deletes any orphaned driver and executor pods.
+4. **Datagen jobs** -- Deletes Kubernetes batch Jobs and pods from data generation.
+5. **Table removal** -- Removes the workload's tables from the catalog without
+   deleting files. On Trino destroy runs
+   `CALL <catalog>.system.unregister_table(...)` rather than `DROP TABLE`,
+   because Trino's `DROP TABLE` deletes table files (on Polaris, when the
+   namespace is being deleted, it runs nothing: the catalog database goes
+   with the namespace). On Spark Thrift Server an
+   Iceberg `DROP TABLE` (no `PURGE`) removes only the catalog entry; a Delta
+   table is dropped only when `DESCRIBE DETAIL` puts its location in a bucket
+   destroy is about to empty, and any table left registered is listed in the
+   summary. Destroy runs no table maintenance: no Iceberg `expire_snapshots`
+   or `remove_orphan_files` and no Delta `VACUUM`. Skipped when the engine is
+   DuckDB or `none`.
+6. **S3 buckets** -- Empties the buckets, including aborting incomplete
+   multipart uploads, then deletes only the buckets this deployment created
+   (see below).
+7. **Observability** -- Leaves the shared kube-prometheus-stack release in
+   place, since other deployments may use it. Only a release an older
+   lakebench installed into this deployment's own namespace is uninstalled.
+8. **Query engine** -- Removes the configured engine (Trino, Spark Thrift
+   Server, or DuckDB).
+9. **Catalog** -- Removes the HiveCluster or Polaris deployment (or a Unity
+   Catalog deployment, if the config selected `unity`; no recipe does).
+10. **PostgreSQL** -- Removes the StatefulSet and Service. Its data PVC is
+    removed with the namespace; with `create_namespace: false` it survives
+    destroy.
+11. **RBAC and Secrets** -- Removes the Spark ServiceAccount, Role,
+    RoleBinding, and Secrets.
+12. **Namespace** -- Removes the namespace from the Spark Operator watch list,
+    deletes it (only when `create_namespace` is true), and waits until it is
+    NotFound before reporting it deleted.
+
+Destroy never deletes the scratch StorageClass. It is shared, cluster-scoped
+infrastructure that other deployments on the same cluster use.
+
+Only buckets lakebench created are deleted. Deploy records each bucket it
+creates (the `lakebench.deployment/created-buckets` namespace annotation, plus
+a `lakebench.created` tag where the backend supports tagging), and destroy
+deletes a bucket only when it is in that record and its ownership checks out.
+Pre-provisioned buckets (`create_buckets: false`), buckets deploy adopted, and
+`--keep-buckets` runs are emptied but kept. On a backend without bucket
+tagging (FlashBlade) the bucket name is the only other ownership evidence, so
+a pre-existing bucket is emptied only when deploy found it empty and recorded
+that (`lakebench.deployment/adopted-empty-buckets`); one that already held
+objects is left in place and reported unless you pass `--force-legacy`. If a recorded bucket cannot be
+emptied or deleted, destroy keeps the namespace, because its annotations are
+the only ownership record a re-run can use to finish the job.
 
 ### Command Flags
 
 | Flag | Short | Description |
 |---|---|---|
-| `--force` | `-f` | Skip the confirmation prompt |
+| `--force` / `--yes` | `-y` | Skip the confirmation prompt |
+| `--keep-buckets` | | Empty the S3 buckets but do not delete them |
+| `--namespace-timeout` | | Seconds to wait for the namespace to terminate (default 600) |
+| `--force-legacy` | | Proceed on a namespace or bucket with no lakebench ownership record |
+
+See the [CLI reference](cli-reference.md#destroy) for the full flag list,
+including `--local`, `--workdir`, `--remove-data`,
+`--allow-unverified-cluster` and `--file`, and for exit codes.
 
 ### Examples
 

@@ -1,5 +1,11 @@
 """Kubernetes client module for Lakebench."""
 
+from ._pinned import (
+    pinned_helm,
+    pinned_kubectl,
+    pinned_kubectl_popen,
+    pinned_oc,
+)
 from .client import (
     ClusterCapacity,
     K8sClient,
@@ -60,4 +66,10 @@ __all__ = [
     "SCCStatus",
     "SecurityCheckResult",
     "SecurityVerifier",
+    # Pinned subprocess helpers (route every kubectl/helm/oc through the
+    # configured kube-context; every bare call site is a lint violation).
+    "pinned_helm",
+    "pinned_kubectl",
+    "pinned_kubectl_popen",
+    "pinned_oc",
 ]

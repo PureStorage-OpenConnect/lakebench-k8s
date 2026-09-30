@@ -1,33 +1,44 @@
 # Recipes -- Component Combinations
 
-A **recipe** (also called a **quick-recipe**) is the validated combination of catalog, table format, pipeline engine, and query engine that defines a Lakebench deployment's data architecture. Lakebench validates recipes at config load time against a whitelist of supported combinations and rejects anything unsupported with a clear error message. There are currently 11 supported recipes.
+A **recipe** (also called a **quick-recipe**) is the validated combination of catalog, table format, pipeline engine, and query engine that defines a Lakebench deployment's data architecture. Lakebench validates the architecture at config load time and rejects anything outside the recipe list with the reason. There are 11 recipes. A recipe is architecture only: whether a workload and mode are supported on it is a separate question, answered by the support table below.
 
 ## Quick-Recipes
 
-Instead of setting `catalog`, `table_format`, `engine`, and `query_engine` individually, use the `recipe:` field for one-line setup:
+Instead of setting `catalog`, `table_format`, `pipeline_engine`, and `query_engine` individually, use the `recipe:` field for one-line setup:
 
 ```yaml
 name: my-lakehouse
 recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query engine in one line
+architecture:
+  catalog:
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # every Polaris recipe needs one
 ```
 
 Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
 
 ## Quick Reference
 
-| Recipe Name | Catalog | Table Format | Query Engine | Best For | Prerequisites |
-|---|---|---|---|---|---|
-| **Standard** | hive | iceberg | trino | Ad-hoc SQL analytics | Stackable Hive Operator |
-| **Standard Headless** | hive | iceberg | none | ETL-only workloads | Stackable Hive Operator |
-| **Spark SQL** | hive | iceberg | spark-thrift | Spark-native analytics | Stackable Hive Operator |
-| **DuckDB** | hive | iceberg | duckdb | Lightweight single-node analytics | Stackable Hive Operator |
-| **Polaris** | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | None (Lakebench deploys Polaris) |
-| **Polaris Headless** | polaris | iceberg | none | REST catalog ETL | None (Lakebench deploys Polaris) |
-| **Polaris Spark SQL** | polaris | iceberg | spark-thrift | Spark-native with REST catalog | None (Lakebench deploys Polaris) |
-| **Polaris DuckDB** | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | None (Lakebench deploys Polaris) |
-| **Hive Delta Trino** | hive | delta | trino | Databricks-comparable analytics | Stackable Hive Operator |
-| **Hive Delta Spark SQL** | hive | delta | spark-thrift | Delta + Spark-native analytics | Stackable Hive Operator |
-| **Hive Delta Headless** | hive | delta | none | Delta ETL-only workloads | Stackable Hive Operator |
+The short names in the first column are the section headings below; the
+`recipe:` value is the second column.
+
+| Name | `recipe:` | Catalog | Table Format | Query Engine | Best For | Prerequisites |
+|---|---|---|---|---|---|---|
+| **Standard** | `hive-iceberg-spark-trino` (`default`) | hive | iceberg | trino | Ad-hoc SQL analytics | Stackable Hive Operator |
+| **Standard Headless** | `hive-iceberg-spark-none` | hive | iceberg | none | ETL-only workloads | Stackable Hive Operator |
+| **Spark SQL** | `hive-iceberg-spark-thrift` | hive | iceberg | spark-thrift | Spark-native analytics | Stackable Hive Operator |
+| **DuckDB** | `hive-iceberg-spark-duckdb` | hive | iceberg | duckdb | Lightweight single-node analytics | Stackable Hive Operator |
+| **Polaris** | `polaris-iceberg-spark-trino` | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Polaris Headless** | `polaris-iceberg-spark-none` | polaris | iceberg | none | REST catalog ETL | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Polaris Spark SQL** | `polaris-iceberg-spark-thrift` | polaris | iceberg | spark-thrift | Spark-native with REST catalog | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Polaris DuckDB** | `polaris-iceberg-spark-duckdb` | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Hive Delta Trino** | `hive-delta-spark-trino` | hive | delta | trino | Databricks-comparable analytics | Stackable Hive Operator |
+| **Hive Delta Spark SQL** | `hive-delta-spark-thrift` | hive | delta | spark-thrift | Delta + Spark-native analytics | Stackable Hive Operator |
+| **Hive Delta Headless** | `hive-delta-spark-none` | hive | delta | none | Delta ETL-only workloads | Stackable Hive Operator |
+
+Every recipe uses Spark as the pipeline engine. There is no DuckDB + Delta
+recipe (DuckDB cannot read Delta on non-AWS S3) and no Polaris + Delta recipe
+(Polaris is Iceberg-only).
 
 ## Choosing a Recipe
 
@@ -36,7 +47,8 @@ Use this decision tree to narrow down the right recipe:
 - **Need ad-hoc SQL after the pipeline runs?** Use `trino` as the query engine (Standard or Polaris).
 - **Need a REST catalog API?** Use `polaris` recipes. Polaris exposes an Iceberg REST API on port 8181, enabling multi-engine access and OAuth2 authentication.
 - **Already have the Stackable Hive Operator installed?** The `hive` recipes are simpler to reason about and use the battle-tested Thrift protocol.
-- **Only need ETL, no interactive queries?** Use a `none` query engine recipe (Standard Headless or Polaris Headless). This skips Trino deployment entirely.
+- **Only need ETL, no interactive queries?** Use a `none` query engine recipe (Standard Headless, Polaris Headless or Hive Delta Headless). This skips the query engine entirely.
+- **Running the AML (financial) workload?** Use an Iceberg recipe. AML on Delta is refused at config load.
 
 ## Recipe Details
 
@@ -58,11 +70,13 @@ architecture:
 
 **Does not deploy:** Polaris.
 
-**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) to be installed on the cluster. Install it with:
+**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) and the commons, listener and secret operators it depends on. Either set `architecture.catalog.hive.operator.install: true` or install them with:
 
 ```bash
-helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
-  --version 25.7.0 --namespace stackable
+for op in commons-operator listener-operator secret-operator hive-operator; do
+  helm install $op oci://oci.stackable.tech/sdp-charts/$op \
+    --version 25.7.0 --namespace stackable --create-namespace
+done
 ```
 
 ---
@@ -107,7 +121,7 @@ architecture:
 
 **Does not deploy:** Trino, Polaris.
 
-**Caveats:** Requires the Stackable Hive Operator. The Spark Thrift Server uses 2 cores and 4g memory by default (configurable via `architecture.query_engine.spark_thrift`).
+**Caveats:** Requires the Stackable Hive Operator. The Spark Thrift Server uses 2 cores and a 4g heap by default (configurable via `architecture.query_engine.spark_thrift`); on `hive-delta-spark-thrift` the auto-sized default is 8 cores and a 16g heap, because Delta is not compacted before the benchmark.
 
 ---
 
@@ -151,9 +165,9 @@ architecture:
 
 **Does not deploy:** Hive Metastore.
 
-**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0), Trino 454+.
+**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0), Trino 454+, and `architecture.catalog.polaris.client_secret` set in the config (every Polaris recipe; `deploy` and `run` refuse a Polaris config without it).
 
-**Caveats:** On FlashBlade, Polaris runs with `stsUnavailable=true` and `pathStyleAccess=true`. Each client (Spark, Trino) maintains its own static S3 credentials rather than using credential vending.
+**Caveats:** The bootstrap Job always creates the catalog with `stsUnavailable=true` and `pathStyleAccess=true` (needed on FlashBlade and other non-AWS S3). Each client (Spark, Trino) maintains its own static S3 credentials rather than using credential vending.
 
 ---
 
@@ -223,53 +237,67 @@ architecture:
 
 ---
 
-## Pipeline Modes
+## Pipeline Modes and Support States
 
-Recipes define the data architecture (catalog + format + engine + query engine). Pipeline modes define how data flows through it. The three supported patterns are:
+Recipes define the data architecture. The pipeline mode, `batch` or
+`continuous`, defines how data flows through it:
 
-| Pattern | Config Value | Description |
-|---|---|---|
-| **Medallion** | `medallion` | Sequential batch pipeline: bronze-verify, silver-build, gold-finalize. The default. |
-| **Streaming** | `streaming` | Concurrent streaming jobs: bronze-ingest, silver-stream, gold-refresh running simultaneously. |
-| **Batch** | `batch` | Alias for medallion with batch-oriented tuning. |
-
-Pipeline mode is independent of recipe -- any recipe works with any pipeline pattern. Set the pattern in config:
+| Mode | Stages |
+|---|---|
+| `batch` | bronze-verify, silver-build, gold-finalize, then the benchmark. The default. |
+| `continuous` | bronze-ingest, silver-stream and gold-refresh run concurrently over a corpus that keeps arriving, for `architecture.pipeline.continuous.run_duration`. |
 
 ```yaml
 architecture:
   pipeline:
-    pattern: medallion  # or streaming, batch
+    mode: continuous   # or batch
 ```
 
-To run in sustained streaming mode:
+`lakebench run <config> --continuous` runs one config in continuous mode
+without editing it. `sustained` is accepted as a deprecated alias of
+`continuous`.
+
+Support is judged per workload x recipe x mode: **supported** (validated on the
+release tree), **unverified** (valid, not release-validated) or
+**unsupported** (refused before a run). See
+[Compatibility Matrix](compatibility-matrix.md#support-states) for the rules.
+This table is generated from the code:
+
+<!-- BEGIN GENERATED: support-states -->
+<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+
+| Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
+|---|---|---|---|---|
+| `hive-delta-spark-none` | unverified | unverified | unsupported | unsupported |
+| `hive-delta-spark-thrift` | unverified | unverified | unsupported | unsupported |
+| `hive-delta-spark-trino` | unverified | unverified | unsupported | unsupported |
+| `hive-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-none` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-none` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+
+- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Set architecture.table_format.type to iceberg (for example recipe: polaris-iceberg-spark-trino).
+- Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
+- AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
+
+<!-- END GENERATED: support-states -->
+
+## Using `lakebench config recommend`
+
+The `config recommend` command shows sizing guidance for your cluster: the scale factor it can hold, or what a larger scale needs. It does not select a recipe, but it helps size the deployment. It takes an optional config file, used to detect the pipeline mode (default `lakebench.yaml`):
 
 ```bash
-lakebench run test-config.yaml --sustained
+lakebench config recommend
+lakebench config recommend my-config.yaml
 ```
 
-The `--sustained` flag launches bronze-ingest, silver-stream, and gold-refresh as concurrent streaming jobs that run for the configured duration (default 30 minutes, configurable via `architecture.pipeline.sustained.run_duration`).
+The older top-level `lakebench recommend` is deprecated and hidden from help; use `lakebench config recommend`.
 
-> **Note:** The old field name `processing:` is still accepted with a deprecation warning.
-
-## Using `lakebench recommend`
-
-The `recommend` command helps you choose the right scale factor for your cluster, or determine the cluster size needed for a target scale. It does not select a recipe, but it helps size the deployment.
-
-```bash
-# Auto-detect cluster capacity and show max feasible scale
-lakebench recommend
-
-# Specify cluster resources manually
-lakebench recommend --cores 64 --memory 256
-
-# Check requirements for a specific scale
-lakebench recommend --scale 100
-
-# Check requirements for petabyte scale
-lakebench recommend --scale 100000
-```
-
-Combine the output of `recommend` with the recipe table above to configure your deployment. The recipe controls what gets deployed; the scale factor (informed by `recommend`) controls how large the deployment is.
+Combine the output of `config recommend` with the recipe table above to configure your deployment. The recipe controls what gets deployed; the scale factor (informed by `config recommend`) controls how large the deployment is.
 
 ## Advanced Configuration
 
@@ -288,6 +316,9 @@ platform:
       gold_executors: 12
 
 architecture:
+  catalog:
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
   query_engine:
     trino:
       worker:
@@ -295,11 +326,11 @@ architecture:
         memory: 32Gi
 
   pipeline:
-    mode: sustained                    # streaming instead of batch
+    mode: continuous                    # continuous instead of batch
 
-  workload:
-    datagen:
-      scale: 100                       # 1 TB test
+workload:
+  datagen:
+    scale: 100                       # 1 TB test
 
 observability:
   enabled: true                        # deploy Prometheus + Grafana

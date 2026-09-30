@@ -10,8 +10,11 @@ from rich.panel import Panel
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
 from lakebench.cli._helpers import (
+    DEPRECATED_SHORT_F_HELP,
+    EXIT_DECLINED,
     _journal_safe,
     console,
+    deprecated_short_f_force,
     journal_open,
     print_error,
     print_info,
@@ -55,8 +58,36 @@ def clean(
         bool,
         typer.Option(
             "--force",
-            "-f",
+            "--yes",
+            "-y",
             help="Skip confirmation prompt",
+        ),
+    ] = False,
+    force_short_f: Annotated[
+        bool,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
+    ] = False,
+    force_legacy: Annotated[
+        bool,
+        typer.Option(
+            "--force-legacy",
+            help=(
+                "Clean a bucket that has no lakebench ownership tag "
+                "(legacy). Caution: another team's data may live in an "
+                "untagged bucket. Refuses always on foreign-tagged "
+                "buckets regardless of this flag."
+            ),
+        ),
+    ] = False,
+    allow_unverified_cluster: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unverified-cluster",
+            help=(
+                "Proceed when the kubeconfig cannot prove which cluster it "
+                "points at (no CA data for the api-server fingerprint). Same "
+                "meaning as on destroy."
+            ),
         ),
     ] = False,
     metrics_dir: Annotated[
@@ -80,6 +111,8 @@ def clean(
       metrics - Delete local metrics/runs directory
       journal - Delete all journal session files
     """
+    if force_short_f:
+        force = deprecated_short_f_force("--force or -y", force)
     target = target.lower().strip()
     if target not in CLEAN_TARGETS:
         print_error(f"Invalid target: '{target}'. Must be one of: {', '.join(CLEAN_TARGETS)}")
@@ -89,7 +122,7 @@ def clean(
 
     # Load configuration
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, allow_long_names=True)  # LB-153: cleanup path
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -142,7 +175,7 @@ def clean(
         confirm = typer.confirm("Are you sure you want to proceed?")
         if not confirm:
             print_info("Clean cancelled")
-            raise typer.Exit(0)
+            raise typer.Exit(EXIT_DECLINED)
 
     console.print(Panel(f"Cleaning: [bold]{target}[/bold]", expand=False))
 
@@ -153,21 +186,115 @@ def clean(
     total_deleted = 0
     errors = []
 
-    # Check for active datagen before cleaning S3 buckets
+    # Check for writers still active before cleaning S3 buckets. The prompt
+    # sits outside the try: typer.confirm(abort=True) raises click.Abort,
+    # which subclasses RuntimeError, so inside `except Exception` a "no"
+    # was swallowed and the clean went ahead.
+    # Ownership gate, shared with destroy (check_data_ownership): clean must
+    # not be a bypass. Load the configured kube context first; every K8s call
+    # below (including the active-writer check) depends on it.
     if bucket_targets:
+        from lakebench.deploy.ownership import (
+            IdentityVerdict,
+            build_identity_from_config,
+            check_data_ownership,
+            verify_namespace_identity,
+        )
+
+        ns = cfg.get_namespace()
+        kube_ctx = cfg.platform.kubernetes.context or ""
+        core_v1 = None
+        ns_present = False
+        ns_verified = False
+        try:
+            from kubernetes import client as _k8s
+            from kubernetes.client.rest import ApiException
+
+            from lakebench.k8s import get_k8s_client
+
+            get_k8s_client(context=kube_ctx, namespace=ns)
+            core_v1 = _k8s.CoreV1Api()
+            try:
+                core_v1.read_namespace(ns)
+                ns_present = True
+            except ApiException as e:
+                if e.status != 404:
+                    raise
+            if ns_present:
+                identity = build_identity_from_config(cfg, context=kube_ctx)
+                v = verify_namespace_identity(
+                    core_v1,
+                    ns,
+                    identity.name,
+                    identity.api_server,
+                    allow_unverified_cluster=allow_unverified_cluster,
+                )
+                if v.verdict is IdentityVerdict.MISMATCH:
+                    print_error(f"Refusing to clean: {v.hint}")
+                    raise typer.Exit(1)
+                ns_verified = v.verdict is IdentityVerdict.MATCH or (
+                    v.verdict is IdentityVerdict.ABSENT and force_legacy
+                )
+        except typer.Exit:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print_warning(f"Could not reach the cluster to verify ownership: {e}")
+            core_v1 = None
+        decision = check_data_ownership(
+            core_v1,
+            namespace=ns,
+            deployment_name=cfg.name,
+            namespace_present=ns_present,
+            namespace_verified=ns_verified,
+            force_legacy=force_legacy,
+            context_name=kube_ctx,
+        )
+        if not decision.allowed:
+            print_error(decision.hint)
+            errors.append(decision.hint)
+            bucket_targets = {}
+        elif decision.hint:
+            print_warning(decision.hint)
+
+    if bucket_targets:
+        active_writers: list[str] = []
         try:
             from kubernetes import client as k8s_client
 
             ns = cfg.get_namespace()
-            batch_v1 = k8s_client.BatchV1Api()
-            job = batch_v1.read_namespaced_job("lakebench-datagen", ns)
-            active_pods = job.status.active or 0
-            if active_pods > 0:
-                print_warning(f"Datagen job has {active_pods} active pod(s)")
-                if not force:
-                    typer.confirm("Data generation is running. Clean anyway?", abort=True)
+            try:
+                job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", ns)
+                active_pods = job.status.active or 0
+                if active_pods > 0:
+                    active_writers.append(f"datagen job ({active_pods} active pod(s))")
+            except Exception:
+                pass  # no datagen job
+            try:
+                apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
+                    group="sparkoperator.k8s.io",
+                    version="v1beta2",
+                    namespace=ns,
+                    plural="sparkapplications",
+                )
+                for app in apps.get("items", []):
+                    state = ((app.get("status") or {}).get("applicationState") or {}).get(
+                        "state", ""
+                    )
+                    # SUBMISSION_FAILED is not final: the operator resubmits
+                    # it (restartPolicy), so the app may start writing.
+                    if state not in ("COMPLETED", "FAILED"):
+                        active_writers.append(
+                            f"Spark application {app['metadata']['name']} ({state or 'pending'})"
+                        )
+            except Exception:
+                pass  # no Spark Operator CRD or K8s unavailable
         except Exception:
-            pass  # No datagen job or K8s unavailable -- safe to proceed
+            pass  # K8s client unavailable -- nothing to check
+        if active_writers:
+            for w in active_writers:
+                print_warning(f"Still writing: {w}")
+            if not force:
+                typer.confirm("Jobs are still writing to these buckets. Clean anyway?", abort=True)
 
     # Clean S3 buckets
     if bucket_targets:
@@ -183,12 +310,122 @@ def clean(
                 ca_cert=s3_cfg.ca_cert,
                 verify_ssl=s3_cfg.verify_ssl,
             )
+            # F1-A: bail on S3 init failure with a clean refusal.
+            # Without this guard, `raw_client` returns None and every
+            # verify_bucket_ownership call raises AttributeError.
+            if s3._init_error:
+                print_error(f"S3 client init failed: {s3._init_error}")
+                raise typer.Exit(1)
 
             def _clean_progress(bkt: str, count: int) -> None:
                 console.print(f"  Deleting from s3://{bkt}/... ({count:,} objects so far)")
 
+            # F-1: ownership check per bucket before touching contents.
+            # Foreign-tagged buckets always refuse; legacy (untagged)
+            # buckets need --force-legacy. This mirrors the deploy and
+            # destroy paths so `clean` cannot be used as a bypass.
+            from lakebench.deploy.ownership import (
+                IdentityVerdict,
+                bucket_name_matches_deployment,
+                list_lakebench_deployment_names,
+                verify_bucket_ownership,
+            )
+
+            # Backends without bucket tagging (FlashBlade) report every bucket
+            # as UNSUPPORTED. Fall back to the same longest-prefix name check
+            # destroy uses, which needs the other deployments' names. None
+            # means the enumeration failed, and the fallback then refuses.
+            other_deployments: list[str] | None
+            try:
+                from kubernetes import client as _k8s
+
+                from lakebench.k8s import get_k8s_client
+
+                get_k8s_client(
+                    context=cfg.platform.kubernetes.context or "",
+                    namespace=cfg.get_namespace(),
+                )
+                other_deployments = list_lakebench_deployment_names(
+                    _k8s.CoreV1Api(), exclude=cfg.get_namespace()
+                )
+            except Exception:
+                other_deployments = None
+
             for layer, bucket in bucket_targets.items():
                 try:
+                    v = verify_bucket_ownership(s3.raw_client, bucket, cfg.name)
+                    if v.verdict is IdentityVerdict.MISMATCH:
+                        errors.append(f"{layer}: {v.hint}")
+                        print_error(
+                            f"Refusing to clean {layer}: bucket "
+                            f"{bucket!r} is owned by another lakebench "
+                            f"deployment. {v.hint}"
+                        )
+                        continue
+                    if v.verdict is IdentityVerdict.ABSENT and not force_legacy:
+                        errors.append(f"{layer}: legacy untagged bucket, --force-legacy required")
+                        print_error(
+                            f"Refusing to clean {layer}: bucket "
+                            f"{bucket!r} has no lakebench ownership tag. "
+                            "FIRST verify your cluster context: run "
+                            "`oc whoami && kubectl config current-context` "
+                            "and confirm the output matches this "
+                            "deployment's expected cluster. Only after "
+                            "that check, if you have confirmed this is "
+                            "yours, pass --force-legacy to clean as a "
+                            "last resort (caution: this may collide with "
+                            "another team's data)."
+                        )
+                        continue
+                    if v.verdict is IdentityVerdict.NOT_FOUND:
+                        print_info(f"{layer}: bucket {bucket!r} does not exist")
+                        continue
+                    if v.verdict is IdentityVerdict.UNSUPPORTED:
+                        prefix_ok = other_deployments is not None and (
+                            bucket_name_matches_deployment(bucket, cfg.name, other_deployments)
+                        )
+                        # The name is not proof: deploy adopts a pre-existing
+                        # matching bucket on these backends. Same rule as
+                        # destroy: the namespace must record that lakebench
+                        # created it or adopted it empty.
+                        if prefix_ok and not force_legacy:
+                            try:
+                                from kubernetes import client as _k8s_rec
+
+                                from lakebench.deploy.ownership import (
+                                    tagless_contents_are_ours,
+                                )
+
+                                recorded = tagless_contents_are_ours(
+                                    _k8s_rec.CoreV1Api(), cfg.get_namespace(), bucket
+                                )
+                            except Exception:  # noqa: BLE001
+                                recorded = False
+                            if not recorded:
+                                errors.append(f"{layer}: not recorded as created or adopted empty")
+                                print_error(
+                                    f"Refusing to clean {layer}: bucket {bucket!r} is on a "
+                                    "backend without bucket tagging and this deployment's "
+                                    "namespace does not record creating it or adopting it "
+                                    "empty, so its data may not be lakebench's. Pass "
+                                    "--force-legacy only if you have confirmed it is yours."
+                                )
+                                continue
+                        if not prefix_ok and not force_legacy:
+                            reason = (
+                                "could not list other lakebench deployments to check name ownership"
+                                if other_deployments is None
+                                else "the bucket name does not match this deployment, "
+                                "or another deployment has a longer-prefix claim"
+                            )
+                            errors.append(f"{layer}: ownership unverifiable ({reason})")
+                            print_error(
+                                f"Refusing to clean {layer}: bucket {bucket!r} is on a "
+                                f"backend without bucket tagging and {reason}. Pass "
+                                "--force-legacy only if you have confirmed it is yours."
+                            )
+                            continue
+
                     deleted = s3.empty_bucket(bucket, progress_callback=_clean_progress)
                     total_deleted += deleted
                     if deleted > 0:

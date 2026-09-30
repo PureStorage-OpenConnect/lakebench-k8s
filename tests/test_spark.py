@@ -60,7 +60,10 @@ class TestJobType:
 
     def test_all_types_iterable(self):
         types = list(JobType)
-        assert len(types) == 6
+        # 6 medallion + 3 Financial-only operator actions (ENG-2C.3g/h/i)
+        # + 1 reference detector / leakage gate (SCORE_FINANCIAL_REFERENCE, LB-130 gate)
+        assert len(types) == 10
+        assert JobType.SCORE_FINANCIAL_REFERENCE in types
 
 
 class TestJobState:
@@ -212,6 +215,29 @@ class TestSparkJobManager:
         assert "iceberg-spark-runtime" in packages
         assert "hadoop-aws" in packages
 
+    def test_manifest_has_maven_mirror_repositories(self):
+        """Spark conf must set ``spark.jars.repositories`` to a Central
+        mirror so Ivy falls to it when the cluster's egress hits an
+        HTTP 429 rate-limit on repo1.maven.org. Live-verified 2026-09-22
+        on aml-baseline-s1 where a fresh Central 429 blocked
+        bronze-verify; adding this fallback let the same run finish.
+        """
+        from lakebench.spark.job import _MAVEN_MIRROR_REPOS
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        spark_conf = manifest["spec"]["sparkConf"]
+
+        assert "spark.jars.repositories" in spark_conf, (
+            "spark.jars.repositories missing -- Ivy has no Central mirror "
+            "fallback when repo1.maven.org 429s the cluster's egress IP"
+        )
+        assert spark_conf["spark.jars.repositories"] == _MAVEN_MIRROR_REPOS
+        assert "maven-central.storage-download.googleapis.com" in _MAVEN_MIRROR_REPOS
+
     def test_manifest_has_s3_config(self):
         """Spark conf should include S3A endpoint."""
         config = _make_config()
@@ -242,7 +268,10 @@ class TestSparkJobManager:
         """Spark conf should use REST catalog when Polaris is configured."""
         config = _make_config(
             architecture={
-                "catalog": {"type": "polaris"},
+                "catalog": {
+                    "type": "polaris",
+                    "polaris": {"client_secret": "test-only-secret"},
+                },
                 "table_format": {"type": "iceberg"},
                 "query_engine": {"type": "trino"},
             }
@@ -1065,6 +1094,99 @@ class TestStreamingThroughputEnvVars:
         assert silver_env["TARGET_FILE_SIZE_BYTES"] == str(512 * 1024 * 1024)
         assert gold_env["TARGET_FILE_SIZE_BYTES"] == str(128 * 1024 * 1024)
 
+    def test_financial_bronze_ingest_gets_lb_financial_env_aliases(self):
+        """LB-090 bronze half: bronze_ingest_financial reads
+        ``LB_FINANCIAL_BRONZE_CHECKPOINT``, ``LB_FINANCIAL_BRONZE_MAX_FILES``,
+        ``LB_FINANCIAL_BRONZE_TRIGGER_S``. Without matching aliases the
+        script falls back to a hard-coded checkpoint under
+        ``s3a://lb-bronze/`` (a bucket that is NOT part of the current
+        deployment on any non-default config), and two parallel
+        sustained runs stomp each other's checkpoint state -- silent
+        corruption of the very parallel-safety invariant the S-P
+        scenarios exist to prove.
+        """
+        config = _make_config(
+            architecture={
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+                "processing": {
+                    "sustained": {
+                        "max_files_per_trigger": 30,
+                        "bronze_trigger_interval": "20 seconds",
+                    },
+                },
+            },
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.BRONZE_INGEST)
+        env = self._get_env_dict(manifest)
+
+        assert "CHECKPOINT_LOCATION" in env
+        assert env["MAX_FILES_PER_TRIGGER"] == "30"
+        assert env["TRIGGER_INTERVAL"] == "20 seconds"
+
+        assert env.get("LB_FINANCIAL_BRONZE_CHECKPOINT") == env["CHECKPOINT_LOCATION"]
+        assert env.get("LB_FINANCIAL_BRONZE_MAX_FILES") == "30"
+        # bronze_ingest_financial expects an int-seconds string.
+        assert env.get("LB_FINANCIAL_BRONZE_TRIGGER_S") == "20"
+
+    def test_financial_silver_stream_gets_lb_financial_env_aliases(self):
+        """LB-090 silver half: silver_stream_financial reads
+        ``LB_FINANCIAL_SILVER_CHECKPOINT`` and
+        ``LB_FINANCIAL_SILVER_TRIGGER_S``. Same failure shape as bronze
+        -- silent checkpoint at a wrong bucket on any non-default
+        config, and cross-run stomping on parallel deploys."""
+        config = _make_config(
+            architecture={
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+                "processing": {
+                    "sustained": {"silver_trigger_interval": "45 seconds"},
+                },
+            },
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.SILVER_STREAM)
+        env = self._get_env_dict(manifest)
+
+        assert env.get("LB_FINANCIAL_SILVER_CHECKPOINT") == env["CHECKPOINT_LOCATION"]
+        assert env.get("LB_FINANCIAL_SILVER_TRIGGER_S") == "45"
+
+    def test_financial_gold_refresh_gets_lb_financial_env_alias(self):
+        """LB-090 gold half: gold_refresh_financial reads
+        ``LB_FINANCIAL_GOLD_REFRESH_S`` (an int seconds trigger). Gold
+        refresh does not have a checkpoint like the streaming stages,
+        so only the refresh-interval alias is required."""
+        config = _make_config(
+            architecture={
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+                "processing": {
+                    "sustained": {"gold_refresh_interval": "2 minutes"},
+                },
+            },
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.GOLD_REFRESH)
+        env = self._get_env_dict(manifest)
+
+        assert env.get("LB_FINANCIAL_GOLD_REFRESH_S") == "120"
+
+    def test_c360_streaming_does_not_get_lb_financial_env(self):
+        """The LB_FINANCIAL_* aliases must only appear under
+        ``workload.schema=financial``. Belt and braces against a
+        future generic script that greps for the LB_FINANCIAL_ prefix."""
+        config = _make_config()  # default schema = customer360
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        for jt in (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH):
+            manifest = mgr._build_manifest(jt)
+            env = self._get_env_dict(manifest)
+            for k in env:
+                assert not k.startswith("LB_FINANCIAL_"), (
+                    f"{jt.value} unexpectedly carries {k!r} under a C360 schema"
+                )
+
 
 # ---------------------------------------------------------------------------
 # Spark Operator Namespace Watching
@@ -1073,6 +1195,26 @@ class TestStreamingThroughputEnvVars:
 
 class TestSparkOperatorNamespaceWatching:
     """Tests for Spark Operator namespace watching detection and self-healing."""
+
+    @pytest.fixture(autouse=True)
+    def _bypass_cluster_lock(self):
+        """ADR-F5 wraps _add_namespace_to_watch in a cluster lease
+        acquisition. In this class the tests mock subprocess.run to
+        drive helm exchange; the lease attempt would introduce extra
+        subprocess.run calls (git rev-parse in build_holder_id) and
+        upset side_effect counts. Bypass the lease here -- the
+        concurrency safety it provides is covered by
+        test_watch_list_strict.py."""
+        from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
+
+        SparkOperatorManager._bypass_cluster_lock = True
+        try:
+            yield
+        finally:
+            try:
+                del SparkOperatorManager._bypass_cluster_lock
+            except AttributeError:
+                pass
 
     def test_operator_status_backward_compatible(self):
         """OperatorStatus can be constructed without the new fields."""
@@ -1271,7 +1413,11 @@ class TestSparkOperatorNamespaceWatching:
 
     @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_ensure_namespace_watched_provides_fix_command(self, mock_run):
-        """When can_heal=False, message contains the exact helm fix command."""
+        """When can_heal=False, the remedy routes through lakebench deploy.
+
+        A raw ``helm upgrade --reuse-values`` bypasses the cluster lease
+        and can overwrite other deployments' watch entries, so it must
+        never be suggested."""
         from lakebench.spark.operator import SparkOperatorManager
 
         # check_status() returns watching_namespace=False
@@ -1295,16 +1441,21 @@ class TestSparkOperatorNamespaceWatching:
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
         status = mgr.ensure_namespace_watched(can_heal=False)
         assert status.watching_namespace is False
-        assert "helm upgrade" in status.message
+        assert "helm upgrade" not in status.message
+        assert "--reuse-values" not in status.message
+        assert "lakebench deploy" in status.message
         assert "lakebench-test" in status.message
-        assert "lakebench,lakebench-test" in status.message
 
+    @patch(
+        "lakebench.spark.operator.SparkOperatorManager._namespace_is_terminating",
+        return_value=False,
+    )
     @patch(
         "lakebench.spark.operator.SparkOperatorManager._filter_existing_namespaces",
         side_effect=lambda ns: ns,
     )
     @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
-    def test_ensure_namespace_watched_self_heals(self, mock_run, _mock_filter):
+    def test_ensure_namespace_watched_self_heals(self, mock_run, _mock_filter, _mock_live):
         """When can_heal=True, adds namespace via helm upgrade + restart + verify."""
         from lakebench.spark.operator import SparkOperatorManager
 
@@ -1408,7 +1559,7 @@ class TestSparkOperatorNamespaceWatching:
 
 
 _POLARIS_ARCH = {
-    "catalog": {"type": "polaris"},
+    "catalog": {"type": "polaris", "polaris": {"client_secret": "test-only-secret"}},
     "table_format": {"type": "iceberg"},
     "query_engine": {"type": "trino"},
 }
@@ -1445,7 +1596,6 @@ class TestPolarisSparkManifest:
                         },
                     }
                 },
-                "compute": {"spark": {"image": "apache/spark:4.0.0-python3"}},
             },
             architecture=_POLARIS_ARCH,
             images={"spark": "apache/spark:4.0.0-python3"},
@@ -1572,6 +1722,325 @@ class TestScriptsConfigMapDeltaScripts:
                     )
 
 
+class TestFinancialScriptDispatch:
+    """schema=financial routes JobType -> *_financial.py scripts (ENG-2C.3c+)."""
+
+    def _make_financial_config(self):
+        cfg = _make_config()
+        # Rebuild via schema to pick up the FINANCIAL enum path cleanly.
+        from lakebench.config import LakebenchConfig
+
+        blob = cfg.model_dump(by_alias=True)
+        blob["architecture"]["workload"]["schema"] = "financial"
+        return LakebenchConfig(**blob)
+
+    def test_bronze_verify_dispatches_to_financial_script(self):
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_financial_config()
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        assert "bronze_verify_financial.py" in manifest["spec"]["mainApplicationFile"]
+
+    def test_customer360_bronze_verify_unchanged(self):
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = _make_config()  # default schema is customer360
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        assert manifest["spec"]["mainApplicationFile"].endswith("bronze_verify.py")
+        assert "financial" not in manifest["spec"]["mainApplicationFile"]
+
+    def test_reference_score_dispatches_to_reference_script(self):
+        """SCORE_FINANCIAL_REFERENCE routes to score_financial_reference.py so
+        the leakage gate + reference detector (the LB-130 gate) is runnable."""
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_financial_config()
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
+        assert "score_financial_reference.py" in manifest["spec"]["mainApplicationFile"]
+        assert manifest["metadata"]["name"] == "lakebench-score-financial-reference"
+
+
+class TestReferenceScoreWiring:
+    """The reference detector (LB-130 gate) must be packaged and importable on a
+    Spark driver that has no lakebench install."""
+
+    def test_reference_job_carries_seed_and_git_sha(self, monkeypatch):
+        """The fidelity gate names the corpus seed and revision it scored
+        (AML-GOALS R6); only the reference job gets them."""
+        from lakebench.config.datagen_seed import NON_AML_DEFAULT_SEED
+        from lakebench.modules.pipeline_engines.spark import job as jobmod
+
+        monkeypatch.setattr(jobmod, "_lakebench_git_sha", lambda: "abc123")
+        mgr = SparkJobManager(_make_config(), _mock_k8s())
+
+        def env(jt):
+            return {e["name"]: e.get("value") for e in mgr._build_env_vars(jt)}
+
+        ref = env(JobType.SCORE_FINANCIAL_REFERENCE)
+        assert ref["LB_DATAGEN_SEED"] == str(NON_AML_DEFAULT_SEED)
+        assert ref["LB_GIT_SHA"] == "abc123"
+        other = env(JobType.SCORE_FINANCIAL)
+        assert "LB_DATAGEN_SEED" not in other and "LB_GIT_SHA" not in other
+
+    def test_git_sha_helper_never_raises(self, monkeypatch):
+        import subprocess
+
+        from lakebench.modules.pipeline_engines.spark import job as jobmod
+
+        def boom(*a, **k):
+            raise OSError("no git")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        assert jobmod._lakebench_git_sha() == "unknown"
+
+    def test_configmap_includes_reference_script_and_module(self):
+        """deploy_scripts_configmap must ship BOTH score_financial_reference.py
+        and reference_score.py (the self-contained module it imports) flat, so
+        the bare `from reference_score import` resolves on the driver."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        k8s.apply_manifest.return_value = True
+        mgr = SparkJobManager(config, k8s)
+
+        result = mgr.deploy_scripts_configmap()
+        assert result is True
+        data = k8s.apply_manifest.call_args[0][0]["data"]
+        assert "score_financial_reference.py" in data, "reference Spark entry point not packaged"
+        assert "reference_score.py" in data, (
+            "reference_score.py module not packaged -- the driver has no lakebench "
+            "install, so the bare import would fail at runtime"
+        )
+        # The packaged module must be the real thing, not an empty stub.
+        assert "def compute_leakage_gate" in data["reference_score.py"]
+        assert "def train_reference_gbt" in data["reference_score.py"]
+        # The fidelity gate (D9): its feature module, evaluation module and the
+        # pre-registration it reads all ship flat next to the entry point.
+        assert "def entity_features" in data["aml_features.py"]
+        assert "def evaluate_gate" in data["fidelity_gate.py"]
+        assert "aml_preregistration.json" in data
+
+    def test_reference_spark_script_uses_bare_import(self):
+        """score_financial_reference.py must import the module by its flat name,
+        never `from lakebench.aml...` -- the lakebench package is not on the
+        apache/spark driver image."""
+        from lakebench._resources import get_scripts_dir
+
+        src = (get_scripts_dir() / "score_financial_reference.py").read_text()
+        assert "from lakebench.aml" not in src, (
+            "reference script imports from lakebench.aml, which is absent on the driver"
+        )
+        assert "from reference_score import" in src, (
+            "reference script no longer imports the flat-packaged reference_score module"
+        )
+
+    def test_reference_score_module_is_self_contained(self):
+        """reference_score.py must not import from lakebench (it ships flat with
+        no package around it)."""
+        from lakebench._resources import _package_dir
+
+        for mod in ("reference_score.py", "fidelity_gate.py"):
+            src = (_package_dir() / "aml" / mod).read_text()
+            assert "from lakebench" not in src and "import lakebench" not in src, (
+                f"{mod} imports lakebench; it cannot ship as a flat driver module"
+            )
+
+    def test_reference_script_uses_real_silver_column(self):
+        """The reference feature build must read silver's real timestamp column
+        (txn_timestamp), not the txn_ts that never existed in the DDL -- a
+        column-not-found at runtime is exactly the never-run-script bug class."""
+        from lakebench._resources import get_scripts_dir
+
+        src = (get_scripts_dir() / "score_financial_reference.py").read_text()
+        src += (get_scripts_dir() / "aml_features.py").read_text()
+        import re
+
+        assert not re.search(r'"txn_ts"|\btxn_ts\b', src), (
+            "reference script still references the nonexistent txn_ts column"
+        )
+        assert "txn_timestamp" in src, "reference script no longer reads txn_timestamp"
+
+
+class TestSchemaProfileOverrides:
+    """LB-118: AML bronze-verify needs a bigger scratch PVC than c360's
+    50Gi baseline because the CTAS fallback path rewrites the full pacs.008
+    dataset through Iceberg and its per-executor spill overwhelms 50Gi at
+    scale >= 5. Live at scale 10 this hit ``No space left on device`` after
+    78 min."""
+
+    def _find_pvc_size_limit(self, manifest):
+        conf = manifest["spec"]["sparkConf"]
+        key = (
+            "spark.kubernetes.executor.volumes.persistentVolumeClaim."
+            "spark-local-dir-1.options.sizeLimit"
+        )
+        return conf.get(key)
+
+    def _make_config(self, schema):
+        from lakebench.config import LakebenchConfig
+
+        cfg = _make_config()
+        blob = cfg.model_dump(by_alias=True)
+        blob["architecture"]["workload"]["schema"] = schema
+        # Portworx scratch must be enabled for sizeLimit to appear in the manifest.
+        blob["platform"]["storage"]["scratch"]["enabled"] = True
+        blob["platform"]["storage"]["scratch"]["storage_class"] = "px-csi-scratch"
+        return LakebenchConfig(**blob)
+
+    def test_aml_bronze_verify_gets_500gi_scratch(self):
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_config("financial")
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        assert self._find_pvc_size_limit(manifest) == "500Gi"
+
+    def test_c360_bronze_verify_stays_50gi_scratch(self):
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_config("customer360")
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        assert self._find_pvc_size_limit(manifest) == "50Gi"
+
+    def test_aml_silver_build_scratch_unchanged(self):
+        """AML overrides scoped to bronze-verify only; silver-build stays at c360."""
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_config("financial")
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        assert self._find_pvc_size_limit(manifest) == "300Gi"
+
+    def test_resolve_job_profile_returns_copy(self):
+        """Callers must be able to mutate the resolved profile without
+        corrupting module-level state (regression guard: _JOB_PROFILES.get()
+        returns a reference)."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _JOB_PROFILES,
+            _resolve_job_profile,
+        )
+
+        base_before = _JOB_PROFILES["bronze-verify"]["scratch_size"]
+        merged = _resolve_job_profile("bronze-verify", "financial")
+        assert merged is not None
+        merged["scratch_size"] = "999Gi"
+        assert _JOB_PROFILES["bronze-verify"]["scratch_size"] == base_before
+
+    def test_score_financial_has_dedicated_small_profile(self):
+        """LB-123 review: score-financial must NOT inherit the silver-build
+        fallback (36 cores / 512 GB at scale 1) just to score recall. It has
+        its own small profile."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _JOB_PROFILES,
+            _resolve_job_profile,
+        )
+
+        prof = _resolve_job_profile("score-financial", "financial")
+        assert prof is not None
+        silver = _JOB_PROFILES["silver-build"]
+        # Must be genuinely smaller than the silver-build fallback it replaces.
+        assert prof["executor_memory"] != silver["executor_memory"]
+        assert prof["scratch_size"] == "50Gi"
+        assert prof["max_executors"] <= 10
+
+    def test_compute_peak_requirements_aml_bumps_bronze_scratch(self):
+        """compute_peak_requirements is the docs source of truth; AML
+        peaks must reflect the bronze-verify override."""
+        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+        c360 = compute_peak_requirements(1, "batch", "customer360")
+        aml = compute_peak_requirements(1, "batch", "financial")
+        c360_bronze = next(r for r in c360.per_job if r.job_type == "bronze-verify")
+        aml_bronze = next(r for r in aml.per_job if r.job_type == "bronze-verify")
+        assert aml_bronze.scratch_gb == 10 * c360_bronze.scratch_gb  # 500 / 50
+
+    def test_aml_bronze_verify_scales_executors_at_scale_100(self):
+        """LB-118 review finding: at scale 100 the base bronze-verify
+        profile gives 7 executors (~143 GB input/executor for AML),
+        which projects to CTAS spill above 200 Gi. The AML override
+        bumps ``executors_per_100_scale`` 4 -> 8 and ``max_executors``
+        20 -> 28 so per-executor load at scale 100 stays under 100 GB."""
+        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+        c360 = compute_peak_requirements(100, "batch", "customer360")
+        aml = compute_peak_requirements(100, "batch", "financial")
+        c360_bronze = next(r for r in c360.per_job if r.job_type == "bronze-verify")
+        aml_bronze = next(r for r in aml.per_job if r.job_type == "bronze-verify")
+        # AML must have more executors than c360 at s100+.
+        assert aml_bronze.executors > c360_bronze.executors
+        # And scale toward the fabric8 ceiling by scale 500.
+        aml_500 = compute_peak_requirements(500, "batch", "financial")
+        aml_500_bronze = next(r for r in aml_500.per_job if r.job_type == "bronze-verify")
+        assert aml_500_bronze.executors == 28  # matches silver/gold ceiling
+
+    def test_compute_peak_requirements_defaults_to_c360(self):
+        """Backward compat: no schema arg == c360 baseline."""
+        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+        default = compute_peak_requirements(1, "batch")
+        c360 = compute_peak_requirements(1, "batch", "customer360")
+        assert default.scratch_gb == c360.scratch_gb
+
+    def test_get_job_profile_is_schema_aware(self):
+        """LB-135 review Finding 2: the metrics/scorecard path must be able to
+        get schema-resolved profiles, else AML bronze-verify is reported at the
+        c360 base (6Gi) instead of the deployed 20Gi -- an honest-scorecard bug."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            get_executor_count,
+            get_job_profile,
+        )
+
+        # No schema == c360 base (backward compat).
+        base = get_job_profile("bronze-verify")
+        assert base["executor_memory"] == "4g"
+        # Schema-aware == deployed AML profile.
+        aml = get_job_profile("bronze-verify", "financial")
+        assert aml["executor_memory"] == "8g"
+        assert aml["executor_memory_overhead"] == "12g"
+        # Executor count also schema-aware at scale > 10 (AML 8-per-100 vs base 4).
+        assert get_executor_count("bronze-verify", 100, "financial") > get_executor_count(
+            "bronze-verify", 100
+        )
+
+    def test_aml_bronze_verify_has_memory_headroom_over_c360(self):
+        """LB-135: c360's 4g+2g bronze-verify (a thin add_files register) is too
+        small for AML's full-corpus CTAS DISTINCT/ORDER BY -- executors
+        OOMKilled on the 6Gi container limit at scale 10. The AML override must
+        give real per-executor memory headroom, in both modes (OOMKilled is a
+        container-limit hit, not node contention)."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _JOB_PROFILES,
+            _resolve_job_profile,
+        )
+
+        base = _JOB_PROFILES["bronze-verify"]
+        aml = _resolve_job_profile("bronze-verify", "financial")
+        assert aml is not None
+        # The OOM is OFF-HEAP (partitioned Iceberg write shuffle + S3A bytebuffer
+        # uploads), so the bump goes into OVERHEAD, not heap. Total 20Gi.
+        assert aml["executor_memory"] == "8g"
+        assert aml["executor_memory_overhead"] == "12g"
+        heap = int(aml["executor_memory"].rstrip("g"))
+        overhead = int(aml["executor_memory_overhead"].rstrip("g"))
+        assert heap + overhead == 20  # total container
+        # Overhead must exceed heap -- the pressure is off-heap, not heap. A
+        # regression that pours the bump back into heap (the original mistake)
+        # would flip this.
+        assert overhead > heap, "bronze-verify memory bump must favour overhead, not heap"
+        assert overhead > int(base["executor_memory_overhead"].rstrip("g"))
+        # Still bounded well under the heaviest batch job (silver-build 48g heap).
+        assert heap + overhead < int(
+            _JOB_PROFILES["silver-build"]["executor_memory"].rstrip("g")
+        ) + int(_JOB_PROFILES["silver-build"]["executor_memory_overhead"].rstrip("g"))
+        # c360 bronze-verify must stay register-sized (no AML cost leak).
+        c360 = _resolve_job_profile("bronze-verify", "customer360")
+        assert c360["executor_memory"] == base["executor_memory"]
+        assert c360["executor_memory_overhead"] == base["executor_memory_overhead"]
+
+
 # ---------------------------------------------------------------------------
 # PipelineEngine protocol conformance
 # ---------------------------------------------------------------------------
@@ -1654,3 +2123,61 @@ def test_get_engine_rejects_unknown_engine():
         mock_engine.value = "flink"
         with pytest.raises(ValueError, match="Unsupported pipeline engine"):
             get_engine(cfg, k8s)
+
+
+class TestReferencePyDeps:
+    """D9: the reference-detector job installs pinned scikit-learn/pandas into a
+    driver-only emptyDir; no other job pays for it."""
+
+    def _mgr(self):
+        config = _make_config(
+            architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}}
+        )
+        return SparkJobManager(config, _mock_k8s())
+
+    def test_reference_job_installs_pinned_deps_on_driver_only(self):
+        from lakebench.modules.pipeline_engines.spark.job import (
+            REFERENCE_PY_DEPS,
+            REFERENCE_PY_DEPS_DIR,
+        )
+
+        m = self._mgr()._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
+        drv = m["spec"]["driver"]["template"]["spec"]
+        init = {c["name"]: c for c in drv["initContainers"]}
+        assert "install-pydeps" in init
+        cmd = init["install-pydeps"]["command"][-1]
+        for dep in REFERENCE_PY_DEPS:
+            assert "==" in dep and dep in cmd
+        assert f"--target {REFERENCE_PY_DEPS_DIR}" in cmd
+        mounts = drv["containers"][0]["volumeMounts"]
+        assert any(v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in mounts)
+        exe = m["spec"]["executor"]["template"]["spec"]
+        assert not any(v["name"] == "lb-pydeps" for v in exe["volumes"])
+        assert not any(
+            v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in exe["containers"][0]["volumeMounts"]
+        )
+
+    def test_other_jobs_do_not_install_deps(self):
+        m = self._mgr()._build_manifest(JobType.GOLD_FINALIZE)
+        drv = m["spec"]["driver"]["template"]["spec"]
+        assert "install-pydeps" not in {c["name"] for c in drv["initContainers"]}
+
+
+class TestSparkDriverPushgatewayEnv:
+    """Gate 2: the Spark driver gets LB_PUSHGATEWAY_URL + LB_RUN_ID only when
+    observability + the pushgateway are enabled (drives common.py stage push)."""
+
+    def test_env_has_pushgateway_when_enabled(self):
+        config = _make_config(observability={"enabled": True})
+        mgr = SparkJobManager(config, _mock_k8s())
+        env = mgr._build_env_vars(JobType.SILVER_BUILD)
+        by_name = {e["name"]: e.get("value") for e in env}
+        assert by_name["LB_PUSHGATEWAY_URL"].startswith("http://lakebench-pushgateway.")
+        assert by_name["LB_PUSHGATEWAY_URL"].endswith(".svc:9091")
+        assert "LB_RUN_ID" in by_name
+
+    def test_env_omits_pushgateway_when_disabled(self):
+        config = _make_config()  # observability defaults off
+        mgr = SparkJobManager(config, _mock_k8s())
+        names = {e["name"] for e in mgr._build_env_vars(JobType.SILVER_BUILD)}
+        assert "LB_PUSHGATEWAY_URL" not in names

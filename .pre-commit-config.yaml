@@ -1,0 +1,23 @@
+# Local hooks mirroring CI. Install once with:
+#   pip install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.1
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^(src|tests)/
+      - id: ruff-format
+        files: ^(src|tests)/
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt (datagen_rs)
+        entry: bash -c 'cd datagen_rs && cargo fmt --check'
+        language: system
+        files: ^datagen_rs/.*\.rs$
+        pass_filenames: false

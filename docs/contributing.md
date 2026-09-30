@@ -15,7 +15,7 @@ contributions.
    ```
 4. **Set up the dev environment:**
    ```bash
-   cd lakebench
+   cd lakebench-k8s
    pip install -e ".[dev]"
    pre-commit install
    ```
@@ -47,16 +47,14 @@ Lakebench uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting,
 configured in `pyproject.toml`. Run both before submitting:
 
 ```bash
-ruff check src/ tests/
-ruff format src/ tests/
+ruff check src/ tests/ scripts/
+ruff format --check src/ tests/ scripts/
 ```
 
-Or use the Makefile shortcuts:
-
-```bash
-make lint
-make fmt
-```
+These are the commands CI runs. `ruff format` without `--check` applies the
+formatting. The Makefile shortcuts `make lint` and `make fmt` cover only
+`src/` and `tests/`, so run the commands above when you change anything
+under `scripts/`.
 
 ### Type Checking
 
@@ -97,7 +95,7 @@ pytest tests/ -x -v --ignore=tests/test_e2e.py --ignore=tests/test_integration.p
 ### Integration and End-to-End Tests
 
 Integration and e2e tests are optional for most contributions. They require a
-live Kubernetes cluster with S3 storage and are typically run in CI or by
+live Kubernetes cluster with S3 storage, are excluded from CI, and are run by
 maintainers. If your change affects deployment or runtime behavior, mention
 this in your PR description so maintainers can run the appropriate tests.
 
@@ -105,8 +103,17 @@ this in your PR description so maintainers can run the appropriate tests.
 
 1. **Run the full check suite** before pushing:
    ```bash
-   make lint && make typecheck && make test
+   ruff check src/ tests/ scripts/
+   ruff format --check src/ tests/ scripts/
+   mypy src/lakebench/
+   pytest tests/ -x --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
    ```
+   If you changed a Spark script, also run `pytest tests/spark` (needs
+   `pyspark==4.0.1` and Java 17). If you changed `datagen_rs/`, run
+   `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`
+   and `cargo test --release --locked` there. CI also enforces per-file
+   coverage floors (`scripts/check_coverage.py`) and a gitleaks secret scan;
+   see [What CI Runs](development.md#what-ci-runs).
 2. **Push** your branch to your fork.
 3. **Open a pull request** against `main`.
 4. **Describe your changes** in the PR body:
@@ -118,9 +125,10 @@ this in your PR description so maintainers can run the appropriate tests.
 
 ### PR Checklist
 
-- [ ] Ruff lint and format pass (`make lint && make fmt`)
-- [ ] mypy passes (`make typecheck`)
-- [ ] Unit tests pass (`make test`)
+- [ ] Ruff lint and format check pass on `src/ tests/ scripts/`
+- [ ] mypy passes (`mypy src/lakebench/`)
+- [ ] Unit tests pass, plus `pytest tests/spark` for Spark script changes
+- [ ] `cargo fmt`, `clippy` and `cargo test` pass for `datagen_rs/` changes
 - [ ] New code has test coverage
 - [ ] Commit messages are clear and descriptive
 

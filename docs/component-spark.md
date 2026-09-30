@@ -6,7 +6,7 @@ on Kubernetes. Spark runs PySpark scripts that move data through three layers:
 
 - **Batch mode:** `bronze-verify`, `silver-build`, `gold-finalize` -- run sequentially,
   each job starts after the previous one completes.
-- **Sustained mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` -- run
+- **Continuous mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` -- run
   concurrently as structured streaming jobs with configurable trigger intervals.
 
 All scripts are deployed as a ConfigMap (`lakebench-spark-scripts`) and mounted
@@ -15,24 +15,30 @@ at `/opt/spark/scripts` in both driver and executor pods.
 ## Spark Operator
 
 Lakebench requires **Kubeflow Spark Operator v2.x** (2.5.1 is the current
-default). The v2.x line's webhook does mutate pod specs, but ConfigMap
-volumes specifically are not injected through Spark's native
-`spark.kubernetes.*.volumes.*` conf-property path -- lakebench routes those
-through `driver.template`/`executor.template` pod templates instead (see
-CLAUDE.md gotcha 3 for the exact mechanism, verified against the operator's
-own source through 2.5.1). PVC and emptyDir mounts use the native conf-property
-path and do not need the workaround. The v1.x line has broken volume
+default). ConfigMap volumes cannot use Spark's native
+`spark.kubernetes.*.volumes.*` conf properties, because Spark's
+`KubernetesVolumeUtils` has no `configMap` volume type, so lakebench defines
+its volumes (the scripts ConfigMap and the work-dir and Ivy-cache emptyDirs)
+in `driver.template`/`executor.template` pod templates; see `_build_manifest()`
+in `modules/pipeline_engines/spark/job.py`. Only the executor scratch PVC uses
+the conf-property path. The operator's webhook injection was checked against
+its source through 2.5.1 and is unchanged from 2.4.0, so the pod-template
+route stays. The v1.x line has broken volume
 injection entirely and is not supported.
 
-Lakebench can auto-install the operator into its own namespace, or skip
-installation if the operator is already present on the cluster:
+`lakebench deploy` always checks the operator and adds the deployment's
+namespace to the operator's watch list (`spark.jobNamespaces`), whatever
+`install` says. With `install: true` it also installs the operator when none
+is present. With `install: false` (the default) a missing operator fails the
+deploy; a cluster admin installs the shared operator once with
+`lakebench admin install-spark-operator`:
 
 ```yaml
 platform:
   compute:
     spark:
       operator:
-        install: false              # Set true to auto-install (requires cluster-admin)
+        install: false              # true also installs a missing operator (requires cluster-admin)
         namespace: "spark-operator"  # Where the operator runs
         version: "2.5.1"            # Must be v2.x
 ```
@@ -51,10 +57,17 @@ images:
   # spark: "apache/spark:3.5.8-python3" # Spark 3.5.x (also supported)
 ```
 
-**Supported versions:** Spark 3.5.x, 4.0.x, and 4.1.x. The image tag must end
-with `-python3` (PySpark scripts require a Python-enabled image). Unsupported
-versions, non-Python images, and unparseable tags are rejected at config load
-time with a clear error.
+**Supported versions:** Spark 3.5.x, 4.0.x, and 4.1.x. Spark 4.2 is not
+supported: no Iceberg release ships a runtime that works with it. The image
+tag must contain `-python3` (PySpark scripts require a Python-enabled image).
+Unsupported versions, non-Python images, and unparseable tags are rejected at
+config load time with a clear error.
+
+The default Iceberg version is 1.11.0, which needs Java 17. The plain
+`apache/spark:3.5.x-python3` images ship Java 11, so on those lakebench falls
+back to Iceberg 1.10.1 and logs a warning; use a `-java17-python3` 3.5 tag to
+run Iceberg 1.11.0. An explicitly configured Iceberg 1.11+ on a Java 11 image
+is rejected.
 
 The Spark version is parsed from the image tag to resolve the correct
 dependency coordinates and driver resource profiles:
@@ -131,7 +144,7 @@ platform:
       silver_executors: null         # Override silver-build executor count
       gold_executors: null           # Override gold-finalize executor count
 
-      # Streaming jobs (null = auto-derived from scale factor)
+      # Continuous-mode jobs (null = auto-derived from scale factor)
       bronze_ingest_executors: null  # Override bronze-ingest executor count
       silver_stream_executors: null  # Override silver-stream executor count
       gold_refresh_executors: null   # Override gold-refresh executor count
@@ -150,14 +163,15 @@ platform:
       enabled: false                 # Enable Portworx scratch PVCs
       storage_class: "px-csi-scratch"  # Must be repl=1
       size: "100Gi"                  # Default PVC size (overridden per job)
-      create_storage_class: true     # Auto-create the StorageClass
 ```
 
 When enabled, each executor gets a dynamically provisioned PVC mounted at
 `/tmp/spark-local` for shuffle spill. The PVC size comes from the per-job
 profile, not from `scratch.size`. The StorageClass must use `repl=1` --
 using `repl=2+` doubles storage consumption with zero benefit for
-recomputable shuffle data.
+recomputable shuffle data. `lakebench deploy` only verifies that the
+StorageClass exists; it never creates it. A cluster admin creates it once with
+`lakebench admin install-scratch-storage-class`.
 
 ### Spark Configuration Overrides (S3A, Shuffle, Memory)
 
@@ -183,25 +197,55 @@ spark:
     spark.memory.storageFraction: "0.3"
 ```
 
-These are applied as the base Spark configuration for every job. Per-job
-shuffle partitions are then overridden to `executor_count * cores * 2`
-(the standard convention for partition sizing).
+These are the schema defaults of `spark.conf`, and they are the base Spark
+configuration for every job. Lakebench then sets its own tuning on top, so
+for the keys below the value in `spark.conf` has no effect and cannot
+currently be overridden:
+
+| Key | Value that runs |
+|---|---|
+| `spark.hadoop.fs.s3a.connection.maximum` | `200` (not the `500` default above) |
+| `spark.hadoop.fs.s3a.threads.max` | `100` (not the `200` default above) |
+| `spark.hadoop.fs.s3a.fast.upload` | `true` |
+| `spark.hadoop.fs.s3a.fast.upload.buffer` | `bytebuffer` |
+| `spark.hadoop.fs.s3a.multipart.threshold` | `268435456` |
+| `spark.hadoop.fs.s3a.max.total.tasks` | `200` |
+| `spark.hadoop.fs.s3a.block.size` | `268435456` |
+| `spark.hadoop.fs.s3a.connection.timeout` | `60000` |
+| `spark.memory.fraction` / `spark.memory.storageFraction` | `0.8` / `0.3` |
+
+The same applies to the other adaptive-execution, stability, Parquet and
+Spark UI settings lakebench sets in `_build_manifest()` in
+`src/lakebench/modules/pipeline_engines/spark/job.py`;
+`spark.driver.maxResultSize` is the exception and honours a user value. The
+remaining S3A keys above (`multipart.size`, `fast.upload.active.blocks`,
+`attempts.maximum`, `retry.limit`, `retry.interval`) are not set later and
+take the `spark.conf` value. Per-job shuffle partitions (`spark.sql.shuffle.partitions` and
+`spark.default.parallelism`) are then overridden: at scale 10 or below the
+job profile's `base_partitions` is used, unless an executor override raises
+the count above the profile default; otherwise `executor_count * cores * 2`.
 
 ## Job Profiles
 
 Per-executor sizing is **fixed** and proven at 1TB+ scale. These values are not
 user-configurable. They live in
-`_JOB_PROFILES` in `src/lakebench/spark/job.py`.
+`_JOB_PROFILES` in `src/lakebench/modules/pipeline_engines/spark/job.py`.
 
 ### Batch Jobs
 
 | Job | Executor Cores | Executor Memory | Overhead | Scratch PVC | Driver (Spark 3) | Driver (Spark 4) |
 |---|---|---|---|---|---|---|
-| `bronze-verify` | 2 | 4g | 2g | 50Gi | 4g | 4g |
-| `silver-build` | 4 | 48g | 12g | 150Gi | 24g | 32g |
-| `gold-finalize` | 4 | 32g | 8g | 100Gi | 24g | 32g |
+| `bronze-verify` | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial) | 4g | 4g |
+| `silver-build` | 4 | 48g | 12g | 300Gi | 24g | 32g |
+| `gold-finalize` | 4 | 32g | 8g | 300Gi | 24g | 32g |
 
-### Streaming Jobs
+For financial workloads (LB-118) `bronze-verify` also overrides executor
+memory (4g -> 8g), overhead (2g -> 12g), `executors_per_100_scale` (4 -> 8)
+and `max_executors` (20 -> 28), since the CTAS fallback in
+`bronze_verify_financial.py` rewrites the full pacs.008 source above scale 5.
+Overrides live in `_SCHEMA_PROFILE_OVERRIDES` alongside the base profiles.
+
+### Continuous-Mode Jobs
 
 | Job | Executor Cores | Executor Memory | Overhead | Scratch PVC | Driver Memory |
 |---|---|---|---|---|---|
@@ -209,10 +253,16 @@ user-configurable. They live in
 | `silver-stream` | 4 | 32g | 8g | 100Gi | 8g |
 | `gold-refresh` | 4 | 32g | 8g | 100Gi | 8g |
 
+For financial workloads `bronze-ingest` runs 4 cores, 8g memory and 8g
+overhead per executor. The financial overrides also change the executor
+counts of all three continuous jobs (see the Auto-Scaling section), and set
+base partitions to 80 for `silver-stream` and 96 for `gold-refresh`. Per-executor
+cores, memory and scratch for `silver-stream` and `gold-refresh` are unchanged.
+
 **Why are these fixed?** Adding executors keeps data-per-executor constant, so
 per-executor memory and PVC requirements do not change with scale. The silver-build
-job is the bottleneck -- at scale 100 (~1TB) it requests 19 executors at 60g
-each (48g + 12g overhead) plus 150Gi scratch PVCs. Reducing these values causes
+job is the bottleneck -- at scale 100 (~1TB) it requests 18 executors at 60g
+each (48g + 12g overhead) plus 300Gi scratch PVCs. Reducing these values causes
 OOM kills or "No space left on device" failures.
 
 ## Auto-Scaling
@@ -226,16 +276,20 @@ The formula in `_scale_executor_count()`:
 | Job | Base | Rate per 100 scale units | Maximum |
 |---|---|---|---|
 | `bronze-verify` | 4 | 4 | 20 |
-| `silver-build` | 8 | 12 | 30 |
-| `gold-finalize` | 4 | 8 | 20 |
+| `silver-build` | 8 | 12 | 28 |
+| `gold-finalize` | 4 | 8 | 28 |
 | `bronze-ingest` | 2 | 4 | 10 |
 | `silver-stream` | 4 | 8 | 20 |
 | `gold-refresh` | 2 | 4 | 10 |
 
-In sustained mode, streaming jobs share the cluster concurrently with datagen.
+Financial (AML) overrides: `bronze-verify` 4 / 8 / 28, `bronze-ingest`
+5 / 4 / 20, `silver-stream` 10 / 8 / 28, `gold-refresh` 12 / 120 / 28.
+
+In continuous mode, the three jobs share the cluster concurrently with datagen.
 A budget calculation (`_streaming_concurrent_budget()`) proportionally caps each
-streaming job's executor count based on available cluster CPU after subtracting
-Trino, Hive, PostgreSQL, and datagen.
+job's executor count based on available cluster CPU after subtracting
+Trino, Hive, PostgreSQL, and datagen while it is still running. An explicit
+per-job executor override wins over this cap.
 
 To override the auto-derived count for any job:
 

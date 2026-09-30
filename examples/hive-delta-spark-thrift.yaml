@@ -35,7 +35,6 @@ platform:
     scratch:
       enabled: true
       storage_class: <YOUR_SCRATCH_STORAGE_CLASS>  # Portworx: px-csi-scratch (repl=1)
-      create_storage_class: false
 
   compute:
     postgres:
@@ -51,16 +50,18 @@ architecture:
   pipeline:
     mode: batch
 
-  workload:
-    schema: customer360
-    datagen:
-      scale: 1                  # ~10 GB bronze data
-      file_size: 64mb
-      timestamp_start: "2024-01-01"
-      timestamp_end: "2025-01-01"
-
   query_engine:
     type: spark-thrift
-    spark_thrift:
-      cores: 2
-      memory: 4g
+    # spark_thrift cores/memory are left unset so the autosizer picks them:
+    # 8 cores / 16g heap on Delta, fitted down on small nodes, 24g heap on the
+    # financial schema (LB-148, LB-117). At 2 cores / 4g, Delta is not
+    # compacted before the Thrift benchmark and three c360 queries exceed the
+    # 300 s query timeout.
+
+workload:
+  schema: customer360
+  datagen:
+    scale: 1                  # ~10 GB bronze data
+    file_size: 64mb
+    timestamp_start: "2024-01-01"
+    timestamp_end: "2025-01-01"

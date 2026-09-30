@@ -34,7 +34,6 @@ platform:
     scratch:
       enabled: true
       storage_class: <YOUR_SCRATCH_STORAGE_CLASS>  # Portworx: px-csi-scratch (repl=1)
-      create_storage_class: false
 
   compute:
     postgres:
@@ -45,16 +44,16 @@ architecture:
   pipeline:
     mode: batch
 
-  workload:
-    schema: customer360
-    datagen:
-      scale: 1                  # ~10 GB bronze data
-      file_size: 64mb
-      timestamp_start: "2024-01-01"
-      timestamp_end: "2025-01-01"
-
   query_engine:
     type: spark-thrift
     spark_thrift:
       cores: 2
       memory: 4g
+
+workload:
+  schema: customer360
+  datagen:
+    scale: 1                  # ~10 GB bronze data
+    file_size: 64mb
+    timestamp_start: "2024-01-01"
+    timestamp_end: "2025-01-01"

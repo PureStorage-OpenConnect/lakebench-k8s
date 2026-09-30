@@ -26,6 +26,7 @@ kubectl get storageclass -o wide
 
 # Check the PVC status
 kubectl get pvc -n <namespace> -l app=lakebench-postgres
+# (the claim is named data-lakebench-postgres-0)
 ```
 
 **Fix:** Either create a default StorageClass for your cluster, or set the
@@ -53,7 +54,7 @@ silver-build shuffle and spill data. Silver-build is the most storage-intensive
 stage in the pipeline because it performs heavy joins and aggregations across
 the enriched customer interactions dataset.
 
-**Fix:** Use at least 150Gi per silver executor PVC. This sizing is proven at
+**Fix:** Silver-build requests 300Gi per executor PVC. This sizing is proven at
 1TB+ scale and should not be reduced. The per-executor PVC size does not need
 to scale with data volume because adding more executors (driven by the scale
 factor) keeps data-per-executor constant.
@@ -66,9 +67,9 @@ Reference resource profiles:
 
 | Job | Cores | Memory | Overhead | PVC |
 |---|---|---|---|---|
-| bronze-verify | 2 | 4g | 2g | 50Gi |
-| silver-build | 4 | 48g | 12g | 150Gi |
-| gold-finalize | 4 | 32g | 8g | 100Gi |
+| bronze-verify | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial, LB-118) |
+| silver-build | 4 | 48g | 12g | 300Gi |
+| gold-finalize | 4 | 32g | 8g | 300Gi |
 
 ---
 
@@ -103,8 +104,9 @@ dropped.
 
 **Fix:** Use Kubeflow Spark Operator v2.x (2.5.1 is the current default). Do
 not downgrade to v1.x. Even on v2.x, ConfigMap volumes specifically are
-routed through pod templates rather than native webhook injection -- see the
-Spark Operator gotcha in CLAUDE.md if you're adding a new volume type.
+routed through pod templates rather than native webhook injection -- see
+[component-spark.md](component-spark.md#spark-operator) if you're adding a new
+volume type.
 
 ```bash
 # Verify your Spark Operator version
@@ -135,26 +137,58 @@ helm get values spark-operator -n spark-operator --all -o json | \
 kubectl logs -n spark-operator -l app.kubernetes.io/component=controller --tail=20
 ```
 
-**Fix:** `lakebench validate` detects this automatically. If
-`spark.operator.install: true`, the deploy/run commands auto-add the
-namespace and restart the operator. If `install: false` (the default),
-validate prints the exact fix command:
+**Fix:** re-run `lakebench deploy <config>`. Deploy adds the namespace to
+`spark.jobNamespaces` whatever `spark.operator.install` says, and `lakebench
+run` re-adds it before submitting jobs. Both take the
+`lakebench-cluster-lock` lease first, so a concurrent deploy or destroy of
+another deployment cannot lose its entry. `lakebench validate` reports a
+missing entry as a warning, or as expected before the first deploy.
 
-```bash
-helm upgrade spark-operator spark-operator/spark-operator \
-  -n spark-operator --reuse-values \
-  --set 'spark.jobNamespaces={default,your-namespace}'
-```
+If the lease is held, `lakebench admin status` shows who holds it. If the
+watch list still names namespaces that no longer exist, run
+`lakebench admin repair-operator` (use `--dry-run` first) and then deploy
+again.
 
-After updating, restart the operator controller (it reads jobNamespaces at
-startup only):
+Do not edit `spark.jobNamespaces` with `helm upgrade --reuse-values` by hand.
+That skips the lease, and a list copied from an earlier read silently drops
+any namespace another deployment added in the meantime.
 
-```bash
-kubectl rollout restart deployment/spark-operator-controller -n spark-operator
-```
+---
 
-On OpenShift, you may also need to re-patch the deployment to remove
-`fsGroup` and `seccompProfile` after any `helm upgrade`.
+## Stages slow at random, SUBMISSION_FAILED, Spark Operator controller evicted
+
+**Symptom:** A stage that usually takes about a minute takes two or more, and
+`lakebench run` prints `submission attempt N failed` before the stage ends.
+The stage line reads `completed in 150.0s (includes 60s waiting on 1 failed
+operator submission)`, and metrics.json records each failure under the stage's
+`submission_failures` with `submission_retry_seconds` as the total. The SparkApplication's status shows `SUBMISSION_FAILED`
+with a Maven message such as `Downloaded file size (0) doesn't match expected
+Content Length`, or `driver pod already exist`. It affects every deployment on
+the cluster, not only yours.
+
+**Cause:** The Spark Operator runs spark-submit inside its controller pod, and
+spark-submit resolves `spark.jars.packages` into `spark.jars.ivy`
+(`/tmp/.ivy2`). The controller's root filesystem is read-only, so `/tmp` is
+the chart's `tmp` emptyDir, which chart 2.5.1 caps at `sizeLimit: 1Gi`. One
+Spark line's Iceberg or Delta runtime, hadoop-aws and AWS SDK bundle come to
+about 1.2 GB. The kubelet evicts the controller (`Usage of EmptyDir volume
+"tmp" exceeds the limit "1Gi"`); the next leader starts with an empty cache
+and retries any submission the old one had in flight about 60 s later.
+
+**Diagnosis:** `lakebench admin doctor` (or `lakebench admin status`) reports
+the controller's `/tmp` sizeLimit and any storage evictions still on record
+(evicted pods and events last about an hour).
+
+**Fix (cluster admin):** `lakebench admin repair-operator --dry-run`, then
+`lakebench admin repair-operator`. It raises the controller's `/tmp` to 8Gi
+under the `lakebench-cluster-lock` lease with `--reuse-values`, keeps the
+watch list and the installed chart version, and rolls the controller once.
+`lakebench admin install-spark-operator` sets the same size on install or
+upgrade (`--controller-tmp-size` to choose another). The size is stored in the
+release's values, so later watch-list edits carry it forward.
+
+Baking the jars into the Spark image, so `spark.jars.packages` is empty at
+submit, removes the controller download entirely and is the durable fix.
 
 ---
 
@@ -177,10 +211,11 @@ oc adm policy add-scc-to-user anyuid \
   -n <namespace>
 ```
 
-Verify the binding:
+Verify the binding. On OpenShift 4.10 and later the grant is a namespaced
+RoleBinding, not an entry in the SCC's `.users` list (which stays empty):
 
 ```bash
-oc get scc anyuid -o json | jq '.users'
+oc get rolebinding system:openshift:scc:anyuid -n <namespace> -o yaml
 ```
 
 ---
@@ -215,12 +250,11 @@ vending errors. Polaris server logs show failures in `TaskFileIOSupplier`
 related to credential subscoping.
 
 **Cause:** Upstream bug
-[apache/polaris#379](https://github.com/apache/polaris/issues/379). In Polaris
-1.1.0 and 1.2.0, the `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION` configuration
-is silently ignored by `TaskFileIOSupplier`, causing the server to attempt
-STS credential vending. FlashBlade has no STS endpoint, so this always fails.
+[apache/polaris#379](https://github.com/apache/polaris/issues/379) in Polaris
+1.1.0 and 1.2.0 makes the server attempt STS credential vending even when it
+is configured not to. FlashBlade has no STS endpoint, so this always fails.
 
-**Fix:** Use Polaris 1.3.0-incubating or later. Lakebench now defaults to
+**Fix:** Use Polaris 1.3.0-incubating or later. Lakebench defaults to
 1.6.0, which is well past this floor and needs no action. The 1.3.0 tag
 specifically includes the `-incubating` suffix:
 
@@ -229,18 +263,17 @@ apache/polaris:1.3.0-incubating
 apache/polaris-admin-tool:1.3.0-incubating
 ```
 
-Note: `apache/polaris:1.3.0` (without the suffix) does not exist -- that
+`apache/polaris:1.3.0` (without the suffix) does not exist -- that
 release was only ever published with `-incubating`. Polaris graduated from
 the Apache incubator at 1.4.0, so 1.4.0 and later (including the 1.6.0
-default) drop the suffix entirely; there is no `1.6.0-incubating` tag. The
-Quarkus/SmallRye Config environment variable also requires a double underscore:
+default) drop the suffix entirely; there is no `1.6.0-incubating` tag.
 
-```
-POLARIS_FEATURES__SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true
-```
-
-The pre-Quarkus name `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION` (single
-underscore prefix) is silently ignored.
+The STS skip is per catalog: the bootstrap Job creates the catalog
+with `stsUnavailable: true` and `pathStyleAccess: true` in its storage
+config. No server-wide feature flag is needed, and none should be added --
+any server-wide credential-subscoping override drops the endpoint and
+path-style settings from the storage access config, and Polaris's
+server-side S3FileIO then falls back to `s3.amazonaws.com`.
 
 ---
 
@@ -271,8 +304,11 @@ prior to 454 do not support it and cannot work with Polaris. Upgrade to Trino
 reference DNS resolution failure or connection refused on port 9083.
 
 **Cause:** The Hive Metastore pod is not running, or the DNS name is wrong.
-The Stackable Hive Operator names the service after the HiveCluster custom
-resource plus the role name.
+`lakebench-hive-metastore` is a ClusterIP Service that lakebench creates
+itself (not one the Stackable operator generates). It selects the metastore
+pods of the `lakebench-hive` HiveCluster (`app.kubernetes.io/instance=lakebench-hive`,
+`app.kubernetes.io/component=metastore`), so it has no endpoints until those
+pods are ready.
 
 **Expected DNS name:**
 
@@ -325,10 +361,13 @@ kubectl get sparkapplications -n <namespace>
 All three (`bronze-verify`, `silver-build`, `gold-finalize`) should show
 status `COMPLETED`.
 
-2. Verify that the Iceberg tables exist and have data. The expected table
-names are:
+2. Verify that the Iceberg tables exist and have data. The default table
+names for Customer 360 are:
    - Silver: `customer_interactions_enriched`
    - Gold: `customer_executive_dashboard`
+
+   For AML (financial) the main tables are `silver.transactions` and
+   `gold.alerts`.
 
 3. If tables are missing or empty, run a fresh pipeline:
 

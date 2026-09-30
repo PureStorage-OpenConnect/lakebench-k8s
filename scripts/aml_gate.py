@@ -1,0 +1,795 @@
+#!/usr/bin/env python3
+"""Local AML fidelity gate over a raw datagen corpus (AML-GOALS R7, A6).
+
+Runs the bronze adapter of ``aml_features`` over a local corpus in a local
+Spark session, then ``lakebench.aml.fidelity_gate.evaluate_gate``, and writes
+the same JSON report the cluster job (score_financial_reference.py, silver
+adapter) writes. Every gate constant comes from aml_preregistration.json.
+
+The corpus directory is what the generator writes under ``--prefix`` with
+DG_LOCAL_DIR set: ``bronze/pacs008/part-*.parquet``, ``bronze/party.parquet``,
+``bronze/account.parquet`` and ``manifest/manifest.parquet``.
+
+Usage (needs pyspark, a JDK, numpy, pandas and scikit-learn):
+
+    DG_LOCAL_DIR=/scratch/c datagen_rs/target/release/generate \\
+        --bucket bronze --prefix pacs008/ --seed 43 --scale 2
+    python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 43 --out gate.json
+
+The robustness corpus is generated with ``--robustness-perturbation`` (the
+driver refuses the robustness seed without it). The generator stamps it into
+the manifest; ``--registered robustness`` requires the stamp and every other
+role refuses it.
+
+D8 (pre-registration scale_invariance) scores each shard of a scale-10
+calibration corpus with ``--d8-shard INDEX`` (features on the whole corpus,
+only the shard's customers scored, uncapped) and every D8 run with
+``--generator-image repo@sha256:<digest>``, the pinned datagen image that
+generated the corpus (host-built corpora are not bit-reproducible across
+hosts and never feed D8). ``--l2-sensitivity`` adds the ungated l2 refits.
+
+``--seed`` is checked against the manifest's instance seeds and recorded.
+Spent seeds are refused, and so are the evaluation and robustness seeds unless
+``--registered <role>`` marks this as the registered gate run for that role
+(the report then records the look under ``registered_look``). A registered
+look appends its seed to src/lakebench/spark/data/aml/aml_registered_looks.json
+before any model is fitted and its report sha256 before the verdict is
+printed; commit that file after the look. The manifest is
+checked against every guarded seed, so a corpus from one is refused whatever
+``--seed`` claims.
+
+Library versions must match the cluster's (A6 compares like with like): the
+runner refuses to score when numpy, scipy, pandas, scikit-learn, joblib or
+threadpoolctl differ from REFERENCE_PY_DEPS in
+src/lakebench/modules/pipeline_engines/spark/job.py, unless
+``--allow-version-mismatch`` is given, in which case the mismatch is recorded
+and ``passes.library_versions_match`` fails. Build a matching environment
+with (Python 3.11; the cluster driver runs 3.10, which the report records):
+
+    python3.11 -m venv /scratch/aml-gate-venv
+    /scratch/aml-gate-venv/bin/pip install pyspark==4.0.1 pyarrow \
+        $(python3.11 scripts/aml_gate.py --print-pinned-deps)
+
+and point JAVA_HOME at a JDK 17.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "src/lakebench/spark/scripts"))
+
+
+JOB_PY = ROOT / "src/lakebench/modules/pipeline_engines/spark/job.py"
+#: Pinned packages whose version must match; the rest of REFERENCE_PY_DEPS are
+#: pure-Python helpers that do not change a number.
+_CHECKED = {"numpy", "scipy", "pandas", "scikit-learn", "joblib", "threadpoolctl"}
+_MODULE_OF = {"scikit-learn": "sklearn"}
+
+
+def pinned_deps() -> dict[str, str]:
+    """REFERENCE_PY_DEPS from job.py, read from source (importing job.py
+    would pull the whole CLI dependency tree into the Spark venv)."""
+    import ast
+
+    tree = ast.parse(JOB_PY.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "REFERENCE_PY_DEPS" for t in node.targets
+        ):
+            pins = [e.value for e in node.value.elts]
+            return dict(p.split("==", 1) for p in pins)
+    raise RuntimeError(f"REFERENCE_PY_DEPS not found in {JOB_PY}")
+
+
+def version_mismatches(installed: dict) -> dict[str, dict]:
+    """{package: {pinned, installed}} for every checked package that differs."""
+    out = {}
+    for pkg, want in pinned_deps().items():
+        if pkg not in _CHECKED:
+            continue
+        have = installed.get(_MODULE_OF.get(pkg, pkg))
+        if have != want:
+            out[pkg] = {"pinned": want, "installed": have}
+    return out
+
+
+def _git_sha() -> str:
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        return sha + ("-dirty" if dirty else "")
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def seed_guard_error(
+    claimed, registered, matched, counts_only=False, claim_verified=None
+) -> str | None:
+    """Why the gate must refuse this corpus, or None (AML-GOALS R3).
+
+    ``matched`` lists the guarded seeds (spent, evaluation, robustness) the
+    manifest's instance seeds come from: the corpus's real seed if it is a
+    guarded one, whatever ``--seed`` claims, so omitting or misstating
+    ``--seed`` does not get an evaluation corpus scored.
+    """
+    from lakebench.config.datagen_seed import _corpora, aml_seed_error
+
+    return aml_seed_error(
+        _corpora(), claimed, registered, matched, counts_only, claim_verified=claim_verified
+    )
+
+
+def ledger_path() -> Path:
+    """An append-only record of look claims outside the checkout, so a
+    reverted or stashed aml_registered_looks.json cannot un-spend a seed on
+    this host (LB_AML_LOOKS_LEDGER overrides the location)."""
+    return Path(
+        os.environ.get("LB_AML_LOOKS_LEDGER") or Path.home() / ".lakebench" / "aml_looks.jsonl"
+    )
+
+
+def seed_ever_recorded(seed: int) -> str | None:
+    """Why ``seed`` already has a look anywhere this host can see, or None:
+    the out-of-tree ledger, or any commit on any branch that added it to the
+    tracked record."""
+    from lakebench.config.datagen_seed import looks_path
+
+    led = ledger_path()
+    if led.is_file():
+        for line in led.read_text().splitlines():
+            if line.strip() and int(json.loads(line)["seed"]) == int(seed):
+                return f"seed {seed} is in the look ledger {led}"
+    rec = looks_path()
+    hits = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "log",
+            "--all",
+            "--format=%H",
+            "-S",
+            f'"seed": {int(seed)}',
+            "--",
+            str(rec.relative_to(ROOT)),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if hits:
+        return f"seed {seed} was recorded in {rec.name} by commit {hits.splitlines()[0]}"
+    return None
+
+
+def append_ledger(entry: dict) -> None:
+    """Append ``entry`` to the ledger and fsync it (raises on failure)."""
+    led = ledger_path()
+    led.parent.mkdir(parents=True, exist_ok=True)
+    with open(led, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def clean_checkout_error() -> str | None:
+    """Why this checkout may not take a registered look, or None: it must be
+    a git work tree with no uncommitted change to a tracked file."""
+    try:
+        dirty = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as e:
+        return f"a registered look runs from a git checkout ({e})"
+    if dirty:
+        return (
+            "a registered look needs a clean checkout (commit the look record, the "
+            f"predictions and the pre-registration first): {dirty.splitlines()[0]} ..."
+        )
+    return None
+
+
+def predictions_error(generator_image) -> str | None:
+    """Why a registered look may not start on the committed Level-2
+    predictions (AML-GOALS #46 D-8), or None."""
+    from lakebench.aml.fidelity_gate import in_scope_typologies, load_preregistration
+    from lakebench.config.datagen_seed import load_predictions
+
+    prereg, sha = load_preregistration()
+    try:
+        pred, _ = load_predictions(typologies=in_scope_typologies(prereg))
+    except (OSError, ValueError) as e:
+        return f"the Level-2 predictions are not committed: {e}"
+    if pred["prereg_sha256"] != sha:
+        return "the Level-2 predictions were made under another pre-registration file"
+    if pred["generator_image"] != generator_image:
+        return (
+            f"the Level-2 predictions come from image {pred['generator_image']}, not "
+            f"--generator-image {generator_image}"
+        )
+    return None
+
+
+def image_digest_ok(ref: str) -> bool:
+    """True for a digest-pinned image reference: ...@sha256:<64 lowercase hex>."""
+    import re
+
+    return re.fullmatch(r".+@sha256:[0-9a-f]{64}", ref) is not None
+
+
+def emit_report(
+    report: dict, out, registered, seed, summary_lines, print_fn=print, predictions_sha=None
+) -> bool:
+    """Write the report and print its verdict; False when a registered look
+    could not be recorded (nothing verdict-bearing is printed then).
+
+    R3: for a registered evaluation or robustness look the report is written
+    and fsynced, its sha256 is recorded in the tracked look record
+    (datagen_seed.complete_look), and only then is the verdict printed."""
+    text = json.dumps(report, indent=2, default=str) + "\n"
+    if registered in ("evaluation", "robustness"):
+        import hashlib
+
+        from lakebench.config.datagen_seed import complete_look, load_predictions
+
+        try:
+            # The predictions must be the ones the look started with.
+            if predictions_sha is None or load_predictions()[1] != predictions_sha:
+                raise ValueError("the Level-2 predictions changed (or vanished) during the look")
+            with open(out, "w") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            entry = complete_look(registered, seed, digest, str(Path(out).resolve()))
+        except Exception as e:  # noqa: BLE001 -- fail closed: no record, no verdict
+            print_fn(
+                f"the look's report hash could not be recorded ({e}); verdict withheld. The "
+                "seed is spent (recorded when the look started).",
+                file=sys.stderr,
+            )
+            return False
+        print_fn(f"recorded look {entry['role']} seed {entry['seed']} report sha256 {digest}")
+        for line in summary_lines(report):
+            print_fn(line)
+        print_fn(f"wrote {out}")
+        return True
+    for line in summary_lines(report):
+        print_fn(line)
+    if out:
+        Path(out).write_text(text)
+        print_fn(f"wrote {out}")
+    else:
+        print_fn(text, end="")
+    return True
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    if argv is None and "--print-pinned-deps" in sys.argv[1:]:
+        print(" ".join(f"{k}=={v}" for k, v in pinned_deps().items()))
+        return 0
+    ap.add_argument("corpus", type=Path, help="corpus root (contains bronze/ and manifest/)")
+    ap.add_argument("--seed", type=int, default=None, help="corpus seed (provenance only)")
+    ap.add_argument("--out", type=Path, default=None, help="write the JSON report here")
+    ap.add_argument("--prereg", type=Path, default=None, help="pre-registration JSON path")
+    ap.add_argument("--driver-memory", default="12g")
+    ap.add_argument("--master", default="local[*]")
+    ap.add_argument(
+        "--label-role",
+        choices=["participant", "subject"],
+        default=None,
+        help="override the pre-registered unit_of_scoring.label_role (diagnostic only; "
+        "the report records the override)",
+    )
+    ap.add_argument(
+        "--allow-version-mismatch",
+        action="store_true",
+        help="score even when library versions differ from the cluster pins (recorded, fails "
+        "passes.library_versions_match)",
+    )
+    ap.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="allow a corpus whose scale is not corpora.gate_scale; the report is marked "
+        "diagnostic and passes.corpus_at_gate_scale fails",
+    )
+    ap.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="build units and labels and report counts only: no model, no AP (smoke tests "
+        "on a unit that must not be looked at before its first registered gate run)",
+    )
+    ap.add_argument(
+        "--registered",
+        choices=["calibration", "evaluation", "robustness"],
+        default=None,
+        help="this is the registered gate run for the role: required to score the "
+        "evaluation or robustness seed (each is looked at once, after the freeze); the "
+        "report records the look. Spent seeds are always refused",
+    )
+    ap.add_argument(
+        "--d8-shard",
+        type=int,
+        default=None,
+        metavar="INDEX",
+        help="D8 (scale_invariance.shard_rule): score only this shard of a "
+        "scale_invariance.large_scale calibration corpus. Features and labels are built on "
+        "the whole corpus; customers are sharded by planted-instance component and the plan "
+        "is refused if any instance spans shards",
+    )
+    ap.add_argument(
+        "--generator-image",
+        default=None,
+        metavar="REF",
+        help="the digest-pinned datagen image that generated the corpus "
+        "(registry/repo@sha256:<64 hex>), recorded in the report. Required for a D8 run "
+        "(D8 refuses reports without it) and for a registered look: generator output is "
+        "bit-reproducible only within one build environment, so host-built corpora never "
+        "feed D8, A6 or Level 2",
+    )
+    ap.add_argument(
+        "--l2-sensitivity",
+        action="store_true",
+        help="also refit at each scale_invariance.l2_sensitivity value (ungated D8 secondary)",
+    )
+    ap.add_argument(
+        "--require-pass",
+        action="store_true",
+        help="exit 2 unless every gate passes (passes.all); default exit 0 when the gate ran",
+    )
+    args = ap.parse_args(argv)
+    if args.generator_image is not None and not image_digest_ok(args.generator_image):
+        print(
+            f"refusing: --generator-image {args.generator_image!r} is not a digest-pinned "
+            "reference (...@sha256:<64 hex>)",
+            file=sys.stderr,
+        )
+        return 1
+    if args.generator_image is None and (
+        args.d8_shard is not None or args.registered in ("evaluation", "robustness")
+    ):
+        print(
+            "refusing: a D8 shard or registered look needs --generator-image (the pinned "
+            "datagen image that generated the corpus)",
+            file=sys.stderr,
+        )
+        return 1
+    if args.registered in ("evaluation", "robustness"):
+        # A registered look runs exactly as registered, and leaves a record.
+        bad = [
+            flag
+            for flag, on in (
+                ("--diagnostic", args.diagnostic),
+                ("--label-role", args.label_role is not None),
+                ("--allow-version-mismatch", args.allow_version_mismatch),
+                ("--prereg", args.prereg is not None),
+                ("LB_AML_PREREG_PATH", bool(os.environ.get("LB_AML_PREREG_PATH"))),
+            )
+            if on
+        ]
+        if bad:
+            print(
+                f"refusing: a registered {args.registered} look cannot run with {', '.join(bad)}",
+                file=sys.stderr,
+            )
+            return 1
+        if args.out is None:
+            print("refusing: a registered look needs --out to record it", file=sys.stderr)
+            return 1
+        if args.d8_shard is not None:
+            print("refusing: a registered look is never a D8 shard run", file=sys.stderr)
+            return 1
+        # The look record must be writable before any AP exists: a look whose
+        # record cannot be written would have no verdict to print.
+        from lakebench.config.datagen_seed import looks_path
+
+        try:
+            rec = looks_path()
+            if not os.access(rec, os.W_OK) or not os.access(rec.parent, os.W_OK):
+                raise OSError(f"{rec} is not writable")
+        except OSError as e:
+            print(f"refusing: the look record is not writable: {e}", file=sys.stderr)
+            return 1
+        # The look record, the predictions and the pre-registration are read
+        # from this checkout: they must be the committed ones, or a look in
+        # another worktree (or a reverted record) goes unseen.
+        err = clean_checkout_error() or seed_ever_recorded(args.seed)
+        if err:
+            print(f"refusing: {err}", file=sys.stderr)
+            return 1
+        # #46 D-8: the look needs committed predictions made under this
+        # pre-registration from corpora of this generator image.
+        err = predictions_error(args.generator_image)
+        if err:
+            print(f"refusing: {err}", file=sys.stderr)
+            return 1
+        from lakebench.config.datagen_seed import load_predictions as _lp
+
+        preflight_pred_sha = _lp()[1]
+    # Cheap refusal before Spark starts; the manifest check below catches a
+    # corpus whose real seed is guarded whatever --seed says.
+    err = seed_guard_error(args.seed, args.registered, [], args.counts_only)
+    if err:
+        print(f"refusing: {err}", file=sys.stderr)
+        return 1
+    if args.registered in ("evaluation", "robustness"):
+        # Claim --out before Spark starts: exclusive create, so the record is
+        # writable before any AP exists and a second run on the same path is
+        # refused instead of overwriting the first look's record.
+        try:
+            with open(args.out, "x") as f:
+                f.write(json.dumps({"registered_look": args.registered, "state": "started"}))
+        except OSError as e:
+            print(f"refusing: cannot claim --out {args.out} for the look: {e}", file=sys.stderr)
+            return 1
+
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    import aml_features as af
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col
+
+    from lakebench.aml.fidelity_gate import (
+        add_pass,
+        evaluate_gate,
+        in_scope_typologies,
+        library_versions,
+        lifetime_prereg,
+        load_preregistration,
+        output_fingerprints,
+        summary_lines,
+        write_model_outputs,
+    )
+
+    mismatch = version_mismatches(library_versions())
+    if mismatch:
+        print(f"LIBRARY VERSION MISMATCH vs REFERENCE_PY_DEPS: {mismatch}", file=sys.stderr)
+        if not args.allow_version_mismatch:
+            print("refusing to score; see the docstring for a pinned env", file=sys.stderr)
+            return 1
+    prereg, sha = load_preregistration(args.prereg)
+    typologies = in_scope_typologies(prereg)
+    corpus = args.corpus.resolve()
+    spark = (
+        SparkSession.builder.master(args.master)
+        .appName("lb-aml-gate-local")
+        .config("spark.driver.memory", args.driver_memory)
+        # The monthly unit's frame is collected whole: at scale 2 its Arrow
+        # batches pass 1 GiB (Spark's default cap), so the cap follows the
+        # driver's memory instead.
+        .config("spark.driver.maxResultSize", args.driver_memory)
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.session.timeZone", "UTC")
+        # Arrow for toPandas: the monthly unit pulls millions of units, which
+        # the row-by-row path converts far more slowly. Measured at scale 0.1
+        # (seed 7777): identical primary and lifetime frames, values and
+        # dtypes, with build_gate_inputs at 27 s against 107 s.
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true")
+        .getOrCreate()
+    )
+    spark.sparkContext.setLogLevel("ERROR")
+    t0 = time.time()
+    try:
+        manifest_src = af.manifest_glob(str(corpus / "manifest/manifest.parquet"))
+        manifest = af.read_manifest(spark, manifest_src)
+        af.check_manifest(manifest)
+        seed_check = af.corpus_seed_check(manifest, args.seed)
+        from lakebench.config.datagen_seed import protected_seeds, spent_seeds
+
+        guarded = sorted(spent_seeds() | set(protected_seeds()))
+        # Any matching instance seed counts: a corpus that mixes a guarded
+        # seed's instances with others is still that seed's corpus.
+        matched = [
+            g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0
+        ]
+        err = seed_guard_error(
+            args.seed,
+            args.registered,
+            matched,
+            args.counts_only,
+            claim_verified=seed_check["matched_share"] == 1,
+        )
+        if err:
+            print(f"refusing: {err}", file=sys.stderr)
+            return 1
+        # The robustness perturbation comes from the manifest stamp, never
+        # from the seed alone: a registered robustness look on a corpus
+        # without it (an older generator) is refused.
+        from lakebench.config.datagen_seed import (
+            MANIFEST_KEYS,
+            perturbation_stamp_error,
+            summarise_stamp,
+        )
+
+        stamp = summarise_stamp(af.manifest_stamp_groups(manifest, MANIFEST_KEYS))
+        err = perturbation_stamp_error(prereg["corpora"], args.registered, stamp)
+        if err:
+            print(f"refusing: {err}", file=sys.stderr)
+            return 1
+        scale_info = af.corpus_scale(
+            spark,
+            str(corpus / "bronze/account.parquet"),
+            prereg["corpora"]["entities_per_scale_unit"],
+        )
+        at_scale = af.at_gate_scale(scale_info, prereg)
+        si = prereg["scale_invariance"]
+        if args.d8_shard is not None:
+            # A D8 shard is defined on the calibration corpus at the large
+            # scale only; anything else is refused, not marked diagnostic.
+            large_n = round(prereg["corpora"]["entities_per_scale_unit"] * si["large_scale"])
+            why = None
+            if not 0 <= args.d8_shard < si["n_shards"]:
+                why = f"--d8-shard must be in [0, {si['n_shards']})"
+            elif args.seed != prereg["corpora"]["calibration_seed"]:
+                why = "D8 shards are scored on the calibration seed only"
+            elif scale_info["n_entities"] != large_n:
+                why = f"the corpus is not at scale_invariance.large_scale ({scale_info})"
+            if why:
+                print(f"refusing: {why}", file=sys.stderr)
+                return 1
+        elif not at_scale and not args.diagnostic:
+            print(
+                f"corpus scale {scale_info['scale']} is not the gate scale "
+                f"{prereg['corpora']['gate_scale']}; refusing (use --diagnostic)",
+                file=sys.stderr,
+            )
+            return 1
+        txns, ents, id_map = af.bronze_frames(
+            spark,
+            pacs_path=str(corpus / "bronze/pacs008"),
+            party_path=str(corpus / "bronze/party.parquet"),
+            account_path=str(corpus / "bronze/account.parquet"),
+        )
+        txns = txns.cache()
+        registered_role = prereg["unit_of_scoring"]["label_role"]
+        role = args.label_role or registered_role
+        pull = None
+        shard_info = None
+        pred = pred_sha = None
+        if args.d8_shard is not None:
+            plan, shard_info = af.d8_shard_plan(
+                spark,
+                manifest=manifest,
+                id_map=id_map,
+                txns=txns,
+                customers=ents.filter(col("is_customer").cast("boolean")).select("key"),
+                n_shards=si["n_shards"],
+                salt=si["shard_salt"],
+                typologies=typologies,
+            )
+            shard_info = {"index": args.d8_shard, **shard_info}
+            from lakebench.aml.scale_invariance import shard_plan_errors
+
+            bad = shard_plan_errors(shard_info, prereg)
+            if bad:
+                print(f"refusing the shard plan: {'; '.join(bad)}", file=sys.stderr)
+                return 1
+            pull = af.shard_pull(af.default_pull, plan, args.d8_shard)
+        if args.registered in ("evaluation", "robustness") and not args.counts_only:
+            # The corpus is verified as the registered seed's; record the look
+            # before any model exists. From here the seed is spent.
+            from lakebench.config.datagen_seed import claim_look, load_predictions
+
+            try:
+                # Re-checked here: the checkout must still be clean and the
+                # predictions the ones checked before Spark started.
+                err = (
+                    clean_checkout_error()
+                    or seed_ever_recorded(args.seed)
+                    or predictions_error(args.generator_image)
+                )
+                if err:
+                    raise ValueError(err)
+                pred, pred_sha = load_predictions(typologies=typologies)
+                if pred_sha != preflight_pred_sha:
+                    raise ValueError("the Level-2 predictions changed after the look was checked")
+                append_ledger(
+                    {
+                        "role": args.registered,
+                        "seed": args.seed,
+                        "checkout": str(ROOT),
+                        "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    }
+                )
+                claim_look(
+                    args.registered,
+                    args.seed,
+                    {
+                        "out": str(args.out.resolve()),
+                        "git_sha": _git_sha(),
+                        "prereg_sha256": sha,
+                        "generator_image": args.generator_image,
+                        "level2_predictions_sha256": pred_sha,
+                    },
+                )
+            except Exception as e:  # noqa: BLE001 -- fail closed before any AP exists
+                print(f"refusing: the look could not be recorded: {e}", file=sys.stderr)
+                return 1
+        inputs = af.build_gate_inputs(
+            spark,
+            prereg,
+            txns=txns,
+            ents=ents,
+            id_map=id_map,
+            manifest=manifest,
+            role=role,
+            typologies=typologies,
+            pull=pull,
+        )
+        features = inputs["lifetime_features"]
+        by_participant = af.labels_from_participants(manifest, id_map)
+        tm = prereg["timing_mixture"]
+        timing = af.timing_mixture_counts(
+            features,
+            cohort_min_sends=tm["cohort_min_sends"],
+            low_cv_edge=tm["low_cv_edge"],
+            high_cv_edge=tm["high_cv_edge"],
+        )
+        density = af.typology_density(txns, manifest)
+        unkeyed = af.unkeyed_rows(txns)
+        dup_ibans = af.duplicate_ibans(spark, str(corpus / "bronze/account.parquet"))
+        cust_keys = features.filter(col("is_customer")).select("key")
+        agreement = af.label_agreement(
+            by_participant.join(cust_keys, "key", "left_semi"),
+            af.labels_from_uetrs(manifest, txns).join(cust_keys, "key", "left_semi"),
+        )
+        prov = {
+            "adapter": "bronze",
+            "manifest": manifest_src,
+            "label_role": role,
+            "label_role_overridden": role != registered_role,
+            "library_version_mismatch": mismatch,
+            "unkeyed_rows": unkeyed,
+            "duplicate_ibans": dup_ibans,
+            "corpus_seed_check": seed_check,
+            "robustness_stamp": stamp,
+            "corpus_scale": scale_info,
+            "d8_shard": shard_info,
+            "generator_image": args.generator_image,
+            "level2_predictions_sha256": pred_sha,
+            "diagnostic": bool(args.diagnostic),
+            "aml_features_sha256": af.source_sha256(),
+            "corpus": str(corpus),
+            "corpus_seed": args.seed,
+            "git_sha": _git_sha(),
+            **af.manifest_provenance(manifest),
+            "n_entities": int(features.count()),
+            "n_payments": int(txns.count()),
+            "label_route_agreement_customers": agreement,
+        }
+        t_spark = time.time() - t0
+    finally:
+        spark.stop()
+
+    report = evaluate_gate(
+        inputs["primary"],
+        prereg,
+        prereg_sha256=sha,
+        timing_counts=timing,
+        density_counts=density,
+        provenance={**prov, "spark_seconds": round(t_spark, 1)},
+        score=not args.counts_only,
+        collect_outputs=args.out is not None and not args.counts_only,
+        l2_values=si["l2_sensitivity"]["values"] if args.l2_sensitivity else None,
+    )
+    outputs = report.pop("_model_outputs", None)
+    if outputs is not None:
+        # Absolute, so the paths recorded in the report resolve from anywhere
+        # (scale_invariance.py reads them back).
+        base = str(args.out.resolve().with_suffix(""))
+        # Written before the report, so a failure here (a full disk) must be
+        # recorded rather than lose the gate numbers.
+        try:
+            paths = write_model_outputs(outputs, base)
+            report["model_outputs"] = {
+                name: {"path": p, "bytes": os.path.getsize(p)} for name, p in paths.items()
+            }
+            report["model_outputs"]["oof_scores"]["rows"] = int(len(outputs["scores"]))
+            # Content hashes D8 checks the files against (scale_invariance.py).
+            for name, fps in output_fingerprints(outputs).items():
+                if name in report["model_outputs"]:
+                    report["model_outputs"][name]["fingerprint"] = fps
+        except Exception as e:  # noqa: BLE001
+            report["model_outputs"] = {"error": str(e)}
+    report["unit_detail"] = inputs["unit"]
+    if "secondary_lifetime_error" in inputs:
+        report["secondary_lifetime"] = {
+            "gated": False,
+            "verdict": "error",
+            "note": inputs["secondary_lifetime_error"],
+        }
+    if "secondary_lifetime" in inputs:
+        # Ungated: the lifetime unit kept for comparison, never in passes; its
+        # failure must not lose the gated report.
+        try:
+            sec = evaluate_gate(
+                inputs["secondary_lifetime"],
+                lifetime_prereg(prereg, secondary=True),
+                score=not args.counts_only,
+                secondary=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            sec = {"verdict": "error", "note": str(e)}
+        report["secondary_lifetime"] = {
+            "gated": False,
+            **{
+                k: sec.get(k)
+                for k in (
+                    "unit",
+                    "verdict",
+                    "note",
+                    "n_scored_customers",
+                    "n_scored_units",
+                    "typologies",
+                )
+            },
+        }
+    report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
+    if pred is not None and report.get("verdict") == "ok":
+        from lakebench.config.datagen_seed import replication
+
+        report["level2_replication"] = replication(report["typologies"], pred)
+    if args.registered is not None:
+        # The look itself is the record R3 needs: which role, seed and revision
+        # were scored, and when.
+        report["registered_look"] = {
+            "role": args.registered,
+            "seed": args.seed,
+            "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "git_sha": report["provenance"].get("git_sha"),
+            "prereg_version": report.get("prereg_version"),
+        }
+    seed_ok = seed_check["matched_share"] == 1
+    if args.seed is not None and not seed_ok:
+        report["corpus_role"] = "unverified"
+    if report.get("verdict") == "ok":
+        n_unres = af.unresolved_subjects(inputs["unit"])
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0 and n_unres == 0)
+        add_pass(report, "library_versions_match", not mismatch)
+        add_pass(report, "corpus_at_gate_scale", at_scale)
+        if args.seed is not None:
+            add_pass(report, "corpus_seed_verified", seed_ok)
+        # A diagnostic run under another label role is never a pass.
+        add_pass(report, "registered_label_role", role == registered_role)
+    if not emit_report(
+        report,
+        args.out,
+        args.registered if not args.counts_only else None,
+        args.seed,
+        summary_lines,
+        predictions_sha=pred_sha,
+    ):
+        return 1
+    if args.counts_only:
+        return 0 if report.get("verdict") == "counts_only" else 1
+    if report.get("verdict") != "ok":
+        return 1
+    if args.require_pass and not report["passes"]["all"]:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

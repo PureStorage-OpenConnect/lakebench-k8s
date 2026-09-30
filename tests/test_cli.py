@@ -462,6 +462,55 @@ class TestBenchmarkSchedulingFloors:
         assert bench_interval == 600
 
 
+class TestResolveMaintenanceRetention:
+    """Tests for the schema-aware retention resolver (ENG-R-05)."""
+
+    def _cfg(self, retention_workload=False, retention_months=60):
+        from unittest.mock import MagicMock
+
+        cfg = MagicMock()
+        cfg.architecture.workload.retention_workload = retention_workload
+        cfg.architecture.workload.retention_months = retention_months
+        return cfg
+
+    def test_default_workload_returns_zero_seconds(self):
+        from lakebench.cli._sustained import resolve_maintenance_retention
+
+        assert resolve_maintenance_retention(self._cfg()) == "0s"
+
+    def test_retention_workload_preserves_60_months_plus_headroom(self):
+        from lakebench.cli._sustained import resolve_maintenance_retention
+
+        threshold = resolve_maintenance_retention(
+            self._cfg(retention_workload=True, retention_months=60)
+        )
+        # 66 months * 30.5 days = 2013 days
+        assert threshold == "2013d"
+
+    def test_retention_workload_scales_with_months(self):
+        from lakebench.cli._sustained import resolve_maintenance_retention
+
+        # 12 + 6 = 18 months * 30.5 = 549 days
+        threshold = resolve_maintenance_retention(
+            self._cfg(retention_workload=True, retention_months=12)
+        )
+        assert threshold == "549d"
+
+    def test_retention_workload_threshold_is_parseable_by_maintenance(self):
+        """Sanity check: the day-string must round-trip through the parser."""
+        from lakebench.cli._sustained import resolve_maintenance_retention
+        from lakebench.modules.table_formats.iceberg.maintenance import (
+            _parse_threshold_seconds,
+        )
+
+        threshold = resolve_maintenance_retention(
+            self._cfg(retention_workload=True, retention_months=60)
+        )
+        seconds = _parse_threshold_seconds(threshold)
+        # 2013 days in seconds
+        assert seconds == 2013 * 86400
+
+
 class TestRunIcebergMaintenance:
     """Tests for _run_iceberg_maintenance() engine-aware helper."""
 
@@ -473,9 +522,10 @@ class TestRunIcebergMaintenance:
         cfg.architecture.query_engine.type.value = engine_type
         cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
         cfg.architecture.query_engine.spark_thrift.catalog_name = "lakehouse"
-        cfg.architecture.tables.bronze = "default.bronze_raw"
-        cfg.architecture.tables.silver = "silver.customer_interactions_enriched"
-        cfg.architecture.tables.gold = "gold.customer_executive_dashboard"
+        from lakebench.config.schema import TableNamesConfig
+
+        cfg.architecture.tables = TableNamesConfig()
+        cfg.architecture.workload.schema_type.value = "customer360"
         return cfg
 
     def test_runs_maintenance_on_all_tables_trino(self):
@@ -500,13 +550,17 @@ class TestRunIcebergMaintenance:
             mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
             _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
 
-        # 3 tables * 2 operations = 6 exec_in_pod calls
-        assert k8s.exec_in_pod.call_count == 6
-        # Verify Trino SQL contains retention_threshold
+        # Batch c360: silver + gold (no bronze table exists) x 2 operations.
+        assert k8s.exec_in_pod.call_count == 4
+        assert not any("bronze" in str(c[0][1]) for c in k8s.exec_in_pod.call_args_list)
+        # Expire at the threshold; orphan removal never below 24 h + 10 min.
         for call in k8s.exec_in_pod.call_args_list:
             cmd = call[0][1]
             assert cmd[0] == "trino"
-            assert "30m" in cmd[2]
+            if "expire_snapshots" in cmd[2]:
+                assert "retention_threshold => '30m'" in cmd[2]
+            else:
+                assert "retention_threshold => '1450m'" in cmd[2]
 
     def test_runs_maintenance_on_all_tables_spark_thrift(self):
         """Runs expire_snapshots + remove_orphan_files via Spark Thrift beeline."""
@@ -530,8 +584,8 @@ class TestRunIcebergMaintenance:
             mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
             _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
 
-        # 3 tables * 2 operations = 6 exec_in_pod calls
-        assert k8s.exec_in_pod.call_count == 6
+        # Batch c360: silver + gold (no bronze table exists) x 2 operations.
+        assert k8s.exec_in_pod.call_count == 4
         # Verify beeline invocation
         for call in k8s.exec_in_pod.call_args_list:
             cmd = call[0][1]
@@ -594,14 +648,12 @@ class TestRunIcebergMaintenance:
         mock_pod_list = MagicMock()
         mock_pod_list.items = [mock_pod]
 
-        # First two calls (bronze) fail, rest succeed
+        # First two calls (silver) fail, the gold ones still run
         k8s.exec_in_pod.side_effect = [
             Exception("table not found"),
             Exception("table not found"),
-            None,
-            None,
-            None,
-            None,
+            (0, "", ""),
+            (0, "", ""),
         ]
 
         with patch("kubernetes.client") as mock_core:
@@ -609,8 +661,8 @@ class TestRunIcebergMaintenance:
             # Should not raise
             _run_iceberg_maintenance(cfg, k8s, console, j, "1h")
 
-        # All 6 calls were attempted despite first 2 failing
-        assert k8s.exec_in_pod.call_count == 6
+        # All 4 calls were attempted despite the first 2 failing
+        assert k8s.exec_in_pod.call_count == 4
 
     def test_handles_k8s_api_failure(self):
         """Does not crash when K8s API listing fails."""
@@ -644,8 +696,10 @@ class TestRunIcebergCompaction:
         cfg.architecture.query_engine.type.value = engine_type
         cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
         cfg.architecture.query_engine.spark_thrift.catalog_name = "lakehouse"
-        cfg.architecture.tables.silver = "silver.customer_interactions_enriched"
-        cfg.architecture.tables.gold = "gold.customer_executive_dashboard"
+        from lakebench.config.schema import TableNamesConfig
+
+        cfg.architecture.tables = TableNamesConfig()
+        cfg.architecture.workload.schema_type.value = "customer360"
         return cfg
 
     def test_runs_compaction_trino(self):

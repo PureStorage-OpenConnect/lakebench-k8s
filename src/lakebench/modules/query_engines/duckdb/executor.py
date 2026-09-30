@@ -6,15 +6,69 @@ using a Python one-liner with the duckdb module.
 
 from __future__ import annotations
 
-import json
+import hashlib
 import logging
 import re
 import subprocess
 import time
+from pathlib import Path
 
-from lakebench.benchmark.result import QueryExecutorResult
+from lakebench.benchmark.fingerprint import last_json_line, unusable
+from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
+from lakebench.k8s import pinned_kubectl
 
 logger = logging.getLogger(__name__)
+
+# The in-pod Python process ends itself this many seconds before the client
+# gives up. Killing the local ``kubectl exec`` on a client timeout leaves the
+# process (and its DuckDB query, memory and S3 reads) running in the pod.
+# SIGALRM with its default action terminates the process even inside a
+# long C call, where a Python-level handler would never run.
+SERVER_TIMEOUT_MARGIN_SECONDS = 5
+_SIGALRM_EXIT_CODES = (-14, 142)  # killed by signal 14, as seen locally / via kubectl
+
+# Python statement that turns ``rel`` (a DuckDB relation, or None for a
+# statement with no result) into ``rows``. Spark writes TIMESTAMP columns as
+# Iceberg timestamptz, and DuckDB can only hand a TIMESTAMP WITH TIME ZONE
+# back to Python through pytz, which the query pod does not install. Every
+# query that returned one (FQ4, FQ6, FQ8) failed after it had finished
+# running. The cast to text happens inside DuckDB instead; positional
+# references keep duplicate or quoted column names intact, and a projection
+# does not disturb the query's ORDER BY.
+# String literals (with '' escapes), double-quoted identifiers and comments.
+_SQL_NON_CODE = re.compile(r"('(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|--[^\n]*|/\*.*?\*/)", re.DOTALL)
+
+FETCH_ROWS = (
+    "cols = [('CAST(#%d AS VARCHAR)' if 'TIME ZONE' in str(t) else '#%d') % (i + 1) "
+    "for i, t in enumerate(rel.types)] if rel is not None else []; "
+    "rel = rel.project(', '.join(cols)) if any(c.startswith('CAST') for c in cols) else rel; "
+    "rows = rel.fetchall() if rel is not None else []"
+)
+
+# Session settings every DuckDB query runs with. The progress bar goes to
+# stdout even when it is a pipe, once a query passes 2 s: the JSON payload
+# was then the second line, json.loads failed and the old fallback counted
+# 2 rows. The zone pins timestamptz rendering and date arithmetic.
+SESSION_SETTINGS = (
+    "conn.execute('SET enable_progress_bar = false'); conn.execute(\"SET TimeZone = 'UTC'\")"
+)
+
+
+def fingerprint_statement(approx_columns: dict[int, float] | None) -> str:
+    """Python statements, run in the query process after FETCH_ROWS, that
+    fingerprint ``rows`` with this tree's benchmark.fingerprint (its source
+    is shipped in the script) and print ``{"rows": n, "fingerprint": fp}``,
+    so the rows never cross kubectl."""
+    from lakebench.benchmark import fingerprint
+
+    src = Path(fingerprint.__file__).read_text()
+    approx = {int(k): float(v) for k, v in (approx_columns or {}).items()}
+    return (
+        "_lbfp = {}; "
+        f"exec({src!r}, _lbfp); "
+        f"fp = _lbfp['fingerprint_or_reason'](rows, {approx!r}, 'duckdb'); "
+        "print(json.dumps({'rows': len(rows), 'fingerprint': fp}))"
+    )
 
 
 class DuckDBExecutor:
@@ -31,6 +85,7 @@ class DuckDBExecutor:
         table_names: dict[str, str] | None = None,
         table_format: str = "iceberg",
         catalog_type: str = "hive",
+        kube_context: str | None = None,
     ):
         self.namespace = namespace
         self.catalog_name = catalog_name
@@ -41,18 +96,25 @@ class DuckDBExecutor:
         self.s3_path_style = s3_path_style
         self.s3_buckets = s3_buckets or {}
         self.table_names = table_names or {}
+        self.kube_context = kube_context or None
         self._pod: str | None = None
 
     def engine_name(self) -> str:
         return "duckdb"
 
+    def _kubectl_prefix(self) -> list[str]:
+        """The ``kubectl`` argv prefix with the configured context pinned."""
+        if self.kube_context:
+            return ["kubectl", "--context", self.kube_context]
+        return ["kubectl"]
+
     def _discover_pod(self) -> str:
         """Find the DuckDB pod."""
         if self._pod:
             return self._pod
-        result = subprocess.run(
+        result = pinned_kubectl(
+            self.kube_context,
             [
-                "kubectl",
                 "get",
                 "pods",
                 "-n",
@@ -72,11 +134,25 @@ class DuckDBExecutor:
         self._pod = pod
         return pod
 
-    def _build_python_script(self, sql: str) -> str:
-        """Build a Python one-liner that executes SQL via duckdb."""
+    def _build_python_script(
+        self, sql: str, timeout: int | None = None, result_statement: str | None = None
+    ) -> str:
+        """Build a Python one-liner that executes SQL via duckdb.
+
+        With *timeout*, the process terminates itself (SIGALRM) a few seconds
+        before the client timeout so no orphan outlives it in the pod.
+        *result_statement* replaces the default JSON print (the fingerprint
+        path uses it).
+        """
         sql = " ".join(sql.split())
         escaped_sql = sql.replace("'", "\\'")
+        alarm = (
+            f"import signal; signal.alarm({max(1, int(timeout) - SERVER_TIMEOUT_MARGIN_SECONDS)}); "
+            if timeout
+            else ""
+        )
         return (
+            f"{alarm}"
             "import duckdb, json, os; "
             "conn = duckdb.connect(); "
             f"conn.load_extension('{'delta' if self.table_format == 'delta' else 'iceberg'}'); "
@@ -88,16 +164,20 @@ class DuckDBExecutor:
             "conn.execute(\"SET s3_access_key_id='\" + os.environ['AWS_ACCESS_KEY_ID'] + \"'\"); "
             "conn.execute(\"SET s3_secret_access_key='\" + os.environ['AWS_SECRET_ACCESS_KEY'] + \"'\"); "
             "conn.execute('SET unsafe_enable_version_guessing = true'); "
-            f"result = conn.execute('{escaped_sql}'); "
-            "rows = result.fetchall(); "
-            "print(json.dumps({'rows': len(rows), 'data': [str(r) for r in rows[:100]]}))"
+            f"{SESSION_SETTINGS}; "
+            f"rel = conn.sql('{escaped_sql}'); "
+            f"{FETCH_ROWS}; "
+            + (
+                result_statement
+                or "print(json.dumps({'rows': len(rows), 'data': [str(r) for r in rows[:100]]}))"
+            )
         )
 
     def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult:
         pod = self._discover_pod()
-        script = self._build_python_script(sql)
+        script = self._build_python_script(sql, timeout=timeout)
         cmd = [
-            "kubectl",
+            *self._kubectl_prefix(),
             "exec",
             pod,
             "-n",
@@ -129,7 +209,12 @@ class DuckDBExecutor:
             )
 
         if result.returncode != 0:
-            error = result.stderr.strip()[:200] if result.stderr else "Unknown error"
+            # kubectl exec reports the remote exit on stderr ("command
+            # terminated with exit code 142"), so the code alone decides.
+            if result.returncode in _SIGALRM_EXIT_CODES:
+                error = f"Query timed out ({timeout}s, ended in the pod)"
+            else:
+                error = summarise_engine_error(result.stderr or "")
             return QueryExecutorResult(
                 sql=sql,
                 engine="duckdb",
@@ -140,20 +225,56 @@ class DuckDBExecutor:
             )
 
         output = result.stdout.strip()
-        try:
-            parsed = json.loads(output)
-            row_count = parsed.get("rows", 0)
-        except (json.JSONDecodeError, KeyError):
-            lines = output.split("\n") if output else []
-            row_count = len(lines)
+        payload = last_json_line(output)
+        if payload is None or not isinstance(payload.get("rows"), int):
+            # Never count lines instead: that turned a progress bar into a
+            # 2-row result (invariant 3).
+            return QueryExecutorResult(
+                sql=sql,
+                engine="duckdb",
+                duration_seconds=elapsed,
+                rows_returned=0,
+                raw_output=output,
+                error="Query produced no readable result payload",
+            )
 
         return QueryExecutorResult(
             sql=sql,
             engine="duckdb",
             duration_seconds=elapsed,
-            rows_returned=row_count,
+            rows_returned=payload["rows"],
             raw_output=output,
         )
+
+    def fingerprint_query(
+        self, sql: str, timeout: int = 300, approx_columns: dict[int, float] | None = None
+    ) -> QueryExecutorResult:
+        """Run *sql* once, untimed, and fingerprint the rows in the pod."""
+        pod = self._discover_pod()
+        script = self._build_python_script(
+            sql, timeout=timeout, result_statement=fingerprint_statement(approx_columns)
+        )
+        cmd = [
+            *self._kubectl_prefix(),
+            "exec",
+            pod,
+            "-n",
+            self.namespace,
+            "--",
+            "python",
+            "-c",
+            script,
+        ]
+        start = time.monotonic()
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # noqa: S603
+        except subprocess.TimeoutExpired:
+            error = f"fingerprint query timed out ({timeout}s)"
+            return _fp_result(sql, start, unusable("error", error, "duckdb"), error)
+        if result.returncode != 0:
+            error = summarise_engine_error(result.stderr or "")
+            return _fp_result(sql, start, unusable("error", error, "duckdb"), error)
+        return _fp_result(sql, start, *fingerprint_from_payload(result.stdout or "", sql))
 
     def health_check(self) -> bool:
         try:
@@ -169,7 +290,13 @@ class DuckDBExecutor:
     def adapt_query(self, sql: str) -> str:
         """Rewrite Trino SQL to DuckDB dialect."""
         for layer, fq_name in self.table_names.items():
-            bucket = self.s3_buckets.get(layer, "")
+            # The auxiliary financial tables are keyed by name
+            # ("silver_entities", "gold_alerts"), not by layer. They live in
+            # the bucket of the job that writes them, which the key's prefix
+            # names. Looking the key up directly found no bucket, left the
+            # catalog-qualified name in place, and DuckDB then failed with
+            # 'Catalog "lakehouse" does not exist' (FQ3, FQ4, FQ5, FQ8).
+            bucket = self.s3_buckets.get(layer) or self.s3_buckets.get(layer.split("_", 1)[0], "")
             if not bucket or not fq_name:
                 continue
             parts = fq_name.split(".", 1)
@@ -191,7 +318,26 @@ class DuckDBExecutor:
 
         sql = self._rewrite_date_add(sql)
         sql = self._rewrite_date_diff(sql)
+        sql = self._rewrite_cardinality(sql)
         return sql
+
+    @staticmethod
+    def _rewrite_cardinality(sql: str) -> str:
+        """Rewrite Trino ``cardinality(array)`` to DuckDB ``len(array)``.
+
+        DuckDB's ``cardinality`` accepts only MAPs and raises a Binder Error
+        on a list. Every benchmark use is on an array column
+        (``related_txn_ids`` in FQ8); ``len`` returns NULL for a NULL list,
+        as Trino's ``cardinality`` does. A MAP argument would break (``len``
+        rejects it); no benchmark query passes one. String literals, quoted
+        identifiers and comments are left alone.
+        """
+        # The capture group makes re.split keep the literals, quoted
+        # identifiers and comments at odd indices; only code is rewritten.
+        pieces = _SQL_NON_CODE.split(sql)
+        for i in range(0, len(pieces), 2):
+            pieces[i] = re.sub(r"\bcardinality\s*\(", "len(", pieces[i], flags=re.IGNORECASE)
+        return "".join(pieces)
 
     @staticmethod
     def _rewrite_date_diff(sql: str) -> str:
@@ -221,3 +367,28 @@ class DuckDBExecutor:
         expr = sql[start : i - 1]
         replacement = f"({expr} + INTERVAL {n} {unit})"
         return sql[: m.start()] + replacement + sql[i:]
+
+
+def fingerprint_from_payload(output: str, sql: str) -> tuple[dict, str | None]:
+    """(fingerprint, error) from a fingerprint script's stdout."""
+    payload = last_json_line(output)
+    fp = (payload or {}).get("fingerprint")
+    if not isinstance(fp, dict):
+        error = "fingerprint query produced no readable payload"
+        return unusable("error", error, "duckdb"), error
+    fp = dict(fp)
+    if "exact" in fp:
+        fp["adapted_sql_sha"] = hashlib.sha256(sql.encode()).hexdigest()[:16]
+    return fp, None
+
+
+def _fp_result(sql: str, start: float, fp: dict, error: str | None) -> QueryExecutorResult:
+    return QueryExecutorResult(
+        sql=sql,
+        engine="duckdb",
+        duration_seconds=time.monotonic() - start,
+        rows_returned=int(fp.get("rows") or 0),
+        raw_output="",
+        error=error,
+        fingerprint=fp,
+    )

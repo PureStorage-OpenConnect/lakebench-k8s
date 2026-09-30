@@ -27,15 +27,16 @@ Benchmark queries are executed via `kubectl exec` into the pod using
 
 ### Init containers
 
-Two init containers run before the Spark Thrift Server starts:
+Two init containers run before the Spark Thrift Server starts (plus a
+CA-import container when `platform.storage.s3.ca_cert` is set):
 
 1. **Catalog wait** -- blocks until the catalog backend is reachable:
    - Hive: waits for `lakebench-hive-metastore:9083` (TCP)
    - Polaris: waits for `lakebench-polaris:8181` (TCP)
 
-2. **JAR download** -- downloads Iceberg runtime, AWS SDK, and Hadoop S3
-   JARs from Maven Central. These are required for reading Iceberg tables
-   on S3-compatible storage.
+2. **JAR download** -- downloads the table-format runtime (Iceberg or
+   Delta), AWS SDK, and Hadoop S3 JARs from Maven Central. These are
+   required for reading the tables on S3-compatible storage.
 
 ### Health checks
 
@@ -71,8 +72,8 @@ architecture:
 | Field | Default | Description |
 |---|---|---|
 | `query_engine.type` | `trino` | Set to `spark-thrift` to deploy Spark Thrift Server instead of Trino. |
-| `spark_thrift.cores` | `2` | CPU request and limit for the Spark Thrift pod. |
-| `spark_thrift.memory` | `"4g"` | Memory request and limit. This is the Spark driver memory -- all query processing happens in this single JVM. |
+| `spark_thrift.cores` | `2` (`8` on Delta + Hive) | CPU request and limit for the Spark Thrift pod. The server runs Spark in local mode, so this is the query parallelism. |
+| `spark_thrift.memory` | `"4g"` (`"16g"` on Delta + Hive, `"24g"` on the financial schema) | Spark driver heap -- all query processing happens in this single JVM. The pod memory request and limit are the heap plus max(10% of heap, 1 GiB) for non-heap memory, so `4g` gives a 5 GiB pod. |
 | `spark_thrift.catalog_name` | `"lakehouse"` | The Iceberg catalog name used in SQL queries. Must match the catalog registered in Hive or Polaris. |
 
 ### What the overrides do
@@ -111,6 +112,7 @@ Spark Thrift Server is used by these recipes:
 
 - `hive-iceberg-spark-thrift`
 - `polaris-iceberg-spark-thrift`
+- `hive-delta-spark-thrift`
 
 See the [Recipes Guide](recipes.md) for all combinations.
 

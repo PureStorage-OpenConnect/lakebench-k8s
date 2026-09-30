@@ -45,6 +45,19 @@ class WaitTimeout(WaitError):
     pass
 
 
+class WaitTerminal(WaitError):
+    """Raised from a check function to short-circuit ``wait_for_condition``.
+
+    Regular exceptions from a check are swallowed so transient errors do
+    not fail the whole wait. This one is the exception -- callers raise
+    it when the observed state cannot recover without operator
+    intervention (image pull failure, crash loop, admission rejection)
+    and there is no point continuing to poll.
+    """
+
+    pass
+
+
 def wait_for_condition(
     check_fn: Callable[[], tuple[bool, str]],
     timeout_seconds: int = 300,
@@ -78,6 +91,13 @@ def wait_for_condition(
                     elapsed_seconds=elapsed,
                     attempts=attempts,
                 )
+        except WaitTerminal as e:
+            return WaitResult(
+                status=WaitStatus.FAILED,
+                message=f"Terminal state waiting for {description}: {e}",
+                elapsed_seconds=elapsed,
+                attempts=attempts,
+            )
         except Exception as e:
             message = str(e)
 
@@ -331,6 +351,132 @@ def wait_for_trino_catalog(
     )
 
 
+# Container Waiting reasons where continuing to poll is pointless -- the
+# container will not become ready without operator intervention (image fix,
+# config change, CR fix). Everything else (ContainerCreating, PodInitializing,
+# ...) is transient and we keep waiting.
+_TERMINAL_WAITING_REASONS = frozenset(
+    {
+        "ImagePullBackOff",
+        "ErrImagePull",
+        "InvalidImageName",
+        "CreateContainerConfigError",
+        "CreateContainerError",
+        "RunContainerError",
+    }
+)
+
+# CrashLoopBackOff is terminal only after this many observed restarts. A
+# container that crashes once because a dependency is still coming up
+# (Trino before Hive is ready, Polaris before Postgres is ready) can
+# eventually pass; killing the wait on the first observation would turn
+# every such normal cold-start race into a spurious deploy failure.
+_CRASH_LOOP_TERMINAL_RESTART_COUNT = 3
+
+
+def _describe_deployment_pods(namespace: str, label_selector: str | None) -> str:
+    """Best-effort pod-state summary for a not-ready Deployment/StatefulSet.
+
+    Returns a human-readable string listing each pod's Waiting reason /
+    Terminated exit code / probe failure. Diagnostics must not raise, so any
+    lookup failure degrades to a note.
+    """
+    from kubernetes import client as k8s_client
+
+    if not label_selector:
+        return "no label selector available to inspect pods"
+
+    try:
+        core_api = k8s_client.CoreV1Api()
+        pods = core_api.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=label_selector,
+        ).items
+    except Exception as e:  # noqa: BLE001 - diagnostics only
+        return f"could not inspect pods: {e}"
+
+    if not pods:
+        return (
+            "no pods matched the Deployment's selector -- likely rejected by an "
+            "SCC, quota, or admission webhook; check the Deployment events."
+        )
+
+    notes: list[str] = []
+    for pod in pods:
+        pod_name = pod.metadata.name
+        phase = pod.status.phase
+        found = False
+        for cs in pod.status.container_statuses or []:
+            waiting = cs.state.waiting if cs.state else None
+            terminated = cs.state.terminated if cs.state else None
+            if waiting and waiting.reason:
+                notes.append(
+                    f"{pod_name}: waiting ({waiting.reason}: {waiting.message or 'no detail'})"
+                )
+                found = True
+            elif terminated and terminated.reason:
+                notes.append(
+                    f"{pod_name}: terminated ({terminated.reason}, exit {terminated.exit_code})"
+                )
+                found = True
+            elif not cs.ready:
+                notes.append(
+                    f"{pod_name}: running but not ready after "
+                    f"{cs.restart_count} restart(s) -- probe likely failing"
+                )
+                found = True
+        if not found:
+            notes.append(f"{pod_name}: phase {phase}")
+
+    return " | ".join(notes)
+
+
+def _selector_from_match_labels(match_labels: dict[str, str] | None) -> str | None:
+    if not match_labels:
+        return None
+    return ",".join(f"{k}={v}" for k, v in sorted(match_labels.items()))
+
+
+def _pod_has_terminal_waiting(namespace: str, label_selector: str | None) -> str | None:
+    """Return a diagnostic string if any pod is in a terminal Waiting state,
+    otherwise None. Failures reading pods degrade to None (keep waiting).
+    """
+    from kubernetes import client as k8s_client
+
+    if not label_selector:
+        return None
+    try:
+        core_api = k8s_client.CoreV1Api()
+        pods = core_api.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=label_selector,
+        ).items
+    except Exception:  # noqa: BLE001 - diagnostics only
+        return None
+
+    for pod in pods:
+        for cs in pod.status.container_statuses or []:
+            waiting = cs.state.waiting if cs.state else None
+            if not waiting or not waiting.reason:
+                continue
+            if waiting.reason in _TERMINAL_WAITING_REASONS:
+                return f"{pod.metadata.name}: {waiting.reason} ({waiting.message or 'no detail'})"
+            # CrashLoopBackOff is not terminal until it has crashed
+            # `_CRASH_LOOP_TERMINAL_RESTART_COUNT` times. Below that
+            # threshold the container may still recover once a
+            # dependency (Hive metastore, Postgres, ...) comes up.
+            if (
+                waiting.reason == "CrashLoopBackOff"
+                and (cs.restart_count or 0) >= _CRASH_LOOP_TERMINAL_RESTART_COUNT
+            ):
+                return (
+                    f"{pod.metadata.name}: CrashLoopBackOff "
+                    f"({waiting.message or 'no detail'}); "
+                    f"restarts={cs.restart_count}"
+                )
+    return None
+
+
 def wait_for_deployment_ready(
     client: K8sClient,
     name: str,
@@ -340,15 +486,12 @@ def wait_for_deployment_ready(
 ) -> WaitResult:
     """Wait for a Deployment to have all replicas ready.
 
-    Args:
-        client: K8sClient instance
-        name: Deployment name
-        namespace: Namespace
-        timeout_seconds: Maximum time to wait
-        poll_interval: Seconds between checks
-
-    Returns:
-        WaitResult with outcome
+    Fails fast when a pod enters a terminal Waiting state (ImagePullBackOff,
+    CrashLoopBackOff, ...), rather than polling `ready_replicas` for the full
+    timeout and returning a bare "not ready" (LB-070 shape: a Helm crash loop
+    was masked as an SCC rollout timeout for 10 minutes because the only
+    signal was `ready >= desired`). On timeout, the message names each pod's
+    state so the caller can act.
     """
     from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
@@ -363,18 +506,44 @@ def wait_for_deployment_ready(
 
             if ready >= desired:
                 return True, f"Deployment {name} ready ({ready}/{desired} replicas)"
+
+            selector = _selector_from_match_labels(
+                dep.spec.selector.match_labels if dep.spec.selector else None
+            )
+            terminal = _pod_has_terminal_waiting(namespace, selector)
+            if terminal:
+                raise WaitTerminal(
+                    f"Deployment {name} pod entered terminal Waiting state: {terminal}"
+                )
+
             return False, f"Deployment {name} not ready ({ready}/{desired} replicas)"
         except ApiException as e:
             if e.status == 404:
                 return False, f"Deployment {name} not found"
             return False, f"Error: {e.reason}"
 
-    return wait_for_condition(
+    result = wait_for_condition(
         check,
         timeout_seconds=timeout_seconds,
         poll_interval=poll_interval,
         description=f"deployment {name}",
     )
+
+    # FAILED already carries the terminal Waiting reason in its message;
+    # only augment TIMEOUT, where the caller otherwise sees just
+    # "not ready (0/1 replicas)".
+    if result.status is WaitStatus.TIMEOUT:
+        try:
+            dep = apps_v1.read_namespaced_deployment(name, namespace)
+            selector = _selector_from_match_labels(
+                dep.spec.selector.match_labels if dep.spec.selector else None
+            )
+            diagnostic = _describe_deployment_pods(namespace, selector)
+            result.message = f"{result.message}. Pod state: {diagnostic}"
+        except Exception:  # noqa: BLE001 - diagnostics only
+            pass
+
+    return result
 
 
 def wait_for_statefulset_ready(
@@ -386,15 +555,11 @@ def wait_for_statefulset_ready(
 ) -> WaitResult:
     """Wait for a StatefulSet to have all replicas ready.
 
-    Args:
-        client: K8sClient instance
-        name: StatefulSet name
-        namespace: Namespace
-        timeout_seconds: Maximum time to wait
-        poll_interval: Seconds between checks
-
-    Returns:
-        WaitResult with outcome
+    Same LB-070 shape as ``wait_for_deployment_ready`` -- Postgres and
+    Trino workers both run as StatefulSets, and a bad image tag or
+    misconfigured probe used to burn the full timeout with a bare
+    "not ready" message. Terminal-Waiting fast-fail and per-pod
+    diagnostic on timeout apply here too.
     """
     from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
@@ -409,15 +574,38 @@ def wait_for_statefulset_ready(
 
             if ready >= desired:
                 return True, f"StatefulSet {name} ready ({ready}/{desired} replicas)"
+
+            selector = _selector_from_match_labels(
+                sts.spec.selector.match_labels if sts.spec.selector else None
+            )
+            terminal = _pod_has_terminal_waiting(namespace, selector)
+            if terminal:
+                raise WaitTerminal(
+                    f"StatefulSet {name} pod entered terminal Waiting state: {terminal}"
+                )
+
             return False, f"StatefulSet {name} not ready ({ready}/{desired} replicas)"
         except ApiException as e:
             if e.status == 404:
                 return False, f"StatefulSet {name} not found"
             return False, f"Error: {e.reason}"
 
-    return wait_for_condition(
+    result = wait_for_condition(
         check,
         timeout_seconds=timeout_seconds,
         poll_interval=poll_interval,
         description=f"statefulset {name}",
     )
+
+    if result.status is WaitStatus.TIMEOUT:
+        try:
+            sts = apps_v1.read_namespaced_stateful_set(name, namespace)
+            selector = _selector_from_match_labels(
+                sts.spec.selector.match_labels if sts.spec.selector else None
+            )
+            diagnostic = _describe_deployment_pods(namespace, selector)
+            result.message = f"{result.message}. Pod state: {diagnostic}"
+        except Exception:  # noqa: BLE001 - diagnostics only
+            pass
+
+    return result

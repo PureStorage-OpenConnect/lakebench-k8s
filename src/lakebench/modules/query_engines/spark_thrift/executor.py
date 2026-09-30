@@ -10,17 +10,60 @@ import re
 import subprocess
 import time
 
-from lakebench.benchmark.result import QueryExecutorResult
+from lakebench.benchmark.fingerprint import (
+    Unsupported,
+    fingerprint_rows,
+    rows_from_beeline_tsv2,
+    unusable,
+)
+from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
+from lakebench.k8s import pinned_kubectl
 
 logger = logging.getLogger(__name__)
+
+
+def beeline_argv(sql: str, url: str = "jdbc:hive2://localhost:10000") -> list[str]:
+    """beeline argv that runs *sql* with tsv2 output.
+
+    Every option goes before ``-e``. ``-e`` takes several values, so options
+    after it were read as more ``-e`` statements (each starting ``--``, an
+    SQL comment): silent mode and tsv2 were dropped, beeline printed its
+    table format with a 3-line header every 100 rows, and the row count
+    read n + 3 x ceil(n/100). ``--nullemptystring=false`` prints NULL as
+    ``NULL``, so it stays distinct from an empty string.
+    """
+    return [
+        "/opt/spark/bin/beeline",
+        "-u",
+        url,
+        "--silent=true",
+        "--outputformat=tsv2",
+        "--nullemptystring=false",
+        "-e",
+        sql,
+    ]
+
+
+def _drop_terminal_newline(text: str) -> str:
+    if text.endswith("\n"):
+        text = text[:-1]
+    if text.endswith("\r"):
+        text = text[:-1]
+    return text
 
 
 class SparkThriftExecutor:
     """Executes queries via ``kubectl exec`` into beeline on the Spark Thrift Server."""
 
-    def __init__(self, namespace: str, catalog_name: str):
+    def __init__(
+        self,
+        namespace: str,
+        catalog_name: str,
+        kube_context: str | None = None,
+    ):
         self.namespace = namespace
         self.catalog_name = catalog_name
+        self.kube_context = kube_context or None
         self._pod: str | None = None
 
     def engine_name(self) -> str:
@@ -30,9 +73,9 @@ class SparkThriftExecutor:
         """Find the Spark Thrift Server driver pod."""
         if self._pod:
             return self._pod
-        result = subprocess.run(
+        result = pinned_kubectl(
+            self.kube_context,
             [
-                "kubectl",
                 "get",
                 "pods",
                 "-n",
@@ -52,10 +95,15 @@ class SparkThriftExecutor:
         self._pod = pod
         return pod
 
-    def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult:
-        pod = self._discover_pod()
-        cmd = [
-            "kubectl",
+    def _kubectl_prefix(self) -> list[str]:
+        """The ``kubectl`` argv prefix with the configured context pinned."""
+        if self.kube_context:
+            return ["kubectl", "--context", self.kube_context]
+        return ["kubectl"]
+
+    def _beeline_cmd(self, pod: str, sql: str) -> list[str]:
+        return [
+            *self._kubectl_prefix(),
             "exec",
             pod,
             "-c",
@@ -63,14 +111,12 @@ class SparkThriftExecutor:
             "-n",
             self.namespace,
             "--",
-            "/opt/spark/bin/beeline",
-            "-u",
-            "jdbc:hive2://localhost:10000",
-            "-e",
-            sql,
-            "--silent=true",
-            "--outputformat=tsv2",
+            *beeline_argv(sql),
         ]
+
+    def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult:
+        pod = self._discover_pod()
+        cmd = self._beeline_cmd(pod, sql)
 
         start = time.monotonic()
         try:
@@ -93,7 +139,7 @@ class SparkThriftExecutor:
             )
 
         if result.returncode != 0:
-            error = result.stderr.strip()[:200] if result.stderr else "Unknown error"
+            error = summarise_engine_error(result.stderr or "")
             return QueryExecutorResult(
                 sql=sql,
                 engine="spark-thrift",
@@ -103,15 +149,65 @@ class SparkThriftExecutor:
                 error=error,
             )
 
-        output = result.stdout.strip()
+        output = _drop_terminal_newline(result.stdout or "")
+        # tsv2 prints one header line and then a line per row, and prints
+        # the header for an empty result too: a header alone is 0 rows. Only
+        # the terminal newline is dropped: a one-column empty-string row is
+        # an empty line and still a row.
         lines = output.split("\n") if output else []
-        data_rows = lines[1:] if len(lines) > 1 else lines
+        data_rows = lines[1:]
         return QueryExecutorResult(
             sql=sql,
             engine="spark-thrift",
             duration_seconds=elapsed,
             rows_returned=len(data_rows),
             raw_output=output,
+        )
+
+    def fingerprint_query(
+        self, sql: str, timeout: int = 300, approx_columns: dict[int, float] | None = None
+    ) -> QueryExecutorResult:
+        """Run *sql* once, untimed, and fingerprint the tsv2 rows
+        (benchmark.fingerprint)."""
+        pod = self._discover_pod()
+        start = time.monotonic()
+        try:
+            result = subprocess.run(
+                self._beeline_cmd(pod, sql), capture_output=True, text=True, timeout=timeout
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = f"fingerprint query timed out ({timeout}s)"
+            return QueryExecutorResult(
+                sql=sql,
+                engine="spark-thrift",
+                duration_seconds=time.monotonic() - start,
+                rows_returned=0,
+                raw_output="",
+                error=timed_out,
+                fingerprint=unusable("error", timed_out, "spark-thrift"),
+            )
+        error: str | None = None
+        if result.returncode != 0:
+            error = summarise_engine_error(result.stderr or "")
+            fp = unusable("error", error, "spark-thrift")
+        else:
+            try:
+                fp = fingerprint_rows(
+                    rows_from_beeline_tsv2(result.stdout or ""),
+                    approx_columns,
+                    engine="spark-thrift",
+                    adapted_sql=sql,
+                )
+            except Unsupported as e:
+                fp = unusable("unsupported", str(e), "spark-thrift")
+        return QueryExecutorResult(
+            sql=sql,
+            engine="spark-thrift",
+            duration_seconds=time.monotonic() - start,
+            rows_returned=int(fp.get("rows") or 0),
+            raw_output="",
+            error=error,
+            fingerprint=fp,
         )
 
     def health_check(self) -> bool:

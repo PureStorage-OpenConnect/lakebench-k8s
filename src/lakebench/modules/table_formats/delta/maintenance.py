@@ -87,23 +87,32 @@ def build_delta_maintenance_sql(
                 table,
             )
             schema, tbl = "default", table
-        stmts: list[str] = []
         # Trino enforces a 7-day (168h) minimum retention by default.
         # Override the connector session property when a shorter threshold
-        # is requested (e.g. retention_hours=0 on destroy path).
-        if retention_hours < 168.0:
-            stmts.append(f"SET SESSION {catalog}.vacuum_min_retention = '0s'")
-        stmts.append(
+        # is requested (e.g. retention_hours=0 on destroy path). exec_sql
+        # runs each list element as its own `trino --execute` process, so a
+        # separate SET SESSION would be lost before the CALL: send both in
+        # one submission, which the CLI runs in order in one session.
+        call = (
             f"CALL {catalog}.system.vacuum("
             f"schema_name => '{schema}', "
             f"table_name => '{tbl}', "
             f"retention => '{retention_hours}h')"
         )
-        return stmts
+        if retention_hours < 168.0:
+            return [f"SET SESSION {catalog}.vacuum_min_retention = '0s'; {call}"]
+        return [call]
     if engine == "spark-thrift":
-        return [
-            f"VACUUM {table} RETAIN {retention_hours} HOURS",
-        ]
+        # Spark refuses VACUUM below the 7-day default retention unless
+        # retentionDurationCheck is off for the session. exec_sql runs each
+        # list element as its own beeline connection, so the SET must travel
+        # in the same `-e` submission as the VACUUM to apply to it. (Live UAT
+        # on Delta 4.0.0 + Spark 4.0.2 did not trip the check on a fresh
+        # table; tables with real tombstone history would.)
+        vacuum = f"VACUUM {table} RETAIN {retention_hours} HOURS"
+        if retention_hours < 168.0:
+            return [f"SET spark.databricks.delta.retentionDurationCheck.enabled=false; {vacuum}"]
+        return [vacuum]
     return []
 
 
@@ -129,6 +138,17 @@ def build_delta_compaction_sql(
     return []
 
 
+#: Engines that cannot report a Delta table's data file count, and why. The
+#: health probe says so instead of recording nothing silently.
+DELTA_HEALTH_UNAVAILABLE = {
+    "trino": (
+        "Trino's Delta connector has no metadata table with a data file count "
+        "($properties holds table properties, not counts), and counting distinct "
+        '"$path" values would scan the table inside the measured window'
+    ),
+}
+
+
 def build_delta_table_health_sql(
     engine: str,
     catalog: str,
@@ -136,29 +156,45 @@ def build_delta_table_health_sql(
 ) -> dict[str, str]:
     """Build SQL queries to probe Delta table health metrics.
 
-    Returns a dict mapping metric name to SQL string.
+    Returns a dict mapping metric name to SQL string, with the metric names
+    the Iceberg probe uses (``data_file_count``).
 
-    - Trino exposes a ``$properties`` system table for Delta tables.
-    - Spark provides ``DESCRIBE DETAIL`` which returns table metadata
-      including ``numFiles``, ``sizeInBytes``, and ``properties``.
+    - Spark: ``DESCRIBE DETAIL`` returns one row whose ``numFiles`` column
+      is the data file count; parse it with :func:`parse_describe_detail`.
+    - Trino: nothing (see ``DELTA_HEALTH_UNAVAILABLE``). The earlier
+      ``SELECT * FROM "t$properties"`` returned property rows, which the
+      count parser could never read, so every Delta + Trino probe logged
+      "no count in output".
     """
-    if engine == "trino":
-        # Trino Delta connector: $properties system table.
-        # Input: "catalog.schema.table" -> 'catalog.schema."table$properties"'
-        parts = table.rsplit(".", 1)
-        if len(parts) == 2:
-            prefix, tbl = parts
-            props_ref = f'{prefix}."{tbl}$properties"'
-        else:
-            props_ref = f'"{table}$properties"'
-        return {
-            "table_properties": f"SELECT * FROM {props_ref}",
-        }
     if engine == "spark-thrift":
         return {
-            "table_detail": f"DESCRIBE DETAIL {table}",
+            "data_file_count": f"DESCRIBE DETAIL {table}",
         }
     return {}
+
+
+def parse_describe_detail(stdout: str, column: str = "numFiles") -> int | None:
+    """The integer *column* of beeline's ``DESCRIBE DETAIL`` table output,
+    or None when the output has no such column or value.
+
+    Beeline prints a header row of column names and one data row, both
+    ``|``-separated, between ``+---+`` rules.
+    """
+    header: list[str] | None = None
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text.startswith("|"):
+            continue
+        cells = [c.strip() for c in text.strip("|").split("|")]
+        if header is None:
+            if column in cells:
+                header = cells
+            continue
+        if len(cells) != len(header):
+            continue
+        value = cells[header.index(column)]
+        return int(value) if value.isdigit() else None
+    return None
 
 
 def build_delta_drop_table_sql(catalog: str, table: str) -> str:

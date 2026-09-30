@@ -40,7 +40,7 @@ are easier to write and read than the full nested structure:
 | `access_key` | `platform.storage.s3.access_key` | (required) |
 | `secret_key` | `platform.storage.s3.secret_key` | (required) |
 | `secret_ref` | `platform.storage.s3.secret_ref` | (none) |
-| `scale` | `architecture.workload.datagen.scale` | 10 |
+| `scale` | `workload.datagen.scale` | 10 |
 | `name` | root `name` | auto-generated |
 | `recipe` | root `recipe` | default (hive-iceberg-spark-trino) |
 | `namespace` | `platform.kubernetes.namespace` | same as name |
@@ -94,7 +94,8 @@ When you omit optional sections, these defaults apply:
 **What to tune first as you scale up:**
 
 1. `datagen.scale` -- controls data volume
-2. `compute.spark.executor` -- match instances/memory to your cluster
+2. `compute.spark.*_executors` -- per-job executor counts (the `executor`
+   block does not size the Spark jobs; see [Executor Override Guide](#executor-override-guide))
 3. `query_engine.trino.worker` -- match replicas/memory to your cluster
 4. `scratch` / `postgres` storage classes -- match to your storage provider
 
@@ -107,6 +108,10 @@ everything else has sensible defaults.
 ```yaml
 # REQUIRED: Unique name for this deployment. Also used as the default
 # Kubernetes namespace if platform.kubernetes.namespace is empty.
+# The namespace is limited to 23 characters on a Hive recipe and 38 on any
+# other: Stackable derives a metastore pod volume name,
+# lakebench-s3-credentials-<namespace>-s3-credentials, that Kubernetes caps
+# at 63. Config load refuses a longer one and names the derived object.
 name: my-lakehouse
 
 # Optional human-readable description.
@@ -125,14 +130,13 @@ version: 1
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:latest
+  datagen: docker.io/sillidata/lb-datagen:1.6.0
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
   pull_policy: Always                 # Always | IfNotPresent | Never
-  pull_secrets: []                    # List of imagePullSecret names
 
 # ---------------------------------------------------------------------------
 # LAYER 1: PLATFORM
@@ -164,22 +168,21 @@ platform:
       # ca_cert: "/path/to/ca-bundle.pem"  # PEM CA cert for self-signed endpoints
       # verify_ssl: true                    # Set false to skip SSL verification (dev only)
 
-      buckets:
-        bronze: lakebench-bronze
-        silver: lakebench-silver
-        gold: lakebench-gold
+      buckets:                        # default: <name>-bronze, <name>-silver, <name>-gold
+        bronze: my-lakehouse-bronze
+        silver: my-lakehouse-silver
+        gold: my-lakehouse-gold
       create_buckets: true
 
     scratch:
       enabled: false                  # Enable Portworx scratch StorageClass
       storage_class: px-csi-scratch
       size: 100Gi
-      create_storage_class: true
 
   compute:
     spark:
       operator:
-        install: true
+        install: false                # default; true installs it via Helm (cluster-admin)
         namespace: spark-operator
         version: "2.5.1"
 
@@ -187,6 +190,10 @@ platform:
         cores: 4
         memory: 8g
 
+      # The driver and executor blocks are not read by the Spark job
+      # manifests: each job takes its driver and executor sizing from its
+      # built-in job profile. They feed the `validate` compute check and
+      # are recorded in metrics.json.
       executor:
         instances: 8
         cores: 4
@@ -199,7 +206,7 @@ platform:
       silver_executors: null
       gold_executors: null
 
-      # Streaming job overrides (sustained mode).
+      # Streaming job overrides (continuous mode).
       bronze_ingest_executors: null
       silver_stream_executors: null
       gold_refresh_executors: null
@@ -220,18 +227,25 @@ Higher executor counts increase driver memory pressure because the Spark
 driver manages per-executor K8s API watches and aggregates serialized task
 results. The table below shows tested boundaries:
 
+Profile driver defaults are 4g for bronze-verify and 32g for silver-build
+and gold-finalize on Spark 4 (24g on Spark 3). `driver_memory` overrides
+all jobs at once, so setting it below 24g shrinks the silver and gold
+drivers. Lakebench logs a warning when a job has more than 24 executors and a driver
+below 24g.
+
 | Executors | Driver Memory | Status |
 |:---------:|:------------:|--------|
-| 1--12     | 4g (default) | Proven stable |
+| 1--12     | 4g           | Proven stable |
 | 13--20    | 4--24g       | Stable; driver_memory override may be needed |
 | 21--24    | 24g          | Proven stable with 24g driver |
-| 25--28    | 24g          | Safe range; recommended maximum |
+| 25--28    | 24g          | Safe range; recommended maximum (the job profiles cap auto counts at 28, a Lakebench-imposed ceiling) |
 | 29--32    | 24g+         | Risk of K8s API polling storms |
 | 33+       | any          | Not recommended -- fabric8 client overwhelms K8s API |
 
 `spark.driver.maxResultSize` is set automatically based on the effective
-executor count (formula: `min(16, max(4, count // 3))` GiB). Override it
-in `spark.conf` if needed.
+executor count: `min(16, max(8, count // 2))` GiB on Spark 4 and
+`min(16, max(4, count // 3))` GiB on Spark 3. Override it in `spark.conf`
+if needed.
 
 Recommended overrides by cluster size:
 
@@ -256,10 +270,10 @@ These assume per-executor sizing from the proven profiles: silver uses
 # ---------------------------------------------------------------------------
 architecture:
   catalog:
-    type: hive                        # hive | polaris | none
+    type: hive                        # hive | polaris (unity and none have no supported recipe)
 
   table_format:
-    type: iceberg                     # Only iceberg is currently supported
+    type: iceberg                     # iceberg | delta (delta: hive catalog only)
 
   query_engine:
     type: trino                       # trino | spark-thrift | duckdb | none
@@ -278,10 +292,9 @@ architecture:
       catalog_name: lakehouse
 
   pipeline:
-    mode: batch                       # batch | sustained
-    pattern: medallion                # medallion | streaming | batch
+    mode: batch                       # batch | continuous
 
-    # Sustained pipeline tuning (active when mode: sustained or --sustained flag).
+    # Continuous pipeline tuning (active when mode: continuous or the --continuous flag).
     # Iterative batch cycles (v1.1.0). Runs N batch iterations where cycle 1
     # is full overwrite and cycles 2-N are incremental append/merge. Simulates
     # multi-day lakehouse table growth. Datagen timestamp range is split evenly
@@ -289,35 +302,35 @@ architecture:
     cycles: 1                         # 1 = single batch (default). 2-50 = multi-cycle.
     pre_benchmark_maintenance: true   # Compact + expire before benchmark (recommended)
 
-    sustained:
+    continuous:
       bronze_trigger_interval: "30 seconds"
       silver_trigger_interval: "60 seconds"
       gold_refresh_interval: "5 minutes"
       run_duration: 1800              # Seconds (30 min default)
-      max_files_per_trigger: 50
+      # max_files_per_trigger: auto (unset) keeps data arriving through the window
       checkpoint_base: checkpoints
       benchmark_interval: 300         # Clamped to gold_refresh_interval at runtime
       benchmark_warmup: 300           # Clamped to gold_refresh_interval at runtime
 
-  workload:
-    schema: customer360               # customer360 | iot | financial
-    datagen:
-      scale: 10                       # 1 unit ~ 10 GB bronze
-      mode: auto                      # auto | batch | continuous
-      parallelism: 4
-      file_size: 512mb
-      dirty_data_ratio: 0.08
-
   benchmark:
-    mode: power                       # power | standard | extended
+    mode: power                       # power | throughput | composite | standard | extended
     streams: 4
     cache: hot                        # hot | cold
-    iterations: 1
+    iterations: 3                     # timed runs per query; QpH uses the median
 
   tables:
     bronze: "default.bronze_raw"
     silver: "silver.customer_interactions_enriched"
     gold: "gold.customer_executive_dashboard"
+
+workload:
+  schema: customer360               # customer360 | financial
+  datagen:
+    scale: 10                       # 1 unit ~ 10 GB bronze
+    mode: auto                      # auto | batch | continuous
+    # parallelism: auto             # datagen pods; unset = sized from scale
+    file_size: 64mb
+    dirty_data_ratio: 0.08
 
 # ---------------------------------------------------------------------------
 # LAYER 3: OBSERVABILITY
@@ -331,11 +344,6 @@ observability:
   retention: 7d                       # Prometheus data retention
   storage: 10Gi                       # Prometheus PVC size
   storage_class: ""                   # Prometheus PVC StorageClass
-
-  reports:
-    enabled: true
-    output_dir: ./lakebench-output/runs
-    format: html                      # html | json | both
 
 # ---------------------------------------------------------------------------
 # SPARK CONFIGURATION OVERRIDES
@@ -375,14 +383,13 @@ registries or custom builds.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:latest` | Data generator image. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:1.6.0` | Data generator image. Pinned by digest `sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a` for provenance. Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`); this build cuts datagen pod memory (LB-204). |
 | `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | Apache Polaris REST catalog image. |
 | `images.trino` | string | `trinodb/trino:483` | Trino query engine image. |
 | `images.pull_policy` | enum | `Always` | `Always`, `IfNotPresent`, or `Never`. |
-| `images.pull_secrets` | list | `[]` | List of Kubernetes `imagePullSecret` names. |
 
 ### Platform -- Kubernetes
 
@@ -402,9 +409,9 @@ registries or custom builds.
 | `platform.storage.s3.access_key` | string | `""` | Inline S3 access key. Provide this OR `secret_ref`. |
 | `platform.storage.s3.secret_key` | string | `""` | Inline S3 secret key. Provide this OR `secret_ref`. |
 | `platform.storage.s3.secret_ref` | string | `""` | Name of an existing K8s Secret containing S3 credentials. Alternative to inline keys. |
-| `platform.storage.s3.buckets.bronze` | string | `lakebench-bronze` | Bronze layer S3 bucket name. |
-| `platform.storage.s3.buckets.silver` | string | `lakebench-silver` | Silver layer S3 bucket name. |
-| `platform.storage.s3.buckets.gold` | string | `lakebench-gold` | Gold layer S3 bucket name. |
+| `platform.storage.s3.buckets.bronze` | string | `<name>-bronze` | Bronze layer S3 bucket name. Unset, it is derived from the deployment `name`. |
+| `platform.storage.s3.buckets.silver` | string | `<name>-silver` | Silver layer S3 bucket name. Unset, it is derived from the deployment `name`. |
+| `platform.storage.s3.buckets.gold` | string | `<name>-gold` | Gold layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.create_buckets` | bool | `true` | Create buckets if they do not exist. |
 | `platform.storage.s3.ca_cert` | string | `""` | Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs. Empty = use system default CAs. The PEM content is read at deploy time and embedded into a Kubernetes Secret for all components. |
 | `platform.storage.s3.verify_ssl` | bool | `true` | Verify SSL certificates for HTTPS endpoints. Set `false` only for development with self-signed certs when you don't have the CA certificate file. |
@@ -418,7 +425,6 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.storage.scratch.enabled` | bool | `false` | Enable scratch StorageClass for Spark PVCs. |
 | `platform.storage.scratch.storage_class` | string | `px-csi-scratch` | StorageClass name for scratch volumes. |
 | `platform.storage.scratch.size` | string | `100Gi` | Default scratch PVC size. |
-| `platform.storage.scratch.create_storage_class` | bool | `true` | Create the StorageClass if it does not exist (requires cluster-admin). Set to `false` if the SC already exists or is managed externally. |
 | `platform.storage.scratch.provisioner` | string | `pxd.portworx.com` | CSI provisioner for the StorageClass. Use `rancher.io/local-path`, `ebs.csi.aws.com`, etc. for non-Portworx providers. |
 | `platform.storage.scratch.parameters` | dict | `{"repl": "1", ...}` | Provider-specific StorageClass parameters. |
 
@@ -429,12 +435,12 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.compute.spark.operator.install` | bool | `false` | Install the Kubeflow Spark Operator via Helm. Requires cluster-admin. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | Namespace for the Spark Operator. |
 | `platform.compute.spark.operator.version` | string | `2.5.1` | Spark Operator chart version. v2.x required. |
-| `platform.compute.spark.driver.cores` | int | `4` | Spark driver CPU cores. |
-| `platform.compute.spark.driver.memory` | string | `8g` | Spark driver memory. |
-| `platform.compute.spark.executor.instances` | int | `8` | Default executor count (overridden by per-job settings). |
-| `platform.compute.spark.executor.cores` | int | `4` | Executor CPU cores. |
-| `platform.compute.spark.executor.memory` | string | `48g` | Executor memory. |
-| `platform.compute.spark.executor.memory_overhead` | string | `12g` | Executor memory overhead (off-heap). |
+| `platform.compute.spark.driver.cores` | int | `4` | Not read by the Spark job manifests (drivers are sized from the job profiles). Used by the compute check in `validate` and recorded in `metrics.json`. |
+| `platform.compute.spark.driver.memory` | string | `8g` | As `driver.cores`: not read by the job manifests. Use `driver_memory` to override driver memory. |
+| `platform.compute.spark.executor.instances` | int | `8` | Not read by the Spark job manifests. Per-job executor counts come from the job profiles (scaled with `datagen.scale`) or the `*_executors` overrides below. Used by the compute check in `validate`. |
+| `platform.compute.spark.executor.cores` | int | `4` | Not read by the job manifests; per-executor sizing is fixed per job profile. |
+| `platform.compute.spark.executor.memory` | string | `48g` | Not read by the job manifests; per-executor sizing is fixed per job profile. |
+| `platform.compute.spark.executor.memory_overhead` | string | `12g` | Not read by the job manifests; per-executor sizing is fixed per job profile. |
 | `platform.compute.spark.bronze_executors` | int or null | `null` | Override bronze-verify executor count. Null = auto from scale. |
 | `platform.compute.spark.silver_executors` | int or null | `null` | Override silver-build executor count. Null = auto from scale. |
 | `platform.compute.spark.gold_executors` | int or null | `null` | Override gold-finalize executor count. Null = auto from scale. |
@@ -474,10 +480,12 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.table_format.type` | enum | `iceberg` | Table format. Only `iceberg` is currently supported. |
+| `architecture.table_format.type` | enum | `iceberg` | Table format: `iceberg` or `delta`. Delta runs with the `hive` catalog and `trino`, `spark-thrift` or `none` query engines (the `hive-delta-*` recipes). The `financial` (AML) workload refuses Delta. |
 | `architecture.table_format.iceberg.version` | string | `1.11.0` | Apache Iceberg runtime JAR version. |
-| `architecture.table_format.iceberg.file_format` | enum | `parquet` | Underlying file format: `parquet`, `orc`, or `avro`. |
-| `architecture.table_format.iceberg.properties` | dict | `{}` | Additional Iceberg table properties (key-value pairs). |
+| `architecture.table_format.iceberg.file_format` | enum | `parquet` | **No effect; removed in v1.7.** Nothing reads it (tables are written as Parquet); a non-default value prints a warning. |
+| `architecture.table_format.iceberg.properties` | dict | `{}` | **No effect; removed in v1.7.** No table property is applied from the config; a non-empty value prints a warning. |
+| `architecture.table_format.delta.version` | string | `auto` | Delta Lake version. `auto` resolves a version that matches the Spark image. |
+| `architecture.table_format.delta.properties` | dict | `{}` | **No effect.** No table property is applied from the config. |
 
 ### Architecture -- Query Engine
 
@@ -494,8 +502,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.query_engine.trino.worker.storage` | string | `50Gi` | Worker storage size for spill and temp data. |
 | `architecture.query_engine.trino.worker.storage_class` | string | `""` | Worker StorageClass. Empty = emptyDir (ephemeral, no PVC needed). Set a class name to use PVC-backed persistent volumes instead. |
 | `architecture.query_engine.trino.catalog_name` | string | `lakehouse` | Trino catalog name for the Iceberg connector. |
-| `architecture.query_engine.spark_thrift.cores` | int | `2` | Spark Thrift Server CPU cores. |
-| `architecture.query_engine.spark_thrift.memory` | string | `4g` | Spark Thrift Server memory. |
+| `architecture.query_engine.spark_thrift.cores` | int | `2` | Spark Thrift Server CPU cores. Auto-sized to `8` on Delta + Hive when unset. |
+| `architecture.query_engine.spark_thrift.memory` | string | `4g` | Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to `16g` on Delta + Hive and `24g` on the financial schema when unset. |
 | `architecture.query_engine.spark_thrift.catalog_name` | string | `lakehouse` | Iceberg catalog name for Spark Thrift Server. |
 | `architecture.query_engine.duckdb.cores` | int | `2` | DuckDB CPU cores. |
 | `architecture.query_engine.duckdb.memory` | string | `4g` | DuckDB memory. |
@@ -508,42 +516,42 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.pipeline.mode` | enum | `batch` | Pipeline execution mode: `batch` (sequential medallion jobs) or `sustained` (concurrent streaming jobs). The `--sustained` CLI flag overrides this. |
-| `architecture.pipeline.pattern` | enum | `medallion` | Pipeline pattern: `medallion`, `streaming`, `batch`, or `custom`. |
+| `architecture.pipeline.mode` | enum | `batch` | Pipeline execution mode: `batch` (sequential medallion jobs) or `continuous` (concurrent jobs over arriving data). `sustained` is accepted as a deprecated alias. The `--continuous` CLI flag overrides this. |
+| `architecture.pipeline.pattern` | enum | `medallion` | **Deprecated; removed in v1.7.** The stages are chosen by `pipeline.mode`. The only remaining effect is that `streaming` makes the auto-sizer give Spark 60% and datagen 40% of the CPU budget; any value other than `medallion` prints a warning. |
 | `architecture.pipeline.cycles` | int | `1` | Batch iterations (1--50). Cycle 1 is full overwrite; cycles 2+ are incremental append/merge. Simulates multi-day lakehouse behavior. Only valid when `mode: batch`. See [Multi-Cycle Batch](#multi-cycle-batch). |
-| `architecture.pipeline.pre_benchmark_maintenance` | bool | `true` | Run Iceberg compaction + expire_snapshots before the benchmark phase. Ensures QpH is measured against compacted tables, not fragmented small files from multi-cycle ingestion. |
-| `architecture.pipeline.sustained.bronze_trigger_interval` | string | `30 seconds` | Bronze streaming trigger interval. |
-| `architecture.pipeline.sustained.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
-| `architecture.pipeline.sustained.gold_refresh_interval` | string | `5 minutes` | Gold refresh trigger interval. |
-| `architecture.pipeline.sustained.run_duration` | int | `1800` | Streaming run duration in seconds. Minimum 60. |
-| `architecture.pipeline.sustained.max_files_per_trigger` | int | `50` | Max Parquet files per micro-batch. Primary throughput cap. |
-| `architecture.pipeline.sustained.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
-| `architecture.pipeline.sustained.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
-| `architecture.pipeline.sustained.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |
-| `architecture.pipeline.sustained.retention_interval` | int | `1800` | Seconds between Iceberg maintenance rounds (`expire_snapshots` + `remove_orphan_files`). Range: 300--7200. |
-| `architecture.pipeline.sustained.retention_threshold` | string | `30m` | Iceberg snapshot retention threshold. Snapshots older than this are expired. Uses Trino duration format (e.g., `30m`, `1h`, `7d`). |
-| `architecture.pipeline.sustained.compaction_enabled` | bool | `true` | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during sustained runs. |
-| `architecture.pipeline.sustained.compaction_interval` | int | `0` | Seconds between compaction rounds. `0` = 2x `retention_interval` (default: 3600s). Range: 0--14400. |
+| `architecture.pipeline.pre_benchmark_maintenance` | bool | `true` | Run table maintenance before the benchmark phase so QpH is measured against maintained tables. Iceberg: `expire_snapshots`, `remove_orphan_files` (never below 24 h 10 min) and compaction of silver and gold. Delta: `VACUUM` on Trino only; Delta `OPTIMIZE` is never run. All statements share one 30-minute budget; the first statement timeout or the deadline stops the rest, and the perf gate then treats post-maintenance QpH as not a measurement. |
+| `architecture.pipeline.continuous.bronze_trigger_interval` | string | `30 seconds` | Bronze streaming trigger interval. |
+| `architecture.pipeline.continuous.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
+| `architecture.pipeline.continuous.gold_refresh_interval` | string | `5 minutes` | Gold refresh trigger interval. |
+| `architecture.pipeline.continuous.run_duration` | int | `1800` | Measurement window in seconds. The schema accepts 60 and up; a continuous run refuses less than 3 x `gold_refresh_interval` (900 s at defaults). Use 900 s or more, UAT included. |
+| `architecture.pipeline.continuous.max_files_per_trigger` | int | auto | Max Parquet files bronze reads per trigger; with `bronze_trigger_interval` it sets the offered load. Unset: derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50 (a Lakebench-imposed cap; 50 files per 30 s is about 107 MB/s, so an auto-capped ingest rate measures the cap, not the infrastructure). An explicit value that would offer the corpus before the window ends is refused at run start. |
+| `architecture.pipeline.continuous.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
+| `architecture.pipeline.continuous.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 300--3600. |
+| `architecture.pipeline.continuous.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 300--1800. |
+| `architecture.pipeline.continuous.retention_interval` | int | unset (auto) | Seconds between table maintenance rounds during a continuous run: Iceberg `expire_snapshots` + `remove_orphan_files`, or Delta `VACUUM` (Trino only). Unset: `run_duration / 3`, within 300--7200, resolved at run start (600 s for the default 1800 s window), so a default run maintains inside its window. An explicit value too long for the first round to run inside the window is refused at run start unless `--skip-maintenance` is given. While streams are live Delta `VACUUM` keeps Delta's 7-day default retention, so continuous Delta has no effective table maintenance in v1.6. Range: 300--7200. |
+| `architecture.pipeline.continuous.retention_threshold` | string | `30m` | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, Iceberg expiry is floored at `1h`, and a continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints a warning when it loads. The `30m` default does not warn: every continuous maintenance round runs beside live streams, so it expires at `1h`, and the run records the applied values in `continuous.retention` of `metrics.json`. Delta has no effective table maintenance in continuous mode (v1.6). Orphan-file removal never uses less than 24 h 10 min, on any engine. |
+| `architecture.pipeline.continuous.compaction_enabled` | bool | `true` | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during continuous runs. |
+| `architecture.pipeline.continuous.compaction_interval` | int | `0` | Seconds between compaction rounds. `0` = 2x the effective `retention_interval` (1200 s for the default window). An explicit value that cannot run inside the window is refused at run start unless `compaction_enabled` is false or `--skip-maintenance` is given. Minimum 0; no upper bound in the schema. |
 
 ### Architecture -- Workload & Datagen
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.workload.schema` | enum | `customer360` | Workload schema: `customer360`, `iot`, or `financial`. |
-| `architecture.workload.datagen.scale` | int | `10` | Scale factor (1 unit ~ 10 GB bronze). Range: 1--10000. |
-| `architecture.workload.datagen.target_size` | string or null | `null` | **Deprecated.** Legacy size string (e.g., `100gb`). Converted to scale automatically. |
-| `architecture.workload.datagen.mode` | enum | `auto` | Datagen mode: `auto`, `batch`, or `continuous`. Auto selects based on scale. |
-| `architecture.workload.datagen.parallelism` | int | `4` | Number of parallel datagen pods. |
-| `architecture.workload.datagen.file_size` | string | `512mb` | Target Parquet file size. |
-| `architecture.workload.datagen.dirty_data_ratio` | float | `0.08` | Fraction of intentionally dirty records (0.0--1.0). |
-| `architecture.workload.datagen.cpu` | string | `2` | CPU per datagen pod. **Hard-locked by mode** (batch=4, continuous=8). |
-| `architecture.workload.datagen.memory` | string | `4Gi` | Memory per datagen pod. **Hard-locked by mode** (batch=4Gi, continuous=24Gi). |
-| `architecture.workload.datagen.generators` | int | `0` | Generator processes per pod. 0 = auto (1 batch, 8 continuous). |
-| `architecture.workload.datagen.uploaders` | int | `0` | Uploader threads per pod. 0 = auto (1 batch, 2 continuous). |
-| `architecture.workload.datagen.checkpoint.enabled` | bool | `true` | Enable datagen checkpoint for resume. |
-| `architecture.workload.datagen.checkpoint.path` | string | `.lakebench_checkpoint.json` | Checkpoint file path. |
-| `architecture.workload.datagen.timestamp_start` | string or null | `null` | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
-| `architecture.workload.datagen.timestamp_end` | string or null | `null` | End date for generated timestamps (ISO format). Default: `2025-12-31`. See [Timestamp Range Impact](#timestamp-range-impact). |
+| `workload.schema` | enum | `customer360` | Workload schema: `customer360` or `financial`. `custom` is refused at load in v1.6. `financial` requires `table_format: iceberg`. The block was `architecture.workload` before v1.6; that location still loads with a deprecation warning, and setting both with different values is an error. |
+| `workload.datagen.scale` | float | `10` | Scale factor (1 unit ~ 10 GB bronze). The schema accepts 0.01--10000, but datagen is banded per workload: Customer 360 supported to 300, unverified to 600, refused above; AML supported to 300, unverified to 800, refused above (see [Scale Factors](#scale-factors)). Values below 1 are intended for local mode. |
+| `workload.datagen.target_size` | string or null | `null` | **Deprecated.** Legacy size string (e.g., `100gb`). Converted to scale automatically. |
+| `workload.datagen.mode` | enum | `auto` | S3 delivery pattern: `batch` = one PUT per file, `continuous` = S3 multipart upload as row-groups close, `auto` = `continuous` at every scale (owner D18, 2026-09-28). Row content is byte-identical across modes at a fixed seed. Sizing is keyed on scale, not mode. |
+| `workload.datagen.seed` | int or null | `null` | Top-level generator seed, which names the corpus. Unset: the AML pre-registration's calibration seed for `financial`, 42 for other schemas. A `financial` seed listed in the pre-registration's `corpora.spent_seeds` is refused at config load, so a retired corpus is never regenerated by accident. The AML reference job reports the seed it scored. The pre-registered evaluation and robustness seeds are refused unless `corpus_role` declares that role. |
+| `workload.datagen.corpus_role` | enum or null | `null` | `financial` only: `calibration`, `evaluation` or `robustness`. Declares this deployment as the registered corpus for that role; it must match the role's pre-registered seed (unset `seed` then uses it). Only set it for the one registered gate run of that role. |
+| `workload.datagen.robustness_perturbation` | bool | `false` | `financial` only. Generates the robustness corpus: the pre-registration's `corpora.robustness_perturbation` multipliers shift the nuisance parameters in natural units (median amount x1.2, persona activity and amount log-sds x1.2, dormancy lengths x1.2). Instances, participants and row counts are unchanged. Required with `corpus_role: robustness`, refused with `calibration` or `evaluation`; the generator also refuses the robustness seed without it. Off, the corpus is byte-identical to a run without the option. |
+| `workload.datagen.parallelism` | int | auto | Number of parallel datagen pods. A value you set is used as given, except that it is capped to fit the cluster and financial above scale 100 is raised to at least 8 pods; unset, the auto-sizer derives it from the scale. The schema fallback without auto-sizing is 4. |
+| `workload.datagen.file_size` | string | `64mb` | Fixed at `64mb` for every workload and mode; any other value is refused. One size keeps row content identical across delivery modes. |
+| `workload.datagen.dirty_data_ratio` | float | `0.08` | Fraction of intentionally dirty records (0.0--1.0). Applies to the `customer360` schema only; the `financial` (AML) generator ignores it. |
+| `workload.datagen.cpu` | string | `8` (auto) | CPU per datagen pod. A value you set is used as given; unset, the auto-sizer sets 8 in both modes. |
+| `workload.datagen.memory` | string | auto | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) at the fixed 64mb file size, with a 4Gi floor. |
+| `workload.datagen.generators` | int | `0` | Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU request. |
+| `workload.datagen.timestamp_start` | string or null | `null` | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
+| `workload.datagen.timestamp_end` | string or null | `null` | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`deploy/datagen.py` fallback, matched by `metrics/c360_correctness.py`). See [Timestamp Range Impact](#timestamp-range-impact). |
 
 ### Architecture -- Customer360 Overrides
 
@@ -552,16 +560,10 @@ leave these at defaults and control volume via `datagen.scale`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.workload.customer360.unique_customers` | int or null | `null` | Override customer count. Null = derived from scale. |
-| `architecture.workload.customer360.date_range_days` | int or null | `null` | Override date range in days. Null = 365. |
-| `architecture.workload.customer360.channels` | list | `[web, mobile, store, call_center, social_media]` | Interaction channels. |
-| `architecture.workload.customer360.event_types` | list | `[purchase, browse, support, login, abandoned_cart]` | Event types. |
-| `architecture.workload.customer360.quality_distribution.clean` | float | `0.92` | Fraction of clean records. |
-| `architecture.workload.customer360.quality_distribution.duplicate_suspected` | float | `0.02` | Fraction of suspected duplicates. |
-| `architecture.workload.customer360.quality_distribution.incomplete` | float | `0.03` | Fraction of incomplete records. |
-| `architecture.workload.customer360.quality_distribution.format_inconsistent` | float | `0.03` | Fraction of format-inconsistent records. |
+| `workload.customer360.unique_customers` | int or null | `null` | Override customer count. Null = derived from scale. |
+| `workload.customer360.date_range_days` | int or null | `null` | Override date range in days. Null = 365. |
+| `workload.tm_operations.*` | block | enabled | AML only: the simulated TM operations layer (dispositions, cases, SARs) run after detection. Fields, defaults and ranges are in [aml-scoring.md](aml-scoring.md#the-transaction-monitoring-operations-layer). |
 
-Note: quality distribution values must sum to 1.0.
 
 ### Architecture -- Benchmark
 
@@ -570,7 +572,13 @@ Note: quality distribution values must sum to 1.0.
 | `architecture.benchmark.mode` | enum | `power` | Benchmark mode: `power`, `standard`, `extended`, `throughput`, or `composite`. |
 | `architecture.benchmark.streams` | int | `4` | Concurrent query streams for throughput mode. Range: 1--64. |
 | `architecture.benchmark.cache` | enum | `hot` | Cache mode: `hot` (warm cache) or `cold` (cleared before each query). |
-| `architecture.benchmark.iterations` | int | `1` | Iterations per query. >1 uses median timing. Range: 1--100. |
+| `architecture.benchmark.iterations` | int | `3` | Timed runs of each query per benchmark round. QpH is scored from the per-query median and every sample plus the spread is recorded in `metrics.json`. `1` is a quick run with no measured spread; the maintenance value is then not reported. Range: 1--100. |
+| `architecture.benchmark.maintenance_settle.enabled` | bool | `true` | Batch mode: probe until storage settles between maintenance and the post-maintenance round. See [benchmarking.md](benchmarking.md). |
+| `architecture.benchmark.maintenance_settle.max_seconds` | int | `2700` | Longest wait. When reached, the post round still runs and `maintenance_value_pct` is null. Range: 60--14400. |
+| `architecture.benchmark.maintenance_settle.interval_seconds` | int | `60` | Seconds between the starts of consecutive probes. Range: 5--3600. |
+| `architecture.benchmark.maintenance_settle.tolerance_pct` | float | `10.0` | Settled when two consecutive probes differ by at most this percent and neither is slower than the pre-maintenance time by more. Range: above 0, up to 100. |
+| `architecture.benchmark.maintenance_settle.probe_query` | string or null | `null` | Benchmark query to probe with. Null = the workload's first scan-class query. |
+| `architecture.benchmark.maintenance_settle.probe_samples` | int | `1` | Timed runs per probe; the probe time is their median. Range: 1--10. |
 
 ### Architecture -- Table Names
 
@@ -589,8 +597,8 @@ added at runtime.
 |---|---|---|---|
 | `observability.enabled` | bool | `false` | Deploy the observability stack (Prometheus + Grafana). |
 | `observability.prometheus_stack_enabled` | bool | `true` | Deploy kube-prometheus-stack when observability is enabled. |
-| `observability.s3_metrics_enabled` | bool | `true` | Collect S3 operation metrics from CLI-side boto3 calls. |
-| `observability.spark_metrics_enabled` | bool | `true` | Collect Spark job metrics via Prometheus servlet. |
+| `observability.s3_metrics_enabled` | bool or null | `null` | **No effect.** Nothing reads it; setting either value prints a deprecation warning. |
+| `observability.spark_metrics_enabled` | bool or null | `null` | **No effect.** Nothing reads it; setting either value prints a deprecation warning. |
 | `observability.dashboards_enabled` | bool | `true` | Deploy Grafana dashboards. |
 | `observability.retention` | string | `7d` | Prometheus data retention period. |
 | `observability.storage` | string | `10Gi` | Prometheus PVC size. |
@@ -601,14 +609,7 @@ added at runtime.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `observability.reports.enabled` | bool | `true` | Generate benchmark reports after runs. |
-| `observability.reports.output_dir` | string | `./lakebench-output/runs` | Report output directory. |
-| `observability.reports.format` | enum | `html` | Report format: `html`, `json`, or `both`. |
-| `observability.reports.include.summary` | bool | `true` | Include pipeline summary in report. |
-| `observability.reports.include.stage_breakdown` | bool | `true` | Include per-stage breakdown. |
-| `observability.reports.include.storage_metrics` | bool | `true` | Include storage throughput metrics. |
-| `observability.reports.include.resource_utilization` | bool | `true` | Include resource utilization data. |
-| `observability.reports.include.recommendations` | bool | `true` | Include sizing recommendations. |
+| `observability.reports.*` | block | | **No effect; removed in v1.7.** Every run writes `report.html` into its run directory once; `lakebench report --render` writes a fresh copy to `lakebench-output/reports/` without overwriting the delivered file. A non-default value prints a warning. |
 
 ### Spark Configuration Overrides
 
@@ -644,7 +645,13 @@ Customer360 workload schema mapping (the default):
 | 1 | 100,000 | 2.4 M | ~10 GB |
 | 10 | 1,000,000 | 24 M | ~100 GB |
 | 100 | 10,000,000 | 240 M | ~1 TB |
-| 1000 | 100,000,000 | 2.4 B | ~10 TB |
+
+Datagen scale is banded per workload. Customer 360 is supported up to scale
+300 and unverified up to 600; AML (financial) is supported up to 300 and
+unverified up to 800. Above the ceiling `deploy` and `generate` refuse the
+config, because a datagen pod would exceed the 16 GiB per-pod memory cap
+(a Lakebench-imposed cap); in the unverified range they warn. The run's
+support state records the band.
 
 Each customer generates approximately 24 events across a 365-day date range.
 Scaling is linear: doubling the scale factor doubles customers, rows, and data
@@ -678,9 +685,14 @@ architecture:
    switching silver-build to `.append()` and gold-finalize to incremental
    merge based on a watermark on `max(interaction_date)`.
 4. After all cycles, if `pre_benchmark_maintenance` is true, Lakebench runs
-   `expire_snapshots` (with `retention_threshold='0s'`) and Iceberg
-   compaction (`optimize` on Trino or `rewrite_data_files` on Spark Thrift)
-   before the benchmark phase.
+   `expire_snapshots` (with `retention_threshold='0s'`, or the retention
+   horizon when `workload.retention_workload` is set),
+   `remove_orphan_files` (at least 24 h 10 min, so recent orphans survive),
+   and Iceberg compaction (`optimize` on Trino or `rewrite_data_files` on
+   Spark Thrift) before the benchmark phase, all inside one 30-minute budget.
+   If stream apps are still present, expiry is floored at 1 h, AML gold is
+   not compacted, and the run is flagged `maintenance_live_streams`, so the
+   perf gate does not treat its post-maintenance QpH as a measurement.
 
 ### Table health tracking
 
@@ -704,7 +716,7 @@ in the `cycle_progression` score when `cycles > 1`.
 
 ### Limitations
 
-- `cycles > 1` requires `mode: batch`. Sustained mode has its own iteration
+- `cycles > 1` requires `mode: batch`. Continuous mode has its own iteration
   model via streaming micro-batches.
 - DuckDB cannot run Iceberg maintenance or compaction (read-only). Table
   health is still probed but compaction is skipped.
@@ -716,7 +728,7 @@ The `timestamp_start` and `timestamp_end` fields control the range of
 Iceberg partition count because the silver table is partitioned by
 `interaction_date` (derived from `event_timestamp` via `to_date()`).
 
-**In sustained mode, use a narrow range (days to weeks).** Each streaming
+**In continuous mode, use a narrow range (days to weeks).** Each streaming
 micro-batch writes small files across every date partition that appears in
 its data. A wide range (e.g., 3 years = ~1,095 date partitions) causes
 massive small-file proliferation -- each micro-batch creates a tiny file
@@ -726,13 +738,17 @@ hours. This degrades Iceberg metadata operations and query planning.
 **In batch mode, wider ranges are fine.** Compaction runs once after the
 pipeline completes, consolidating small files.
 
-The range also affects the `customer_recency_score` derived column, which
-is computed as `30 - datediff(current_date(), event_timestamp)`. Timestamps
-far from today produce meaningless negative or inflated scores.
+The range also sets the data clock for the `customer_recency_score` derived
+column: `30 - days between the event date and the last day of the range`.
+The last day is the day before `timestamp_end` (the end is exclusive), so
+an event on the newest day scores 30 and one 30 days older scores 0. When
+`timestamp_end` is unset, the clock is the newest event date in the data.
+The score no longer depends on the date the pipeline runs, so reruns of the
+same corpus reproduce it.
 
 | Mode | Recommended Range | Reason |
 |------|-------------------|--------|
-| Sustained | Days to weeks | Fewer partitions per micro-batch, larger files |
+| Continuous | Days to weeks | Fewer partitions per micro-batch, larger files |
 | Batch | Months to years | Single compaction pass handles small files |
 
 ## Auto-Sizing
@@ -749,16 +765,21 @@ The algorithm:
 2. **Datagen and Spark** share the remaining CPU budget.
    - In **batch mode** (default), they run sequentially -- each gets the full
      remaining budget.
-   - In **streaming mode** (`--sustained`), they run concurrently -- the budget
-     is split 40% datagen, 60% Spark.
+   - Only the deprecated `pipeline.pattern: streaming` splits the budget
+     40% datagen, 60% Spark. Continuous mode (`--continuous`) does not
+     change the split; the continuous Spark jobs are capped to a concurrent
+     budget when their manifests are built.
 3. **Small scales (1--50):** Resources are only capped downward to fit.
-4. **Large scales (51+):** Executor counts are scaled up to use available
-   cluster capacity.
+4. **Large scales (51+):** `executor.instances` is scaled up to use
+   available cluster capacity. The Spark job manifests do not read it.
 5. **Per-pod memory** is capped to 85% of the largest node.
 
-Use `lakebench info <config>` to see the resolved executor counts after
-auto-sizing. Override any auto-sized value with explicit settings in the config
-(e.g., `spark.bronze_executors: 4`).
+Per-job executor counts do not come from the auto-sizer. Each job takes a
+base count from its job profile and adds executors linearly above scale 10,
+up to the profile's maximum (28 at most, a Lakebench-imposed ceiling, not a
+cluster limit). A `platform.compute.spark.*_executors` value replaces the
+computed count for that job (e.g., `spark.bronze_executors: 4`). Use
+`lakebench info <config>` (hidden and deprecated, but the only command that prints the per-job counts) to see the resolved per-job counts.
 
 ## Example: Scale 100 (~1 TB)
 
@@ -768,8 +789,7 @@ A production-scale config for 1 TB benchmarking on a 64-core cluster:
 name: lakebench-1tb
 recipe: hive-iceberg-spark-trino
 
-datagen:
-  scale: 100
+scale: 100
 
 platform:
   storage:
@@ -778,6 +798,7 @@ platform:
       access_key: <key>
       secret_key: <secret>
     scratch:
+      enabled: true
       storage_class: px-csi-scratch
   compute:
     postgres:
@@ -789,11 +810,11 @@ resolved resources are approximately:
 
 | Component | Instances | Per-Instance Resources |
 |---|---|---|
-| Datagen pods | 10 | 8 CPU, 24Gi |
-| Bronze-verify executors | 8 | 2 cores, 4g+2g overhead, 50Gi PVC |
-| Silver-build executors | 8 | 4 cores, 48g+12g overhead, 150Gi PVC |
-| Gold-finalize executors | 8 | 4 cores, 32g+8g overhead, 100Gi PVC |
-| Trino workers | 4 | 4 cores, 16Gi |
+| Datagen pods | 10+ | 8 CPU, 4Gi (c360) / 8Gi (financial) |
+| Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 500Gi PVC (financial, LB-118) |
+| Silver-build executors | 18 | 4 cores, 48g+12g overhead, 300Gi PVC |
+| Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 300Gi PVC |
+| Trino workers | 4 | 8 cores, 48Gi |
 
 Recommended timeouts:
 
@@ -802,7 +823,7 @@ lakebench generate lakebench.yaml --wait --timeout 14400  # 4 hours
 lakebench run lakebench.yaml --timeout 7200               # 2 hours
 ```
 
-Use `lakebench recommend lakebench.yaml` to verify your cluster can handle
+Use `lakebench config recommend lakebench.yaml` to verify your cluster can handle
 this scale before deploying.
 
 ## Example: HTTPS Endpoint with Self-Signed CA
@@ -818,11 +839,16 @@ recipe: polaris-iceberg-spark-trino
 platform:
   storage:
     s3:
-      endpoint: https://10.21.227.93:443
+      endpoint: https://10.0.1.50:443
       access_key: <key>
       secret_key: <secret>
       ca_cert: ./flashblade-ca.pem
       # verify_ssl: true  # default; set false only for dev
+
+architecture:
+  catalog:
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
 ```
 
 **How it works:** At deploy time, lakebench reads the PEM file and creates a
@@ -835,7 +861,7 @@ receive the PEM path via environment variables for boto3.
 certificate using `openssl`:
 
 ```bash
-openssl s_client -connect 10.21.227.93:443 -showcerts </dev/null 2>/dev/null \
+openssl s_client -connect 10.0.1.50:443 -showcerts </dev/null 2>/dev/null \
   | openssl x509 -outform PEM > flashblade-ca.pem
 ```
 
@@ -864,6 +890,12 @@ clear error message.
 | polaris | iceberg | spark-thrift | Yes |
 | polaris | iceberg | duckdb | Yes |
 | polaris | iceberg | none | Yes |
+| hive | delta | trino | Yes |
+| hive | delta | spark-thrift | Yes |
+| hive | delta | none | Yes |
+
+Delta is not supported with Polaris or with DuckDB. The `financial` (AML)
+workload runs on Iceberg only and refuses a Delta config at load.
 
 ## Image Overrides
 
@@ -876,9 +908,10 @@ images:
   spark: my-registry.internal/apache/spark:4.0.2-python3
   trino: my-registry.internal/trinodb/trino:483
   pull_policy: Always
-  pull_secrets:
-    - my-registry-pull-secret
 ```
+
+Private registries need an `imagePullSecret` on the service accounts in the
+namespace; lakebench does not set one.
 
 Set `pull_policy: Always` after pushing a new image tag to ensure Kubernetes
 pulls the latest version.

@@ -18,6 +18,7 @@ from lakebench.cli._helpers import (
     journal_open,
     print_error,
     print_info,
+    print_warning,
     resolve_config_path,
 )
 from lakebench.config import (
@@ -363,7 +364,7 @@ def query(
         console.print(table)
         print_info("Usage: lakebench query <config> --example <name>")
         print_info('Usage: lakebench query <config> --sql "SELECT ..."')
-        print_info("Usage: lakebench query <config> --file query.sql")
+        print_info("Usage: lakebench query <config> --sql-file query.sql")
         print_info("Usage: lakebench query <config> --interactive")
         return
 
@@ -491,11 +492,17 @@ def query(
         success=True,
     )
 
-    # Try to append to latest run's metrics
+    # Try to append to latest run's metrics.
+    # Scope by deployment name so a parallel deployment's newer run cannot
+    # be mistaken for this deployment's latest and rewritten with our
+    # queries (SP-2 owns deployment_id; this is the interim name-scoped
+    # lookup).
     from lakebench.metrics import MetricsStorage
 
     storage = MetricsStorage()
-    latest_run = storage.get_latest_run()
+    # writable=True: this is the rewrite path; never fall back to a legacy
+    # record (which could belong to another deployment) and rewrite it.
+    latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
     if latest_run:
         latest_run.queries.append(query_metrics)
         storage.save_run(latest_run)
@@ -529,6 +536,28 @@ def _display_throughput_results(result: Any) -> None:
         )
     console.print(f"\n  Wall clock: {result.total_seconds:.1f}s")
     console.print(f"  [bold]Throughput QpH: {result.qph:.1f}[/bold]")
+
+
+def _latest_tm_run_id(cfg) -> str | None:
+    """The deployment's newest recorded run, when its TM operations layer ran
+    (verdict pass or fail). Each run overwrites the TM tables, so an older
+    run's verdict says nothing about what the tables hold now: when the
+    newest run's layer did not run, the investigator queries are skipped."""
+    from lakebench.metrics import MetricsStorage
+
+    try:
+        storage = MetricsStorage()
+        for info in storage.list_runs():
+            if info.get("deployment_name") not in (None, cfg.name):
+                continue
+            run = storage.load_run(info["run_id"])
+            if run is None or run.deployment_name != cfg.name:
+                continue
+            status = (getattr(run, "tm_operations", None) or {}).get("status")
+            return run.run_id if status in ("pass", "fail") else None
+    except Exception:  # noqa: BLE001 -- no history: no investigator queries
+        return None
+    return None
 
 
 def benchmark(
@@ -570,25 +599,33 @@ def benchmark(
         ),
     ] = False,
     iterations: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--iterations",
             "-n",
-            help="Number of iterations per query (>1 uses median)",
+            min=1,
+            help=(
+                "Timed runs per query, scored by the median "
+                "(overrides architecture.benchmark.iterations, default 3)"
+            ),
         ),
-    ] = 1,
+    ] = None,
     query_class: Annotated[
         str | None,
         typer.Option(
             "--class",
             "-c",
-            help="Run only queries of a specific class (scan, analytics, gold)",
+            help=(
+                "Run only queries of a specific class (scan, filter_prune, "
+                "aggregation, analytics, operational; AML also investigator)"
+            ),
         ),
     ] = None,
 ) -> None:
     """Run query benchmark and compute QpH.
 
-    Executes 8 analytical queries against the Customer 360 pipeline
+    Executes the workload's analytical query set (8 queries for
+    Customer 360, 12 for AML) against the silver and gold tables
     and reports Queries per Hour (QpH) throughput.
 
     Modes:
@@ -632,6 +669,7 @@ def benchmark(
     effective_mode = mode or bench_cfg.mode.value
     effective_streams = streams if streams is not None else bench_cfg.streams
     effective_cache = cache_mode or bench_cfg.cache
+    iterations = iterations if iterations is not None else bench_cfg.iterations
 
     console.print(
         Panel(
@@ -667,7 +705,12 @@ def benchmark(
     )
 
     try:
-        runner = BenchmarkRunner(cfg)
+        runner = BenchmarkRunner(cfg, tm_run_id=_latest_tm_run_id(cfg))
+        if query_class == "investigator" and runner.tm_run_id is None:
+            print_warning(
+                "No run of this deployment has TM operations tables that ran "
+                "(verdict pass or fail); the investigator queries are skipped."
+            )
         run_result = runner.run(
             mode=mode,
             cache=cache_mode,
@@ -680,7 +723,10 @@ def benchmark(
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
-    # Handle composite (returns tuple) vs single result
+    # Handle composite (returns tuple) vs single result. Track the
+    # throughput half separately so the composite qph=0 gate below can
+    # inspect it without indexing back into the union.
+    composite_throughput_qph: float | None = None
     if isinstance(run_result, tuple):
         power_result, throughput_result, composite_result = run_result
         _display_power_results(power_result)
@@ -691,6 +737,7 @@ def benchmark(
             f"and throughput {throughput_result.qph:.1f})"
         )
         primary_result = composite_result
+        composite_throughput_qph = throughput_result.qph
     else:
         if run_result.mode == "throughput":
             _display_throughput_results(run_result)
@@ -698,9 +745,53 @@ def benchmark(
             _display_power_results(run_result)
         primary_result = run_result
 
-    # Save to latest metrics if available
+    # Benchmark gate (invariant 3: exit 0 is not a pass). Mirrors what
+    # `run` applies via _benchmark_gate_problems: any query failure
+    # outside the known-upstream allowlist, any zero-row query not
+    # declared allow_empty, and the empty-set / all-failed case all fail
+    # the run. Also refuse when composite mode's throughput half
+    # produced qph=0 (the LB-044 shape: power passes, throughput is
+    # empty, composite headline is 0.0 but exit was previously 0).
+    from lakebench.cli._run import _benchmark_gate_problems
+
+    total_queries = len(primary_result.queries)
+    succeeded = [q for q in primary_result.queries if bool(getattr(q, "success", False))]
+    gate_problems: list[str] = []
+    if total_queries == 0 or not succeeded:
+        reason = (
+            "the query set was empty"
+            if total_queries == 0
+            else f"0 of {total_queries} queries succeeded"
+        )
+        gate_problems.append(
+            f"Benchmark produced no query results ({reason}); "
+            "QpH over the rest is not a valid score."
+        )
+    else:
+        gate_problems.extend(_benchmark_gate_problems(cfg, primary_result.queries))
+        if composite_throughput_qph is not None and composite_throughput_qph <= 0:
+            gate_problems.append(
+                f"Composite throughput half produced qph={composite_throughput_qph}; "
+                "composite QpH is not a valid score."
+            )
+    if gate_problems:
+        for problem in gate_problems:
+            print_error(problem)
+        _journal_safe(
+            j.end_command,
+            success=False,
+            message="benchmark gate failed: " + "; ".join(gate_problems),
+        )
+        raise typer.Exit(1)
+
+    # Save to latest metrics if available. Scope by deployment name so a
+    # parallel deployment's newer run cannot be rewritten with this
+    # benchmark's metrics (SP-2 owns deployment_id; this is the interim
+    # name-scoped lookup).
     storage = MetricsStorage()
-    latest_run = storage.get_latest_run()
+    # writable=True: this is the rewrite path; never fall back to a legacy
+    # record (which could belong to another deployment) and rewrite it.
+    latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
     if latest_run:
         bench_metrics = BenchmarkMetrics(
             mode=primary_result.mode,
@@ -712,6 +803,7 @@ def benchmark(
             iterations=primary_result.iterations,
             streams=primary_result.streams,
             stream_results=[s.to_dict() for s in primary_result.stream_results],
+            engine=primary_result.engine,
         )
         latest_run.benchmark = bench_metrics
         storage.save_run(latest_run)

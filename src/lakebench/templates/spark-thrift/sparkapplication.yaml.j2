@@ -67,6 +67,7 @@ spec:
               mkdir -p /tmp/.ivy2
               /opt/spark/bin/spark-submit \
                 --packages "{{ spark_thrift_packages }}" \
+                --repositories "{{ spark_thrift_repositories }}" \
                 --conf spark.jars.ivy=/tmp/.ivy2 \
                 --class org.apache.spark.deploy.DummyNonExistent \
                 local:///dev/null 2>&1 || true
@@ -127,6 +128,7 @@ spec:
 {% elif table_format_type == "delta" %}
                 --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
                 --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+                --conf spark.databricks.delta.optimizeMetadataQuery.enabled=false \
                 --conf spark.sql.catalogImplementation=hive \
                 --conf spark.hadoop.hive.metastore.uris=thrift://lakebench-hive-metastore.{{ namespace }}.svc.cluster.local:9083 \
 {% else %}
@@ -149,16 +151,22 @@ spec:
                 --conf spark.sql.defaultCatalog={{ spark_thrift_catalog_name }} \
 {% endif %}
                 --conf spark.hadoop.fs.s3a.endpoint={{ s3_endpoint }} \
+                --conf spark.hadoop.fs.s3a.endpoint.region={{ s3_region }} \
                 --conf spark.hadoop.fs.s3a.access.key={{ s3_access_key }} \
                 --conf spark.hadoop.fs.s3a.secret.key={{ s3_secret_key }} \
                 --conf spark.hadoop.fs.s3a.path.style.access={{ s3_path_style | lower }} \
                 --conf spark.hadoop.fs.s3a.connection.ssl.enabled={{ s3_use_ssl | lower }} \
                 --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+{# REST catalogs (Polaris) hand out s3:// table locations. Without an
+    s3:// implementation remove_orphan_files fails with 'No FileSystem for
+    scheme "s3"'. Same mapping as the Spark jobs (spark/job.py). #}
+                --conf spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
                 --conf spark.hive.server2.thrift.port=10000 \
                 --conf spark.driver.memory={{ spark_thrift_memory }} \
                 --conf spark.driver.cores={{ spark_thrift_cores }} \
                 --conf spark.local.dir=/tmp/spark-local \
                 --conf spark.sql.warehouse.dir=/tmp/spark-warehouse \
+                --conf spark.sql.session.timeZone=UTC \
 {% if observability_enabled | default(false) %}
                 --conf spark.ui.prometheus.enabled=true \
                 --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet \

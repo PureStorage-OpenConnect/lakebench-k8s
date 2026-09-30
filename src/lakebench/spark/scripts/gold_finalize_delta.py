@@ -17,11 +17,20 @@ import sys
 import time
 from enum import Enum
 
-from common import env, get_daily_kpi_aggregations, log, write_delta_table
+from common import (
+    env,
+    get_daily_kpi_aggregations,
+    gold_date_coverage_problem,
+    log,
+    log_c360_check,
+    log_job_metrics,
+    set_utc_session,
+    write_delta_table,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
-    current_timestamp,
+    lit,
 )
 from pyspark.sql.functions import max as max_
 
@@ -218,6 +227,18 @@ def gold_two_phase_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
     return kpi_count
 
 
+def _merge_gold(existing_gold, new_kpis, last_date):
+    """Gold rows before ``last_date`` plus the recomputed rows, materialized.
+
+    Materialized (gold is a few hundred rows) so the overwrite does not read
+    the table it is replacing.
+    """
+    kept = existing_gold
+    if last_date is not None:  # an empty gold table has no watermark
+        kept = existing_gold.filter(col("interaction_date") < lit(last_date))
+    return kept.unionByName(new_kpis).coalesce(1).localCheckpoint(eager=True)
+
+
 def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
     """INCREMENTAL strategy: Process only new Silver data. For > 10TB or repeat runs."""
     log("Executing INCREMENTAL strategy...")
@@ -232,10 +253,12 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
         last_date = None
         existing_gold = None
 
-    # Read Silver, filter to new data if watermark exists
+    # Recompute from the watermark date INCLUSIVE and replace those gold rows
+    # (same fix as gold_finalize.py, E2). A strict > dropped any silver rows
+    # that landed on the last processed date, a cycle boundary day.
     silver_df = spark.table(silver_tbl)
     if last_date:
-        silver_df = silver_df.filter(col("interaction_date") > last_date)
+        silver_df = silver_df.filter(col("interaction_date") >= last_date)
 
     new_count = silver_df.count()
     if new_count == 0:
@@ -247,11 +270,9 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
     log(f"Processing {new_count:,} new records")
 
     # Aggregate new data
-    new_kpis = (
-        silver_df.groupBy("interaction_date")
-        .agg(*get_daily_kpi_aggregations())
-        .withColumn("last_updated", current_timestamp())
-    )
+    # Same columns as SIMPLE_AGG / TWO_PHASE_AGG: an extra update-time column
+    # made the append fail on cycle 2 of every multi-cycle run.
+    new_kpis = silver_df.groupBy("interaction_date").agg(*get_daily_kpi_aggregations())
 
     new_kpi_count = new_kpis.count()
     log(f"Generated {new_kpi_count:,} new KPI records")
@@ -274,14 +295,14 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
             options=opts,
         )
     else:
-        # Append new records (dates don't overlap due to filter)
-        log("Appending to existing Gold table...")
+        # One commit: gold is one small table of daily rows, so rewrite it
+        # whole (rows before the watermark plus the recomputed ones).
+        # DELETE-then-append was two commits and a failure between them left
+        # gold missing days.
+        log(f"Replacing gold rows from {last_date} on...")
+        merged = _merge_gold(existing_gold, new_kpis_consolidated, last_date)
         write_delta_table(
-            spark,
-            new_kpis_consolidated,
-            gold_tbl,
-            gold_bucket,
-            mode="append",
+            spark, merged, gold_tbl, gold_bucket, mode="overwrite", options=_delta_write_props()
         )
 
     total_count = spark.table(gold_tbl).count()
@@ -299,6 +320,7 @@ log("Customer 360 Gold Finalize (Delta) - Adaptive Aggregation Pipeline")
 log("=" * 60)
 
 spark = SparkSession.builder.appName("lb-gold-finalize-delta").getOrCreate()
+set_utc_session(spark)
 
 start_time = time.time()
 
@@ -349,6 +371,17 @@ else:
     spark.stop()
     sys.exit(1)
 
+# Non-degeneracy gate (invariant 3): gold must hold one KPI row per distinct
+# silver interaction_date, else the run did not produce a valid gold.
+_gold_rows = spark.table(gold_tbl).count()
+_distinct_dates = spark.table(silver_tbl).select("interaction_date").distinct().count()
+_gate = gold_date_coverage_problem(_gold_rows, _distinct_dates)
+if _gate:
+    log(f"ERROR: gold non-degeneracy gate FAILED ({strategy.value}): {_gate}")
+    spark.stop()
+    sys.exit(1)
+log(f"Gold non-degeneracy gate PASSED: {_gold_rows} gold rows == {_distinct_dates} silver dates")
+
 total_time = time.time() - start_time
 
 # Show sample output
@@ -370,10 +403,16 @@ log(f"Strategy: {strategy.value}")
 log(f"KPI records: {kpi_count:,}")
 log(f"Table: {gold_tbl}")
 log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
-log("=== JOB METRICS: gold-finalize ===")
-log(f"input_size_gb: {silver_size_gb:.3f}")
-log(f"estimated_rows: {silver_count}")
-log(f"output_rows: {kpi_count}")
-log(f"elapsed_seconds: {total_time:.1f}")
-log("=" * 60)
+# log_job_metrics writes the JOB METRICS block (input_rows aliases estimated_rows
+# in the collector) and pushes the stage gauges to the Pushgateway, so the Delta
+# c360 gold adapter reaches the live dashboard like the Iceberg adapter (Gate 3 obs).
+log_job_metrics(
+    "gold-finalize",
+    input_size_gb=silver_size_gb,
+    input_rows=silver_count,
+    output_rows=kpi_count,
+    elapsed_seconds=total_time,
+)
+# Expected-result facts (reporting only, D6), after the timing above.
+log_c360_check(spark, silver_tbl, gold_tbl)
 spark.stop()

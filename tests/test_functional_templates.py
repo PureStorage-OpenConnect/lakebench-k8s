@@ -116,10 +116,9 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     # Datagen deployer injects these (see datagen.py _build_datagen_context)
     ctx.setdefault("datagen_target_tb", "0.010000")
     ctx.setdefault("datagen_file_size_mb", 512)
-    ctx.setdefault("datagen_payload_kb", 2)
+    # datagen_payload_kb removed 2026-09-28; template no longer renders it.
     ctx.setdefault("datagen_path_prefix", "customer/interactions/")
     ctx.setdefault("datagen_seed", 42)
-    ctx.setdefault("datagen_resume", False)
     ctx.setdefault("datagen_cpu", "2")
     ctx.setdefault("datagen_memory", "4Gi")
     ctx.setdefault("datagen_mode", "batch")
@@ -672,7 +671,7 @@ class TestTemplateConditionals:
         ctx = _enrich_context(engine)
 
         rendered = renderer.render("hive/stackable-hivecluster.yaml.j2", ctx)
-        assert "lakebench-s3-ca-cert-class" in rendered
+        assert f"lakebench-s3-ca-cert-{ctx['namespace']}" in rendered
         assert "tls:" in rendered or "secretClass" in rendered
 
     def test_hive_no_tls_block_for_http(self, renderer: TemplateRenderer):
@@ -681,7 +680,7 @@ class TestTemplateConditionals:
         ctx = _enrich_context(engine)
 
         rendered = renderer.render("hive/stackable-hivecluster.yaml.j2", ctx)
-        assert "lakebench-s3-ca-cert-class" not in rendered
+        assert f"lakebench-s3-ca-cert-{ctx['namespace']}" not in rendered
 
     def test_all_templates_render_with_https_context(self, renderer: TemplateRenderer):
         """All templates should render without error with HTTPS + CA cert context."""
@@ -803,3 +802,20 @@ class TestTrinoConfigMapFormatConditional:
         assert any("delta_lake" in cl for cl in connector_lines), (
             f"Expected delta_lake connector in lakehouse.properties, got: {connector_lines}"
         )
+
+
+class TestDuckDBProbeTimeouts:
+    """Every DuckDB exec probe starts a python process, which the 1 s default
+    timeoutSeconds does not cover: the startup probe took 1.38 s live and
+    failed at random, restarting the container and costing an 892 s deploy."""
+
+    def test_every_probe_sets_a_realistic_timeout(self, renderer: TemplateRenderer):
+        engine = _make_engine(recipe="hive-iceberg-spark-duckdb")
+        ctx = _enrich_context(engine)
+        parsed = yaml.safe_load(renderer.render("duckdb/deployment.yaml.j2", ctx))
+        container = parsed["spec"]["template"]["spec"]["containers"][0]
+        for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+            assert container[probe].get("timeoutSeconds", 1) >= 10, probe
+        startup = container["startupProbe"]
+        # The whole startup budget still covers the pip install window.
+        assert startup["periodSeconds"] * startup["failureThreshold"] >= 300

@@ -10,9 +10,29 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
 _RUN = "lakebench.modules.pipeline_engines.spark.operator.subprocess.run"
+
+
+@pytest.fixture(autouse=True)
+def _bypass_cluster_lock_in_race_tests():
+    """ADR-F5: production adds are lease-gated, but this module tests
+    the read-modify-write concurrency semantics via subprocess mocking,
+    not lease acquisition. Bypass the lease so tests do not hit the
+    Kubernetes API for a fixture that has no bearing on what they
+    exercise."""
+    SparkOperatorManager._bypass_cluster_lock = True
+    # The add refuses a namespace it cannot prove is live (a destroy-race
+    # guard covered in test_watch_list_strict.py); these tests exercise the
+    # read-modify-write, so treat every namespace as live.
+    try:
+        with patch.object(SparkOperatorManager, "_namespace_is_terminating", return_value=False):
+            yield
+    finally:
+        del SparkOperatorManager._bypass_cluster_lock
 
 
 def _ok() -> MagicMock:

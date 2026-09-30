@@ -11,6 +11,16 @@ pipeline with Spark, Iceberg, and Trino -- all from a single YAML file.
 
 Before you begin, make sure your environment has the following.
 
+If you are the **cluster admin** setting up Lakebench on a shared cluster for the first time, the fastest path is:
+
+```bash
+lakebench admin install-spark-operator            # once per cluster
+lakebench admin install-scratch-storage-class     # once per cluster, if using scratch PVCs
+lakebench admin doctor                            # confirm everything is in place
+```
+
+Developers then use ordinary `lakebench deploy` / `run` / `destroy` without cluster-admin privileges. Every `admin` mutation takes a cluster-wide lease so concurrent admins on different workstations do not race each other; see `lakebench admin --help` for the full subcommand tree.
+
 ### Kubernetes cluster
 
 Any cluster running Kubernetes 1.26+ will work. Lakebench is tested on:
@@ -28,10 +38,10 @@ job profiles:
 
 | Scale | Bronze data | Minimum CPU | Minimum RAM | Scratch PVC |
 |------:|------------:|------------:|------------:|------------:|
-| 1 | ~10 GB | 36 cores | 512 GB | 1,200 Gi |
-| 10 | ~100 GB | 36 cores | 512 GB | 1,200 Gi |
-| 50 | ~500 GB | 52 cores | 752 GB | 1,800 Gi |
-| 100 | ~1 TB | 76 cores | 1,112 GB | 2,700 Gi |
+| 1 | ~10 GB | 36 cores | 512 GB | 2,400 Gi |
+| 10 | ~100 GB | 36 cores | 512 GB | 2,400 Gi |
+| 50 | ~500 GB | 52 cores | 752 GB | 3,600 Gi |
+| 100 | ~1 TB | 76 cores | 1,112 GB | 5,400 Gi |
 
 Three things surprise people about this table:
 
@@ -47,13 +57,68 @@ Three things surprise people about this table:
   needs 60 GB on one node. A cluster with 512 GB spread across sixteen 32 GB
   nodes has enough total memory on paper and still cannot schedule the job.
 
+The table above is the Customer360 workload. AML (`schema: financial`) batch
+requests come from the same function, `compute_peak_requirements(scale,
+"batch", "financial")`. They match Customer360 except for scratch at scale
+100, where the AML bronze-verify job (11 executors with 500 Gi PVCs, for its
+CTAS fallback) sets the scratch peak:
+
+| Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
+|:---------|------:|------------:|------------:|------------:|
+| AML batch | 1-10 | 36 cores | 512 GB | 2,400 Gi |
+| AML batch | 50 | 52 cores | 752 GB | 3,600 Gi |
+| AML batch | 100 | 76 cores | 1,112 GB | 5,500 Gi |
+
+These are the Spark pipeline's requests. Data generation runs before the
+pipeline and can be the larger demand: the AML scale-100 generate in
+run-20260925-104703-c02890 ran 44 datagen pods at 8 cores, about 350 cores
+at once (measured, not derived from `compute_peak_requirements`). The pod
+count is `workload.datagen.parallelism`; set it lower on a
+smaller cluster and generation takes longer.
+
+Continuous mode runs its three stream jobs at the same time, so the
+minimum is their sum, and it differs by workload. AML (`schema: financial`)
+sizes all three from a measured scale-10 run: bronze-ingest 5 executors x 4
+cores so the corpus drains inside a 30-minute window, silver-stream 10 x 4 so
+a micro-batch finishes inside its 60 s trigger, and gold-refresh 12 x 4 so a
+detection tick over the whole scale-10 silver finishes inside the 5-minute
+refresh interval. gold-refresh grows with scale to the 28-executor cap
+(reached near scale 23); past that a tick outgrows the interval and time to
+detect grows with it:
+
+| Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
+|:---------|------:|------------:|------------:|------------:|
+| Customer360 | 1-10 | 38 cores | 272 GB | 640 Gi |
+| AML | 1-10 | 118 cores | 980 GB | 2,300 Gi |
+| Customer360 | 50 | 56 cores | 438 GB | 1,060 Gi |
+| AML | 50 | 198 cores | 1,756 GB | 4,220 Gi |
+| Customer360 | 100 | 84 cores | 690 GB | 1,700 Gi |
+| AML | 100 | 222 cores | 1,948 GB | 4,660 Gi |
+
+The AML scale-10 continuous run run-20260925-180003-bb3df4 ran at exactly
+this split (bronze-ingest 5, silver-stream 10, gold-refresh 12 executors at 4
+cores each).
+
+On a smaller cluster the run caps the stream jobs to what fits and warns
+naming each capped job. Each AML stage keeps at least the cores the
+Customer360 split would give it, and the room above that goes upstream first
+(bronze-ingest, then silver-stream up to the count that keeps pace with
+bronze, then gold-refresh, then the rest of silver-stream), since a stage
+runs no faster than its input arrives. The capacity preflight passes such a
+cluster with a WARNING naming the capped stages, as long as the capped
+request plus Trino, Hive/Postgres and datagen fits (AML scale 1-10: 57
+cores); it fails only when even that does not fit, or when a single pod fits
+no node. An explicit `*_executors` count is not capped and is counted as
+set.
+
 Lakebench checks this for you. The prerequisite phase of `lakebench run`
 compares the peak request against your cluster's allocatable capacity and
 fails immediately with the specific shortfall, rather than leaving pods
 `Pending` until the job times out. Skipped when you pass `--skip-preflight`.
 
-Run `lakebench recommend` after install to check your cluster's maximum
-supported scale.
+Run `lakebench config recommend lakebench.yaml` after install to check your
+cluster's maximum supported scale, and `lakebench config show lakebench.yaml`
+to see the peak request for the scale in your config.
 
 ### CLI tools on PATH
 
@@ -91,6 +156,12 @@ kubectl get storageclass -o wide
 
 Look for `(default)` next to one of the class names.
 
+**Scratch StorageClass**: if you enable `platform.storage.scratch` (Portworx-backed shuffle volumes on OpenShift, for example), the named `StorageClass` must exist before `deploy` runs. `deploy` will refuse with an actionable error rather than create it -- a `StorageClass` is shared infrastructure and a create-race between parallel deploys could strip it out from under an in-flight run. A cluster admin installs it once with:
+
+```bash
+lakebench admin install-scratch-storage-class
+```
+
 ### S3-compatible object storage
 
 Lakebench needs an S3-compatible endpoint for the bronze, silver, and gold
@@ -105,12 +176,17 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide.
-Lakebench assumes the operator is pre-installed (the default is
-`platform.compute.spark.operator.install: false`). Set it to `true` if you
-want `lakebench deploy` to install it automatically via Helm.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure; with the default `platform.compute.spark.operator.install: false`, `deploy` does not install it and fails if it is missing (with `install: true` it installs a missing operator). Whatever `install` says, `deploy` always checks the operator and adds its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
 
-Install manually with Helm if you prefer:
+The supported installation path is:
+
+```bash
+lakebench admin install-spark-operator
+```
+
+`admin install-spark-operator` takes the cluster-wide `lakebench-cluster-lock` lease before running `helm upgrade`, so concurrent `admin` invocations from different workstations cannot race each other. Confirm the install with `lakebench admin doctor`.
+
+Falling back to raw Helm still works:
 
 ```bash
 helm repo add spark-operator https://kubeflow.github.io/spark-operator
@@ -121,6 +197,8 @@ helm install spark-operator spark-operator/spark-operator \
   --set spark.jobNamespaces="" \
   --set webhook.enable=true
 ```
+
+but no lock is taken, so two parallel Helm installs may still stomp each other. Prefer the `admin` command on any cluster used by more than one engineer.
 
 ### Catalog operator (depends on your recipe)
 
@@ -224,6 +302,25 @@ This section walks through a complete deploy-generate-run cycle at **scale 1**
 (approximately 10 GB of generated data). Scale 1 is small enough to finish in
 minutes on most clusters while still exercising every stage of the pipeline.
 
+### First-day workflow at a glance
+
+On a fresh cluster the shortest path is four commands. The two flags on
+`run` are load-bearing: `--yes` lets `run` deploy the namespace and
+components when they do not exist yet (without it `run` refuses and asks
+you to run `lakebench deploy` first), and `--generate` populates the
+bronze bucket before the pipeline (without it, `run` executes against an
+empty bronze).
+
+```bash
+lakebench init                                  # writes lakebench.yaml
+lakebench run lakebench.yaml --generate --yes   # deploy + generate + pipeline + benchmark
+lakebench results lakebench.yaml                # print the scorecard
+lakebench destroy lakebench.yaml --yes          # tear down what this deployment owns
+```
+
+The step-by-step below walks the same path with the intermediate checks
+(`config validate`, `status`) for a first-time cluster.
+
 ### 1. Generate a configuration file
 
 ```bash
@@ -249,10 +346,9 @@ platform:
       access_key: YOUR_ACCESS_KEY            # your S3 access key
       secret_key: YOUR_SECRET_KEY            # your S3 secret key
 
-architecture:
-  workload:
-    datagen:
-      scale: 1                               # ~10 GB bronze data
+workload:
+  datagen:
+    scale: 1                               # ~10 GB bronze data
 ```
 
 If your storage uses virtual-hosted bucket addressing (like AWS S3), set
@@ -262,11 +358,13 @@ default).
 ### 3. Validate the configuration
 
 ```bash
-lakebench validate lakebench.yaml
+lakebench config validate lakebench.yaml
 ```
 
 This checks YAML syntax, Pydantic schema validation, Kubernetes connectivity,
-and S3 reachability. Fix any errors before continuing.
+and S3 reachability. Fix any errors before continuing. Before the first
+deploy, the Spark Operator section reports that the namespace is not yet
+watched; that is expected, because `deploy` adds it.
 
 ### 4. Run everything (single command)
 
@@ -284,10 +382,10 @@ Alternatively, run each step separately for more control:
 lakebench deploy lakebench.yaml --yes     # deploy infrastructure
 lakebench status lakebench.yaml           # verify deployment
 lakebench generate lakebench.yaml --wait  # generate test data (~5 min at scale 1)
-lakebench run lakebench.yaml --skip-preflight  # run pipeline + benchmark
+lakebench run lakebench.yaml              # run pipeline + benchmark
 ```
 
-### What happens during `run`
+### 5. What happens during `run`
 
 ```bash
 lakebench run lakebench.yaml
@@ -298,26 +396,50 @@ This executes three Spark jobs in sequence, followed by a query benchmark:
 1. **bronze-verify** -- validates and deduplicates raw Parquet data
 2. **silver-build** -- enriches, normalizes, and writes an Iceberg table
 3. **gold-finalize** -- aggregates into a business-ready executive dashboard
-4. **benchmark** -- runs 8 analytical queries against the gold table via the
-   active query engine (Trino by default)
+4. **benchmark** -- runs 8 analytical queries (12 for AML) against the silver and gold
+   tables via the active query engine (Trino by default)
 
 Each job's progress, duration, and throughput are recorded to metrics.
 
-### 7. Generate a report
+### 6. View the report
 
 ```bash
 lakebench report
 ```
 
-This produces an HTML report in `lakebench-output/runs/<run-id>/report.html`
+Every run writes an HTML report to `lakebench-output/runs/run-<id>/report.html`
 containing job performance tables, query latencies, throughput metrics, and a
-configuration snapshot. Open it in your browser to review the results.
+configuration snapshot. `lakebench report` prints the latest run's summary and
+the path to that file; open it in your browser to review the results.
+`lakebench report --render` writes a fresh copy under
+`lakebench-output/reports/` without touching the original.
 
 To list all recorded runs:
 
 ```bash
 lakebench report --list
 ```
+
+`lakebench results lakebench.yaml` prints the same scorecard in the terminal
+(`--format json` or `csv` for scripts).
+
+### 7. Compare two configurations
+
+```bash
+lakebench deploy lakebench-polaris.yaml --yes
+lakebench generate lakebench-polaris.yaml --wait
+lakebench compare lakebench.yaml lakebench-polaris.yaml
+```
+
+`compare` runs each config through the pipeline and benchmark in turn and
+prints the two results side by side. It destroys each deployment after its
+run unless you pass `--keep`, and it does not deploy a missing stack, so run
+`lakebench deploy` on both configs first. Both configs need bronze data:
+`lakebench.yaml` already has it from step 4, so generate only for the second
+one. Do not pass `--generate` here: generating into a bronze prefix that
+already holds data is refused, and that side of the comparison fails. Give the two configs different
+names and bucket names: the first deployment's destroy empties its buckets
+before the second one runs.
 
 ### 8. Tear down
 
@@ -329,10 +451,17 @@ lakebench destroy lakebench.yaml
 
 You will be prompted to confirm. Add `--force` to skip the confirmation prompt.
 
-The destroy sequence runs in the correct order: kill running Spark jobs, clean
-up datagen pods, run Iceberg maintenance (expire snapshots, remove orphan
-files), drop tables, empty S3 buckets, tear down infrastructure in reverse
-deploy order, and finally delete the namespace.
+The destroy sequence runs in this order: kill running Spark jobs, clean up
+datagen pods, remove the tables from the catalog without deleting files (no
+snapshot expiry, orphan removal, or VACUUM runs first), empty the S3 buckets and delete the ones lakebench created, tear down
+infrastructure in reverse deploy order, and finally delete the namespace and
+wait for it to be gone. If a bucket lakebench created cannot be deleted, the
+namespace is kept so a re-run can finish. Buckets that existed before deploy
+are emptied but never deleted. On a backend without bucket tagging
+(FlashBlade) the name is the only other evidence of ownership, so destroy
+empties a pre-existing bucket only if deploy found it empty and recorded
+that; one that already held data is left alone and reported, and
+`--force-legacy` empties it.
 
 ---
 
@@ -342,7 +471,11 @@ deploy order, and finally delete the namespace.
 idempotent -- components that already exist are skipped.
 
 **Generate fails or times out:** Increase the timeout with `--timeout 14400`
-(4 hours). Datagen supports resume -- re-running picks up where it left off.
+(4 hours). The Rust generator has no checkpoint-resume, so a re-run starts
+from the beginning, and because the failed run left partial data in bronze,
+the re-run needs `--regenerate` (`lakebench generate lakebench.yaml --wait
+--regenerate`), which empties the bronze bucket first. Without it `generate`
+exits 2 and names the non-empty prefix.
 
 **A pipeline stage fails:** Re-run just that stage:
 
@@ -387,14 +520,14 @@ Gold: Aggregate into an executive dashboard with daily KPIs, channel performance
       customer lifetime value
   |                    (written as an Iceberg table)
   v
-Benchmark: 8 queries against the gold table via query engine (RFM segmentation,
+Benchmark: 8 queries against the silver and gold tables (RFM segmentation,
            revenue moving averages, cohort retention, channel attribution, CLV, etc.)
 ```
 
 The bronze layer lives as raw Parquet files in S3. Silver and gold are Apache
 Iceberg tables registered in the catalog (Hive Metastore or Polaris). The
-query engine (Trino, Spark Thrift, or DuckDB) queries the gold table through
-its Iceberg connector.
+query engine (Trino, Spark Thrift, or DuckDB) queries the silver and gold
+tables through its Iceberg connector.
 
 All processing is done by Apache Spark running on Kubernetes via the Spark
 Operator. Executor count scales automatically with the data volume (controlled
@@ -420,12 +553,12 @@ Polaris, Trino coordinator and workers, Spark service account, and S3 buckets.
 ### Review configuration
 
 ```bash
-lakebench info lakebench.yaml
+lakebench config show lakebench.yaml
 ```
 
-Prints the resolved configuration including computed values: which recipe
-(catalog + table format + query engine) is active, how many executors each
-Spark job will use at the current scale, and the component versions.
+Prints the resolved configuration with the source of each value (recipe,
+config file or default), and the peak CPU, memory and scratch the pipeline
+requests at the configured scale.
 
 ### Stream component logs
 
@@ -454,6 +587,29 @@ lakebench query lakebench.yaml --sql "SELECT count(*) FROM lakehouse.gold.custom
 
 ---
 
+## Local Mode (no cluster)
+
+For a laptop try-out without Kubernetes, `lakebench init --local` writes a
+podman/docker config that runs against a Garage container on `localhost`:
+
+```bash
+lakebench init --local --scale 1
+lakebench deploy lakebench.yaml --local
+lakebench run lakebench.yaml --local --generate --yes
+lakebench destroy lakebench.yaml --local
+```
+
+`--generate` populates bronze on the first local run. Subsequent runs
+against the same `--workdir` reuse the existing bronze corpus, so
+`--generate` is only needed again after `destroy --remove-data`, after
+`clean bronze`, or when the scale factor changes. Without `--generate`
+the pipeline runs against whatever bronze the workdir already holds; an
+empty workdir gives an empty pipeline.
+
+Local mode is Iceberg-only and Customer 360 batch only. AML configs and
+continuous mode are refused with an actionable error; see
+[Compatibility Matrix](compatibility-matrix.md).
+
 ## Scaling Up
 
 To run at a larger scale, change the `scale` value in your config:
@@ -463,10 +619,16 @@ To run at a larger scale, change the `scale` value in your config:
 | 1 | 10 GB | 100K | 2.4M |
 | 10 | 100 GB | 1M | 24M |
 | 100 | 1 TB | 10M | 240M |
-| 1,000 | 10 TB | 100M | 2.4B |
 
-Use `lakebench recommend` to get cluster-aware sizing guidance before scaling
-up. At scale 100+ you will want to increase the `--timeout` on both generate
+Datagen scale is banded per workload. Customer 360 is supported up to scale
+300 and unverified up to 600; AML (financial) is supported up to 300 and
+unverified up to 800. Above the ceiling `deploy` and `generate` refuse the
+config, because a datagen pod would exceed the 16 GiB per-pod memory cap
+(a Lakebench-imposed cap); in the unverified range they warn. The run's
+support state records the band.
+
+Use `lakebench config recommend lakebench.yaml` to get cluster-aware sizing
+guidance before scaling up. At scale 100+ you will want to increase the `--timeout` on both generate
 and run commands:
 
 ```bash
@@ -485,18 +647,23 @@ in the `images` section of your YAML.
 |-----------|----------------|-------|
 | Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` |
 | Spark Operator | 2.5.1 | Kubeflow Helm chart |
-| Apache Iceberg | 1.11.0 | Spark runtime JAR |
+| Apache Iceberg | 1.11.0 (1.10.1 on `3.5.4-python3`) | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |
 | Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` |
 | Trino | 483 | `trinodb/trino:483` |
 | PostgreSQL | 17 | `postgres:17` |
 
+Iceberg 1.11.0 needs Java 17, and the `3.5.4-python3` image ships Java 11.
+With that image and no explicit `table_format.iceberg.version`, config load
+logs a warning and uses Iceberg 1.10.1. An explicit 1.11.0 on a Java 11 image
+is refused; use a `java17` Spark 3.5 image tag to run 1.11.0 on Spark 3.5.
+
 ---
 
 ## Choosing a Recipe
 
-The default deployment uses Hive + Iceberg + Trino. Lakebench supports 8
-validated component combinations ("recipes"). Use the `recipe:` field for
+The default deployment uses Hive + Iceberg + Trino. Lakebench supports 11
+component combinations ("recipes"); the eight Iceberg ones are below. Use the `recipe:` field for
 quick setup, or set architecture fields individually:
 
 ```yaml
@@ -514,15 +681,101 @@ recipe: polaris-iceberg-spark-trino   # one-line setup
 | Polaris + DuckDB | `polaris-iceberg-spark-duckdb` | REST catalog with lightweight engine |
 | Polaris headless | `polaris-iceberg-spark-none` | REST catalog, ETL-only |
 
-See the [Recipes Guide](recipes.md) for all 8 combinations, decision guidance,
+See the [Recipes Guide](recipes.md) for all 11 combinations, decision guidance,
 and detailed YAML snippets.
 
-Use `lakebench recommend` to get cluster-aware sizing guidance before choosing
-a scale factor:
+Use `lakebench config recommend lakebench.yaml` to get cluster-aware sizing
+guidance before choosing a scale factor. To see what a given scale requests,
+set it in the config and run `lakebench config show lakebench.yaml`.
+
+---
+
+## Choosing a Workload
+
+Lakebench ships two workload schemas. The recipe (catalog + format + engine)
+is orthogonal to the workload -- switch schemas by changing one field.
+
+### Customer 360 (default)
+
+Retail customer-interactions from ~8 channels through a bronze / silver /
+gold medallion into an executive dashboard, then the 8-query analytical
+benchmark. This is the workload the [First Deployment Walkthrough](#first-deployment-walkthrough)
+above runs.
+
+```yaml
+workload:
+  schema: customer360   # default; can be omitted
+```
+
+### Financial crime (AML)
+
+pacs.008 wire-message pipeline with nine detection rules (W1-W8 and
+W17) scoring against planted AML typologies. `lakebench run` scores
+per-rule recall and precision inline after gold-finalize by joining
+`gold.alerts` against the datagen manifest on transaction UETRs
+(`spark/scripts/score_financial.py`); it does not run the reference
+detector, so the run itself does not cross-check recall against a
+model. Pattern-span (a datagen window-width property, not detection
+latency) is reported for context. A separate command,
+`lakebench financial reference-score`, submits the pre-registered
+fidelity gate over silver and writes a per-typology reference-model
+report; that job is invoked on its own, and the gate report says
+whether the corpus was on the calibration seed or a held-out one.
+
+```yaml
+workload:
+  schema: financial
+  retention_workload: true    # keeps snapshots for replay / reproduce
+  retention_months: 60
+```
+
+A worked example ships at [`examples/polaris-iceberg-spark-financial.yaml`](../examples/polaris-iceberg-spark-financial.yaml).
+The full loop is `deploy -> generate -> run`; `financial score` is an
+optional re-score after a rule change or replay:
 
 ```bash
-lakebench recommend --scale 100
+lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
+lakebench generate examples/polaris-iceberg-spark-financial.yaml --wait
+lakebench run      examples/polaris-iceberg-spark-financial.yaml
+
+# Optional re-score. Path prefix is pacs008/ under the default template.
+lakebench financial score \
+    examples/polaris-iceberg-spark-financial.yaml \
+    --manifest s3a://<bronze-bucket>/pacs008/manifest/manifest.parquet \
+    --output   s3a://<gold-bucket>/scoring/rescore/recall.parquet
 ```
+
+The manifest path only labels cycle 0. On a multi-cycle corpus
+(`architecture.pipeline.cycles > 1`) later cycles land at
+`pacs008/manifest/manifest-cNNN.parquet`, and this command scores
+only the manifest URI you pass it.
+
+Two additional operator subcommands cover the retention scenarios:
+
+- `lakebench financial replay CONFIG --rule W2_structuring --depth-months 60`
+  reruns one rule against a historical Iceberg snapshot.
+- `lakebench financial reproduce CONFIG --alert-id <id>` reproduces a specific
+  past alert via Iceberg time-travel.
+
+`CONFIG` in both cases is the same YAML you passed to `deploy`.
+
+The AML precision numbers on this benchmark are not a claim about a
+production ops-queue false-positive rate -- the datagen has one baseline
+distribution and roughly a dozen planted typology shapes, and the rules
+were tuned against it. Use them for stack comparison and regression
+detection.
+
+`workload.datagen.seed = 43` is the calibration corpus the generator,
+the rule thresholds and the reference features were tuned against, and
+it is the default when `seed` is unset for `financial`. Recall and
+precision from a seed-43 run are in-sample. v1.6 publishes no held-out
+result, so AML recall in v1.6 is uncalibrated; the held-out looks are
+deferred to v1.7. Numbers meant for comparison with other stacks should
+cite the seed and, when it is 43, say so.
+
+See [AML Scoring](aml-scoring.md) for the full explanation
+of what the metrics measure, the band leakage report, the reference
+detector, and the current untargeted typologies.
 
 ---
 
@@ -530,5 +783,6 @@ lakebench recommend --scale 100
 
 - [Recipes Guide](recipes.md) -- all supported component combinations
 - [Polaris Quick Start](quickstart-polaris.md) -- use Apache Polaris instead of Hive
+- [AML Scoring](aml-scoring.md) -- financial-crime / AML workload: what precision and recall measure here, the leakage gate, and the reference detector
 - [Configuration Reference](configuration.md) -- full YAML schema with all options
 - [Operators and Catalogs](operators-and-catalogs.md) -- tested versions and troubleshooting

@@ -81,14 +81,28 @@ def default_workdir(config_name: str) -> Path:
     return Path.home() / ".lakebench" / "local" / (safe or "default")
 
 
-def check_local_supported(cfg: LakebenchConfig) -> None:
+def check_local_supported(cfg: LakebenchConfig, *, continuous: bool = False) -> None:
     """Raise if the config asks for something local mode cannot do.
+
+    Local mode runs Customer 360 in batch mode only: its job map, datagen
+    arguments and benchmark tables are the Customer 360 batch ones, so an AML
+    or continuous config would run different work under its own label.
+    *continuous* is the run's --continuous/--sustained flag, which is not
+    written back to the config.
 
     Local mode is Iceberg-only. DuckDB's delta extension uses delta-kernel-rs,
     which ignores DuckDB's S3 settings and hangs on AWS IMDS against a non-AWS
     endpoint (gotcha 18), and Trino would reintroduce a catalog service and
     PostgreSQL, defeating the two-container model.
     """
+    from lakebench.config.support import local_problem
+
+    problem = local_problem(
+        cfg.architecture.workload.schema_type.value,
+        "continuous" if continuous else cfg.architecture.pipeline.mode,
+    )
+    if problem:
+        raise LocalModeError(problem)
     table_format = cfg.architecture.table_format.type
     fmt = getattr(table_format, "value", str(table_format))
     if fmt != "iceberg":
@@ -368,6 +382,8 @@ def generate_local(
         cfg.platform.storage.s3.buckets.bronze,
         "--target-tb",
         f"{target_tb:.6f}",
+        "--customer-id-max",
+        str(dims.customers),
         # Small files locally: one 512 MB part would be most of the dataset and
         # would leave Spark a single partition to work with.
         "--file-size-mb",
@@ -405,11 +421,12 @@ def benchmark_local(
     deployment: LocalDeployment,
     workdir: Path | None = None,
     timeout: int = 300,
-) -> tuple[list[tuple[str, bool, float, int]], float]:
+) -> tuple[list[tuple[str, bool, float, int, dict | None]], float]:
     """Run the query benchmark locally with DuckDB.
 
     Returns (per-query results, queries per hour). Each result is
-    (name, success, elapsed_seconds, rows_returned). QpH uses the same
+    (name, success, elapsed_seconds, rows_returned, result fingerprint or
+    None). QpH uses the same
     definition as the cluster path -- successful queries / total seconds *
     3600 -- so a local number is comparable in kind, though obviously not in
     magnitude.
@@ -447,8 +464,10 @@ def benchmark_local(
     silver_table = "silver.customer_interactions_enriched"
     gold_table = "gold.customer_executive_dashboard"
 
-    results: list[tuple[str, bool, float, int]] = []
+    # (name, success, elapsed, rows, result fingerprint or None)
+    results: list[tuple[str, bool, float, int, dict | None]] = []
     durations: list[float] = []
+    sent: dict[str, str] = {}
     for query in BENCHMARK_QUERIES:
         # Queries are templates: substitute the table names first, then let the
         # executor rewrite them to iceberg_scan paths. Skipping the format step
@@ -458,9 +477,10 @@ def benchmark_local(
             silver_table=silver_table,
             gold_table=gold_table,
         )
-        outcome = executor.execute_query(executor.adapt_query(sql), timeout=timeout)
+        sent[query.name] = executor.adapt_query(sql)
+        outcome = executor.execute_query(sent[query.name], timeout=timeout)
         results.append(
-            (query.name, outcome.success, outcome.duration_seconds, outcome.rows_returned)
+            (query.name, outcome.success, outcome.duration_seconds, outcome.rows_returned, None)
         )
         if outcome.success:
             durations.append(outcome.duration_seconds)
@@ -468,13 +488,38 @@ def benchmark_local(
         else:
             print_error(f"{query.name}: {outcome.error}")
 
+    results = _fingerprint_local(executor, results, sent, timeout)
+
     qph = 0.0
     if durations:
         qph = 3600.0 / (sum(durations) / len(durations))
     return results, qph
 
 
-def print_local_benchmark(results: list[tuple[str, bool, float, int]], qph: float) -> None:
+def _fingerprint_local(executor, results, sent: dict[str, str], timeout: int) -> list[tuple]:
+    """Each successful query once more, untimed, for its result fingerprint
+    (benchmark.fingerprint); the timed loop is over by now."""
+    from lakebench.benchmark.fingerprint import unusable
+    from lakebench.benchmark.queries import BENCHMARK_QUERIES
+
+    approx = {q.name: q.fingerprint_columns() for q in BENCHMARK_QUERIES}
+    out = []
+    for name, ok, elapsed, rows, _ in results:
+        fp = None
+        if ok and hasattr(executor, "fingerprint_query"):
+            try:
+                fp = executor.fingerprint_query(
+                    sent[name], timeout=timeout, approx_columns=approx.get(name)
+                ).fingerprint
+            except Exception as e:  # noqa: BLE001 -- recorded, never fatal
+                fp = unusable("error", f"fingerprint run failed: {e}", "duckdb")
+            if not isinstance(fp, dict):
+                fp = unusable("error", "fingerprint run returned nothing", "duckdb")
+        out.append((name, ok, elapsed, rows, fp))
+    return out
+
+
+def print_local_benchmark(results: list[tuple], qph: float) -> None:
     """Render the local benchmark results."""
     if not results:
         return
@@ -484,11 +529,11 @@ def print_local_benchmark(results: list[tuple[str, bool, float, int]], qph: floa
     table.add_column("Result")
     table.add_column("Elapsed", justify="right")
     table.add_column("Rows", justify="right")
-    for name, ok, elapsed, rows in results:
+    for name, ok, elapsed, rows, *_ in results:
         marker = "[green]ok[/green]" if ok else "[red]failed[/red]"
         table.add_row(name, marker, f"{elapsed:.2f}s", f"{rows:,}" if rows else "-")
 
-    passed = sum(1 for _, ok, _, _ in results if ok)
+    passed = sum(1 for r in results if r[1])
     console.print()
     console.print(table)
     console.print()

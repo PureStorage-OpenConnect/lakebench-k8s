@@ -67,14 +67,23 @@ spec:
               command: ["python", "-c", "import duckdb; c=duckdb.connect(); c.load_extension('iceberg'); c.load_extension('httpfs'); print('ok')"]
             initialDelaySeconds: 10
             periodSeconds: 10
+            # The command starts python, imports duckdb and loads two
+            # extensions: 1.38 s measured in a running pod (2026-09-27). The
+            # 1 s default failed it at random, restarting the container twice
+            # and stretching one deploy to 892 s.
+            timeoutSeconds: 15
             failureThreshold: 30
           readinessProbe:
             exec:
               command: ["python", "-c", "import duckdb; print('ok')"]
             initialDelaySeconds: 5
             periodSeconds: 30
+            timeoutSeconds: 10
           livenessProbe:
             exec:
               command: ["python", "-c", "import duckdb; print('ok')"]
             initialDelaySeconds: 5
             periodSeconds: 60
+            # A python start plus import under the CPU limit can pass 1 s too;
+            # a liveness failure restarts the engine mid-benchmark.
+            timeoutSeconds: 10

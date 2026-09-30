@@ -24,8 +24,8 @@ Lakebench deploys Polaris as three Kubernetes resources:
   realm, root principal, catalog, and namespaces (default, bronze, silver,
   gold). Runs once after the Polaris server is healthy.
 
-Polaris stores its metadata in the shared PostgreSQL instance, using a
-separate `polaris` database alongside the `hive` database.
+Polaris stores its metadata in the deployment's PostgreSQL instance, in a
+`polaris` database that the deployer creates.
 
 ### Health checks
 
@@ -56,13 +56,15 @@ The image is set under `images`.
 
 ```yaml
 images:
-  polaris: "apache/polaris:1.6.0"
+  polaris: "apache/polaris:1.6.0"                        # Polaris server image
+  polaris_admin_tool: "apache/polaris-admin-tool:1.6.0"  # Bootstrap init container
 
 architecture:
   catalog:
     type: polaris
     polaris:
-      version: "1.6.0"    # Docker image tag
+      client_secret: "${LAKEBENCH_POLARIS_CLIENT_SECRET}"  # Required, no default
+      version: "1.6.0"                # Not read by the deployer (see below)
       port: 8181                      # REST API port
       resources:
         cpu: "1"                      # CPU request and limit
@@ -74,7 +76,9 @@ architecture:
 | Field | Default | Description |
 |---|---|---|
 | `catalog.type` | `hive` | Set to `polaris` to deploy Polaris instead of Hive Metastore. |
-| `polaris.version` | `1.6.0` | Polaris image tag. 1.4.0+ (including this default) has no `-incubating` suffix; only 1.3.0 specifically needs the suffix -- `apache/polaris:1.3.0` (without it) does not exist. |
+| `polaris.client_secret` | `""` | OAuth2 client secret for the `lakebench` root principal. Required: `deploy` and `run` refuse a Polaris config without it. Generate one with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`. It must stay the same across `deploy`, `run` and `destroy`. |
+| `polaris.version` | `1.6.0` | Not read by the deployer. The Polaris version that runs is the tag of `images.polaris` (and `images.polaris_admin_tool` for bootstrap). |
+| `images.polaris` | `apache/polaris:1.6.0` | Polaris server image. 1.4.0+ (including this default) has no `-incubating` suffix; only 1.3.0 specifically needs the suffix -- `apache/polaris:1.3.0` (without it) does not exist. |
 | `polaris.port` | `8181` | REST API port. Rarely needs changing. |
 | `polaris.resources.cpu` | `"1"` | CPU request and limit for the Polaris pod. |
 | `polaris.resources.memory` | `"2Gi"` | Memory request and limit for the Polaris pod. |
@@ -85,14 +89,20 @@ architecture:
 |---|---|---|
 | `polaris.resources.cpu` | Controls how much CPU Polaris gets for handling catalog requests. | Increase to `"2"` at scale 100+ if catalog operations (table commits, metadata reads) become slow. |
 | `polaris.resources.memory` | JVM heap for the Polaris server. | Increase to `"4Gi"` if Polaris OOMs during concurrent table commits from multiple Spark executors. |
-| `polaris.version` | Pins the Polaris image tag. | Default is `1.6.0`. Only change if you need a different Polaris release; minimum supported is `1.3.0-incubating`. |
+| `images.polaris`, `images.polaris_admin_tool` | Pin the Polaris server and admin-tool images. | Default is `1.6.0`. Only change if you need a different Polaris release; minimum supported is `1.3.0-incubating`. Keep both tags on the same release. |
 
 ## Version Constraints
 
 - **Minimum Polaris version**: 1.3.0-incubating. Versions 1.1.0 and 1.2.0
-  have a credential vending bug where `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION`
-  is ignored, causing S3 failures on non-AWS storage. Lakebench defaults to
-  1.6.0, well past this floor.
+  have a credential vending bug (apache/polaris#379) that makes the server
+  attempt STS even when told not to, causing S3 failures on non-AWS storage.
+  Lakebench defaults to 1.6.0, well past this floor.
+- **STS skip**: lakebench creates the catalog with `stsUnavailable: true`
+  and `pathStyleAccess: true` in the bootstrap payload. This is the only
+  supported way to skip STS on FlashBlade or other non-AWS S3. Do not add
+  any server-wide credential-subscoping override to Polaris; it drops the
+  endpoint and path-style settings, and server-side S3FileIO falls back to
+  `s3.amazonaws.com`.
 - **Minimum Trino version**: 454 (for `oauth2.scope` support). Default is 483.
 - **Image tag suffix**: only the 1.3.0 release carries `-incubating`.
   Polaris graduated from the Apache incubator at 1.4.0, so 1.4.0 and later

@@ -8,7 +8,7 @@
 #          Spark RBAC, DuckDB pod.
 #
 # Requirements:
-#   - Polaris minimum version: 1.3.0-incubating (earlier versions have STS bug)
+#   - Polaris minimum version: 1.6.0 (earlier versions have STS bug)
 
 name: polaris-iceberg-duckdb
 recipe: polaris-iceberg-spark-duckdb
@@ -16,8 +16,8 @@ recipe: polaris-iceberg-spark-duckdb
 images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
-  polaris: apache/polaris:1.3.0-incubating
-  polaris_admin_tool: apache/polaris-admin-tool:1.3.0-incubating
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
   duckdb: python:3.11-slim
   pull_policy: Always
 
@@ -41,7 +41,6 @@ platform:
     scratch:
       enabled: true
       storage_class: <YOUR_SCRATCH_STORAGE_CLASS>  # Portworx: px-csi-scratch (repl=1)
-      create_storage_class: false
 
   compute:
     postgres:
@@ -51,20 +50,24 @@ platform:
 architecture:
   catalog:
     type: polaris
+    polaris:
+      # LB-090: each install must set its own OAuth2 secret. Generate with:
+      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
 
   pipeline:
     mode: batch
-
-  workload:
-    schema: customer360
-    datagen:
-      scale: 1                  # ~10 GB bronze data
-      file_size: 64mb
-      timestamp_start: "2024-01-01"
-      timestamp_end: "2025-01-01"
 
   query_engine:
     type: duckdb
     duckdb:
       cores: 2
       memory: 4g
+
+workload:
+  schema: customer360
+  datagen:
+    scale: 1                  # ~10 GB bronze data
+    file_size: 64mb
+    timestamp_start: "2024-01-01"
+    timestamp_end: "2025-01-01"

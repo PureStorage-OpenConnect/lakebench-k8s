@@ -1,0 +1,20 @@
+# Release validation record (DESIGN.md section 6.5, layer 4).
+#
+# One entry per workload x recipe x mode that a live run on the release tree
+# completed end to end with the correctness contract passing and
+# non-degenerate output. Only a combination listed here is stamped
+# "supported" in a run's evidence. A combination that is valid for its
+# workload and mode but not listed is "unverified". A combination that fails
+# the architecture, workload or mode checks is refused at config load and can
+# never be listed (lakebench refuses to load a record that lists one).
+#
+# Entry shape:
+#
+#   - workload: customer360          # customer360 | financial
+#     recipe: hive-iceberg-spark-trino
+#     mode: batch                    # batch | continuous
+#     tree: 3d304d1                  # release-tree commit the runs ran on
+#     runs: [run-20261001-120000-abcd]
+#
+# The list starts empty for every release and is filled from live runs.
+validated: []

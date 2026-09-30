@@ -16,6 +16,7 @@ from rich.panel import Panel
 
 from lakebench.cli._helpers import (
     _journal_safe,
+    check_datagen_scale,
     console,
     journal_open,
     print_error,
@@ -267,17 +268,35 @@ def deploy(
             help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
         ),
     ] = None,
+    force_legacy: Annotated[
+        bool,
+        typer.Option(
+            "--force-legacy",
+            help=(
+                "Claim ownership without tag proof. Covers two cases: "
+                "(1) a pre-1.5 annotation-less namespace or untagged "
+                "bucket being migrated; (2) a bucket on a backend that "
+                "does not implement bucket tagging AND does not match "
+                "the deployment-name prefix. Use only when you have "
+                "confirmed the resources are yours -- a mistake can "
+                "silently take over another team's storage."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Deploy lakehouse infrastructure.
 
-    Deploys all components in the correct order:
-    1. Namespace + Secrets + Scratch StorageClass
-    2. PostgreSQL
-    3. Catalog (Hive Metastore or Polaris)
-    4. Spark RBAC
-    5. Spark Operator (if operator.install: true)
-    6. Query Engine (Trino / Spark Thrift / DuckDB)
-    7. Observability (if enabled)
+    Deploys all components in this order:
+    1. Namespace, secrets and S3 buckets
+    2. Scratch StorageClass check (it must already exist; a cluster admin
+       installs it with `lakebench admin install-scratch-storage-class`)
+    3. PostgreSQL
+    4. Catalog (Hive Metastore or Polaris)
+    5. Spark RBAC (then Unity Catalog, only if catalog.type is unity)
+    6. Spark Operator check and watch-list entry for the namespace (always
+       runs; operator.install: true also installs a missing operator)
+    7. Query Engine (Trino / Spark Thrift / DuckDB)
+    8. Observability (if enabled)
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
@@ -308,6 +327,8 @@ def deploy(
     if local:
         _deploy_local_mode(cfg, config_file, workdir, dry_run, yes, timeout)
         return
+
+    check_datagen_scale(cfg)
 
     namespace = cfg.get_namespace()
 
@@ -376,7 +397,11 @@ def deploy(
                 elapsed = time.time() - _step_start.pop(component, time.time())
                 console.print(_fmt_deploy_line("x", "red", elapsed))
 
-        results = engine.deploy_all(progress_callback=on_progress, timeout=timeout)
+        results = engine.deploy_all(
+            progress_callback=on_progress,
+            timeout=timeout,
+            force_legacy=force_legacy,
+        )
 
         # Record each component result in journal
         for r in results:
@@ -432,14 +457,13 @@ def deploy(
             None,
         )
         if obs_result and obs_result.details:
-            namespace = cfg.get_namespace()
+            # The stack is shared and lives in its own namespace.
+            obs_ns = obs_result.details.get("release_namespace") or cfg.get_namespace()
             success_msg += (
-                f"\n\n[bold]Monitoring (in-cluster):[/bold]"
-                f"\n  Grafana:    http://lakebench-grafana.{namespace}.svc:3000 (admin / lakebench)"
-                f"\n  Prometheus: http://lakebench-prometheus.{namespace}.svc:9090"
-                f"\n\n[bold]Local access via port-forward:[/bold]"
-                f"\n  [cyan]kubectl port-forward svc/lakebench-grafana 3000:3000 -n {namespace}[/cyan]"
-                f"\n  [cyan]kubectl port-forward svc/lakebench-prometheus 9090:9090 -n {namespace}[/cyan]"
+                f"\n\n[bold]Monitoring (shared stack in namespace {obs_ns}):[/bold]"
+                f"\n  Services: [cyan]kubectl get svc -n {obs_ns} -l release=lakebench-observability[/cyan]"
+                f"\n  Grafana login: admin / lakebench"
+                f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
             )
 
         success_msg += (

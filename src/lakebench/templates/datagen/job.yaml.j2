@@ -35,23 +35,50 @@ spec:
       {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:latest') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:1.6.0') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
+            - "--schema"
+            - "{{ datagen_schema | default('customer360') }}"
+            {# --scale and --customer-id-max are exclusive: --scale drives the
+               financial corpus (typology counts, world size); --customer-id-max
+               drives the c360 customer id space. Rendering both on c360 made
+               --scale silently dead there and dropped `scale` from provenance.
+               Now schema-gated: financial gets --scale only, c360 gets
+               --customer-id-max only. LB-191 companion fix, 2026-09-28. #}
+            {% if datagen_scale_factor is defined and datagen_schema | default('customer360') == 'financial' %}
+            - "--scale"
+            - "{{ datagen_scale_factor }}"
+            {% endif %}
             - "--target-tb"
             - "{{ datagen_target_tb }}"
+            {% if datagen_customer_id_max is defined and datagen_schema | default('customer360') == 'customer360' %}
+            - "--customer-id-max"
+            - "{{ datagen_customer_id_max }}"
+            {% endif %}
             - "--mode"
-            - "{{ datagen_mode | default('batch') }}"
+            - "all"
+            {# Wave 2 D3/D7 (2026-09-28): DatagenMode now controls DELIVERY
+               pattern (batch vs continuous stream via S3 multipart), not
+               the internal work-split which stays at `all`. Default is
+               continuous per owner D18 (PipelineMode.CONTINUOUS is
+               canonical). #}
+            - "--delivery-mode"
+            - "{{ datagen_mode | default('continuous') }}"
             - "--file-size-mb"
-            - "{{ datagen_file_size_mb | default(512) }}"
-            - "--payload-kb"
-            - "{{ datagen_payload_kb | default(0) }}"
+            - "{{ datagen_file_size_mb | default(64) }}"
+            {# --payload-kb dropped 2026-09-28 (LB-191 companion). Rust hardcodes 2 KiB.
+               No shipped template ever used anything else; a future variable payload
+               comes back with per-payload bytes/row calibration. #}
             - "--bucket"
             - "{{ bucket_bronze }}"
             - "--prefix"
             - "{{ datagen_path_prefix | default('customer/interactions/') }}"
             - "--seed"
-            - "{{ datagen_seed | default(42) }}"
+            - "{{ datagen_seed }}"
+            {% if datagen_robustness_perturbation is defined and datagen_robustness_perturbation %}
+            - "--robustness-perturbation"
+            {% endif %}
             - "--dirty-ratio"
             - "{{ datagen_dirty_ratio | default(0.08) }}"
             - "--total-nodes"
@@ -66,17 +93,30 @@ spec:
             - "--timestamp-end"
             - "{{ datagen_timestamp_end }}"
             {% endif %}
-            {% if datagen_resume %}- "--resume"{% endif %}
-            {% if datagen_duration is defined and datagen_duration %}
-            - "--duration"
-            - "{{ datagen_duration }}"
+            {% if datagen_cycles is defined and datagen_cycles > 1 %}
+            - "--cycle"
+            - "{{ datagen_cycle }}"
+            - "--cycles"
+            - "{{ datagen_cycles }}"
             {% endif %}
+            {# --resume + checkpoint config removed 2026-09-28. The Rust
+               generator never implemented checkpoint-resume; interrupted
+               runs re-run from the start. #}
+            {# --duration removed 2026-09-28 (Wave 2 D8). The Rust binary never
+               parsed it; deploy/datagen.py no longer populates the context
+               var. Continuous pipelines get their arrival window from the
+               pipeline-side trickle-read (LB-156). #}
           env:
             # JOB_COMPLETION_INDEX is automatically set by Kubernetes (0, 1, 2, ...)
             # Used as default --node-id in generate.py
             - name: S3_ENDPOINT
               value: "{{ s3_endpoint }}"
             - name: S3_REGION
+              value: "{{ s3_region }}"
+            # The Rust S3 sink reads AWS_REGION (object_store); without it,
+            # PUTs are signed for us-east-1, which region-strict backends
+            # (Garage, AWS) reject. Same class as LB-052 on the Spark side.
+            - name: AWS_REGION
               value: "{{ s3_region }}"
             - name: S3_PATH_STYLE
               value: "{{ 'true' if s3_path_style else 'false' }}"
@@ -96,6 +136,26 @@ spec:
             {% elif not s3_verify_ssl %}
             - name: S3_VERIFY_SSL
               value: "false"
+            {% endif %}
+            # k8s CPU request in millicores, read by the Rust datagen at
+            # completion for accurate CPU-hour accounting. When set, the
+            # aggregator prefers this over rayon's pool size (which may
+            # differ from the pod's request because rayon's default reads
+            # `available_parallelism()`, not the cgroup CPU quota).
+            - name: LB_POD_CPU_REQUEST_MILLI
+              valueFrom:
+                resourceFieldRef:
+                  containerName: datagen
+                  resource: requests.cpu
+                  divisor: "1m"
+            {% if pushgateway_url is defined and pushgateway_url %}
+            # Live observability (best-effort): the pod pushes metrics to the
+            # per-deployment Pushgateway. Absent when observability is off, in
+            # which case the binary no-ops.
+            - name: LB_PUSHGATEWAY_URL
+              value: "{{ pushgateway_url }}"
+            - name: LB_RUN_ID
+              value: "{{ run_id | default('') }}"
             {% endif %}
           {% if s3_ca_cert_pem %}
           volumeMounts:

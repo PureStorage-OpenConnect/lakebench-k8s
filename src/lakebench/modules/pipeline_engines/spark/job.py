@@ -6,12 +6,14 @@ Handles SparkApplication submission and lifecycle.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from lakebench._constants import POLARIS_CLIENT_ID, SPARK_SERVICE_ACCOUNT
+from lakebench.config.schema import require_polaris_client_secret
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 #
 #   bronze-verify:  2 cores,  6g total (4g + 2g overhead),  50Gi Portworx PVC
 #   silver-build:   4 cores, 60g total (48g + 12g overhead), 150Gi Portworx PVC
-#   gold-finalize:  4 cores, 40g total (32g + 8g overhead),  100Gi Portworx PVC
+#   gold-finalize:  4 cores, 40g total (32g + 8g overhead),  300Gi Portworx PVC
 #
 # The silver job is the bottleneck -- at scale 100 (~1TB) it requests
 # 19 executors × 60g = ~1.14 TB RAM + 19 × 150Gi = 2.85 TB scratch PVC.
@@ -67,7 +69,13 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "executor_cores": 4,
         "executor_memory": "48g",
         "executor_memory_overhead": "12g",
-        "scratch_size": "150Gi",
+        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
+        # on device" mid-silver-build: c360's window + wide-join shuffle
+        # spill exceeds 150Gi per executor once the max_executors cap
+        # (28) means data-per-executor stops decreasing with scale.
+        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
+        # only costs bare block storage. Do not shrink.
+        "scratch_size": "300Gi",
         "base_executors": 8,  # scale <= 10
         "executors_per_100_scale": 12,  # add 12 per 100 scale units
         "max_executors": _MAX_EXECUTORS_SAFE,
@@ -79,7 +87,12 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "executor_cores": 4,
         "executor_memory": "32g",
         "executor_memory_overhead": "8g",
-        "scratch_size": "100Gi",
+        # LB-201: 100Gi filled to 88-92% at scale 100 and spilled
+        # "No space left on device" in a skewed detection sort (stage 184),
+        # losing 5 tasks (recovered, but marginal). Raised to 300Gi, matching
+        # the proven silver-build scratch, so the spill-heavy detection DAG
+        # has headroom at scale 100. Portworx px-csi-scratch is thin-provisioned.
+        "scratch_size": "300Gi",
         "base_executors": 4,  # scale <= 10
         "executors_per_100_scale": 8,  # add 8 per 100 scale units
         "max_executors": _MAX_EXECUTORS_SAFE,
@@ -124,7 +137,191 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
+    # Recall/precision scoring (LB-123). A manifest read + a linear
+    # explode-and-join against gold.alerts (score_financial.py rewrote the
+    # old N*M crossjoin to a single explode per side, so it stays linear in
+    # the UETR footprint). Deliberately small: without this entry the job
+    # falls back to the silver-build profile (~36 cores / 512 GB at scale 1)
+    # just to score a handful of typologies, which under the 4-parallel UAT
+    # limit fails to schedule and blocks on the per-job timeout after the
+    # pipeline already reported success (adversarial-review finding).
+    "score-financial": {
+        "driver_cores": 2,
+        "driver_memory": "8g",
+        "executor_cores": 4,
+        "executor_memory": "16g",
+        "executor_memory_overhead": "4g",
+        "scratch_size": "50Gi",
+        "base_executors": 2,
+        "executors_per_100_scale": 4,
+        "max_executors": 10,
+        "base_partitions": 32,
+    },
 }
+
+
+# ---------------------------------------------------------------------------
+# Per-workload-schema profile overrides
+# ---------------------------------------------------------------------------
+# Base ``_JOB_PROFILES`` are sized for Customer360. Other workload schemas
+# whose data-per-executor characteristics differ patch specific fields here
+# rather than owning a full parallel profile tree. Fields not listed stay at
+# the base value.
+#
+# Financial (AML / FinServ-Crime) bronze-verify: c360's bronze_verify does a
+# thin schema/row-count check and hands off to Iceberg add_files (zero-copy
+# register). AML's bronze source (pacs.008) routinely exceeds ADD_FILES_MAX
+# thresholds at scale >= 5, tripping the CTAS fallback in
+# bronze_verify_financial.py -- a full parquet rewrite through an Iceberg
+# write, whose per-executor staging + shuffle spill overwhelms the 50 Gi
+# base PVC. Live at scale 10 this hit ``No space left on device`` after
+# 78 min (LB-118).
+#
+# Sizing headroom: at scale 10, ~25 GB input/executor blew out 50 Gi
+# (~2x amplification through the Iceberg CTAS shuffle+staging path).
+# Scaling projections at higher scales without more executors turn ugly:
+# scale 100 reaches 143 GB/exec at 7 executors, scale 500 reaches
+# 250 GB/exec at the 20-executor cap. Fix widens on three axes:
+#   * ``scratch_size`` 50Gi -> 500Gi (thin-provisioned Portworx repl=1)
+#   * ``executors_per_100_scale`` 4 -> 8 (halves per-exec load at s100+)
+#   * ``max_executors`` 20 -> 28 (matches the proven fabric8 ceiling
+#     already used by silver/gold)
+# Combined ~10x headroom at scale 10, ~4x at scale 100, ~2x at scale 500.
+# Fields not listed here stay at the c360 base value.
+#
+# Memory: the c360 base (4g heap + 2g overhead = 6Gi) is sized for a thin
+# add_files register. AML's CTAS fallback runs a partitioned Iceberg write --
+# `CREATE TABLE ... PARTITIONED BY (days(intr_bk_sttlm_dt)) AS SELECT * FROM
+# parquet` over the whole pacs.008 corpus (266M rows / ~94 GB at scale 10) --
+# and executors were OOMKilled (ExitCode 137, container cgroup limit) on 6Gi:
+# repeatedly in the scale-10 continuous preflight, once transiently in the
+# scale-10 batch run that squeaked by on data-distribution luck. This is
+# per-executor undersizing, not node contention (OOMKilled is the container
+# hitting its own limit, not eviction), so it bites regardless of scheduling in
+# both modes.
+#
+# The pressure is OFF-HEAP, not heap (adversarial review, LB-135): there is no
+# aggregation/ORDER BY in the CTAS. What blows the container is the partitioned
+# write -- the days() clustering shuffle plus S3A `fast.upload.buffer=bytebuffer`
+# uploads (256 MB direct ByteBuffers, uncapped active blocks) and Iceberg
+# parquet row-group buffers, all charged to memoryOverhead. So the bump goes
+# into OVERHEAD, not heap: 8g heap + 12g overhead (20Gi total). 8g heap is ample
+# for a streaming `SELECT *` scan with cores=2 (no in-memory aggregation); 12g
+# overhead (vs the base 2g) gives 6x the off-heap headroom where the OOM
+# actually lives. 20Gi total stays well under silver-build (60Gi) and
+# gold-finalize (40Gi). At the scale-10 bronze-verify executor count (4, from
+# base_executors -- the override does not change base_executors) that is ~84Gi,
+# comfortable on the reference cluster. If scale-100 still OOMs off-heap, cap
+# fs.s3a.fast.upload.active.blocks or set -XX:MaxDirectMemorySize before adding
+# more total memory.
+_SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
+    "financial": {
+        "bronze-verify": {
+            "scratch_size": "500Gi",
+            "executors_per_100_scale": 8,
+            "max_executors": 28,
+            "executor_memory": "8g",
+            "executor_memory_overhead": "12g",
+        },
+        # AML continuous bronze-ingest. Measured on run-20260925-104452-21bf3a
+        # (scale 10, 1800 s window) with the base 2 executors x 2 cores: every
+        # micro-batch took the full 50 files (maxFilesPerTrigger) and ran
+        # 109.7 s against a 30 s trigger, so bronze was busy 97.5% of the
+        # window and moved 0.456 files/s. The scale-10 corpus is 1,371 files:
+        # 3,000 s to drain, ingest_ratio 0.58. The trickle ceiling is 50 files
+        # / 30 s = 1.67 files/s, 823 s to drain.
+        # A batch's files run in waves of one file per core: 50 files on 4
+        # cores is 13 waves, 8.4 s each. 5 executors x 4 cores = 20 cores run
+        # a batch in 3 waves (~25 s), inside the 30 s trigger, so the trigger
+        # rate rather than bronze bounds intake and the corpus drains in ~823 s
+        # (46% of the window). 16 cores would need 4 waves (~34 s) and fall
+        # just short of the trigger.
+        # Memory follows the cores: 8g heap (a streaming read-and-append, no
+        # aggregation) plus 8g overhead for the S3A upload and Parquet writer
+        # buffers of 4 concurrent tasks (the bronze-verify note above: that is
+        # where the off-heap pressure lives). Scaling adds 4 executors per 100
+        # scale to a 20 cap: at the default trigger more cores only help once
+        # max_files_per_trigger is raised, which larger corpora need anyway.
+        "bronze-ingest": {
+            "executor_cores": 4,
+            "executor_memory": "8g",
+            "executor_memory_overhead": "8g",
+            "base_executors": 5,
+            "executors_per_100_scale": 4,
+            "max_executors": 20,
+        },
+        # AML continuous silver-stream. Measured on run-20260925-135005-4b7a97
+        # (scale 10, 1800 s, bronze-ingest at the override above) with the base
+        # 4 executors x 4 cores: 4 micro-batches of 66.7M rows at 299 s each
+        # against a 60 s trigger, 13.9K rows/s per core with the per-batch
+        # overhead folded in. The silver source has no per-trigger file or row
+        # limit, so a slow batch makes the next one bigger: silver fell behind
+        # bronze (317K rows/s while the corpus drains, 50 files per 30 s
+        # trigger) and ~900 s of the 1,280 s time to detect was bronze and
+        # silver lag. Caught up, a 60 s trigger holds 19M rows. 10 x 4 = 40
+        # cores process that in ~34 s at the measured rate, leaving 26 s of the
+        # trigger for fixed per-batch cost, and hold 557K rows/s, 1.76x bronze
+        # intake, so a backlog cannot build. 8 executors (43 s of work) would
+        # leave only 17 s. Per-executor sizing stays at the base 4 cores / 32g
+        # / 8g; scaling keeps the base 8 per 100 scale, to the 28 cap. The
+        # base 32 shuffle partitions would leave 8 of the 40 cores idle in
+        # every shuffle stage (43 s, the 8-executor case), so base_partitions
+        # is 2x the cores, as _scale_partitions uses above scale 10.
+        # keep_up_executors (7 x 4 cores hold 390K rows/s, 1.2x bronze intake)
+        # is what the concurrent budget gives silver before gold on a cluster
+        # too small for all three: beyond it silver's cores mostly wait.
+        "silver-stream": {
+            "base_executors": 10,
+            "keep_up_executors": 7,
+            "executors_per_100_scale": 8,
+            "max_executors": _MAX_EXECUTORS_SAFE,
+            "base_partitions": 80,
+        },
+        # AML continuous gold-refresh. Same run: 4 ticks at 349.5 s mean on
+        # the base 2 x 4 = 8 cores, over the 300 s refresh interval, so ticks
+        # ran back to back. Every tick recomputes all of silver (windowing
+        # loses recall, LB-127), so tick cost follows silver's size, and those
+        # ticks read a lagging silver: 58.4M rows on average. Once silver keeps
+        # up it holds the whole scale-10 corpus, 266.7M rows, by the time
+        # bronze drains. Lane U's local ticks (84 s at 3.4M rows, 122 s at
+        # 6.7M) put the fixed per-tick cost near 45 s, which leaves 5.2 s of
+        # row work per million rows at 8 cores, taken as scaling with cores
+        # (path searches, ~80% of a tick, are shuffle joins). A full-silver
+        # tick is then 1,389 s of row work at 8 cores: 12 x 4 = 48 cores run
+        # it in ~276 s, inside the refresh interval, so ticks start on the
+        # timer. 10 executors (~323 s) would not. Per-executor sizing stays at
+        # the base. The tick's row work grows with scale, so the count grows
+        # in proportion (12 per 10 scale) until the 28 cap at scale ~23;
+        # beyond that a full-silver tick outgrows the interval (scale 100:
+        # ~1,000 s at the cap). base_partitions follows 2x the cores, as
+        # _scale_partitions uses above scale 10.
+        "gold-refresh": {
+            "base_executors": 12,
+            "executors_per_100_scale": 120,
+            "max_executors": _MAX_EXECUTORS_SAFE,
+            "base_partitions": 96,
+        },
+    },
+}
+
+
+def _resolve_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
+    """Return the resolved profile for ``job_type`` under ``schema_type``.
+
+    Merges ``_SCHEMA_PROFILE_OVERRIDES[schema][job_type]`` on top of the base
+    ``_JOB_PROFILES[job_type]``. Returns a shallow copy so callers can mutate
+    the result without corrupting module-level state. Returns ``None`` if the
+    base job type is unknown.
+    """
+    base = _JOB_PROFILES.get(job_type)
+    if base is None:
+        return None
+    merged = dict(base)
+    if schema_type:
+        overrides = _SCHEMA_PROFILE_OVERRIDES.get(schema_type, {}).get(job_type)
+        if overrides:
+            merged.update(overrides)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -202,33 +399,86 @@ def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
     return min(base + extra, profile["max_executors"])
 
 
-def get_job_profile(job_type: str) -> dict[str, Any] | None:
+def bronze_ingest_checkpoint_uri(cfg) -> str:
+    """Checkpoint location of the continuous bronze-ingest stream.
+
+    Shared by the ingest job env and the AML continuous preflight, which
+    uses its existence to tell a restart (keep the bronze table) from a
+    fresh stream (the bronze table must start empty).
+    """
+    s3 = cfg.platform.storage.s3
+    base = cfg.architecture.pipeline.sustained.checkpoint_base
+    return f"s3a://{s3.buckets.bronze}/{base}/bronze-ingest/"
+
+
+def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
     """Return the resource profile for a given job type.
 
     Args:
         job_type: Job type string (e.g. "bronze-verify", "silver-build").
+        schema_type: Workload schema (e.g. "financial"). When given, the
+            schema's ``_SCHEMA_PROFILE_OVERRIDES`` are merged on top of the base
+            profile, so the returned memory/scratch/executor fields match what
+            the job actually deploys. The metrics/scorecard path MUST pass this
+            or it under-reports AML resources (e.g. bronze-verify as 6Gi when
+            the pod requests 20Gi -- LB-135 review finding). Omitting it keeps
+            the c360 base for backward compatibility.
 
     Returns:
         Profile dict copy or None if job_type is unknown.
     """
+    if schema_type is not None:
+        return _resolve_job_profile(job_type, schema_type)
     profile = _JOB_PROFILES.get(job_type)
     return dict(profile) if profile else None
 
 
-def get_executor_count(job_type: str, scale: float) -> int:
+def get_executor_count(job_type: str, scale: float, schema_type: str | None = None) -> int:
     """Compute the deterministic executor count for a job at a given scale.
 
     Args:
         job_type: Job type string.
         scale: Scale factor from config.
+        schema_type: Workload schema. When given, schema overrides to
+            ``base_executors`` / ``executors_per_100_scale`` / ``max_executors``
+            are applied (AML bronze-verify scales 8-per-100 to a 28 cap, vs the
+            c360 base 4-per-100 / 20 cap). The metrics path must pass this so the
+            scorecard's executor count matches the deployed job at scale > 10.
 
     Returns:
         Expected executor count, or 0 if job_type is unknown.
     """
-    profile = _JOB_PROFILES.get(job_type)
+    profile = (
+        _resolve_job_profile(job_type, schema_type)
+        if schema_type is not None
+        else _JOB_PROFILES.get(job_type)
+    )
     if not profile:
         return 0
     return _scale_executor_count(profile, scale)
+
+
+def aml_bronze_verify_timeout_budget(scale: float) -> int:
+    """Wall-clock kill-switch budget (seconds) for a single AML bronze-verify.
+
+    AML bronze-verify is NOT the thin add_files register c360 uses. It trips
+    the CTAS fallback in bronze_verify_financial.py that rewrites the full
+    pacs.008 corpus through Iceberg and spills ~2x the input per executor.
+    Measured live at 4278s at scale 10 (run-20260923-120258-b71af2, 7
+    executors, ~100 GB raw pacs008 present at job start). Executor count scales
+    with data (executors_per_100_scale=8, capped at max_executors=28), so cost
+    grows sublinearly with scale rather than 1:1.
+
+    The 5400s floor covers the scale-10 measurement plus headroom for a cold
+    Ivy jar fetch (~135s) or a transient OOM-retry, and the gentle scale*120
+    slope adds growth once executor scaling saturates at high scale. Both the
+    batch per-job timeout (cli/_run.py) and the sustained bronze-verify
+    preflight (cli/_sustained.py) size against this single helper so they
+    cannot diverge for the same job -- the batch path had only 222s (5%)
+    headroom over the measured cost before this was shared, a false-failure
+    risk on the primary UAT path under a cold classpath or OOM retry.
+    """
+    return max(5400, int(scale * 120))
 
 
 # Batch pipeline job order.  These run sequentially, so the cluster only ever
@@ -274,9 +524,16 @@ class PeakRequirement:
     per_job: tuple[JobRequirement, ...]
 
 
-def _job_requirement(job_type: str, scale: float) -> JobRequirement | None:
-    """Compute the resource request for one job at a given scale."""
-    profile = _JOB_PROFILES.get(job_type)
+def _job_requirement(
+    job_type: str, scale: float, schema_type: str | None = None
+) -> JobRequirement | None:
+    """Compute the resource request for one job at a given scale.
+
+    ``schema_type`` (e.g. ``"financial"``) selects per-workload profile
+    overrides. Omitted or unknown values fall through to the Customer360
+    baseline.
+    """
+    profile = _resolve_job_profile(job_type, schema_type)
     if not profile:
         return None
 
@@ -306,7 +563,9 @@ def _job_requirement(job_type: str, scale: float) -> JobRequirement | None:
     )
 
 
-def compute_peak_requirements(scale: float, mode: str = "batch") -> PeakRequirement:
+def compute_peak_requirements(
+    scale: float, mode: str = "batch", schema_type: str | None = None
+) -> PeakRequirement:
     """Compute the peak resources the pipeline requests at a given scale.
 
     This is the single source of truth for "how big a cluster do I need".
@@ -318,15 +577,26 @@ def compute_peak_requirements(scale: float, mode: str = "batch") -> PeakRequirem
 
     Args:
         scale: Scale factor from config.
-        mode: Pipeline mode, ``"batch"`` or ``"sustained"``.
+        mode: Pipeline mode, ``"batch"`` or ``"continuous"`` (``"sustained"``
+            and ``PipelineMode`` values are accepted too).
+        schema_type: Workload schema (``"c360"``, ``"financial"``). Selects
+            per-workload profile overrides; ``None`` uses the Customer360
+            baseline. AML at scale >= 5 needs a larger bronze-verify PVC
+            than c360 (LB-118).
 
     Returns:
         PeakRequirement describing the peak CPU, memory, and scratch request.
     """
-    streaming = str(mode).lower() == "sustained"
+    from lakebench.config.schema import is_continuous_mode
+
+    streaming = is_continuous_mode(mode)
+    # One spelling in the result, whichever alias the caller passed.
+    mode = "continuous" if streaming else "batch"
     job_types = STREAMING_JOB_TYPES if streaming else BATCH_JOB_TYPES
 
-    reqs = tuple(r for jt in job_types if (r := _job_requirement(jt, scale)) is not None)
+    reqs = tuple(
+        r for jt in job_types if (r := _job_requirement(jt, scale, schema_type)) is not None
+    )
     if not reqs:
         return PeakRequirement(
             scale=scale,
@@ -372,12 +642,19 @@ def compute_peak_requirements(scale: float, mode: str = "batch") -> PeakRequirem
 def _streaming_concurrent_budget(
     config: LakebenchConfig,
     cluster_cpu_millicores: int | None,
+    *,
+    datagen_running: bool = True,
 ) -> dict[JobType, int]:
     """Compute max executor count per streaming job for concurrent execution.
 
     In sustained mode, datagen + 3 streaming jobs share the cluster.
     Divides the available CPU (after Trino + infra + datagen) among
     streaming jobs proportionally to their uncapped demand.
+
+    ``datagen_running=False`` drops the datagen reservation: the continuous
+    corpus is finite and usually written before the streams start, and a
+    finished Job holds no cores (LB-158). The default stays conservative
+    for callers that cannot know whether datagen is still running.
 
     Returns:
         Dict mapping each streaming JobType to its capped executor count.
@@ -387,46 +664,193 @@ def _streaming_concurrent_budget(
         return {}
 
     scale = config.architecture.workload.datagen.scale
+    # Schema overrides change streaming profiles too (AML bronze-ingest); the
+    # budget must see the profile the manifest deploys, or it caps the job
+    # back to the base count.
+    schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
 
-    # Co-resident pods (Trino + Hive + Postgres)
+    # Co-resident pods (Trino + Hive + Postgres). Use the shared parser so
+    # Kubernetes-idiomatic CPU strings ("500m", "1.5") don't crash mid-run.
+    from lakebench.config.autosizer import _parse_cpu_millicores
+
     trino = config.architecture.query_engine.trino
     co_resident_m = (
-        int(trino.coordinator.cpu) * 1000
-        + trino.worker.replicas * int(trino.worker.cpu) * 1000
+        _parse_cpu_millicores(trino.coordinator.cpu)
+        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
         + 1000  # Hive + Postgres
     )
 
-    # Datagen runs concurrently with streaming
+    # Datagen runs concurrently with streaming while its Job is unfinished
     datagen = config.architecture.workload.datagen
-    datagen_m = datagen.parallelism * int(datagen.cpu) * 1000
+    datagen_m = datagen.parallelism * _parse_cpu_millicores(datagen.cpu) if datagen_running else 0
 
     # Budget for all streaming jobs combined (90% of remaining after co-resident + datagen)
     remaining_m = max(0, cluster_cpu_millicores - co_resident_m - datagen_m)
     streaming_budget_m = int(remaining_m * 0.90)
 
-    # Compute each streaming job's uncapped CPU demand
-    demands: dict[JobType, int] = {}
-    for jt in _STREAMING_JOB_TYPES:
-        profile = _JOB_PROFILES[jt.value]
-        count = _scale_executor_count(profile, scale)
-        demands[jt] = count * profile["executor_cores"] * 1000
-
-    total_demand_m = sum(demands.values())
-    if total_demand_m == 0:
+    base_caps = _proportional_caps(
+        {jt: dict(_JOB_PROFILES[jt.value]) for jt in _STREAMING_JOB_TYPES},
+        scale,
+        streaming_budget_m,
+    )
+    if not base_caps:
         return {}
+    resolved: dict[JobType, dict[str, Any]] = {
+        jt: _resolve_job_profile(jt.value, schema) or _JOB_PROFILES[jt.value]
+        for jt in _STREAMING_JOB_TYPES
+    }
+    overridden = [jt for jt in _STREAMING_JOB_TYPES if resolved[jt] != _JOB_PROFILES[jt.value]]
+    if not overridden:
+        return base_caps
 
-    # Proportional allocation
+    # A schema override must not take cores from the stages it does not
+    # touch: they keep the split they had on the base profiles. Each
+    # overridden job first gets a floor, the whole executors that fit in the
+    # cores its base allocation had (at least one); rounding down, because
+    # rounding up to whole larger executors would request more than the base
+    # split did. The headroom above the kept stages and the floors then goes
+    # upstream first, bronze before silver before gold: a stage runs no
+    # faster than its input arrives, so cores given to silver while bronze
+    # sits at its floor idle (AML at scale 10 on 60-80 cores: bronze at one
+    # executor is the intake the bronze override was sized to fix, and
+    # silver's extra cores would wait on it). Silver is filled first only to
+    # its keep-up count, then gold, then silver's surplus, so gold is not left
+    # at its floor behind a silver that outruns bronze. Granting floors before
+    # sharing also keeps the total inside the budget when a schema overrides
+    # several stages.
+    caps = {jt: base_caps[jt] for jt in _STREAMING_JOB_TYPES if jt not in overridden}
+    kept_m = sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in caps)
+    want = {jt: _scale_executor_count(resolved[jt], scale) for jt in overridden}
+    for jt in overridden:
+        floor_cores = base_caps[jt] * _JOB_PROFILES[jt.value]["executor_cores"]
+        floor = max(1, floor_cores // resolved[jt]["executor_cores"])
+        caps[jt] = min(want[jt], floor)
+    used_m = kept_m + sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in overridden)
+    # The base split leaves the drivers to the 10% slack, which the larger
+    # overridden stages outgrow: take the drivers out before sharing, or a
+    # capped AML run asks for a few cores more than the cluster has (100
+    # cores at scale 10: 101 with Trino and datagen).
+    forced_driver = config.platform.compute.spark.driver_cores
+    driver_m = sum(
+        (forced_driver if forced_driver is not None else resolved[jt]["driver_cores"]) * 1000
+        for jt in _STREAMING_JOB_TYPES
+    )
+    override_budget_m = min(streaming_budget_m, int(max(0, remaining_m - driver_m) * 0.90))
+    headroom_m = max(0, override_budget_m - used_m)
+    # A stage with ``keep_up_executors`` is filled only to that count on the
+    # first pass (enough to keep pace with its input), so the stages after it
+    # are not left at their floor; its surplus comes last.
+    first = [
+        (jt, min(want[jt], resolved[jt].get("keep_up_executors", want[jt])))
+        for jt in _STREAMING_PIPELINE_ORDER
+        if jt in overridden
+    ]
+    second = [(jt, want[jt]) for jt in _STREAMING_PIPELINE_ORDER if jt in overridden]
+    for jt, target in first + second:
+        exec_cpu_m = resolved[jt]["executor_cores"] * 1000
+        add = max(0, min(target - caps[jt], headroom_m // exec_cpu_m))
+        caps[jt] += add
+        headroom_m -= add * exec_cpu_m
+    return caps
+
+
+@dataclass(frozen=True)
+class BudgetedStreamingRequest:
+    """What a continuous run requests once the concurrent budget caps the
+    streams, co-resident pods (Trino, Hive/Postgres, datagen) included."""
+
+    cpu_cores: int
+    memory_gb: int
+    # "silver-stream 10 -> 6" for each stage the budget cut below its profile.
+    capped: tuple[str, ...]
+
+
+def streaming_request_under_budget(
+    config: LakebenchConfig, cluster_cpu_millicores: int, *, datagen_running: bool = True
+) -> BudgetedStreamingRequest:
+    """Continuous-mode request after ``_streaming_concurrent_budget`` caps it.
+
+    The capacity preflight uses this when the uncapped peak does not fit: the
+    run caps the streams to what fits and warns, so the preflight fails only
+    when even the capped request does not fit. The totals include what the
+    budget sets aside and the cluster must also hold (Trino, Hive/Postgres,
+    datagen), and an explicit per-job executor count, which the manifest
+    applies after the budget.
+    """
+    from lakebench.config.autosizer import _parse_cpu_millicores, _parse_memory_gi
+    from lakebench.config.schema import parse_spark_memory
+
+    scale = config.architecture.workload.datagen.scale
+    schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
+    budget = _streaming_concurrent_budget(
+        config, cluster_cpu_millicores, datagen_running=datagen_running
+    )
+    spark_cfg = config.platform.compute.spark
+    explicit = {
+        JobType.BRONZE_INGEST: spark_cfg.bronze_ingest_executors,
+        JobType.SILVER_STREAM: spark_cfg.silver_stream_executors,
+        JobType.GOLD_REFRESH: spark_cfg.gold_refresh_executors,
+    }
+    gib = 1024**3
+    cores_m = mem = 0
+    capped: list[str] = []
+    for jt in _STREAMING_PIPELINE_ORDER:
+        prof = _resolve_job_profile(jt.value, schema) or _JOB_PROFILES[jt.value]
+        full = _scale_executor_count(prof, scale)
+        forced = explicit[jt]
+        if forced is not None:
+            n = int(forced)
+        else:
+            n = min(full, budget.get(jt, full))
+            if n < full:
+                capped.append(f"{jt.value} {full} -> {n}")
+        exec_bytes = parse_spark_memory(prof["executor_memory"]) + parse_spark_memory(
+            prof["executor_memory_overhead"]
+        )
+        # The manifest applies the global driver overrides to every job.
+        drv_cores = spark_cfg.driver_cores or prof["driver_cores"]
+        drv_mem = spark_cfg.driver_memory or prof["driver_memory"]
+        cores_m += (n * prof["executor_cores"] + drv_cores) * 1000
+        mem += n * exec_bytes + parse_spark_memory(drv_mem)
+
+    trino = config.architecture.query_engine.trino
+    datagen = config.architecture.workload.datagen
+    dg_pods = datagen.parallelism if datagen_running else 0
+    cores_m += (
+        _parse_cpu_millicores(trino.coordinator.cpu)
+        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
+        + 1000  # Hive + Postgres, as the budget counts them
+        + dg_pods * _parse_cpu_millicores(datagen.cpu)
+    )
+    co_gi = (
+        _parse_memory_gi(trino.coordinator.memory)
+        + trino.worker.replicas * _parse_memory_gi(trino.worker.memory)
+        + dg_pods * _parse_memory_gi(datagen.memory)
+    )
+    return BudgetedStreamingRequest(
+        cpu_cores=-(-cores_m // 1000),
+        memory_gb=int(-(-(mem + co_gi * gib) // gib)),
+        capped=tuple(capped),
+    )
+
+
+def _proportional_caps(
+    profiles: dict[JobType, dict[str, Any]], scale: float, budget_m: int
+) -> dict[JobType, int]:
+    """Split ``budget_m`` among jobs in proportion to their uncapped CPU
+    demand, at least 2 executors each and never above the uncapped count."""
+    demands = {
+        jt: _scale_executor_count(p, scale) * p["executor_cores"] * 1000
+        for jt, p in profiles.items()
+    }
+    total = sum(demands.values())
+    if total == 0:
+        return {}
     caps: dict[JobType, int] = {}
-    for jt in _STREAMING_JOB_TYPES:
-        profile = _JOB_PROFILES[jt.value]
-        fraction = demands[jt] / total_demand_m
-        job_budget_m = streaming_budget_m * fraction
-        exec_cpu_m = profile["executor_cores"] * 1000
-        max_executors = max(2, int(job_budget_m // exec_cpu_m))
-        # Never exceed the uncapped profile count
-        uncapped = _scale_executor_count(profile, scale)
-        caps[jt] = min(max_executors, uncapped)
-
+    for jt, p in profiles.items():
+        job_budget_m = budget_m * demands[jt] / total
+        max_executors = max(2, int(job_budget_m // (p["executor_cores"] * 1000)))
+        caps[jt] = min(max_executors, _scale_executor_count(p, scale))
     return caps
 
 
@@ -436,8 +860,16 @@ def _scale_partitions(
     """Derive shuffle partition count from executor count and cores.
 
     Target: 2x total cores.
+
+    At small scales (<=10), the default is the profile's ``base_partitions``,
+    but only when the executor count is still the profile default. If a user
+    override boosts executors beyond the profile default (e.g.
+    ``silver_executors: 28`` at scale 5), 2x-total-cores wins so shuffle
+    parallelism scales with the cluster commitment rather than idling ~40%
+    of the requested cores.
     """
-    if scale <= 10:
+    default_executors = profile.get("base_executors", executor_count)
+    if scale <= 10 and executor_count <= default_executors:
         return str(profile["base_partitions"])
     return str(executor_count * cores * 2)
 
@@ -509,6 +941,169 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
 }
 # No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
 # the 4.1 jar there throws IncompatibleClassChangeError -- see LB-069.
+
+# Additional Maven repositories to include in ``spark.jars.repositories`` /
+# ``--repositories`` on every job. Google mirrors Maven Central at
+# ``maven-central.storage-download.googleapis.com`` and rate-limits
+# independently, so when Central returns HTTP 429 to the cluster's egress
+# IP (which happens after a burst of UAT deploys) Ivy falls to the mirror
+# and the driver still resolves cleanly. Ordered mirror-first: Ivy tries
+# resolvers in list order, and Central 429s register as "not found" which
+# is exactly the signal that triggers the next resolver.
+_MAVEN_MIRROR_REPOS = "https://maven-central.storage-download.googleapis.com/maven2/"
+
+# Python packages the AML reference detector (D9) needs on the driver. The
+# apache/spark images ship Python 3.10 with pip but no numpy, so these are
+# installed per job into an emptyDir by an init container. Exact pins keep the
+# GBT reproducible (P4.2); they are the newest releases with cp310 wheels, so
+# they trail the local harness (Python 3.11) by a minor version or two, which
+# A6 absorbs (cluster AP must match the harness within its bootstrap CI).
+REFERENCE_PY_DEPS = (
+    "numpy==2.2.6",
+    "scipy==1.15.3",
+    "pandas==2.3.3",
+    "scikit-learn==1.7.2",
+    "joblib==1.5.2",
+    "threadpoolctl==3.6.0",
+    "python-dateutil==2.9.0.post0",
+    "pytz==2025.2",
+    "tzdata==2025.2",
+    "six==1.17.0",
+)
+REFERENCE_PY_DEPS_DIR = "/opt/lb-pydeps"
+
+
+def _lakebench_git_sha() -> str:
+    """HEAD of the git checkout the lakebench package runs from, with a
+    -dirty suffix for tracked changes; "unknown" for an installed wheel or
+    when git is unavailable."""
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # A wheel installed inside some other repository (a venv under a repo)
+        # must not report that repository's HEAD.
+        if top.returncode != 0 or not (Path(top.stdout.strip()) / "src/lakebench").is_dir():
+            return "unknown"
+        sha = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if sha.returncode != 0 or not sha.stdout.strip():
+            return "unknown"
+        dirty = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if dirty.returncode != 0:
+            suffix = "-dirty-unknown"
+        else:
+            suffix = "-dirty" if dirty.stdout.strip() else ""
+        return sha.stdout.strip() + suffix
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def _rebuild_epoch_key(cfg) -> str | None:
+    """The lakebench-silver-state ConfigMap key for this deployment.
+
+    Delta and Iceberg silver builds each carry their own rebuild-epoch
+    counter so a --force-rebuild on one deployment cannot silently disturb
+    the other. AML is Iceberg-only per the plan; a financial+delta config
+    returns None (Delta AML is out of v1.6 scope) and no LB_REBUILD_EPOCH
+    is exported for it.
+    """
+    try:
+        schema_type = cfg.architecture.workload.schema_type.value
+        table_format = cfg.architecture.table_format.type.value
+    except AttributeError:
+        return None
+    if schema_type == "financial":
+        if table_format == "iceberg":
+            return "rebuild_epoch_aml_iceberg"
+        return None
+    # c360 (or any other workload today) keys per format.
+    if table_format == "delta":
+        return "rebuild_epoch_c360_delta"
+    if table_format == "iceberg":
+        return "rebuild_epoch_c360_iceberg"
+    return None
+
+
+def _read_silver_state_epoch(namespace: str, key: str) -> int:
+    """Read a rebuild-epoch counter from ``lakebench-silver-state``.
+
+    Falls back to 0 on any read failure -- the ConfigMap is per-deployment
+    and pre-B1 deployments do not have it. A missing key inside an existing
+    ConfigMap also returns 0. Log level is WARNING so a real ops issue is
+    visible even when the fallback is taken (e.g. unit tests running
+    without a live cluster context, or a manifest built out-of-cluster).
+
+    The CLI-side ``_bump_silver_rebuild_epoch`` is the load-bearing
+    defense against the collision surface this cache-line would otherwise
+    open: a failed bump refuses to submit silver (``cli/_run.py`` raises
+    ``typer.Exit(1)`` before the cycle loop), so the submit path only
+    runs after a bump the same process just observed to succeed. A
+    transient read failure here at submit-time (post-bump) is a very
+    narrow window against a cluster the CLI just talked to successfully.
+    """
+    try:
+        from kubernetes import client as _kclient
+        from kubernetes.client.exceptions import ApiException
+
+        core_v1 = _kclient.CoreV1Api()
+        try:
+            cm = core_v1.read_namespaced_config_map("lakebench-silver-state", namespace)
+        except ApiException as e:
+            if e.status == 404:
+                return 0
+            raise
+        data = cm.data or {}
+        try:
+            return int(data.get(key, "0"))
+        except (TypeError, ValueError):
+            return 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LB_REBUILD_EPOCH fallback to 0 for key %s: %s", key, e)
+        return 0
+
+
+def _spark_interval_to_seconds(interval: str) -> int:
+    """Parse a Spark-style interval string (``"20 seconds"``, ``"5 minutes"``,
+    ``"1 hour"``) to an integer seconds value. Returns 10 on unparseable
+    input rather than raising, since this feeds a env-var value that the
+    AML sustained scripts use as a trigger period; a bad parse should
+    default to their previous hard-coded fallback rather than blow up
+    the manifest build. Kept alongside the mirror constant so the two
+    small stringy helpers live together instead of drifting into
+    separate modules."""
+    parts = interval.strip().lower().split()
+    if len(parts) != 2:
+        return 10
+    try:
+        value = int(parts[0])
+    except ValueError:
+        return 10
+    unit = parts[1].rstrip("s")
+    if unit == "second":
+        return value
+    if unit == "minute":
+        return value * 60
+    if unit == "hour":
+        return value * 3600
+    return 10
+
 
 # Spark version -> the first Iceberg version publishing a native runtime for it.
 # Below this, the fallback in _ICEBERG_RUNTIME_SUFFIX applies.
@@ -638,21 +1233,43 @@ _HADOOP_AWS_COMPAT: dict[tuple[int, int], tuple[str, str]] = {
 }
 
 
+# Completeness gate: every supported Spark minor must have an explicit
+# hadoop-aws + AWS SDK pin. A silent fallback here previously reproduced
+# LB-069 (Spark 4.2 borrowed the (4,0) pair, driver started clean, S3
+# signing diverged at runtime). Adding a Spark minor to
+# ``_SUPPORTED_SPARK_VERSIONS`` without touching this table now fails
+# at import instead of at S3 request time.
+_missing_hadoop_aws = set(_SUPPORTED_SPARK_VERSIONS) - set(_HADOOP_AWS_COMPAT)
+if _missing_hadoop_aws:
+    raise RuntimeError(
+        "Spark minors present in _SUPPORTED_SPARK_VERSIONS but missing from "
+        f"_HADOOP_AWS_COMPAT: {sorted(_missing_hadoop_aws)}. Add explicit "
+        "hadoop-aws and AWS SDK versions before shipping."
+    )
+del _missing_hadoop_aws
+
+
 def _spark_compat(image: str) -> tuple[str, str, str]:
     """Derive Scala suffix, Hadoop AWS version, and AWS SDK version from Spark image tag.
 
     Returns:
         Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version), keyed on
-        the Spark image's own major.minor -- Hadoop AWS versions differ across
-        Spark 4.0/4.1 (3.4.1/3.4.2), not just across the 3.x/4.x Scala
-        boundary. See ``_HADOOP_AWS_COMPAT``.
+        the Spark image's own major.minor. Every supported Spark minor is
+        required to have an explicit ``_HADOOP_AWS_COMPAT`` entry -- the
+        import-time gate above enforces this. Unknown Spark minors (which
+        should have failed earlier at ``_validate_spark_image``) raise a
+        loud KeyError rather than falling back to a wrong pair.
     """
     major = _parse_spark_major(image)
     key = _parse_spark_major_minor(image)
     scala_suffix = "_2.13" if major >= 4 else "_2.12"
-    hadoop_aws_version, aws_sdk_version = _HADOOP_AWS_COMPAT.get(
-        key, ("3.4.1", "1.12.720") if major >= 4 else ("3.3.4", "1.12.262")
-    )
+    if key not in _HADOOP_AWS_COMPAT:
+        raise KeyError(
+            f"No hadoop-aws / AWS SDK pin for Spark {key[0]}.{key[1]} in "
+            "_HADOOP_AWS_COMPAT. This must be resolved before submitting the "
+            "job -- a fallback would silently produce a wrong S3 signing pair."
+        )
+    hadoop_aws_version, aws_sdk_version = _HADOOP_AWS_COMPAT[key]
     return scala_suffix, hadoop_aws_version, aws_sdk_version
 
 
@@ -761,6 +1378,15 @@ class JobType(Enum):
     SILVER_STREAM = "silver-stream"
     GOLD_REFRESH = "gold-refresh"
 
+    # Financial-only operator actions (W8 / W10 / recall scoring)
+    REPLAY_FINANCIAL = "replay-financial"
+    REPRODUCE_FINANCIAL = "reproduce-financial"
+    SCORE_FINANCIAL = "score-financial"
+    # Reference detector + leakage gate: the "distribution checks do not
+    # prove semantics" gate that a relative-threshold rule rewrite (e.g. the
+    # W4/W8 precision work, LB-130) must be validated against before it ships.
+    SCORE_FINANCIAL_REFERENCE = "score-financial-reference"
+
 
 # Streaming job types (for conditional manifest logic)
 _STREAMING_JOB_TYPES = frozenset(
@@ -770,6 +1396,9 @@ _STREAMING_JOB_TYPES = frozenset(
         JobType.GOLD_REFRESH,
     }
 )
+# The same jobs in data-flow order, upstream first (the concurrent budget
+# grants spare cores in this order).
+_STREAMING_PIPELINE_ORDER = (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH)
 
 
 class JobState(Enum):
@@ -806,6 +1435,23 @@ class JobState(Enum):
 #: operator's own transitional state on the way to ``COMPLETED``.
 SUCCESS_STATES = frozenset({JobState.SUCCEEDING, JobState.COMPLETED})
 
+#: (connect, read) seconds for one SparkApplication status read.
+STATUS_REQUEST_TIMEOUT = (10, 30)
+#: Status reads tried per get_job_status call before a transient error is raised.
+STATUS_READ_ATTEMPTS = 3
+
+
+def is_transient_status_error(exc: BaseException) -> bool:
+    """A status read failure worth retrying: timeout, reset, 429, 5xx or status 0."""
+    from kubernetes.client.rest import ApiException
+    from urllib3.exceptions import HTTPError as Urllib3HTTPError
+
+    if isinstance(exc, ApiException):
+        # status 0: the client wrapped a transport error (e.g. a bare SSLError)
+        return exc.status in (0, None, 429) or (exc.status or 0) >= 500
+    return isinstance(exc, (Urllib3HTTPError, ConnectionError, TimeoutError))
+
+
 #: States meaning the job will not produce a result.
 FAILURE_STATES = frozenset({JobState.FAILING, JobState.FAILED, JobState.SUBMISSION_FAILED})
 
@@ -830,6 +1476,8 @@ class JobStatus:
     start_time: str | None = None
     completion_time: str | None = None
     executor_count: int = 0
+    # Operator submission attempts (status.submissionAttempts); 0 when unknown.
+    submission_attempts: int = 0
 
 
 class SparkJobManager:
@@ -852,6 +1500,11 @@ class SparkJobManager:
         self.config = config
         self.k8s = k8s
         self.namespace = config.get_namespace()
+        # Streaming jobs the concurrent budget capped, for the CLI to show.
+        self.budget_warnings: list[str] = []
+        # Whether the streaming budget reserves datagen's cores. The
+        # continuous CLI clears it once the datagen Job has finished (LB-158).
+        self.datagen_running: bool = True
 
         # Cache cluster capacity for streaming concurrent budget calculation
         try:
@@ -866,6 +1519,7 @@ class SparkJobManager:
         job_type: JobType,
         extra_conf: dict[str, str] | None = None,
         cycle_env: dict[str, str] | None = None,
+        arguments: list[str] | None = None,
     ) -> JobStatus:
         """Submit a Spark job.
 
@@ -874,17 +1528,24 @@ class SparkJobManager:
             extra_conf: Additional Spark configuration
             cycle_env: Extra environment variables for multi-cycle batch runs
                        (e.g. LB_SILVER_INCREMENTAL, LB_GOLD_INCREMENTAL)
+            arguments: CLI arguments to append to the main application file.
+                       Used by financial replay/reproduce/score which take
+                       --rule / --alert-id / --manifest at the script level.
 
         Returns:
             Initial JobStatus
         """
         job_name = f"lakebench-{job_type.value}"
-
         # Delete existing job if present
         self._delete_job(job_name)
 
         # Build SparkApplication manifest
-        manifest = self._build_manifest(job_type, extra_conf, cycle_env=cycle_env)
+        manifest = self._build_manifest(
+            job_type,
+            extra_conf,
+            cycle_env=cycle_env,
+            arguments=arguments,
+        )
 
         # Apply manifest
         from kubernetes import client as k8s_client
@@ -911,6 +1572,9 @@ class SparkJobManager:
                     name=job_name,
                     state=JobState.SUBMITTED,
                     message=f"Job {job_name} submitted",
+                    # What was requested after the concurrent budget and any
+                    # override, so the scorecard's CPU-hours match it.
+                    executor_count=int(manifest["spec"]["executor"].get("instances") or 0),
                 )
 
             except ApiException as e:
@@ -943,11 +1607,14 @@ class SparkJobManager:
             message=f"Failed to submit after retries: {last_exc}",
         )
 
-    def _delete_job(self, job_name: str) -> None:
+    def _delete_job(self, job_name: str, *, request_timeout: int | None = None) -> None:
         """Delete existing Spark job if present.
 
         Args:
             job_name: Name of job to delete
+            request_timeout: Optional cap on the K8s API call. Used by the
+                datagen-timeout cleanup path so a hung API does not block
+                the cleanup indefinitely.
         """
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
@@ -955,13 +1622,16 @@ class SparkJobManager:
         custom_api = k8s_client.CustomObjectsApi()
 
         try:
-            custom_api.delete_namespaced_custom_object(
-                group="sparkoperator.k8s.io",
-                version="v1beta2",
-                namespace=self.namespace,
-                plural="sparkapplications",
-                name=job_name,
-            )
+            kwargs: dict = {
+                "group": "sparkoperator.k8s.io",
+                "version": "v1beta2",
+                "namespace": self.namespace,
+                "plural": "sparkapplications",
+                "name": job_name,
+            }
+            if request_timeout is not None:
+                kwargs["_request_timeout"] = request_timeout
+            custom_api.delete_namespaced_custom_object(**kwargs)
             # Wait for deletion
             time.sleep(2)
         except ApiException as e:
@@ -983,13 +1653,28 @@ class SparkJobManager:
         custom_api = k8s_client.CustomObjectsApi()
 
         try:
-            obj = custom_api.get_namespaced_custom_object(
-                group="sparkoperator.k8s.io",
-                version="v1beta2",
-                namespace=self.namespace,
-                plural="sparkapplications",
-                name=job_name,
-            )
+            # Bounded: without a timeout a half-dead connection blocks the
+            # stage monitor for as long as the socket stays open.
+            # Retried here so every caller (continuous start-up and end-of-
+            # window checks included) rides out one slow read.
+            for attempt in range(STATUS_READ_ATTEMPTS):
+                try:
+                    obj = custom_api.get_namespaced_custom_object(
+                        group="sparkoperator.k8s.io",
+                        version="v1beta2",
+                        namespace=self.namespace,
+                        plural="sparkapplications",
+                        name=job_name,
+                        _request_timeout=STATUS_REQUEST_TIMEOUT,
+                    )
+                    break
+                except Exception as e:
+                    if attempt + 1 >= STATUS_READ_ATTEMPTS or not is_transient_status_error(e):
+                        raise
+                    logger.warning(
+                        "status read for %s failed (%s), retrying", job_name, type(e).__name__
+                    )
+                    time.sleep(2)
 
             status = obj.get("status", {})
             app_state = status.get("applicationState", {})
@@ -1023,6 +1708,7 @@ class SparkJobManager:
                 executor_count=len(status.get("executorState", {}))
                 if status.get("executorState")
                 else 0,
+                submission_attempts=int(status.get("submissionAttempts") or 0),
             )
 
         except ApiException as e:
@@ -1039,6 +1725,7 @@ class SparkJobManager:
         job_type: JobType,
         extra_conf: dict[str, str] | None = None,
         cycle_env: dict[str, str] | None = None,
+        arguments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build SparkApplication manifest.
 
@@ -1046,6 +1733,7 @@ class SparkJobManager:
             job_type: Type of job
             extra_conf: Additional Spark configuration
             cycle_env: Extra env vars for multi-cycle batch (e.g. LB_SILVER_INCREMENTAL)
+            arguments: CLI arguments appended to the main app file.
 
         Returns:
             SparkApplication manifest dict
@@ -1057,21 +1745,31 @@ class SparkJobManager:
         job_name = f"lakebench-{job_type.value}"
         spark_major = _parse_spark_major(cfg.images.spark)
 
-        # Per-job resource profile (proven at 1TB+ scale)
-        profile = _JOB_PROFILES.get(job_type.value, _JOB_PROFILES["silver-build"])
+        # Per-job resource profile (proven at 1TB+ scale). Schema-aware:
+        # AML bronze-verify needs a bigger scratch PVC than c360 to survive
+        # the CTAS fallback path (LB-118).
+        _schema = getattr(getattr(cfg.architecture.workload, "schema_type", None), "value", None)
+        profile = _resolve_job_profile(job_type.value, _schema) or _resolve_job_profile(
+            "silver-build", _schema
+        )
+        assert profile is not None  # silver-build always exists
         scale = cfg.architecture.workload.datagen.scale
         executor_count = _scale_executor_count(profile, scale)
 
         # Streaming: cap to concurrent budget (all 3 jobs + datagen share cluster)
+        capped_from = executor_count
         if job_type in _STREAMING_JOB_TYPES and self._cluster_cpu_m is not None:
-            budget = _streaming_concurrent_budget(cfg, self._cluster_cpu_m)
+            budget = _streaming_concurrent_budget(
+                cfg, self._cluster_cpu_m, datagen_running=self.datagen_running
+            )
             if job_type in budget and budget[job_type] < executor_count:
-                logger.info(
+                logger.warning(
                     "Concurrent budget: %s capped from %d to %d executors",
                     job_type.value,
                     executor_count,
                     budget[job_type],
                 )
+                capped_from = executor_count
                 executor_count = budget[job_type]
 
         # Per-job executor override (user escape hatch)
@@ -1084,6 +1782,13 @@ class SparkJobManager:
             JobType.GOLD_REFRESH: cfg.platform.compute.spark.gold_refresh_executors,
         }
         override = override_map.get(job_type)
+        if job_type in _STREAMING_JOB_TYPES and override is None and capped_from != executor_count:
+            # After the override check: an explicit count wins over the
+            # budget, so there is nothing to warn about then.
+            self.budget_warnings.append(
+                f"Concurrent budget: {job_type.value} capped from {capped_from} "
+                f"to {executor_count} executors (cluster too small for the profile)"
+            )
         if override is not None:
             logger.info(
                 "Using executor override for %s: %d (auto would be %d)",
@@ -1169,8 +1874,11 @@ class SparkJobManager:
         # Select script based on job type and table format.
         # Scripts are mounted from ConfigMap at /opt/spark/scripts.
         # Delta scripts use *_delta.py variants; format-agnostic scripts
-        # (bronze_verify) are shared.
+        # (bronze_verify) are shared. Financial (schema=financial) uses
+        # its own *_financial.py scripts because the pacs.008 shape and
+        # workload set differ from Customer 360's medallion pipeline.
         table_format = cfg.architecture.table_format.type.value
+        workload_schema = cfg.architecture.workload.schema_type.value
         script_map = {
             JobType.BRONZE_VERIFY: "bronze_verify.py",
             JobType.SILVER_BUILD: "silver_build.py",
@@ -1179,7 +1887,21 @@ class SparkJobManager:
             JobType.SILVER_STREAM: "silver_stream.py",
             JobType.GOLD_REFRESH: "gold_refresh.py",
         }
-        if table_format == "delta":
+        if workload_schema == "financial":
+            # Financial pipeline is authored end-to-end; each sub-PR of
+            # ENG-2C.3 fills in the corresponding entry. Scripts that have
+            # not shipped yet fall back to the Customer 360 file above so
+            # a partial-landing branch still boots.
+            _financial_scripts = {
+                JobType.BRONZE_VERIFY: "bronze_verify_financial.py",
+                JobType.SILVER_BUILD: "silver_build_financial.py",
+                JobType.GOLD_FINALIZE: "gold_finalize_financial.py",
+                JobType.BRONZE_INGEST: "bronze_ingest_financial.py",
+                JobType.SILVER_STREAM: "silver_stream_financial.py",
+                JobType.GOLD_REFRESH: "gold_refresh_financial.py",
+            }
+            script_map.update(_financial_scripts)
+        elif table_format == "delta":
             script_map.update(
                 {
                     JobType.SILVER_BUILD: "silver_build_delta.py",
@@ -1189,6 +1911,15 @@ class SparkJobManager:
                     JobType.GOLD_REFRESH: "gold_refresh_delta.py",
                 }
             )
+        # Financial-only operator actions (replay/reproduce/score) are
+        # schema-agnostic in the deploy path but only meaningful for
+        # Financial workloads. Registered unconditionally so
+        # `lakebench financial <verb>` works regardless of the elif
+        # branch above.
+        script_map.setdefault(JobType.REPLAY_FINANCIAL, "replay_financial.py")
+        script_map.setdefault(JobType.REPRODUCE_FINANCIAL, "reproduce_financial.py")
+        script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
+        script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
         # Use local:// to reference scripts already in the container filesystem
         # (mounted from lakebench-spark-scripts ConfigMap)
         main_file = f"local:///opt/spark/scripts/{script_map[job_type]}"
@@ -1231,6 +1962,7 @@ class SparkJobManager:
                     f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
                 )
             spark_conf["spark.jars.packages"] = ",".join(packages)
+            spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
             spark_conf["spark.sql.extensions"] = "io.delta.sql.DeltaSparkSessionExtension"
         else:
             # Iceberg (default)
@@ -1250,6 +1982,16 @@ class SparkJobManager:
                     f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
                 )
             spark_conf["spark.jars.packages"] = ",".join(packages)
+            # Central rate-limits per-egress-IP (HTTP 429), and a burst of
+            # UAT deploys can silently starve a fresh driver pod's Ivy
+            # resolve. Google's Central mirror at
+            # ``maven-central.storage-download.googleapis.com`` is
+            # rate-limited independently and works with a plain
+            # ``--repositories`` entry -- Ivy falls to it when Central
+            # returns 429 as "not found". Adding as spark_conf so both
+            # the SparkApplication CR and the ivy-warmer init container
+            # (which reads spark.jars.* from the same conf) see it.
+            spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
             spark_conf["spark.sql.extensions"] = (
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
             )
@@ -1275,6 +2017,12 @@ class SparkJobManager:
                 "spark.hadoop.fs.s3a.endpoint.region": s3.region,
                 "spark.hadoop.fs.s3a.path.style.access": str(s3.path_style).lower(),
                 "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+                # REST catalogs (Polaris) hand out s3:// table locations.
+                # Iceberg's add_files stages manifests through Hadoop FS at
+                # that location, and with no s3:// implementation it failed
+                # ("Failed to get file system"), falling back to a full CTAS
+                # copy of bronze. S3A reads the same fs.s3a.* settings.
+                "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
             }
         )
@@ -1310,6 +2058,14 @@ class SparkJobManager:
                 spark_conf.update(
                     {
                         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+                        # LB-148 / LB-034: Delta's metadata-only MIN/MAX
+                        # rewrite throws ClassCastException (LocalDate ->
+                        # java.sql.Date) on date partition columns.
+                        # gold_incremental reads max(interaction_date) inside
+                        # a broad except, so if that read hit the crash it
+                        # would silently turn an incremental run into a full
+                        # recompute.
+                        "spark.databricks.delta.optimizeMetadataQuery.enabled": "false",
                         "spark.sql.catalogImplementation": "hive",
                         "spark.hadoop.hive.metastore.uris": hive_uri,
                         "spark.sql.warehouse.dir": f"s3a://{warehouse_bucket}/warehouse/",
@@ -1332,8 +2088,11 @@ class SparkJobManager:
                 f"spark.sql.catalog.{catalog_name}.s3.path-style-access": str(
                     s3.path_style
                 ).lower(),
-                # OAuth2 credential (client_id:client_secret)
-                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{cfg.architecture.catalog.polaris.client_secret}",
+                # OAuth2 credential (client_id:client_secret).
+                # `require_polaris_client_secret` refuses an empty value
+                # (LB-090) -- a Spark job that submits with an empty
+                # secret would fail OAuth2 far from the config file.
+                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{require_polaris_client_secret(cfg)}",
                 f"spark.sql.catalog.{catalog_name}.scope": "PRINCIPAL_ROLE:ALL",
                 f"spark.sql.catalog.{catalog_name}.token-refresh-enabled": "true",
                 # FlashBlade: static S3 credentials on catalog (no STS vending)
@@ -1385,7 +2144,16 @@ class SparkJobManager:
                 }
             )
 
-        # Ivy cache must be writable
+        # Ivy cache must be writable. Two processes resolve spark.jars.packages
+        # into this path: the driver (the spark-ivy-cache emptyDir below) and,
+        # first, spark-submit inside the Spark Operator controller, whose /tmp
+        # is the chart's 1Gi emptyDir. This job's jars (~1.2 GB) overflow that
+        # and the kubelet evicts the shared controller; `lakebench admin
+        # install-spark-operator` / `repair-operator` size it to 8Gi
+        # (operator_scratch.py). Moving the path would not help: the
+        # controller's root filesystem is read-only, so /tmp is its only
+        # writable volume. The durable fix is jars baked into the Spark image
+        # so spark.jars.packages is empty at submit.
         spark_conf["spark.jars.ivy"] = "/tmp/.ivy2"
         spark_conf["spark.files.useFetchCache"] = "false"
 
@@ -1452,8 +2220,14 @@ class SparkJobManager:
         # At scale 100 (1TB): 1024MB partitions = ~1000 tasks.
         # At scale 10 (100GB): 256MB partitions = ~400 tasks (floor applies).
         target_tasks = 2000
-        approx_bronze_gb = scale * 10
-        partition_mb = max(256, min(2048, (approx_bronze_gb * 1024) // target_tasks))
+        # `scale` is a float (e.g. 100.0). Without int() the arithmetic
+        # returns a float, `str(536870912.0) = "536870912.0"`, and Spark
+        # rejects the fractional byte value with `NumberFormatException:
+        # Size must be specified as bytes ...`. Only manifests when
+        # `partition_bytes` is not a whole GiB (i.e. at scales where the
+        # formula lands between the 256 MiB floor and the 2 GiB ceiling).
+        approx_bronze_gb = int(scale * 10)
+        partition_mb = int(max(256, min(2048, (approx_bronze_gb * 1024) // target_tasks)))
         partition_bytes = partition_mb * 1024 * 1024
         spark_conf.update(
             {
@@ -1563,6 +2337,7 @@ class SparkJobManager:
                                 "set -e; "
                                 "/opt/spark/bin/spark-submit "
                                 f'--packages "{packages_str}" '
+                                f'--repositories "{_MAVEN_MIRROR_REPOS}" '
                                 "--conf spark.jars.ivy=/tmp/.ivy2 "
                                 "--class org.apache.spark.deploy.DummyNonExistent "
                                 "local:///dev/null 2>&1 || true; "
@@ -1639,6 +2414,7 @@ class SparkJobManager:
                 container["volumeMounts"].append({"name": "truststore", "mountPath": "/truststore"})
             for container in executor_pod_template["spec"]["containers"]:
                 container["volumeMounts"].append({"name": "truststore", "mountPath": "/truststore"})
+
             # JVM truststore args for driver and executor
             _ts_opts = (
                 " -Djavax.net.ssl.trustStore=/truststore/truststore.jks"
@@ -1650,6 +2426,35 @@ class SparkJobManager:
             spark_conf["spark.executor.extraJavaOptions"] = (
                 spark_conf.get("spark.executor.extraJavaOptions", "") + _ts_opts
             ).strip()
+
+        # The reference detector trains on the driver only; executors do not
+        # need the packages. Driver-side only: the volume is added to the
+        # driver template's own copy of the volume list.
+        if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
+            driver_pod_template["spec"]["volumes"] = [
+                *driver_pod_template["spec"]["volumes"],
+                {"name": "lb-pydeps", "emptyDir": {"sizeLimit": "2Gi"}},
+            ]
+            _deps_mount = {"name": "lb-pydeps", "mountPath": REFERENCE_PY_DEPS_DIR}
+            driver_pod_template["spec"]["initContainers"].append(
+                {
+                    "name": "install-pydeps",
+                    "image": cfg.images.spark,
+                    "imagePullPolicy": cfg.images.pull_policy.value,
+                    "securityContext": {"runAsUser": 185, "runAsGroup": 185},
+                    "env": [{"name": "HOME", "value": "/tmp"}],
+                    "command": [
+                        "/bin/bash",
+                        "-c",
+                        "set -e; python3 -m pip install --no-cache-dir --no-deps "
+                        f"--only-binary=:all: --target {REFERENCE_PY_DEPS_DIR} "
+                        + " ".join(REFERENCE_PY_DEPS),
+                    ],
+                    "volumeMounts": [_deps_mount],
+                }
+            )
+            for container in driver_pod_template["spec"]["containers"]:
+                container["volumeMounts"] = [*container["volumeMounts"], _deps_mount]
 
         # Check for scratch storage (Portworx) configuration
         scratch = cfg.platform.storage.scratch
@@ -1671,16 +2476,40 @@ class SparkJobManager:
             spark_conf["spark.local.dir"] = "/tmp/spark-local"
 
         _restart_policy: dict[str, Any] = (
-            {"type": "Always"}
+            {
+                "type": "Always",
+                "onFailureRetryInterval": 30,
+                "onSubmissionFailureRetryInterval": 60,
+            }
             if job_type in _STREAMING_JOB_TYPES
             else {
                 "type": "OnFailure",
                 "onFailureRetries": 2,
                 "onFailureRetryInterval": 30,
-                "onSubmissionFailureRetries": 2,
-                "onSubmissionFailureRetryInterval": 30,
+                # Submission runs spark-submit inside the SHARED operator,
+                # which resolves spark.jars.packages into one Ivy cache;
+                # concurrent deployments race there on a cold cache
+                # (SPARK-10878) and fail FAILED DOWNLOADS until one of them
+                # fills it. Retry more, and wait longer between attempts.
+                "onSubmissionFailureRetries": 5,
+                "onSubmissionFailureRetryInterval": 60,
             }
         )
+
+        if (
+            job_type == JobType.SCORE_FINANCIAL_REFERENCE
+            and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
+        ):
+            # A registered look runs once: an operator retry after the gate
+            # computed AP (a crash or an error verdict) would look again.
+            # Submission retries stay: they run before the driver starts,
+            # so no AP exists yet (shared Ivy cache race, see above).
+            _restart_policy = {
+                "type": "OnFailure",
+                "onFailureRetries": 0,
+                "onSubmissionFailureRetries": 5,
+                "onSubmissionFailureRetryInterval": 60,
+            }
 
         manifest = {
             "apiVersion": "sparkoperator.k8s.io/v1beta2",
@@ -1702,6 +2531,11 @@ class SparkJobManager:
                 "image": cfg.images.spark,
                 "imagePullPolicy": cfg.images.pull_policy.value,
                 "mainApplicationFile": main_file,
+                # Args for scripts that take CLI options (replay/reproduce/score).
+                # SparkOperator maps this to the driver's Python argv after the
+                # script path. Omit when unused so we don't break the older
+                # config's assumption that omitting the field is safe.
+                **({"arguments": arguments} if arguments else {}),
                 # No deps.pyFiles needed - PYTHONPATH includes /opt/spark/scripts for common.py imports
                 "sparkVersion": spark_image_tag,  # From config: images.spark
                 "restartPolicy": _restart_policy,
@@ -1746,6 +2580,65 @@ class SparkJobManager:
         }
 
         return manifest
+
+    def _resolve_silver_data_clock(self, cfg: LakebenchConfig) -> tuple[str, str]:
+        """C2 (silver-plan): resolve LB_DATA_CLOCK for a silver job.
+
+        Returns ``(iso_date, source_label)`` where ``source_label`` is one of
+        ``datagen_timestamp_end``, ``bronze_data_clock``,
+        ``datagen_timestamp_start`` or ``fallback_default``.
+
+        The Kubernetes lookup (``lakebench-silver-state.bronze_data_clock``)
+        is best-effort: any error (404, transport, missing config) falls
+        through to the next rung of the ladder. Silver's C1 strict resolver
+        raises if LB_DATA_CLOCK is somehow still missing on the driver, but
+        this path is designed so that never happens for a bare config.
+        """
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        # Rung 1: configured window end.
+        _ts_end = cfg.architecture.workload.datagen.timestamp_end
+        if _ts_end:
+            return str(_ts_end), "datagen_timestamp_end"
+
+        # Rung 2: bronze-verify's max(event_ts).
+        bronze_clock = self._read_bronze_data_clock()
+        if bronze_clock:
+            return bronze_clock, "bronze_data_clock"
+
+        # Rung 3: configured window start.
+        _ts_start = cfg.architecture.workload.datagen.timestamp_start
+        if _ts_start:
+            return str(_ts_start), "datagen_timestamp_start"
+
+        # Rung 4: today at 00:00 UTC.
+        today = _dt.now(_tz.utc).date().isoformat()
+        return today, "fallback_default"
+
+    def _read_bronze_data_clock(self) -> str | None:
+        """Best-effort read of ``lakebench-silver-state.bronze_data_clock``
+        from the deployment namespace. Returns None on any failure so the
+        resolver falls through to the next ladder rung."""
+        try:
+            from kubernetes import client as _kclient
+            from kubernetes.client.exceptions import ApiException
+        except ImportError:  # pragma: no cover
+            return None
+        try:
+            core = _kclient.CoreV1Api()
+            cm = core.read_namespaced_config_map("lakebench-silver-state", self.namespace)
+            data = getattr(cm, "data", None) or {}
+            val = data.get("bronze_data_clock", "")
+            return val.strip() or None
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            logger.debug("silver-state ConfigMap read failed (%s); falling back", e.status)
+            return None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("silver-state ConfigMap read error: %s; falling back", e)
+            return None
 
     def _build_env_vars(
         self,
@@ -1814,6 +2707,157 @@ class SparkJobManager:
             {"name": "LB_GOLD_TABLE", "value": cfg.architecture.tables.gold},
         ]
 
+        # Live observability: point the Spark driver at the per-deployment
+        # Pushgateway so bronze/silver/gold stage metrics show live in Grafana.
+        # Best-effort -- common.py:log_job_metrics no-ops when the env is unset.
+        # LB_RUN_ID is shared with datagen via the orchestrator process env so a
+        # run correlates across stages.
+        obs = cfg.observability
+        if obs.enabled and obs.pushgateway_enabled:
+            env.append(
+                {
+                    "name": "LB_PUSHGATEWAY_URL",
+                    "value": f"http://lakebench-pushgateway.{self.namespace}.svc:9091",
+                }
+            )
+            env.append({"name": "LB_RUN_ID", "value": os.environ.get("LB_RUN_ID", "")})
+
+        # C2 (silver-plan): silver jobs always carry LB_DATA_CLOCK so a rerun
+        # scores recency reproducibly, and a greenfield deployment never
+        # silently writes NULL customer_recency_score. Resolution order:
+        #
+        #   1. datagen.timestamp_end (configured window end, exclusive)
+        #   2. bronze-verify's max(event_ts) recorded in ConfigMap
+        #      ``lakebench-silver-state.bronze_data_clock``
+        #   3. datagen.timestamp_start (first-cycle greenfield with no bronze)
+        #   4. today at 00:00 UTC (bare-config safety net)
+        #
+        # A companion ``LB_DATA_CLOCK_SOURCE`` label lands in metrics.json so
+        # a report reader can tell which rung of the ladder fired.
+        #
+        # Non-silver jobs (bronze-verify, gold-*) keep the old behaviour of
+        # emitting LB_DATA_CLOCK only when timestamp_end is directly set;
+        # they do not carry the fallback source label.
+        _ts_end = cfg.architecture.workload.datagen.timestamp_end
+        _is_silver_job = job_type in (JobType.SILVER_BUILD, JobType.SILVER_STREAM)
+        if _is_silver_job:
+            _clock_value, _clock_source = self._resolve_silver_data_clock(cfg)
+            env.append({"name": "LB_DATA_CLOCK", "value": _clock_value})
+            env.append({"name": "LB_DATA_CLOCK_SOURCE", "value": _clock_source})
+        elif _ts_end:
+            env.append({"name": "LB_DATA_CLOCK", "value": str(_ts_end)})
+
+        # G3: reproducibility seed for silver-build profile sampling
+        # (silver_build.py, silver_build_delta.py). Exported so re-runs at
+        # the same seed produce the same profile numbers. Uses the resolved
+        # datagen seed (config/datagen_seed.py) so the sampler sees the same
+        # deterministic value the generator was run with.
+        # Narrow catch: config_seed raises AttributeError when the workload
+        # block lacks a datagen slot (e.g. legacy fixture configs) and
+        # ValueError from resolve_seed on a spent seed the schema validator
+        # already refused. Anything else -- an import failure, an IO error
+        # reading the prereg JSON on the pod -- is a real problem and should
+        # surface, not be silently downgraded to seed 0 (evidence-mislabel:
+        # metrics would then claim reproducibility from a seed the datagen
+        # never ran with).
+        try:
+            from lakebench.config.datagen_seed import config_seed
+
+            _lb_seed = config_seed(cfg)
+        except (AttributeError, ValueError) as e:
+            logger.info(
+                "LB_SEED fallback to 0 for silver-build sampler: %s: %s",
+                type(e).__name__,
+                e,
+            )
+            _lb_seed = 0
+        env.append({"name": "LB_SEED", "value": str(_lb_seed)})
+
+        # B1 rebuild-epoch: the per-deployment lakebench-silver-state ConfigMap
+        # stores one counter per (workload x format). The counter bumps on a
+        # user-triggered --force-rebuild via the CLI so Delta's (txnAppId,
+        # txnVersion) commits from earlier epochs do not short-circuit the
+        # fresh rebuild's cycle 0. Iceberg silver reads the same counter to
+        # guard against unintended full rebuilds. A missing ConfigMap on an
+        # older deployment falls back to 0 (behavioural no-op vs the previous
+        # release).
+        _rebuild_key = _rebuild_epoch_key(cfg)
+        if _rebuild_key is not None and job_type in (
+            JobType.SILVER_BUILD,
+            JobType.SILVER_STREAM,
+        ):
+            _epoch = _read_silver_state_epoch(self.namespace, _rebuild_key)
+            env.append({"name": "LB_REBUILD_EPOCH", "value": str(_epoch)})
+
+        # G5: silver streams label their admission decision against the
+        # measured scale envelope (invariant 6). The stream mains compute
+        # `admission = "ok"` when scale <= measured envelope, else
+        # `labelled_beyond_measured_envelope`. Export the deployment scale
+        # so a running stream can decide, not just recite a hardcoded string.
+        try:
+            _scale = float(cfg.architecture.workload.datagen.scale)
+        except (AttributeError, TypeError, ValueError):
+            _scale = 1.0
+        env.append({"name": "LB_SCALE", "value": str(_scale)})
+
+        # Financial workload: point bronze_verify_financial / silver_build_financial
+        # at the same S3 prefix the datagen K8s Job wrote to. Datagen picks
+        # `pacs008` when path_template is at its C360 default; mirror that here.
+        if cfg.architecture.workload.schema_type.value == "financial":
+            _bronze_prefix = cfg.architecture.pipeline.medallion.bronze.path_template
+            if _bronze_prefix == "customer/interactions":
+                _bronze_prefix = "pacs008"
+            env.append(
+                {
+                    "name": "LB_FINANCIAL_BRONZE_PREFIX",
+                    "value": _bronze_prefix.rstrip("/") + "/",
+                }
+            )
+            env.append(
+                {
+                    "name": "LB_FINANCIAL_BRONZE_TABLE",
+                    "value": cfg.architecture.tables.bronze,
+                }
+            )
+            env.extend(
+                {"name": k, "value": v} for k, v in cfg.architecture.tables.financial_env().items()
+            )
+            # W1 connected-components vertex cap (LB-119/LB-120). Read by
+            # gold_finalize_financial and threaded into the W1 rule so the
+            # graph detector runs at scale 10 by default and can be raised
+            # for larger scales via config rather than a code edit.
+            env.append(
+                {
+                    "name": "LB_FINANCIAL_W1_MAX_VERTICES",
+                    "value": str(cfg.architecture.workload.w1_max_vertices),
+                }
+            )
+            # P10 operations layer parameters (tm_operations.py).
+            env.extend(
+                {"name": k, "value": v}
+                for k, v in cfg.architecture.workload.tm_operations.env().items()
+            )
+            # H4 fat-finger guard: AML batch silver refuses to overwrite while
+            # continuous silver is active. silver_build_financial.main() probes
+            # for ``_STARTED`` under this deployment's known silver-stream
+            # checkpoint path -- the same URI job.py builds for the SILVER_STREAM
+            # trigger_map (streaming-specific env block below). We export it
+            # for SILVER_BUILD too so the guard's env-var read is not None in
+            # a batch pod; without this, the guard is a silent no-op and a
+            # concurrent batch run wipes silver.transactions the stream just
+            # committed. Any current-behaviour SILVER_STREAM setter still fires
+            # in the streaming block: this only adds the SILVER_BUILD case.
+            if job_type == JobType.SILVER_BUILD:
+                _sustained = cfg.architecture.pipeline.sustained
+                env.append(
+                    {
+                        "name": "LB_FINANCIAL_SILVER_CHECKPOINT",
+                        "value": (
+                            f"s3a://{s3.buckets.silver}/{_sustained.checkpoint_base}/silver-stream/"
+                        ),
+                    }
+                )
+
         # Streaming-specific env vars
         if job_type is not None and job_type in _STREAMING_JOB_TYPES:
             sustained = cfg.architecture.pipeline.sustained
@@ -1823,7 +2867,7 @@ class SparkJobManager:
             trigger_map = {
                 JobType.BRONZE_INGEST: (
                     sustained.bronze_trigger_interval,
-                    f"s3a://{s3.buckets.bronze}/{checkpoint_base}/bronze-ingest/",
+                    bronze_ingest_checkpoint_uri(cfg),
                 ),
                 JobType.SILVER_STREAM: (
                     sustained.silver_trigger_interval,
@@ -1851,11 +2895,97 @@ class SparkJobManager:
                     {"name": "CHECKPOINT_LOCATION", "value": checkpoint_location},
                     {
                         "name": "MAX_FILES_PER_TRIGGER",
-                        "value": str(sustained.max_files_per_trigger),
+                        # Resolved by cli/_sustained.resolve_trickle before submit.
+                        "value": str(sustained.max_files_per_trigger or 50),
                     },
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
             )
+            # A3 (silver-plan): silver-stream reads this cap so its bronze
+            # wait loop cannot spend the whole window before the LB-044 gate
+            # fires. See SustainedConfig.effective_silver_bronze_wait_seconds.
+            if job_type == JobType.SILVER_STREAM:
+                env.append(
+                    {
+                        "name": "LB_SILVER_BRONZE_WAIT_SECONDS",
+                        "value": str(sustained.effective_silver_bronze_wait_seconds()),
+                    }
+                )
+            # LB-090: AML sustained scripts read a different set of env
+            # var names than the schema-agnostic C360 scripts do.
+            # Rather than rename either side (both have callers), set
+            # BOTH spellings under financial so bronze_ingest_financial,
+            # silver_stream_financial, and gold_refresh_financial pick up
+            # the configured values. Without these, the AML scripts
+            # fall back to hard-coded defaults that write checkpoints
+            # to ``s3a://lb-bronze/_checkpoints/...`` -- a bucket that
+            # is NOT part of the current deployment on any non-default
+            # config, and that two parallel sustained runs would stomp
+            # on each other (silent corruption of the very parallel-
+            # safety invariant the shared-cluster ownership discipline
+            # exists to prove).
+            if cfg.architecture.workload.schema_type.value == "financial":
+                if job_type == JobType.BRONZE_INGEST:
+                    env.extend(
+                        [
+                            {
+                                "name": "LB_FINANCIAL_BRONZE_CHECKPOINT",
+                                "value": checkpoint_location,
+                            },
+                            {
+                                "name": "LB_FINANCIAL_BRONZE_MAX_FILES",
+                                # Resolved by cli/_sustained.resolve_trickle before submit.
+                                "value": str(sustained.max_files_per_trigger or 50),
+                            },
+                            {
+                                "name": "LB_FINANCIAL_BRONZE_TRIGGER_S",
+                                "value": str(_spark_interval_to_seconds(trigger_interval)),
+                            },
+                        ]
+                    )
+                elif job_type == JobType.SILVER_STREAM:
+                    env.extend(
+                        [
+                            {
+                                "name": "LB_FINANCIAL_SILVER_CHECKPOINT",
+                                "value": checkpoint_location,
+                            },
+                            {
+                                "name": "LB_FINANCIAL_SILVER_TRIGGER_S",
+                                "value": str(_spark_interval_to_seconds(trigger_interval)),
+                            },
+                        ]
+                    )
+                elif job_type == JobType.GOLD_REFRESH:
+                    env.append(
+                        {
+                            "name": "LB_FINANCIAL_GOLD_REFRESH_S",
+                            "value": str(_spark_interval_to_seconds(trigger_interval)),
+                        }
+                    )
+                    # The TM layer reads the bronze stream's source log to
+                    # know which raw files bronze should hold (P10 stage 1).
+                    env.append(
+                        {
+                            "name": "LB_FINANCIAL_BRONZE_CHECKPOINT",
+                            "value": bronze_ingest_checkpoint_uri(cfg),
+                        }
+                    )
+
+        # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
+        # the report scored and which lakebench revision produced it.
+        if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
+            from lakebench.config.datagen_seed import config_seed
+
+            env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
+            role = cfg.architecture.workload.datagen.corpus_role
+            if role is not None:
+                # The declared role of a registered run, recorded in the report.
+                env.append({"name": "LB_DATAGEN_CORPUS_ROLE", "value": role})
+            if cfg.architecture.workload.datagen.robustness_perturbation:
+                # The corpus was generated with the robustness perturbation.
+                env.append({"name": "LB_DATAGEN_ROBUSTNESS_PERTURBATION", "value": "true"})
+            env.append({"name": "LB_GIT_SHA", "value": _lakebench_git_sha()})
 
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
         if cycle_env:
@@ -1892,6 +3022,29 @@ class SparkJobManager:
             "gold_refresh_delta.py",
             "bronze_ingest_delta.py",
             "silver_stream_delta.py",
+            # Financial (FinServ-Crime, AML) pipeline scripts
+            "bronze_verify_financial.py",
+            "silver_build_financial.py",
+            "gold_finalize_financial.py",
+            "bronze_ingest_financial.py",
+            "silver_stream_financial.py",
+            "gold_refresh_financial.py",
+            "replay_financial.py",
+            "reproduce_financial.py",
+            "score_financial.py",
+            "score_financial_reference.py",
+            # Library module imported by replay_financial (not a Spark
+            # entry point but must be mounted alongside so the local
+            # import resolves inside the driver pod).
+            "detection_rules.py",
+            # Library module imported by score_financial_reference: the
+            # pre-registered AML gate features (shared with the local
+            # harness scripts/aml_gate.py).
+            "aml_features.py",
+            # Library module imported by gold_finalize_financial and
+            # gold_refresh_financial: the P10 operations layer. Executors
+            # import it too (the per-customer workflow replay runs there).
+            "tm_operations.py",
         ]
 
         # Build ConfigMap data
@@ -1901,6 +3054,53 @@ class SparkJobManager:
             if script_path.exists():
                 data[script_file] = script_path.read_text()
                 logger.info(f"Loaded script: {script_file}")
+
+        # reference_score.py is the single source of truth for the leakage
+        # gate + reference-detector logic and lives in the lakebench.aml
+        # package (unit-tested there as lakebench.aml.reference_score). The
+        # apache/spark image has no lakebench install, so it is packaged flat
+        # into the ConfigMap next to the scripts and imported by
+        # score_financial_reference.py as a bare `from reference_score import`
+        # -- the same pattern common.py and detection_rules.py use. It is
+        # self-contained (stdlib + optional sklearn/pandas at call time), so a
+        # flat mount resolves with no lakebench package on the driver.
+        from lakebench._resources import _package_dir
+
+        # fidelity_gate.py (the pre-registered AML gate evaluation) ships the
+        # same way, for the same reason; it reads aml_preregistration.json,
+        # which the AML data loop below also mounts flat.
+        for _aml_mod in ("reference_score.py", "fidelity_gate.py"):
+            _mod_path = _package_dir() / "aml" / _aml_mod
+            if _mod_path.exists():
+                data[_aml_mod] = _mod_path.read_text()
+                logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
+        # The AML seed guard (stdlib only) ships flat too, so the reference
+        # job refuses a corpus from a spent or unregistered protected seed.
+        # Fail at build time, not three driver attempts later.
+        _seed_mod = _package_dir() / "config" / "datagen_seed.py"
+        if not _seed_mod.exists():
+            raise FileNotFoundError(f"AML seed guard missing from the package: {_seed_mod}")
+        data["datagen_seed.py"] = _seed_mod.read_text()
+
+        # AML reference JSON sidecars (sanctions, PEP, high-risk
+        # jurisdictions). Detection rules load these by filename via
+        # ``_load_reference`` in detection_rules.py; without them
+        # inside the driver, W5/W6/W7 silently return zero alerts,
+        # and W7 previously crashed with an opaque ImportError from
+        # ``import lakebench.spark.data`` because the lakebench
+        # package is not installed in the apache/spark image. The
+        # three files together are ~8 KB, well under the 1 MiB
+        # ConfigMap limit. ConfigMap keys cannot contain slashes so
+        # the files land flat next to the scripts under
+        # /opt/spark/scripts/; the reader's candidate-directory search
+        # finds them there.
+        from lakebench._resources import get_aml_data_dir
+
+        aml_data_dir = get_aml_data_dir()
+        if aml_data_dir is not None and aml_data_dir.is_dir():
+            for json_path in sorted(aml_data_dir.glob("*.json")):
+                data[json_path.name] = json_path.read_text()
+                logger.info(f"Loaded AML reference: {json_path.name}")
 
         if not data:
             logger.warning("No Spark scripts found")

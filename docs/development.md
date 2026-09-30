@@ -18,7 +18,8 @@ cluster for integration and end-to-end tests.
 Clone the repository and install in editable mode with development dependencies:
 
 ```bash
-cd lakebench
+git clone https://github.com/PureStorage-OpenConnect/lakebench-k8s.git
+cd lakebench-k8s
 pip install -e ".[dev]"
 pre-commit install
 ```
@@ -30,8 +31,8 @@ This installs:
 - **Dev dependencies:** pytest, pytest-cov, ruff, mypy, moto (AWS mocking),
   pre-commit
 
-The `pre-commit install` step registers Git hooks that run linting, formatting,
-and unit tests automatically before each commit. You can also set up the full
+The `pre-commit install` step registers Git hooks that run the secret scan,
+linting and formatting automatically before each commit. You can also set up the full
 dev environment in one step with `make dev`.
 
 ## Running Tests
@@ -90,17 +91,17 @@ Run checks manually:
 
 ```bash
 # Lint (check for errors)
-ruff check src/ tests/
+ruff check src/ tests/ scripts/
 
-# Format (apply consistent style)
-ruff format src/ tests/
+# Format check, as CI runs it (drop --check to apply formatting)
+ruff format --check src/ tests/ scripts/
 ```
 
-Type checking is available via mypy with strict settings
-(`disallow_untyped_defs = true`):
+Type checking uses mypy, configured in `pyproject.toml` (untyped
+functions are allowed; CI runs the same command and must pass):
 
 ```bash
-mypy src/
+mypy src/lakebench/
 ```
 
 ## Makefile Targets
@@ -119,20 +120,20 @@ to see the full list.
 
 | Target | Description |
 |--------|-------------|
-| `make test` | Run all tests (excludes e2e, extended, and stress) |
-| `make test-unit` | Run unit tests only (fast, no cluster needed) |
+| `make test` | Run the tests that need no cluster (excludes integration, e2e, extended and stress) |
+| `make test-unit` | Run every test not marked `integration` or `e2e` (`-m "not integration and not e2e"`); unlike `make test` it does not exclude `extended` or `stress` |
 | `make test-integration` | Run integration tests (requires K8s and S3) |
 | `make test-e2e` | Run end-to-end tests (full workflow) |
 | `make test-extended` | Run scale matrix tests (scales 1, 10, 50, 100) |
 | `make test-stress` | Run stress tests at large scales (250, 500, 1000) |
-| `make test-cov` | Run unit tests with coverage report |
+| `make test-cov` | Run `pytest tests/` with no marker filter and a coverage report |
 
 ### Code Quality
 
 | Target | Description |
 |--------|-------------|
-| `make lint` | Run ruff linter on `src/` and `tests/` |
-| `make fmt` | Format code with ruff and apply auto-fixes |
+| `make lint` | Run ruff linter on `src/` and `tests/` (CI also lints `scripts/`) |
+| `make fmt` | Format `src/` and `tests/` with ruff and apply auto-fixes (CI also checks `scripts/`) |
 | `make typecheck` | Run mypy type checker on `src/` |
 
 ### Maintenance
@@ -143,19 +144,34 @@ to see the full list.
 
 ## Pre-commit Hooks
 
-When you run `pre-commit install`, the following hooks are registered and run
-automatically on every `git commit`:
+When you run `pre-commit install`, the hooks in `.pre-commit-config.yaml` are
+registered and run automatically on every `git commit`:
 
-1. **Ruff lint** -- Checks for code quality issues and applies auto-fixes
-   where possible.
-2. **Ruff format** -- Enforces consistent code formatting.
-3. **Trailing whitespace** -- Removes trailing whitespace from all files.
-4. **End-of-file fixer** -- Ensures files end with a single newline.
-5. **YAML check** -- Validates YAML syntax (with support for custom tags).
-6. **Large file check** -- Prevents committing files larger than 500KB.
-7. **Merge conflict check** -- Catches unresolved merge conflict markers.
-8. **Unit tests** -- Runs `pytest tests/ -x -q -m "not integration and not e2e"`
-   to catch regressions before they reach the remote.
+1. **gitleaks** -- Fails the commit on anything that looks like a credential.
+2. **Ruff lint** -- Checks `src/` and `tests/` and applies auto-fixes where
+   possible.
+3. **Ruff format** -- Enforces consistent formatting on `src/` and `tests/`.
+4. **cargo fmt** -- Checks formatting of the Rust datagen when a `.rs` file
+   changes.
+
+The hooks do not run the tests; run `pytest tests/ -x` yourself.
+
+## What CI Runs
+
+`.github/workflows/ci.yml` runs on every branch push and on pull requests to
+`main`. The lint job runs `ruff check src/ tests/ scripts/`,
+`ruff format --check src/ tests/ scripts/` and `mypy src/lakebench/` on
+Python 3.11. The test job runs `pytest tests/ -x` (excluding
+`tests/test_e2e.py` and `tests/test_integration.py`) on Python 3.10, 3.11,
+3.12 and 3.13, and on 3.11 checks per-file coverage floors with
+`scripts/check_coverage.py --suite unit`. A Spark job runs `pytest tests/spark`
+with `pyspark==4.0.1` on Java 17 and checks its own floors with
+`scripts/check_coverage.py --suite spark`. The Rust job runs `cargo fmt
+--check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test
+--release --locked` in `datagen_rs/`. A gitleaks job scans the working tree
+for credentials. The package build runs only after all of these pass. Because
+the pre-commit hooks and Makefile targets cover only `src/` and `tests/`, run
+the ruff commands above before pushing a change under `scripts/`.
 
 To run all hooks manually against the entire codebase:
 
@@ -170,10 +186,12 @@ self-contained module with a specific responsibility:
 
 ```
 src/lakebench/
-  benchmark/    Query engine benchmark (8-query QpH suite)
-  cli/          CLI package (Typer commands, helpers, sustained pipeline)
+  aml/          Pure-Python AML helpers: reference detector, leakage gate, predictions
+  benchmark/    Query engine benchmark (QpH; 8 c360 queries, 12 AML queries)
+  cli/          CLI package (Typer commands, helpers, continuous pipeline)
   config/       Pydantic config schema, YAML loader, cluster autosizer
-  deploy/       Deployment engine and re-export shims for deployers
+  deploy/       Deployment engine, destroy, ownership records, cluster lease,
+                and re-export shims for deployers
   engine/       PipelineEngine protocol and get_engine() factory
   journal/      Event logging (session-scoped JSONL provenance logs)
   k8s/          Kubernetes client wrapper and OpenShift security (SCC/RBAC)
@@ -183,9 +201,13 @@ src/lakebench/
     query_engines/  trino/, spark_thrift/, duckdb/ -- deployers + executors
     pipeline_engines/ spark/ -- job manager, monitor, operator, RBAC
     table_formats/  iceberg/, delta/ -- maintenance SQL builders
+  observability/ Platform and S3 metrics collection for the observability stack
   reports/      HTML report generation from benchmark results
+  runtime/      Runtime abstraction: Kubernetes, or podman/docker for local runs
   s3/           S3 client (boto3 wrapper with FlashBlade compatibility)
-  spark/        Re-export shim (implementations in modules/pipeline_engines/spark/)
+  spark/        Spark job scripts (scripts/), AML data including the
+                pre-registration JSON (data/aml/), and re-exports of
+                modules/pipeline_engines/spark/
   templates/    Jinja2 templates for Kubernetes manifests
 ```
 
@@ -193,7 +215,7 @@ Supporting directories:
 
 - `tests/` -- pytest test suite organized by module
   (`test_config.py`, `test_deploy.py`, `test_spark.py`, etc.)
-- `datagen/` -- Docker image for data generation (Parquet files to S3)
+- `datagen_rs/` -- Rust data generator and its container image (Parquet files to S3)
 - `docs/` -- Project documentation
 
 ### Key Conventions

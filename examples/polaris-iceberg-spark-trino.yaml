@@ -7,9 +7,10 @@
 #          Spark RBAC, Trino (coordinator + workers).
 #
 # Requirements:
-#   - Polaris minimum version: 1.3.0-incubating (earlier versions have STS bug)
-#   - FlashBlade / non-AWS S3: set SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true
-#     (handled automatically by the deployer)
+#   - Polaris minimum version: 1.6.0 (earlier versions have STS bug)
+#   - FlashBlade / non-AWS S3: the deployer bootstraps each catalog with
+#     `stsUnavailable: true` and `pathStyleAccess: true` in the storage
+#     config. No server-wide feature flag is required or supported.
 #   - Trino 479+ needed for iceberg.rest-catalog.oauth2.scope support
 
 name: polaris-iceberg-trino
@@ -18,9 +19,9 @@ recipe: polaris-iceberg-spark-trino
 images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
-  polaris: apache/polaris:1.3.0-incubating
-  polaris_admin_tool: apache/polaris-admin-tool:1.3.0-incubating
-  trino: trinodb/trino:479
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
+  trino: trinodb/trino:483
   pull_policy: Always
 
 platform:
@@ -43,7 +44,6 @@ platform:
     scratch:
       enabled: true
       storage_class: <YOUR_SCRATCH_STORAGE_CLASS>  # Portworx: px-csi-scratch (repl=1)
-      create_storage_class: false
 
   compute:
     postgres:
@@ -53,17 +53,18 @@ platform:
 architecture:
   catalog:
     type: polaris
+    polaris:
+      # Required. Each install must set its own OAuth2 client secret (LB-090):
+      # `deploy`, `run` and `destroy` each reload the config, so they must
+      # agree on the same value. Generate one with
+      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+      # then export it as LAKEBENCH_POLARIS_CLIENT_SECRET before running any
+      # lakebench command. The env-var pattern avoids committing the secret
+      # by accident and matches the other polaris-*.yaml examples.
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
 
   pipeline:
     mode: batch
-
-  workload:
-    schema: customer360
-    datagen:
-      scale: 1                  # ~10 GB bronze data
-      file_size: 64mb
-      timestamp_start: "2024-01-01"
-      timestamp_end: "2025-01-01"
 
   query_engine:
     type: trino
@@ -79,3 +80,11 @@ architecture:
         spill_max_per_node: 40Gi
         storage: 50Gi
         storage_class: ""
+
+workload:
+  schema: customer360
+  datagen:
+    scale: 1                  # ~10 GB bronze data
+    file_size: 64mb
+    timestamp_start: "2024-01-01"
+    timestamp_end: "2025-01-01"

@@ -86,11 +86,14 @@ class TestBuildDeltaMaintenanceSql:
             table="lakehouse.bronze.events",
             retention_hours=0.0,
         )
-        # Short retention: SET SESSION first, then catalog-qualified CALL
-        assert len(stmts) == 2
-        assert "SET SESSION lakehouse.vacuum_min_retention = '0s'" in stmts[0]
-        assert "CALL lakehouse.system.vacuum" in stmts[1]
-        assert "retention => '0.0h'" in stmts[1]
+        # Short retention: SET SESSION then the CALL, in ONE submission.
+        # exec_sql runs each element as its own `trino --execute` process, so
+        # a separate SET would be lost and VACUUM would hit the 7-day minimum.
+        assert len(stmts) == 1
+        set_part, call_part = stmts[0].split("; ", 1)
+        assert set_part == "SET SESSION lakehouse.vacuum_min_retention = '0s'"
+        assert call_part.startswith("CALL lakehouse.system.vacuum")
+        assert "retention => '0.0h'" in call_part
 
     def test_spark_thrift_vacuum(self):
         stmts = build_delta_maintenance_sql(
@@ -99,10 +102,28 @@ class TestBuildDeltaMaintenanceSql:
             table="lakehouse.bronze.events",
             retention_hours=168.0,
         )
+        # At >= 7-day default, no retention-check override is needed.
         assert len(stmts) == 1
         assert "VACUUM" in stmts[0]
         assert "lakehouse.bronze.events" in stmts[0]
         assert "168.0 HOURS" in stmts[0]
+
+    def test_spark_thrift_vacuum_short_retention_disables_check(self):
+        """Regression: retention_hours=0 (destroy path) previously threw
+        IllegalArgumentException, the caller swallowed the warning, and
+        DROP TABLE ran on top of the failed VACUUM leaving orphan S3 files.
+        The override must precede the VACUUM."""
+        stmts = build_delta_maintenance_sql(
+            engine="spark-thrift",
+            catalog="lakehouse",
+            table="lakehouse.bronze.events",
+            retention_hours=0.0,
+        )
+        # One beeline -e submission, so the SET applies to the VACUUM.
+        assert stmts == [
+            "SET spark.databricks.delta.retentionDurationCheck.enabled=false; "
+            "VACUUM lakehouse.bronze.events RETAIN 0.0 HOURS"
+        ]
 
     def test_duckdb_returns_empty(self):
         stmts = build_delta_maintenance_sql(
@@ -167,15 +188,18 @@ class TestBuildDeltaCompactionSql:
 class TestBuildDeltaTableHealthSql:
     """Tests for Delta table health probe SQL per engine."""
 
-    def test_trino_properties(self):
+    def test_trino_has_no_count_query(self):
+        """Trino's Delta connector exposes no file count; the old
+        $properties query could never parse as one."""
+        from lakebench.deploy.delta_maintenance import DELTA_HEALTH_UNAVAILABLE
+
         result = build_delta_table_health_sql(
             engine="trino",
             catalog="lakehouse",
             table="lakehouse.silver.enriched",
         )
-        assert isinstance(result, dict)
-        assert "table_properties" in result
-        assert "$properties" in result["table_properties"]
+        assert result == {}
+        assert "trino" in DELTA_HEALTH_UNAVAILABLE
 
     def test_spark_thrift_describe_detail(self):
         result = build_delta_table_health_sql(
@@ -183,9 +207,7 @@ class TestBuildDeltaTableHealthSql:
             catalog="lakehouse",
             table="lakehouse.silver.enriched",
         )
-        assert isinstance(result, dict)
-        assert "table_detail" in result
-        assert "DESCRIBE DETAIL" in result["table_detail"]
+        assert result == {"data_file_count": "DESCRIBE DETAIL lakehouse.silver.enriched"}
 
     def test_duckdb_returns_empty(self):
         result = build_delta_table_health_sql(

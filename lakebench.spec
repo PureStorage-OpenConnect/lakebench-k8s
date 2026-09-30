@@ -26,6 +26,18 @@ a = Analysis(
         ("src/lakebench/templates", "lakebench/templates"),
         # Spark pipeline scripts submitted to driver pods
         ("src/lakebench/spark/scripts", "lakebench/spark/scripts"),
+        # AML reference data (sanctions/PEP/high-risk JSON, pre-registration);
+        # without it W5/W6/W7 silently emit zero alerts from a binary install.
+        ("src/lakebench/spark/data/aml", "lakebench/spark/data/aml"),
+        # Benchmark query templates (AML Trino recall/precision queries)
+        ("src/lakebench/benchmark/queries", "lakebench/benchmark/queries"),
+        # Shipped as source into the driver ConfigMap, so it must exist as a
+        # file, not only as bytecode in the archive.
+        ("src/lakebench/aml/reference_score.py", "lakebench/aml"),
+        ("src/lakebench/aml/fidelity_gate.py", "lakebench/aml"),
+        # Release validation record: without it every run reads the record
+        # as unreadable and nothing is ever stamped supported.
+        ("src/lakebench/config/validated_combinations.yaml", "lakebench/config"),
     ]
     + pydantic_datas
     + pydantic_settings_datas,

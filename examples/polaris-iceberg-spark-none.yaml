@@ -40,7 +40,6 @@ platform:
     scratch:
       enabled: true
       storage_class: <YOUR_SCRATCH_STORAGE_CLASS>  # Portworx: px-csi-scratch (repl=1)
-      create_storage_class: false
 
   compute:
     postgres:
@@ -50,17 +49,21 @@ platform:
 architecture:
   catalog:
     type: polaris
+    polaris:
+      # LB-090: each install must set its own OAuth2 secret. Generate with:
+      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
 
   pipeline:
     mode: batch
 
-  workload:
-    schema: customer360
-    datagen:
-      scale: 1                  # ~10 GB bronze data
-      file_size: 64mb
-      timestamp_start: "2024-01-01"
-      timestamp_end: "2025-01-01"
-
   query_engine:
     type: none
+
+workload:
+  schema: customer360
+  datagen:
+    scale: 1                  # ~10 GB bronze data
+    file_size: 64mb
+    timestamp_start: "2024-01-01"
+    timestamp_end: "2025-01-01"

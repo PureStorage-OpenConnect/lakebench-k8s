@@ -22,13 +22,17 @@ from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
 from ._helpers import (
+    DEPRECATED_SHORT_F_HELP,
+    EXIT_DECLINED,
     _journal_safe,
     console,
+    deprecated_short_f_force,
     journal_open,
     print_error,
     print_info,
     print_success,
     resolve_config_path,
+    stdin_is_tty,
 )
 
 
@@ -48,21 +52,20 @@ def _build_destroy_list(cfg) -> str:
     elif engine == "duckdb":
         items.append("DuckDB")
     if cfg.observability.enabled:
-        items.append("Prometheus + Grafana")
+        items.append("This deployment's PodMonitors (the shared Prometheus + Grafana stay)")
     items.append("All secrets, configs, and namespace")
     return "\n".join(f"  - {item}" for item in items)
 
 
 def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
     """Tear down the local stack. Raises typer.Exit on failure."""
-    import sys
 
     from lakebench.cli._local import default_workdir, destroy_local, status_local
 
     resolved = workdir or default_workdir(cfg.name)
     running = status_local(cfg, workdir=resolved)["running"]
 
-    if not force and sys.stdin.isatty():
+    if not force and stdin_is_tty():
         detail = (
             f"Containers: {', '.join(str(r) for r in running)}" if running else "Nothing is running"
         )
@@ -80,7 +83,7 @@ def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
         )
         if not typer.confirm("Proceed?"):
             print_info("Destruction cancelled")
-            raise typer.Exit(0)
+            raise typer.Exit(EXIT_DECLINED)
 
     try:
         removed, used_workdir = destroy_local(cfg, workdir=resolved, remove_data=remove_data)
@@ -93,6 +96,15 @@ def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
         print_info(f"Deleted {used_workdir}")
     else:
         print_info(f"Data kept in {used_workdir} (--remove-data to delete)")
+
+
+# Exit code when everything else succeeded but the namespace was still
+# Terminating at --namespace-timeout (LB-157). Distinct from 1 (a step
+# failed) so scripts can wait and re-check instead of treating it as broken.
+# 3 is reserved for EXIT_DECLINED (a declined confirmation prompt), which
+# destroy also returns; a wrapper that retries destroy on exit 3 would
+# otherwise loop when a human answers `n` under a TTY.
+EXIT_NAMESPACE_STILL_TERMINATING = 4
 
 
 def destroy(
@@ -113,9 +125,14 @@ def destroy(
         bool,
         typer.Option(
             "--force",
-            "-f",
+            "--yes",
+            "-y",
             help="Skip confirmation prompt",
         ),
+    ] = False,
+    force_short_f: Annotated[
+        bool,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
     ] = False,
     local: Annotated[
         bool,
@@ -138,18 +155,87 @@ def destroy(
             help="Local mode: also delete generated data and the Ivy cache",
         ),
     ] = False,
+    allow_unverified_cluster: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unverified-cluster",
+            help=(
+                "Bypass the api-server fingerprint match when it cannot "
+                "be computed on one or both sides. Only use when you "
+                "know the current kubectl context is correct (dev "
+                "environment with a broken kubeconfig, etc)."
+            ),
+        ),
+    ] = False,
+    force_legacy: Annotated[
+        bool,
+        typer.Option(
+            "--force-legacy",
+            help=(
+                "Destroy without tag / annotation proof of ownership. "
+                "Covers two cases: (1) legacy pre-ownership namespace "
+                "or bucket that carries no lakebench identity "
+                "annotation / ownership tag; (2) a bucket on an S3 "
+                "backend that does not implement tagging AND does not "
+                "match the deployment-name prefix. Caution: another "
+                "workload's data may live there. Prefer `lakebench "
+                "admin migrate-deployment <namespace>` first (case 1) "
+                "or rename the bucket to start with the deployment "
+                "name (case 2). Refuses always on foreign-tagged "
+                "buckets or namespaces regardless of this flag."
+            ),
+        ),
+    ] = False,
+    namespace_timeout: Annotated[
+        int,
+        typer.Option(
+            "--namespace-timeout",
+            min=0,
+            help=(
+                "Seconds to wait for the namespace to finish terminating "
+                "after the delete is issued (PVC and pod finalizers can "
+                "hold it for minutes). A namespace still terminating at "
+                "the deadline is not reported as deleted and destroy exits "
+                f"{EXIT_NAMESPACE_STILL_TERMINATING}. 0 skips the wait, so "
+                f"destroy exits {EXIT_NAMESPACE_STILL_TERMINATING} unless "
+                "the namespace is already gone."
+            ),
+        ),
+    ] = 600,
+    keep_buckets: Annotated[
+        bool,
+        typer.Option(
+            "--keep-buckets",
+            help=(
+                "Empty the S3 buckets but do not delete them. By default "
+                "destroy deletes the emptied buckets this deployment "
+                "created (listed in the namespace's created-buckets record) "
+                "and provably owns (ownership tag, or name prefix on "
+                "backends without tagging) when create_buckets is true. "
+                "Without tagging, a bucket is emptied only if the namespace "
+                "records creating it or adopting it empty."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Tear down lakehouse infrastructure.
 
-    Removes all Lakebench resources from the cluster.
+    Removes the resources this deployment owns: its namespace and what is
+    in it. It empties the S3 buckets it can prove it owns and deletes only
+    those it created. Shared operators, CRDs and the scratch StorageClass
+    are never removed.
     """
+    if force_short_f:
+        force = deprecated_short_f_force("--force or -y", force)
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
     config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
     try:
-        cfg = load_config(config_file)
+        # A namespace too long to finish deploying (LB-153) still has to be
+        # destroyable, so the derived-name length check is skipped here.
+        cfg = load_config(config_file, allow_long_names=True)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -171,9 +257,7 @@ def destroy(
 
     # Confirmation
     if not force:
-        import sys
-
-        if sys.stdin.isatty():
+        if stdin_is_tty():
             console.print(
                 Panel(
                     f"[red]WARNING[/red]: This will destroy all Lakebench resources in namespace [bold]{namespace}[/bold]\n\n"
@@ -185,7 +269,7 @@ def destroy(
             confirm = typer.confirm("Are you sure you want to proceed?")
             if not confirm:
                 print_info("Destruction cancelled")
-                raise typer.Exit(0)
+                raise typer.Exit(EXIT_DECLINED)
         else:
             print_error(
                 "Refusing to destroy without --force in non-interactive mode. "
@@ -235,9 +319,26 @@ def destroy(
             if group != _dg_current_group:
                 _dg_current_group = group
                 console.print(f"  [dim]{group}[/dim]")
-            _dg_step_start[component] = time.time()
+            if component in _dg_step_start:
+                # A repeat for a step already running is a progress line
+                # (e.g. waiting for the namespace to terminate); show it and
+                # keep the step's start time.
+                console.print(f"    [dim]{message}[/dim]")
+            else:
+                _dg_step_start[component] = time.time()
         elif status == DeploymentStatus.SKIPPED:
             _dg_step_start.pop(component, None)
+            if component in ("namespace", "table-cleanup"):
+                # The namespace was kept or is still terminating, or tables
+                # were left registered (LB-186): never silent.
+                console.print(f"    [yellow]![/yellow] {message}")
+                _journal_safe(
+                    j.record,
+                    EventType.DESTROY_COMPONENT,
+                    message=message,
+                    success=True,
+                    details={"component": component, "status": "skipped"},
+                )
         elif status == DeploymentStatus.SUCCESS:
             elapsed = time.time() - _dg_step_start.pop(component, time.time())
             console.print(f"    [green]+[/green] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
@@ -263,7 +364,13 @@ def destroy(
     destroy_start = time.time()
     try:
         engine = DeploymentEngine(cfg)
-        results = engine.destroy_all(progress_callback=on_progress)
+        results = engine.destroy_all(
+            progress_callback=on_progress,
+            allow_unverified_cluster=allow_unverified_cluster,
+            force_legacy=force_legacy,
+            namespace_wait_timeout=namespace_timeout,
+            delete_buckets=not keep_buckets,
+        )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
@@ -274,30 +381,74 @@ def destroy(
     console.print()
     passed = sum(1 for r in results if r.status == DeploymentStatus.SUCCESS)
     failed = sum(1 for r in results if r.status == DeploymentStatus.FAILED)
+    # LB-186: tables destroy left registered because their data is in buckets
+    # it does not own (or bucket cleanup was off). Never hidden by the panel.
+    left_registered = [
+        entry
+        for r in results
+        if r.component == "table-cleanup"
+        for entry in (r.details or {}).get("tables_left_registered", [])
+    ]
+    for entry in left_registered:
+        console.print(
+            f"  [yellow]![/yellow] table left registered: {entry['table']} ({entry['reason']})"
+        )
+    left_note = (
+        f"\n[yellow]{len(left_registered)} table(s) left registered[/yellow] (their data "
+        "is in buckets this deployment does not own, or bucket cleanup was off)"
+        if left_registered
+        else ""
+    )
 
     _journal_safe(
         j.record,
         EventType.DESTROY_COMPLETE,
-        message=f"{passed} destroyed, {failed} failed",
+        message=f"{passed} destroyed, {failed} failed"
+        + (f", {len(left_registered)} tables left registered" if left_registered else ""),
         success=failed == 0,
-        details={"components_destroyed": passed, "components_failed": failed},
+        details={
+            "components_destroyed": passed,
+            "components_failed": failed,
+            "tables_left_registered": left_registered,
+        },
     )
     _journal_safe(j.end_command, success=failed == 0)
     _journal_safe(j.close_session)
 
-    if failed == 0:
+    ns_pending = any(
+        r.component == "namespace" and r.details.get("still_terminating") for r in results
+    )
+    if failed == 0 and ns_pending:
         console.print(
             Panel(
                 f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
+                f"{left_note}"
+                f"\n\n[yellow]Namespace {namespace} is still terminating.[/yellow] "
+                f"Wait until `kubectl get ns {namespace}` returns NotFound "
+                "before re-deploying under the same name.",
+                title="Destroy Incomplete (namespace still terminating)",
+                expand=False,
+            )
+        )
+        raise typer.Exit(EXIT_NAMESPACE_STILL_TERMINATING)
+    elif failed == 0:
+        console.print(
+            Panel(
+                f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
+                f"{left_note}"
                 f"\n\nTo re-deploy: [bold]lakebench deploy[/bold]",
-                title="Destroy Complete",
+                title=(
+                    f"Destroy Complete; {len(left_registered)} tables left registered"
+                    if left_registered
+                    else "Destroy Complete"
+                ),
                 expand=False,
             )
         )
     else:
         console.print(
             Panel(
-                f"[red]{failed} failed[/red], {passed} succeeded\n\n"
+                f"[red]{failed} failed[/red], {passed} succeeded{left_note}\n\n"
                 f"Some resources may need manual cleanup",
                 title="Destroy Incomplete",
                 expand=False,

@@ -1,0 +1,3121 @@
+{
+  "run_id": "20260929-204941-1d17f4",
+  "deployment_name": "pipe-c360-c1",
+  "start_time": "2026-09-30T02:49:41.182993+00:00",
+  "end_time": "2026-09-30T03:42:37.284650+00:00",
+  "total_elapsed_seconds": 3176.101657,
+  "success": true,
+  "verdict": {
+    "status": "PASSED",
+    "reasons": [],
+    "gates": {
+      "pipeline": "PASS",
+      "benchmark": "PASS"
+    },
+    "qualifiers": {
+      "pipeline_mode": "sustained",
+      "n_streaming_stages": 3,
+      "n_benchmark_queries": 8
+    }
+  },
+  "bronze_size_gb": 17.33189887087792,
+  "silver_size_gb": 7.517117780633271,
+  "gold_size_gb": 0.0003937678411602974,
+  "jobs": [],
+  "queries": [],
+  "streaming": [
+    {
+      "job_name": "lakebench-bronze-ingest",
+      "job_type": "bronze-ingest",
+      "throughput_rps": 1032.7092792393103,
+      "freshness_seconds": null,
+      "freshness_active_seconds": null,
+      "trailing_idle_cycles": 0,
+      "committed_rows": null,
+      "batch_span_seconds": 1750.251004,
+      "ttd_alerts": null,
+      "ttd_unmatched": 0,
+      "ttd_late": 0,
+      "ttd_unmeasured_cycles": 0,
+      "ttd_p50_seconds": null,
+      "ttd_p95_seconds": null,
+      "ttd_max_seconds": null,
+      "ttd_pass_end_p50_seconds": null,
+      "ttd_pass_end_p95_seconds": null,
+      "ttd_by_rule": {},
+      "tick_timings": [],
+      "requested_executors": 2,
+      "micro_batch_duration_ms": 2273.333333333334,
+      "batch_size": 30982,
+      "total_batches": 60,
+      "total_rows_processed": 1858920,
+      "unique_rows_processed": 1858920,
+      "elapsed_seconds": 1800.041926,
+      "success": true,
+      "error_message": null,
+      "window_input_rows": 1858920,
+      "pre_window_input_rows": 0,
+      "window_commits": 60,
+      "window_new_data_cycles": null,
+      "window_output_rows": null,
+      "last_write_offset_seconds": 1779.354304,
+      "trickle_start_offset_seconds": 29.1033,
+      "output_rows": 1858920,
+      "submission_failures": [],
+      "running_at": "2026-09-30T02:51:04.601620+00:00",
+      "extra_metrics": {}
+    },
+    {
+      "job_name": "lakebench-silver-stream",
+      "job_type": "silver-stream",
+      "throughput_rps": 1015.4974579186551,
+      "freshness_seconds": null,
+      "freshness_active_seconds": null,
+      "trailing_idle_cycles": 0,
+      "committed_rows": 1827938,
+      "batch_span_seconds": null,
+      "ttd_alerts": null,
+      "ttd_unmatched": 0,
+      "ttd_late": 0,
+      "ttd_unmeasured_cycles": 0,
+      "ttd_p50_seconds": null,
+      "ttd_p95_seconds": null,
+      "ttd_max_seconds": null,
+      "ttd_pass_end_p50_seconds": null,
+      "ttd_pass_end_p95_seconds": null,
+      "ttd_by_rule": {},
+      "tick_timings": [],
+      "requested_executors": 4,
+      "micro_batch_duration_ms": 8243.333333333334,
+      "batch_size": 60931,
+      "total_batches": 30,
+      "total_rows_processed": 1827938,
+      "unique_rows_processed": 1827938,
+      "elapsed_seconds": 1800.041926,
+      "success": true,
+      "error_message": null,
+      "window_input_rows": 1827938,
+      "pre_window_input_rows": 0,
+      "window_commits": 30,
+      "window_new_data_cycles": null,
+      "window_output_rows": 1790912,
+      "last_write_offset_seconds": null,
+      "trickle_start_offset_seconds": null,
+      "output_rows": 1790912,
+      "submission_failures": [],
+      "running_at": "2026-09-30T02:51:04.613639+00:00",
+      "extra_metrics": {
+        "silver_stream_scale_cap": "measured_up_to_scale_10",
+        "silver_stream_scale_admission": "ok"
+      }
+    },
+    {
+      "job_name": "lakebench-gold-refresh",
+      "job_type": "gold-refresh",
+      "throughput_rps": 3035.7798454967765,
+      "freshness_seconds": 101.0,
+      "freshness_active_seconds": 101.0,
+      "trailing_idle_cycles": 0,
+      "committed_rows": null,
+      "batch_span_seconds": null,
+      "ttd_alerts": null,
+      "ttd_unmatched": 0,
+      "ttd_late": 0,
+      "ttd_unmeasured_cycles": 6,
+      "ttd_p50_seconds": null,
+      "ttd_p95_seconds": null,
+      "ttd_max_seconds": null,
+      "ttd_pass_end_p50_seconds": null,
+      "ttd_pass_end_p95_seconds": null,
+      "ttd_by_rule": {},
+      "tick_timings": [],
+      "requested_executors": 2,
+      "micro_batch_duration_ms": 28166.666666666668,
+      "batch_size": 910755,
+      "total_batches": 6,
+      "total_rows_processed": 5464531,
+      "unique_rows_processed": null,
+      "elapsed_seconds": 1800.041926,
+      "success": true,
+      "error_message": null,
+      "window_input_rows": 5464531,
+      "pre_window_input_rows": 0,
+      "window_commits": 6,
+      "window_new_data_cycles": 6,
+      "window_output_rows": null,
+      "last_write_offset_seconds": null,
+      "trickle_start_offset_seconds": null,
+      "output_rows": 366,
+      "submission_failures": [],
+      "running_at": "2026-09-30T02:51:04.624521+00:00",
+      "extra_metrics": {}
+    }
+  ],
+  "config_snapshot": {
+    "name": "pipe-c360-c1",
+    "scale": 1.0,
+    "approx_bronze_gb": 10.0,
+    "processing_pattern": "medallion",
+    "s3": {
+      "endpoint": "http://s3-endpoint-redacted:80",
+      "buckets": {
+        "bronze": "pipe-c360-c1-bronze",
+        "silver": "pipe-c360-c1-silver",
+        "gold": "pipe-c360-c1-gold"
+      }
+    },
+    "scratch": {
+      "enabled": true,
+      "storage_class": "px-csi-scratch",
+      "size": "100Gi"
+    },
+    "spark": {
+      "driver": {
+        "cores": 2,
+        "memory": "2g"
+      },
+      "executor": {
+        "instances": 2,
+        "cores": 2,
+        "memory": "4g",
+        "memory_overhead": "1g"
+      },
+      "executor_overrides": {
+        "bronze": null,
+        "silver": null,
+        "gold": null,
+        "bronze_ingest": null,
+        "silver_stream": null,
+        "gold_refresh": null
+      }
+    },
+    "catalog": "hive",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "trino",
+    "workload_schema": "customer360",
+    "sustained": {
+      "bronze_trigger_interval": "30 seconds",
+      "silver_trigger_interval": "60 seconds",
+      "gold_refresh_interval": "5 minutes",
+      "run_duration": 1800,
+      "max_files_per_trigger": 2,
+      "bronze_target_file_size_mb": 512,
+      "silver_target_file_size_mb": 512,
+      "gold_target_file_size_mb": 128,
+      "benchmark_interval": 300,
+      "benchmark_warmup": 300
+    },
+    "datagen": {
+      "scale": 1.0,
+      "mode": "continuous",
+      "parallelism": 2,
+      "file_size": "64mb"
+    },
+    "images": {
+      "datagen": "docker.io/sillidata/lb-datagen:034f998",
+      "spark": "apache/spark:4.0.2-python3",
+      "trino": "trinodb/trino:483"
+    },
+    "trino": {
+      "coordinator": {
+        "cpu": "1",
+        "memory": "4Gi"
+      },
+      "worker": {
+        "replicas": 1,
+        "cpu": "2",
+        "memory": "8Gi"
+      }
+    },
+    "benchmark": {
+      "mode": "power",
+      "streams": 1,
+      "cache": "hot",
+      "iterations": 1
+    },
+    "maintenance": {
+      "pre_benchmark_maintenance": true,
+      "retention_interval": 600,
+      "retention_threshold": "30m",
+      "compaction_enabled": true,
+      "compaction_interval": 1200
+    },
+    "experiment_inputs": {
+      "workload": {
+        "name": "customer360",
+        "version": "c360-1",
+        "generator_model_version": null,
+        "parameters_id": "12bee0ff88813f11",
+        "parameters": {
+          "customer360": {
+            "unique_customers": 100000,
+            "unique_customers_source": "scale",
+            "event_window": {
+              "start": "2024-01-01",
+              "end": "2025-01-01"
+            }
+          }
+        }
+      },
+      "corpus": {
+        "schema": "customer360",
+        "generator_image": "docker.io/sillidata/lb-datagen:034f998",
+        "seed": 42,
+        "corpus_role": null,
+        "robustness_perturbation": false,
+        "scale": 1.0,
+        "timestamp_start": null,
+        "timestamp_end": null,
+        "dirty_data_ratio": 0.08,
+        "id": "13eaa2a3ed5fcf74",
+        "unique_customers": 100000
+      },
+      "architecture": {
+        "recipe": "hive-iceberg-spark-trino",
+        "catalog": {
+          "type": "hive",
+          "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+        },
+        "table_format": {
+          "type": "iceberg",
+          "version": "1.11.0"
+        },
+        "pipeline_engine": {
+          "type": "spark",
+          "image": "apache/spark:4.0.2-python3"
+        },
+        "query_engine": {
+          "type": "trino",
+          "version": "trinodb/trino:483"
+        },
+        "query_access_path": "catalog"
+      },
+      "maintenance_config": {
+        "pre_benchmark_maintenance": true,
+        "compaction_enabled": true,
+        "settings": {
+          "retention_threshold": "30m",
+          "retention_interval": 600,
+          "compaction_interval": 1200
+        }
+      },
+      "mode": "continuous",
+      "run_mode": "continuous",
+      "support": {
+        "workload": "customer360",
+        "mode": "continuous",
+        "recipe": "hive-iceberg-spark-trino",
+        "state": "unverified",
+        "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+      },
+      "config_limits": {
+        "max_files_per_trigger": 2,
+        "benchmark_iterations": 1,
+        "w1_max_vertices": null,
+        "tm_max_alerts_per_customer": null
+      }
+    }
+  },
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.6.0.dev0",
+    "git_sha": "e6927ce3ed3fe60b609192e23a2fa9eda2d4644a",
+    "git_dirty": false
+  },
+  "autosize_cuts": [],
+  "maintenance_outcomes": [
+    {
+      "kind": "expire",
+      "retention": "1h",
+      "operations": [
+        {
+          "operation": "expire_snapshots",
+          "retention": "1h",
+          "total": 3,
+          "succeeded": 3,
+          "failed": 0,
+          "timed_out": 0,
+          "not_attempted": 0
+        },
+        {
+          "operation": "remove_orphan_files",
+          "retention": "1450m",
+          "total": 3,
+          "succeeded": 3,
+          "failed": 0,
+          "timed_out": 0,
+          "not_attempted": 0
+        }
+      ],
+      "engine": "trino",
+      "total": 6,
+      "succeeded": 6,
+      "failed": 0,
+      "timed_out": 0,
+      "not_attempted": 0
+    },
+    {
+      "kind": "expire",
+      "retention": "1h",
+      "operations": [
+        {
+          "operation": "expire_snapshots",
+          "retention": "1h",
+          "total": 3,
+          "succeeded": 3,
+          "failed": 0,
+          "timed_out": 0,
+          "not_attempted": 0
+        },
+        {
+          "operation": "remove_orphan_files",
+          "retention": "1450m",
+          "total": 3,
+          "succeeded": 3,
+          "failed": 0,
+          "timed_out": 0,
+          "not_attempted": 0
+        }
+      ],
+      "engine": "trino",
+      "total": 6,
+      "succeeded": 6,
+      "failed": 0,
+      "timed_out": 0,
+      "not_attempted": 0
+    },
+    {
+      "kind": "compaction",
+      "engine": "trino",
+      "total": 2,
+      "succeeded": 1,
+      "failed": 1,
+      "timed_out": 0,
+      "not_attempted": 0
+    }
+  ],
+  "continuous": {
+    "streams": {
+      "bronze-ingest": {
+        "running_at": "2026-09-30T02:51:04.601620+00:00",
+        "submission_failures": [],
+        "submission_retry_seconds": 0
+      },
+      "silver-stream": {
+        "running_at": "2026-09-30T02:51:04.613639+00:00",
+        "submission_failures": [],
+        "submission_retry_seconds": 0
+      },
+      "gold-refresh": {
+        "running_at": "2026-09-30T02:51:04.624521+00:00",
+        "submission_failures": [],
+        "submission_retry_seconds": 0
+      }
+    },
+    "window": {
+      "start": "2026-09-30T02:51:21.505266Z",
+      "end": "2026-09-30T03:21:21.547192Z",
+      "seconds": 1800.0,
+      "cluster_clock_offset_seconds": 16.8
+    },
+    "gate_problems": [],
+    "trickle": {
+      "value": 2,
+      "source": "auto",
+      "arrival_seconds": 2400.0,
+      "problem": null
+    },
+    "retention": {
+      "configured": "30m",
+      "configured_by": "default",
+      "applied_expire": "1h",
+      "applied_orphan": "1450m"
+    },
+    "settle": {
+      "settled": true,
+      "seconds": 902.6,
+      "reason": "settled"
+    },
+    "result_check": {
+      "query_set_id": "qs8-32043638dbc4",
+      "fingerprints": {
+        "Q1_full_aggregation_scan": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 5,
+          "exact": "04635dc9b2e0c492",
+          "approx": {
+            "3": 66380566.73,
+            "4": 151.86
+          },
+          "approx_w": {
+            "3": 67518409.98486899,
+            "4": 154.46306419779802
+          },
+          "quanta": {
+            "3": 0.01,
+            "4": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "a28fcc92039f15c0"
+        },
+        "Q2_filtered_aggregation": {
+          "spec": "rf2",
+          "rows": 455,
+          "cols": 5,
+          "exact": "d312393a3ea6402c",
+          "approx": {
+            "4": 16464608.7
+          },
+          "approx_w": {
+            "4": 23829436.68442223
+          },
+          "quanta": {
+            "4": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "3606b15edd93d7f4"
+        },
+        "Q4_churn_risk_analysis": {
+          "spec": "rf2",
+          "rows": 6,
+          "cols": 7,
+          "exact": "5953b65c626cc696",
+          "approx": {
+            "5": 0.0,
+            "6": 13.5
+          },
+          "approx_w": {
+            "5": 0.0,
+            "6": 22.03775473616127
+          },
+          "quanta": {
+            "5": 0.01,
+            "6": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "186991779fad9dae"
+        },
+        "Q3_customer_segmentation": {
+          "spec": "rf2",
+          "rows": 12,
+          "cols": 6,
+          "exact": "bfcf99f10d445498",
+          "approx": {
+            "3": 66380566.73,
+            "4": 37.81,
+            "5": 40227.35
+          },
+          "approx_w": {
+            "3": 102444974.44616814,
+            "4": 55.916635097780016,
+            "5": 61878.949186078666
+          },
+          "quanta": {
+            "3": 0.01,
+            "4": 0.01,
+            "5": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "3bbefc8f6167c5ad"
+        },
+        "Q7_channel_conversion_funnel": {
+          "spec": "rf2",
+          "rows": 5,
+          "cols": 9,
+          "exact": "67ad3d2879de7513",
+          "approx": {
+            "6": 256.99,
+            "7": 66380566.73,
+            "8": 8.35
+          },
+          "approx_w": {
+            "6": 380.55552079395784,
+            "7": 98327192.07839638,
+            "8": 12.366328566911399
+          },
+          "quanta": {
+            "6": 0.01,
+            "7": 0.01,
+            "8": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "55c780c73df5e40d"
+        },
+        "Q5_revenue_trend_ma7": {
+          "spec": "rf2",
+          "rows": 90,
+          "cols": 6,
+          "exact": "457ae80cbc0e4686",
+          "approx": {
+            "2": 16289308.03,
+            "4": 16331345.59,
+            "5": 36615.0
+          },
+          "approx_w": {
+            "2": 24348502.15235408,
+            "4": 24388699.169126395,
+            "5": 54644.99682892152
+          },
+          "quanta": {
+            "2": 0.01,
+            "4": 0.01,
+            "5": 1.0
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "38eb0335e9afec9f"
+        },
+        "Q6_customer_rfm": {
+          "spec": "rf2",
+          "rows": 6,
+          "cols": 5,
+          "exact": "b606eac07568fec3",
+          "approx": {
+            "2": 95303.06,
+            "3": 110.0,
+            "4": 459.0
+          },
+          "approx_w": {
+            "2": 168281.01503062848,
+            "3": 183.1718664981421,
+            "4": 582.5706688558067
+          },
+          "quanta": {
+            "2": 0.01,
+            "3": 0.1,
+            "4": 1.0
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "864fb6811e91367a"
+        },
+        "Q9_executive_dashboard": {
+          "spec": "rf2",
+          "rows": 30,
+          "cols": 8,
+          "exact": "401e6d7e93cdd882",
+          "approx": {
+            "6": -10006.750000000002,
+            "7": -1.7000000000000033
+          },
+          "approx_w": {
+            "6": -32898.63010192448,
+            "7": 9.213906555412594
+          },
+          "quanta": {
+            "6": 0.01,
+            "7": 0.1
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "e36917a11dffae0c"
+        }
+      },
+      "failed": []
+    }
+  },
+  "experiment": {
+    "schema": "exp1",
+    "system": "cluster",
+    "support": {
+      "workload": "customer360",
+      "mode": "continuous",
+      "recipe": "hive-iceberg-spark-trino",
+      "state": "unverified",
+      "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+    },
+    "repetitions": {
+      "runs": 1,
+      "benchmark_samples_per_query": 1,
+      "benchmark_rounds": 4
+    },
+    "workload": {
+      "name": "customer360",
+      "version": "c360-1",
+      "generator_model_version": null,
+      "parameters_id": "12bee0ff88813f11",
+      "parameters": {
+        "customer360": {
+          "unique_customers": 100000,
+          "unique_customers_source": "scale",
+          "event_window": {
+            "start": "2024-01-01",
+            "end": "2025-01-01"
+          }
+        }
+      }
+    },
+    "corpus": {
+      "schema": "customer360",
+      "generator_image": "docker.io/sillidata/lb-datagen:034f998",
+      "seed": 42,
+      "corpus_role": null,
+      "robustness_perturbation": false,
+      "scale": 1.0,
+      "timestamp_start": null,
+      "timestamp_end": null,
+      "dirty_data_ratio": 0.08,
+      "id": "13eaa2a3ed5fcf74",
+      "unique_customers": 100000,
+      "observed": false,
+      "observed_note": "declared by the config, not observed from the datagen pods",
+      "datagen": {
+        "configured_image": "docker.io/sillidata/lb-datagen:034f998",
+        "pod_image": null,
+        "digest": null,
+        "digest_reason": "no datagen fleet record for this run (data generated elsewhere or earlier)",
+        "observed": false,
+        "seed": null,
+        "scale": null,
+        "data_quality": null,
+        "mixed_params": []
+      }
+    },
+    "architecture": {
+      "recipe": "hive-iceberg-spark-trino",
+      "catalog": {
+        "type": "hive",
+        "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+      },
+      "table_format": {
+        "type": "iceberg",
+        "version": "1.11.0"
+      },
+      "pipeline_engine": {
+        "type": "spark",
+        "image": "apache/spark:4.0.2-python3"
+      },
+      "query_engine": {
+        "type": "trino",
+        "version": "trinodb/trino:483"
+      },
+      "query_access_path": "catalog"
+    },
+    "maintenance_settings": {
+      "retention_threshold": "30m",
+      "retention_interval": 600,
+      "compaction_interval": 1200
+    },
+    "mode": "sustained",
+    "maintenance_policy_id": "m2-2026-09-26",
+    "effective_maintenance": {
+      "id": "m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran",
+      "detail_id": "m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=partial",
+      "operations": {
+        "expire_snapshots": "ran",
+        "remove_orphan_files": "ran",
+        "compaction": "ran"
+      },
+      "expire": "ran",
+      "compaction": "ran",
+      "detail": {
+        "expire_snapshots": "on",
+        "remove_orphan_files": "on",
+        "compaction": "partial",
+        "applied_retention": [
+          "1h"
+        ],
+        "operations": {
+          "expire_snapshots": {
+            "kind": "expire",
+            "applied_retention": [
+              "1h"
+            ],
+            "total": 6,
+            "succeeded": 6
+          },
+          "remove_orphan_files": {
+            "kind": "expire",
+            "applied_retention": [
+              "1450m"
+            ],
+            "total": 6,
+            "succeeded": 6
+          }
+        }
+      },
+      "basis": "recorded outcomes",
+      "reasons": [
+        "compaction: 1 of 2 statements succeeded"
+      ],
+      "known_limitations": []
+    },
+    "stages": {
+      "executed": [
+        "bronze",
+        "silver",
+        "gold",
+        "query"
+      ],
+      "skipped": []
+    },
+    "rules": {},
+    "limits": {
+      "max_files_per_trigger": 2,
+      "benchmark_iterations": 1,
+      "w1_max_vertices": null,
+      "tm_max_alerts_per_customer": null,
+      "executors": [
+        {
+          "job_type": "bronze-ingest",
+          "scale_derived": 2,
+          "cap": 10,
+          "override": null,
+          "cap_hit": false,
+          "observed": 2
+        },
+        {
+          "job_type": "silver-stream",
+          "scale_derived": 4,
+          "cap": 20,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        },
+        {
+          "job_type": "gold-refresh",
+          "scale_derived": 2,
+          "cap": 10,
+          "override": null,
+          "cap_hit": false,
+          "observed": 2
+        }
+      ],
+      "autosize_cuts": [],
+      "intake_limit": "none",
+      "benchmark_rounds": 4,
+      "maintenance_stopped": false,
+      "bound": [],
+      "bound_kinds": [],
+      "benchmark_mode": "power"
+    },
+    "results": {
+      "query_set_id": "qs8-32043638dbc4",
+      "fingerprints": {
+        "Q1_full_aggregation_scan": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 5,
+          "exact": "04635dc9b2e0c492",
+          "approx": {
+            "3": 66380566.73,
+            "4": 151.86
+          },
+          "approx_w": {
+            "3": 67518409.98486899,
+            "4": 154.46306419779802
+          },
+          "quanta": {
+            "3": 0.01,
+            "4": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "a28fcc92039f15c0"
+        },
+        "Q2_filtered_aggregation": {
+          "spec": "rf2",
+          "rows": 455,
+          "cols": 5,
+          "exact": "d312393a3ea6402c",
+          "approx": {
+            "4": 16464608.7
+          },
+          "approx_w": {
+            "4": 23829436.68442223
+          },
+          "quanta": {
+            "4": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "3606b15edd93d7f4"
+        },
+        "Q4_churn_risk_analysis": {
+          "spec": "rf2",
+          "rows": 6,
+          "cols": 7,
+          "exact": "5953b65c626cc696",
+          "approx": {
+            "5": 0.0,
+            "6": 13.5
+          },
+          "approx_w": {
+            "5": 0.0,
+            "6": 22.03775473616127
+          },
+          "quanta": {
+            "5": 0.01,
+            "6": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "186991779fad9dae"
+        },
+        "Q3_customer_segmentation": {
+          "spec": "rf2",
+          "rows": 12,
+          "cols": 6,
+          "exact": "bfcf99f10d445498",
+          "approx": {
+            "3": 66380566.73,
+            "4": 37.81,
+            "5": 40227.35
+          },
+          "approx_w": {
+            "3": 102444974.44616814,
+            "4": 55.916635097780016,
+            "5": 61878.949186078666
+          },
+          "quanta": {
+            "3": 0.01,
+            "4": 0.01,
+            "5": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "3bbefc8f6167c5ad"
+        },
+        "Q7_channel_conversion_funnel": {
+          "spec": "rf2",
+          "rows": 5,
+          "cols": 9,
+          "exact": "67ad3d2879de7513",
+          "approx": {
+            "6": 256.99,
+            "7": 66380566.73,
+            "8": 8.35
+          },
+          "approx_w": {
+            "6": 380.55552079395784,
+            "7": 98327192.07839638,
+            "8": 12.366328566911399
+          },
+          "quanta": {
+            "6": 0.01,
+            "7": 0.01,
+            "8": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "55c780c73df5e40d"
+        },
+        "Q5_revenue_trend_ma7": {
+          "spec": "rf2",
+          "rows": 90,
+          "cols": 6,
+          "exact": "457ae80cbc0e4686",
+          "approx": {
+            "2": 16289308.03,
+            "4": 16331345.59,
+            "5": 36615.0
+          },
+          "approx_w": {
+            "2": 24348502.15235408,
+            "4": 24388699.169126395,
+            "5": 54644.99682892152
+          },
+          "quanta": {
+            "2": 0.01,
+            "4": 0.01,
+            "5": 1.0
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "38eb0335e9afec9f"
+        },
+        "Q6_customer_rfm": {
+          "spec": "rf2",
+          "rows": 6,
+          "cols": 5,
+          "exact": "b606eac07568fec3",
+          "approx": {
+            "2": 95303.06,
+            "3": 110.0,
+            "4": 459.0
+          },
+          "approx_w": {
+            "2": 168281.01503062848,
+            "3": 183.1718664981421,
+            "4": 582.5706688558067
+          },
+          "quanta": {
+            "2": 0.01,
+            "3": 0.1,
+            "4": 1.0
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "864fb6811e91367a"
+        },
+        "Q9_executive_dashboard": {
+          "spec": "rf2",
+          "rows": 30,
+          "cols": 8,
+          "exact": "401e6d7e93cdd882",
+          "approx": {
+            "6": -10006.750000000002,
+            "7": -1.7000000000000033
+          },
+          "approx_w": {
+            "6": -32898.63010192448,
+            "7": 9.213906555412594
+          },
+          "quanta": {
+            "6": 0.01,
+            "7": 0.1
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "e36917a11dffae0c"
+        }
+      },
+      "basis": "continuous result check after the corpus settled"
+    },
+    "lakebench": {
+      "lakebench_version": "1.6.0.dev0",
+      "git_sha": "e6927ce3ed3fe60b609192e23a2fa9eda2d4644a",
+      "git_dirty": false
+    }
+  },
+  "benchmark": {
+    "benchmark_type": "trino_query",
+    "engine": "trino",
+    "query_set_id": "qs8-32043638dbc4",
+    "mode": "power",
+    "cache": "hot",
+    "scale": 1.0,
+    "qph": 260.0,
+    "total_seconds": 110.99,
+    "iterations": 1,
+    "streams": 1,
+    "queries": [
+      {
+        "name": "Q1_full_aggregation_scan",
+        "display_name": "Full aggregation scan",
+        "class": "scan",
+        "elapsed_seconds": 18.712,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": null,
+        "samples": [
+          19.312
+        ],
+        "min_seconds": 19.312,
+        "max_seconds": 19.312,
+        "relative_range": 0.0,
+        "result_fingerprint_note": "aggregated over in-stream rounds"
+      },
+      {
+        "name": "Q2_filtered_aggregation",
+        "display_name": "Filtered aggregation",
+        "class": "filter_prune",
+        "elapsed_seconds": 12.249,
+        "rows_returned": 455,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": null,
+        "samples": [
+          13.294
+        ],
+        "min_seconds": 13.294,
+        "max_seconds": 13.294,
+        "relative_range": 0.0,
+        "result_fingerprint_note": "aggregated over in-stream rounds"
+      },
+      {
+        "name": "Q4_churn_risk_analysis",
+        "display_name": "Churn risk analysis",
+        "class": "filter_prune",
+        "elapsed_seconds": 15.357,
+        "rows_returned": 6,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": null,
+        "samples": [
+          14.022
+        ],
+        "min_seconds": 14.022,
+        "max_seconds": 14.022,
+        "relative_range": 0.0,
+        "result_fingerprint_note": "aggregated over in-stream rounds"
+      },
+      {
+        "name": "Q3_customer_segmentation",
+        "display_name": "Customer segmentation",
+        "class": "aggregation",
+        "elapsed_seconds": 15.951,
+        "rows_returned": 12,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": null,
+        "samples": [
+          14.399
+        ],
+        "min_seconds": 14.399,
+        "max_seconds": 14.399,
+        "relative_range": 0.0,
+        "result_fingerprint_note": "aggregated over in-stream rounds"
+      },
+      {
+        "name": "Q7_channel_conversion_funnel",
+        "display_name": "Channel conversion funnel",
+        "class": "aggregation",
+        "elapsed_seconds": 14.246,
+        "rows_returned": 5,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": null,
+        "samples": [
+          11.104
+        ],
+        "min_seconds": 11.104,
+        "max_seconds": 11.104,
+        "relative_range": 0.0,
+        "result_fingerprint_note": "aggregated over in-stream rounds"
+      },
+      {
+        "name": "Q5_revenue_trend_ma7",
+        "display_name": "Revenue trend MA7",
+        "class": "analytics",
+        "elapsed_seconds": 15.354,
+        "rows_returned": 90,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": null,
+        "samples": [
+          11.294
+        ],
+        "min_seconds": 11.294,
+        "max_seconds": 11.294,
+        "relative_range": 0.0,
+        "result_fingerprint_note": "aggregated over in-stream rounds"
+      },
+      {
+        "name": "Q6_customer_rfm",
+        "display_name": "Customer RFM scoring",
+        "class": "analytics",
+        "elapsed_seconds": 18.353,
+        "rows_returned": 6,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": null,
+        "samples": [
+          14.298
+        ],
+        "min_seconds": 14.298,
+        "max_seconds": 14.298,
+        "relative_range": 0.0,
+        "result_fingerprint_note": "aggregated over in-stream rounds"
+      },
+      {
+        "name": "Q9_executive_dashboard",
+        "display_name": "Executive dashboard",
+        "class": "operational",
+        "elapsed_seconds": 3.833,
+        "rows_returned": 30,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": null,
+        "samples": [
+          3.784
+        ],
+        "min_seconds": 3.784,
+        "max_seconds": 3.784,
+        "relative_range": 0.0,
+        "result_fingerprint_note": "aggregated over in-stream rounds"
+      }
+    ],
+    "spread": {
+      "samples_per_query": 1,
+      "qph_low": 283.7,
+      "qph_high": 283.7,
+      "relative_range": 0.0
+    }
+  },
+  "benchmark_rounds": [
+    {
+      "benchmark_type": "trino_query",
+      "engine": "trino",
+      "query_set_id": "qs8-32043638dbc4",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 283.7,
+      "total_seconds": 101.51,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "Q1_full_aggregation_scan",
+          "display_name": "Full aggregation scan",
+          "class": "scan",
+          "elapsed_seconds": 19.312,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            19.312
+          ],
+          "min_seconds": 19.312,
+          "max_seconds": 19.312,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q2_filtered_aggregation",
+          "display_name": "Filtered aggregation",
+          "class": "filter_prune",
+          "elapsed_seconds": 13.294,
+          "rows_returned": 455,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            13.294
+          ],
+          "min_seconds": 13.294,
+          "max_seconds": 13.294,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q4_churn_risk_analysis",
+          "display_name": "Churn risk analysis",
+          "class": "filter_prune",
+          "elapsed_seconds": 14.022,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            14.022
+          ],
+          "min_seconds": 14.022,
+          "max_seconds": 14.022,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q3_customer_segmentation",
+          "display_name": "Customer segmentation",
+          "class": "aggregation",
+          "elapsed_seconds": 14.399,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            14.399
+          ],
+          "min_seconds": 14.399,
+          "max_seconds": 14.399,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q7_channel_conversion_funnel",
+          "display_name": "Channel conversion funnel",
+          "class": "aggregation",
+          "elapsed_seconds": 11.104,
+          "rows_returned": 5,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            11.104
+          ],
+          "min_seconds": 11.104,
+          "max_seconds": 11.104,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q5_revenue_trend_ma7",
+          "display_name": "Revenue trend MA7",
+          "class": "analytics",
+          "elapsed_seconds": 11.294,
+          "rows_returned": 90,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            11.294
+          ],
+          "min_seconds": 11.294,
+          "max_seconds": 11.294,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q6_customer_rfm",
+          "display_name": "Customer RFM scoring",
+          "class": "analytics",
+          "elapsed_seconds": 14.298,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            14.298
+          ],
+          "min_seconds": 14.298,
+          "max_seconds": 14.298,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q9_executive_dashboard",
+          "display_name": "Executive dashboard",
+          "class": "operational",
+          "elapsed_seconds": 3.784,
+          "rows_returned": 30,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            3.784
+          ],
+          "min_seconds": 3.784,
+          "max_seconds": 3.784,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 283.7,
+        "qph_high": 283.7,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 1,
+        "timestamp": "2026-09-30T02:56:04.754034+00:00",
+        "gold_event_age_seconds": 55133808.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 1830,
+          "silver_snapshot_count": 5,
+          "gold_data_file_count": 1,
+          "gold_snapshot_count": 1
+        }
+      }
+    },
+    {
+      "benchmark_type": "trino_query",
+      "engine": "trino",
+      "query_set_id": "qs8-32043638dbc4",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 272.0,
+      "total_seconds": 105.88,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "Q1_full_aggregation_scan",
+          "display_name": "Full aggregation scan",
+          "class": "scan",
+          "elapsed_seconds": 18.112,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            18.112
+          ],
+          "min_seconds": 18.112,
+          "max_seconds": 18.112,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q2_filtered_aggregation",
+          "display_name": "Filtered aggregation",
+          "class": "filter_prune",
+          "elapsed_seconds": 11.076,
+          "rows_returned": 455,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            11.076
+          ],
+          "min_seconds": 11.076,
+          "max_seconds": 11.076,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q4_churn_risk_analysis",
+          "display_name": "Churn risk analysis",
+          "class": "filter_prune",
+          "elapsed_seconds": 15.319,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            15.319
+          ],
+          "min_seconds": 15.319,
+          "max_seconds": 15.319,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q3_customer_segmentation",
+          "display_name": "Customer segmentation",
+          "class": "aggregation",
+          "elapsed_seconds": 13.307,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            13.307
+          ],
+          "min_seconds": 13.307,
+          "max_seconds": 13.307,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q7_channel_conversion_funnel",
+          "display_name": "Channel conversion funnel",
+          "class": "aggregation",
+          "elapsed_seconds": 13.306,
+          "rows_returned": 5,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            13.306
+          ],
+          "min_seconds": 13.306,
+          "max_seconds": 13.306,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q5_revenue_trend_ma7",
+          "display_name": "Revenue trend MA7",
+          "class": "analytics",
+          "elapsed_seconds": 14.081,
+          "rows_returned": 90,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            14.081
+          ],
+          "min_seconds": 14.081,
+          "max_seconds": 14.081,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q6_customer_rfm",
+          "display_name": "Customer RFM scoring",
+          "class": "analytics",
+          "elapsed_seconds": 16.81,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            16.81
+          ],
+          "min_seconds": 16.81,
+          "max_seconds": 16.81,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q9_executive_dashboard",
+          "display_name": "Executive dashboard",
+          "class": "operational",
+          "elapsed_seconds": 3.872,
+          "rows_returned": 30,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            3.872
+          ],
+          "min_seconds": 3.872,
+          "max_seconds": 3.872,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 272.0,
+        "qph_high": 272.0,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 2,
+        "timestamp": "2026-09-30T03:03:14.678776+00:00",
+        "gold_event_age_seconds": 55134233.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 4392,
+          "silver_snapshot_count": 12,
+          "gold_data_file_count": 1,
+          "gold_snapshot_count": 2
+        }
+      }
+    },
+    {
+      "benchmark_type": "trino_query",
+      "engine": "trino",
+      "query_set_id": "qs8-32043638dbc4",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 248.1,
+      "total_seconds": 116.09,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "Q1_full_aggregation_scan",
+          "display_name": "Full aggregation scan",
+          "class": "scan",
+          "elapsed_seconds": 16.29,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            16.29
+          ],
+          "min_seconds": 16.29,
+          "max_seconds": 16.29,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q2_filtered_aggregation",
+          "display_name": "Filtered aggregation",
+          "class": "filter_prune",
+          "elapsed_seconds": 11.403,
+          "rows_returned": 455,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            11.403
+          ],
+          "min_seconds": 11.403,
+          "max_seconds": 11.403,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q4_churn_risk_analysis",
+          "display_name": "Churn risk analysis",
+          "class": "filter_prune",
+          "elapsed_seconds": 15.395,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            15.395
+          ],
+          "min_seconds": 15.395,
+          "max_seconds": 15.395,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q3_customer_segmentation",
+          "display_name": "Customer segmentation",
+          "class": "aggregation",
+          "elapsed_seconds": 17.504,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            17.504
+          ],
+          "min_seconds": 17.504,
+          "max_seconds": 17.504,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q7_channel_conversion_funnel",
+          "display_name": "Channel conversion funnel",
+          "class": "aggregation",
+          "elapsed_seconds": 15.186,
+          "rows_returned": 5,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            15.186
+          ],
+          "min_seconds": 15.186,
+          "max_seconds": 15.186,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q5_revenue_trend_ma7",
+          "display_name": "Revenue trend MA7",
+          "class": "analytics",
+          "elapsed_seconds": 16.627,
+          "rows_returned": 90,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            16.627
+          ],
+          "min_seconds": 16.627,
+          "max_seconds": 16.627,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q6_customer_rfm",
+          "display_name": "Customer RFM scoring",
+          "class": "analytics",
+          "elapsed_seconds": 19.896,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            19.896
+          ],
+          "min_seconds": 19.896,
+          "max_seconds": 19.896,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q9_executive_dashboard",
+          "display_name": "Executive dashboard",
+          "class": "operational",
+          "elapsed_seconds": 3.794,
+          "rows_returned": 30,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            3.794
+          ],
+          "min_seconds": 3.794,
+          "max_seconds": 3.794,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 248.1,
+        "qph_high": 248.1,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 3,
+        "timestamp": "2026-09-30T03:10:22.846741+00:00",
+        "gold_event_age_seconds": 55134661.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 6954,
+          "silver_snapshot_count": 19,
+          "gold_data_file_count": 1,
+          "gold_snapshot_count": 4
+        }
+      }
+    },
+    {
+      "benchmark_type": "trino_query",
+      "engine": "trino",
+      "query_set_id": "qs8-32043638dbc4",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 191.5,
+      "total_seconds": 150.37,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "Q1_full_aggregation_scan",
+          "display_name": "Full aggregation scan",
+          "class": "scan",
+          "elapsed_seconds": 23.801,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            23.801
+          ],
+          "min_seconds": 23.801,
+          "max_seconds": 23.801,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q2_filtered_aggregation",
+          "display_name": "Filtered aggregation",
+          "class": "filter_prune",
+          "elapsed_seconds": 13.095,
+          "rows_returned": 455,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            13.095
+          ],
+          "min_seconds": 13.095,
+          "max_seconds": 13.095,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q4_churn_risk_analysis",
+          "display_name": "Churn risk analysis",
+          "class": "filter_prune",
+          "elapsed_seconds": 18.998,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            18.998
+          ],
+          "min_seconds": 18.998,
+          "max_seconds": 18.998,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q3_customer_segmentation",
+          "display_name": "Customer segmentation",
+          "class": "aggregation",
+          "elapsed_seconds": 22.696,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            22.696
+          ],
+          "min_seconds": 22.696,
+          "max_seconds": 22.696,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q7_channel_conversion_funnel",
+          "display_name": "Channel conversion funnel",
+          "class": "aggregation",
+          "elapsed_seconds": 20.723,
+          "rows_returned": 5,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            20.723
+          ],
+          "min_seconds": 20.723,
+          "max_seconds": 20.723,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q5_revenue_trend_ma7",
+          "display_name": "Revenue trend MA7",
+          "class": "analytics",
+          "elapsed_seconds": 19.381,
+          "rows_returned": 90,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            19.381
+          ],
+          "min_seconds": 19.381,
+          "max_seconds": 19.381,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q6_customer_rfm",
+          "display_name": "Customer RFM scoring",
+          "class": "analytics",
+          "elapsed_seconds": 27.689,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            27.689
+          ],
+          "min_seconds": 27.689,
+          "max_seconds": 27.689,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q9_executive_dashboard",
+          "display_name": "Executive dashboard",
+          "class": "operational",
+          "elapsed_seconds": 3.985,
+          "rows_returned": 30,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            3.985
+          ],
+          "min_seconds": 3.985,
+          "max_seconds": 3.985,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 191.5,
+        "qph_high": 191.5,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 4,
+        "timestamp": "2026-09-30T03:17:40.959646+00:00",
+        "gold_event_age_seconds": 55135098.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 9516,
+          "silver_snapshot_count": 26,
+          "gold_data_file_count": 1,
+          "gold_snapshot_count": 5
+        }
+      }
+    }
+  ],
+  "pipeline_benchmark": {
+    "run_id": "20260929-204941-1d17f4",
+    "deployment_name": "pipe-c360-c1",
+    "pipeline_mode": "sustained",
+    "scale_factor": 1.0,
+    "start_time": "2026-09-30T02:49:41.182993+00:00",
+    "end_time": "2026-09-30T03:42:37.284650+00:00",
+    "success": true,
+    "scorecard": {
+      "data_freshness_seconds": 101.0,
+      "sustained_throughput_rps": 1032.7,
+      "total_data_processed_gb": 32.367,
+      "pipeline_throughput_gb_per_second": 0.018,
+      "total_core_hours": 14.0,
+      "ingest_ratio": 1.0,
+      "compute_efficiency_gb_per_core_hour": 2.3118,
+      "stage_latency_profile": {
+        "bronze_ms": 2273.3,
+        "silver_ms": 8243.3,
+        "gold_ms": 28166.7
+      },
+      "composite_qph": 260.0,
+      "composite_qph_rounds": 4,
+      "pipeline_saturated": false,
+      "corpus_drained": false,
+      "intake_limit": "none",
+      "corpus_drain_seconds": null,
+      "bronze_busy_fraction": 0.076,
+      "total_rows_processed": 9151389,
+      "total_elapsed_seconds": 3176.1,
+      "total_s3_objects": 11819,
+      "corpus_ingest_ratio": 0.75,
+      "released_rows": 1858920,
+      "window_seconds": 1800.0,
+      "arrival_seconds": 1800.0,
+      "window_arrival_fraction": 1.0,
+      "pre_window_rows": 0,
+      "query_time_event_age_seconds": 55134447.0,
+      "in_stream_composite_qph": 260.0,
+      "benchmark_rounds_count": 4,
+      "qph_degradation_pct": 20.9
+    },
+    "scores": {
+      "data_freshness_seconds": 101.0,
+      "sustained_throughput_rps": 1032.7,
+      "total_data_processed_gb": 32.367,
+      "pipeline_throughput_gb_per_second": 0.018,
+      "total_core_hours": 14.0,
+      "ingest_ratio": 1.0,
+      "compute_efficiency_gb_per_core_hour": 2.3118,
+      "stage_latency_profile": {
+        "bronze_ms": 2273.3,
+        "silver_ms": 8243.3,
+        "gold_ms": 28166.7
+      },
+      "composite_qph": 260.0,
+      "composite_qph_rounds": 4,
+      "pipeline_saturated": false,
+      "corpus_drained": false,
+      "intake_limit": "none",
+      "corpus_drain_seconds": null,
+      "bronze_busy_fraction": 0.076,
+      "total_rows_processed": 9151389,
+      "total_elapsed_seconds": 3176.1,
+      "total_s3_objects": 11819,
+      "corpus_ingest_ratio": 0.75,
+      "released_rows": 1858920,
+      "window_seconds": 1800.0,
+      "arrival_seconds": 1800.0,
+      "window_arrival_fraction": 1.0,
+      "pre_window_rows": 0,
+      "query_time_event_age_seconds": 55134447.0,
+      "in_stream_composite_qph": 260.0,
+      "benchmark_rounds_count": 4,
+      "qph_degradation_pct": 20.9
+    },
+    "stages": [
+      {
+        "stage_name": "bronze",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 1800.041926,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 17.33189887087792,
+        "output_size_gb": 0.0,
+        "input_rows": 1858920,
+        "output_rows": 1858920,
+        "throughput_gb_per_second": 0.009628608434355946,
+        "throughput_rows_per_second": 1032.7092792393103,
+        "executor_count": 2,
+        "executor_cores": 2,
+        "executor_memory_gb": 4.0,
+        "latency_ms": 2273.333333333334,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": 1750.251004,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 60,
+        "batch_size": 30982,
+        "unique_rows_processed": 1858920,
+        "window_input_rows": 1858920,
+        "pre_window_input_rows": 0,
+        "window_commits": 60,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": 1779.354304,
+        "trickle_start_offset_seconds": 29.1033,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 1800.041926,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 7.517117780633271,
+        "output_size_gb": 0.0,
+        "input_rows": 1827938,
+        "output_rows": 1790912,
+        "throughput_gb_per_second": 0.004176079274629779,
+        "throughput_rows_per_second": 1015.4974579186551,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 8243.333333333334,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": 1827938,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 30,
+        "batch_size": 60931,
+        "unique_rows_processed": 1827938,
+        "window_input_rows": 1827938,
+        "pre_window_input_rows": 0,
+        "window_commits": 30,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "gold",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 1800.041926,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 7.517117780633271,
+        "output_size_gb": 0.0,
+        "input_rows": 5464531,
+        "output_rows": 366,
+        "throughput_gb_per_second": 0.004176079274629779,
+        "throughput_rows_per_second": 3035.7798454967765,
+        "executor_count": 2,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 28166.666666666668,
+        "freshness_seconds": 101.0,
+        "freshness_active_seconds": 101.0,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 6,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 6,
+        "batch_size": 910755,
+        "unique_rows_processed": null,
+        "window_input_rows": 5464531,
+        "pre_window_input_rows": 0,
+        "window_commits": 6,
+        "window_new_data_cycles": 6,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "query",
+        "stage_type": "query",
+        "engine": "trino",
+        "elapsed_seconds": 110.98887362107052,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0.0,
+        "input_size_gb": 0.0003937678411602974,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 8,
+        "queries_per_hour": 260.03576540464167
+      }
+    ],
+    "stage_matrix": {
+      "bronze": {
+        "engine": "spark",
+        "elapsed_seconds": 1800.04,
+        "input_size_gb": 17.332,
+        "output_size_gb": 0.0,
+        "input_rows": 1858920,
+        "output_rows": 1858920,
+        "throughput_gb_per_second": 0.0096,
+        "throughput_rows_per_second": 1032.7,
+        "executor_count": 2,
+        "executor_cores": 2,
+        "executor_memory_gb": 4.0,
+        "latency_ms": 2273.3,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "silver": {
+        "engine": "spark",
+        "elapsed_seconds": 1800.04,
+        "input_size_gb": 7.517,
+        "output_size_gb": 0.0,
+        "input_rows": 1827938,
+        "output_rows": 1790912,
+        "throughput_gb_per_second": 0.0042,
+        "throughput_rows_per_second": 1015.5,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 8243.3,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "gold": {
+        "engine": "spark",
+        "elapsed_seconds": 1800.04,
+        "input_size_gb": 7.517,
+        "output_size_gb": 0.0,
+        "input_rows": 5464531,
+        "output_rows": 366,
+        "throughput_gb_per_second": 0.0042,
+        "throughput_rows_per_second": 3035.8,
+        "executor_count": 2,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 28166.7,
+        "freshness_seconds": 101.0,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "query": {
+        "engine": "trino",
+        "elapsed_seconds": 110.99,
+        "input_size_gb": 0.0,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 260.0,
+        "success": true
+      }
+    },
+    "bucket_sizes": {
+      "bronze_gb": 17.332,
+      "silver_gb": 0.0,
+      "gold_gb": 0.0
+    },
+    "config_snapshot": {
+      "name": "pipe-c360-c1",
+      "scale": 1.0,
+      "approx_bronze_gb": 10.0,
+      "processing_pattern": "medallion",
+      "s3": {
+        "endpoint": "http://s3-endpoint-redacted:80",
+        "buckets": {
+          "bronze": "pipe-c360-c1-bronze",
+          "silver": "pipe-c360-c1-silver",
+          "gold": "pipe-c360-c1-gold"
+        }
+      },
+      "scratch": {
+        "enabled": true,
+        "storage_class": "px-csi-scratch",
+        "size": "100Gi"
+      },
+      "spark": {
+        "driver": {
+          "cores": 2,
+          "memory": "2g"
+        },
+        "executor": {
+          "instances": 2,
+          "cores": 2,
+          "memory": "4g",
+          "memory_overhead": "1g"
+        },
+        "executor_overrides": {
+          "bronze": null,
+          "silver": null,
+          "gold": null,
+          "bronze_ingest": null,
+          "silver_stream": null,
+          "gold_refresh": null
+        }
+      },
+      "catalog": "hive",
+      "table_format": "iceberg",
+      "pipeline_engine": "spark",
+      "query_engine": "trino",
+      "workload_schema": "customer360",
+      "sustained": {
+        "bronze_trigger_interval": "30 seconds",
+        "silver_trigger_interval": "60 seconds",
+        "gold_refresh_interval": "5 minutes",
+        "run_duration": 1800,
+        "max_files_per_trigger": 2,
+        "bronze_target_file_size_mb": 512,
+        "silver_target_file_size_mb": 512,
+        "gold_target_file_size_mb": 128,
+        "benchmark_interval": 300,
+        "benchmark_warmup": 300
+      },
+      "datagen": {
+        "scale": 1.0,
+        "mode": "continuous",
+        "parallelism": 2,
+        "file_size": "64mb"
+      },
+      "images": {
+        "datagen": "docker.io/sillidata/lb-datagen:034f998",
+        "spark": "apache/spark:4.0.2-python3",
+        "trino": "trinodb/trino:483"
+      },
+      "trino": {
+        "coordinator": {
+          "cpu": "1",
+          "memory": "4Gi"
+        },
+        "worker": {
+          "replicas": 1,
+          "cpu": "2",
+          "memory": "8Gi"
+        }
+      },
+      "benchmark": {
+        "mode": "power",
+        "streams": 1,
+        "cache": "hot",
+        "iterations": 1
+      },
+      "maintenance": {
+        "pre_benchmark_maintenance": true,
+        "retention_interval": 600,
+        "retention_threshold": "30m",
+        "compaction_enabled": true,
+        "compaction_interval": 1200
+      },
+      "experiment_inputs": {
+        "workload": {
+          "name": "customer360",
+          "version": "c360-1",
+          "generator_model_version": null,
+          "parameters_id": "12bee0ff88813f11",
+          "parameters": {
+            "customer360": {
+              "unique_customers": 100000,
+              "unique_customers_source": "scale",
+              "event_window": {
+                "start": "2024-01-01",
+                "end": "2025-01-01"
+              }
+            }
+          }
+        },
+        "corpus": {
+          "schema": "customer360",
+          "generator_image": "docker.io/sillidata/lb-datagen:034f998",
+          "seed": 42,
+          "corpus_role": null,
+          "robustness_perturbation": false,
+          "scale": 1.0,
+          "timestamp_start": null,
+          "timestamp_end": null,
+          "dirty_data_ratio": 0.08,
+          "id": "13eaa2a3ed5fcf74",
+          "unique_customers": 100000
+        },
+        "architecture": {
+          "recipe": "hive-iceberg-spark-trino",
+          "catalog": {
+            "type": "hive",
+            "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+          },
+          "table_format": {
+            "type": "iceberg",
+            "version": "1.11.0"
+          },
+          "pipeline_engine": {
+            "type": "spark",
+            "image": "apache/spark:4.0.2-python3"
+          },
+          "query_engine": {
+            "type": "trino",
+            "version": "trinodb/trino:483"
+          },
+          "query_access_path": "catalog"
+        },
+        "maintenance_config": {
+          "pre_benchmark_maintenance": true,
+          "compaction_enabled": true,
+          "settings": {
+            "retention_threshold": "30m",
+            "retention_interval": 600,
+            "compaction_interval": 1200
+          }
+        },
+        "mode": "continuous",
+        "run_mode": "continuous",
+        "support": {
+          "workload": "customer360",
+          "mode": "continuous",
+          "recipe": "hive-iceberg-spark-trino",
+          "state": "unverified",
+          "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+        },
+        "config_limits": {
+          "max_files_per_trigger": 2,
+          "benchmark_iterations": 1,
+          "w1_max_vertices": null,
+          "tm_max_alerts_per_customer": null
+        }
+      },
+      "datagen_output_rows": 2478560,
+      "datagen_output_files": 160
+    },
+    "ingest_ratio": 1.0,
+    "pipeline_saturated": false,
+    "corpus_drained": false,
+    "query_benchmark": {
+      "benchmark_type": "trino_query",
+      "engine": "trino",
+      "query_set_id": "qs8-32043638dbc4",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 260.0,
+      "total_seconds": 110.99,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "Q1_full_aggregation_scan",
+          "display_name": "Full aggregation scan",
+          "class": "scan",
+          "elapsed_seconds": 18.712,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            19.312
+          ],
+          "min_seconds": 19.312,
+          "max_seconds": 19.312,
+          "relative_range": 0.0,
+          "result_fingerprint_note": "aggregated over in-stream rounds"
+        },
+        {
+          "name": "Q2_filtered_aggregation",
+          "display_name": "Filtered aggregation",
+          "class": "filter_prune",
+          "elapsed_seconds": 12.249,
+          "rows_returned": 455,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            13.294
+          ],
+          "min_seconds": 13.294,
+          "max_seconds": 13.294,
+          "relative_range": 0.0,
+          "result_fingerprint_note": "aggregated over in-stream rounds"
+        },
+        {
+          "name": "Q4_churn_risk_analysis",
+          "display_name": "Churn risk analysis",
+          "class": "filter_prune",
+          "elapsed_seconds": 15.357,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            14.022
+          ],
+          "min_seconds": 14.022,
+          "max_seconds": 14.022,
+          "relative_range": 0.0,
+          "result_fingerprint_note": "aggregated over in-stream rounds"
+        },
+        {
+          "name": "Q3_customer_segmentation",
+          "display_name": "Customer segmentation",
+          "class": "aggregation",
+          "elapsed_seconds": 15.951,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            14.399
+          ],
+          "min_seconds": 14.399,
+          "max_seconds": 14.399,
+          "relative_range": 0.0,
+          "result_fingerprint_note": "aggregated over in-stream rounds"
+        },
+        {
+          "name": "Q7_channel_conversion_funnel",
+          "display_name": "Channel conversion funnel",
+          "class": "aggregation",
+          "elapsed_seconds": 14.246,
+          "rows_returned": 5,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            11.104
+          ],
+          "min_seconds": 11.104,
+          "max_seconds": 11.104,
+          "relative_range": 0.0,
+          "result_fingerprint_note": "aggregated over in-stream rounds"
+        },
+        {
+          "name": "Q5_revenue_trend_ma7",
+          "display_name": "Revenue trend MA7",
+          "class": "analytics",
+          "elapsed_seconds": 15.354,
+          "rows_returned": 90,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            11.294
+          ],
+          "min_seconds": 11.294,
+          "max_seconds": 11.294,
+          "relative_range": 0.0,
+          "result_fingerprint_note": "aggregated over in-stream rounds"
+        },
+        {
+          "name": "Q6_customer_rfm",
+          "display_name": "Customer RFM scoring",
+          "class": "analytics",
+          "elapsed_seconds": 18.353,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            14.298
+          ],
+          "min_seconds": 14.298,
+          "max_seconds": 14.298,
+          "relative_range": 0.0,
+          "result_fingerprint_note": "aggregated over in-stream rounds"
+        },
+        {
+          "name": "Q9_executive_dashboard",
+          "display_name": "Executive dashboard",
+          "class": "operational",
+          "elapsed_seconds": 3.833,
+          "rows_returned": 30,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            3.784
+          ],
+          "min_seconds": 3.784,
+          "max_seconds": 3.784,
+          "relative_range": 0.0,
+          "result_fingerprint_note": "aggregated over in-stream rounds"
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 283.7,
+        "qph_high": 283.7,
+        "relative_range": 0.0
+      }
+    },
+    "benchmark_rounds": [
+      {
+        "benchmark_type": "trino_query",
+        "engine": "trino",
+        "query_set_id": "qs8-32043638dbc4",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 1.0,
+        "qph": 283.7,
+        "total_seconds": 101.51,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "Q1_full_aggregation_scan",
+            "display_name": "Full aggregation scan",
+            "class": "scan",
+            "elapsed_seconds": 19.312,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              19.312
+            ],
+            "min_seconds": 19.312,
+            "max_seconds": 19.312,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q2_filtered_aggregation",
+            "display_name": "Filtered aggregation",
+            "class": "filter_prune",
+            "elapsed_seconds": 13.294,
+            "rows_returned": 455,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              13.294
+            ],
+            "min_seconds": 13.294,
+            "max_seconds": 13.294,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q4_churn_risk_analysis",
+            "display_name": "Churn risk analysis",
+            "class": "filter_prune",
+            "elapsed_seconds": 14.022,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              14.022
+            ],
+            "min_seconds": 14.022,
+            "max_seconds": 14.022,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q3_customer_segmentation",
+            "display_name": "Customer segmentation",
+            "class": "aggregation",
+            "elapsed_seconds": 14.399,
+            "rows_returned": 12,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              14.399
+            ],
+            "min_seconds": 14.399,
+            "max_seconds": 14.399,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q7_channel_conversion_funnel",
+            "display_name": "Channel conversion funnel",
+            "class": "aggregation",
+            "elapsed_seconds": 11.104,
+            "rows_returned": 5,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              11.104
+            ],
+            "min_seconds": 11.104,
+            "max_seconds": 11.104,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q5_revenue_trend_ma7",
+            "display_name": "Revenue trend MA7",
+            "class": "analytics",
+            "elapsed_seconds": 11.294,
+            "rows_returned": 90,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              11.294
+            ],
+            "min_seconds": 11.294,
+            "max_seconds": 11.294,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q6_customer_rfm",
+            "display_name": "Customer RFM scoring",
+            "class": "analytics",
+            "elapsed_seconds": 14.298,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              14.298
+            ],
+            "min_seconds": 14.298,
+            "max_seconds": 14.298,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q9_executive_dashboard",
+            "display_name": "Executive dashboard",
+            "class": "operational",
+            "elapsed_seconds": 3.784,
+            "rows_returned": 30,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              3.784
+            ],
+            "min_seconds": 3.784,
+            "max_seconds": 3.784,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 283.7,
+          "qph_high": 283.7,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 1,
+          "timestamp": "2026-09-30T02:56:04.754034+00:00",
+          "gold_event_age_seconds": 55133808.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 1830,
+            "silver_snapshot_count": 5,
+            "gold_data_file_count": 1,
+            "gold_snapshot_count": 1
+          }
+        }
+      },
+      {
+        "benchmark_type": "trino_query",
+        "engine": "trino",
+        "query_set_id": "qs8-32043638dbc4",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 1.0,
+        "qph": 272.0,
+        "total_seconds": 105.88,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "Q1_full_aggregation_scan",
+            "display_name": "Full aggregation scan",
+            "class": "scan",
+            "elapsed_seconds": 18.112,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              18.112
+            ],
+            "min_seconds": 18.112,
+            "max_seconds": 18.112,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q2_filtered_aggregation",
+            "display_name": "Filtered aggregation",
+            "class": "filter_prune",
+            "elapsed_seconds": 11.076,
+            "rows_returned": 455,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              11.076
+            ],
+            "min_seconds": 11.076,
+            "max_seconds": 11.076,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q4_churn_risk_analysis",
+            "display_name": "Churn risk analysis",
+            "class": "filter_prune",
+            "elapsed_seconds": 15.319,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              15.319
+            ],
+            "min_seconds": 15.319,
+            "max_seconds": 15.319,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q3_customer_segmentation",
+            "display_name": "Customer segmentation",
+            "class": "aggregation",
+            "elapsed_seconds": 13.307,
+            "rows_returned": 12,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              13.307
+            ],
+            "min_seconds": 13.307,
+            "max_seconds": 13.307,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q7_channel_conversion_funnel",
+            "display_name": "Channel conversion funnel",
+            "class": "aggregation",
+            "elapsed_seconds": 13.306,
+            "rows_returned": 5,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              13.306
+            ],
+            "min_seconds": 13.306,
+            "max_seconds": 13.306,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q5_revenue_trend_ma7",
+            "display_name": "Revenue trend MA7",
+            "class": "analytics",
+            "elapsed_seconds": 14.081,
+            "rows_returned": 90,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              14.081
+            ],
+            "min_seconds": 14.081,
+            "max_seconds": 14.081,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q6_customer_rfm",
+            "display_name": "Customer RFM scoring",
+            "class": "analytics",
+            "elapsed_seconds": 16.81,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              16.81
+            ],
+            "min_seconds": 16.81,
+            "max_seconds": 16.81,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q9_executive_dashboard",
+            "display_name": "Executive dashboard",
+            "class": "operational",
+            "elapsed_seconds": 3.872,
+            "rows_returned": 30,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              3.872
+            ],
+            "min_seconds": 3.872,
+            "max_seconds": 3.872,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 272.0,
+          "qph_high": 272.0,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 2,
+          "timestamp": "2026-09-30T03:03:14.678776+00:00",
+          "gold_event_age_seconds": 55134233.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 4392,
+            "silver_snapshot_count": 12,
+            "gold_data_file_count": 1,
+            "gold_snapshot_count": 2
+          }
+        }
+      },
+      {
+        "benchmark_type": "trino_query",
+        "engine": "trino",
+        "query_set_id": "qs8-32043638dbc4",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 1.0,
+        "qph": 248.1,
+        "total_seconds": 116.09,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "Q1_full_aggregation_scan",
+            "display_name": "Full aggregation scan",
+            "class": "scan",
+            "elapsed_seconds": 16.29,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              16.29
+            ],
+            "min_seconds": 16.29,
+            "max_seconds": 16.29,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q2_filtered_aggregation",
+            "display_name": "Filtered aggregation",
+            "class": "filter_prune",
+            "elapsed_seconds": 11.403,
+            "rows_returned": 455,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              11.403
+            ],
+            "min_seconds": 11.403,
+            "max_seconds": 11.403,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q4_churn_risk_analysis",
+            "display_name": "Churn risk analysis",
+            "class": "filter_prune",
+            "elapsed_seconds": 15.395,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              15.395
+            ],
+            "min_seconds": 15.395,
+            "max_seconds": 15.395,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q3_customer_segmentation",
+            "display_name": "Customer segmentation",
+            "class": "aggregation",
+            "elapsed_seconds": 17.504,
+            "rows_returned": 12,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              17.504
+            ],
+            "min_seconds": 17.504,
+            "max_seconds": 17.504,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q7_channel_conversion_funnel",
+            "display_name": "Channel conversion funnel",
+            "class": "aggregation",
+            "elapsed_seconds": 15.186,
+            "rows_returned": 5,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              15.186
+            ],
+            "min_seconds": 15.186,
+            "max_seconds": 15.186,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q5_revenue_trend_ma7",
+            "display_name": "Revenue trend MA7",
+            "class": "analytics",
+            "elapsed_seconds": 16.627,
+            "rows_returned": 90,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              16.627
+            ],
+            "min_seconds": 16.627,
+            "max_seconds": 16.627,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q6_customer_rfm",
+            "display_name": "Customer RFM scoring",
+            "class": "analytics",
+            "elapsed_seconds": 19.896,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              19.896
+            ],
+            "min_seconds": 19.896,
+            "max_seconds": 19.896,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q9_executive_dashboard",
+            "display_name": "Executive dashboard",
+            "class": "operational",
+            "elapsed_seconds": 3.794,
+            "rows_returned": 30,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              3.794
+            ],
+            "min_seconds": 3.794,
+            "max_seconds": 3.794,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 248.1,
+          "qph_high": 248.1,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 3,
+          "timestamp": "2026-09-30T03:10:22.846741+00:00",
+          "gold_event_age_seconds": 55134661.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 6954,
+            "silver_snapshot_count": 19,
+            "gold_data_file_count": 1,
+            "gold_snapshot_count": 4
+          }
+        }
+      },
+      {
+        "benchmark_type": "trino_query",
+        "engine": "trino",
+        "query_set_id": "qs8-32043638dbc4",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 1.0,
+        "qph": 191.5,
+        "total_seconds": 150.37,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "Q1_full_aggregation_scan",
+            "display_name": "Full aggregation scan",
+            "class": "scan",
+            "elapsed_seconds": 23.801,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              23.801
+            ],
+            "min_seconds": 23.801,
+            "max_seconds": 23.801,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q2_filtered_aggregation",
+            "display_name": "Filtered aggregation",
+            "class": "filter_prune",
+            "elapsed_seconds": 13.095,
+            "rows_returned": 455,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              13.095
+            ],
+            "min_seconds": 13.095,
+            "max_seconds": 13.095,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q4_churn_risk_analysis",
+            "display_name": "Churn risk analysis",
+            "class": "filter_prune",
+            "elapsed_seconds": 18.998,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              18.998
+            ],
+            "min_seconds": 18.998,
+            "max_seconds": 18.998,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q3_customer_segmentation",
+            "display_name": "Customer segmentation",
+            "class": "aggregation",
+            "elapsed_seconds": 22.696,
+            "rows_returned": 12,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              22.696
+            ],
+            "min_seconds": 22.696,
+            "max_seconds": 22.696,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q7_channel_conversion_funnel",
+            "display_name": "Channel conversion funnel",
+            "class": "aggregation",
+            "elapsed_seconds": 20.723,
+            "rows_returned": 5,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              20.723
+            ],
+            "min_seconds": 20.723,
+            "max_seconds": 20.723,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q5_revenue_trend_ma7",
+            "display_name": "Revenue trend MA7",
+            "class": "analytics",
+            "elapsed_seconds": 19.381,
+            "rows_returned": 90,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              19.381
+            ],
+            "min_seconds": 19.381,
+            "max_seconds": 19.381,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q6_customer_rfm",
+            "display_name": "Customer RFM scoring",
+            "class": "analytics",
+            "elapsed_seconds": 27.689,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              27.689
+            ],
+            "min_seconds": 27.689,
+            "max_seconds": 27.689,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q9_executive_dashboard",
+            "display_name": "Executive dashboard",
+            "class": "operational",
+            "elapsed_seconds": 3.985,
+            "rows_returned": 30,
+            "success": true,
+            "error_message": "",
+            "result_fingerprint": null,
+            "samples": [
+              3.985
+            ],
+            "min_seconds": 3.985,
+            "max_seconds": 3.985,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 191.5,
+          "qph_high": 191.5,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 4,
+          "timestamp": "2026-09-30T03:17:40.959646+00:00",
+          "gold_event_age_seconds": 55135098.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 9516,
+            "silver_snapshot_count": 26,
+            "gold_data_file_count": 1,
+            "gold_snapshot_count": 5
+          }
+        }
+      }
+    ],
+    "qph_trend": {
+      "rounds": 4,
+      "first_round_qph": 283.7,
+      "last_round_qph": 191.5,
+      "change_pct": -32.5,
+      "silver_data_files_start": 1830,
+      "silver_data_files_end": 9516,
+      "silver_data_files_rounds": 4
+    },
+    "score_descriptions": {
+      "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+      "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+      "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+      "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+      "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+      "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+      "composite_qph_rounds": "Continuous. In-stream benchmark rounds whose median is composite_qph (rounds with a QpH); 0 means composite_qph is the single post-stream benchmark. Runs with different counts are not like-for-like",
+      "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
+      "sustained_throughput_rps": "Rows bronze ingested inside the measurement window per second of the window that data was arriving (arrival_seconds), higher is better. Rows ingested before the window opened are not counted. When intake_limit is trickle_rate this is the configured offered load, not a capacity",
+      "window_seconds": "Length of the measurement window: from the moment every stream's driver was running, run_duration seconds",
+      "arrival_seconds": "Seconds of the window data was still arriving at bronze: the whole window while corpus was left, else until one bronze trigger after its last write inside the window",
+      "window_arrival_fraction": "arrival_seconds / window_seconds. Below 1 the corpus ran out inside the window; the window after that measured an idle pipeline",
+      "pre_window_rows": "Rows bronze ingested before the window opened (a stream that started while another waited to submit). Not part of any window score",
+      "ingest_ratio": "Bronze rows ingested by the window's end / rows the trickle had released to bronze by then (released_rows: max_files_per_trigger files per bronze trigger since bronze's first write, at the corpus's mean rows per file, capped at the corpus). 1.0 = bronze kept up with what arrived. Falls back to corpus_ingest_ratio when released_rows is unknown",
+      "corpus_ingest_ratio": "Bronze rows ingested by the window's end / datagen rows produced: the share of the whole corpus taken. Below 1 on a default run, whose trickle is sized to outlast the window",
+      "released_rows": "Rows the trickle had made available to bronze by the window's end (ingest_ratio's denominator); null when the corpus file count or window is unknown",
+      "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
+      "pipeline_saturated": "True when ingest_ratio < 0.95: bronze fell behind the rows the trickle released. False when intake_limit is trickle_rate: the configured trickle, not the pipeline, bounded intake",
+      "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), trickle_rate (bronze ran a micro-batch on nearly every trigger, each inside the trigger, with corpus left: the configured max_files_per_trigger per trigger bounded intake and the pipeline kept pace), below_bronze_capacity (bronze had idle time without that pattern: a late start or a stall), none (kept up)",
+      "corpus_drain_seconds": "When intake_limit is trickle_rate: seconds the trickle needs to ingest the whole corpus at the rate it held (datagen rows / sustained_throughput_rps); a window this long drains it",
+      "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
+      "corpus_drained": "True when every datagen row reached bronze and silver committed all of them before the window ended: freshness covers only gold cycles that saw new data, and arrival_seconds stops at bronze's last write",
+      "total_rows_processed": "Rows taken in across all streaming stages inside the measurement window (gold re-reads of silver included)",
+      "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
+      "query_time_event_age_seconds": "Diagnostic, not freshness. Median age of the newest event date in gold at benchmark query time (query time minus MAX(interaction_date), day resolution). It tracks where the corpus's event timestamps sit, not how stale gold is; data_freshness_seconds is the freshness score. Replaces query_time_freshness_seconds, which carried this figure under a freshness name",
+      "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
+      "benchmark_rounds_count": "Number of in-stream benchmark rounds executed",
+      "qph_degradation_pct": "QpH degradation from first-half to second-half of sustained run (positive = slower, negative = faster)"
+    },
+    "advanced_metrics": null
+  }
+}

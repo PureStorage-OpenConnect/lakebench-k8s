@@ -51,7 +51,7 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "access_key": ("platform", "storage", "s3", "access_key"),
     "secret_key": ("platform", "storage", "s3", "secret_key"),
     "secret_ref": ("platform", "storage", "s3", "secret_ref"),
-    "scale": ("architecture", "workload", "datagen", "scale"),
+    "scale": ("workload", "datagen", "scale"),
     "namespace": ("platform", "kubernetes", "namespace"),
     "mode": ("architecture", "pipeline", "mode"),
     "cycles": ("architecture", "pipeline", "cycles"),
@@ -73,10 +73,44 @@ def _apply_flat_fields(data: dict[str, Any]) -> dict[str, Any]:
             continue
         value = data.pop(flat_key)
 
-        # Walk the nested path, creating intermediate dicts as needed
+        # A config still using the deprecated 'architecture.workload' block
+        # (and no top-level one) gets flat 'scale' there, so the two blocks
+        # are not both set with only the flat value in one of them.
+        arch = data.get("architecture")
+        if (
+            nested_path[0] == "workload"
+            and "workload" not in data
+            and isinstance(arch, dict)
+            and "workload" in arch
+        ):
+            nested_path = ("architecture", *nested_path)
+
+        # A config still using the deprecated 'architecture.processing' key
+        # gets flat pipeline fields there, rather than a new 'pipeline'
+        # block that would collide with it. An empty 'processing:' is None.
+        arch = data.get("architecture")
+        if (
+            nested_path[:2] == ("architecture", "pipeline")
+            and isinstance(arch, dict)
+            and "processing" in arch
+            and (arch["processing"] is None or isinstance(arch["processing"], dict))
+            and "pipeline" not in arch
+        ):
+            nested_path = ("architecture", "processing", *nested_path[2:])
+
+        # Walk the nested path, creating intermediate dicts as needed. An
+        # empty YAML mapping ('architecture:' with nothing under it) is None.
         target = data
         for key in nested_path[:-1]:
-            target = target.setdefault(key, {})
+            nxt = target.get(key)
+            if nxt is None:
+                nxt = target[key] = {}
+            if not isinstance(nxt, dict):
+                raise ConfigError(
+                    f"flat field '{flat_key}' belongs under '{'.'.join(nested_path[:-1])}', "
+                    f"but '{key}' is not a mapping"
+                )
+            target = nxt
 
         final_key = nested_path[-1]
         if final_key in target:
@@ -196,7 +230,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
 
 
-def load_config(path: str | Path) -> LakebenchConfig:
+def load_config(path: str | Path, *, allow_long_names: bool = False) -> LakebenchConfig:
     """Load and validate Lakebench configuration from file.
 
     Processing order:
@@ -206,6 +240,11 @@ def load_config(path: str | Path) -> LakebenchConfig:
 
     Args:
         path: Path to configuration YAML file
+        allow_long_names: Skip the derived-name length check (LB-153). Set by
+            the teardown and diagnostic commands (destroy, clean, status,
+            stop, logs, admin) and the perf gate, so a deployment whose
+            namespace is too long to finish deploying can still be
+            inspected and torn down. deploy, generate and run never set it.
 
     Returns:
         Validated LakebenchConfig object
@@ -223,10 +262,34 @@ def load_config(path: str | Path) -> LakebenchConfig:
     if not data.get("name"):
         data["name"] = _resolve_auto_name(path.parent)
 
+    # The model stores the workload block at architecture.workload; report
+    # errors at the location the user wrote it.
+    _arch = data.get("architecture")
+    _top_level_workload = "workload" in data and not (
+        isinstance(_arch, dict) and "workload" in _arch
+    )
+
     try:
-        return LakebenchConfig.model_validate(data)
+        cfg = LakebenchConfig.model_validate(data, context={"allow_long_names": allow_long_names})
     except ValidationError as e:
         errors = e.errors()
+        if _top_level_workload:
+            errors = [
+                {**err, "loc": tuple(err["loc"][1:])}
+                if tuple(err["loc"][:2]) == ("architecture", "workload")
+                else err
+                for err in errors
+            ]
+        # The continuous block is stored on the 'sustained' field; name it
+        # the way the user wrote it.
+        _pipe = _arch.get("pipeline") if isinstance(_arch, dict) else None
+        if not (isinstance(_pipe, dict) and "sustained" in _pipe):
+            errors = [
+                {**err, "loc": ("architecture", "pipeline", "continuous", *err["loc"][3:])}
+                if tuple(err["loc"][:3]) == ("architecture", "pipeline", "sustained")
+                else err
+                for err in errors
+            ]
         error_messages = []
         for err in errors:
             loc = ".".join(str(x) for x in err["loc"])
@@ -237,6 +300,85 @@ def load_config(path: str | Path) -> LakebenchConfig:
             "Configuration validation failed:\n" + "\n".join(error_messages),
             errors=[dict(e) for e in errors],  # type: ignore[call-overload]
         )
+    _print_load_advisories(cfg)
+    return cfg
+
+
+# Iceberg snapshot-expiry floor while continuous streams are live. Mirrors
+# LIVE_EXPIRE_MIN_RETENTION_SECONDS in
+# modules/table_formats/iceberg/maintenance.py; a test holds them in step.
+# Delta is not checked: continuous Delta has no effective table maintenance
+# in v1.6 (VACUUM keeps the 7 d default while streams are live, OPTIMIZE is
+# skipped), and the report says so.
+_ICEBERG_LIVE_EXPIRE_FLOOR_SECONDS = 3600
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# Engines that run continuous Iceberg maintenance (DuckDB and none skip it).
+_MAINTENANCE_ENGINES = ("trino", "spark-thrift")
+_printed_advisories: set[str] = set()
+
+
+def retention_floor_advisory(cfg: LakebenchConfig) -> str | None:
+    """Warning text when the continuous retention_threshold is below the live floor.
+
+    A continuous run floors Iceberg snapshot expiry at 1 h while streams are
+    live, so a lower retention_threshold is silently raised. The maintenance
+    journal records the effective value, but nothing told the user. Only
+    Iceberg recipes whose query engine runs maintenance (Trino, Spark
+    Thrift) are checked, and only a threshold the config sets. Ignores the
+    pipeline mode; callers decide.
+    """
+    if cfg.architecture.table_format.type.value != "iceberg":
+        return None
+    if cfg.architecture.query_engine.type.value not in _MAINTENANCE_ENGINES:
+        return None
+    sustained = cfg.architecture.pipeline.sustained
+    if "retention_threshold" not in sustained.model_fields_set:
+        # The 30m default stays (it is in every config's perf-gate
+        # fingerprint, so moving it would orphan every pinned baseline), and
+        # the floor raises live expiry to 1h on its own. The run records the
+        # applied value (continuous.retention), so the default needs no
+        # warning.
+        return None
+    threshold = sustained.retention_threshold
+    m = re.fullmatch(r"(\d+)([smhd])", threshold)
+    if m is None:
+        return None
+    if int(m.group(1)) * _UNIT_SECONDS[m.group(2)] >= _ICEBERG_LIVE_EXPIRE_FLOOR_SECONDS:
+        return None
+    return (
+        f"architecture.pipeline.continuous.retention_threshold is {threshold}, below the "
+        "1h floor for Iceberg snapshot expiry while continuous streams are live; "
+        "continuous maintenance expires at 1h. Set 1h or more to make the config say "
+        "what runs."
+    )
+
+
+def load_advisories(cfg: LakebenchConfig) -> list[str]:
+    """Settings that are valid but will not do what they say (continuous configs).
+
+    A batch config run with ``run --continuous`` gets the same retention
+    warning from the continuous loop instead: saved configs carry every
+    field, so an explicit threshold does not mean the user chose it.
+    """
+    if cfg.architecture.pipeline.mode.value != "continuous":
+        return []
+    msg = retention_floor_advisory(cfg)
+    return [msg] if msg else []
+
+
+def _print_load_advisories(cfg: LakebenchConfig) -> None:
+    advisories = load_advisories(cfg)
+    if not advisories:
+        return
+    from rich.console import Console
+
+    console = Console(stderr=True)
+    for msg in advisories:
+        # Once per process: some commands load the config several times.
+        if msg in _printed_advisories:
+            continue
+        _printed_advisories.add(msg)
+        console.print(f"[yellow]WARN[/yellow] {msg}")
 
 
 def save_config(config: LakebenchConfig, path: str | Path) -> None:
@@ -248,6 +390,16 @@ def save_config(config: LakebenchConfig, path: str | Path) -> None:
     """
     path = Path(path)
     data = config.model_dump(mode="json", exclude_defaults=False)
+    # Write the canonical locations, so the saved file reloads without
+    # deprecation warnings: 'workload' is a top-level key and the continuous
+    # settings block is 'pipeline.continuous' (the model stores them at
+    # architecture.workload and pipeline.sustained).
+    arch = data.get("architecture") or {}
+    if "workload" in arch:
+        data["workload"] = arch.pop("workload")
+    pipeline = arch.get("pipeline") or {}
+    if "sustained" in pipeline:
+        pipeline["continuous"] = pipeline.pop("sustained")
 
     with open(path, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
@@ -359,7 +511,7 @@ name: my-lakehouse
 # Container images for all components. Override for private registries.
 # See docs/datagen-custom-images.md for building custom datagen images.
 # images:
-#   datagen: docker.io/sillidata/lb-datagen:latest # Customizable (see docs/datagen-custom-images.md)
+#   datagen: docker.io/sillidata/lb-datagen:1.6.0 # Customizable (see docs/datagen-custom-images.md)
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
@@ -367,11 +519,7 @@ name: my-lakehouse
 #   polaris: apache/polaris:1.6.0
 #   duckdb: python:3.11-slim
 #   jmx_exporter: bitnami/jmx-exporter:latest
-#   prometheus: prom/prometheus:v2.48.0
-#   grafana: grafana/grafana:10.2.0
 #   pull_policy: Always               # Always | IfNotPresent | Never
-#   pull_secrets:                     # List of K8s imagePullSecret names
-#     - my-registry-secret
 
 # ============================================================================
 # LAYER 1: PLATFORM
@@ -398,10 +546,10 @@ platform:
 
       # region: us-east-1
       # path_style: true             # true for FlashBlade/MinIO, false for AWS S3
-      # buckets:
-      #   bronze: lakebench-bronze
-      #   silver: lakebench-silver
-      #   gold: lakebench-gold
+      # buckets:                     # default: <name>-bronze, <name>-silver, <name>-gold
+      #   bronze: <name>-bronze        # bucket names are global on most stores; keep them unique
+      #   silver: <name>-silver
+      #   gold: <name>-gold
       # create_buckets: true
 
     ## Scratch storage for Spark shuffle PVCs
@@ -409,12 +557,13 @@ platform:
     ## Any StorageClass that provides RWO volumes works (Portworx, local-path, EBS, etc.).
     # scratch:
     #   enabled: false
-    #   storage_class: px-csi-scratch    # Name of the StorageClass to use
+    #   storage_class: px-csi-scratch    # Name of the StorageClass to use. Must exist
+    #                                    # before `deploy` runs -- a cluster admin
+    #                                    # installs it once with
+    #                                    # `lakebench admin install-scratch-storage-class`.
     #   size: 100Gi
-    #   create_storage_class: true       # If true, lakebench creates this StorageClass
-    #                                    # on deploy (requires cluster-admin). Set false
-    #                                    # if the SC already exists or is managed externally.
-    #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Examples:
+    #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Consumed by
+    #                                    # `admin install-scratch-storage-class`. Examples:
     #                                    #   pxd.portworx.com (Portworx)
     #                                    #   rancher.io/local-path (local-path)
     #                                    #   ebs.csi.aws.com (AWS EBS)
@@ -448,7 +597,7 @@ platform:
   #     # bronze_executors: null
   #     # silver_executors: null
   #     # gold_executors: null
-  #     ## Streaming job executor overrides (sustained mode)
+  #     ## Streaming job executor overrides (continuous mode)
   #     # bronze_ingest_executors: null
   #     # silver_stream_executors: null
   #     # gold_refresh_executors: null
@@ -497,8 +646,6 @@ architecture:
   #   type: iceberg                  # iceberg (only fully supported format)
   #   iceberg:
   #     version: "1.11.0"
-  #     file_format: parquet         # parquet | orc | avro
-  #     properties: {}               # Additional Iceberg table properties
 
   # query_engine:
   #   type: trino                    # trino | spark-thrift | duckdb | none
@@ -524,8 +671,7 @@ architecture:
   #   #   catalog_name: lakehouse
 
   pipeline:
-    mode: batch                    # batch | sustained
-  #   pattern: medallion             # medallion | streaming | batch
+    mode: batch                    # batch | continuous
   #   ## Medallion layer configuration
   #   medallion:
   #     bronze:
@@ -548,52 +694,21 @@ architecture:
   #         - name: customer_executive_dashboard
   #           partition_by: [date]
   #           aggregations: [daily_revenue, daily_engagement, churn_indicators, channel_performance]
-  #   ## Sustained pipeline settings (used when mode: sustained)
-  #   sustained:
+  #   ## Continuous pipeline settings (used when mode: continuous)
+  #   continuous:
   #     bronze_trigger_interval: "30 seconds"
   #     silver_trigger_interval: "60 seconds"
   #     gold_refresh_interval: "5 minutes"
   #     run_duration: 1800           # Streaming run duration in seconds
   #     checkpoint_base: checkpoints # S3 prefix for checkpoint data
   #     ## Throughput tuning
-  #     max_files_per_trigger: 50    # Max Parquet files per micro-batch
+  #     max_files_per_trigger: 10    # Files per micro-batch; unset = auto (data arrives all window)
   #     bronze_target_file_size_mb: 512
   #     silver_target_file_size_mb: 512
   #     gold_target_file_size_mb: 128
   #     ## In-stream benchmark rounds (runs Trino queries while streaming)
   #     benchmark_interval: 300      # Seconds between rounds (300-3600)
   #     benchmark_warmup: 300        # Seconds before first round (300-1800)
-
-  workload:
-    # schema: customer360            # customer360 | iot | financial
-    datagen:
-      # Image: configured via images.datagen (see docs/datagen-custom-images.md)
-      scale: 10                    # 1 unit ~ 10 GB bronze (10 = ~100 GB)
-      # mode: auto                    # auto | batch | continuous
-      parallelism: 1                 # Number of datagen pods
-      # file_size: 512mb
-      # dirty_data_ratio: 0.08
-      ## CPU and memory are hard-locked per mode (cannot be overridden):
-      ##   batch:      4 CPU, 4Gi   (scale <= 10)
-      ##   continuous: 8 CPU, 24Gi  (scale > 10)
-      # generators: 0                # Per-pod generator processes (0 = auto)
-      # uploaders: 0                 # Per-pod uploader threads (0 = auto)
-      # timestamp_start: "2024-01-01"
-      # timestamp_end: "2025-12-31"
-      # checkpoint:
-      #   enabled: true
-      #   path: .lakebench_checkpoint.json
-    ## Customer360 workload overrides
-    # customer360:
-    #   unique_customers: null       # Override: derived from scale if null
-    #   date_range_days: null        # Override: defaults to 365 if null
-    #   channels: [web, mobile, store, call_center, social_media]
-    #   event_types: [purchase, browse, support, login, abandoned_cart]
-    #   quality_distribution:
-    #     clean: 0.92
-    #     duplicate_suspected: 0.02
-    #     incomplete: 0.03
-    #     format_inconsistent: 0.03
 
   ## Benchmark configuration
   ## Runs analytical SQL queries against silver/gold tables via the configured
@@ -615,28 +730,51 @@ architecture:
   #   gold: gold.customer_executive_dashboard
 
 # ============================================================================
+# WORKLOAD
+# ============================================================================
+# What runs through the architecture: the generated corpus and its scale.
+workload:
+  # schema: customer360            # customer360 | financial
+  datagen:
+    # Image: configured via images.datagen (see docs/datagen-custom-images.md)
+    ## Scale is per-schema:
+    ##   customer360: ~10 GB bronze / unit (~100,000 customers)
+    ##   financial:   ~8.4 GB bronze / unit (~111,111 entities and their
+    ##                accounts + 60 months of pacs.008 transactions)
+    scale: 10                    # Interpreted per-schema; see above
+    # mode: auto                    # S3 delivery pattern: auto | batch | continuous
+    ##   batch:      one PUT per Parquet file (bursty upload, higher peak RSS)
+    ##   continuous: S3 multipart upload as row-groups close
+    ##   auto:       continuous at every scale (owner D18, 2026-09-28)
+    ## Row content is byte-identical across modes at fixed seed. CPU/memory
+    ## are sized by scale via the autosizer independently of mode, and any
+    ## cpu/memory you set are honoured.
+    # parallelism: 8                # Number of datagen pods. Left commented so
+                                    # the autosizer picks a value from cluster
+                                    # capacity (scale > 50 scales up beyond the
+                                    # default; small scales cap down). Set an
+                                    # explicit integer to pin it.
+    # file_size: 64mb
+    # dirty_data_ratio: 0.08         # customer360 only; financial ignores it
+    # generators: 0                # Per-pod generator threads (0 = auto: follow pod CPU)
+    # timestamp_start: "2024-01-01"
+    # timestamp_end: "2025-01-01"    # exclusive
+  ## Customer360 workload overrides
+  # customer360:
+  #   unique_customers: null       # Override: derived from scale if null
+  #   date_range_days: null        # Override: defaults to 365 if null
+
+# ============================================================================
 # LAYER 3: OBSERVABILITY
 # ============================================================================
 # Flat schema -- use top-level keys directly under observability:
 # observability:
 #   enabled: false                   # Deploy kube-prometheus-stack (Prometheus + Grafana)
 #   prometheus_stack_enabled: true   # Prometheus collection
-#   s3_metrics_enabled: true         # S3 operation metrics
-#   spark_metrics_enabled: true      # Spark job metrics
 #   dashboards_enabled: true         # Grafana dashboards
 #   retention: 7d                    # Prometheus data retention
 #   storage: 10Gi                    # Prometheus PVC size
 #   storage_class: ""                # PVC storage class (empty = default)
-#   reports:
-#     enabled: true
-#     output_dir: ./lakebench-output/runs
-#     format: html                   # html | json | both
-#     include:
-#       summary: true
-#       stage_breakdown: true
-#       storage_metrics: true
-#       resource_utilization: true
-#       recommendations: true
 
 # ============================================================================
 # SPARK CONFIGURATION OVERRIDES
