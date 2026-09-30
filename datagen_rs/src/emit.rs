@@ -239,15 +239,18 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
 
         // The beneficiary can be an external counterparty (a listed party or
         // a decoy, crate::screening): cp_* resolves both. Originators are
-        // always population entities.
+        // always population entities. Attributes are recomputed on demand
+        // (LB-204): the world no longer holds the name/street/town/country
+        // columns, so recompute the originator's country once and reuse it.
+        let o_country = w.country(o);
         let c_country = w.cp_country(c);
-        b_no.append_value(w.name.get(o));
+        b_no.append_value(w.name(o));
         b_nc.append_value(w.cp_name(c));
-        b_sto.append_value(w.street.get(o));
+        b_sto.append_value(w.street(o));
         b_stc.append_value(w.cp_street(c));
-        b_two.append_value(w.town.get(o));
+        b_two.append_value(w.town(o));
         b_twc.append_value(w.cp_town(c));
-        b_cto.append_value(w.country[o]);
+        b_cto.append_value(o_country);
         b_ctc.append_value(c_country);
         // Recompute fixed-width ids (identical bytes to the world columns, which
         // were built by these same functions) instead of random-gathering them.
@@ -255,7 +258,7 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         let cust_o = is_customer(b.orig[i], w.seed);
         // An external counterparty is never a customer.
         let cust_c = !w.is_external(c) && is_customer(b.bene[i], w.seed);
-        let cco = account_country(cust_o, w.country[o]).as_bytes();
+        let cco = account_country(cust_o, o_country).as_bytes();
         let ccc = account_country(cust_c, c_country).as_bytes();
         iban_into(&[cco[0], cco[1]], b.orig[i], &mut ib_o);
         iban_into(&[ccc[0], ccc[1]], b.bene[i], &mut ib_c);
@@ -272,10 +275,10 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         let bic_c = &pool[bic_idx_for(b.bene[i], cust_c, pool.len())];
         b_bico.append_value(bic_o);
         b_bicc.append_value(bic_c);
-        ct_o_ref.push(w.country[o]);
+        ct_o_ref.push(o_country);
         ct_c_ref.push(c_country);
 
-        let cross = w.country[o] != c_country;
+        let cross = o_country != c_country;
         let hop = splitmix64(s ^ 0xF00);
         if (hop & 0xFFFF) < 15_000 {
             b_instg.append_value(&pool[(splitmix64(b.orig[i] ^ 0x2222) % plen) as usize]);

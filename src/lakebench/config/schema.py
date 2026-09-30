@@ -285,15 +285,31 @@ class ImagesConfig(ConfigModel):
     # the FUNCTIONAL default; it is DISQUALIFIED from generating any D8 / A6 /
     # registered-look / calibration corpus -- those runs pass an explicit frozen
     # digest via --generator-image (aml-protocol.md), never this default.
-    # Pushed digest (30603b1):
-    # sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16
-    # Prior tags:
+    # e14d0fd (LB-204): mimalloc allocator, typology payloads pruned to each
+    # pod's own files, world columns recomputed on demand, fixed 64 MB files,
+    # re-fit memory model with a 16Gi pod cap, LB-196 delivery-mode forwarding.
+    # AML pod peak at scale 100 fell from 18.18 to 5.70 GiB. Output-neutral,
+    # PROVEN on the pushed image: seed-43 --mode all byte-compare against the
+    # frozen generator (rebuilt from 9382420 source) -- 73/73 objects at 128 MB,
+    # 141/141 at 64 MB, 141/141 with 4 pods, 141/141 thread-throttled; cargo pin
+    # cycles.rs::financial_output_is_pinned_to_the_frozen_generator. MODEL_VERSION
+    # stays datagen-v2-rs-0.3, same freeze. Functional default, disqualified from
+    # registered-look corpora as below.
+    # 034f998: same Rust source as e14d0fd; entrypoint.py thread-cap model gains
+    # the batch-delivery allowance. Byte-identical to e14d0fd at seed 43 on the
+    # pushed images (141/141 objects), so identical to the frozen generator.
+    # Pushed digest (034f998):
+    # sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc
+    #   e14d0fd (sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591)
+    # Prior tags (deleted from docker.io between 2026-09-29 22:30 and 23:29;
+    # rebuild from source to reproduce):
+    #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) LB-199 memory refit
     #   9382420 (sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2) live-metrics Pushgateway push
     #   b6f2905 (sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6)
     #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
     #   0a83acd (sha256:acdf3925...)
     #   7c24641 (sha256:c5a6bc80...)
-    datagen: str = "docker.io/sillidata/lb-datagen:30603b1"
+    datagen: str = "docker.io/sillidata/lb-datagen:034f998"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
@@ -1206,11 +1222,12 @@ class DatagenConfig(ConfigModel):
     # calibration or evaluation role. Off: output is unchanged.
     robustness_perturbation: bool = False
     parallelism: int = Field(default=4, ge=1)
-    # Datagen output file size. Per-thread generator memory scales with it
-    # (about 4.8x for financial, 3.0x for c360, measured), so the old 512mb
-    # default needed 12-26 GiB per 8-thread pod. At 64mb, measured single-pod
-    # throughput at 8 threads was c360 982 MB/s, financial 221-309 MB/s.
-    file_size: str = "64mb"
+    # Datagen output file size, fixed at 64mb for every workload and mode
+    # (owner decision 2026-09-29). c360 rows are drawn per file and truncated
+    # by file size, so one size keeps row content identical across delivery
+    # modes (DESIGN.md) and keeps corpus identity stable. The field stays so
+    # existing configs that set 64mb still load; any other value is refused.
+    file_size: Literal["64mb"] = "64mb"
     dirty_data_ratio: float = 0.08
     cpu: str = "2"
     memory: str = "4Gi"
@@ -1229,6 +1246,29 @@ class DatagenConfig(ConfigModel):
             "(deploy/datagen.py fallback, matched by metrics.c360_correctness)."
         ),
     )
+
+    @field_validator("file_size", mode="before")
+    @classmethod
+    def _fixed_file_size(cls, v: object, info: ValidationInfo) -> object:
+        """Accept any spelling of 64mb; refuse every other size. Cleanup loaders
+        (destroy, clean, admin: the ``allow_long_names`` context of
+        ``load_config``) accept an old size with a warning, so a deployment made
+        from an older config can still be torn down."""
+        if isinstance(v, str) and v.strip().lower() == "64mb":
+            return "64mb"
+        if info.context and info.context.get("allow_long_names"):
+            import warnings
+
+            warnings.warn(
+                f"datagen.file_size {v!r} is ignored: the file size is fixed at 64mb.",
+                stacklevel=2,
+            )
+            return "64mb"
+        raise ValueError(
+            f"datagen.file_size is fixed at 64mb; got {v!r}. Remove the key or set 64mb. "
+            "(Configs and reproduce packages from before v1.6 that used another size "
+            "cannot be regenerated with this version.)"
+        )
 
     @field_validator("dirty_data_ratio")
     @classmethod

@@ -130,7 +130,7 @@ version: 1
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:30603b1
+  datagen: docker.io/sillidata/lb-datagen:034f998
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
@@ -383,7 +383,7 @@ registries or custom builds.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:30603b1` | Data generator image. Pinned by digest `sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2` for provenance; the v1.6 AML generator-freeze commit (Python base bumped to 3.14-slim + digest-pinned; Rust source unchanged from 25f1aa8, corpus bytes unchanged). |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:034f998` | Data generator image. Pinned by digest `sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc` for provenance. Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`); this build cuts datagen pod memory (LB-204). |
 | `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
@@ -545,10 +545,10 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `workload.datagen.corpus_role` | enum or null | `null` | `financial` only: `calibration`, `evaluation` or `robustness`. Declares this deployment as the registered corpus for that role; it must match the role's pre-registered seed (unset `seed` then uses it). Only set it for the one registered gate run of that role. |
 | `workload.datagen.robustness_perturbation` | bool | `false` | `financial` only. Generates the robustness corpus: the pre-registration's `corpora.robustness_perturbation` multipliers shift the nuisance parameters in natural units (median amount x1.2, persona activity and amount log-sds x1.2, dormancy lengths x1.2). Instances, participants and row counts are unchanged. Required with `corpus_role: robustness`, refused with `calibration` or `evaluation`; the generator also refuses the robustness seed without it. Off, the corpus is byte-identical to a run without the option. |
 | `workload.datagen.parallelism` | int | `4` | Number of parallel datagen pods. |
-| `workload.datagen.file_size` | string | `64mb` | Target Parquet file size. Datagen memory per thread scales with it (about 4.8x for financial, 3.0x for customer360). |
+| `workload.datagen.file_size` | string | `64mb` | Fixed at `64mb` for every workload and mode; any other value is refused. One size keeps row content identical across delivery modes. |
 | `workload.datagen.dirty_data_ratio` | float | `0.08` | Fraction of intentionally dirty records (0.0--1.0). Applies to the `customer360` schema only; the `financial` (AML) generator ignores it. |
 | `workload.datagen.cpu` | string | `8` (auto) | CPU per datagen pod. A value you set is used as given; unset, the auto-sizer sets 8 in both modes. |
-| `workload.datagen.memory` | string | auto | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) and `file_size`, with a 4Gi floor. |
+| `workload.datagen.memory` | string | auto | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) at the fixed 64mb file size, with a 4Gi floor. |
 | `workload.datagen.generators` | int | `0` | Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU request. |
 | `workload.datagen.timestamp_start` | string or null | `null` | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
 | `workload.datagen.timestamp_end` | string or null | `null` | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`deploy/datagen.py` fallback, matched by `metrics/c360_correctness.py`). See [Timestamp Range Impact](#timestamp-range-impact). |
@@ -803,7 +803,7 @@ resolved resources are approximately:
 
 | Component | Instances | Per-Instance Resources |
 |---|---|---|
-| Datagen pods | 10 | 8 CPU, 4Gi (c360) / 14Gi (financial) |
+| Datagen pods | 10+ | 8 CPU, 4Gi (c360) / 8Gi (financial) |
 | Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 500Gi PVC (financial, LB-118) |
 | Silver-build executors | 18 | 4 cores, 48g+12g overhead, 300Gi PVC |
 | Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 100Gi PVC |

@@ -94,76 +94,113 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
     return int(float(s) * 1000)
 
 
-# Datagen memory model, fitted to measured peak RSS of the real generator
-# binary at 64 MB and 512 MB files, 1 and 8 threads (2026-09-24): each worker
-# thread holds about 4.8x the output file size for financial (row vectors,
-# sorted copies, the Arrow batch, writer buffers) and about 3.0x for c360; a
-# pod carries a fixed ~1.5 GiB (financial) or ~0.3 GiB (c360). Two terms scale
-# with entity count (111,111 per scale unit): EVERY financial node builds
-# per-entity structures (watchlist/external counterparties from screening.rs,
-# plus related population state) at about 420 B per entity, and node 0 ALSO
-# builds the full financial world at about 600 B per entity.
+# Datagen memory model (LB-204 re-fit, 2026-09-29). Fitted to the cgroup
+# memory high-watermark (memory.peak) of the busiest pod of datagen-only
+# cluster Jobs: generator with mimalloc and owned-file typology pruning, the
+# fixed 64 MB file size, 8 threads (request = limit = 8 CPU), 8 pods (4 for
+# c360; 40 for financial scale 500), no thread cap. Every pod holds full-population state, so the busiest
+# pod (node 0 or a worker) sets the request for all of them. Measured points
+# are in DATAGEN_MEASURED_PEAK_GIB; the model is an upper envelope of them at
+# the pod count each was measured with (tests/test_lb199_datagen_memfit.py).
+# Each point is n=1; above scale 300 only the 40-pod scale-500 point exists,
+# which is why that range is 'unverified' in config/support.py. Batch delivery
+# buffers whole files and peaks higher than continuous (financial scale 300:
+# 7.70 vs 7.29 GiB), so the financial base carries a 0.5 GiB batch allowance
+# over the continuous-only points at 100 and 500.
 #
-# LB-199 re-fit 2026-09-29 from a measurement matrix (local podman cgroup
-# high-watermark, anchored to two authoritative cluster working-set points
-# s100/8t/128: worker 12.23, node-0 18.18 GiB). The old model under-fit the
-# per-thread term (4.8; measured slope ~7.1 at 4-8 threads rising to ~8.0 at
-# 8-16 threads) AND omitted the worker per-entity term entirely (~407 B/ent
-# measured), so scale-100 node-0 OOMKilled at the 17Gi default. The per-thread
-# term keeps a touch of margin (8.0) to cover the slightly super-linear 16-thread
-# slope; the world/worker/base terms sit near the measured mean and the 1.25
-# HEADROOM carries the safety margin (not stacked coefficient round-ups). The
-# same coefficients cap threads in datagen_rs/entrypoint.py, kept equal by
-# tests/test_datagen_template_entrypoint_contract.py. All datagen pods take the
-# node-0 request (the busiest pod), so workers are over-provisioned by the world
-# term they never build -- an Indexed Job has one pod template.
-DATAGEN_PER_THREAD_FILE_MULTIPLIER = {"financial": 8.0, "customer360": 3.0}
-DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 = 600
-# Per-entity structures built on EVERY financial node. c360 has no screening
-# track; its scale-dependent loyalty lookup is 2 B/customer (negligible) and
-# runtime-guarded (customer360.rs), so it needs no term here.
-DATAGEN_WORKER_ENTITY_BYTES = {"financial": 420}
-DATAGEN_ENTITIES_PER_SCALE = 111_111
-DATAGEN_BASE_GIB = {"financial": 1.5, "customer360": 0.3}
+#   peak = BASE + GIB_PER_SCALE * scale + max(0, threads - 8) * GIB_PER_EXTRA_THREAD
+#
+# Below 8 threads the 8-thread peak is kept: fewer threads were not measured,
+# so the model never assumes they save memory. Above 8, each extra thread adds
+# the pre-mimalloc per-thread cost (8.0x / 3.0x the 64 MB file), a conservative
+# bound. DATAGEN_HEADROOM carries the safety margin. The pod request never
+# exceeds the 16 GiB cap (config/support.py DATAGEN_POD_MEMORY_CAP_GIB); scales
+# whose modelled request would are refused there (DATAGEN_SCALE_BANDS). The same
+# coefficients cap threads in datagen_rs/entrypoint.py, kept equal by
+# tests/test_datagen_template_entrypoint_contract.py.
+DATAGEN_MEASURED_PEAK_GIB: dict[str, dict[int, float]] = {
+    "financial": {100: 5.70, 300: 7.70, 500: 9.17},
+    "customer360": {100: 2.23, 300: 2.36},
+}
+DATAGEN_BASE_GIB = {"financial": 5.35, "customer360": 2.2}
+DATAGEN_GIB_PER_SCALE = {"financial": 0.0087, "customer360": 0.0007}
+DATAGEN_GIB_PER_EXTRA_THREAD = {"financial": 0.5, "customer360": 0.1875}
+DATAGEN_BASE_THREADS = 8
 DATAGEN_HEADROOM = 1.25
 
 
-def _parse_size_mb(size: str) -> float:
-    """'64mb' / '1GB' / '512MB' -> MiB (same units as the datagen deployer)."""
-    t = size.strip().upper()
-    for suffix, mult in (("TB", 2**20), ("GB", 2**10), ("MB", 1.0), ("KB", 2**-10)):
-        if t.endswith(suffix):
-            return float(t[: -len(suffix)]) * mult
-    return float(t.rstrip("B") or 0) / 2**20
+def datagen_peak_gib(schema: str, scale: float, threads: int) -> float:
+    """Modelled peak memory in GiB of the busiest datagen pod, no headroom."""
+    base = DATAGEN_BASE_GIB.get(schema, DATAGEN_BASE_GIB["financial"])
+    per_scale = DATAGEN_GIB_PER_SCALE.get(schema, DATAGEN_GIB_PER_SCALE["financial"])
+    extra = DATAGEN_GIB_PER_EXTRA_THREAD.get(schema, DATAGEN_GIB_PER_EXTRA_THREAD["financial"])
+    return base + per_scale * scale + max(0, threads - DATAGEN_BASE_THREADS) * extra
 
 
-def datagen_memory_gib(schema: str, scale: float, threads: int, file_size_mb: float) -> float:
-    """Estimated peak RSS in GiB for the busiest datagen pod (node 0).
-
-    Sizes the pod REQUEST to node 0, the busiest pod, which carries the base
-    overhead, the per-thread file buffers, the per-node screening structures,
-    and (node 0 only) the full financial world.
-    """
-    entities = DATAGEN_ENTITIES_PER_SCALE * scale
-    per_thread = (file_size_mb / 1024.0) * DATAGEN_PER_THREAD_FILE_MULTIPLIER.get(schema, 3.0)
-    worker_scale = entities * DATAGEN_WORKER_ENTITY_BYTES.get(schema, 0) / 2**30
-    world = 0.0
-    if schema == "financial":
-        world = entities * DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 / 2**30
-    base = DATAGEN_BASE_GIB.get(schema, 0.3)
-    return (world + worker_scale + threads * per_thread + base) * DATAGEN_HEADROOM
+def datagen_memory_gib(schema: str, scale: float, threads: int) -> float:
+    """Modelled datagen pod memory in GiB, with DATAGEN_HEADROOM."""
+    return datagen_peak_gib(schema, scale, threads) * DATAGEN_HEADROOM
 
 
 def _datagen_memory_default(config: LakebenchConfig, cpu: str) -> str:
-    """Per-pod datagen memory limit that fits the measured peak RSS."""
+    """Per-pod datagen memory: the modelled request, never above the 16 GiB
+    pod cap. A pod whose threads would not fit the cap gets the cap, and the
+    entrypoint runs fewer threads (it logs the cut)."""
     import math
+
+    from lakebench.config.support import DATAGEN_POD_MEMORY_CAP_GIB
 
     datagen = config.architecture.workload.datagen
     schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
     threads = max(1, _parse_cpu_millicores(cpu) // 1000)
-    file_mb = _parse_size_mb(datagen.file_size)
-    gib = datagen_memory_gib(schema, float(datagen.scale or 1), threads, file_mb)
-    return f"{max(4, math.ceil(gib))}Gi"
+    gib = datagen_memory_gib(schema, float(datagen.scale or 1), threads)
+    return f"{min(DATAGEN_POD_MEMORY_CAP_GIB, max(4, math.ceil(gib)))}Gi"
+
+
+def _datagen_clamp_note(config: LakebenchConfig, cpu: str) -> str:
+    """Why the datagen request sits at the 16 GiB cap with fewer threads than
+    CPUs, or '' when the modelled request fits."""
+    import math
+
+    from lakebench.config.support import DATAGEN_POD_MEMORY_CAP_GIB
+
+    datagen = config.architecture.workload.datagen
+    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    threads = max(1, _parse_cpu_millicores(cpu) // 1000)
+    scale = float(datagen.scale or 1)
+    need = math.ceil(datagen_memory_gib(schema, scale, threads))
+    if need <= DATAGEN_POD_MEMORY_CAP_GIB:
+        return ""
+    spare = DATAGEN_POD_MEMORY_CAP_GIB / DATAGEN_HEADROOM - datagen_peak_gib(schema, scale, 8)
+    extra = DATAGEN_GIB_PER_EXTRA_THREAD.get(schema, DATAGEN_GIB_PER_EXTRA_THREAD["financial"])
+    fit = max(1, DATAGEN_BASE_THREADS + int(spare // extra)) if spare >= 0 else 1
+    return (
+        f"datagen.memory capped at {DATAGEN_POD_MEMORY_CAP_GIB}Gi: {threads} CPU would need "
+        f"{need}Gi, so each pod runs {min(fit, threads)} generator threads"
+    )
+
+
+# Datagen pod floor (LB-204): each pod keeps typology row payloads only for the
+# files it owns, so per-pod memory rises as the pod count falls. The memory
+# model was measured at 8 or more pods, so financial datagen above scale 100
+# runs at least that many (the Indexed Job queues pods a small cluster cannot
+# place at once).
+DATAGEN_MIN_PODS = 8
+
+
+def _apply_datagen_pod_floor(config: LakebenchConfig, changes: list[str]) -> None:
+    datagen = config.architecture.workload.datagen
+    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    if (
+        schema == "financial"
+        and float(datagen.get_effective_scale()) > 100
+        and datagen.parallelism < DATAGEN_MIN_PODS
+    ):
+        object.__setattr__(datagen, "parallelism", DATAGEN_MIN_PODS)
+        changes.append(
+            f"datagen.parallelism raised to {DATAGEN_MIN_PODS}: the datagen memory model "
+            f"was measured at {DATAGEN_MIN_PODS} or more pods"
+        )
 
 
 def _resolve_datagen_mode(config: LakebenchConfig) -> str:
@@ -282,6 +319,9 @@ def resolve_auto_sizing(
     datagen = config.architecture.workload.datagen
     dg_cpu = datagen.cpu if "cpu" in datagen.model_fields_set else "8"
     dg_memory = _datagen_memory_default(config, dg_cpu)
+    clamp = _datagen_clamp_note(config, dg_cpu)
+    if clamp and "memory" not in datagen.model_fields_set:
+        changes.append(clamp)
     if _set_if_default(datagen, "cpu", dg_cpu):
         changes.append(f"datagen.cpu={dg_cpu}")
     if _set_if_default(datagen, "memory", dg_memory):
@@ -307,6 +347,9 @@ def resolve_auto_sizing(
         changes.append(schema_change)
 
     # -- Cluster capacity: cap to fit --
+    # The pod floor goes first so a cluster cap (which also sets the
+    # continuous-mode streaming budget) always has the last word.
+    _apply_datagen_pod_floor(config, changes)
     if cluster_capacity is not None:
         _apply_cluster_scaling(config, cluster_capacity, effective_mode, guidance, changes)
 
@@ -318,7 +361,7 @@ def resolve_auto_sizing(
             effective_mode,
             ", ".join(changes),
         )
-    cuts = [c for c in changes if " capped " in c]
+    cuts = [c for c in changes if " capped " in c or c.startswith("datagen.parallelism raised")]
     for cut in cuts:
         log.warning("Auto-sizing cut to fit the cluster: %s", cut)
     return cuts

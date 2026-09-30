@@ -228,13 +228,16 @@ fn person_pool(population: usize, seed: i64) -> Vec<u64> {
 
 /// Subset of `person_pool` where the participant lives in a corridor
 /// country. Falls back to the full pool if the corridor pool is too small.
-fn corridor_pool(pool: &[u64], country: &[&'static str]) -> Vec<u64> {
+fn corridor_pool<F: Fn(usize) -> &'static str>(pool: &[u64], country: F) -> Vec<u64> {
+    // `country` is recomputed on demand (LB-204). `pool` ids are real entities
+    // (1..=population), so `country(id)` is always valid; the former
+    // `idx < country.len()` bound only guarded the sentinel-length Vec.
     let mut v: Vec<u64> = pool
         .iter()
         .copied()
         .filter(|&id| {
             let idx = id as usize;
-            idx < country.len() && HIGH_RISK_CC.iter().any(|&cc| cc == country[idx])
+            HIGH_RISK_CC.iter().any(|&cc| cc == country(idx))
         })
         .collect();
     if v.len() < 4 {
@@ -353,7 +356,7 @@ pub fn schedule_ex(
         population,
         corpus_start_us,
         corpus_end_us,
-        country,
+        |i| country[i],
         &Perturbation::NONE,
     )
 }
@@ -364,18 +367,18 @@ pub fn schedule_ex(
 /// those of the unperturbed schedule. `Perturbation::NONE` reproduces
 /// `schedule_ex` bit for bit.
 #[allow(clippy::too_many_arguments)]
-pub fn schedule_p(
+pub fn schedule_p<F: Fn(usize) -> &'static str>(
     world_seed: i64,
     seed: i64,
     total_rows: i64,
     population: usize,
     corpus_start_us: i64,
     corpus_end_us: i64,
-    country: &[&'static str],
+    country: F,
     perturb: &Perturbation,
 ) -> Vec<Instance> {
     let pool = person_pool(population, world_seed);
-    let corridor = corridor_pool(&pool, country);
+    let corridor = corridor_pool(&pool, &country);
     let cust_of = |v: &[u64]| -> Vec<u64> {
         v.iter()
             .copied()

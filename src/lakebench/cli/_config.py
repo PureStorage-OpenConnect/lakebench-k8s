@@ -139,6 +139,8 @@ def config_show(
         )
         if support.get("mode_note"):
             fields.append(("mode_note", support["mode_note"], "workload x mode"))
+        if support.get("scale_note"):
+            fields.append(("scale_note", support["scale_note"], "datagen scale band"))
 
         table = Table(show_header=True, header_style="bold")
         table.add_column("Field", style="cyan")

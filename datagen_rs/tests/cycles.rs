@@ -2,7 +2,7 @@
 //! the one-shot corpus, row for row, and the manifest union is the one-shot
 //! manifest. Runs the real binary against a local sink (DG_LOCAL_DIR).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -631,5 +631,384 @@ fn aml_row_identity_across_delivery_modes() {
     assert_eq!(
         batch_rows, cont_rows,
         "aml pacs008 row content differs between --delivery-mode batch and continuous"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LB-204 (datagen per-pod memory redesign, Tier-1): the world's full-population
+// attribute columns are recomputed on demand instead of held resident. The
+// corpus must stay identical. These tests are the byte/row-multiset proof that
+// the refactor is output-neutral, exercised across --total-nodes 1 and a
+// --total-nodes 2 split (so the node partition actually fires), at a scale
+// where synthetic_identity, dormant_reactivation and corridor_high_risk each
+// have >=1 instance (so the reference syn_overrides base-PII recompute and the
+// dormancy suppression path are actually walked).
+// ---------------------------------------------------------------------------
+
+/// Scale for the full-corpus checks below: verified to contain at least one
+/// synthetic_identity, dormant_reactivation and corridor_high_risk instance at
+/// seed 7777 (asserted in-test), while keeping the decoded corpus small enough
+/// for a unit-tier run.
+const NODE_SCALE: &str = "0.02";
+
+fn run_at(dir: &Path, scale: &str, extra: &[&str]) {
+    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", dir)
+        .args([
+            "--bucket", "b", "--seed", "7777", "--scale", scale, "--mode", "all",
+        ])
+        .args(extra)
+        .output()
+        .expect("run generate");
+    assert!(
+        out.status.success(),
+        "generate {:?} failed: {}",
+        extra,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Whole-corpus row multiset (a single sorted Vec of complete rendered rows,
+/// keyed only by content, so it is order- and file-partition-invariant). Each
+/// table's rows are tagged by table so a bronze row can never coincidentally
+/// equal a reference row.
+fn corpus_multiset(dir: &Path) -> Vec<String> {
+    let tag = |sub: &str, stem: &str, paths: &[PathBuf]| -> Vec<String> {
+        rows(paths)
+            .into_iter()
+            .map(|r| format!("{sub}/{stem}\u{1e}{r}"))
+            .collect()
+    };
+    let mut out = Vec::new();
+    out.extend(tag(
+        "bronze/pacs008",
+        "part-",
+        &files(dir, "bronze/pacs008", "part-"),
+    ));
+    out.extend(tag("bronze", "party", &files(dir, "bronze", "party")));
+    out.extend(tag("bronze", "account", &files(dir, "bronze", "account")));
+    out.extend(tag(
+        "bronze",
+        "watchlist",
+        &files(dir, "bronze", "watchlist"),
+    ));
+    out.extend(tag(
+        "manifest",
+        "manifest",
+        &files(dir, "manifest", "manifest"),
+    ));
+    out.sort();
+    out
+}
+
+fn manifest_typology_types(dir: &Path) -> BTreeSet<String> {
+    let mut s = BTreeSet::new();
+    for p in files(dir, "manifest", "manifest") {
+        for b in batches(&p) {
+            let c = b.column_by_name("typology_type").unwrap();
+            for r in 0..b.num_rows() {
+                s.insert(array_value_to_string(c, r).unwrap());
+            }
+        }
+    }
+    s
+}
+
+/// The whole corpus (bronze + party + account + watchlist + manifest) is the
+/// same row multiset whether generated as one node or split across two, after
+/// the LB-204 recompute-on-demand refactor. A two-node run fires the file
+/// partition on every table, so a recompute that diverged per node (or a
+/// reference column that leaned on a now-removed world Vec) would surface here.
+#[test]
+fn full_corpus_row_multiset_is_node_count_invariant() {
+    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-node-multiset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let one = tmp.join("one");
+    let two = tmp.join("two");
+    // One node, one shot.
+    run_at(
+        &one,
+        NODE_SCALE,
+        &["--threads", "3", "--total-nodes", "1", "--node-id", "0"],
+    );
+    // Two nodes into one tree: node 0 also writes the reference zones, node 1
+    // writes only its bronze shards. Their union is the whole corpus.
+    run_at(
+        &two,
+        NODE_SCALE,
+        &["--threads", "3", "--total-nodes", "2", "--node-id", "0"],
+    );
+    run_at(
+        &two,
+        NODE_SCALE,
+        &["--threads", "3", "--total-nodes", "2", "--node-id", "1"],
+    );
+
+    // The scale must actually exercise the three landmine typologies.
+    let types = manifest_typology_types(&one);
+    for t in [
+        "synthetic_identity",
+        "dormant_reactivation",
+        "corridor_high_risk",
+    ] {
+        assert!(
+            types.contains(t),
+            "typology {t} absent at scale {NODE_SCALE}: {types:?}"
+        );
+    }
+
+    // The two-node run really sharded the bronze zone across both nodes: file
+    // fid is `part-{fid:06}.parquet`, and node n writes fids with fid % 2 == n.
+    // Require at least one even-fid shard (node 0) AND one odd-fid shard (node
+    // 1), so a degenerate "node 0 writes everything, node 1 writes nothing" bug
+    // cannot pass this test.
+    let bronze_two = files(&two, "bronze/pacs008", "part-");
+    let fid_parity = |p: &PathBuf, want: i64| -> bool {
+        let n = p.file_name().unwrap().to_string_lossy();
+        n.strip_prefix("part-")
+            .and_then(|s| s.strip_suffix(".parquet"))
+            .and_then(|s| s.parse::<i64>().ok())
+            .map(|fid| fid % 2 == want)
+            .unwrap_or(false)
+    };
+    assert!(bronze_two.len() > 1, "two-node run did not shard bronze");
+    assert!(
+        bronze_two.iter().any(|p| fid_parity(p, 0)),
+        "no node-0 (even-fid) bronze shard in the two-node run"
+    );
+    assert!(
+        bronze_two.iter().any(|p| fid_parity(p, 1)),
+        "no node-1 (odd-fid) bronze shard: the two-node split did not fire"
+    );
+    // Reference tables are single-writer: exactly one of each in both runs.
+    assert_eq!(files(&two, "bronze", "party").len(), 1);
+    assert_eq!(files(&two, "manifest", "manifest").len(), 1);
+    assert_eq!(files(&two, "bronze", "account").len(), 1);
+    assert_eq!(files(&two, "bronze", "watchlist").len(), 1);
+
+    let ms_one = corpus_multiset(&one);
+    let ms_two = corpus_multiset(&two);
+    assert_eq!(
+        ms_one.len(),
+        ms_two.len(),
+        "corpus row count differs: 1-node {} vs 2-node {}",
+        ms_one.len(),
+        ms_two.len()
+    );
+    assert!(
+        ms_one == ms_two,
+        "full-corpus row multiset differs between 1-node and 2-node builds"
+    );
+    // Sanity: the corpus is non-degenerate (bronze + all four reference tables
+    // contributed rows).
+    assert!(!files(&one, "bronze/pacs008", "part-").is_empty());
+    assert!(ms_one.iter().any(|r| r.starts_with("bronze/party\u{1e}")));
+    assert!(ms_one.iter().any(|r| r.starts_with("bronze/account\u{1e}")));
+    assert!(ms_one
+        .iter()
+        .any(|r| r.starts_with("bronze/watchlist\u{1e}")));
+    assert!(ms_one
+        .iter()
+        .any(|r| r.starts_with("manifest/manifest\u{1e}")));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// LB-204 coverage: the only code path that reads `typ_by_file` to decide cycle
+/// membership (the `my_files` filter's cycles>1 branch) fires only when BOTH
+/// --cycles>1 and --total-nodes>1. The typ_by_file prune retains a file's payload
+/// only on its owning node, so a prune that dropped an owned file's rows, or a
+/// cycle filter that read a pruned file, would corrupt the corpus in exactly this
+/// combination and nowhere else. Assert the union over (cycle x node) is the
+/// one-shot corpus, byte-for-byte at the row-multiset level.
+#[test]
+fn cycles_and_nodes_together_union_to_the_one_shot_corpus() {
+    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-cyc-node-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let one = tmp.join("one");
+    let split = tmp.join("split");
+    run_at(
+        &one,
+        NODE_SCALE,
+        &["--threads", "3", "--total-nodes", "1", "--node-id", "0"],
+    );
+    // 2 cycles x 2 nodes. Node 0 writes the reference zones (once for party/
+    // account, once per cycle for the manifest); node 1 writes only bronze.
+    for c in 0..2 {
+        for n in 0..2 {
+            run_at(
+                &split,
+                NODE_SCALE,
+                &[
+                    "--threads",
+                    "3",
+                    "--total-nodes",
+                    "2",
+                    "--node-id",
+                    &n.to_string(),
+                    "--cycle",
+                    &c.to_string(),
+                    "--cycles",
+                    "2",
+                ],
+            );
+        }
+    }
+    // Cycle 1 actually produced bronze (so the cycles>1 my_files path fired).
+    let bronze = files(&split, "bronze/pacs008", "part-");
+    assert!(
+        bronze
+            .iter()
+            .any(|p| p.to_string_lossy().contains("part-c001-")),
+        "cycle 1 wrote no bronze -- the cycle>1 x node>1 path did not fire"
+    );
+    // One manifest per cycle, single-writer reference zones.
+    assert_eq!(files(&split, "manifest", "manifest").len(), 2);
+    assert_eq!(files(&split, "bronze", "party").len(), 1);
+    assert_eq!(files(&split, "bronze", "account").len(), 1);
+
+    let ms_one = corpus_multiset(&one);
+    let ms_split = corpus_multiset(&split);
+    assert_eq!(
+        ms_one.len(),
+        ms_split.len(),
+        "corpus row count differs: one-shot {} vs cycles x nodes {}",
+        ms_one.len(),
+        ms_split.len()
+    );
+    assert!(
+        ms_one == ms_split,
+        "full-corpus row multiset differs between one-shot and cycles x nodes"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The freeze-void razor's edges (LB-204 REVISION 2): total_activity feeds
+/// crr_score/crr_tier in party.parquet, and inst_uids feeds participant_uetrs
+/// in manifest.parquet -- both frozen. A byte-level (not just row-multiset)
+/// comparison of these two files between a 1-node and a 2-node build catches a
+/// low-bit drift a multiset would smear over, and proves the reference bytes do
+/// not depend on the node count. Party/account/manifest each stream through the
+/// same chunked writer regardless of node count, so byte identity is the bar.
+#[test]
+fn reference_files_are_byte_identical_across_node_counts() {
+    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-node-bytes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let one = tmp.join("one");
+    let two = tmp.join("two");
+    run_at(
+        &one,
+        NODE_SCALE,
+        &["--threads", "3", "--total-nodes", "1", "--node-id", "0"],
+    );
+    run_at(
+        &two,
+        NODE_SCALE,
+        &["--threads", "3", "--total-nodes", "2", "--node-id", "0"],
+    );
+    run_at(
+        &two,
+        NODE_SCALE,
+        &["--threads", "3", "--total-nodes", "2", "--node-id", "1"],
+    );
+
+    for rel in [
+        "b/bronze/party.parquet",
+        "b/manifest/manifest.parquet",
+        "b/bronze/account.parquet",
+        "b/bronze/watchlist.parquet",
+    ] {
+        let a = std::fs::read(one.join(rel)).unwrap_or_else(|e| panic!("read {rel} (1-node): {e}"));
+        let b = std::fs::read(two.join(rel)).unwrap_or_else(|e| panic!("read {rel} (2-node): {e}"));
+        assert_eq!(
+            a, b,
+            "{rel} differs byte-for-byte between 1-node and 2-node builds"
+        );
+        assert!(!a.is_empty(), "{rel} is empty");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// FNV-1a over every file under `dir` (relative path, then bytes), sorted by
+/// relative path string.
+fn tree_digest(dir: &Path) -> (u64, usize) {
+    let mut paths = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                paths.push(p.strip_prefix(dir).unwrap().to_string_lossy().to_string());
+            }
+        }
+    }
+    paths.sort();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for rel in &paths {
+        for &x in rel
+            .as_bytes()
+            .iter()
+            .chain(std::fs::read(dir.join(rel)).unwrap().iter())
+        {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    (h, paths.len())
+}
+
+#[test]
+fn financial_output_is_pinned_to_the_frozen_generator() {
+    // Every financial object (pacs008 bronze, party, account, watchlist,
+    // manifest) of a 2-node --mode all run, byte for byte. The digest was
+    // captured from the frozen generator (datagen_rs at 9382420) with the same
+    // arguments, so this pins the LB-204 changes (owned-file typology pruning,
+    // on-demand world columns, mimalloc) as output-neutral. A change here is
+    // an AML generator output change: it voids the AML freeze
+    // (docs/internal/aml-protocol.md).
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-fin-pin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for node in ["0", "1"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+            .env("DG_LOCAL_DIR", &dir)
+            .args([
+                "--bucket",
+                "b",
+                "--seed",
+                "7777",
+                "--scale",
+                "0.02",
+                "--threads",
+                "2",
+                "--mode",
+                "all",
+                "--total-nodes",
+                "2",
+                "--node-id",
+                node,
+                "--file-size-mb",
+                "1",
+                "--delivery-mode",
+                "batch",
+            ])
+            .output()
+            .expect("run generate");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let got = tree_digest(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        got,
+        (14_946_780_858_166_320_800, 179),
+        "financial generator output changed"
     );
 }

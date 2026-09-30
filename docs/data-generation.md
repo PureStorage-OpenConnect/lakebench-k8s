@@ -137,11 +137,36 @@ values you set in the config:
 | Field | When unset | When set |
 |---|---|---|
 | `cpu` | `8` | Used as given |
-| `memory` | Derived from the measured peak RSS for the schema, scale, thread count and `file_size`, at least `4Gi` | Used as given |
+| `memory` | Derived from the measured peak RSS for the schema, scale, thread count at the fixed 64mb file size, at least `4Gi` | Used as given |
 | `generators` | `0` (auto): one generator thread per pod CPU | Used as the thread count |
 
-The entrypoint lowers the thread count if the pod's memory limit cannot hold
-that many threads, rather than risk an OOMKill.
+| `memory` default at 8 CPU | Scale 1 | Scale 100 | Scale 300 | Scale 800 |
+|---|---|---|---|---|
+| AML (financial) | 7Gi | 8Gi | 10Gi | 16Gi |
+| Customer 360 | 4Gi | 4Gi | 4Gi | 4Gi |
+
+A datagen pod never requests more than 16Gi. If the CPU you set would need
+more, the request stays at 16Gi and each pod runs fewer generator threads;
+the autosizer says so. The entrypoint also lowers the thread count if a
+memory limit you set cannot hold that many threads, rather than risk an
+OOMKill. Above scale 100, AML datagen runs at least 8 pods: each pod holds
+typology rows only for the files it writes, so fewer pods means more memory
+per pod.
+
+### Scale limits
+
+Every datagen pod holds the whole population's state, so per-pod memory grows
+with scale whatever the pod count. Each workload has a scale band, measured on
+the cluster at 8 CPU per pod with the 16Gi cap:
+
+| Workload | Supported (measured) | Unverified (modelled to fit) | Refused |
+|---|---|---|---|
+| AML (financial) | up to 300 | above 300, up to 800 | above 800 |
+| Customer 360 | up to 300 | above 300, up to 600 | above 600 |
+
+An unverified scale runs with a warning and is recorded as unverified in the
+run's support state. A refused scale stops `deploy`, `generate` and `run`
+before anything starts.
 
 The number of datagen pods (parallelism) also scales with the scale factor:
 
@@ -202,7 +227,7 @@ workload:
     scale: 10                  # Abstract scale factor (1 unit ~ 10 GB)
     mode: auto                 # auto | batch | continuous
     parallelism: 4             # Number of parallel Kubernetes pods
-    file_size: 64mb            # Target Parquet file size (per-thread memory scales with it)
+    file_size: 64mb            # Fixed; the only accepted value
     dirty_data_ratio: 0.08     # Fraction of intentionally dirty records
     cpu: "8"                   # CPU per pod (autosizer default when unset)
     memory: 4Gi                # Memory per pod (autosizer derives it when unset)
@@ -232,8 +257,8 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:30603b1`, digest
-`sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16`;
+The default image (`docker.io/sillidata/lb-datagen:034f998`, digest
+`sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc`;
 the v1.6 AML generator-freeze commit, generator version `datagen-v2-rs-0.3`)
 is built from the `datagen_rs/` directory in this repository. To build and push a custom
 image:

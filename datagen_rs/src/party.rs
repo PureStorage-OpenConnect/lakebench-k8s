@@ -100,16 +100,23 @@ fn syn_overrides(w: &World, instances: &[Instance]) -> HashMap<usize, Override> 
             continue;
         }
         let base = cluster[0] as usize;
-        let base_phone = R::phone(base as u64, w.country[base], w.seed);
+        // Base PII is recomputed on demand (LB-204). It is ty-branch-dependent
+        // via w.name/w.email (person/company/fi), reproduced exactly here.
+        let base_phone = R::phone(base as u64, w.country(base), w.seed);
+        let base_name = w.name(base);
+        let base_email = w.email(base);
+        let base_street = w.street(base);
+        let base_town = w.town(base);
+        let base_postcode = w.postcode(base);
         let half = (cluster.len() / 2).max(1);
         for &e in &cluster[1..=half.min(cluster.len() - 1)] {
             ov.insert(
                 e as usize,
                 Override {
-                    street: Some(w.street.get(base).to_string()),
-                    town: Some(w.town.get(base).to_string()),
-                    postcode: Some(w.postcode[base].clone()),
-                    email: Some(w.email[base].clone()),
+                    street: Some(base_street.clone()),
+                    town: Some(base_town.clone()),
+                    postcode: Some(base_postcode.clone()),
+                    email: Some(base_email.clone()),
                     phone: Some(base_phone.clone()),
                     ..Default::default()
                 },
@@ -119,8 +126,8 @@ fn syn_overrides(w: &World, instances: &[Instance]) -> HashMap<usize, Override> 
             ov.insert(
                 e as usize,
                 Override {
-                    name: Some(name_variant(w.name.get(base), k % 5)),
-                    email: Some(email_typo(&w.email[base])),
+                    name: Some(name_variant(&base_name, k % 5)),
+                    email: Some(email_typo(&base_email)),
                     phone: Some(phone_variant(&base_phone)),
                     ..Default::default()
                 },
@@ -152,25 +159,29 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
     for i in lo..=hi {
         let o = ov.get(&i);
         let id = i as u64;
+        // Attributes recomputed on demand (LB-204); bind the ones read more
+        // than once per row so the recompute happens at most once each.
+        let ty_i = w.ty(i);
+        let country_i = w.country(i);
         let cust = kyc::is_customer(id, w.seed);
         is_cust.push(cust);
-        home.push(kyc::home_fi(&w.bic[i]).to_string());
+        home.push(kyc::home_fi(&w.bic(i)).to_string());
         if cust {
             since.push(Some(kyc::customer_since_day(
                 id,
                 w.seed,
                 w.dims.corpus_months,
             )));
-            ctype.push(Some(kyc::customer_type(w.ty[i])));
+            ctype.push(Some(kyc::customer_type(ty_i)));
             let v = kyc::expected_monthly_volume_usd(
                 id,
                 w.seed,
-                w.amount_logshift[i],
+                w.amount_logshift(i),
                 w.activity[i] / w.total_activity.max(f64::MIN_POSITIVE),
                 w.population,
                 w.dims.txn_per_entity_per_month,
             );
-            let (sc, tier, f) = kyc::crr(w.ty[i], w.country[i], v);
+            let (sc, tier, f) = kyc::crr(ty_i, country_i, v);
             exp_vol.push(Some(v));
             crr_score.push(Some(sc));
             crr_tier.push(Some(tier));
@@ -184,42 +195,37 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
             crr_factors.push(None);
         }
         ids.push(i as i64);
-        etype.push(TYPE_LABELS[w.ty[i] as usize].to_string());
-        let nm = o
-            .and_then(|x| x.name.clone())
-            .unwrap_or_else(|| w.name.get(i).to_string());
+        etype.push(TYPE_LABELS[ty_i as usize].to_string());
+        let nm = o.and_then(|x| x.name.clone()).unwrap_or_else(|| w.name(i));
         names.push(nm);
         st.push(
             o.and_then(|x| x.street.clone())
-                .unwrap_or_else(|| w.street.get(i).to_string()),
+                .unwrap_or_else(|| w.street(i)),
         );
-        tw.push(
-            o.and_then(|x| x.town.clone())
-                .unwrap_or_else(|| w.town.get(i).to_string()),
-        );
-        rg.push(w.region[i].clone());
+        tw.push(o.and_then(|x| x.town.clone()).unwrap_or_else(|| w.town(i)));
+        rg.push(w.region(i));
         pc.push(
             o.and_then(|x| x.postcode.clone())
-                .unwrap_or_else(|| w.postcode[i].clone()),
+                .unwrap_or_else(|| w.postcode(i)),
         );
-        ctry.push(w.country[i].to_string());
+        ctry.push(country_i.to_string());
         em.push(
             o.and_then(|x| x.email.clone())
-                .unwrap_or_else(|| w.email[i].clone()),
+                .unwrap_or_else(|| w.email(i)),
         );
         ph.push(
             o.and_then(|x| x.phone.clone())
-                .unwrap_or_else(|| R::phone(i as u64, w.country[i], w.seed)),
+                .unwrap_or_else(|| R::phone(i as u64, country_i, w.seed)),
         );
-        lei.push(if w.ty[i] == TYPE_PERSON {
+        lei.push(if ty_i == TYPE_PERSON {
             None
         } else {
-            Some(w.lei[i].clone())
+            Some(w.lei(i))
         });
         // An FI's own identifier: a pool BIC that is never the reporting
         // FI's, even when the FI banks with the reporting FI (then w.bic, its
         // account-holding bank, is the reporting FI's BIC).
-        bic.push(if w.ty[i] == TYPE_FI {
+        bic.push(if ty_i == TYPE_FI {
             Some(w.bic_pool[kyc::own_bic_idx(i as u64, w.bic_pool.len())].clone())
         } else {
             None
@@ -318,10 +324,17 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
     let mut home: Vec<String> = Vec::new();
     for id in lo as u64..=hi as u64 {
         let i = id as usize;
-        let cc = kyc::account_country(kyc::is_customer(id, w.seed), w.country[i]);
+        // Attributes recomputed on demand (LB-204); bind the per-entity ones so
+        // the recompute happens once for the whole account-sequence loop.
+        let country_i = w.country(i);
+        let bic_i = w.bic(i);
+        let home_fi = kyc::home_fi(&bic_i).to_string();
+        let ccy_i = w.ccy(i);
+        let iban_i = w.iban(i);
+        let cc = kyc::account_country(kyc::is_customer(id, w.seed), country_i);
         let cb = [cc.as_bytes()[0], cc.as_bytes()[1]];
         let primary_od = kyc::primary_opened_day(id, w.seed, w.dims.corpus_months);
-        for seq in 0..w.n_accounts[i] as u64 {
+        for seq in 0..w.n_accounts(i) as u64 {
             let (aid, acc_seed) = account_keys(id, seq, seed_u);
             acct_id.push(aid);
             // The first account is the one the entity's payments use: the
@@ -330,14 +343,14 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
             // and silver can join a payment to its holder's KYC. Further
             // accounts keep their own IBANs.
             iban.push(if seq == 0 {
-                w.iban[i].clone()
+                iban_i.clone()
             } else {
                 iban_for(&cb, acc_seed)
             });
             holder.push(id as i64);
-            bank_bic.push(w.bic[i].clone());
-            home.push(kyc::home_fi(&w.bic[i]).to_string());
-            currency.push(w.ccy[i].to_string());
+            bank_bic.push(bic_i.clone());
+            home.push(home_fi.clone());
+            currency.push(ccy_i.to_string());
             let od = if seq == 0 {
                 primary_od
             } else {

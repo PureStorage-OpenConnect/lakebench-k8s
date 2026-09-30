@@ -1,23 +1,24 @@
-"""LB-199: the datagen peak-RSS model must cover the measured scale-100 peak.
+"""Datagen memory model (LB-199, re-fit for LB-204): it must cover every
+measured cluster peak, stay within the 16 GiB pod cap across each workload's
+scale band, and agree with the band table in config/support.py.
 
-Root cause: the model under-fit the per-thread term AND omitted the per-node
-screening (worker) scale term, so financial scale-100 node-0 OOMKilled at the
-old 17Gi default (measured working-set peak 18.18 GiB, workers 12.23 GiB;
-run-20260929-000406). These tests fail if the coefficients regress below what
-the measured cluster peaks require.
+Measured points are the cgroup memory.peak of the busiest pod of datagen-only
+cluster Jobs (8 threads, 64 MB files, no thread cap), in
+autosizer.DATAGEN_MEASURED_PEAK_GIB. History: the pre-LB-204 generator peaked
+at 18.18 GiB (node 0) at financial scale 100 and OOMKilled at 17Gi.
 """
 
 import importlib.util
 import math
 from pathlib import Path
 
+import pytest
+
 from lakebench.config import autosizer as a
+from lakebench.config.support import DATAGEN_POD_MEMORY_CAP_GIB, DATAGEN_SCALE_BANDS
 
 REPO = Path(__file__).resolve().parents[1]
-
-# Authoritative cluster working-set measurements (GiB), s100 / 8 threads / 128MB.
-CLUSTER_NODE0_PEAK = 18.18
-CLUSTER_WORKER_PEAK = 12.23
+SCHEMAS = sorted(a.DATAGEN_MEASURED_PEAK_GIB)
 
 
 def _entrypoint():
@@ -30,37 +31,118 @@ def _entrypoint():
     return mod
 
 
-def test_scale100_request_covers_measured_node0_peak():
-    """The node-0 request (with headroom) must exceed the measured 18.18 GiB."""
-    req = math.ceil(a.datagen_memory_gib("financial", 100, 8, 128))
-    assert req >= CLUSTER_NODE0_PEAK, req
-    # and it must clear the measured peak with real headroom, not sit on it.
-    assert req >= 24, f"request {req}Gi too tight over an 18.18 GiB peak"
+@pytest.mark.parametrize("schema", SCHEMAS)
+def test_model_covers_every_measured_peak(schema):
+    """Upper envelope: the modelled peak (no headroom) is at or above every
+    measured busiest-pod peak."""
+    for scale, measured in a.DATAGEN_MEASURED_PEAK_GIB[schema].items():
+        assert a.datagen_peak_gib(schema, scale, 8) >= measured, (schema, scale)
 
 
-def test_worker_scale_term_present_for_financial():
-    """The missing piece: financial workers carry a per-entity screening term."""
-    assert a.DATAGEN_WORKER_ENTITY_BYTES.get("financial", 0) > 0
-    # A worker (no world term) must still be sized above the 12.23 GiB peak.
-    entities = a.DATAGEN_ENTITIES_PER_SCALE * 100
-    worker_pre = (
-        a.DATAGEN_BASE_GIB["financial"]
-        + entities * a.DATAGEN_WORKER_ENTITY_BYTES["financial"] / 2**30
-        + 8 * (128 / 1024) * a.DATAGEN_PER_THREAD_FILE_MULTIPLIER["financial"]
-    )
-    assert worker_pre * a.DATAGEN_HEADROOM >= CLUSTER_WORKER_PEAK
+def test_bands_cover_the_measured_workloads():
+    assert set(DATAGEN_SCALE_BANDS) == set(a.DATAGEN_MEASURED_PEAK_GIB)
 
 
-def test_entrypoint_cap_admits_cpu_threads_at_scale100():
-    """The thread cap at the new default must not throttle 8 requested threads."""
+@pytest.mark.parametrize("schema", SCHEMAS)
+def test_supported_max_is_measured_and_fits_the_cap(schema):
+    """supported_max is a measured scale whose measured peak, with headroom,
+    fits the pod cap."""
+    supported_max, _ = DATAGEN_SCALE_BANDS[schema]
+    measured = a.DATAGEN_MEASURED_PEAK_GIB[schema]
+    assert int(supported_max) in measured
+    assert measured[int(supported_max)] * a.DATAGEN_HEADROOM <= DATAGEN_POD_MEMORY_CAP_GIB
+
+
+@pytest.mark.parametrize("schema", SCHEMAS)
+def test_ceiling_fits_the_cap_and_is_bounded_by_measurement(schema):
+    """The ceiling's modelled request fits 16 GiB at 8 threads, and the
+    ceiling never extrapolates past twice the largest measured scale."""
+    _, ceiling = DATAGEN_SCALE_BANDS[schema]
+    assert a.datagen_memory_gib(schema, ceiling, 8) <= DATAGEN_POD_MEMORY_CAP_GIB
+    assert ceiling <= 2 * max(a.DATAGEN_MEASURED_PEAK_GIB[schema])
+
+
+@pytest.mark.parametrize("schema", SCHEMAS)
+def test_every_scale_up_to_the_ceiling_runs_8_threads_within_the_cap(schema):
+    """At the 8 CPU default, every scale up to the ceiling gets a request of at
+    most 16 GiB, and that request admits all 8 threads (no entrypoint cut)."""
     ep = _entrypoint()
-    req_gib = math.ceil(a.datagen_memory_gib("financial", 100, 8, 128))
-    cap = ep.max_threads_for_memory("financial", 100.0, 128, True, req_gib * 2**30)
-    assert cap >= 8, f"cap {cap} < 8 requested threads at scale 100"
+    _, ceiling = DATAGEN_SCALE_BANDS[schema]
+    for scale in (1, 10, 100, ceiling / 2, ceiling):
+        req = min(
+            DATAGEN_POD_MEMORY_CAP_GIB, max(4, math.ceil(a.datagen_memory_gib(schema, scale, 8)))
+        )
+        assert ep.max_threads_for_memory(schema, float(scale), req * 2**30) >= 8, (schema, scale)
 
 
-def test_c360_model_unchanged():
-    """The refit is financial-only; c360 coefficients must not move."""
-    assert a.DATAGEN_PER_THREAD_FILE_MULTIPLIER["customer360"] == 3.0
-    assert a.DATAGEN_BASE_GIB["customer360"] == 0.3
-    assert "customer360" not in a.DATAGEN_WORKER_ENTITY_BYTES
+def test_fewer_threads_never_lower_the_estimate():
+    """Below 8 threads nothing was measured, so the model keeps the 8-thread peak."""
+    for schema in SCHEMAS:
+        assert a.datagen_peak_gib(schema, 100, 2) == a.datagen_peak_gib(schema, 100, 8)
+        assert a.datagen_peak_gib(schema, 100, 16) > a.datagen_peak_gib(schema, 100, 8)
+
+
+def test_default_request_is_capped_at_16gi():
+    """A 32-CPU override at the financial ceiling models above 16 GiB; the
+    request is still the cap and the entrypoint runs fewer threads."""
+    from lakebench.config import LakebenchConfig
+
+    _, ceiling = DATAGEN_SCALE_BANDS["financial"]
+    assert a.datagen_memory_gib("financial", ceiling, 32) > DATAGEN_POD_MEMORY_CAP_GIB
+    cfg = LakebenchConfig(
+        name="cap",
+        platform={
+            "storage": {"s3": {"endpoint": "http://s3:80", "access_key": "k", "secret_key": "s"}}
+        },
+        workload={"schema": "financial", "datagen": {"scale": ceiling}},
+    )
+    assert a._datagen_memory_default(cfg, "32") == f"{DATAGEN_POD_MEMORY_CAP_GIB}Gi"
+
+
+def _cfg(schema, scale, **datagen):
+    from lakebench.config import LakebenchConfig
+
+    return LakebenchConfig(
+        name="floor",
+        platform={
+            "storage": {"s3": {"endpoint": "http://s3:80", "access_key": "k", "secret_key": "s"}}
+        },
+        workload={"schema": schema, "datagen": {"scale": scale, **datagen}},
+    )
+
+
+def test_financial_above_scale_100_runs_at_least_8_pods():
+    """Each pod keeps typology payloads for its own files only, so fewer pods
+    means more memory per pod; the model was measured at 8 or more pods."""
+    cfg = _cfg("financial", 300, parallelism=4)
+    changes: list[str] = []
+    a._apply_datagen_pod_floor(cfg, changes)
+    assert cfg.architecture.workload.datagen.parallelism == a.DATAGEN_MIN_PODS
+    assert changes and changes[0].startswith("datagen.parallelism raised")
+
+
+@pytest.mark.parametrize(("schema", "scale"), [("financial", 100), ("customer360", 300)])
+def test_pod_floor_leaves_small_scale_and_c360_alone(schema, scale):
+    cfg = _cfg(schema, scale, parallelism=4)
+    changes: list[str] = []
+    a._apply_datagen_pod_floor(cfg, changes)
+    assert cfg.architecture.workload.datagen.parallelism == 4
+    assert changes == []
+
+
+def test_clamp_note_explains_thread_cut():
+    _, ceiling = DATAGEN_SCALE_BANDS["financial"]
+    note = a._datagen_clamp_note(_cfg("financial", ceiling), "32")
+    assert f"capped at {DATAGEN_POD_MEMORY_CAP_GIB}Gi" in note
+    assert a._datagen_clamp_note(_cfg("financial", 100), "8") == ""
+
+
+def test_model_was_fitted_for_the_pinned_image():
+    """The memory model and scale bands describe one generator build. An image
+    re-pin without a re-measurement would size pods for the wrong binary (the
+    pre-LB-204 generator peaked at 18.18 GiB where this model requests 8Gi)."""
+    from lakebench.config.schema import ImagesConfig
+
+    assert ImagesConfig().datagen == "docker.io/sillidata/lb-datagen:034f998", (
+        "re-measure datagen memory (autosizer.DATAGEN_MEASURED_PEAK_GIB) before re-pinning"
+    )

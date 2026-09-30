@@ -72,6 +72,45 @@ MODE_NOTES: dict[tuple[str, str], str] = {
 }
 
 
+#: Datagen scale bands per workload (owner decision 2026-09-29): every datagen
+#: pod stays within DATAGEN_POD_MEMORY_CAP_GIB at 8 threads. ``supported_max``
+#: is the largest scale measured on the cluster within the cap (with the
+#: autosizer headroom); ``ceiling`` is the largest scale the fitted memory
+#: model keeps within the cap, bounded by twice the largest measured scale.
+#: Above ``supported_max`` a run is unverified; above ``ceiling`` it is
+#: refused. Measurement basis: config/autosizer.py (datagen memory model).
+DATAGEN_POD_MEMORY_CAP_GIB = 16
+DATAGEN_SCALE_BANDS: dict[str, tuple[float, float]] = {
+    "financial": (300.0, 800.0),
+    "customer360": (300.0, 600.0),
+}
+
+
+def datagen_scale_problem(workload: str | None, scale: float | None) -> tuple[str, str] | None:
+    """``(state, basis)`` when *scale* is outside the workload's supported
+    datagen band, else None. UNSUPPORTED above the ceiling, UNVERIFIED between
+    the supported maximum and the ceiling."""
+    band = DATAGEN_SCALE_BANDS.get(str(workload))
+    if band is None or scale is None:
+        return None
+    supported_max, ceiling = band
+    label = WORKLOAD_LABELS.get(str(workload), str(workload))
+    if scale > ceiling:
+        return (
+            UNSUPPORTED,
+            f"{label} scale {scale:g} is above the datagen ceiling of {ceiling:g}: a datagen "
+            f"pod would exceed {DATAGEN_POD_MEMORY_CAP_GIB} GiB. Use a scale of {ceiling:g} or less.",
+        )
+    if scale > supported_max:
+        return (
+            UNVERIFIED,
+            f"{label} scale {scale:g} is above the largest scale measured within "
+            f"{DATAGEN_POD_MEMORY_CAP_GIB} GiB per datagen pod ({supported_max:g}); the memory "
+            f"model predicts it fits up to {ceiling:g}.",
+        )
+    return None
+
+
 class ValidationRecordError(ValueError):
     """The release validation record is malformed or lists a combination
     that is not valid for its workload and mode."""
@@ -253,14 +292,52 @@ def support_state(
     system: str = "cluster",
     record: Mapping[tuple[str, str, str], Validation] | None = None,
     provenance: Mapping[str, Any] | None = None,
+    scale: float | None = None,
 ) -> dict[str, Any]:
     """The DESIGN 6.5 support state of one workload x architecture x mode.
 
     Returns ``{"state", "basis", ...}``. ``supported`` only when the release
     validation record lists the combination with run ids and lakebench is not
     running from a modified tree (*provenance* ``git_dirty``); an unreadable
-    record never promotes anything.
+    record never promotes anything. With *scale*, a cluster run outside the
+    workload's datagen scale band is refused above the ceiling and at most
+    unverified above the supported maximum (``DATAGEN_SCALE_BANDS``).
     """
+    out = _support_state(
+        workload,
+        catalog,
+        table_format,
+        pipeline_engine,
+        query_engine,
+        mode,
+        system=system,
+        record=record,
+        provenance=provenance,
+    )
+    band = None if system == "local" else datagen_scale_problem(workload, scale)
+    if band is None or out["state"] == UNSUPPORTED:
+        return out
+    state, basis = band
+    out["scale_note"] = basis
+    if state == UNSUPPORTED or out["state"] == SUPPORTED:
+        for k in ("validation_runs", "validation_tree"):
+            out.pop(k, None)
+        out.update(state=state, basis=basis)
+    return out
+
+
+def _support_state(
+    workload: str | None,
+    catalog: str | None,
+    table_format: str | None,
+    pipeline_engine: str | None,
+    query_engine: str | None,
+    mode: object,
+    *,
+    system: str,
+    record: Mapping[tuple[str, str, str], Validation] | None,
+    provenance: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     wl, m = str(workload), canonical_mode(mode)
     comps = (str(catalog), str(table_format), str(pipeline_engine), str(query_engine))
     out: dict[str, Any] = {"workload": wl, "mode": m}
@@ -342,6 +419,7 @@ def support_state_for_config(
         mode if mode is not None else arch.pipeline.mode,
         system=system,
         provenance=provenance,
+        scale=float(arch.workload.datagen.get_effective_scale()),
     )
 
 

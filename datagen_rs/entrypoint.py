@@ -19,6 +19,7 @@ S3 credentials + endpoint are read by the Rust binary directly from env vars:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 
@@ -58,19 +59,15 @@ def detect_cpu_quota() -> int:
     return os.cpu_count() or 1
 
 
-# Peak-RSS model, mirrored from lakebench.config.autosizer (a unit test keeps
-# the two copies equal): per worker thread about MULT x the output file size;
-# EVERY financial node builds per-entity structures at about 420 B per entity and
-# node 0 also builds the full world at about 600 B per entity (111,111 entities
-# per scale unit). Re-fit for LB-199 (2026-09-29): the per-thread term was
-# under-fit (4.8 -> 8.0) and the worker per-entity term was missing, so scale-100
-# node-0 OOMKilled at the old default. See autosizer.py for the measurement basis.
-PER_THREAD_FILE_MULTIPLIER = {"financial": 8.0, "customer360": 3.0}
-WORLD_BYTES_PER_ENTITY_NODE0 = 600
-# Per-entity structures on EVERY financial node (src/screening.rs::build etc).
-WORKER_ENTITY_BYTES = {"financial": 420}
-ENTITIES_PER_SCALE = 111_111
-BASE_GIB = {"financial": 1.5, "customer360": 0.3}
+# Peak-memory model, mirrored from lakebench.config.autosizer (a unit test keeps
+# the two copies equal; see autosizer.py for the measurement basis, LB-204):
+#   peak = BASE + GIB_PER_SCALE * scale + max(0, threads - 8) * GIB_PER_EXTRA_THREAD
+# at the fixed 64 MB file size, for the busiest pod. A limit below the 8-thread
+# peak drops one thread per GIB_PER_EXTRA_THREAD short (user override only).
+BASE_GIB = {"financial": 5.35, "customer360": 2.2}
+GIB_PER_SCALE = {"financial": 0.0087, "customer360": 0.0007}
+GIB_PER_EXTRA_THREAD = {"financial": 0.5, "customer360": 0.1875}
+BASE_THREADS = 8
 HEADROOM = 1.25
 
 
@@ -89,19 +86,18 @@ def detect_memory_limit_bytes() -> int | None:
     return None
 
 
-def max_threads_for_memory(
-    schema: str, scale: float, file_size_mb: int, is_node0: bool, limit_bytes: int
-) -> int:
-    """Largest thread count whose estimated peak RSS fits the memory limit."""
-    gib = limit_bytes / 2**30
-    entities = ENTITIES_PER_SCALE * scale
-    worker_scale = entities * WORKER_ENTITY_BYTES.get(schema, 0) / 2**30
-    world = 0.0
-    if schema == "financial" and is_node0:
-        world = entities * WORLD_BYTES_PER_ENTITY_NODE0 / 2**30
-    per_thread = (file_size_mb / 1024.0) * PER_THREAD_FILE_MULTIPLIER.get(schema, 3.0)
-    budget = gib / HEADROOM - world - worker_scale - BASE_GIB.get(schema, 0.3)
-    return max(1, int(budget // per_thread)) if per_thread > 0 else 1
+def max_threads_for_memory(schema: str, scale: float, limit_bytes: int) -> int:
+    """Largest thread count whose modelled peak fits the memory limit."""
+    base = BASE_GIB.get(schema, BASE_GIB["financial"])
+    per_scale = GIB_PER_SCALE.get(schema, GIB_PER_SCALE["financial"])
+    extra = GIB_PER_EXTRA_THREAD.get(schema, GIB_PER_EXTRA_THREAD["financial"])
+    spare = limit_bytes / 2**30 / HEADROOM - base - per_scale * scale
+    if spare >= 0:
+        return BASE_THREADS + int(spare // extra)
+    # Below the 8-thread peak (only a user memory override gets here: the
+    # autosized request always fits 8 threads). Drop one thread per per-thread
+    # cost short; the pod logs the cut.
+    return max(1, BASE_THREADS - math.ceil(-spare / extra))
 
 
 def main() -> int:
@@ -246,8 +242,12 @@ def main() -> int:
     # from scratch. Fewer threads is slower but finishes.
     limit = detect_memory_limit_bytes()
     if limit:
-        is_node0 = node_id == 0 and args.mode in ("all", "batch", "continuous", "reference")
-        cap = max_threads_for_memory(args.schema, args.scale, args.file_size_mb, is_node0, limit)
+        # c360 is sized by its customer count (100,000 per scale unit); the
+        # template passes --customer-id-max, not --scale, for c360.
+        cap_scale = args.scale
+        if args.schema == "customer360" and args.customer_id_max:
+            cap_scale = args.customer_id_max / 100_000
+        cap = max_threads_for_memory(args.schema, cap_scale, limit)
         if threads > cap:
             print(
                 f"[entrypoint] capping threads {threads} -> {cap} to fit memory limit "
@@ -299,10 +299,9 @@ def main() -> int:
     delivery = args.delivery_mode
     if delivery == "auto":
         delivery = "continuous"
-    if delivery != "batch":
-        # Only forward when non-default from the Rust binary's perspective
-        # (batch), so an older image without --delivery-mode still parses.
-        common += ["--delivery-mode", delivery]
+    # Always forwarded (LB-196): the Rust default is continuous, so dropping
+    # "batch" here silently ran every batch request as continuous.
+    common += ["--delivery-mode", delivery]
 
     if args.robustness_perturbation and args.schema != "financial":
         print(

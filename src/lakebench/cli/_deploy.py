@@ -16,6 +16,7 @@ from rich.panel import Panel
 
 from lakebench.cli._helpers import (
     _journal_safe,
+    check_datagen_scale,
     console,
     journal_open,
     print_error,
@@ -326,6 +327,8 @@ def deploy(
     if local:
         _deploy_local_mode(cfg, config_file, workdir, dry_run, yes, timeout)
         return
+
+    check_datagen_scale(cfg)
 
     namespace = cfg.get_namespace()
 
