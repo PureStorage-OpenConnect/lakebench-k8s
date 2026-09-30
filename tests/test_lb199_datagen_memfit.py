@@ -143,6 +143,6 @@ def test_model_was_fitted_for_the_pinned_image():
     pre-LB-204 generator peaked at 18.18 GiB where this model requests 8Gi)."""
     from lakebench.config.schema import ImagesConfig
 
-    assert ImagesConfig().datagen == "docker.io/sillidata/lb-datagen:034f998", (
+    assert ImagesConfig().datagen == "docker.io/sillidata/lb-datagen:1.6.0", (
         "re-measure datagen memory (autosizer.DATAGEN_MEASURED_PEAK_GIB) before re-pinning"
     )

@@ -4,7 +4,7 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.6.0] - Unreleased
+## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and
 runs two workloads, Customer 360 and AML, through the same composable
@@ -153,9 +153,10 @@ with 1.6; the first section lists why.
   which of them bound, so a bound figure is not read as infrastructure
   performance.
 - **AML generator image.** `images.datagen` defaults to
-  `docker.io/sillidata/lb-datagen:034f998` (digest
-  `sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc`),
-  generator `MODEL_VERSION` `datagen-v2-rs-0.3`. Its output is
+  `docker.io/sillidata/lb-datagen:1.6.0` (digest
+  `sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a`),
+  generator `MODEL_VERSION` `datagen-v2-rs-0.3`, the release build of the
+  same datagen_rs source as the validated `034f998` image. Its output is
   byte-identical to the frozen generator built from 9382420 source (seed 43,
   141/141 objects, across thread and pod counts). It adds the per-pod memory
   model with a 16Gi cap, fixed 64 MB files and delivery-mode forwarding
@@ -564,7 +565,7 @@ with 1.6; the first section lists why.
   covered only buckets this deployment recorded creating.
 
 ### Changed
-- Datagen image `lb-datagen:034f998` (LB-204): AML datagen pod memory at scale
+- Datagen image `lb-datagen:1.6.0` (LB-204): AML datagen pod memory at scale
   100 falls from 18.18 GiB to 5.70 GiB (mimalloc allocator, typology rows kept
   only for each pod's own files, world columns recomputed on demand). Output is
   byte-identical to the v1.6 AML generator freeze (seed-43 byte-compare on the

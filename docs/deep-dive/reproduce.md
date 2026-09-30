@@ -124,7 +124,7 @@ Some things we cannot control:
 
 - AML generator output does not depend on the thread pool or pod
   count: at seed 43 the e14d0fd image produced byte-identical objects
-  thread-throttled and with 4 pods, and 034f998 is byte-identical to
+  thread-throttled and with 4 pods, and 034f998 (rebuilt unchanged as the 1.6.0 release image) is byte-identical to
   e14d0fd. This was not measured for Customer 360, where Snappy
   compression can vary by about 0.5% with the order rows reach the
   Parquet writer. The package does not record the pool size, so keep

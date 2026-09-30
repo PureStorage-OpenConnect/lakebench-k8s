@@ -301,6 +301,7 @@ class ImagesConfig(ConfigModel):
     # Pushed digest (034f998):
     # sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc
     #   e14d0fd (sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591)
+    # 034f998 and e14d0fd were deleted with the repository wipe of 2026-09-30.
     # Prior tags (deleted from docker.io between 2026-09-29 22:30 and 23:29;
     # rebuild from source to reproduce):
     #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) LB-199 memory refit
@@ -309,7 +310,12 @@ class ImagesConfig(ConfigModel):
     #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
     #   0a83acd (sha256:acdf3925...)
     #   7c24641 (sha256:c5a6bc80...)
-    datagen: str = "docker.io/sillidata/lb-datagen:034f998"
+    # 1.6.0: the v1.6 release image, rebuilt from the same datagen_rs source as
+    # 034f998 (datagen_rs unchanged 034f998..release; base images digest-pinned,
+    # cargo --locked) after the docker.io repository was wiped (LB-209). Release
+    # tags are the exception to the commit-tag rule above.
+    # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
+    datagen: str = "docker.io/sillidata/lb-datagen:1.6.0"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
