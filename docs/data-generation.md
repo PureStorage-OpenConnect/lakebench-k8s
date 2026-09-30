@@ -143,7 +143,7 @@ values you set in the config:
 | `memory` default at 8 CPU | Scale 1 | Scale 100 | Scale 300 | Scale 800 |
 |---|---|---|---|---|
 | AML (financial) | 7Gi | 8Gi | 10Gi | 15Gi |
-| Customer 360 | 3Gi | 3Gi | 4Gi | 4Gi |
+| Customer 360 | 4Gi | 4Gi | 4Gi | 4Gi |
 
 A datagen pod never requests more than 16Gi. If the CPU you set would need
 more, the request stays at 16Gi and each pod runs fewer generator threads;

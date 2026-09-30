@@ -100,8 +100,10 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
 # fixed 64 MB file size, 8 threads (request = limit = 8 CPU), 8 pods (4 for
 # c360; 40 for financial scale 500), no thread cap. Every pod holds full-population state, so the busiest
 # pod (node 0 or a worker) sets the request for all of them. Measured points
-# are in DATAGEN_MEASURED_PEAK_GIB; the model is an upper envelope of them
-# (tests/test_lb199_datagen_memfit.py). Each point is n=1.
+# are in DATAGEN_MEASURED_PEAK_GIB; the model is an upper envelope of them at
+# the pod count each was measured with (tests/test_lb199_datagen_memfit.py).
+# Each point is n=1; above scale 300 only the 40-pod scale-500 point exists,
+# which is why that range is 'unverified' in config/support.py.
 #
 #   peak = BASE + GIB_PER_SCALE * scale + max(0, threads - 8) * GIB_PER_EXTRA_THREAD
 #
@@ -342,9 +344,11 @@ def resolve_auto_sizing(
         changes.append(schema_change)
 
     # -- Cluster capacity: cap to fit --
+    # The pod floor goes first so a cluster cap (which also sets the
+    # continuous-mode streaming budget) always has the last word.
+    _apply_datagen_pod_floor(config, changes)
     if cluster_capacity is not None:
         _apply_cluster_scaling(config, cluster_capacity, effective_mode, guidance, changes)
-    _apply_datagen_pod_floor(config, changes)
 
     if changes:
         log.info(

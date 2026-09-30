@@ -803,7 +803,7 @@ resolved resources are approximately:
 
 | Component | Instances | Per-Instance Resources |
 |---|---|---|
-| Datagen pods | 10+ | 8 CPU, 3Gi (c360) / 8Gi (financial) |
+| Datagen pods | 10+ | 8 CPU, 4Gi (c360) / 8Gi (financial) |
 | Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 500Gi PVC (financial, LB-118) |
 | Silver-build executors | 18 | 4 cores, 48g+12g overhead, 300Gi PVC |
 | Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 100Gi PVC |
