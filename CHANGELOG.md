@@ -536,7 +536,7 @@ with 1.6; the first section lists why.
   covered only buckets this deployment recorded creating.
 
 ### Changed
-- Datagen image `lb-datagen:e14d0fd` (LB-204): AML datagen pod memory at scale
+- Datagen image `lb-datagen:034f998` (LB-204): AML datagen pod memory at scale
   100 falls from 18.18 GiB to 5.70 GiB (mimalloc allocator, typology rows kept
   only for each pod's own files, world columns recomputed on demand). Output is
   byte-identical to the v1.6 AML generator freeze (seed-43 byte-compare on the

@@ -511,7 +511,7 @@ name: my-lakehouse
 # Container images for all components. Override for private registries.
 # See docs/datagen-custom-images.md for building custom datagen images.
 # images:
-#   datagen: docker.io/sillidata/lb-datagen:e14d0fd # Customizable (see docs/datagen-custom-images.md)
+#   datagen: docker.io/sillidata/lb-datagen:034f998 # Customizable (see docs/datagen-custom-images.md)
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3

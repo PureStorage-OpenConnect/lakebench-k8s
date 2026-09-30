@@ -295,8 +295,12 @@ class ImagesConfig(ConfigModel):
     # cycles.rs::financial_output_is_pinned_to_the_frozen_generator. MODEL_VERSION
     # stays datagen-v2-rs-0.3, same freeze. Functional default, disqualified from
     # registered-look corpora as below.
-    # Pushed digest (e14d0fd):
-    # sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591
+    # 034f998: same Rust source as e14d0fd; entrypoint.py thread-cap model gains
+    # the batch-delivery allowance. Byte-identical to e14d0fd at seed 43 on the
+    # pushed images (141/141 objects), so identical to the frozen generator.
+    # Pushed digest (034f998):
+    # sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc
+    #   e14d0fd (sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591)
     # Prior tags (deleted from docker.io between 2026-09-29 22:30 and 23:29;
     # rebuild from source to reproduce):
     #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) LB-199 memory refit
@@ -305,7 +309,7 @@ class ImagesConfig(ConfigModel):
     #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
     #   0a83acd (sha256:acdf3925...)
     #   7c24641 (sha256:c5a6bc80...)
-    datagen: str = "docker.io/sillidata/lb-datagen:e14d0fd"
+    datagen: str = "docker.io/sillidata/lb-datagen:034f998"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
