@@ -64,7 +64,7 @@ def detect_cpu_quota() -> int:
 #   peak = BASE + GIB_PER_SCALE * scale + max(0, threads - 8) * GIB_PER_EXTRA_THREAD
 # at the fixed 64 MB file size, for the busiest pod. A limit below the 8-thread
 # peak drops one thread per GIB_PER_EXTRA_THREAD short (user override only).
-BASE_GIB = {"financial": 4.85, "customer360": 2.2}
+BASE_GIB = {"financial": 5.35, "customer360": 2.2}
 GIB_PER_SCALE = {"financial": 0.0087, "customer360": 0.0007}
 GIB_PER_EXTRA_THREAD = {"financial": 0.5, "customer360": 0.1875}
 BASE_THREADS = 8

@@ -194,8 +194,8 @@ def test_request_and_cap_agree_off_the_default_grid(schema, scale, cpu):
 def test_thread_cap_under_tight_memory():
     ep = _entrypoint()
     # Below the 8-thread peak: one thread fewer per per-thread cost short.
-    # s300 peak 4.85 + 0.0087*300 = 7.46 GiB; 6 GiB / 1.25 = 4.8 -> 2.66 short -> 6 fewer.
-    assert ep.max_threads_for_memory("financial", 300.0, 6 * 2**30) == 2
+    # s300 peak 5.35 + 0.0087*300 = 7.96 GiB; 7 GiB / 1.25 = 5.6 -> 2.36 short -> 5 fewer.
+    assert ep.max_threads_for_memory("financial", 300.0, 7 * 2**30) == 3
     # Far below: never under 1.
     assert ep.max_threads_for_memory("financial", 300.0, 1 * 2**30) == 1
     # Spare memory above the 8-thread peak buys extra threads.

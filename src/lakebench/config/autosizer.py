@@ -103,7 +103,10 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
 # are in DATAGEN_MEASURED_PEAK_GIB; the model is an upper envelope of them at
 # the pod count each was measured with (tests/test_lb199_datagen_memfit.py).
 # Each point is n=1; above scale 300 only the 40-pod scale-500 point exists,
-# which is why that range is 'unverified' in config/support.py.
+# which is why that range is 'unverified' in config/support.py. Batch delivery
+# buffers whole files and peaks higher than continuous (financial scale 300:
+# 7.70 vs 7.29 GiB), so the financial base carries a 0.5 GiB batch allowance
+# over the continuous-only points at 100 and 500.
 #
 #   peak = BASE + GIB_PER_SCALE * scale + max(0, threads - 8) * GIB_PER_EXTRA_THREAD
 #
@@ -116,10 +119,10 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
 # coefficients cap threads in datagen_rs/entrypoint.py, kept equal by
 # tests/test_datagen_template_entrypoint_contract.py.
 DATAGEN_MEASURED_PEAK_GIB: dict[str, dict[int, float]] = {
-    "financial": {100: 5.70, 300: 7.29, 500: 9.17},
+    "financial": {100: 5.70, 300: 7.70, 500: 9.17},
     "customer360": {100: 2.23, 300: 2.36},
 }
-DATAGEN_BASE_GIB = {"financial": 4.85, "customer360": 2.2}
+DATAGEN_BASE_GIB = {"financial": 5.35, "customer360": 2.2}
 DATAGEN_GIB_PER_SCALE = {"financial": 0.0087, "customer360": 0.0007}
 DATAGEN_GIB_PER_EXTRA_THREAD = {"financial": 0.5, "customer360": 0.1875}
 DATAGEN_BASE_THREADS = 8
