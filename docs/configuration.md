@@ -545,10 +545,10 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `workload.datagen.corpus_role` | enum or null | `null` | `financial` only: `calibration`, `evaluation` or `robustness`. Declares this deployment as the registered corpus for that role; it must match the role's pre-registered seed (unset `seed` then uses it). Only set it for the one registered gate run of that role. |
 | `workload.datagen.robustness_perturbation` | bool | `false` | `financial` only. Generates the robustness corpus: the pre-registration's `corpora.robustness_perturbation` multipliers shift the nuisance parameters in natural units (median amount x1.2, persona activity and amount log-sds x1.2, dormancy lengths x1.2). Instances, participants and row counts are unchanged. Required with `corpus_role: robustness`, refused with `calibration` or `evaluation`; the generator also refuses the robustness seed without it. Off, the corpus is byte-identical to a run without the option. |
 | `workload.datagen.parallelism` | int | `4` | Number of parallel datagen pods. |
-| `workload.datagen.file_size` | string | `64mb` | Target Parquet file size. Datagen memory per thread scales with it (about 4.8x for financial, 3.0x for customer360). |
+| `workload.datagen.file_size` | string | `64mb` | Fixed at `64mb` for every workload and mode; any other value is refused. One size keeps row content identical across delivery modes. |
 | `workload.datagen.dirty_data_ratio` | float | `0.08` | Fraction of intentionally dirty records (0.0--1.0). Applies to the `customer360` schema only; the `financial` (AML) generator ignores it. |
 | `workload.datagen.cpu` | string | `8` (auto) | CPU per datagen pod. A value you set is used as given; unset, the auto-sizer sets 8 in both modes. |
-| `workload.datagen.memory` | string | auto | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) and `file_size`, with a 4Gi floor. |
+| `workload.datagen.memory` | string | auto | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) at the fixed 64mb file size, with a 4Gi floor. |
 | `workload.datagen.generators` | int | `0` | Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU request. |
 | `workload.datagen.timestamp_start` | string or null | `null` | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
 | `workload.datagen.timestamp_end` | string or null | `null` | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`deploy/datagen.py` fallback, matched by `metrics/c360_correctness.py`). See [Timestamp Range Impact](#timestamp-range-impact). |
@@ -803,7 +803,7 @@ resolved resources are approximately:
 
 | Component | Instances | Per-Instance Resources |
 |---|---|---|
-| Datagen pods | 10 | 8 CPU, 4Gi (c360) / 14Gi (financial) |
+| Datagen pods | 10+ | 8 CPU, 3Gi (c360) / 8Gi (financial) |
 | Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 500Gi PVC (financial, LB-118) |
 | Silver-build executors | 18 | 4 cores, 48g+12g overhead, 300Gi PVC |
 | Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 100Gi PVC |

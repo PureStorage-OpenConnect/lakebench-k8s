@@ -101,6 +101,24 @@ def print_warning(message: str) -> None:
     console.print(f"[yellow]WARN[/yellow] {message}")
 
 
+def check_datagen_scale(cfg: object) -> None:
+    """Refuse a scale above the workload's datagen ceiling; warn above the
+    largest measured scale (config/support.py DATAGEN_SCALE_BANDS)."""
+    from lakebench.config.support import UNSUPPORTED, datagen_scale_problem
+
+    arch = cfg.architecture  # type: ignore[attr-defined]
+    band = datagen_scale_problem(
+        arch.workload.schema_type.value, float(arch.workload.datagen.get_effective_scale())
+    )
+    if band is None:
+        return
+    state, basis = band
+    if state == UNSUPPORTED:
+        print_error(f"Unsupported scale, refused: {basis}")
+        raise typer.Exit(1)
+    print_warning(f"Unverified scale: {basis}")
+
+
 # ``-f`` means ``--file`` (the config path) on every command. Commands where it
 # used to mean something else keep the old meaning for one release behind a
 # hidden option and call this, so scripts keep working and users see the move.

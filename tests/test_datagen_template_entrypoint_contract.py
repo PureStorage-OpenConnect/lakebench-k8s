@@ -90,6 +90,38 @@ def test_rendered_args_are_accepted_and_use_pod_cpu(schema, scale, monkeypatch):
     assert threads >= 4, f"generator pinned to {threads} thread(s)"
 
 
+@pytest.mark.parametrize("delivery", ["batch", "continuous", "auto"])
+def test_delivery_mode_always_reaches_the_generator(delivery):
+    """LB-196: the Rust default is continuous, so batch must be forwarded
+    explicitly or every batch request silently runs continuous."""
+    ep = _entrypoint()
+    captured: dict = {}
+
+    def _fake_exec(_path, cmd):
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    argv = [
+        "entrypoint.py",
+        "--schema",
+        "financial",
+        "--scale",
+        "1",
+        "--seed",
+        "777011",
+        "--bucket",
+        "b",
+        "--delivery-mode",
+        delivery,
+    ]
+    with patch.object(sys, "argv", argv), patch.object(ep.os, "execvp", _fake_exec):
+        with pytest.raises(SystemExit):
+            ep.main()
+    cmd = captured["cmd"]
+    expected = "continuous" if delivery == "auto" else delivery
+    assert cmd[cmd.index("--delivery-mode") + 1] == expected
+
+
 @pytest.mark.parametrize("schema", ["customer360", "financial"])
 def test_datagen_job_sets_aws_region(schema):
     env = {e["name"]: e.get("value") for e in _container(_render(schema, 1))["env"]}
@@ -117,11 +149,10 @@ def test_entrypoint_memory_model_matches_autosizer():
     from lakebench.config import autosizer as a
 
     ep = _entrypoint()
-    assert ep.PER_THREAD_FILE_MULTIPLIER == a.DATAGEN_PER_THREAD_FILE_MULTIPLIER
-    assert ep.WORLD_BYTES_PER_ENTITY_NODE0 == a.DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0
-    assert ep.WORKER_ENTITY_BYTES == a.DATAGEN_WORKER_ENTITY_BYTES
-    assert ep.ENTITIES_PER_SCALE == a.DATAGEN_ENTITIES_PER_SCALE
     assert ep.BASE_GIB == a.DATAGEN_BASE_GIB
+    assert ep.GIB_PER_SCALE == a.DATAGEN_GIB_PER_SCALE
+    assert ep.GIB_PER_EXTRA_THREAD == a.DATAGEN_GIB_PER_EXTRA_THREAD
+    assert ep.BASE_THREADS == a.DATAGEN_BASE_THREADS
     assert ep.HEADROOM == a.DATAGEN_HEADROOM
 
 
@@ -137,8 +168,8 @@ def test_default_memory_fits_default_threads(schema, scale):
     cpu = int(str(c["resources"]["limits"]["cpu"]))
     mem_gib = int(str(c["resources"]["limits"]["memory"]).removesuffix("Gi"))
     args = [str(a) for a in c["args"]]
-    file_mb = int(args[args.index("--file-size-mb") + 1])
-    cap = ep.max_threads_for_memory(schema, float(scale), file_mb, True, mem_gib * 2**30)
+    assert args[args.index("--file-size-mb") + 1] == "64"
+    cap = ep.max_threads_for_memory(schema, float(scale), mem_gib * 2**30)
     assert cap >= cpu, f"{schema} scale {scale}: {cpu} threads but memory fits {cap}"
     assert args[args.index("--workers") + 1] == "0"
 
@@ -146,29 +177,33 @@ def test_default_memory_fits_default_threads(schema, scale):
 @pytest.mark.parametrize("schema", ["customer360", "financial"])
 @pytest.mark.parametrize("scale", [1, 10, 100])
 @pytest.mark.parametrize("cpu", [2, 4, 8, 16])
-@pytest.mark.parametrize("file_mb", [64, 128, 256])
-def test_request_and_cap_agree_off_the_default_grid(schema, scale, cpu, file_mb):
+def test_request_and_cap_agree_off_the_default_grid(schema, scale, cpu):
     """LB-199 review F4: the autosizer request and the entrypoint cap use one
-    model, so for any (schema, scale, cpu, file) the request must admit the cpu
+    model, so for any (schema, scale, cpu) the request must admit the cpu
     threads. Catches a worker-term added to the cap but omitted from the request
     (the mismatch that was invisible at scale 1/10 with the old grid)."""
     from lakebench.config import autosizer as a
 
     ep = _entrypoint()
     threads = cpu
-    req = math.ceil(a.datagen_memory_gib(schema, float(scale), threads, float(file_mb)))
-    cap = ep.max_threads_for_memory(schema, float(scale), file_mb, True, req * 2**30)
-    assert cap >= threads, (
-        f"{schema} s{scale} cpu{cpu} f{file_mb}: request {req}Gi caps to {cap} < {threads}"
-    )
+    req = math.ceil(a.datagen_memory_gib(schema, float(scale), threads))
+    cap = ep.max_threads_for_memory(schema, float(scale), req * 2**30)
+    assert cap >= threads, f"{schema} s{scale} cpu{cpu}: request {req}Gi caps to {cap} < {threads}"
 
 
 def test_thread_cap_under_tight_memory():
     ep = _entrypoint()
-    # 512 MB files, 8 GiB limit, c360: about 1.5 GiB per thread -> 4 threads.
-    assert ep.max_threads_for_memory("customer360", 1.0, 512, True, 8 * 2**30) == 4
-    # Financial scale 500 on node 0 does not fit 8 GiB at all -> floor of 1.
-    assert ep.max_threads_for_memory("financial", 500.0, 64, True, 8 * 2**30) == 1
+    # Below the 8-thread peak: one thread fewer per per-thread cost short.
+    # s300 peak 4.85 + 0.0087*300 = 7.46 GiB; 6 GiB / 1.25 = 4.8 -> 2.66 short -> 6 fewer.
+    assert ep.max_threads_for_memory("financial", 300.0, 6 * 2**30) == 2
+    # Far below: never under 1.
+    assert ep.max_threads_for_memory("financial", 300.0, 1 * 2**30) == 1
+    # Spare memory above the 8-thread peak buys extra threads.
+    peak = (ep.BASE_GIB["financial"] + ep.GIB_PER_SCALE["financial"] * 100) * ep.HEADROOM
+    extra = ep.GIB_PER_EXTRA_THREAD["financial"] * ep.HEADROOM
+    assert (
+        ep.max_threads_for_memory("financial", 100.0, int((peak + 2 * extra + 0.01) * 2**30)) == 10
+    )
 
 
 @pytest.mark.parametrize("schema", ["customer360", "financial"])

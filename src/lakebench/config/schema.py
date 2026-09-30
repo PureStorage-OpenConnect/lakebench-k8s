@@ -1206,11 +1206,12 @@ class DatagenConfig(ConfigModel):
     # calibration or evaluation role. Off: output is unchanged.
     robustness_perturbation: bool = False
     parallelism: int = Field(default=4, ge=1)
-    # Datagen output file size. Per-thread generator memory scales with it
-    # (about 4.8x for financial, 3.0x for c360, measured), so the old 512mb
-    # default needed 12-26 GiB per 8-thread pod. At 64mb, measured single-pod
-    # throughput at 8 threads was c360 982 MB/s, financial 221-309 MB/s.
-    file_size: str = "64mb"
+    # Datagen output file size, fixed at 64mb for every workload and mode
+    # (owner decision 2026-09-29). c360 rows are drawn per file and truncated
+    # by file size, so one size keeps row content identical across delivery
+    # modes (DESIGN.md) and keeps corpus identity stable. The field stays so
+    # existing configs that set 64mb still load; any other value is refused.
+    file_size: Literal["64mb"] = "64mb"
     dirty_data_ratio: float = 0.08
     cpu: str = "2"
     memory: str = "4Gi"
@@ -1229,6 +1230,29 @@ class DatagenConfig(ConfigModel):
             "(deploy/datagen.py fallback, matched by metrics.c360_correctness)."
         ),
     )
+
+    @field_validator("file_size", mode="before")
+    @classmethod
+    def _fixed_file_size(cls, v: object, info: ValidationInfo) -> object:
+        """Accept any spelling of 64mb; refuse every other size. Cleanup loaders
+        (destroy, clean, admin: the ``allow_long_names`` context of
+        ``load_config``) accept an old size with a warning, so a deployment made
+        from an older config can still be torn down."""
+        if isinstance(v, str) and v.strip().lower() == "64mb":
+            return "64mb"
+        if info.context and info.context.get("allow_long_names"):
+            import warnings
+
+            warnings.warn(
+                f"datagen.file_size {v!r} is ignored: the file size is fixed at 64mb.",
+                stacklevel=2,
+            )
+            return "64mb"
+        raise ValueError(
+            f"datagen.file_size is fixed at 64mb; got {v!r}. Remove the key or set 64mb. "
+            "(Configs and reproduce packages from before v1.6 that used another size "
+            "cannot be regenerated with this version.)"
+        )
 
     @field_validator("dirty_data_ratio")
     @classmethod

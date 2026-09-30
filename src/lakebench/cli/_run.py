@@ -1718,12 +1718,15 @@ def run(
     from lakebench.config.support import UNSUPPORTED, support_state_for_config
 
     _run_mode = "continuous" if (sustained or continuous) else cfg.architecture.pipeline.mode
-    _support = support_state_for_config(cfg, _run_mode)
-    if _support["state"] != UNSUPPORTED and local:
+    if local:
         _support = support_state_for_config(cfg, _run_mode, system="local")
+    else:
+        _support = support_state_for_config(cfg, _run_mode)
     if _support["state"] == UNSUPPORTED:
         print_error(f"Unsupported combination, refused: {_support['basis']}")
         raise typer.Exit(1)
+    if _support.get("scale_note"):
+        print_warning(f"Unverified scale: {_support['scale_note']}")
 
     # Local mode runs before auto-sizing: there is no cluster to size against,
     # and the local profiles are fixed rather than derived from capacity.

@@ -21,6 +21,7 @@ from lakebench.k8s import K8sConnectionError, get_k8s_client
 
 from ._helpers import (
     _journal_safe,
+    check_datagen_scale,
     console,
     enforce_bronze_regenerate,
     journal_open,
@@ -115,6 +116,8 @@ def generate(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
+
+    check_datagen_scale(cfg)
 
     # Auto-size resources based on scale + cluster capacity
     from lakebench.config.autosizer import resolve_auto_sizing

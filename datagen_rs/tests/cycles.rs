@@ -930,3 +930,85 @@ fn reference_files_are_byte_identical_across_node_counts() {
     }
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// FNV-1a over every file under `dir` (relative path, then bytes), sorted by
+/// relative path string.
+fn tree_digest(dir: &Path) -> (u64, usize) {
+    let mut paths = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                paths.push(p.strip_prefix(dir).unwrap().to_string_lossy().to_string());
+            }
+        }
+    }
+    paths.sort();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for rel in &paths {
+        for &x in rel
+            .as_bytes()
+            .iter()
+            .chain(std::fs::read(dir.join(rel)).unwrap().iter())
+        {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    (h, paths.len())
+}
+
+#[test]
+fn financial_output_is_pinned_to_the_frozen_generator() {
+    // Every financial object (pacs008 bronze, party, account, watchlist,
+    // manifest) of a 2-node --mode all run, byte for byte. The digest was
+    // captured from the frozen generator (datagen_rs at 9382420) with the same
+    // arguments, so this pins the LB-204 changes (owned-file typology pruning,
+    // on-demand world columns, mimalloc) as output-neutral. A change here is
+    // an AML generator output change: it voids the AML freeze
+    // (docs/internal/aml-protocol.md).
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-fin-pin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for node in ["0", "1"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+            .env("DG_LOCAL_DIR", &dir)
+            .args([
+                "--bucket",
+                "b",
+                "--seed",
+                "7777",
+                "--scale",
+                "0.02",
+                "--threads",
+                "2",
+                "--mode",
+                "all",
+                "--total-nodes",
+                "2",
+                "--node-id",
+                node,
+                "--file-size-mb",
+                "1",
+                "--delivery-mode",
+                "batch",
+            ])
+            .output()
+            .expect("run generate");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let got = tree_digest(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        got,
+        (14_946_780_858_166_320_800, 179),
+        "financial generator output changed"
+    );
+}
