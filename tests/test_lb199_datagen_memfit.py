@@ -135,3 +135,14 @@ def test_clamp_note_explains_thread_cut():
     note = a._datagen_clamp_note(_cfg("financial", ceiling), "32")
     assert f"capped at {DATAGEN_POD_MEMORY_CAP_GIB}Gi" in note
     assert a._datagen_clamp_note(_cfg("financial", 100), "8") == ""
+
+
+def test_model_was_fitted_for_the_pinned_image():
+    """The memory model and scale bands describe one generator build. An image
+    re-pin without a re-measurement would size pods for the wrong binary (the
+    pre-LB-204 generator peaked at 18.18 GiB where this model requests 8Gi)."""
+    from lakebench.config.schema import ImagesConfig
+
+    assert ImagesConfig().datagen == "docker.io/sillidata/lb-datagen:e14d0fd", (
+        "re-measure datagen memory (autosizer.DATAGEN_MEASURED_PEAK_GIB) before re-pinning"
+    )

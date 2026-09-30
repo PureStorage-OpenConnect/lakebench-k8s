@@ -1,8 +1,8 @@
 # Building Custom Datagen Images
 
 The Lakebench data generator runs as a container image deployed to Kubernetes.
-The default image (`docker.io/sillidata/lb-datagen:30603b1`, digest
-`sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16`) is built from
+The default image (`docker.io/sillidata/lb-datagen:e14d0fd`, digest
+`sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591`) is built from
 `datagen_rs/` (Rust) and produces both the Customer360 schema
 ([datagen-schema.md](datagen-schema.md)) and the Financial `pacs.008` schema,
 dispatched by `--schema`. You can build a custom image to add columns, change
@@ -69,8 +69,8 @@ it, Kubernetes may use a cached version of the image if the tag already existed
 on the node. Prefer a new, immutable tag per build over reusing one.
 
 A custom image is not the frozen AML generator (`datagen-v2-rs-0.3`, image
-tag `30603b1`, digest
-`sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16`).
+tag `e14d0fd`, digest
+`sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591`).
 The run records the image reference you configured, and AML results from a
 modified generator are not comparable with results from the frozen one.
 Freeze identity is defined by `MODEL_VERSION` in `datagen_rs/src/model.rs`:

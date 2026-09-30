@@ -350,7 +350,7 @@ class TestScaleConfig:
     def test_datagen_image_default(self):
         """Default datagen image pins the v1.6 AML generator-freeze commit."""
         config = LakebenchConfig(name="test")
-        assert config.images.datagen == "docker.io/sillidata/lb-datagen:30603b1"
+        assert config.images.datagen == "docker.io/sillidata/lb-datagen:e14d0fd"
 
     def test_datagen_mode_defaults_auto(self):
         """Datagen mode defaults to 'auto'."""

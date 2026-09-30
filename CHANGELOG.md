@@ -14,6 +14,17 @@ changed meaning. Most numbers recorded by 1.5 and earlier are not comparable
 with 1.6; the first section lists why.
 
 ### Read this first: comparability with earlier releases
+- **Datagen file size is fixed at 64mb and datagen scale is banded (LB-204).**
+  `workload.datagen.file_size` accepts only `64mb` (any case); another size
+  is refused by `deploy`, `generate` and `run` (destroy and clean still load
+  such a config, with a warning). Batch runs published at another size are
+  not like-for-like at the bronze stage. Datagen scale has per-workload
+  limits: AML supported to 300, unverified to 800, refused above; Customer
+  360 supported to 300, unverified to 600, refused above.
+- **Datagen batch delivery now actually runs batch (LB-196).** Since the Rust
+  default flipped to continuous, `datagen.mode: batch` silently ran
+  continuous. Datagen timings recorded as batch before this fix were
+  continuous.
 - **Before 1.6.0 no Iceberg `expire_snapshots` or `remove_orphan_files` and
   no Delta `VACUUM` ever ran (LB-172, LB-173, LB-174), so no earlier
   continuous number is comparable with 1.6.** Trino refused every Iceberg
@@ -525,6 +536,13 @@ with 1.6; the first section lists why.
   covered only buckets this deployment recorded creating.
 
 ### Changed
+- Datagen image `lb-datagen:e14d0fd` (LB-204): AML datagen pod memory at scale
+  100 falls from 18.18 GiB to 5.70 GiB (mimalloc allocator, typology rows kept
+  only for each pod's own files, world columns recomputed on demand). Output is
+  byte-identical to the v1.6 AML generator freeze (seed-43 byte-compare on the
+  pushed image; pinned in `datagen_rs/tests/cycles.rs`). The autosizer memory
+  model is re-fit to cluster measurements and a datagen pod never requests more
+  than 16Gi; AML above scale 100 runs at least 8 datagen pods.
 - **Datagen: the Python image is retired; the Rust image serves both
   schemas** (`datagen_rs/`, `--schema customer360` and `--schema
   financial`). Per-pod throughput on customer360 measured at 590 MB/s

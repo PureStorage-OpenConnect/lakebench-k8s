@@ -285,15 +285,27 @@ class ImagesConfig(ConfigModel):
     # the FUNCTIONAL default; it is DISQUALIFIED from generating any D8 / A6 /
     # registered-look / calibration corpus -- those runs pass an explicit frozen
     # digest via --generator-image (aml-protocol.md), never this default.
-    # Pushed digest (30603b1):
-    # sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16
-    # Prior tags:
+    # e14d0fd (LB-204): mimalloc allocator, typology payloads pruned to each
+    # pod's own files, world columns recomputed on demand, fixed 64 MB files,
+    # re-fit memory model with a 16Gi pod cap, LB-196 delivery-mode forwarding.
+    # AML pod peak at scale 100 fell from 18.18 to 5.70 GiB. Output-neutral,
+    # PROVEN on the pushed image: seed-43 --mode all byte-compare against the
+    # frozen generator (rebuilt from 9382420 source) -- 73/73 objects at 128 MB,
+    # 141/141 at 64 MB, 141/141 with 4 pods, 141/141 thread-throttled; cargo pin
+    # cycles.rs::financial_output_is_pinned_to_the_frozen_generator. MODEL_VERSION
+    # stays datagen-v2-rs-0.3, same freeze. Functional default, disqualified from
+    # registered-look corpora as below.
+    # Pushed digest (e14d0fd):
+    # sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591
+    # Prior tags (deleted from docker.io between 2026-09-29 22:30 and 23:29;
+    # rebuild from source to reproduce):
+    #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) LB-199 memory refit
     #   9382420 (sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2) live-metrics Pushgateway push
     #   b6f2905 (sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6)
     #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
     #   0a83acd (sha256:acdf3925...)
     #   7c24641 (sha256:c5a6bc80...)
-    datagen: str = "docker.io/sillidata/lb-datagen:30603b1"
+    datagen: str = "docker.io/sillidata/lb-datagen:e14d0fd"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
