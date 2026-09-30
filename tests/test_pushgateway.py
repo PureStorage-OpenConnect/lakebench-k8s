@@ -116,6 +116,11 @@ class TestDashboard:
         # Invariant 6: the datagen throughput panel labels the cap.
         assert any("CAPPED" in t for t in titles)
         tp = next(p for p in dash["panels"] if "throughput" in p["title"].lower())
+        # The label names the real sizing (8 CPU default, 16Gi memory cap),
+        # not the retired 4 CPU / 4Gi / 24Gi lock.
+        label = tp["title"] + " " + tp["description"]
+        assert "16Gi" in label and "default 8" in label
+        assert "4Gi" not in label and "24Gi" not in label
         expr = tp["targets"][0]["expr"]
         assert 'namespace=~"$namespace"' in expr and 'run_id=~"$run_id"' in expr
 

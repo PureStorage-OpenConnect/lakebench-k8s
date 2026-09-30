@@ -615,7 +615,10 @@ def benchmark(
         typer.Option(
             "--class",
             "-c",
-            help="Run only queries of a specific class (scan, analytics, gold)",
+            help=(
+                "Run only queries of a specific class (scan, filter_prune, "
+                "aggregation, analytics, operational; AML also investigator)"
+            ),
         ),
     ] = None,
 ) -> None:

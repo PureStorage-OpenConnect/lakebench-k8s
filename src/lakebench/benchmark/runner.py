@@ -239,7 +239,7 @@ class BenchmarkRunner:
             cache: "hot" or "cold" (default: from config)
             iterations: Per-query iterations (default: from config)
             streams: Concurrent streams for throughput/composite (default: from config)
-            query_class: Filter to specific class ("scan", "analytics", "gold")
+            query_class: Filter to one BenchmarkQuery.query_class (exact match)
 
         Returns:
             BenchmarkResult for power/throughput modes.

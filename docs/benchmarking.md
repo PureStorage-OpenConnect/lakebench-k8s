@@ -7,8 +7,9 @@ Lakebench produces two distinct measurements:
    does raw data become queryable gold?" in batch mode, or "how fresh is
    gold and can the pipeline keep up?" in continuous mode.
 
-2. **Query engine benchmark** -- an 8-query SQL benchmark against the
-   silver and gold tables using whichever engine your recipe specifies
+2. **Query engine benchmark** -- a SQL benchmark against the silver and
+   gold tables (8 queries for Customer 360; 12 for AML, FQ1-FQ8 plus the
+   investigator queries IQ1-IQ4) using whichever engine your recipe specifies
    (Trino, Spark Thrift Server, or DuckDB). Produces a QpH (Queries per
    Hour) score that measures engine-level analytical performance.
 
@@ -167,7 +168,7 @@ cost and value of table maintenance by running the benchmark twice:
    batch maintenance was compaction only.
 3. **Storage settle wait** -- probes one query until storage has settled
    after the maintenance burst (see below).
-4. **Post-compaction benchmark** -- runs the same 8 queries on compacted data.
+4. **Post-compaction benchmark** -- runs the same query set on compacted data.
 
 The scorecard then reports:
 
@@ -292,12 +293,14 @@ the cap, not of the infrastructure.
 ## Query Engine Benchmark
 
 The query engine benchmark measures analytical query performance independently
-from the pipeline. It runs 8 SQL queries against the silver and gold tables
-using the active query engine and produces a QpH (Queries per Hour) score.
+from the pipeline. It runs the workload's query set (8 queries for Customer
+360, 12 for AML: FQ1-FQ8 plus investigator queries IQ1-IQ4) against the
+silver and gold tables using the active query engine and produces a QpH (Queries per Hour) score.
 
 ### Query Categories
 
-The 8 queries are organized into five categories:
+The 8 Customer 360 queries are organized into five categories (the AML
+set is listed in [Query Reference](query-reference.md)):
 
 **Scan (Q1)** -- Full table scan with aggregation. Exercises raw I/O
 throughput by scanning the entire silver table and computing global
@@ -329,7 +332,7 @@ The benchmark runner supports three modes following TPC methodology:
 
 #### Power Run (default)
 
-Executes all 8 queries sequentially in a single stream. Each query is timed
+Executes every query in the set sequentially in a single stream. Each query is timed
 individually.
 
 ```
@@ -412,7 +415,8 @@ Each round:
 
 1. Flushes the query engine metadata cache
 2. Probes gold-table freshness at query time
-3. Runs the full 8-query power benchmark
+3. Runs the workload's full power benchmark (8 queries for Customer 360,
+   12 for AML)
 4. Records per-round QpH, per-query times, and freshness
 
 The final QpH for the continuous pipeline scorecard is the **median** across
@@ -528,7 +532,8 @@ gold_ms]` showing per-stage micro-batch processing latency. If one stage has
 significantly higher latency, it is the bottleneck.
 
 **Offered load.** Continuous mode trickles a finite corpus. Datagen writes
-the whole scale's corpus at full speed (1 TB in 121 s on 44 pods at scale 100,
+the whole scale's corpus at full speed (one measurement, n=1, on the
+pre-v1.6 generator: 1 TB in 121 s on 44 pods at scale 100,
 run-20260924-201745-cb354f)
 and bronze reads it at a fixed rate: `max_files_per_trigger` files of about
 64 MB per `bronze_trigger_interval`. A run measures sustained throughput and
@@ -684,21 +689,19 @@ To reduce gold re-read amplification:
 
 ### Reducing Data Freshness
 
-`data_freshness_seconds` is worst-case gold staleness. It is bounded below
-by `gold_refresh_interval` -- gold can never be fresher than its rewrite
-cycle.
-
-| Gold Refresh Interval | Best Achievable Freshness |
-|---|---|
-| 5 minutes | ~250--300 seconds |
-| 3 minutes | ~150--180 seconds |
-| 2 minutes | ~100--120 seconds |
+`data_freshness_seconds` is the worst gold staleness measured in the
+window. Each gold refresh measures it right after its write, as the age of
+the newest silver row it read, so it is made of the silver trigger delay
+(how long a row waits in silver before gold can see it) plus the time gold
+takes to read silver and write. `gold_refresh_interval` does not bound it:
+the measurement is taken at the write, not between writes. What a consumer
+sees between refreshes can be up to one `gold_refresh_interval` older.
 
 To lower freshness:
-1. Decrease `gold_refresh_interval`. This increases compute cost (more
-   silver full-table reads) and requires `benchmark_warmup` and
-   `benchmark_interval` to be at least as large as the gold interval.
-2. Add gold executors (`gold_refresh_executors`) to speed up each rewrite.
+1. Speed up each gold rewrite: add gold executors
+   (`gold_refresh_executors`).
+2. Decrease `silver_trigger_interval`, so silver rows are visible to gold
+   sooner. This adds silver micro-batches and their commit cost.
 
 ### Stage-by-Stage Tuning
 
@@ -959,7 +962,8 @@ In continuous mode: rows/s, micro-batch latency, freshness.
 
 ### Query Performance (batch and continuous)
 
-Performance table for the 8-query engine benchmark. Columns: query name,
+Performance table for the engine benchmark (8 queries for Customer 360,
+12 for AML). Columns: query name,
 display name, category, elapsed time, rows returned, and pass/fail status.
 The benchmark mode (power, throughput, composite), stream count, and final QpH
 appear in a summary row.

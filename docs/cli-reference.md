@@ -38,6 +38,7 @@ lakebench init [OPTIONS]
 | `--secret-key` | | `""` | S3 secret key |
 | `--namespace` | | `""` | Kubernetes namespace |
 | `--recipe` | `-r` | `""` | Architecture recipe |
+| `--workload` | `-w` | `customer360` | Workload schema: `customer360` or `financial` |
 | `--interactive/--no-interactive` | `-i` | `true` | Guided setup with prompts |
 | `--advanced` | | `false` | Full 5-step wizard (recipe, mode, scale) |
 | `--force` | | `false` | Overwrite existing file (`-f` is deprecated here) |
@@ -66,6 +67,9 @@ Compare two configurations side-by-side.
 lakebench compare CONFIG_A CONFIG_B [OPTIONS]
 ```
 
+On a cluster, `compare` does not deploy: run `lakebench deploy` on both
+configs first. With `--local` it deploys each stack itself before the run.
+
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--keep` | | `false` | Keep deployments after (do not destroy) |
@@ -74,7 +78,7 @@ lakebench compare CONFIG_A CONFIG_B [OPTIONS]
 | `--format` | | `table` | Output format: table, json, csv, html |
 | `--skip-benchmark` | | `false` | Skip benchmark phase |
 | `--local` | | `false` | Run both configs on this host with podman/docker |
-| `--generate` | | `false` | Generate data before each run |
+| `--generate` | | `false` | Generate data before each run. On a cluster, a side whose bronze prefix already holds data fails when its run reaches datagen (the inner `run` exits 2, and `compare` reports that side as failed); empty it first with `lakebench clean bronze <config>` |
 | `--timeout` | | `7200` | Per-run timeout in seconds |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
@@ -122,8 +126,8 @@ resolve. The figure is recorded as `noise_floor_pct` in the saved comparison.
 One caveat on local timings: `bronze-verify` is the first stage to touch S3 and
 runs about 9s slower on a freshly deployed stack than on a warm one (30.4s vs
 21.4s measured). The heavier stages do not show this -- `silver-build` and
-`gold-finalize` were stable within a second across runs. Since `compare`
-deploys each config fresh, both sides pay this cost equally.
+`gold-finalize` were stable within a second across runs. With `--local`,
+`compare` deploys each config fresh, so both sides pay this cost equally.
 
 ### config
 
@@ -330,7 +334,7 @@ lakebench benchmark [CONFIG_FILE] [OPTIONS]
 | `--streams` | `-s` | `4` | Concurrent query streams (throughput/composite modes) |
 | `--cold` | | `false` | Flush Iceberg metadata cache before each query |
 | `--iterations` | `-n` | config (`3`) | Timed runs per query, scored by the median. Overrides `architecture.benchmark.iterations` |
-| `--class` | `-c` | all | Run only a specific query class (`scan`, `analytics`, `gold`) |
+| `--class` | `-c` | all | Run only one query class: `scan`, `filter_prune`, `aggregation`, `analytics`, `operational`, and for AML also `investigator`. A name that matches no query runs nothing |
 
 Executes the workload's query set (8 queries for Customer 360, 12 for AML)
 against the silver and gold layers and reports Queries per Hour (QpH), the

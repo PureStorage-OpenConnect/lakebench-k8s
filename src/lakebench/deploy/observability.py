@@ -502,8 +502,9 @@ class ObservabilityDeployer:
 
         The kube-prometheus-stack release is shared by every deployment on
         the cluster; uninstalling it would remove other deployments'
-        monitoring. This deployment's PodMonitors and dashboards are in its
-        own namespace and are removed with it. The one release destroy
+        monitoring. This deployment's PodMonitors and Pushgateway are in its
+        own namespace and are removed with it; the shared dashboard ConfigMap
+        in the observability namespace (LB-192) is left in place. The one release destroy
         removes is a pre-v1.6 release installed into this deployment's own
         namespace: it scrapes only that namespace, and deleting the namespace
         without uninstalling it would orphan its cluster-scoped webhooks and
@@ -704,7 +705,8 @@ class ObservabilityDeployer:
             "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage": obs.storage,
             "grafana.enabled": str(obs.dashboards_enabled).lower(),
             "grafana.adminPassword": "lakebench",
-            # Dashboards ConfigMaps live in each deployment's namespace.
+            # The dashboard ConfigMap lives in the shared observability
+            # namespace (LB-192); ALL also picks up older per-namespace ones.
             "grafana.sidecar.dashboards.searchNamespace": "ALL",
         }
         # No namespace selector: the chart default ({}) watches every

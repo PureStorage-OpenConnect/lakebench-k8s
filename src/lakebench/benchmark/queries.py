@@ -44,7 +44,7 @@ class BenchmarkQuery:
 
     name: str
     display_name: str
-    query_class: str  # "scan", "analytics", "gold"
+    query_class: str  # scan, filter_prune, aggregation, analytics, operational, investigator
     sql: str
     approx_columns: dict[int, float] = field(default_factory=dict, compare=False, hash=False)
     allow_empty: bool = False

@@ -25,13 +25,20 @@ approximately 10 GB of on-disk bronze Parquet data.
 | 1 | ~10 GB | 100,000 | 2.4 M | Minutes |
 | 10 | ~100 GB | 1,000,000 | 24 M | 15--30 min |
 | 100 | ~1 TB | 10,000,000 | 240 M | 1--3 hours |
-| 1000 | ~10 TB | 100,000,000 | 2.4 B | 6--12+ hours |
+
+Datagen scale is banded per workload. Customer 360 is supported up to scale
+300 and unverified up to 600; AML (financial) is supported up to 300 and
+unverified up to 800. Above the ceiling `deploy` and `generate` refuse the
+config, because a datagen pod would exceed the 16 GiB per-pod memory cap
+(a Lakebench-imposed cap); in the unverified range they warn. The run's
+support state records the band.
 
 These values assume the Customer360 workload schema (the default). The
 financial (AML) schema has 111,111 entities and about 26.7 M transactions per
 scale unit. Its size estimate (`src/lakebench/config/scale.py`) is about
 8.4 GB of pacs.008 Parquet per scale unit, measured on the pre-freeze
-generator; sizes on the v1.6 frozen generator are pending.
+generator; v1.6 has no size measurements on the frozen generator (deferred
+to v1.7).
 
 Set the scale in your config file:
 
@@ -125,9 +132,10 @@ the default.
 `deploy/datagen.py` translates `datagen.mode` into a `--delivery-mode`
 argv on the datagen container (see `templates/datagen/job.yaml.j2`).
 Operators do not set it directly; it appears in rendered Job manifests
-as an aid when troubleshooting a job. The Rust binary accepts the same
-three values (`auto`, `batch`, `continuous`), so a rendered manifest can
-be replayed by hand.
+as an aid when troubleshooting a job. The container entrypoint accepts
+`auto`, `batch` and `continuous`, maps `auto` to `continuous`, and passes
+the result to the Rust binary, which accepts only `batch` or `continuous`.
+A rendered manifest can be replayed by hand through the entrypoint.
 
 ### Per-pod resources
 
@@ -204,17 +212,25 @@ kubectl logs -n <namespace> -l job-name=lakebench-datagen --tail=50
 
 ## Re-running Data Generation
 
-Data generation is idempotent in the sense that re-running it overwrites
-existing data in the bronze bucket. If you need fresh data:
+`lakebench generate` (and `run --generate`) refuses to write into a bronze
+prefix that already holds data: it exits 2 and names the prefix, so an
+existing corpus is never overwritten by accident. To regenerate, pass
+`--regenerate`, which empties the whole bronze bucket (and aborts dangling
+multipart uploads) before datagen starts:
 
-1. Run `lakebench generate` again. New files will be written alongside or
-   overwriting existing data in the bronze bucket.
-2. If you want a clean slate, empty the bronze bucket first:
+```bash
+lakebench generate my-config.yaml --wait --regenerate
+```
 
-   ```bash
-   lakebench clean bronze my-config.yaml --force
-   lakebench generate my-config.yaml
-   ```
+To keep the existing corpus instead, run the pipeline with `run
+--skip-generate`, or without `--generate`.
+
+The deployer also clears the datagen prefix before the first cycle when
+this deployment created the bronze bucket (LB-185), so a smaller generate
+never inherits a larger earlier generate's `part-*` files. It does not
+touch a bucket it did not create or one with `create_buckets: false`; for
+those, empty the bronze data yourself (`lakebench clean bronze
+my-config.yaml`) or use `--regenerate`.
 
 ## Configuration Options
 
@@ -226,7 +242,7 @@ workload:
   datagen:
     scale: 10                  # Abstract scale factor (1 unit ~ 10 GB)
     mode: auto                 # auto | batch | continuous
-    parallelism: 4             # Number of parallel Kubernetes pods
+    parallelism: 4             # Parallel Kubernetes pods (autosizer sizes it when unset)
     file_size: 64mb            # Fixed; the only accepted value
     dirty_data_ratio: 0.08     # Fraction of intentionally dirty records
     cpu: "8"                   # CPU per pod (autosizer default when unset)
@@ -258,9 +274,10 @@ images:
 ```
 
 The default image (`docker.io/sillidata/lb-datagen:034f998`, digest
-`sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc`;
-the v1.6 AML generator-freeze commit, generator version `datagen-v2-rs-0.3`)
-is built from the `datagen_rs/` directory in this repository. To build and push a custom
+`sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc`,
+generator version `datagen-v2-rs-0.3`; output-identical to the v1.6 AML
+generator freeze but not the registered-look image, see
+`docs/internal/aml-protocol.md`) is built from the `datagen_rs/` directory in this repository. To build and push a custom
 image:
 
 ```bash

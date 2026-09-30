@@ -42,7 +42,7 @@ Spark Operator, Stackable operators, Prometheus/Grafana Helm release. `deploy` r
 
 Cluster-wide state lakebench MUST mutate to work, but that other lakebench deployments also depend on.
 
-Examples: Spark Operator's `spark.jobNamespaces` watch list, the observability release's `podMonitorSelector`, any future cluster-wide `PriorityClass` / `NetworkPolicy` / admission webhook lakebench installs.
+Examples: Spark Operator's `spark.jobNamespaces` watch list, the one-time install of the shared observability release (a check-then-install run under the lease), any future cluster-wide `PriorityClass` / `NetworkPolicy` / admission webhook lakebench installs. The observability release's `podMonitorSelector` is no longer mutated: the shared Prometheus uses the chart's default namespace selector and selects every deployment's PodMonitors by their `release: lakebench-observability` label.
 
 Rule: any mutation goes through a cluster-wide lease (see below), reads live state, computes the diff, writes atomically with retry on conflict, and verifies the shared component is still healthy after. Failure raises; never warns.
 

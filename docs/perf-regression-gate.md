@@ -18,14 +18,17 @@ to Kubernetes or S3.
 
 Pinned configs today:
 
-| Name | Workload | Mode | Scale | Required by the release gate |
-|---|---|---|---|---|
-| `c360-batch-s10` | Customer 360 | batch | 10 | yes |
-| `c360-continuous-s10` | Customer 360 | continuous | 10 | yes |
-| `aml-batch-s1` | AML (financial) | batch | 1 | no, until the AML datagen is frozen |
+| Name | Workload | Mode | Scale | Required by the release gate | Baseline |
+|---|---|---|---|---|---|
+| `c360-batch-s10` | Customer 360 | batch | 10 | no (v1.6) | accepted, but poll-timed (pre-v1.6), so every current run is refused against it |
+| `c360-continuous-s10` | Customer 360 | continuous | 10 | no (v1.6) | pending first run |
+| `aml-batch-s1` | AML (financial) | batch | 1 | no | pending first run |
 
-AML batch at scale 10 joins as a required config once the AML datagen is
-frozen.
+v1.6 has no performance baselines. The re-baseline of the pinned configs on
+the v1.6 tree is deferred to v1.7, so no config is required and the
+`perf-baselines` release check reports each config as `warn` without failing
+the release. Which configs become required again, and when AML joins them, is
+set with the v1.7 re-baseline.
 
 ## How "like for like" is enforced
 
@@ -321,7 +324,8 @@ Runs whose pre-benchmark maintenance stopped are skipped (and listed); if the
 newest remaining run is refused as a baseline, seed tries the next-newest, and
 one config's failure does not stop the others.
 Against the 98 runs on the reference workstation on 2026-09-24 nothing
-matched, so all three configs are "pending first run":
+matched, so all three configs were "pending first run" at that point
+(`c360-batch-s10` was recorded on 2026-09-25, before v1.6 stage timing):
 
 - every earlier run used the floating `lb-datagen:latest` image, left
   per-job executor counts and datagen mode to defaults, and all 22 c360

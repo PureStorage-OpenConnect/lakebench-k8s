@@ -168,10 +168,10 @@ platform:
       # ca_cert: "/path/to/ca-bundle.pem"  # PEM CA cert for self-signed endpoints
       # verify_ssl: true                    # Set false to skip SSL verification (dev only)
 
-      buckets:
-        bronze: lakebench-bronze
-        silver: lakebench-silver
-        gold: lakebench-gold
+      buckets:                        # default: <name>-bronze, <name>-silver, <name>-gold
+        bronze: my-lakehouse-bronze
+        silver: my-lakehouse-silver
+        gold: my-lakehouse-gold
       create_buckets: true
 
     scratch:
@@ -270,7 +270,7 @@ These assume per-executor sizing from the proven profiles: silver uses
 # ---------------------------------------------------------------------------
 architecture:
   catalog:
-    type: hive                        # hive | polaris | none
+    type: hive                        # hive | polaris (unity and none have no supported recipe)
 
   table_format:
     type: iceberg                     # iceberg | delta (delta: hive catalog only)
@@ -313,7 +313,7 @@ architecture:
       benchmark_warmup: 300           # Clamped to gold_refresh_interval at runtime
 
   benchmark:
-    mode: power                       # power | standard | extended
+    mode: power                       # power | throughput | composite | standard | extended
     streams: 4
     cache: hot                        # hot | cold
     iterations: 3                     # timed runs per query; QpH uses the median
@@ -328,7 +328,7 @@ workload:
   datagen:
     scale: 10                       # 1 unit ~ 10 GB bronze
     mode: auto                      # auto | batch | continuous
-    parallelism: 4
+    # parallelism: auto             # datagen pods; unset = sized from scale
     file_size: 64mb
     dirty_data_ratio: 0.08
 
@@ -409,9 +409,9 @@ registries or custom builds.
 | `platform.storage.s3.access_key` | string | `""` | Inline S3 access key. Provide this OR `secret_ref`. |
 | `platform.storage.s3.secret_key` | string | `""` | Inline S3 secret key. Provide this OR `secret_ref`. |
 | `platform.storage.s3.secret_ref` | string | `""` | Name of an existing K8s Secret containing S3 credentials. Alternative to inline keys. |
-| `platform.storage.s3.buckets.bronze` | string | `lakebench-bronze` | Bronze layer S3 bucket name. |
-| `platform.storage.s3.buckets.silver` | string | `lakebench-silver` | Silver layer S3 bucket name. |
-| `platform.storage.s3.buckets.gold` | string | `lakebench-gold` | Gold layer S3 bucket name. |
+| `platform.storage.s3.buckets.bronze` | string | `<name>-bronze` | Bronze layer S3 bucket name. Unset, it is derived from the deployment `name`. |
+| `platform.storage.s3.buckets.silver` | string | `<name>-silver` | Silver layer S3 bucket name. Unset, it is derived from the deployment `name`. |
+| `platform.storage.s3.buckets.gold` | string | `<name>-gold` | Gold layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.create_buckets` | bool | `true` | Create buckets if they do not exist. |
 | `platform.storage.s3.ca_cert` | string | `""` | Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs. Empty = use system default CAs. The PEM content is read at deploy time and embedded into a Kubernetes Secret for all components. |
 | `platform.storage.s3.verify_ssl` | bool | `true` | Verify SSL certificates for HTTPS endpoints. Set `false` only for development with self-signed certs when you don't have the CA certificate file. |
@@ -538,13 +538,13 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `workload.schema` | enum | `customer360` | Workload schema: `customer360` or `financial`. `custom` is refused at load in v1.6. `financial` requires `table_format: iceberg`. The block was `architecture.workload` before v1.6; that location still loads with a deprecation warning, and setting both with different values is an error. |
-| `workload.datagen.scale` | float | `10` | Scale factor (1 unit ~ 10 GB bronze). Range: 0.01--10000; values below 1 are intended for local mode. |
+| `workload.datagen.scale` | float | `10` | Scale factor (1 unit ~ 10 GB bronze). The schema accepts 0.01--10000, but datagen is banded per workload: Customer 360 supported to 300, unverified to 600, refused above; AML supported to 300, unverified to 800, refused above (see [Scale Factors](#scale-factors)). Values below 1 are intended for local mode. |
 | `workload.datagen.target_size` | string or null | `null` | **Deprecated.** Legacy size string (e.g., `100gb`). Converted to scale automatically. |
 | `workload.datagen.mode` | enum | `auto` | S3 delivery pattern: `batch` = one PUT per file, `continuous` = S3 multipart upload as row-groups close, `auto` = `continuous` at every scale (owner D18, 2026-09-28). Row content is byte-identical across modes at a fixed seed. Sizing is keyed on scale, not mode. |
 | `workload.datagen.seed` | int or null | `null` | Top-level generator seed, which names the corpus. Unset: the AML pre-registration's calibration seed for `financial`, 42 for other schemas. A `financial` seed listed in the pre-registration's `corpora.spent_seeds` is refused at config load, so a retired corpus is never regenerated by accident. The AML reference job reports the seed it scored. The pre-registered evaluation and robustness seeds are refused unless `corpus_role` declares that role. |
 | `workload.datagen.corpus_role` | enum or null | `null` | `financial` only: `calibration`, `evaluation` or `robustness`. Declares this deployment as the registered corpus for that role; it must match the role's pre-registered seed (unset `seed` then uses it). Only set it for the one registered gate run of that role. |
 | `workload.datagen.robustness_perturbation` | bool | `false` | `financial` only. Generates the robustness corpus: the pre-registration's `corpora.robustness_perturbation` multipliers shift the nuisance parameters in natural units (median amount x1.2, persona activity and amount log-sds x1.2, dormancy lengths x1.2). Instances, participants and row counts are unchanged. Required with `corpus_role: robustness`, refused with `calibration` or `evaluation`; the generator also refuses the robustness seed without it. Off, the corpus is byte-identical to a run without the option. |
-| `workload.datagen.parallelism` | int | `4` | Number of parallel datagen pods. |
+| `workload.datagen.parallelism` | int | auto | Number of parallel datagen pods. A value you set is used as given, except that it is capped to fit the cluster and financial above scale 100 is raised to at least 8 pods; unset, the auto-sizer derives it from the scale. The schema fallback without auto-sizing is 4. |
 | `workload.datagen.file_size` | string | `64mb` | Fixed at `64mb` for every workload and mode; any other value is refused. One size keeps row content identical across delivery modes. |
 | `workload.datagen.dirty_data_ratio` | float | `0.08` | Fraction of intentionally dirty records (0.0--1.0). Applies to the `customer360` schema only; the `financial` (AML) generator ignores it. |
 | `workload.datagen.cpu` | string | `8` (auto) | CPU per datagen pod. A value you set is used as given; unset, the auto-sizer sets 8 in both modes. |
@@ -645,7 +645,13 @@ Customer360 workload schema mapping (the default):
 | 1 | 100,000 | 2.4 M | ~10 GB |
 | 10 | 1,000,000 | 24 M | ~100 GB |
 | 100 | 10,000,000 | 240 M | ~1 TB |
-| 1000 | 100,000,000 | 2.4 B | ~10 TB |
+
+Datagen scale is banded per workload. Customer 360 is supported up to scale
+300 and unverified up to 600; AML (financial) is supported up to 300 and
+unverified up to 800. Above the ceiling `deploy` and `generate` refuse the
+config, because a datagen pod would exceed the 16 GiB per-pod memory cap
+(a Lakebench-imposed cap); in the unverified range they warn. The run's
+support state records the band.
 
 Each customer generates approximately 24 events across a 365-day date range.
 Scaling is linear: doubling the scale factor doubles customers, rows, and data
@@ -773,7 +779,7 @@ base count from its job profile and adds executors linearly above scale 10,
 up to the profile's maximum (28 at most, a Lakebench-imposed ceiling, not a
 cluster limit). A `platform.compute.spark.*_executors` value replaces the
 computed count for that job (e.g., `spark.bronze_executors: 4`). Use
-`lakebench info <config>` to see the resolved per-job counts.
+`lakebench info <config>` (hidden and deprecated, but the only command that prints the per-job counts) to see the resolved per-job counts.
 
 ## Example: Scale 100 (~1 TB)
 
@@ -792,6 +798,7 @@ platform:
       access_key: <key>
       secret_key: <secret>
     scratch:
+      enabled: true
       storage_class: px-csi-scratch
   compute:
     postgres:
@@ -806,7 +813,7 @@ resolved resources are approximately:
 | Datagen pods | 10+ | 8 CPU, 4Gi (c360) / 8Gi (financial) |
 | Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 500Gi PVC (financial, LB-118) |
 | Silver-build executors | 18 | 4 cores, 48g+12g overhead, 300Gi PVC |
-| Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 100Gi PVC |
+| Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 300Gi PVC |
 | Trino workers | 4 | 8 cores, 48Gi |
 
 Recommended timeouts:
@@ -837,6 +844,11 @@ platform:
       secret_key: <secret>
       ca_cert: ./flashblade-ca.pem
       # verify_ssl: true  # default; set false only for dev
+
+architecture:
+  catalog:
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
 ```
 
 **How it works:** At deploy time, lakebench reads the PEM file and creates a

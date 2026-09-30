@@ -137,11 +137,16 @@ remains open only as implementation work.
     opt-in paths contradict it. The Spark and Stackable operators install from
     `deploy` when their `install` option is set (`SparkOperatorConfig.install`,
     `StackableOperatorConfig.install`, `config/schema.py:341`, `:442`, default
-    False). With `observability.enabled` (default off, `config/schema.py:1733`),
-    `deploy/observability.py:143-158` installs kube-prometheus-stack, a
-    category 3 chart with CRDs and cluster roles, without stamp or lock, and
-    destroy uninstalls it (`deploy/destroy.py:2028-2037`). Resolution: move
-    these installs to `lakebench admin` and have `deploy` verify only.
+    False). With `observability.enabled` (default off), `deploy` still
+    installs kube-prometheus-stack, a category 3 chart with CRDs and cluster
+    roles, but only when no release exists anywhere on the cluster, into the
+    shared `lakebench-observability` namespace and under the cluster lease
+    (`ObservabilityDeployer.deploy` / `_deploy_locked`); an existing release
+    is reused and never modified. `destroy` no longer uninstalls the shared
+    release; it removes only a pre-v1.6 release installed into the
+    deployment's own namespace. The remaining gap: `deploy`, not `admin`,
+    performs the first install. Resolution: move these installs to
+    `lakebench admin` and have `deploy` verify only.
 
 16. **Workload sizing lives in the pipeline-engine module.** [impl]
     `_JOB_PROFILES` (`job.py:51`) is c360-shaped, patched by
@@ -177,6 +182,18 @@ remains open only as implementation work.
     template lists a nonexistent `iot` schema (`config/loader.py:664`).
     Resolution: generate these tables from `_SUPPORTED_COMBINATIONS` and
     `RECIPES`.
+
+21. **Support has a scale layer DESIGN 6.5 does not name.** [owner]
+    DESIGN.md 6.5 judges support over workload x mode x architecture in four
+    layers. The code adds datagen scale bands per workload
+    (`config/support.py` `DATAGEN_SCALE_BANDS`, owner decision 2026-09-29,
+    "per-workload bands"): Customer 360 is supported up to scale 300,
+    unverified up to 600 and unsupported (refused) above; AML (financial) is
+    supported up to 300, unverified up to 800 and unsupported above. The
+    ceiling is where a datagen pod would exceed the 16 GiB per-pod memory cap.
+    `support_state` caps the architecture-level state with the band, and
+    `deploy` and `generate` refuse a config above the ceiling. Resolution
+    pending owner text for DESIGN.md 6.5 describing the scale layer.
 
 ## Owner decisions, 2026-09-26
 

@@ -54,8 +54,8 @@ data:
       ]},
       "panels": [
         {
-          "title": "Datagen: throughput MB/s (CAPPED -- 4 CPU / 4Gi per pod, not infra perf)",
-          "description": "Generator rate is bounded by the hard-locked datagen pod resources (batch 4Gi, continuous 24Gi). A Lakebench-imposed cap, not backend throughput (invariant 6).",
+          "title": "Datagen: throughput MB/s (CAPPED -- Lakebench per-pod CPU/memory, not infra perf)",
+          "description": "Generator rate is bounded by the datagen pod resources Lakebench sets: CPU per pod as configured (default 8), auto-sized memory from the datagen memory model, capped at 16Gi per pod. A Lakebench-imposed cap, not backend throughput (invariant 6).",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
           "targets": [

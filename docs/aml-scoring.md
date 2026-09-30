@@ -10,6 +10,13 @@ to run one end-to-end.
 
 ## What you get on the scorecard
 
+**v1.6 recall is uncalibrated.** v1.6 publishes no held-out Level-2 result.
+Recall and precision are not calibrated against a held-out corpus. On the
+default seed (43, the calibration corpus the generator, rule thresholds and
+reference features were developed on) they are in-sample: they say what the
+pipeline does on that corpus, not how the rules generalise. The
+registered held-out evaluation and robustness looks are deferred to v1.7.
+
 The two headline numbers are per-typology **recall** and per-rule
 **precision** against the planted typology set. The authoritative
 runtime path that produces both is the Spark job
@@ -317,7 +324,9 @@ The report verdicts:
 
 ## Held-out evaluation
 
-The published Level-2 result is measured on held-out corpora that are never
+v1.6 publishes no Level-2 result: the calibration corpora, Level-2 scoring
+and the registered held-out looks are deferred to v1.7. When a Level-2
+result is published, it will be measured on held-out corpora that are never
 used during development. The seeds, the pre-registered gate constants and the
 rules for when the one-shot evaluation and robustness runs may be taken are
 fixed in `src/lakebench/spark/data/aml/aml_preregistration.json`. Maintainers:
@@ -456,13 +465,14 @@ The scale factor sets bronze volume linearly. Lakebench's estimate
 (`src/lakebench/config/scale.py`) is 111,111 entities x 4 transactions a
 month x 60 months per scale unit (about 26.7M transactions) and about
 8.4 GB of pacs.008 per scale unit. The 8.4 GB figure was measured at scale 1
-on the pre-freeze generator and is superseded; sizes measured on the v1.6
-frozen generator are pending. By the estimate, scale 100 is about 840 GB
-and scale 10000, a tier-1 universal bank's AML retention target, about
-84 TB. The Pydantic schema accepts up to scale 10000, but AML has been run
-end to end only up to scale 100, on the pre-freeze generator. Scale 500
-(about 4.2 TB by the estimate) and above are untested; results there are on
-the user.
+on the pre-freeze generator and is superseded; v1.6 has no size
+measurements on the frozen generator (deferred to v1.7). By the estimate,
+scale 100 is about 840 GB and scale 10000, a tier-1 universal bank's AML
+retention target, about 84 TB. The Pydantic schema accepts up to scale
+10000, but AML datagen is banded: supported up to scale 300, unverified up
+to 800, and refused above 800, where a datagen pod would exceed the 16 GiB per-pod memory cap (a
+Lakebench-imposed cap). The pipeline has been run end to end only up to
+scale 100, on the pre-freeze generator.
 
 ## Known limitations in v1.6
 
@@ -491,11 +501,14 @@ the user.
   against loaded, over 30 executions each. The full measurement (Spark and
   Trino, scale 10 and 100, idle, beside one other workload and beside
   everything, at least 100 executions each) moves to v1.7.
-- **AML datagen throughput is published, not gated.** AML datagen reports
-  per-pod write throughput and CPU-hours per TB. Unlike Customer360 (at
-  least 500 MB/s per pod), no release gate fails on the AML figure. The
-  throughput figures published earlier were measured before the generator
-  freeze and are superseded; v1.6 figures are pending.
+- **AML datagen throughput is reported, not gated.** AML datagen reports
+  per-pod write throughput and CPU-hours per TB, and no release gate fails
+  on either figure. The throughput figures published earlier were measured
+  before the generator freeze and are superseded. v1.6 has no measurements
+  on the frozen generator; they are deferred to v1.7.
+- **Recall is uncalibrated.** v1.6 publishes no held-out Level-2 result;
+  recall and precision are in-sample on the calibration corpus. The
+  registered held-out looks are deferred to v1.7.
 
 ## The transaction-monitoring operations layer
 
@@ -669,4 +682,4 @@ is the one case this cannot tell apart.
 - [`src/lakebench/aml/reference_score.py`](../src/lakebench/aml/reference_score.py) -- band leakage gate library.
 - [`src/lakebench/aml/fidelity_gate.py`](../src/lakebench/aml/fidelity_gate.py) -- pre-registered fidelity gate and reference model.
 - [`src/lakebench/spark/scripts/score_financial_reference.py`](../src/lakebench/spark/scripts/score_financial_reference.py) -- Spark driver for both gates, called by `lakebench financial reference-score`.
-- [`docs/financial-benchmark-baselines.md`](financial-benchmark-baselines.md) -- test-cluster wall-clock, recall and time-to-detect numbers, populated per release (pending the v1.6 frozen-generator runs).
+- [`docs/financial-benchmark-baselines.md`](financial-benchmark-baselines.md) -- test-cluster wall-clock, recall and time-to-detect numbers, populated per release (no v1.6 measurements; deferred to v1.7).
