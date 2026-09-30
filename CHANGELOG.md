@@ -29,8 +29,10 @@ with 1.6; the first section lists why.
 - **AML continuous recall is not scored (LB-168).** Stopping the streams
   can interrupt a gold-refresh tick; scoring refuses the partial pass.
   Batch recall is unaffected.
-- **AML gold-finalize is slow at scale 100 (LB-201).** A skewed detection
-  stage takes minutes per task.
+- **AML gold-finalize is slow (LB-201).** At scale 10 it took 4,100 s of its
+  5,400 s auto timeout on 4 executors (run 20260929-214442-825153, n=1); at
+  scale 100 a skewed detection stage takes minutes per task. Under heavy
+  parallel load, raise `--timeout` for AML runs at scale 10 and above.
 - **AML expected-size estimate is off (LB-105).** The financial bronze size
   estimate in `config/scale.py` does not match the generator, so the AML
   `scale_ratio` score is not exact.
