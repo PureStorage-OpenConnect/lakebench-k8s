@@ -6,18 +6,25 @@ silently runs nothing.
 """
 
 import re
-import typing
+
+import typer
 
 from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
 from lakebench.cli._query import benchmark
 
 
 def _class_help() -> str:
-    hint = typing.get_type_hints(benchmark, include_extras=True)["query_class"]
-    for meta in typing.get_args(hint)[1:]:
-        if getattr(meta, "help", None):
-            return meta.help
-    raise AssertionError("--class option has no help text")
+    # Resolve through Typer's own command build: typing.get_type_hints on
+    # Python 3.10 wraps an Annotated hint with a None default in Optional and
+    # drops the typer.Option metadata.
+    app = typer.Typer()
+    app.command()(benchmark)
+    cmd = typer.main.get_command(app)
+    for param in cmd.params:
+        if "--class" in getattr(param, "opts", []):
+            assert param.help, "--class option has no help text"
+            return param.help
+    raise AssertionError("benchmark has no --class option")
 
 
 def test_class_help_names_only_real_classes():
