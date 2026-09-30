@@ -9,6 +9,10 @@ Instead of setting `catalog`, `table_format`, `pipeline_engine`, and `query_engi
 ```yaml
 name: my-lakehouse
 recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query engine in one line
+architecture:
+  catalog:
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # every Polaris recipe needs one
 ```
 
 Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
@@ -312,6 +316,9 @@ platform:
       gold_executors: 12
 
 architecture:
+  catalog:
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
   query_engine:
     trino:
       worker:

@@ -5,10 +5,11 @@ at each scale point. Referenced by ENG-2C.4.8 verification (W8 replay
 timeout budget), by release regression detection, and by external
 narratives that need quotable numbers.
 
-**Numbers are pending the v1.6 frozen-generator runs.** Earlier
-measurements (scale 1 on 2026-09-22, scale 10 on 2026-09-23) were taken on
-a generator and rule set that have since changed and are void; see
-History. The tables below are filled from the post-freeze runs, each with
+**v1.6 publishes no numbers here.** The frozen-generator performance and
+size measurements are deferred to v1.7, with the performance re-baseline.
+Earlier measurements (scale 1 on 2026-09-22, scale 10 on 2026-09-23) were
+taken on a generator and rule set that have since changed and are void; see
+History. The tables below will be filled from post-freeze runs, each with
 its run id.
 
 ## How to read this table
@@ -18,9 +19,10 @@ its run id.
   Lakebench's size estimate (`src/lakebench/config/scale.py`) is about
   8.4 GB of pacs.008 per scale unit, linear in scale (scale 100 is about
   840 GB). That figure was measured on the pre-freeze generator and is
-  superseded; sizes on the v1.6 frozen generator are pending. AML has been
-  run end to end up to scale 100 (pre-freeze); scale 500 (about 4.2 TB by
-  the estimate) and above are untested.
+  superseded; v1.6 has no size measurements on the frozen generator
+  (deferred to v1.7). AML has been run end to end up to scale 100
+  (pre-freeze). Datagen is supported up to scale 300, unverified up to 800
+  and refused above 800.
 - **Wall-clock p50 / p95.** Median and 95th-percentile wall-clock
   seconds across N independent runs at the same scale on the same
   cluster. p95 catches skew / warm-up effects.
@@ -54,16 +56,16 @@ the final step of gold_finalize, so `alert count` reflects what one
 
 | Scale | Wall-clock p50 (s) | Wall-clock p95 (s) | Alert count | Recall | Cores used | Storage read (GB) | Run ids |
 |------:|-------------------:|-------------------:|------------:|-------:|-----------:|------------------:|:--------|
-|     1 | pending | pending | pending | pending | pending | pending | pending |
-|    10 | pending | pending | pending | pending | pending | pending | pending |
-|   100 | pending | pending | pending | pending | pending | pending | pending |
+|     1 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 |
+|    10 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 |
+|   100 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 |
 
 ## Continuous pipeline (bronze_ingest -> silver_stream -> gold_refresh)
 
 | Scale | Ingest rate (rows/s) | Time to detect p50 (s) | Time to detect p95 (s) | Data freshness (s) | Cores used | Run ids |
 |------:|---------------------:|-----------------------:|-----------------------:|-------------------:|-----------:|:--------|
-|    10 | pending | pending | pending | pending | pending | pending |
-|   100 | pending | pending | pending | pending | pending | pending |
+|    10 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 |
+|   100 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 | v1.7 |
 
 ## Replay (W8, `lakebench financial replay`)
 

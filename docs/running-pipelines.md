@@ -31,10 +31,10 @@ schema conformance, flags quality issues (nulls, format inconsistencies,
 duplicates), and writes validation summary metrics. This stage is I/O-bound
 and exercises the S3 read path.
 
-**Job profile:** 2 cores, 4g memory, 2g overhead per executor, 50Gi PVC
-(c360) or 500Gi PVC (financial; LB-118 --- financial trips the CTAS
-fallback above scale 5 which spills roughly twice the per-executor input
-to local disk).
+**Job profile:** 2 cores per executor. Customer 360: 4g memory, 2g
+overhead, 50Gi PVC. Financial (AML): 8g memory, 12g overhead, 500Gi PVC
+(LB-118: financial trips the CTAS fallback above scale 5, which spills
+roughly twice the per-executor input to local disk).
 
 ### Stage 2: silver-build
 
@@ -65,11 +65,12 @@ dashboard. Produces metrics like daily active customers, total revenue,
 conversions, engagement scores, and churn risk counts. The output is a compact
 gold-layer Iceberg table partitioned by date.
 
-**Job profile:** 4 cores, 32g memory, 8g overhead per executor, 100Gi PVC.
+**Job profile:** 4 cores, 32g memory, 8g overhead per executor, 300Gi PVC.
 
 ### Stage 4: benchmark
 
-Runs 8 Trino queries against the silver and gold tables and computes a QpH
+Runs the workload's query set (8 queries for Customer 360, 12 for AML) on
+the active query engine against the silver and gold tables and computes a QpH
 (queries per hour) score. Queries span five categories:
 
 | Category | Queries | Description |
@@ -450,7 +451,7 @@ At scale 100 that gives bronze-verify 7 (c360) or 11 (financial),
 silver-build 18 and gold-finalize 11. The 28 maximum is a Lakebench-imposed
 ceiling (K8s API polling, below), not a cluster limit. The auto-sizer and the
 global `platform.compute.spark.executor` block do not change these counts;
-`lakebench info <config>` shows the resolved per-job values. In continuous
+`lakebench info <config>` (hidden and deprecated, but the only command that prints the per-job counts) shows the resolved per-job values. In continuous
 mode the streaming jobs have their own profiles and are capped to a
 concurrent CPU budget when the cluster is smaller than the profiles need.
 
@@ -474,13 +475,15 @@ When overriding executor counts above 20, be aware of two scaling limits:
 executor pod. Profile drivers are 4g for bronze-verify and 32g for
 silver-build and gold-finalize on Spark 4 (24g on Spark 3). Above 20
 executors, the 4g bronze-verify driver may be insufficient. If you see OOM errors in the driver pod, set a global
-driver memory override:
+driver memory override. It applies to every job, so do not set it below
+the 32g silver-build and gold-finalize default (24g OOMed those drivers on
+Spark 4, BUG-005 and BUG-007):
 
 ```yaml
 platform:
   compute:
     spark:
-      driver_memory: "24g"
+      driver_memory: "32g"
       silver_executors: 24
 ```
 

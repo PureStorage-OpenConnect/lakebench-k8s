@@ -48,7 +48,7 @@ that progressively refines raw data into business-ready tables.
   |   (Raw Parquet)  | ---> | (Cleaned Iceberg)  | ---> |  (Aggregated Iceberg)   |
   |                  |      |                    |      |                         |
   |  S3 bucket:      |      |  S3 bucket:        |      |  S3 bucket:             |
-  |  lakebench-bronze|      |  lakebench-silver  |      |  lakebench-gold         |
+  |  <name>-bronze   |      |  <name>-silver     |      |  <name>-gold            |
   +------------------+      +--------------------+      +-------------------------+
        bronze-verify             silver-build              gold-finalize
        (Spark batch)             (Spark batch)             (Spark batch)
@@ -279,11 +279,12 @@ correspond to the three medallion layers:
 
 | Bucket | Purpose |
 |---|---|
-| `lakebench-bronze` | Raw Parquet files from datagen |
-| `lakebench-silver` | Cleaned Iceberg table |
-| `lakebench-gold` | Aggregated KPI Iceberg table |
+| `<name>-bronze` | Raw Parquet files from datagen |
+| `<name>-silver` | Cleaned Iceberg table |
+| `<name>-gold` | Aggregated KPI Iceberg table |
 
-Bucket names are configurable. Path-style access is enabled by default for
+`<name>` is the deployment `name`. Bucket names are configurable under
+`platform.storage.s3.buckets`. Path-style access is enabled by default for
 compatibility with S3-compatible stores (FlashBlade, MinIO) that do not support
 virtual-hosted bucket addressing.
 
@@ -297,23 +298,26 @@ The deployment engine creates resources in a strict dependency order:
 
 1. **Namespace** -- creates the target namespace if it does not exist
 2. **Secrets** -- S3 credentials and PostgreSQL credentials
-3. **S3 buckets** -- creates the deployment's buckets
-4. **Scratch StorageClass check** -- verifies the scratch class exists (if
+3. **Silver-state ConfigMap** -- per-deployment rebuild-epoch counters and
+   the bronze data clock that bronze-verify records for silver
+4. **S3 buckets** -- creates the deployment's buckets
+5. **Scratch StorageClass check** -- verifies the scratch class exists (if
    scratch is enabled); it never creates it. A cluster admin installs it once
    with `lakebench admin install-scratch-storage-class`
-5. **PostgreSQL** -- StatefulSet with persistent volume
-6. **Hive Metastore** -- skipped unless the catalog is Hive
-7. **Polaris** -- skipped unless the catalog is Polaris
-8. **Spark RBAC** -- ServiceAccount, Role, RoleBinding (plus SCC on OpenShift)
-9. **Unity Catalog** -- skipped unless the catalog is Unity (not a supported
-   combination)
-10. **Spark Operator** -- verifies the shared operator (or installs a missing
+6. **PostgreSQL** -- StatefulSet with persistent volume
+7. **Hive Metastore** -- skipped unless the catalog is Hive
+8. **Polaris** -- skipped unless the catalog is Polaris
+9. **Spark RBAC** -- ServiceAccount, Role, RoleBinding (plus SCC on OpenShift)
+10. **Unity Catalog** -- skipped unless the catalog is Unity (not a supported
+    combination)
+11. **Spark Operator** -- verifies the shared operator (or installs a missing
     one when `platform.compute.spark.operator.install: true`) and adds the
     namespace to its watch list under the cluster lease
-11. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
-12. **Spark Thrift Server** -- if selected
-13. **DuckDB** -- if selected
-14. **Observability** -- one step for Prometheus and Grafana (if enabled)
+12. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
+13. **Spark Thrift Server** -- if selected
+14. **DuckDB** -- if selected
+15. **Observability** -- one step for Prometheus, Grafana and the
+    deployment's Pushgateway (if enabled)
 
 Destruction follows the reverse order: an ownership check, Spark jobs and pods
 first, then table removal from the catalog (metadata only, no table

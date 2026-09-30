@@ -97,6 +97,10 @@ secret_key: ${S3_SECRET_KEY}
 scale: 50
 mode: batch
 spark_image: apache/spark:4.1.1-python3
+architecture:
+  catalog:
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
 ```
 
 Eleven recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
@@ -169,7 +173,9 @@ numbers below are illustrative, not a measurement):
  ──────────────────────────────────────────────────
 ```
 
-`lakebench report` generates an HTML report with per-query latencies,
+Each run writes `lakebench-output/runs/run-<id>/report.html`; `lakebench
+report` prints the run's summary and points at it (`--render` writes a fresh
+copy). The report shows per-query latencies,
 bottleneck analysis, and optional platform metrics (CPU, memory, S3 I/O per
 pod). Every run's `metrics.json` carries an `experiment` block: workload and
 generator version, seed, recipe and component versions, scale, mode, the

@@ -122,10 +122,12 @@ drift means the pipeline has a bug or the config is different.
 
 Some things we cannot control:
 
-- Snappy compression ratio varies by ~0.5% run-to-run based on the
-  order Rust hands rows to the parquet writer. That is deterministic
-  in seed, but is a different determinism across a rayon pool size
-  change. The package does not record the pool size, so keep
+- AML generator output does not depend on the thread pool or pod
+  count: at seed 43 the e14d0fd image produced byte-identical objects
+  thread-throttled and with 4 pods, and 034f998 is byte-identical to
+  e14d0fd. This was not measured for Customer 360, where Snappy
+  compression can vary by about 0.5% with the order rows reach the
+  Parquet writer. The package does not record the pool size, so keep
   `datagen.cpu` and `datagen.generators` as the source run's config
   snapshot has them.
 - FlashBlade S3 latency has a bimodal distribution; a full flash tray

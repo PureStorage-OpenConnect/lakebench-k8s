@@ -39,6 +39,19 @@ Support is judged per workload x recipe x mode, not per recipe:
 - **unsupported**: refused before a run, at config load (or by `run` when
   `--continuous` selects a mode the workload does not declare).
 
+Scale is a further layer. Datagen is banded per workload, and the band caps
+the state from the table below:
+
+| Workload | Supported up to | Unverified up to | Unsupported (refused) above |
+|---|---|---|---|
+| Customer 360 | scale 300 | scale 600 | scale 600 |
+| AML (financial) | scale 300 | scale 800 | scale 800 |
+
+Above the supported maximum a run is at most unverified. Above the ceiling a
+datagen pod would exceed the 16 GiB per-pod memory cap (a Lakebench-imposed
+cap), and `deploy` and `generate` refuse the config. `lakebench config show`
+prints the band note for the config's scale.
+
 The state is computed when the run starts and recorded in `metrics.json` as
 `experiment.support`; rendering the record later does not re-stamp it. A run
 from a lakebench checkout with local changes is never stamped supported.

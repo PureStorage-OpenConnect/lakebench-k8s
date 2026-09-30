@@ -396,20 +396,23 @@ This executes three Spark jobs in sequence, followed by a query benchmark:
 1. **bronze-verify** -- validates and deduplicates raw Parquet data
 2. **silver-build** -- enriches, normalizes, and writes an Iceberg table
 3. **gold-finalize** -- aggregates into a business-ready executive dashboard
-4. **benchmark** -- runs 8 analytical queries against the silver and gold
+4. **benchmark** -- runs 8 analytical queries (12 for AML) against the silver and gold
    tables via the active query engine (Trino by default)
 
 Each job's progress, duration, and throughput are recorded to metrics.
 
-### 6. Generate a report
+### 6. View the report
 
 ```bash
 lakebench report
 ```
 
-This produces an HTML report in `lakebench-output/runs/run-<id>/report.html`
+Every run writes an HTML report to `lakebench-output/runs/run-<id>/report.html`
 containing job performance tables, query latencies, throughput metrics, and a
-configuration snapshot. Open it in your browser to review the results.
+configuration snapshot. `lakebench report` prints the latest run's summary and
+the path to that file; open it in your browser to review the results.
+`lakebench report --render` writes a fresh copy under
+`lakebench-output/reports/` without touching the original.
 
 To list all recorded runs:
 
@@ -423,13 +426,18 @@ lakebench report --list
 ### 7. Compare two configurations
 
 ```bash
-lakebench compare lakebench.yaml lakebench-polaris.yaml --generate
+lakebench deploy lakebench-polaris.yaml --yes
+lakebench generate lakebench-polaris.yaml --wait
+lakebench compare lakebench.yaml lakebench-polaris.yaml
 ```
 
 `compare` runs each config through the pipeline and benchmark in turn and
 prints the two results side by side. It destroys each deployment after its
 run unless you pass `--keep`, and it does not deploy a missing stack, so run
-`lakebench deploy` on both configs first. Give the two configs different
+`lakebench deploy` on both configs first. Both configs need bronze data:
+`lakebench.yaml` already has it from step 4, so generate only for the second
+one. Do not pass `--generate` here: generating into a bronze prefix that
+already holds data is refused, and that side of the comparison fails. Give the two configs different
 names and bucket names: the first deployment's destroy empties its buckets
 before the second one runs.
 
@@ -463,8 +471,11 @@ that; one that already held data is left alone and reported, and
 idempotent -- components that already exist are skipped.
 
 **Generate fails or times out:** Increase the timeout with `--timeout 14400`
-(4 hours). A re-run regenerates the corpus from the start; the Rust
-generator has no checkpoint-resume.
+(4 hours). The Rust generator has no checkpoint-resume, so a re-run starts
+from the beginning, and because the failed run left partial data in bronze,
+the re-run needs `--regenerate` (`lakebench generate lakebench.yaml --wait
+--regenerate`), which empties the bronze bucket first. Without it `generate`
+exits 2 and names the non-empty prefix.
 
 **A pipeline stage fails:** Re-run just that stage:
 
@@ -608,7 +619,13 @@ To run at a larger scale, change the `scale` value in your config:
 | 1 | 10 GB | 100K | 2.4M |
 | 10 | 100 GB | 1M | 24M |
 | 100 | 1 TB | 10M | 240M |
-| 1,000 | 10 TB | 100M | 2.4B |
+
+Datagen scale is banded per workload. Customer 360 is supported up to scale
+300 and unverified up to 600; AML (financial) is supported up to 300 and
+unverified up to 800. Above the ceiling `deploy` and `generate` refuse the
+config, because a datagen pod would exceed the 16 GiB per-pod memory cap
+(a Lakebench-imposed cap); in the unverified range they warn. The run's
+support state records the band.
 
 Use `lakebench config recommend lakebench.yaml` to get cluster-aware sizing
 guidance before scaling up. At scale 100+ you will want to increase the `--timeout` on both generate
@@ -751,9 +768,10 @@ detection.
 `workload.datagen.seed = 43` is the calibration corpus the generator,
 the rule thresholds and the reference features were tuned against, and
 it is the default when `seed` is unset for `financial`. Recall and
-precision from a seed-43 run are in-sample. Numbers meant for
-comparison with other stacks should cite the seed and, when it is 43,
-say so.
+precision from a seed-43 run are in-sample. v1.6 publishes no held-out
+result, so AML recall in v1.6 is uncalibrated; the held-out looks are
+deferred to v1.7. Numbers meant for comparison with other stacks should
+cite the seed and, when it is 43, say so.
 
 See [AML Scoring](aml-scoring.md) for the full explanation
 of what the metrics measure, the band leakage report, the reference

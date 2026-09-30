@@ -206,4 +206,7 @@ data. Common scale factors:
 | 1 | ~10 GB | ~160 |
 | 10 | ~100 GB | ~1,600 |
 | 100 | ~1 TB | ~16,000 |
-| 1000 | ~10 TB | ~160,000 |
+
+Scale is banded: Customer 360 is supported to 300 and refused above 600, AML
+supported to 300 and refused above 800 (see
+[Data Generation](data-generation.md#scale-factor-and-data-volume)).

@@ -68,10 +68,12 @@ Setting `pull_policy: Always` is important after pushing a new image tag. Withou
 it, Kubernetes may use a cached version of the image if the tag already existed
 on the node. Prefer a new, immutable tag per build over reusing one.
 
-A custom image is not the frozen AML generator (`datagen-v2-rs-0.3`, image
-tag `034f998`, digest
-`sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc`).
-The run records the image reference you configured, and AML results from a
+A custom image is not the frozen AML generator (`datagen-v2-rs-0.3`). The
+default image (tag `034f998`, digest
+`sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc`)
+is output-identical to the freeze but is not the registered-look image;
+registered looks use the frozen digest described in
+`docs/internal/aml-protocol.md`. The run records the image reference you configured, and AML results from a
 modified generator are not comparable with results from the frozen one.
 Freeze identity is defined by `MODEL_VERSION` in `datagen_rs/src/model.rs`:
 a rebuild that keeps `MODEL_VERSION` unchanged and produces byte-identical
@@ -136,8 +138,9 @@ print(table.to_pandas().head())
 ## Dockerfile Reference
 
 `datagen_rs/Dockerfile` is a two-stage build. Stage one compiles the
-`generate` binary in `rust:1.98.1-bookworm` (`cargo build --release --locked
---bin generate`). Stage two is `python:3.13-slim` with `boto3`, the binary at
+`generate` binary in `rust:1.98.1-bookworm` (both base images are pinned by
+digest in the Dockerfile; `cargo build --release --locked
+--bin generate`). Stage two is `python:3.14-slim` with `boto3`, the binary at
 `/app/datagen_rs` and `entrypoint.py`, which is the image entrypoint. S3
 credentials come from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
 `S3_ENDPOINT` in the pod environment.

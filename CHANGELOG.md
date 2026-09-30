@@ -13,6 +13,28 @@ compare runs whose workload results differ, and several published metrics
 changed meaning. Most numbers recorded by 1.5 and earlier are not comparable
 with 1.6; the first section lists why.
 
+### Known limitations
+- **AML recall is uncalibrated.** v1.6 publishes no held-out Level-2
+  result. Recall and precision are in-sample on the calibration corpus, and
+  the report labels the column "Recall (uncalibrated)". The registered
+  held-out looks are deferred to v1.7.
+- **No v1.6 performance baselines.** The performance re-baseline and the
+  AML frozen-generator performance and size measurements are deferred to
+  v1.7. No pinned config is required by the release gate's
+  `perf-baselines` check.
+- **Trino OPTIMIZE hits the open-writer limit (LB-210).** On the Customer
+  360 continuous silver table `silver.customer_interactions_enriched`,
+  Trino OPTIMIZE can fail with "Exceeded limit of 100 open writers for
+  partitions".
+- **AML continuous recall is not scored (LB-168).** Stopping the streams
+  can interrupt a gold-refresh tick; scoring refuses the partial pass.
+  Batch recall is unaffected.
+- **AML gold-finalize is slow at scale 100 (LB-201).** A skewed detection
+  stage takes minutes per task.
+- **AML expected-size estimate is off (LB-105).** The financial bronze size
+  estimate in `config/scale.py` does not match the generator, so the AML
+  `scale_ratio` score is not exact.
+
 ### Read this first: comparability with earlier releases
 - **Datagen file size is fixed at 64mb and datagen scale is banded (LB-204).**
   `workload.datagen.file_size` accepts only `64mb` (any case); another size
@@ -128,22 +150,26 @@ with 1.6; the first section lists why.
   benchmark rounds and iterations, TM alert capacity, `w1_max_vertices`) and
   which of them bound, so a bound figure is not read as infrastructure
   performance.
-- **Frozen AML generator image.** `images.datagen` defaults to
-  `docker.io/sillidata/lb-datagen:9382420` (digest
-  `sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2`),
-  generator `MODEL_VERSION` `datagen-v2-rs-0.3`. The pinned image is the
-  reproducibility unit; bit-exact output holds within one build environment.
-  9382420 adds the output-neutral live-metrics Pushgateway push (same freeze,
-  proven byte-identical at seed 43); it is the functional default and is
-  disqualified from generating any registered-look / D8 / A6 / calibration
-  corpus, which pass an explicit frozen digest via `--generator-image`.
-  A corpus from an earlier image is pre-freeze. Prior tags `b6f2905`
-  (digest `sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6`),
-  `25f1aa8`
-  (digest `sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7`),
-  `7c24641` (digest `sha256:c5a6bc80d89341b0753dccd39abb5cbe835ed31a9d14b33e0989863cca774f3b`)
-  and `0a83acd` (digest `sha256:acdf3925...`) are recorded in
-  `src/lakebench/config/schema.py::ImagesConfig.datagen` for provenance.
+- **AML generator image.** `images.datagen` defaults to
+  `docker.io/sillidata/lb-datagen:034f998` (digest
+  `sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc`),
+  generator `MODEL_VERSION` `datagen-v2-rs-0.3`. Its output is
+  byte-identical to the frozen generator built from 9382420 source (seed 43,
+  141/141 objects, across thread and pod counts). It adds the per-pod memory
+  model with a 16Gi cap, fixed 64 MB files and delivery-mode forwarding
+  (LB-204, LB-196). It is the functional default, not the registered-look
+  image: registered-look, D8, A6 and calibration corpora pass an explicit
+  frozen digest via `--generator-image` (see `docs/internal/aml-protocol.md`).
+  The pinned image is the reproducibility unit; bit-exact output holds within
+  one build environment. A corpus from an image before the freeze is
+  pre-freeze. Prior tags `e14d0fd`, `30603b1`, `9382420` (digest
+  `sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2`,
+  live-metrics Pushgateway push), `b6f2905`, `25f1aa8`, `7c24641` and
+  `0a83acd` are recorded in
+  `src/lakebench/config/schema.py::ImagesConfig.datagen` (`7c24641` digest
+  `sha256:c5a6bc80d89341b0753dccd39abb5cbe835ed31a9d14b33e0989863cca774f3b`);
+  all but `e14d0fd`
+  were deleted from docker.io and must be rebuilt from source.
 - **Config contract (v1.6).** `workload` is a top-level key; the old
   `architecture.workload` block still loads with a deprecation warning, and
   setting both with different values is an error. `continuous` is the
@@ -595,8 +621,8 @@ with 1.6; the first section lists why.
   implement it. The `--resume` CLI flag and the `workload.datagen.checkpoint.*`
   config block are removed. Old configs that carry `datagen.checkpoint:`
   load with a `DeprecationWarning` and the block is dropped from the
-  loaded config. Interrupted `lakebench generate` runs re-run from the
-  start.
+  loaded config. An interrupted `lakebench generate` re-runs from the
+  start and needs `--regenerate` to empty the partial bronze data first.
 - `workload.datagen.uploaders`. Never forwarded to the Rust generator;
   uploader concurrency is fixed inside the S3 sink. Old configs that
   carry the field load with a `DeprecationWarning` and the field is

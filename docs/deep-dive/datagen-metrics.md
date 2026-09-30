@@ -122,9 +122,12 @@ now correct across the whole pipeline.
 
 ## What isn't in this change
 
-- No Prometheus scraping. Datagen pods are short-lived batch jobs;
-  their metrics are terminal, not longitudinal. Polling adds noise
-  without value.
+- No Prometheus scraping of datagen pods. They are short-lived batch
+  jobs whose metrics are terminal, so the stderr line above is the
+  source of record. When observability is enabled, each pod also
+  pushes live progress to the deployment's Pushgateway (best-effort,
+  every ~10 s, and a final push at exit); a failed push is ignored and
+  does not affect the run or the recorded metrics.
 - No new pod resources. The emit is on stderr, tiny (<1 KiB per
   pod), and free.
 - No config surface. There's no flag to enable or disable this;

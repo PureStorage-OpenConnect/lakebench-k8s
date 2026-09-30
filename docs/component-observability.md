@@ -1,6 +1,6 @@
 # Observability
 
-Lakebench deploys observability via the `kube-prometheus-stack` Helm chart, which bundles Prometheus, Grafana, node-exporter, and kube-state-metrics in a single install. Prometheus and Grafana versions are not independently configurable -- they come from whatever `observability.chart_version` (default `87.19.2`, currently bundling Prometheus v3.13.1 and Grafana v13.1.x) resolves to.
+Lakebench deploys observability via the `kube-prometheus-stack` Helm chart, which bundles Prometheus, Grafana, kube-state-metrics and node-exporter in a single install (lakebench disables node-exporter on OpenShift, where it needs host access the SCCs block). Prometheus and Grafana versions are not independently configurable -- they come from whatever `observability.chart_version` (default `87.19.2`, currently bundling Prometheus v3.13.1 and Grafana v13.1.x) resolves to.
 
 HTML reports are generated from local metrics and do not require Prometheus or Grafana.
 
@@ -17,7 +17,22 @@ observability:
   storage: "10Gi"                    # Prometheus PVC size
   storage_class: ""                  # Not applied (see below)
   chart_version: "87.19.2"           # kube-prometheus-stack chart version (pins Prometheus + Grafana)
+  pushgateway_enabled: true          # Per-deployment Pushgateway for live datagen and pipeline metrics
+  pushgateway_image: "prom/pushgateway:v1.11.1"
+  pushgateway_storage: "1Gi"         # Pushgateway persistence PVC size
+  pushgateway_storage_class: "px-csi-scratch"
 ```
+
+With observability enabled, each deployment also gets its own Prometheus
+Pushgateway (a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by
+default, and a PodMonitor that scrapes it) in the deployment's namespace,
+removed with the namespace by `destroy`. Datagen pods push live progress to
+it, because a batch pod can finish between two Prometheus scrapes, and
+Spark stages push their final metrics: all three AML batch stages and
+Customer 360 gold-finalize. Customer 360 bronze-verify, silver-build and
+continuous stages do not push yet, so their stage panels stay empty. The push is best-effort: a failed push never affects a
+run, and `metrics.json` stays the source of record. Set
+`pushgateway_enabled: false` to skip it.
 
 `observability.reports` has no effect and is removed in v1.7: every run writes
 `report.html` into its run directory once, and `lakebench report --render`
@@ -52,13 +67,13 @@ The `MetricsCollector` class in `metrics/collector.py` records job metrics, quer
 When `observability.enabled` is `true`, Lakebench uses one shared `kube-prometheus-stack` Helm release for the whole cluster. The chart installs cluster-wide objects (CRDs, cluster roles, admission webhooks), so it is a shared cluster component, not part of a deployment:
 
 - `deploy` installs it into the `lakebench-observability` namespace only when no release named `lakebench-observability` exists anywhere on the cluster, under the cluster lease. An existing release is reused and never upgraded or modified.
-- `destroy` never uninstalls it; another deployment may be using it. Each deployment's PodMonitors and dashboard ConfigMap live in its own namespace and go with it. The one exception is a release an older lakebench installed into the deployment's own namespace, which destroy removes because it served only that namespace.
+- `destroy` never uninstalls it; another deployment may be using it. Each deployment's PodMonitors and Pushgateway live in its own namespace and go with it. The Lakebench Overview dashboard ConfigMap is shared: it lives in `lakebench-observability` and destroy leaves it in place. The one exception is a release an older lakebench installed into the deployment's own namespace, which destroy removes because it served only that namespace.
 - To remove the shared stack when no deployment uses it: `helm uninstall lakebench-observability -n lakebench-observability`.
 
 The stack provides:
 
 - Prometheus server that picks up the PodMonitors of every lakebench namespace
-- Node-exporter and kube-state-metrics for cluster-level visibility
+- kube-state-metrics, and node-exporter except on OpenShift, for cluster-level visibility
 - ServiceMonitor and PodMonitor CRDs for automatic target discovery
 
 The Helm release is named `lakebench-observability`. The chart shortens service names, so list them rather than guessing:
@@ -77,10 +92,16 @@ lakebench deploy test-config.yaml --include-observability
 
 Grafana is included in the kube-prometheus-stack install when `dashboards_enabled` is `true`. Default credentials are `admin` / `lakebench`.
 
-One built-in dashboard, **Lakebench Overview**, is provisioned from a ConfigMap
-in the deployment's namespace. Its panels: Trino running queries, query
-throughput, query wall time (p50/p95/p99) and worker memory; Spark active
-executors, task throughput and JVM heap; node CPU usage.
+One built-in dashboard, **Lakebench Overview**, is provisioned from a single
+ConfigMap in the shared `lakebench-observability` namespace, applied on every
+deploy and left in place by destroy. `namespace` and `run_id` variables select
+the deployment and run. Its panels: datagen throughput (MB/s per pod, labelled as capped by the Lakebench-set
+pod resources), datagen rows written by pod, datagen phase seconds,
+bronze/silver stage rows (input vs output), silver per-table row counts,
+pipeline stage elapsed seconds, Trino running queries, Trino query
+throughput, and node CPU usage by pod. The
+datagen and pipeline panels read the Pushgateway series, so they are empty
+with `pushgateway_enabled: false`.
 
 Access Grafana via port-forward:
 

@@ -34,7 +34,7 @@ tables; Delta tables use Hive. Unity Catalog is not supported. See
 [Recipes](recipes.md) for valid combinations.
 
 **Hive prerequisites:** Stackable operators (commons, secret, listener, hive)
-must be installed cluster-wide. See [Getting Started](getting-started.md#catalog-operator-hive)
+must be installed cluster-wide. See [Getting Started](getting-started.md#catalog-operator-depends-on-your-recipe)
 for Helm commands.
 
 **Polaris:** No operator needed -- Lakebench deploys it directly as a
@@ -106,8 +106,9 @@ v3.13.1 and Grafana v13.1.x -- Prometheus and Grafana versions are not
 independently configurable; they come from whatever the pinned chart version
 bundles. Includes kube-state-metrics, and node-exporter except on OpenShift,
 where lakebench disables it (it needs host access the SCCs block). One
-built-in Grafana dashboard, Lakebench Overview, with Trino, Spark and node CPU
-panels. See
+built-in Grafana dashboard, Lakebench Overview, shared by every deployment,
+with datagen, bronze/silver/pipeline stage, Trino and node CPU panels, and a
+per-deployment Pushgateway for live datagen and pipeline metrics. See
 [Observability Reference](component-observability.md) for dashboard
 configuration and metric details.
 
