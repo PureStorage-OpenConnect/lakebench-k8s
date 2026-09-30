@@ -91,7 +91,7 @@ Override anything with flat fields or nested YAML:
 # lakebench.yaml (with overrides)
 name: flashblade-polaris
 recipe: polaris-iceberg-spark-trino
-endpoint: http://10.21.227.93:80
+endpoint: http://10.0.1.50:80
 access_key: ${S3_ACCESS_KEY}       # env var substitution
 secret_key: ${S3_SECRET_KEY}
 scale: 50

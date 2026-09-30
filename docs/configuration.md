@@ -839,7 +839,7 @@ recipe: polaris-iceberg-spark-trino
 platform:
   storage:
     s3:
-      endpoint: https://10.21.227.93:443
+      endpoint: https://10.0.1.50:443
       access_key: <key>
       secret_key: <secret>
       ca_cert: ./flashblade-ca.pem
@@ -861,7 +861,7 @@ receive the PEM path via environment variables for boto3.
 certificate using `openssl`:
 
 ```bash
-openssl s_client -connect 10.21.227.93:443 -showcerts </dev/null 2>/dev/null \
+openssl s_client -connect 10.0.1.50:443 -showcerts </dev/null 2>/dev/null \
   | openssl x509 -outform PEM > flashblade-ca.pem
 ```
 

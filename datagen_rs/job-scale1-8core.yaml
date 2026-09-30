@@ -42,7 +42,7 @@ spec:
             - "datagen-v2-rs-s1"
           env:
             - name: S3_ENDPOINT
-              value: "http://10.21.227.93:80"
+              value: "http://10.0.1.50:80"
             - name: AWS_REGION
               value: "us-east-1"
             - name: AWS_ACCESS_KEY_ID

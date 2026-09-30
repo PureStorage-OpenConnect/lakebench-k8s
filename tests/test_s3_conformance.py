@@ -17,7 +17,7 @@ Marked ``integration``: they need a live endpoint and are deselected by default.
 
 Run against a backend by setting the endpoint and credentials::
 
-    LB_S3_ENDPOINT=http://10.21.227.93:80 \\
+    LB_S3_ENDPOINT=http://10.0.1.50:80 \\
     LB_S3_ACCESS_KEY=... LB_S3_SECRET_KEY=... \\
     pytest tests/test_s3_conformance.py -m integration -v
 """

@@ -28,7 +28,7 @@ reproduction_metadata:
     approx_bronze_gb: 1.0
     processing_pattern: medallion
     s3:
-      endpoint: http://10.21.227.93:80
+      endpoint: http://10.0.1.50:80
       buckets:
         bronze: c360-e2e-bronze
         silver: c360-e2e-silver
