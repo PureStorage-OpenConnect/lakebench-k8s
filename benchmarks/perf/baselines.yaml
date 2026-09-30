@@ -4,7 +4,10 @@ schema_version: 1
 baselines:
   c360-batch-s10:
     config: c360-batch-s10.yaml
-    required: true
+    # Not required for v1.6 (owner decision 2026-09-29): the performance
+    # re-baseline moved to v1.7. This entry is poll-timed (recorded before
+    # v1.6 stage timing), so the gate refuses every current run against it.
+    required: false
     status: accepted
     run_id: 20260925-144532-16983c
     git_sha: f6c7795cf105301baf3eff92fa6d3f545494cda0
@@ -38,7 +41,9 @@ baselines:
       "Seeding"). Record the first run of it.
   c360-continuous-s10:
     config: c360-continuous-s10.yaml
-    required: true
+    # Not required for v1.6 (owner decision 2026-09-29): the performance
+    # re-baseline moved to v1.7.
+    required: false
     status: pending first run
     notes: Previous baseline run 20260925-153533-529c12 (f6c7795) is void as a perf
       reference. It was measured before f63cb38, when no Iceberg expire_snapshots or

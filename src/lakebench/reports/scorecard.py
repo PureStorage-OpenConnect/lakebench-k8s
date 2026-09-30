@@ -281,7 +281,7 @@ class FinancialScorecardBlock:
                         <th>Rule</th>
                         <th>Target typology</th>
                         {alerts_th}
-                        <th title="Fraction of planted instances detected by this rule">Recall</th>
+                        <th title="Fraction of planted instances detected by this rule. Uncalibrated: no held-out calibration, in-sample on the default seed-43 calibration corpus; v1.6 publishes no held-out result (docs/aml-scoring.md).">Recall (uncalibrated)</th>
                         <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance</th>
                         <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>
                         <th title="Share of this rule's alerts that touch none of its target typology's txns. NOT a production ops-queue false-positive rate; see docs/aml-scoring.md.">Off-target</th>

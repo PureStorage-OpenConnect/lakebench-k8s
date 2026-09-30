@@ -172,6 +172,15 @@ class TestFinancialDetailScorecard:
         assert "<td>12</td>" in w2_row
         assert "Overall off-target rate" in html
 
+    def test_recall_column_labelled_uncalibrated(self):
+        # v1.6 publishes no held-out Level-2 result: the recall a run shows is
+        # in-sample, and the column says so.
+        block = FinancialScorecardBlock()
+        job = self._job(alerts_by_rule={"W2_structuring": 1})
+        scoring = {"typologies": [], "total_alerts": 1, "run_id": "r1"}
+        html = block.render_detail_html(self._metrics(jobs=[job], financial_scoring=scoring))
+        assert ">Recall (uncalibrated)</th>" in html
+
     def test_multi_cycle_alert_counts_last_cycle_wins(self):
         # gold_finalize re-detects over the whole cumulative silver each cycle
         # (DELETE-then-INSERT), so each cycle's count is CUMULATIVE and the

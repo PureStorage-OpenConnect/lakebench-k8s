@@ -199,10 +199,13 @@ def env(tmp_path):
     # Start every test from pending baselines, whatever the checked-in store
     # has accepted since, so recording is exercised from scratch.
     store = yaml.safe_load((store_dir / "baselines.yaml").read_text())
-    for entry in store["baselines"].values():
+    for name, entry in store["baselines"].items():
         for key in [k for k in entry if k not in ("config", "required", "notes")]:
             del entry[key]
         entry["status"] = "pending first run"
+        # The gate-logic tests need required and optional configs whatever the
+        # checked-in store currently requires.
+        entry["required"] = name.startswith("c360-")
     (store_dir / "baselines.yaml").write_text(yaml.safe_dump(store, sort_keys=False))
     runs = tmp_path / "runs"
     runs.mkdir()
@@ -767,12 +770,22 @@ def test_pinned_executor_counts_match_todays_auto_counts(path):
 def test_checked_in_store_loads_and_references_pinned_configs():
     store = pg.load_store(PERF / "baselines.yaml")
     assert {"c360-batch-s10", "c360-continuous-s10", "aml-batch-s1"} <= set(store.baselines)
-    assert store.baselines["c360-batch-s10"].required
-    assert store.baselines["c360-continuous-s10"].required
     for name in store.baselines:
         pinned = store.pinned(name)
         assert pinned.config_hash and pinned.fingerprint_hash
     assert store.pinned("c360-continuous-s10").mode == "sustained"
+
+
+def test_checked_in_store_requires_no_baseline_for_v16(tmp_path):
+    # v1.6 has no performance re-baseline (owner decision 2026-09-29): no
+    # pinned config is required, so the release gate passes with no runs and
+    # still reports every config.
+    store = pg.load_store(PERF / "baselines.yaml")
+    assert not [n for n, b in store.baselines.items() if b.required]
+    passed, lines = pg.release_check(store, tmp_path)
+    assert passed, lines
+    assert len(lines) == len(store.baselines)
+    assert all(ln.startswith(("warn", "ok")) for ln in lines)
 
 
 def test_store_rejects_accepted_entry_without_provenance(tmp_path):
