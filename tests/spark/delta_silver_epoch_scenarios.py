@@ -1,0 +1,232 @@
+"""Rebuild-epoch scenarios for the Delta c360 silver build, run in fresh JVMs.
+
+Not collected by pytest (no ``test_`` prefix).
+``test_silver_build_delta_epoch_spark`` runs it as a subprocess.
+
+Every silver job is the real ``silver_build_delta.py``, started as its own
+process the way the Spark Operator starts one driver per cycle. The jobs
+share a Derby-backed Hive metastore and a warehouse under the work directory,
+so a catalog entry and a Delta log outlive a job exactly as they outlive a
+driver on the cluster. Deleting the Derby directory stands in for a destroy
+that drops the metastore and keeps the bucket.
+
+A run is cycles 0..2 of a multi-cycle batch: cycle 0 is the full build,
+cycles 1 and 2 append with ``LB_SILVER_INCREMENTAL=true``. Each cycle's
+bronze rows carry event ids no other cycle or run uses, so the scenario can
+report which cycles silver holds, not only how many rows.
+
+Usage: python delta_silver_epoch_scenarios.py <jar_dir> <work_dir>
+Prints one JSON object on the last stdout line.
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+_SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from c360_stream_scenarios import bronze_df  # noqa: E402
+
+TABLE = "spark_catalog.silver.customer_interactions_enriched"
+ROWS_PER_CYCLE = 10  # bronze rows; every 10th is filtered, so 9 reach silver
+SILVER_PER_CYCLE = 9
+
+
+def _submit_args(jar_dir, work):
+    jars = ",".join(sorted(glob.glob(os.path.join(jar_dir, "*.jar"))))
+    confs = {
+        "spark.ui.enabled": "false",
+        "spark.sql.shuffle.partitions": "2",
+        "spark.sql.catalogImplementation": "hive",
+        "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+        "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        "spark.sql.warehouse.dir": f"file://{work}/warehouse",
+        "spark.hadoop.javax.jdo.option.ConnectionURL": (
+            f"jdbc:derby:;databaseName={work}/metastore_db;create=true"
+        ),
+        "spark.driver.extraJavaOptions": f"-Dderby.system.home={work}",
+    }
+    parts = ["--master", "local[2]", "--jars", jars]
+    for k, v in confs.items():
+        parts += ["--conf", f"{k}={v}"]
+    return " ".join(parts) + " pyspark-shell"
+
+
+def stage_bronze(spark, work, run, cycle):
+    """Write one cycle's bronze file under the name datagen_rs gives it."""
+    base = Path(work) / "bronze" / "customer" / "interactions"
+    base.mkdir(parents=True, exist_ok=True)
+    name = f"part-{run:06d}.parquet" if cycle == 0 else f"part-c{cycle:03d}-{run:06d}.parquet"
+    tmp = Path(work) / "bronze-tmp"
+    start = 100_000 * (run + 1) + 1_000 * cycle
+    bronze_df(spark, ROWS_PER_CYCLE, start=start).coalesce(1).write.mode("overwrite").parquet(
+        str(tmp)
+    )
+    (part,) = tmp.glob("part-*.parquet")
+    shutil.move(str(part), str(base / name))
+    shutil.rmtree(tmp)
+
+
+def silver_job(jar_dir, work, cycle, epoch, force=False, strategy="simple", log=None):
+    """Run silver_build_delta.py as one driver; return its exit code."""
+    env = dict(os.environ)
+    env.update(
+        {
+            "PYSPARK_SUBMIT_ARGS": _submit_args(jar_dir, work),
+            "LB_ICEBERG_CATALOG": "spark_catalog",
+            "LB_BRONZE_URI": f"file://{work}/bronze/",
+            "LB_SILVER_URI": f"file://{work}/silver/",
+            "LB_DATA_CLOCK": "2031-01-01",
+            "LB_SILVER_SIZE_GB": "0.001",
+            "LB_SILVER_STRATEGY": strategy,
+            "LB_BRONZE_CYCLE": str(cycle),
+            "LB_REBUILD_EPOCH": str(epoch),
+            "LB_FORCE_REBUILD": "1" if force else "0",
+            "LB_SILVER_INCREMENTAL": "true" if cycle > 0 else "false",
+        }
+    )
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "silver_build_delta.py")],
+        cwd=work,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if log is not None:
+        log.append(
+            {
+                "cycle": cycle,
+                "epoch": epoch,
+                "force": force,
+                "rc": proc.returncode,
+                "tail": (proc.stdout + proc.stderr)[-3000:],
+            }
+        )
+    return proc.returncode
+
+
+def silver_cycles(spark, work):
+    """Which (run, cycle) pairs silver holds, with the row count of each."""
+    path = f"{work}/warehouse/silver.db/customer_interactions_enriched"
+    held = {}
+    for r in spark.read.format("delta").load(path).select("id").collect():
+        key = f"{r['id'] // 100_000 - 1}:{(r['id'] % 100_000) // 1_000}"
+        held[key] = held.get(key, 0) + 1
+    return dict(sorted(held.items()))
+
+
+def run(spark, jar_dir, work, run_no, epochs, force_cycle0=False, strategy="simple", log=None):
+    """Cycles 0..2 of one `lakebench run`; ``epochs`` is LB_REBUILD_EPOCH per cycle."""
+    rcs = []
+    for cycle, epoch in enumerate(epochs):
+        stage_bronze(spark, work, run_no, cycle)
+        rcs.append(
+            silver_job(
+                jar_dir,
+                work,
+                cycle,
+                epoch,
+                force=force_cycle0 and cycle == 0,
+                strategy=strategy,
+                log=log,
+            )
+        )
+        if rcs[-1] != 0:
+            break
+    return rcs
+
+
+def _fresh(root, name):
+    work = os.path.join(root, name)
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    return work
+
+
+def _clear_bronze(work):
+    shutil.rmtree(Path(work) / "bronze", ignore_errors=True)
+
+
+def main():
+    from pyspark.sql import SparkSession
+
+    jar_dir, root = sys.argv[1], sys.argv[2]
+    jars = ",".join(sorted(glob.glob(os.path.join(jar_dir, "*.jar"))))
+    spark = (
+        SparkSession.builder.master("local[1]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.jars", jars)
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .config(
+            "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+        )
+        .config("spark.sql.warehouse.dir", f"file://{root}/reader-wh")
+        .getOrCreate()
+    )
+    out = {}
+
+    # 1. The epoch counter goes back to 0 while the catalog entry and the
+    #    log survive (silver-state lost, or job.py's read falling back to 0),
+    #    and the next run is a --force-rebuild. Run 0 committed epoch 0 up to
+    #    cycle 2, so run 1's cycles 1 and 2 reuse those (appId, version) keys.
+    work = _fresh(root, "epoch-reset")
+    log = []
+    first = run(spark, jar_dir, work, 0, [0, 0, 0], log=log)
+    _clear_bronze(work)
+    second = run(spark, jar_dir, work, 1, [0, 0, 0], force_cycle0=True, log=log)
+    out["epoch_reset"] = {
+        "rcs": [first, second],
+        "held": silver_cycles(spark, work),
+        "log": log,
+    }
+
+    # 2. One later cycle reads a stale epoch (the ConfigMap read in job.py
+    #    falls back to 0) while cycles 0 and 2 read the bumped epoch 1.
+    #    STREAMING strategy, so both write functions are covered.
+    work = _fresh(root, "stale-cycle")
+    log = []
+    first = run(spark, jar_dir, work, 0, [0, 0, 0], strategy="streaming", log=log)
+    _clear_bronze(work)
+    second = run(
+        spark, jar_dir, work, 1, [1, 0, 1], force_cycle0=True, strategy="streaming", log=log
+    )
+    held_after_run = silver_cycles(spark, work)
+    # An operator retry of the last cycle (same env): Delta must skip it.
+    retry_rc = silver_job(jar_dir, work, 2, 1, strategy="streaming", log=log)
+    out["stale_cycle"] = {
+        "rcs": [first, second],
+        "held": held_after_run,
+        "retry_rc": retry_rc,
+        "held_after_retry": silver_cycles(spark, work),
+        "log": log,
+    }
+
+    # 3. The BUGS-row staging: the catalog entry goes (metastore dropped,
+    #    bucket kept) and the next deployment starts again at epoch 0.
+    work = _fresh(root, "catalog-lost")
+    log = []
+    first = run(spark, jar_dir, work, 0, [0, 0, 0], log=log)
+    shutil.rmtree(os.path.join(work, "metastore_db"))
+    _clear_bronze(work)
+    second = run(spark, jar_dir, work, 1, [0, 0, 0], log=log)
+    out["catalog_lost"] = {
+        "rcs": [first, second],
+        "held": silver_cycles(spark, work),
+        "refused_orphan_log": "already holds a Delta log" in log[-1]["tail"],
+        "log": log,
+    }
+
+    spark.stop()
+    print(json.dumps(out))
+
+
+if __name__ == "__main__":
+    main()

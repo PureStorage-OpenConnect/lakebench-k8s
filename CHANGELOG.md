@@ -145,6 +145,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   annotations.
 ### Fixed
 
+- A Delta Customer 360 multi-cycle batch run no longer loses cycles when the
+  deployment's rebuild epoch reads lower than one the silver table already
+  used: the `lakebench-silver-state` ConfigMap lost or recreated while the
+  table survived, or the epoch read at job submission falling back to 0.
+  Delta skipped the new run's cycles 1..N as already committed under the
+  old (txnAppId, txnVersion) keys, so silver held only the new cycle 0 and
+  the run exited 0. Silver-build now takes the epoch from the table's Delta
+  log: a full build writes under an epoch above every one in the log, and
+  each append continues the newest. An operator retry of a committed cycle
+  is still skipped. The build refuses when it cannot read the log's
+  transaction ids, or when its cycle is behind one already committed in
+  that epoch. When the metastore is lost and the table files are kept,
+  cycle 0 already refused to adopt the old Delta log; that is unchanged.
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one
