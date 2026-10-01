@@ -10,7 +10,18 @@
   "differs_from_record": "As continuous_c360's differs_from_record (settle 870.0 s vs 874.1, total_s3_objects 300 vs 12320, constant gold event age, throughput over exactly 1800.0 s, round and skip times, window start .500). In addition the record deployed datagen itself (no --skip-generate) and cleared the raw prefix; this scenario does neither and replays the record's fleet as if a finished datagen Job wrote it.",
   "unsure": "Nothing material. The only judgement is that a 'finished' datagen Job makes run() pass datagen_runs=False to the prerequisites, which the code states directly (cli/_run.py:1844).",
   "calls_count": "236 calls (continuous_c360: 238)",
-  "rerecord_sd8": "SD-8 (integrate 2f28d4e, merged before this golden) moved one call and nothing else: _run_sustained now only builds the scripts maps (build_script_configmaps, pure, reads the packaged scripts, cli/_sustained.py:2828) where it used to deploy them, and deploys them (JobManager.deploy_scripts_configmap, cli/_sustained.py:2875) after _stop_leftover_streams and _reset_continuous_state (:2868-2869), so a changed map is not replaced while a leftover stream still mounts it. In calls the deploy_scripts_configmap entry moves from after Benchmark init to after the last reset delete_prefix, before the reset preflight's bronze-verify submit (no Datagen deploy under --skip-generate). Call count unchanged (236); every other section is unchanged. Moved by hand from the SD-8 diff, then checked against the harness on b587651. Line citations in the other _derivation keys are against the tree named in 'tree' (pre-SD-8): on b587651 cli/_sustained.py lines from about 2823 to 2867 sit 6 lower and lines after 2867 sit 21 lower (DatagenDeployer.deploy is now 2891-2892, the reset preflight about 2979-2986), and cli/_run.py lines after 1999 sit 8 lower. The early build_script_configmaps call is real code in the harness, not a seam, so it is not in calls; removing it would not move this golden."
+  "rerecord_sd8": "SD-8 (integrate 2f28d4e, merged before this golden) moved one call and nothing else: _run_sustained now only builds the scripts maps (build_script_configmaps, pure, reads the packaged scripts, cli/_sustained.py:2828) where it used to deploy them, and deploys them (JobManager.deploy_scripts_configmap, cli/_sustained.py:2875) after _stop_leftover_streams and _reset_continuous_state (:2868-2869), so a changed map is not replaced while a leftover stream still mounts it. In calls the deploy_scripts_configmap entry moves from after Benchmark init to after the last reset delete_prefix, before the reset preflight's bronze-verify submit (no Datagen deploy under --skip-generate). Call count unchanged (236); every other section is unchanged. Moved by hand from the SD-8 diff, then checked against the harness on b587651. Line citations in the other _derivation keys are against the tree named in 'tree' (pre-SD-8): on b587651 cli/_sustained.py lines from about 2823 to 2867 sit 6 lower and lines after 2867 sit 21 lower (DatagenDeployer.deploy is now 2891-2892, the reset preflight about 2979-2986), and cli/_run.py lines after 1999 sit 8 lower. The early build_script_configmaps call is real code in the harness, not a seam, so it is not in calls; removing it would not move this golden.",
+  "er9h": {
+   "author": "independent second agent (ER-9h golden update), derived by reading the uncommitted lane diff; pytest, the harness, run(), _run_sustained and the CLI were not run",
+   "tree": "lane/v17-identity-er9h, uncommitted working tree on integrate 9afa879 (cli/_run.py, cli/_sustained.py, corpus_digest.py, metrics/corpus_identity.py, tests/harness/run_harness.py)",
+   "position": "calls[236..238], appended after the result check's run_power(hot, 1, 300, True); the finally block (cli/_sustained.py:3833-3836) skips _stop_streams (streams_stopped True at :3580) and _measure_bucket_sizes (_total_s3_objects set at :3526), and observability is disabled; nothing records between those and the new site. calls 236 -> 239.",
+   "site": "cli/_sustained.py:3892-3896 (continuous finally block, inside `if run_metrics:`, after build_pipeline_benchmark, before save_run at :3897) calls record_corpus_observation(run_metrics, cfg) with s3=None. config_snapshot.experiment_inputs is a dict (metrics/collector.py:2276), so the helper does not return early.",
+   "calls[236]": "S3 init: record_corpus_observation builds S3Client from cfg.platform.storage.s3 (metrics/corpus_identity.py:209-219), via lakebench.s3.S3Client, which the harness patches to FakeS3 (tests/harness/run_harness.py:1501); FakeS3.__init__ records endpoint, keys, region, path_style, verify_ssl (run_harness.py:893-911), the same values as the finally block's init (ca_cert is passed but not recorded).",
+   "calls[237]": "S3 raw_client: observe_corpus reads s3.raw_client once (metrics/corpus_identity.py:161); FakeS3.raw_client records it and returns _FakeBoto (run_harness.py:927-930).",
+   "calls[238]": "S3 paginate list_objects_v2 runchar-bronze customer/interactions/: read_corpus_markers -> _read_into -> list_scope (corpus_digest.py:263-292, 137-146); get_paginator itself records nothing, paginate records (Bucket, Prefix) (run_harness.py:857-872). Bucket cfg.platform.storage.s3.buckets.bronze = runchar-bronze (default_bucket_names, as the get_bucket_size calls show). bronze_datagen_prefix (deploy/datagen.py:40-53): schema customer360, path_template default 'customer/interactions' (config/schema.py:929; base_config does not set it), unchanged; datagen_scope (corpus_digest.py:94-101) -> 'customer/interactions/'. The bucket starts with 'runchar-', so no refusal.",
+   "after": "The page is empty, so no marker or series.json GET (corpus_digest.py:294-356); resolve_lineage reads the local lineage table only (metrics/corpus_identity.py:511-549); no further seam call before save_run.",
+   "other_sections": "unchanged. experiment's top-level keys are fixed (metrics/experiment.py:811-828), so metrics_keys.experiment is the same; the observation adds only experiment.corpus fields (id_v2 None, id_v2_unavailable, declared, problems), which no trace section reads (build_trace, run_harness.py:1687-1746). compute_verdict reads no corpus or experiment field (metrics/verdict.py), so success, verdict and verdict_reasons are unchanged. No journal event. unscripted stays []."
+  }
  },
  "exit_code": 0,
  "unscripted": [],
@@ -1395,6 +1406,26 @@
    1,
    300,
    true
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-bronze",
+   "customer/interactions/"
   ]
  ],
  "submits": [

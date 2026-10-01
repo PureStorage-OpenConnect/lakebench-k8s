@@ -164,9 +164,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   their next deploy; other combinations are unchanged.
 
 ### Added
-- **Corpus id v2 (EVD-6).** A run whose corpus observation was recorded
-  (the generator's per-node markers and `series.json` under the datagen
-  prefix, read once before the record is saved) gains in
+- **Corpus id v2 (EVD-6).** Every `run` (batch, continuous and `--local`)
+  now records its corpus observation (the generator's per-node markers and
+  `series.json` under the datagen prefix, one listing taken just before the
+  record is saved, in `config_snapshot.experiment_inputs.corpus_observation`;
+  Lakebench's own bucket objects under `.lakebench/` are never counted) and
+  gains in
   `experiment.corpus`: `id_v2` (null when it cannot be computed, with the
   reason in `id_v2_unavailable`), `id_version`, `args_sha256`, `declared`
   (the config's corpus settings, for display), and, when markers exist,

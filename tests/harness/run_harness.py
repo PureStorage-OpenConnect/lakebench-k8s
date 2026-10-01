@@ -854,6 +854,23 @@ class _FakeBoto:
         self._rec.add("S3", "list_objects_v2", Bucket, Prefix, MaxKeys)
         return {"KeyCount": 0, "Contents": []}
 
+    def get_paginator(self, operation):
+        """The corpus observation's one listing of the datagen scope
+        (corpus_digest.list_scope): the scenario's markers are not served,
+        so the corpus reads as written by an image without markers."""
+        if operation != "list_objects_v2":
+            raise self._rec.refuse(f"unscripted paginator {operation}")
+        rec = self._rec
+
+        class _Paginator:
+            def paginate(self, Bucket, Prefix=""):  # noqa: N803 -- boto3 keywords
+                rec.add("S3", "paginate list_objects_v2", Bucket, Prefix)
+                if not Bucket.startswith(f"{NAME}-"):
+                    raise rec.refuse(f"listing of a bucket not of the deployment: {Bucket}")
+                return iter([{"KeyCount": 0, "Contents": []}])
+
+        return _Paginator()
+
     def __getattr__(self, attr: str):
         if attr.startswith("_"):
             raise AttributeError(attr)

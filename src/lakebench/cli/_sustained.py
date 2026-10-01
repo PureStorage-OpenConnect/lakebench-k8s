@@ -3889,6 +3889,11 @@ def _run_sustained(
             except Exception as e:
                 console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
+            # The corpus this run read, once, before the save (corpus id v2);
+            # datagen has ended by now.
+            from lakebench.metrics.corpus_identity import record_corpus_observation
+
+            record_corpus_observation(run_metrics, cfg)
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")

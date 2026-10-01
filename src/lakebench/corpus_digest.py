@@ -123,14 +123,29 @@ def listing_sha256(objects: Iterable[Mapping[str, Any]]) -> str:
     return hashlib.sha256(canonical_json(triples).encode()).hexdigest()
 
 
+#: Bucket-level prefix of the objects Lakebench itself keeps in a bucket
+#: (the bucket owner marker). They are never corpus data.
+RESERVED_PREFIX = ".lakebench/"
+
+
+def is_corpus_object(key: str, scope: str) -> bool:
+    """Whether *key* is corpus data under *scope*: inside the scope and not
+    one of Lakebench's own bucket objects."""
+    return key.startswith(scope) and not key.startswith(RESERVED_PREFIX)
+
+
 def list_scope(client: Any, bucket: str, scope: str) -> list[dict[str, Any]]:
-    """Every object under *scope* in *bucket*, through the boto3
-    ``list_objects_v2`` paginator. Errors propagate to the caller."""
+    """Every corpus object under *scope* in *bucket*, through the boto3
+    ``list_objects_v2`` paginator; Lakebench's own bucket objects
+    (``RESERVED_PREFIX``) are never counted. Errors propagate to the
+    caller."""
+    if scope.startswith(RESERVED_PREFIX):
+        raise ValueError(f"a corpus scope is never under {RESERVED_PREFIX}")
     out: list[dict[str, Any]] = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=scope):
         for obj in page.get("Contents") or []:
-            if str(obj.get("Key", "")).startswith(scope):
+            if is_corpus_object(str(obj.get("Key", "")), scope):
                 out.append(dict(obj))
     return out
 
