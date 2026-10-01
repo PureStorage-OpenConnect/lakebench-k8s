@@ -321,6 +321,7 @@ class DependencyServerDeployer:
         return {
             **m.SELECTOR_LABELS,
             "app.kubernetes.io/managed-by": "lakebench",
+            "app.kubernetes.io/instance": self.config.name,
             "lakebench.io/deployment": self.config.name,
         }
 

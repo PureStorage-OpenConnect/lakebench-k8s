@@ -9,12 +9,13 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ server_name }}
+  name: lb-deps
   namespace: {{ namespace }}
   labels:
     app.kubernetes.io/name: lakebench
     app.kubernetes.io/component: deps
     app.kubernetes.io/managed-by: lakebench
+    app.kubernetes.io/instance: "{{ deployment_name }}"
     lakebench.io/deployment: "{{ deployment_name }}"
     lakebench.io/deps-role: server
 spec:
@@ -35,6 +36,7 @@ spec:
         app.kubernetes.io/name: lakebench
         app.kubernetes.io/component: deps
         app.kubernetes.io/managed-by: lakebench
+        app.kubernetes.io/instance: "{{ deployment_name }}"
         lakebench.io/deployment: "{{ deployment_name }}"
         lakebench.io/deps-role: server
       annotations:

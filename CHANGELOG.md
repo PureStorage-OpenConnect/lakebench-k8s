@@ -21,7 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The step removes the annotation first and writes it last, so a deploy
   whose `deps` step fails leaves none. A cold resolve adds one to a few
   minutes to the first deploy; an unchanged redeploy renders the same pod
-  template and does not restart the server.
+  template and does not restart the server. `destroy` removes the server's
+  objects and the annotation, also when `create_namespace: false`.
 - New optional config block `platform.deps`: `maven_repository`,
   `pypi_index` and `duckdb_extension_repository` point the resolve at
   mirrors for clusters without public egress, and `storage_class` picks the

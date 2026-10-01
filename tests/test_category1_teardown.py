@@ -66,6 +66,29 @@ def _instant_waits(mp: pytest.MonkeyPatch) -> None:
     mp.setattr(SparkThriftDeployer, "_wait_for_ready", lambda *a, **k: None)
     mp.setattr(DuckDBDeployer, "_wait_for_ready", lambda *a, **k: None)
     mp.setattr("lakebench.deploy.observability._wait_for_prometheus", lambda *a, **k: "")
+    _instant_deps_server(mp)
+
+
+def _instant_deps_server(mp: pytest.MonkeyPatch) -> None:
+    """The deps step (DEP-2) waits for its pod and reads the set from it;
+    the fake runs no pods, so the pod is Ready and serves the request."""
+    from types import SimpleNamespace
+
+    from lakebench.deploy.deps import DependencyServerDeployer
+    from lakebench.deps.request import select_request
+    from tests.test_deps_manifest import fake_shown
+
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(name="lb-deps-0", uid="uid-lb-deps-0"),
+        status=SimpleNamespace(container_statuses=[], init_container_statuses=[]),
+    )
+    mp.setattr(DependencyServerDeployer, "_wait_for_server_ready", lambda *a, **k: pod)
+    mp.setattr(DependencyServerDeployer, "_recheck_server", lambda *a, **k: None)
+    mp.setattr(
+        DependencyServerDeployer,
+        "_show",
+        lambda self, p, sha: fake_shown(select_request(self.config)),
+    )
 
 
 def _config(recipe: str, workload: str, tmp_path: Path | None = None):

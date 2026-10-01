@@ -4,12 +4,13 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ pvc_name }}
+  name: lb-deps-data
   namespace: {{ namespace }}
   labels:
     app.kubernetes.io/name: lakebench
     app.kubernetes.io/component: deps
     app.kubernetes.io/managed-by: lakebench
+    app.kubernetes.io/instance: "{{ deployment_name }}"
     lakebench.io/deployment: "{{ deployment_name }}"
     lakebench.io/deps-role: data
 spec:
