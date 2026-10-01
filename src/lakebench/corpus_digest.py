@@ -7,17 +7,17 @@ One definition each, so the writers and readers of a corpus never disagree:
   listing never takes in a sibling prefix such as ``customer/interactions_v2/``;
 * ``listing_sha256(objects)`` and ``listing_digest(client, bucket, prefix)``:
   the bronze listing digest, sha256 over the sorted ``(key, size, etag)``
-  triples of every object in the scope (ch02 CC-30's series guard and ch03
-  ER-9's ``bronze_listing_sha256`` are this one value);
+  triples of every object in the scope (the ``--repeat`` series guard and
+  the recorded ``bronze_listing_sha256`` are this one value);
 * ``corpus_series_sha256(markers)``: ch05 section 3.1's multi-cycle form of
   the generator's ``corpus_args_sha256``, sha256 over the canonical JSON
   array of the per-cycle hashes in cycle order, or None when the per-node
   markers do not describe one complete corpus;
 * ``read_corpus_markers(client, bucket, prefix) -> MarkerSet``: the one
   parser of the generator's per-node markers and of ``series.json`` (ch05
-  sections 3.1 and 7.1), from one listing of the scope. ch03 ER-9 persists
-  ``MarkerSet.to_dict()``; ch05 CD-18's ``read_node_markers`` and DAT-4's
-  completeness check wrap ``MarkerSet.markers``.
+  sections 3.1 and 7.1), from one listing of the scope. The run record
+  persists ``MarkerSet.to_dict()``; the ``--skip-generate`` marker read and
+  the object-completeness check wrap ``MarkerSet.markers``.
 
 It imports nothing from Lakebench (stdlib only), so ``s3/``, ``deploy/``
 and ``metrics/`` can all use it without import cycles.

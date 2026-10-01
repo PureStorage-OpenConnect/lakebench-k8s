@@ -1513,7 +1513,7 @@ class SparkJobManager:
         # continuous CLI clears it once the datagen Job has finished (LB-158).
         self.datagen_running: bool = True
         # Set by deploy_scripts_configmap: {"scripts_sha256", "scripts_maps"}
-        # for provenance (EVD-5). None until the maps are applied.
+        # for run provenance. None until the maps are applied.
         self.scripts_provenance: dict[str, Any] | None = None
 
         # Cache cluster capacity for streaming concurrent budget calculation
@@ -1549,7 +1549,7 @@ class SparkJobManager:
         # Delete existing job if present
         self._delete_job(job_name)
         # A later stage is not submitted on scripts other than the ones this
-        # run applied (DEP-1). Checked after the delete, so a caller that
+        # run applied, so one run never mixes script versions. Checked after the delete, so a caller that
         # ignores the FAILED status cannot read a previous run's result.
         changed = self.scripts_changed_since_apply(job_type)
         if changed:
@@ -3012,7 +3012,7 @@ class SparkJobManager:
         return env
 
     def deploy_scripts_configmap(self) -> bool:
-        """Apply the Spark scripts ConfigMaps, one per role (DEP-1).
+        """Apply the Spark scripts ConfigMaps, one per role.
 
         The maps are rendered by ``scripts_maps.build_script_configmaps`` and
         mounted together at /opt/spark/scripts through one projected volume.

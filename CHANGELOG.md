@@ -63,21 +63,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and `report` and `results` no longer create `lakebench-output/runs/`.
 - `platform.storage.s3.secret_ref` without `access_key` and `secret_key` is
   refused at load: nothing reads an existing Secret, so such a config
-  deployed empty S3 credentials (LB-190). `destroy`, `status` and `clean`
+  deployed empty S3 credentials. `destroy`, `status` and `clean`
   still load it, so an old deployment stays destroyable. Set alongside
   inline keys, it loads with a warning that it has no effect. `config
   validate` and the deploy preflight now ask for the inline keys only.
 - Run provenance and the Hive deploy result record Hive 3.1.3, the version
   the Stackable HiveCluster template renders, instead of the tag of
   `images.hive`. An `images.hive` naming another version warns at load that
-  it has no effect (LB-189).
+  it has no effect.
 - Setting `architecture.catalog.hive.thrift.*`,
   `architecture.catalog.polaris.version` or `observability.storage_class`
   to a non-default value warns that it has no effect; nothing reads them.
   The generated config template no longer carries them or `secret_ref`.
 - Deploy step labels say "Verifying scratch StorageClass" and "Checking
   Spark Operator and watch list", and the deploy summary lists the operator
-  step whether or not `operator.install` is set (LB-191). The HTML report's
+  step whether or not `operator.install` is set. The HTML report's
   continuous section is headed "Continuous Pipeline".
 - `docs/reproductions/c360-scale-0-1.yaml` is marked as a legacy package
   that `reproduce` refuses.
@@ -126,7 +126,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `lakebench-s3-ca-cert-class` used to run without it. The lease is taken
   only when one of them exists; if it stays held for 600 s the cleanup is
   skipped and they are kept.
-- **The cluster lease holder names the process (LB-178).** The `holder`
+- **The cluster lease holder names the process.** The `holder`
   field is now `<host>@<user>@<sha>#<pid>-<8 hex>`, unique to each acquire,
   and release matches the lease's write nonce, so a process never deletes a
   lease another run from the same host wrote in the same second. An acquire
@@ -134,14 +134,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a Ctrl-C, a SIGTERM) releases that lease instead of leaving it to the
   3600 s TTL, and an acquire whose own write comes back as a conflict adopts
   it instead of waiting on itself.
-- **`destroy` deletes the PostgreSQL data PVC when the namespace survives
-  (LB-187).** With `create_namespace: false`, `data-lakebench-postgres-<n>`
+- **`destroy` deletes the PostgreSQL data PVC when the namespace
+  survives.** With `create_namespace: false`, `data-lakebench-postgres-<n>`
   and the catalog metadata on it used to survive destroy, because the cleanup
   selected on a label the claim never carried; the next deploy then started
   on the old metastore. Destroy now deletes the claims by name. It no longer
   selects on `app.kubernetes.io/component=postgres`, which could only ever
   match another application's claim in a shared namespace.
-- **Spark scripts ship in one ConfigMap per role (DEP-1, LB-207).** The single
+- **Spark scripts ship in one ConfigMap per role.** The single
   `lakebench-spark-scripts` ConfigMap, about 45 KB from the 1 MiB limit with
   every AML addition, is replaced by six maps (`lakebench-scripts-common`,
   `-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate`, `-aml-data`), projected
@@ -176,7 +176,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   their next deploy; other combinations are unchanged.
 
 ### Added
-- **Corpus id v2 (EVD-6).** A run whose corpus observation was recorded
+- **Corpus id v2.** A run whose corpus observation was recorded
   (the generator's per-node markers and `series.json` under the datagen
   prefix, read once before the record is saved) gains in
   `experiment.corpus`: `id_v2` (null when it cannot be computed, with the

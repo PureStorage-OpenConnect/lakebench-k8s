@@ -304,7 +304,7 @@ class HiveDeployer:
 
             pod_name = self._get_hive_pod_name(namespace)
 
-            # The version the template rendered, not images.hive (LB-189).
+            # The version the template rendered; images.hive does not select it.
             hive_version = STACKABLE_HIVE_VERSION
             return DeploymentResult(
                 component="hive",

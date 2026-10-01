@@ -53,7 +53,7 @@ While the lease is held (cluster-safety 2, DESIGN ch01 3.6):
 
 Not covered: SIGKILL and a lost host. The TTL reclaims the lease. An
 interrupt inside the acquire, after the lease was written, releases it:
-the holder id is unique to each acquire (LB-178).
+the holder id is unique to each acquire.
 """
 
 from __future__ import annotations
@@ -118,13 +118,13 @@ _WAIT_NOTICE_SEC = 30.0
 _POLL_MAX_SEC = 4.0
 
 # How long one holder may keep the lease (DESIGN ch01 3.7). The watch-list
-# phases (helm upgrade, rollout waits, restart, the SAF-4 pod poll, the
+# phases (helm upgrade, rollout waits, restart, the operator pod poll, the
 # namespace delete) fit in LEASE_MAX_HOLD_S. The admin verbs
 # (install-spark-operator with --wait, repair-operator's per-namespace
 # restarts, migrate-deployment, reclaim-bucket) get ADMIN_MAX_HOLD_S. Both
 # stay under the TTL so a crashed holder is still reclaimed. Subprocesses
 # under the lease are bounded by the budget today (lakebench.k8s._pinned);
-# SD-12 moves the remaining waits and sleeps onto lease_clamp.
+# the remaining waits and sleeps are to move onto lease_clamp.
 LEASE_MAX_HOLD_S = 750
 ADMIN_MAX_HOLD_S = 1800
 
@@ -222,7 +222,7 @@ def build_holder_id() -> str:
     """Return ``<hostname>@<user>@<git-sha>#<pid>-<8 hex>`` for the holder field.
 
     The first three components are best-effort so the holder line is never
-    empty. The suffix (LB-178) names the process for ``admin status`` and
+    empty. The suffix names the process for ``admin status`` and
     makes the id unique to one acquire: two runs from the same tree on the
     same host, in the same second, no longer write the same holder, and
     ``cluster_lock`` can tell its own lease from anyone else's after an
@@ -730,7 +730,7 @@ def force_release_cluster_lock(core_v1: Any, *, expired_only: bool) -> LeaseStat
 class LeaseAbort(KeyboardInterrupt):
     """The third interrupt inside the lease: stop now, after the release.
 
-    ``signum`` is the signal that aborted, for an interrupt record (CD-16).
+    ``signum`` is the signal that aborted, for the run's interrupt record.
     """
 
     def __init__(self, signum: int) -> None:
@@ -938,7 +938,7 @@ def cluster_lock(
             elif holder is None:
                 # The acquire failed or was interrupted, possibly after its
                 # write committed (a lost reply, a 504, a signal). The holder
-                # id is unique to this acquire (LB-178), so a lease carrying
+                # id is unique to this acquire, so a lease carrying
                 # it is ours to release.
                 _release_interrupted_acquire(core_v1, holder_id)
         finally:

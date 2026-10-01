@@ -34,7 +34,7 @@ _LEGACY_SECRETCLASSES = ("lakebench-s3-credentials-class", "lakebench-s3-ca-cert
 # <ordinal> (templates/postgres/statefulset.yaml.j2). The claim template
 # carries no labels, and cannot gain one without making a v1.7 deploy over a
 # v1.6 StatefulSet fail (volumeClaimTemplates are immutable), so destroy
-# finds the claims by name (LB-187).
+# finds the claims by name.
 _POSTGRES_PVC_RE = re.compile(r"^data-lakebench-postgres-\d+$")
 
 
@@ -57,7 +57,7 @@ _TABLE_STEP_CAP = 1800
 # Delays before each in-lease namespace delete attempt (seconds).
 _IN_LEASE_DELETE_BACKOFF = (0.0, 2.0, 5.0)
 
-# SAF-4 (DESIGN ch01 3.3): inside the lease, before the namespace delete,
+# Inside the lease, before the namespace delete,
 # destroy waits up to this long (clamped to the lease's hold budget) for every
 # Spark Operator pod still listing the namespace in --namespaces= to go. The
 # restart before it already waited for the rollout, so this covers pods that
@@ -68,7 +68,7 @@ _OPERATOR_POD_POLL_S = 3.0
 # controller pod stays in Failed with its old args).
 _FINISHED_POD_PHASES = frozenset({"Succeeded", "Failed"})
 
-# SAF-4 (3.2): how long the optional legacy SecretClass cleanup waits for the
+# How long the optional legacy SecretClass cleanup waits for the
 # cluster lease before it skips.
 _LEGACY_CLEANUP_LOCK_TIMEOUT_S = 600.0
 
@@ -147,7 +147,7 @@ class _NamespaceUnverifiable(Exception):
 
 
 class _OperatorStillWatching(Exception):
-    """Spark Operator pods still list the namespace in ``--namespaces=`` (SAF-4)."""
+    """Spark Operator pods still list the namespace in ``--namespaces=``."""
 
     def __init__(self, pods: list[str]) -> None:
         super().__init__(", ".join(pods))
@@ -1087,8 +1087,7 @@ def _other_lakebench_namespaces(all_ns: list[Any], namespace: str) -> list[str]:
     deployments predate the annotation). Every phase counts, Terminating
     included: a namespace still being torn down can still have pods that
     mount a legacy SecretClass, so counting it errs toward keeping the
-    shared object. The one refcount for ``_legacy_secretclass_cleanup``
-    (DEP-7).
+    shared object. The one refcount for ``_legacy_secretclass_cleanup``.
     """
     out: list[str] = []
     for n in all_ns:
@@ -1143,7 +1142,7 @@ def _legacy_secretclass_cleanup(core_v1: Any, custom_api: Any, namespace: str) -
     which copies them and does not delete them. They are cluster-scoped and
     shared, so they go only when no other lakebench namespace is left
     (``_other_lakebench_namespaces``), and the count and the deletes run
-    inside the cluster lease (SAF-4), where ``migrate-deployment`` also
+    inside the cluster lease, where ``migrate-deployment`` also
     works. When neither exists the lease is not taken. A lease that stays
     held for ``_LEGACY_CLEANUP_LOCK_TIMEOUT_S``, or a namespace list that
     fails, deletes nothing. The cleanup is optional: every error is logged
@@ -1780,7 +1779,7 @@ def destroy_all(
                 # deleted namespace. Errors fall back to the delete below.
                 if not namespace_uid_at_start:
                     return
-                # SAF-4: never delete a namespace a live operator pod still
+                # Never delete a namespace a live operator pod still
                 # lists; it would crash-loop on the missing namespace. The
                 # lease is held, so no deploy can re-add it meanwhile.
                 try:
@@ -3392,7 +3391,7 @@ def destroy_all(
             core_v1.delete_namespaced_service("lakebench-postgres", namespace)
         except ApiException as e:
             logger.debug("Postgres service delete skipped: %s", e.reason)
-        # The StatefulSet's claims, by name (LB-187: the claim template has
+        # The StatefulSet's claims, by name (the claim template has
         # no labels, so the old component-label selector matched none of
         # ours and only ever could match another app's claim).
         pvcs = core_v1.list_namespaced_persistent_volume_claim(namespace)
@@ -3426,7 +3425,7 @@ def destroy_all(
     stopped = _stop_if_changed("RBAC, secrets and SecretClass teardown")
     if stopped is not None:
         return stopped
-    # Step 8a: the scripts ConfigMaps (DEP-1): the per-role maps and the v1.6
+    # Step 8a: the scripts ConfigMaps, the per-role maps and the v1.6
     # single map, by this deployment's label in its own namespace. With
     # create_namespace=false the namespace survives destroy, so nothing else
     # removes them; with true the namespace delete would, so a failure to

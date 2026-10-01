@@ -273,7 +273,8 @@ class ReportFormat(str, Enum):
 # Fixed on purpose: Stackable recommends 3.1.3, and Hive 4 breaks Iceberg
 # (get_table TApplicationException) and Trino ANALYZE. The template renders
 # this constant and the deploy result and run provenance record it, so the
-# evidence names the version that ran. images.hive does not select it (LB-189).
+# evidence names the version that ran. images.hive does not select it: the
+# Stackable operator takes a productVersion, not an image.
 STACKABLE_HIVE_VERSION = "3.1.3"
 
 
@@ -386,7 +387,7 @@ class ImagesConfig(ConfigModel):
 
     @model_validator(mode="after")
     def _warn_hive_not_deployed(self) -> ImagesConfig:
-        # LB-189: the HiveCluster always runs STACKABLE_HIVE_VERSION. A
+        # The HiveCluster always runs STACKABLE_HIVE_VERSION. A
         # different images.hive used to be recorded as the Hive that ran
         # while 3.1.3 was deployed; now it is ignored, and the user is told.
         version = _hive_version_of(self.hive)
@@ -451,7 +452,7 @@ class S3Config(ConfigModel):
     # lakebench-s3-credentials Secret and the CLI's S3 client reads them.
     access_key: str = ""
     secret_key: str = ""
-    # Not consumed (LB-190): no deployer reads an existing Secret. Refused
+    # Not consumed: no deployer reads an existing Secret. Refused
     # without inline keys, which would deploy empty credentials.
     secret_ref: str = ""
 
@@ -479,7 +480,7 @@ class S3Config(ConfigModel):
 
     @model_validator(mode="after")
     def validate_credentials(self, info: ValidationInfo) -> S3Config:
-        """Refuse secret_ref without inline keys (LB-190).
+        """Refuse secret_ref without inline keys, which would deploy empty credentials.
 
         Missing credentials alone are left to deploy's preflight so that
         ``info`` and ``validate`` still load a config without keys. A

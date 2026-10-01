@@ -1,4 +1,5 @@
-# Datagen image lineage (SPEC v1.7 EVD-6; read by metrics/corpus_identity.py).
+# Datagen image lineage, the input of corpus id v2 (read by
+# metrics/corpus_identity.py).
 #
 # Corpus id v2 hashes the lineage of the image that generated a corpus: the
 # image digest, mapped through this table to the first digest of a chain of

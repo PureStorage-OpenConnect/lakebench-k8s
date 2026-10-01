@@ -169,7 +169,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
     *_named("core_v1", "services", "unity", "lakebench-unity"),
     *_named("batch_v1", "jobs", "unity", "lakebench-unity-bootstrap"),
     *_named("core_v1", "configmaps", "unity", "lakebench-unity"),
-    # PostgreSQL (its claims by exact name, LB-187).
+    # PostgreSQL (its claims by exact name: the claim template has no labels).
     *_named("apps_v1", "statefulsets", "postgres", "lakebench-postgres"),
     *_named("core_v1", "services", "postgres", "lakebench-postgres"),
     *_named(
@@ -179,7 +179,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         "data-lakebench-postgres-<n>",
         owner="SD-14",
     ),
-    # Scripts ConfigMaps (DEP-1): the role maps and the v1.6 single map, by
+    # Scripts ConfigMaps: the per-role maps and the v1.6 single map, by
     # scripts_maps.scripts_label_selector, which keys on
     # app.kubernetes.io/instance (v1.6 maps carry no lakebench.io/deployment
     # label).
@@ -206,7 +206,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         "lakebench-postgres-secret",
         "lakebench-ca-certificate",
     ),
-    # The category1 step (SD-21): objects no component step deleted. The
+    # The category1 step: objects no component step deleted. The
     # deletes do not wait; a claim still mounted by a terminating pod is held
     # by the pvc-protection finalizer until the pod is gone.
     *_named("core_v1", "serviceaccounts", CATEGORY1_STEP, "lakebench-postgres"),
@@ -252,11 +252,11 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
             "lakebench-pushgateway",
         )
     ),
-    # DEP-2 entries (SD-6) sort last in the category1 step.
+    # The per-deployment cluster-scoped entries sort last in the category1 step.
 )
 
 # Namespace annotations the category1 step removes from a surviving
-# namespace. ``state-schema`` is written by CC-2 beside the deploy nonce
+# namespace. ``state-schema`` is written by deploy beside the deploy nonce
 # (DESIGN ch01 d3 N3); removing an absent key is a no-op.
 CATEGORY1_ANNOTATIONS: tuple[str, ...] = ("lakebench.deployment/state-schema",)
 
