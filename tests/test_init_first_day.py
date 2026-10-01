@@ -521,3 +521,60 @@ def test_workload_format_hint_recommends_a_recipe():
     assert "Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino)" in str(
         exc.value
     )
+
+
+def _load_text(tmp_path, text):
+    p = tmp_path / "env.yaml"
+    p.write_text(text)
+    return load_config(p)
+
+
+def test_empty_whole_value_reference_is_null(tmp_path, monkeypatch):
+    monkeypatch.setenv("LB_EMPTY", "")
+    cfg = _load_text(
+        tmp_path,
+        "name: e-t\nrecipe: hive-iceberg-spark-trino\n"
+        "platform:\n  compute:\n    spark:\n      driver_memory: ${LB_EMPTY}\n"
+        "  storage:\n    s3:\n      region: x-${LB_EMPTY}\n",
+    )
+    assert cfg.platform.compute.spark.driver_memory is None
+    assert cfg.platform.storage.s3.region == "x-"
+
+
+def test_reference_in_a_key_is_refused(tmp_path, monkeypatch):
+    from lakebench.config import ConfigError
+
+    monkeypatch.setenv("LB_B", "bkt")
+    with pytest.raises(ConfigError, match=r"spark\.conf\..*not substituted in keys"):
+        _load_text(tmp_path, "name: k-t\nspark:\n  conf:\n    a.${LB_B}.endpoint: x\n")
+
+
+def test_default_cut_by_a_comment_is_refused(tmp_path, monkeypatch):
+    from lakebench.config import ConfigError
+
+    monkeypatch.setenv("LB_RG", "eu-1")
+    with pytest.raises(ConfigError, match=r"platform\.storage\.s3\.region.*unclosed"):
+        _load_text(
+            tmp_path,
+            "name: c-t\nplatform:\n  storage:\n    s3:\n      region: ${LB_RG:-us-east-1 #x}\n",
+        )
+
+
+def test_spark_env_syntax_passes_through(tmp_path):
+    cfg = _load_text(
+        tmp_path,
+        "name: s-t\nrecipe: hive-iceberg-spark-trino\n"
+        "spark:\n  conf:\n    spark.x: ${env:HOME}/x\n",
+    )
+    assert cfg.spark.conf["spark.x"] == "${env:HOME}/x"
+
+
+def test_overwrite_of_a_nameless_v16_config_needs_a_name(tmp_path):
+    (tmp_path / ".lakebench").mkdir()
+    (tmp_path / ".lakebench" / "state.json").write_text('{"name": "v16-auto"}')
+    out = tmp_path / "lakebench.yaml"
+    out.write_text("recipe: hive-iceberg-spark-trino\n")
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
+    assert r.exit_code == 2, r.output
+    assert "--name v16-auto" in r.output
+    assert out.read_text() == "recipe: hive-iceberg-spark-trino\n"

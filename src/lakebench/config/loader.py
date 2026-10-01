@@ -25,14 +25,17 @@ from .schema import LakebenchConfig
 # -- Env var substitution ----------------------------------------------------
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+_CUT_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:-[^}]*$")
 
 
-def _substitute_env_vars(text: str) -> str:
-    """Replace ``${VAR}`` and ``${VAR:-default}`` with environment values.
+def _substitute_env_vars(text: str, unresolved: list[str] | None = None) -> str:
+    """Replace ``${VAR}`` and ``${VAR:-default}`` in one string.
 
-    Unresolved variables without defaults raise ``ConfigError``.
+    Unresolved variables without defaults raise ``ConfigError``, or are
+    appended to *unresolved* when a list is given (``load_yaml`` names them
+    all at once).
     """
-    unresolved: list[str] = []
+    missing: list[str] = [] if unresolved is None else unresolved
 
     def _replace(m: re.Match) -> str:
         var_name = m.group(1)
@@ -41,14 +44,14 @@ def _substitute_env_vars(text: str) -> str:
         if value is not None:
             return value
         if default is not None:
-            return default
-        unresolved.append(var_name)
-        return m.group(0)
+            return str(default)
+        missing.append(var_name)
+        return str(m.group(0))
 
     result = _ENV_PATTERN.sub(_replace, text)
-    if unresolved:
+    if unresolved is None and missing:
         raise ConfigError(
-            f"Unresolved environment variables: {', '.join(unresolved)}. "
+            f"Unresolved environment variables: {', '.join(missing)}. "
             f"Set them or provide defaults with ${{VAR:-default}} syntax."
         )
     return result
@@ -262,7 +265,10 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not content:
         return {}
     unresolved: list[str] = []
-    content = _substitute_in_tree(content, unresolved)
+    malformed: list[str] = []
+    content = _substitute_in_tree(content, unresolved, malformed)
+    if malformed:
+        raise ConfigError("Malformed environment reference at " + "; ".join(malformed))
     if unresolved:
         names = ", ".join(dict.fromkeys(unresolved))
         raise ConfigError(
@@ -272,31 +278,42 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return content  # type: ignore[no-any-return]
 
 
-def _substitute_in_tree(node: Any, unresolved: list[str]) -> Any:
+def _substitute_in_tree(
+    node: Any, unresolved: list[str], malformed: list[str], path: tuple[str, ...] = ()
+) -> Any:
     """Substitute ``${VAR}`` in every string value of a parsed YAML tree.
 
     Substitution runs after parsing, on values only, so a secret holding
     YAML syntax (``x #y``, a leading ``!`` or ``*``, quotes, all digits)
     arrives verbatim as a string: on the raw text it was truncated at
     `` #``, failed the parse with the secret in the error, or became an int.
-    A ``${VAR}`` in a comment is no longer read. Keys are not substituted.
+    A ``${VAR}`` in a comment is no longer read. A value that is only a
+    reference and resolves to nothing is None, as the empty YAML value was.
+    A reference in a key, or an unclosed ``${VAR:-default`` (a default cut
+    by a `` #`` comment), is collected in *malformed* by its dotted path.
+    Other ``${...}`` text (Spark's ``${env:X}``) passes through, as before.
     """
     if isinstance(node, dict):
-        return {k: _substitute_in_tree(v, unresolved) for k, v in node.items()}
+        out = {}
+        for k, v in node.items():
+            here = (*path, str(k))
+            if isinstance(k, str) and _ENV_PATTERN.search(k):
+                malformed.append(".".join(here) + " (references are not substituted in keys)")
+            out[k] = _substitute_in_tree(v, unresolved, malformed, here)
+        return out
     if isinstance(node, list):
-        return [_substitute_in_tree(v, unresolved) for v in node]
+        return [
+            _substitute_in_tree(v, unresolved, malformed, (*path, str(i)))
+            for i, v in enumerate(node)
+        ]
     if isinstance(node, str) and "${" in node:
-
-        def _replace(m: re.Match) -> str:
-            value = os.environ.get(m.group(1))
-            if value is not None:
-                return value
-            if m.group(2) is not None:
-                return str(m.group(2))
-            unresolved.append(m.group(1))
-            return str(m.group(0))
-
-        return _ENV_PATTERN.sub(_replace, node)
+        if _CUT_DEFAULT.search(_ENV_PATTERN.sub("", node)):
+            malformed.append(".".join(path) + " (an unclosed ${VAR:-default}, cut by a comment?)")
+            return node
+        value = _substitute_env_vars(node, unresolved)
+        if value == "" and _ENV_PATTERN.fullmatch(node):
+            return None
+        return value
     return node
 
 

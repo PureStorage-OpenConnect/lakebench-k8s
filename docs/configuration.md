@@ -138,8 +138,10 @@ workload:
 Unresolved variables without defaults produce one error naming all of them.
 Substitution runs on the parsed values, not on the file text: a secret that
 contains YAML syntax (`#`, a leading `!` or `*`, quotes, only digits) arrives
-verbatim as a string, and a `${VAR}` inside a comment is not read. Keys are
-never substituted.
+verbatim as a string, and a `${VAR}` inside a comment is not read. A value
+that is only a reference and resolves to nothing is null. A reference inside
+a key, or an unclosed `${VAR:-default` (a default cut short by ` #`), is an
+error. Inside flow syntax (`[${A}, ${B}]`) quote each reference.
 
 ### Nested Config (v1.2 Compatible)
 

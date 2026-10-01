@@ -37,8 +37,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   secret holding `#`, a leading `!` or `*`, quotes or only digits used to be
   truncated, fail the parse with the value in the error, or become a
   number; it now arrives verbatim. A `${VAR}` in a comment is no longer
-  required to be set. A value that is only `${VAR}` is now a string, which
-  numeric and boolean keys still accept.
+  required to be set, and every unset variable is named in one error. A
+  value that is only `${VAR}` is now a string: decimal numbers and
+  true/false still load into numeric and boolean keys, but hex, `1_000` or
+  date spellings no longer convert. One that resolves to nothing is null,
+  as before. A reference inside a key, or an unclosed `${VAR:-default`, is
+  refused; Spark's `${env:X}` passes through. A reference inside flow
+  syntax (`[${A}, ${B}]`) must be quoted.
 - **A config with no `recipe:`, or `recipe: default`, is deprecated.** It
   still resolves as before (to `hive-iceberg-spark-trino` when it sets no
   component, otherwise to the components it sets) and loads with a note

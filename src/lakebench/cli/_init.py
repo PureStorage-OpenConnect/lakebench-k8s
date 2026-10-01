@@ -384,6 +384,18 @@ def init(
         print_info("Use --overwrite to replace it")
         raise typer.Exit(1)
     kept_name = None if name else _existing_name(output)
+    if overwrite and output.is_file() and not name and not kept_name:
+        from lakebench.config.deploy_state import read_legacy_name
+
+        legacy = read_legacy_name(output)
+        if legacy:
+            # v1.6 gave every nameless config in this directory that name, so
+            # it may be this file's deployment or a sibling's (SAF-2).
+            _refuse(
+                f"{output} has no name, and v1.6 recorded '{legacy}' for nameless "
+                f"configs here: pass --name {legacy} if this file deployed it, or "
+                "--name with a new name"
+            )
 
     from lakebench.config.support import recipe_names, workloads
 
