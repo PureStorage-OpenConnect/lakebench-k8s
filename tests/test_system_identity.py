@@ -168,6 +168,7 @@ def test_full_observation(cluster, ca_file) -> None:
         },
     ]
     assert parts["storage_endpoint"] == "10.0.1.50:80"
+    assert parts["storage_backend"] == "unknown"
     assert parts["storage_server"] == "PureStorageFlashBlade"
     assert parts["scratch"] == {"enabled": True, "storage_class": "px-csi-scratch"}
     assert s3.calls == ["b-bronze"]
@@ -266,6 +267,16 @@ def test_endpoint_spelling_normalised(cluster) -> None:
 
     assert ep("http://FB.Example:80") == ep("fb.example") == "fb.example:80"
     assert ep("https://fb.example") == "fb.example:443"
+
+
+def test_storage_backend_is_the_conformance_guess(cluster) -> None:
+    """The conformance summary part is ``detect_backend`` of the endpoint
+    (main-lane decision 2026-10-01); no endpoint is a gap, not ``unknown``."""
+    aws = _observe(cluster(), cfg=_cfg(endpoint="https://s3.us-east-1.amazonaws.com"))
+    assert aws["parts"]["storage_backend"] == "aws"
+    none = _observe(cluster(), cfg=_cfg(endpoint=""))
+    assert none["parts"]["storage_backend"] == {"not_observed": "no S3 endpoint configured"}
+    assert none["partial"] is True
 
 
 def test_forbidden_node_list_is_partial_and_left_out(cluster) -> None:

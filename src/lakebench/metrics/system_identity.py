@@ -15,6 +15,8 @@ part is one flat entry, so a gap is always a whole part:
   conditions, cordons and node names never enter: they move with load and
   maintenance, not with the hardware;
 * ``storage_endpoint``: the S3 endpoint's lowercased ``host:port``;
+* ``storage_backend``: ``s3/conformance.detect_backend`` of the endpoint
+  (``aws`` or ``unknown``), the read-only half of the conformance summary;
 * ``storage_server``: the ``Server`` header the endpoint answers a HEAD on
   the deployment's bronze bucket with (None when it sends none);
 * ``scratch``: whether scratch PVCs are on and their StorageClass name.
@@ -58,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 #: Bump when what a part holds changes; it enters the hash, so fingerprints
 #: of different versions never compare equal by accident.
-SYSTEM_IDENTITY_VERSION = 1
+SYSTEM_IDENTITY_VERSION = 2
 
 PARTS = (
     "api_server_ca",
@@ -66,6 +68,7 @@ PARTS = (
     "openshift",
     "nodes",
     "storage_endpoint",
+    "storage_backend",
     "storage_server",
     "scratch",
 )
@@ -267,6 +270,19 @@ def _storage_endpoint(cfg: Any) -> Any:
     return f"{host}:{port}"
 
 
+def _storage_backend(cfg: Any) -> Any:
+    """The conformance module's backend guess. The conformance runner itself
+    writes a temporary bucket and objects, so it never runs here; this and
+    the ``Server`` header stand in for its summary (ch03 section 6, main-lane
+    decision 2026-10-01)."""
+    from lakebench.s3.conformance import detect_backend
+
+    endpoint = str(cfg.platform.storage.s3.endpoint or "").strip()
+    if not endpoint:
+        return not_observed("no S3 endpoint configured")
+    return detect_backend(endpoint)
+
+
 def _storage_server(cfg: Any, s3_client: Any) -> Any:
     if s3_client is None:
         return not_observed("no S3 client")
@@ -322,6 +338,7 @@ def observe_system(
             continue
         parts[name] = _safely(name, lambda read=read: read(k8s))
     parts["storage_endpoint"] = _safely("storage_endpoint", lambda: _storage_endpoint(cfg))
+    parts["storage_backend"] = _safely("storage_backend", lambda: _storage_backend(cfg))
     parts["storage_server"] = _safely("storage_server", lambda: _storage_server(cfg, s3_client))
     parts["scratch"] = _safely("scratch", lambda: _scratch(cfg))
     return {
