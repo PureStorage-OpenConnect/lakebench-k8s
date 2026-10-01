@@ -32,6 +32,16 @@ LAB_ADDR = "192.0.2.15"  # RFC 5737 documentation address standing in for a lab 
 # ---------------------------------------------------------------------------
 
 
+def _stub_heldout(monkeypatch, seed: int, role: str) -> None:
+    """Make *seed* the one live held-out seed, with *role*."""
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(
+        datagen_seed, "heldout_role", lambda n, heldout=None: role if int(n) == seed else None
+    )
+    monkeypatch.setattr(datagen_seed, "is_spent", lambda n, heldout=None: False)
+
+
 def test_fixture_set_is_the_pinned_set() -> None:
     ids = sr.record_ids()
     assert len(ids) == 24
@@ -192,11 +202,10 @@ def test_credential_format_under_neutral_key_refused() -> None:
 
 
 def test_protected_seed_refused_without_printing_it(monkeypatch) -> None:
-    from lakebench.config import datagen_seed
 
     rec = sr.load_record("1320bd")
     seed = rec["experiment"]["corpus"]["seed"]
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {seed: "evaluation"})
+    _stub_heldout(monkeypatch, seed, "evaluation")
     with pytest.raises(scrub.ScrubError) as exc:
         scrub.scrub_record(rec)
     assert "evaluation seed" in str(exc.value)
@@ -353,15 +362,25 @@ def test_s3_url_and_endpoints_keys_are_endpoints() -> None:
     }
 
 
-def test_real_protected_seeds_refused_unstubbed() -> None:
-    """The seed tests stub protected_seeds; this one uses the real roles, so
-    a regression to an empty map fails here (review L1). The value is never
-    put in an assertion, so a failure cannot print it."""
-    from lakebench.config import datagen_seed
+def test_held_out_seeds_refused_through_the_hash_record(monkeypatch) -> None:
+    """The seed tests stub the lookup; this one goes through the salted hash
+    record (the test fixture, whose seeds are test values), so a regression
+    to an empty check fails here (review L1). A spent seed passes. No
+    assertion holds a seed, so a failure cannot print it."""
+    import json as _json
 
-    protected = datagen_seed.protected_seeds()
-    assert sorted(protected.values()) == ["evaluation", "robustness"]
-    for seed in protected:
+    from lakebench.config import datagen_seed
+    from tests.fixtures import heldout_test_seeds as ts
+
+    doc = _json.loads(ts.FIXTURE.read_text())
+    floor = {"salt": doc["salt"], "roles": {r: tuple(h) for r, h in doc["roles"].items()}}
+    monkeypatch.setattr(datagen_seed, "_HELDOUT_FLOOR", floor)
+    ts.use_fixture(monkeypatch)
+    for seed, want in (
+        (ts.TEST_EVALUATION_SEED, True),
+        (ts.TEST_ROBUSTNESS_SEED, True),
+        (ts.TEST_SPENT_SEED, False),
+    ):
         rec = sr.load_record("5105a0")
         rec["jobs"][0]["error_message"] = f"generated with seed {seed}"
         try:
@@ -369,9 +388,19 @@ def test_real_protected_seeds_refused_unstubbed() -> None:
             refused, leaked, why = False, False, ""
         except scrub.ScrubError as exc:
             refused, leaked, why = True, str(seed) in str(exc), str(exc).split(":")[0]
-        refused = refused and "seed" in why
-        assert refused, "a real held-out seed was not refused as a seed"
+        assert (refused and "seed" in why) is want, "a held-out seed check gave the wrong answer"
         assert not leaked, "the refusal names the seed value"
+
+
+def test_unreadable_held_out_record_refuses(monkeypatch) -> None:
+    from lakebench.config import datagen_seed
+
+    def broken(*_a, **_k):
+        raise FileNotFoundError("heldout_hashes.json")
+
+    monkeypatch.setattr(datagen_seed, "heldout_role", broken)
+    with pytest.raises(scrub.ScrubError, match="cannot be read"):
+        scrub.scrub_record(sr.load_record("5105a0"))
 
 
 def test_bucket_name_in_a_job_name_is_refused() -> None:
@@ -459,9 +488,8 @@ def test_non_addresses_left_alone() -> None:
     ],
 )
 def test_protected_seed_in_other_shapes_refused(monkeypatch, shape: str) -> None:
-    from lakebench.config import datagen_seed
 
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "robustness"})
+    _stub_heldout(monkeypatch, 987654, "robustness")
     rec = sr.load_record("5105a0")
     extra = rec["config_snapshot"].setdefault("extra", {})
     if shape == "string":
@@ -597,9 +625,8 @@ def test_endpoint_host_matched_case_insensitively() -> None:
 
 @pytest.mark.parametrize("shape", ["argv_list", "argv_ints", "seed_equals"])
 def test_protected_seed_in_argv_shapes_refused(monkeypatch, shape: str) -> None:
-    from lakebench.config import datagen_seed
 
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "evaluation"})
+    _stub_heldout(monkeypatch, 987654, "evaluation")
     rec = sr.load_record("5105a0")
     extra = rec["config_snapshot"].setdefault("extra", {})
     if shape == "argv_list":
@@ -629,9 +656,8 @@ def test_dotless_endpoint_host_rewritten_inside_urls() -> None:
     ['cfg {"seed": 987654}', "seed = 987654", "AML_SEED=987654", "datagen_seed: 987654"],
 )
 def test_protected_seed_in_dumped_text_refused(monkeypatch, text: str) -> None:
-    from lakebench.config import datagen_seed
 
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "evaluation"})
+    _stub_heldout(monkeypatch, 987654, "evaluation")
     rec = sr.load_record("5105a0")
     rec["jobs"][0]["error_message"] = text
     with pytest.raises(scrub.ScrubError, match="evaluation seed"):
@@ -662,9 +688,8 @@ def test_key_rename_inside_verdict_refused_but_not_lookalike_keys() -> None:
 
 def test_seed_in_a_dict_key_is_not_printed_in_the_path(monkeypatch) -> None:
     """Fix-pass review: a path built from a key holding the seed printed it."""
-    from lakebench.config import datagen_seed
 
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "robustness"})
+    _stub_heldout(monkeypatch, 987654, "robustness")
     rec = sr.load_record("5105a0")
     rec["config_snapshot"]["extra"] = {"987654": {"seed": 987654}, "run-987654": {"n": "x"}}
     with pytest.raises(scrub.ScrubError, match="robustness seed") as exc:
@@ -700,9 +725,8 @@ def test_non_credential_pairs_in_text_left_alone() -> None:
 def test_no_message_carries_a_seed(monkeypatch) -> None:
     """Second fix pass: check_clean, bucket refusals and scrub_text built
     messages from paths and keys that can hold a held-out seed."""
-    from lakebench.config import datagen_seed
 
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "robustness"})
+    _stub_heldout(monkeypatch, 987654, "robustness")
     rec = sr.load_record("5105a0")
     rec["config_snapshot"]["extra"] = {"987654": {"host": "10.99.1.2"}, "10.1.2.3-987654": 1}
     problems = scrub.check_clean(rec)
@@ -766,9 +790,8 @@ def test_url_userinfo_glued_to_a_timestamp_dropped() -> None:
 
 
 def test_seed_cut_by_the_key_slice_is_not_printed(monkeypatch) -> None:
-    from lakebench.config import datagen_seed
 
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "robustness"})
+    _stub_heldout(monkeypatch, 987654, "robustness")
     rec = sr.load_record("5105a0")
     rec["config_snapshot"]["extra"] = {"a" * 25 + "10.99.1.2_987654": 1}
     problems = scrub.check_clean(rec)
