@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from lakebench.k8s import pinned_helm, pinned_kubectl, pinned_oc
+from lakebench.k8s.lease_state import LeaseHoldExceeded
 from lakebench.modules.pipeline_engines.spark.operator_scratch import (
     DEFAULT_CONTROLLER_TMP_SIZE,
     TmpVolume,
@@ -635,7 +636,9 @@ class SparkOperatorManager:
             try:
                 from kubernetes import client as k8s_client
 
-                ns = k8s_client.CoreV1Api().read_namespace(namespace)
+                from lakebench.k8s.lease_state import request_timeout_kw
+
+                ns = k8s_client.CoreV1Api().read_namespace(namespace, **request_timeout_kw())
                 break
             except ApiException as e:
                 if e.status == 404:
@@ -674,8 +677,12 @@ class SparkOperatorManager:
         try:
             from kubernetes import client as k8s_client
 
+            from lakebench.k8s.lease_state import request_timeout_kw
+
             core_v1 = k8s_client.CoreV1Api()
-            existing = {ns.metadata.name for ns in core_v1.list_namespace().items}
+            existing = {
+                ns.metadata.name for ns in core_v1.list_namespace(**request_timeout_kw()).items
+            }
             live = [ns for ns in namespaces if ns in existing]
             removed = set(namespaces) - set(live)
             if removed:
@@ -719,7 +726,13 @@ class SparkOperatorManager:
                     namespace,
                 )
                 return False
-            return self._recreate_namespace_rbac_impl(namespace)
+            try:
+                return self._recreate_namespace_rbac_impl(namespace)
+            except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+                logger.error(
+                    "Recreating RBAC for %s stopped inside the cluster lease: %s", namespace, e
+                )
+                return False
         finally:
             if lease_cm is not None:
                 try:
@@ -965,6 +978,12 @@ class SparkOperatorManager:
                 ok = self._remove_namespace_from_watch_impl(namespace)
                 if ok and then is not None:
                     then()
+        except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+            raise WatchListMutationError(
+                f"a command inside the cluster lease ran out of time: {e}. The "
+                "watch list may be partly changed; the namespace was NOT deleted. "
+                "Run `lakebench admin repair-operator`, then destroy again."
+            ) from e
         except ClusterLockHeld as e:
             raise WatchListMutationError(
                 f"another lakebench process holds the cluster lock ({e.holder}); "
@@ -1074,7 +1093,15 @@ class SparkOperatorManager:
                     namespace,
                 )
                 return False
-            return self._add_namespace_to_watch_impl(namespace, _retry_on_eviction)
+            try:
+                return self._add_namespace_to_watch_impl(namespace, _retry_on_eviction)
+            except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+                # A command ran out of the lease's time: fail closed, the
+                # namespace is not proven watched.
+                logger.error(
+                    "Adding %s to the watch list stopped inside the cluster lease: %s", namespace, e
+                )
+                return False
         finally:
             if lease_cm is not None:
                 try:

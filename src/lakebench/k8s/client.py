@@ -222,10 +222,21 @@ class K8sClient:
         except Exception as e:
             return False, f"Connection error: {e}"
 
+    @staticmethod
+    def _lease_kw() -> dict[str, Any]:
+        """``_request_timeout`` for a call made while the cluster lease is held.
+
+        A deferred signal (``cluster_lock``) waits for the leased work to end,
+        so no request inside the lease may hang (DESIGN ch01 3.6).
+        """
+        from lakebench.k8s.lease_state import request_timeout_kw
+
+        return request_timeout_kw()
+
     def namespace_exists(self, name: str) -> bool:
         """Check if a namespace exists."""
         try:
-            self._core_v1.read_namespace(name)
+            self._core_v1.read_namespace(name, **self._lease_kw())
             return True
         except ApiException as e:
             if e.status == 404:
@@ -235,7 +246,7 @@ class K8sClient:
     def get_namespace_phase(self, name: str) -> str:
         """Get the phase of a namespace (Active, Terminating, etc)."""
         try:
-            ns = self._core_v1.read_namespace(name)
+            ns = self._core_v1.read_namespace(name, **self._lease_kw())
             return ns.status.phase or ""
         except ApiException as e:
             if e.status == 404:
@@ -249,7 +260,7 @@ class K8sClient:
         re-created by a later deploy has the same name and a new UID.
         """
         try:
-            ns = self._core_v1.read_namespace(name)
+            ns = self._core_v1.read_namespace(name, **self._lease_kw())
         except ApiException as e:
             if e.status == 404:
                 return ""
@@ -259,7 +270,7 @@ class K8sClient:
     def get_namespace_annotation(self, name: str, key: str) -> str:
         """Return one annotation of a namespace, ``""`` if unset or absent."""
         try:
-            ns = self._core_v1.read_namespace(name)
+            ns = self._core_v1.read_namespace(name, **self._lease_kw())
         except ApiException as e:
             if e.status == 404:
                 return ""
@@ -278,7 +289,7 @@ class K8sClient:
             remaining: persistentvolumeclaims. has 1 resource instances".
         """
         try:
-            ns = self._core_v1.read_namespace(name)
+            ns = self._core_v1.read_namespace(name, **self._lease_kw())
         except ApiException as e:
             if e.status == 404:
                 return "", []
@@ -387,9 +398,10 @@ class K8sClient:
                 self._core_v1.delete_namespace(
                     name,
                     body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid)),
+                    **self._lease_kw(),
                 )
             else:
-                self._core_v1.delete_namespace(name)
+                self._core_v1.delete_namespace(name, **self._lease_kw())
             return True
         except ApiException as e:
             if e.status == 404:

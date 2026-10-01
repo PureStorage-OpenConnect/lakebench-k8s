@@ -202,22 +202,22 @@ class _FakeLockApi:
         assert self.cm is not None
         self._stamp(self.cm, self.cm.metadata.uid)
 
-    def replace_namespaced_config_map(self, name, namespace, body):
+    def replace_namespaced_config_map(self, name, namespace, body, **_kw):
         if self.cm is None:
             raise _api_exc(404)
         if body.metadata.resource_version != self.cm.metadata.resource_version:
             raise _api_exc(409)
         return self._stamp(body, self.cm.metadata.uid)
 
-    def read_namespace(self, name):
+    def read_namespace(self, name, **_kw):
         return MagicMock()
 
-    def create_namespaced_config_map(self, namespace, body):
+    def create_namespaced_config_map(self, namespace, body, **_kw):
         if self.cm is not None:
             raise _api_exc(409)
         return self._stamp(body, "uid-1")
 
-    def read_namespaced_config_map(self, name, namespace):
+    def read_namespaced_config_map(self, name, namespace, **_kw):
         if self.cm is None:
             raise _api_exc(404)
         snap = _cm(
@@ -232,7 +232,7 @@ class _FakeLockApi:
             hook()
         return snap
 
-    def delete_namespaced_config_map(self, name, namespace, body=None):
+    def delete_namespaced_config_map(self, name, namespace, body=None, **_kw):
         if self.cm is None:
             raise _api_exc(404)
         pre = getattr(body, "preconditions", None)
@@ -340,7 +340,7 @@ class TestStealBetweenReadAndDelete:
         reads = {"n": 0}
         orig_read = api.read_namespaced_config_map
 
-        def _read(name, namespace):
+        def _read(name, namespace, **_kw):
             reads["n"] += 1
             # Keep the ghost expired but changed for two rounds, then steal.
             api.after_read = api.touch if reads["n"] < 3 else (lambda: api.steal("late@host@z"))
@@ -412,12 +412,12 @@ def _stateful_lock_core() -> MagicMock:
     core.read_namespace.return_value = MagicMock()
     stored: dict[str, V1ConfigMap] = {}
 
-    def _read(name, namespace):
+    def _read(name, namespace, **_kw):
         if "cm" not in stored:
             raise _api_exc(404)
         return stored["cm"]
 
-    def _create(namespace, body):
+    def _create(namespace, body, **_kw):
         body.metadata.resource_version = "1"
         stored["cm"] = body
         return body

@@ -149,6 +149,16 @@ watch list still names namespaces that no longer exist, run
 `lakebench admin repair-operator` (use `--dry-run` first) and then deploy
 again.
 
+**Ctrl-C does not stop the command at once.** If the command holds the
+cluster lease, it prints "interrupt received while holding the cluster
+lease" and finishes the shared change first (its hold budget is 750 s,
+1800 s for `admin` commands), then releases the lease and stops. Press
+Ctrl-C twice more to abort at once; the lease is still released. If a helm
+upgrade was running, run `helm history spark-operator -n spark-operator`:
+a `pending-upgrade` revision blocks every deployment's watch-list change,
+so roll it back with `helm rollback spark-operator <last deployed
+revision> -n spark-operator`, then run `lakebench admin repair-operator`.
+
 Do not edit `spark.jobNamespaces` with `helm upgrade --reuse-values` by hand.
 That skips the lease, and a list copied from an earlier read silently drops
 any namespace another deployment added in the meantime.
