@@ -56,12 +56,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   wait for the cluster lease, and a wait the deadline cuts short fails the
   step with "deploy timeout (N s) reached after M s while waiting for
   <component>: <resource> (<last state>)". No shared change (a helm
-  upgrade of the Spark Operator watch list, a Stackable or observability
-  install) starts after the deadline; one that has started is completed,
+  upgrade of the Spark Operator watch list or of the operator itself, a
+  Stackable or observability install) starts after the deadline; one that has started is completed,
   with its rollout and verify, before the step fails, so the shared
-  operator is never left mid-restart. Helm calls already running finish
-  first, and a polling wait can overrun by one poll interval (10 s at
-  most).
+  operator is never left mid-restart. That completion can take several
+  minutes past the timeout (restart, rollout and verify are bounded by
+  their own timeouts, about 9 minutes in the worst case, while holding the
+  cluster lease). Helm calls already running finish first, and other
+  polling waits can overrun by one poll interval (10 s at most).
 - The deploy failure panel no longer claims that successful steps are
   skipped on retry: re-running deploy re-applies every step and keeps the
   existing resources.

@@ -270,6 +270,85 @@ def test_a_committed_upgrade_is_restarted_and_verified_past_the_deadline(clock):
     assert m._verify_namespace_watched.call_args.kwargs["timeout"] == op._POST_UPGRADE_VERIFY_S
 
 
+def test_eviction_re_add_is_not_cut_by_the_deadline(clock):
+    m = _operator(clock)
+    m._verify_namespace_watched = MagicMock(side_effect=[False, True])  # evicted once
+
+    def slow_helm(*a, **k):
+        clock.sleep(20)
+        return MagicMock(returncode=0, stderr="")
+
+    m._run = MagicMock(side_effect=slow_helm)
+    with deadline.deploy_deadline(10):
+        assert m._add_namespace_to_watch_impl("mine") is True
+    assert m._run.call_count == 2  # the re-add ran past the deadline
+
+
+def test_rbac_recreate_re_adds_after_a_committed_removal(clock):
+    m = _operator(clock)
+    m._get_watched_namespaces = MagicMock(side_effect=[["other-ns", "mine"], ["other-ns"]])
+
+    def slow_helm(*a, **k):
+        clock.sleep(20)
+        return MagicMock(returncode=0, stderr="")
+
+    m._run = MagicMock(side_effect=slow_helm)
+    with deadline.deploy_deadline(10):
+        assert m._recreate_namespace_rbac_impl("mine") is True
+    assert m._run.call_count == 2  # removal, then the re-add
+
+
+def test_rbac_recreate_does_not_start_after_the_deadline(clock):
+    m = _operator(clock)
+    m._get_watched_namespaces = MagicMock(return_value=["other-ns", "mine"])
+    m._run = MagicMock()
+    with deadline.deploy_deadline(10):
+        clock.sleep(10)
+        with pytest.raises(deadline.DeployTimeout):
+            m._recreate_namespace_rbac_impl("mine")
+    m._run.assert_not_called()
+
+
+def test_no_operator_install_after_the_deadline(clock):
+    m = _operator(clock)
+    m.target_version = "2.5.1"
+    m.job_namespace = "mine"
+    m._release_exists = MagicMock(return_value=False)
+
+    def slow_repo(*a, **k):
+        clock.sleep(20)  # helm repo update outlives the deadline
+        return MagicMock(returncode=0, stderr="")
+
+    m._run = MagicMock(side_effect=slow_repo)
+    with deadline.deploy_deadline(10):
+        with pytest.raises(deadline.DeployTimeout):
+            m.install()
+    assert all(c.args[0][:2] == ["helm", "repo"] for c in m._run.call_args_list)
+
+
+def test_committed_install_reports_not_ready_not_a_timeout(clock, monkeypatch):
+    """After a committed operator install the ready wait keeps its own bound
+    and its own message; the deadline does not relabel it."""
+    from lakebench.modules.pipeline_engines.spark import operator as op
+
+    monkeypatch.setattr(op.time, "time", clock.time)
+    monkeypatch.setattr(op.time, "sleep", clock.sleep)
+    m = _operator(clock)
+    m.target_version = "2.5.1"
+    m.job_namespace = "mine"
+    m._release_exists = MagicMock(return_value=False)
+    m.check_status = MagicMock(return_value=MagicMock(ready=False, message="0/1 ready"))
+
+    def run(cmd, **k):
+        if cmd[:2] == ["helm", "upgrade"]:
+            clock.sleep(20)  # the install outlives the deadline
+        return MagicMock(returncode=0, stderr="")
+
+    m._run = MagicMock(side_effect=run)
+    with deadline.deploy_deadline(10):
+        assert m.install() is False
+
+
 def test_lease_wait_counts_against_the_deadline(clock, monkeypatch):
     from lakebench.deploy import cluster_lock as cl
     from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
