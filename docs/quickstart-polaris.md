@@ -148,10 +148,9 @@ lakebench destroy lakebench.yaml
 
 Destroy handles Polaris-specific cleanup: it deletes the bootstrap job,
 Polaris deployment, service and ConfigMap. The `polaris` PostgreSQL database
-is not dropped separately; it lives on the PostgreSQL PVC, which goes with the
-namespace. With `platform.kubernetes.create_namespace: false` the namespace
-and that PVC survive, so destroy unregisters the tables from the catalog
-first.
+is not dropped separately; it lives on the PostgreSQL PVC, which destroy
+deletes. With `platform.kubernetes.create_namespace: false` the namespace
+survives, and destroy still unregisters the tables from the catalog first.
 
 ---
 

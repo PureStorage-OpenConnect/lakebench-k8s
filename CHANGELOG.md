@@ -66,6 +66,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `detail.compaction_failures`. The maintenance policy id and the effective
   maintenance `id` are unchanged.
 ### Changed
+- **`destroy` deletes the PostgreSQL data PVC when the namespace survives
+  (LB-187).** With `create_namespace: false`, `data-lakebench-postgres-<n>`
+  and the catalog metadata on it used to survive destroy, because the cleanup
+  selected on a label the claim never carried; the next deploy then started
+  on the old metastore. Destroy now deletes the claims by name. It no longer
+  selects on `app.kubernetes.io/component=postgres`, which could only ever
+  match another application's claim in a shared namespace.
 - **Spark scripts ship in one ConfigMap per role (DEP-1, LB-207).** The single
   `lakebench-spark-scripts` ConfigMap, about 45 KB from the 1 MiB limit with
   every AML addition, is replaced by six maps (`lakebench-scripts-common`,

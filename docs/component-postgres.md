@@ -61,7 +61,7 @@ lakebench-postgres.<namespace>.svc.cluster.local:5432
 
 ## Teardown
 
-During `lakebench destroy`, PostgreSQL is torn down in reverse deployment order -- after the catalog service and query engine have been removed, but before the namespace itself is deleted. The StatefulSet and Service are deleted by name, but the data PVC (`data-lakebench-postgres-0`, from the volumeClaimTemplate) does not carry the `app.kubernetes.io/component=postgres` label that the PVC cleanup selects on, so it is removed only when the namespace is deleted. With `platform.kubernetes.create_namespace: false` the namespace is kept and the PVC, with its catalog metadata, survives into the next deploy.
+During `lakebench destroy`, PostgreSQL is torn down in reverse deployment order -- after the catalog service and query engine have been removed, but before the namespace itself is deleted. The StatefulSet, the Service and the data PVC are deleted by name. The PVC comes from the volumeClaimTemplate and carries no labels, so destroy matches `data-lakebench-postgres-<n>` exactly; another application's claim in the same namespace is never selected. The PVC and its catalog metadata are deleted also with `platform.kubernetes.create_namespace: false`, so the next deploy starts with an empty metastore. Before 1.7 the PVC survived such a destroy.
 
 ## See Also
 
