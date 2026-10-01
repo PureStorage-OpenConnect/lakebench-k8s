@@ -1,0 +1,14 @@
+# gitleaks baseline: findings in published history that are not live
+# credentials. Each entry is a fingerprint <commit>:<path>:<rule>:<line>;
+# none holds a secret value. gitleaks reads this file from the scanned tree,
+# so CI's history scan uses origin/main's copy instead of a branch's: a
+# change takes effect once it is merged to main. tests/test_gitleaks_baseline.py
+# pins the list.
+
+# The old default Polaris client secret, public on PyPI in 1.0.0 to 1.4.0. It
+# is not a credential for any live deployment; the current code has no
+# default and requires a secret per deployment.
+6cc98444611411953c72fb394941a11ab98043c3:src/lakebench/_constants.py:generic-api-key:8
+
+# The same default secret, passed to the deploy templates in the same releases.
+e51bd922f17484aead6318536f8c1929b94be8fd:src/lakebench/deploy/engine.py:generic-api-key:260

@@ -104,6 +104,8 @@ def test_gate_covers_the_required_checks():
         "cargo-clippy",
         "cargo-test",
         "gitleaks",
+        "gitleaks-history",
+        "pre-push-hook",
         "examples",
         "version",
         "changelog",
@@ -240,3 +242,124 @@ def test_releasing_doc_matches_release_workflow_only_list():
     assert listed, "docs/releasing.md no longer lists what release.yml runs"
     doc_names = set(re.split(r",\s*|\s+and\s+", " ".join(listed.group(1).split())))
     assert doc_names == only, (sorted(doc_names), sorted(only))
+
+
+def _gitleaks_or_skip() -> str:
+    import os
+    import shutil
+
+    exe = shutil.which("gitleaks")
+    if exe is None:
+        if os.environ.get("LB_REQUIRE_GITLEAKS") == "1":
+            pytest.fail("gitleaks is not on PATH and LB_REQUIRE_GITLEAKS=1")
+        pytest.skip("requires gitleaks on PATH")
+    return exe
+
+
+def _repo(tmp_path, text: str):
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    (tmp_path / ".gitleaks.toml").write_text((ROOT / ".gitleaks.toml").read_text())
+    (tmp_path / "a.txt").write_text(text)
+    git("add", ".")
+    git("commit", "-q", "-m", "c")
+    return git("rev-parse", "HEAD")
+
+
+def test_gitleaks_history_check(tmp_path, monkeypatch):
+    _gitleaks_or_skip()
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+    # Built at run time so this file never matches the FlashBlade rule itself.
+    sha = _repo(tmp_path, "access_key_id: " + "PSFB" + "Q" * 38 + "\n")
+    # Without the baseline file the check refuses to run.
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and ".gitleaksignore" in res.detail
+    (tmp_path / ".gitleaksignore").write_text("# other\n" + "a" * 40 + ":x:generic-api-key:1\n")
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
+    (tmp_path / ".gitleaksignore").write_text(
+        f"# planted\n{sha}:a.txt:pure-flashblade-s3-access-key:1\n"
+    )
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.PASS, res.detail
+
+
+def test_gitleaks_history_check_refuses_a_shallow_clone(monkeypatch, tmp_path):
+    monkeypatch.setattr(rg.shutil, "which", lambda name: "/bin/true")
+    monkeypatch.setattr(rg, "_is_shallow", lambda root: True)
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "shallow" in res.detail
+    monkeypatch.setattr(rg, "_is_shallow", lambda root: None)
+    assert rg.check_gitleaks_history().status == rg.FAIL
+
+
+def test_gitleaks_history_check_skips_without_gitleaks(monkeypatch):
+    monkeypatch.delenv("GITLEAKS", raising=False)
+    monkeypatch.setattr(rg.shutil, "which", lambda name: None)
+    assert rg.check_gitleaks_history().status == rg.SKIP
+
+
+def test_gitleaks_history_check_sees_merges_and_inline_allow(tmp_path, monkeypatch):
+    import subprocess
+
+    _gitleaks_or_skip()
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True,
+            capture_output=True,
+        )
+
+    _repo(tmp_path, "base\n")
+    (tmp_path / ".gitleaksignore").write_text("# none\n")
+    git("add", ".gitleaksignore")
+    git("commit", "-q", "-m", "baseline")
+    assert rg.check_gitleaks_history().status == rg.PASS
+    key = "PSFB" + "Q" * 38  # built at run time
+    # A key added while resolving a merge conflict, in the merge commit only.
+    git("checkout", "-q", "-b", "side")
+    (tmp_path / "a.txt").write_text("side\n")
+    git("commit", "-q", "-am", "side")
+    git("checkout", "-q", "main")
+    (tmp_path / "a.txt").write_text("main\n")
+    git("commit", "-q", "-am", "main")
+    subprocess.run(["git", "-C", str(tmp_path), "merge", "-q", "side"], capture_output=True)
+    (tmp_path / "a.txt").write_text(f"key: {key}\n")
+    git("add", "a.txt")
+    git("commit", "-q", "-m", "merge")
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
+    # An inline allow comment does not hide one either.
+    git("reset", "-q", "--hard", "main~1")
+    (tmp_path / "b.txt").write_text(f"key: {key} # gitleaks:allow\n")
+    git("add", "b.txt")
+    git("commit", "-q", "-m", "allow")
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
+
+
+def test_pre_push_hook_check(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "scripts" / "hooks").mkdir(parents=True)
+    (tmp_path / "scripts" / "hooks" / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+    assert rg.check_pre_push_hook().status == rg.SKIP  # nothing installed
+    installed = tmp_path / ".git" / "hooks" / "pre-push"
+    installed.write_text("#!/bin/sh\nexit 0\n")
+    assert rg.check_pre_push_hook().status == rg.PASS
+    installed.write_text("#!/bin/sh\nexit 1\n")
+    res = rg.check_pre_push_hook()
+    assert res.status == rg.FAIL and "differs" in res.detail
