@@ -38,6 +38,9 @@ a = Analysis(
         # Release validation record: without it every run reads the record
         # as unreadable and nothing is ever stamped supported.
         ("src/lakebench/config/validated_combinations.yaml", "lakebench/config"),
+        # Datagen lineage table: without it every corpus id v2 lineage is
+        # declared and records a corpus problem.
+        ("src/lakebench/config/datagen_lineage.yaml", "lakebench/config"),
     ]
     + pydantic_datas
     + pydantic_settings_datas,
