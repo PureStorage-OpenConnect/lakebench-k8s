@@ -91,6 +91,10 @@ def _c360_continuous_gate_problems(rows_by_job: dict[str, int | None]) -> list[s
     return problems
 
 
+class _OwnershipUnverifiable(Exception):
+    """The reset's ownership check could not run (cluster or API unreadable)."""
+
+
 def _reset_ownership_problem(cfg) -> str | None:
     """Why this run may not delete continuous state, or None when it may.
 
@@ -116,9 +120,12 @@ def _reset_ownership_problem(cfg) -> str | None:
     try:
         core_v1.read_namespace(ns)
     except ApiException as e:
-        return f"namespace {ns} not readable ({e.status}); cannot verify bucket ownership"
+        # Could not check: a prerequisite (exit 4), not a refusal.
+        raise _OwnershipUnverifiable(
+            f"namespace {ns} not readable ({e.status}); cannot verify bucket ownership"
+        ) from e
     except Exception as e:  # noqa: BLE001
-        return f"cannot reach the cluster to verify ownership: {e}"
+        raise _OwnershipUnverifiable(f"cannot reach the cluster to verify ownership: {e}") from e
     identity = build_identity_from_config(cfg, context=kube_ctx)
     v = verify_namespace_identity(core_v1, ns, identity.name, identity.api_server)
     if v.verdict is not IdentityVerdict.MATCH:
@@ -291,6 +298,9 @@ def _require_reset_ownership(cfg) -> None:
     unverifiable = False
     try:
         problem = _reset_ownership_problem(cfg)
+    except _OwnershipUnverifiable as e:
+        problem = str(e)
+        unverifiable = True
     except Exception as e:  # noqa: BLE001
         problem = f"ownership could not be verified: {e}"
         unverifiable = True
@@ -3823,12 +3833,12 @@ def _run_sustained(
             raise typer.Exit(ExitCode.FAILED)
 
     except K8sConnectionError as e:
-        # Streams or datagen may be running by now: a failed run (1), not a
-        # prerequisite that stopped it before anything ran (4).
+        # K8sConnectionError means the kube config did not load
+        # (k8s/client.py), so nothing was submitted: a prerequisite (4).
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     except typer.Exit:
         raise
     except BaseException:

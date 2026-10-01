@@ -100,9 +100,36 @@ def test_c360_state_reset_refuses_without_ownership(monkeypatch):
     monkeypatch.setattr(_sustained, "_reset_ownership_problem", lambda c: "bucket c-b: FOREIGN")
     client = MagicMock()
     monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
-    with pytest.raises(typer.Exit):
+    with pytest.raises(typer.Exit) as exc:
         _sustained._reset_continuous_state(cfg, clear_raw=True)
+    assert exc.value.exit_code == 3  # refused (CLI-1)
     client.delete_prefix.assert_not_called()
+
+
+def test_c360_state_reset_that_cannot_check_ownership_is_a_prerequisite(monkeypatch):
+    """The cluster or namespace could not be read: exit 4, not 3 (retry later)."""
+    cfg = _c360_cfg()
+
+    def unreadable(_c):
+        raise _sustained._OwnershipUnverifiable("cannot reach the cluster to verify ownership")
+
+    monkeypatch.setattr(_sustained, "_reset_ownership_problem", unreadable)
+    client = MagicMock()
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
+    with pytest.raises(typer.Exit) as exc:
+        _sustained._reset_continuous_state(cfg, clear_raw=True)
+    assert exc.value.exit_code == 4
+    client.delete_prefix.assert_not_called()
+
+
+def test_reset_ownership_problem_raises_when_the_namespace_is_unreadable(monkeypatch):
+    from kubernetes.client.rest import ApiException
+
+    core = MagicMock()
+    core.read_namespace.side_effect = ApiException(status=403)
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    with pytest.raises(_sustained._OwnershipUnverifiable):
+        _sustained._reset_ownership_problem(_c360_cfg())
 
 
 class _StopAfterFirstStream(Exception):

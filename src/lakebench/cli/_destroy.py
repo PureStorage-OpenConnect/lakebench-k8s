@@ -356,12 +356,8 @@ def destroy(
 
     # Destroy
     destroy_start = time.time()
-    # CLI-1: 4 (prerequisite, nothing ran) only before destroy_all starts; a
-    # lost connection after that may leave a partial destroy (1).
-    started = False
     try:
         engine = DeploymentEngine(cfg)
-        started = True
         results = engine.destroy_all(
             progress_callback=on_progress,
             allow_unverified_cluster=allow_unverified_cluster,
@@ -372,7 +368,7 @@ def destroy(
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(ExitCode.FAILED if started else ExitCode.PREREQUISITE)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
 
     # Summary
     destroy_elapsed = int(time.time() - destroy_start)

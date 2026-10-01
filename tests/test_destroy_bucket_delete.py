@@ -626,6 +626,45 @@ class TestDestroyAllBuckets:
         ns = [x for x in self._results if x.component == "namespace"][-1]
         assert "NOT deleted" in ns.message
 
+    # -- CLI-1: a refusal exits 3 only when nothing else in the step failed --
+
+    def _exit_code_of_bucket_and_namespace(self):
+        from lakebench.cli._exit import refused_result_code
+
+        steps = [x for x in self._results if x.component in ("s3-buckets", "namespace")]
+        return refused_result_code(steps)
+
+    def test_refusal_with_a_retryable_failure_is_not_a_refusal(self):
+        """A foreign bucket plus an owned bucket whose delete failed: re-running
+        destroy can fix the second, so the step must not exit 3."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": ["theirs"], "a-gold": []})
+        boto.delete_bucket = MagicMock(side_effect=_err("AccessDenied"))
+        r = self._run(
+            boto,
+            {"a-bronze": "MATCH", "a-silver": "MISMATCH", "a-gold": "MATCH"},
+            create_namespace=True,
+        )
+        assert r.status is DeploymentStatus.FAILED
+        assert "Bucket ownership refused" in r.message
+        assert "refusal" not in r.details
+        assert self._exit_code_of_bucket_and_namespace() is None  # exit 1
+
+    def test_refused_untagged_recorded_bucket_keeps_the_namespace_as_a_refusal(self):
+        """The namespace kept as a refused bucket's record follows the refusal."""
+        from lakebench.exit_codes import ExitCode
+
+        boto = FakeBoto({"a-bronze": [], "a-silver": ["x"], "a-gold": []})
+        r = self._run(
+            boto,
+            {"a-bronze": "MATCH", "a-silver": "ABSENT", "a-gold": "MATCH"},
+            create_namespace=True,
+        )
+        assert r.details.get("refusal") == "deploy.identity_foreign", r.message
+        ns = [x for x in self._results if x.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.FAILED and "NOT deleted" in ns.message
+        assert ns.details.get("follows_refusal") is True
+        assert self._exit_code_of_bucket_and_namespace() == ExitCode.REFUSED
+
     # -- second full review ------------------------------------------------
 
     def test_deleted_buckets_are_dropped_from_the_created_record(self):

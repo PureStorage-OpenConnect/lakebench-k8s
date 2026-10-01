@@ -366,7 +366,7 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "k8s.unreachable",
         _C.PREREQUISITE,
-        "the Kubernetes API is unreachable before the command changes anything",
+        "the Kubernetes config does not load or the API is unreachable; nothing ran",
         v16_code=1,
     ),
     ExitPath(

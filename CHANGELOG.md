@@ -250,9 +250,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `--force-reset`, a non-empty bucket `admin reclaim-bucket` will not
     retag. A command whose failed steps include any other failure still
     exits 1;
-  - an unreachable Kubernetes API or S3 endpoint before any change, a failed
-    `run` prerequisite and a Spark Operator that is not ready exit 4 (were
-    1); losing the API after work started exits 1;
+  - a Kubernetes config that does not load or an API that cannot be
+    reached, a bronze bucket or namespace that cannot be read for an
+    ownership or emptiness check, a failed `run` prerequisite and a Spark
+    Operator that is not ready exit 4 (were 1 or 2);
   - `reproduce PACKAGE` exits 14 for performance or correctness drift (were
     1 and 2), for commit drift without `--allow-commit-drift` and for a run
     that does not follow the package (were 2), and 1 when its pipeline could

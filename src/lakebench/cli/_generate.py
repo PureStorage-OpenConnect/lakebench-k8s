@@ -198,9 +198,6 @@ def generate(
         },
     )
 
-    # CLI-1: 4 (prerequisite, nothing ran) only before the datagen Job is
-    # submitted; after that a lost connection is a failed generate (1).
-    submitted = False
     try:
         # Share a run id with the datagen pods (live-observability grouping
         # label) so a standalone `generate` is correlatable in Grafana and a
@@ -223,7 +220,6 @@ def generate(
 
         # Submit job
         print_info("Submitting datagen job...")
-        submitted = True
         result = datagen.deploy()
 
         if result.status != DeploymentStatus.SUCCESS:
@@ -443,4 +439,4 @@ def generate(
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(ExitCode.FAILED if submitted else ExitCode.PREREQUISITE)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load

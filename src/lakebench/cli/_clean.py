@@ -259,7 +259,9 @@ def clean(
         if not decision.allowed:
             print_error(decision.hint)
             errors.append(decision.hint)
-            if core_v1 is not None:  # unreachable: could not verify, not refused
+            # Could not check (cluster unreachable, namespace list unreadable)
+            # is not a refusal.
+            if core_v1 is not None and not decision.unverifiable:
                 refusals += 1
             bucket_targets = {}
         elif decision.hint:

@@ -3102,13 +3102,13 @@ def run(
             _pipeline_exit_code = e.exit_code
         raise
     except K8sConnectionError as e:
-        # The run has started work by now, so this is a failed run (1), not
-        # a prerequisite that stopped it before anything ran (4).
+        # K8sConnectionError means the kube config did not load
+        # (k8s/client.py), so nothing was submitted: a prerequisite (4).
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
-        _pipeline_exit_code = ExitCode.FAILED
+        _pipeline_exit_code = ExitCode.PREREQUISITE
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     finally:
         # -- Phase 7/7: Results ----------------------------------------------------
         console.print()

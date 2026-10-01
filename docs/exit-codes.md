@@ -49,7 +49,7 @@ the CLI down every path listed here and checks the code.
 | `lease.held` | 3 | another command holds the cluster lock lease |
 | `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix without --regenerate |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
-| `k8s.unreachable` | 4 | the Kubernetes API is unreachable before the command changes anything |
+| `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
 | `run.prereq_failed` | 4 | a `run` preflight check failed |
 | `s3.unreachable` | 4 | `generate` or `run --generate` cannot read the bronze bucket to check it is empty |
 | `confirm.declined` | 5 | a confirmation prompt was answered no |
