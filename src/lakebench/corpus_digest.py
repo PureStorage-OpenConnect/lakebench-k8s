@@ -373,26 +373,51 @@ def _num(value: Any) -> float | None:
     return None
 
 
-def _same(a: Any, b: Any) -> bool:
+#: Keys compared with a float tolerance; every other key compares exactly
+#: (as a number when both sides are numeric, so ``"64"`` equals ``64``).
+_FLOAT_KEYS = frozenset({"scale"})
+
+
+def _same(name: str, a: Any, b: Any) -> bool:
     """Equal as numbers (``"1.000000"`` equals ``1.0``), else as JSON."""
     na, nb = _num(a), _num(b)
     if na is not None and nb is not None:
-        return abs(na - nb) <= 1e-6 * max(1.0, abs(na))
+        if name in _FLOAT_KEYS:
+            return abs(na - nb) <= 1e-9 * max(1.0, abs(na))
+        return na == nb
     return _key(a) == _key(b)
 
 
-def _utc(value: Any) -> float | None:
+_ISO_FRACTION = re.compile(r"(\.\d+)(?=(?:[+-]\d{2}:?\d{2}|Z)?$)")
+
+
+def iso_for_python(value: str) -> str:
+    """*value* in the ISO form every supported Python parses: ``Z`` as
+    ``+00:00`` and the fraction cut or padded to six digits (Python 3.10's
+    ``fromisoformat`` takes only three or six)."""
+    text = value.strip().replace("Z", "+00:00").replace("z", "+00:00")
+    return _ISO_FRACTION.sub(lambda m: (m.group(1) + "000000")[:7], text, count=1)
+
+
+def utc_seconds(value: Any) -> float | None:
+    """Seconds since the epoch of an ISO-8601 UTC time, or None. Accepts a
+    ``Z`` suffix and any fraction length (Rust's RFC 3339 writes nine
+    digits, which ``fromisoformat`` rejects before Python 3.11)."""
     from datetime import datetime, timezone
 
     if not isinstance(value, str) or not value:
         return None
+    text = iso_for_python(value)
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(text)
     except ValueError:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
+
+
+_utc = utc_seconds
 
 
 def completed_range(markers: Mapping[int, Sequence[Mapping[str, Any]]]) -> tuple[Any, Any]:
@@ -435,13 +460,16 @@ def series_check(
     ]:
         return "series.json names another cycle count than the corpus markers"
     schemas = distinct(m.get("schema") for m in bodies)
-    keys = _SERIES_ARGS.get(schemas[0], ()) if len(schemas) == 1 else ()
-    for name in keys:
+    if len(schemas) != 1 or schemas[0] not in _SERIES_ARGS:
+        return f"the corpus markers name no single known schema ({schemas})"
+    if series.get("schema") is not None and series.get("schema") != schemas[0]:
+        return "series.json names another schema than the corpus markers"
+    for name in _SERIES_ARGS[schemas[0]]:
         if gen.get(name) is None:
             continue
         for m in bodies:
             args = m.get("corpus_args")
             seen = args.get(name) if isinstance(args, dict) else None
-            if seen is not None and not _same(seen, gen[name]):
+            if seen is not None and not _same(name, seen, gen[name]):
                 return f"series.json names another {name} than the corpus markers"
     return None

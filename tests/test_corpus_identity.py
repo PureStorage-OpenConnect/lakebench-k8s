@@ -831,6 +831,7 @@ class TestFixPassCases:
 
     def test_financial_scale_compares_as_numbers(self):
         body = series()
+        body["schema"] = "financial"
         body["generation"]["scale"] = "1.000000"
         markers = two_nodes(schema="financial", corpus_args={"scale": 1.0})
         obs, _ = observe(markers, body)
@@ -848,6 +849,7 @@ class TestFixPassCases:
 
     def test_huge_numbers_never_raise(self):
         body = series()
+        body["schema"] = "financial"
         body["generation"]["scale"] = 10**400
         obs, _ = observe(two_nodes(schema="financial", corpus_args={"scale": 1.0}), body)
         corpus = corpus_of(cfg=_cfg("financial"), obs=obs)
@@ -866,3 +868,46 @@ class TestFixPassCases:
         obs["lineage"] = lineage
         corpus = corpus_of(obs=obs)
         assert corpus["lineage"] == f"declared:{TAG}" and corpus["lineage_observed"] is False
+
+
+class TestThirdPassCases:
+    def test_nine_digit_fractions_parse(self):
+        """Rust's RFC 3339 writes nanoseconds; fromisoformat on Python 3.10
+        rejects them, which would make every lineage declared there."""
+        assert cd.iso_for_python("2026-10-06T00:00:00.123456789Z") == (
+            "2026-10-06T00:00:00.123456+00:00"
+        )
+        assert cd.iso_for_python("2026-10-06T00:00:00.5Z") == "2026-10-06T00:00:00.500000+00:00"
+        assert cd.utc_seconds("2026-10-06T00:00:00.123456789Z") == pytest.approx(
+            cd.utc_seconds("2026-10-06T00:00:00Z") + 0.123456, abs=1e-6
+        )
+        markers = two_nodes(completed_utc="2026-10-06T00:00:00.123456789Z")
+        obs, _ = observe(markers, series(updated="2026-10-06T00:01:00.987654321Z"))
+        assert corpus_of(obs=obs)["lineage"] == D
+
+    def test_integer_keys_compare_exactly(self):
+        body = series()
+        body["generation"]["customer_id_max"] = 10_000_009
+        args = {"customer_id_max": 10_000_000}
+        obs, _ = observe(two_nodes(corpus_args=args), body)
+        assert "customer_id_max" in corpus_of(obs=obs)["lineage_notes"][0]
+        body["generation"]["customer_id_max"] = "10000000"
+        obs, _ = observe(two_nodes(corpus_args=args), body)
+        assert corpus_of(obs=obs)["lineage"] == D
+
+    @pytest.mark.parametrize(
+        "markers, series_schema, needle",
+        [
+            ([marker(node=0, schema=None), marker(node=1, schema=None)], None, "known schema"),
+            ([marker(node=0), marker(node=1, schema="financial")], None, "known schema"),
+            (None, "financial", "another schema"),
+        ],
+    )
+    def test_unknown_or_mixed_schema_lends_no_lineage(self, markers, series_schema, needle):
+        body = series()
+        if series_schema:
+            body["schema"] = series_schema
+        obs, _ = observe(markers or two_nodes(), body)
+        corpus = corpus_of(obs=obs)
+        assert corpus["lineage"].startswith("declared:")
+        assert needle in corpus["lineage_notes"][0]

@@ -74,10 +74,12 @@ from pathlib import Path
 from typing import Any
 
 from lakebench.corpus_digest import (
+    SERIES_CLOCK_SKEW_S,
     MarkerSet,
     distinct,
     is_sha256_hex,
     read_corpus_markers,
+    utc_seconds,
 )
 
 __all__ = [
@@ -539,13 +541,13 @@ def resolve_lineage(
 
 
 def _utc(value: Any) -> float | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+    return utc_seconds(value)
+
+
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, str):
+        return [value]
+    return list(value) if isinstance(value, (list, tuple)) else []
 
 
 def _lineage_at_build(
@@ -574,8 +576,8 @@ def _lineage_at_build(
     if not isinstance(raw, Mapping):
         return declared(fallback_tag, "the observation carries no resolved lineage")
     value, observed = raw.get("value"), raw.get("observed") is True
-    problems = [str(p) for p in raw.get("problems") or []]
-    notes = [str(n) for n in raw.get("notes") or []]
+    problems = [str(p) for p in _as_list(raw.get("problems"))]
+    notes = [str(n) for n in _as_list(raw.get("notes"))]
     tag = raw.get("tag") or fallback_tag
     if observed and not (isinstance(value, str) and _DIGEST.match(value)):
         return declared(tag, "the persisted lineage is not a digest", problems)
@@ -591,7 +593,7 @@ def _lineage_at_build(
     if observed and fleet_digest and digest and fleet_digest != digest:
         first = _utc((obs.get("markers") or {}).get("completed_first"))
         written = _utc((fleet or {}).get("written_at"))
-        if first is not None and written is not None and written + 60.0 < first:
+        if first is not None and written is not None and written + SERIES_CLOCK_SKEW_S < first:
             notes.append(
                 f"the datagen fleet record ({fleet_digest[:19]}) predates this corpus; ignored"
             )
