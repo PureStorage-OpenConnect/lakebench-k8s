@@ -255,3 +255,44 @@ def test_fidelity_gate_over_silver_monthly_unit(spark, tmp_path, monkeypatch):
     assert 0 < samp["negative_fraction"] < 1 and samp["n_pulled"] < u["n_units"]
     for t, r in capped["typologies"].items():
         assert r["n_positives"] == report["typologies"][t]["n_positives"], t
+
+
+def test_seed_claim_verified_only_by_the_corpus_verdict(spark, tmp_path, monkeypatch):
+    """A claimed seed is verified only by provenance.corpus_seed_matches_claim,
+    the verdict over every manifest row. A provenance without it reads as not
+    verified, even when the 200-row sample would match."""
+    import aml_features as af
+    import score_financial_reference as ref
+    from threadpoolctl import threadpool_limits
+
+    _prereg_variant(tmp_path, monkeypatch, window="lifetime", label_role="participant")
+    manifest, acct = _silver(spark, tmp_path)
+
+    def iseed(tid_j: str) -> int:
+        _, tid, j = tid_j.rsplit("_", 2)
+        inner = af._splitmix64((0xF100 + int(tid) * af._TID_SEED_STRIDE + int(j)) & af._MASK64)
+        v = af._splitmix64(43 ^ inner)
+        return v - (1 << 64) if v >= 1 << 63 else v
+
+    rows = [{**r.asDict(), "seed": iseed(r["typology_id"])} for r in manifest.collect()]
+    manifest = spark.createDataFrame(rows, manifest.schema)
+    assert af.corpus_seed_check(manifest, 43)["matched_share"] == 1
+    monkeypatch.setattr(ref, "CATALOG", "spark_catalog")
+    monkeypatch.setattr(ref, "SILVER_TXNS", "refsilver.transactions")
+    monkeypatch.setattr(ref, "SILVER_ENTITIES", "refsilver.entities")
+    monkeypatch.setattr(ref, "SILVER_ACCOUNTS", "refsilver.accounts")
+    monkeypatch.setattr(ref, "ACCOUNT_PATH", acct)
+    with threadpool_limits(limits=2):
+        bare = ref.run_fidelity_gate(
+            spark, manifest, cap_rows=100_000, provenance={"corpus_seed": "43"}
+        )
+        verified = ref.run_fidelity_gate(
+            spark,
+            manifest,
+            cap_rows=100_000,
+            provenance={"corpus_seed": "43", "corpus_seed_matches_claim": True},
+        )
+    assert bare["corpus_role"] == "unverified"
+    assert bare["passes"]["corpus_seed_verified"] is False
+    assert verified["corpus_role"] != "unverified"
+    assert verified["passes"]["corpus_seed_verified"] is True
