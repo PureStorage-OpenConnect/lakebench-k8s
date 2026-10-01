@@ -45,7 +45,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The AML reference detector (lakebench.aml.reference_score and fidelity_gate)
+# and the local AML gate. The six numeric libraries are pinned to exactly the
+# versions the cluster job installs (REFERENCE_PY_DEPS in
+# modules/pipeline_engines/spark/job.py), so a local or CI gate run fits the
+# same model as the cluster; tests/test_reference_pins.py fails if the two
+# lists drift. numpy 2.2.6 has wheels for Python 3.10 to 3.13 only.
+aml = [
+    "numpy==2.2.6",
+    "scipy==1.15.3",
+    "pandas==2.3.3",
+    "scikit-learn==1.7.2",
+    "joblib==1.5.2",
+    "threadpoolctl==3.6.0",
+    # lakebench.aml.fidelity_gate writes the reference model outputs as
+    # parquet through pandas, which needs an engine.
+    "pyarrow>=14",
+]
+# Supported Pythons: 3.10 to 3.13 (the [aml] pins have no wheels for 3.14).
 dev = [
+    "lakebench-k8s[aml]",
     "pytest>=8.0.0",
     # Pinned: the coverage floors in scripts/check_coverage.py sit within a
     # point of the measured values, and line counting can move between
@@ -65,15 +84,6 @@ dev = [
     "packaging>=23.0",
     "tomli>=2.0; python_version < '3.11'",
     "moto>=5.0.0",  # AWS mocking for tests
-    # The AML reference detector (lakebench.aml.reference_score) and its tests
-    # need these; they were only installed by accident on dev machines, so CI
-    # failed to import the test module.
-    "numpy>=1.26",
-    "pandas>=2.0",
-    "scikit-learn>=1.4",
-    # lakebench.aml.fidelity_gate writes the reference model outputs as
-    # parquet through pandas, which needs an engine.
-    "pyarrow>=14",
     "pre-commit>=3.0.0",
 ]
 build = [

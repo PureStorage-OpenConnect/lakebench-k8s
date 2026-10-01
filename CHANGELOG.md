@@ -39,7 +39,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the other flat spellings still load, each with a note naming the nested
   key to write. Both spellings set: the flat value still wins, with a note.
 
+### Added
+- `[aml]` install extra (`pip install "lakebench-k8s[aml]"`) for running the
+  AML reference detector and the local AML gate. It pins numpy, scipy,
+  pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster
+  job installs, so a local gate fits the same model as the cluster.
+
 ### Changed
+- The `[dev]` extra includes `[aml]`, so a development install now gets the
+  pinned AML libraries (scikit-learn 1.7.2, numpy 2.2.6, pandas 2.3.3, scipy
+  1.15.3) instead of the newest releases. These pins support Python 3.10 to
+  3.13.
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.
