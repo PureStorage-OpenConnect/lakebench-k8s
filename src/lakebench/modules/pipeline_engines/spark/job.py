@@ -3106,6 +3106,9 @@ class SparkJobManager:
             logger.warning("No Spark scripts found")
             return False
 
+        if not self._heldout_absence_ok("lakebench-spark-scripts", data):
+            return False
+
         # Create ConfigMap manifest
         configmap = {
             "apiVersion": "v1",
@@ -3134,6 +3137,37 @@ class SparkJobManager:
         except Exception as e:
             logger.error("Failed to deploy spark-scripts ConfigMap: %s", e)
             return False
+
+    @staticmethod
+    def _heldout_absence_ok(map_name: str, data: dict[str, str]) -> bool:
+        """Scan a ConfigMap's data for an integer token that hashes to a
+        held-out AML seed before it is applied. Every token is hashed and
+        compared with heldout_hashes.json; no value is printed. With the
+        file's ``absence_check: enforce`` a hit refuses the apply; with
+        ``report`` (until the pre-registration's plaintext seeds are removed)
+        it is logged. A hash file that cannot be read refuses the apply."""
+        from lakebench.config.datagen_seed import absence_problems, load_heldout
+
+        try:
+            held = load_heldout()
+            problems = absence_problems({f"{map_name}/{k}": v for k, v in data.items()}, held)
+        except (OSError, ValueError) as e:
+            logger.error(
+                "Held-out absence check could not run for %s, not applying: %s", map_name, e
+            )
+            return False
+        if not problems:
+            return True
+        if held.absence_check == "enforce":
+            for p in problems:
+                logger.error("Held-out seed in a ConfigMap, not applying: %s", p)
+            return False
+        logger.info(
+            "Held-out absence check (report mode) found %d key(s): %s",
+            len(problems),
+            "; ".join(problems),
+        )
+        return True
 
     # Alias for backward compatibility
     def deploy_scripts(self) -> bool:
