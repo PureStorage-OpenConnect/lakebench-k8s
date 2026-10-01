@@ -37,18 +37,17 @@ def _have_jars() -> bool:
     return all(any(n.startswith(k) for n in names) for k in _NEEDED)
 
 
-if not _have_jars() and os.environ.get("LB_REQUIRE_JARS") == "1":
-    raise RuntimeError("LB_REQUIRE_JARS=1 but LB_SPARK_TEST_JARS has no Delta jars")
+_REQUIRED = os.environ.get("LB_REQUIRE_JARS") == "1"
 
 pytestmark = pytest.mark.skipif(
-    not _have_jars(), reason="LB_SPARK_TEST_JARS with Delta jars not set"
+    not _have_jars() and not _REQUIRED, reason="LB_SPARK_TEST_JARS with Delta jars not set"
 )
-
-FULL_RUN = {"1:0": 9, "1:1": 9, "1:2": 9}
 
 
 @pytest.fixture(scope="module")
 def result(tmp_path_factory):
+    if not _have_jars():
+        pytest.fail("LB_REQUIRE_JARS=1 but LB_SPARK_TEST_JARS has no Delta jars")
     work = tmp_path_factory.mktemp("delta-epoch")
     env = dict(os.environ)
     env.setdefault("PYSPARK_PYTHON", sys.executable)
@@ -73,15 +72,15 @@ def _why(case):
 def test_epoch_reset_keeps_every_cycle_of_the_new_run(result):
     """Run 1 restarts at epoch 0 with --force-rebuild over run 0's epoch-0 log."""
     case = result["epoch_reset"]
-    assert case["rcs"] == [[0, 0, 0], [0, 0, 0]], _why(case)
-    assert case["held"] == FULL_RUN, _why(case)
+    assert case["rcs"] == [[0, 0], [0, 0]], _why(case)
+    assert case["held"] == {"1:0": 9, "1:1": 9}, _why(case)
 
 
 def test_one_stale_cycle_epoch_is_not_skipped(result):
     """Cycle 1 reads epoch 0 while cycles 0 and 2 read 1 (STREAMING strategy)."""
     case = result["stale_cycle"]
     assert case["rcs"] == [[0, 0, 0], [0, 0, 0]], _why(case)
-    assert case["held"] == FULL_RUN, _why(case)
+    assert case["held"] == {"1:0": 9, "1:1": 9, "1:2": 9}, _why(case)
 
 
 def test_operator_retry_of_a_committed_cycle_is_still_a_no_op(result):
@@ -91,11 +90,26 @@ def test_operator_retry_of_a_committed_cycle_is_still_a_no_op(result):
     assert case["held_after_retry"] == case["held"], _why(case)
 
 
+def test_the_keys_are_read_back_through_checkpoints(result):
+    """Both tables passed a checkpoint, so the keys came from one too."""
+    assert result["epoch_reset"]["checkpoints"] > 0
+    assert result["stale_cycle"]["checkpoints"] > 0
+
+
 def test_catalog_lost_cycle0_refuses_the_surviving_log(result):
     """With the metastore gone, cycle 0 refuses the old log instead of
     appending to it, so no old rows are adopted and no cycle is skipped."""
     case = result["catalog_lost"]
-    assert case["rcs"][0] == [0, 0, 0], _why(case)
-    assert case["rcs"][1] != [0, 0, 0] and case["rcs"][1][0] != 0, _why(case)
+    assert case["rcs"] == [[0, 0], [1]], _why(case)
     assert case["refused_orphan_log"], _why(case)
-    assert case["held"] == {"0:0": 9, "0:1": 9, "0:2": 9}, _why(case)
+    assert case["held"] == {"0:0": 9, "0:1": 9}, _why(case)
+
+
+def test_later_cycle_rebuild_after_the_remedy_and_its_retry(result):
+    """A cycle that finds no table builds it from every cycle's files; the
+    create records its key, so an operator retry is skipped, not appended."""
+    case = result["catalog_lost"]
+    assert case["rebuild_rc"] == 0, _why(case)
+    assert case["held_after_rebuild"] == {"1:0": 9, "1:1": 9}, _why(case)
+    assert case["retry_rc"] == 0, _why(case)
+    assert case["held_after_retry"] == case["held_after_rebuild"], _why(case)

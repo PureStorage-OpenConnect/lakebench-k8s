@@ -351,16 +351,18 @@ def resolve_txn_epoch(committed, configured, appending, cycle):
       no table) takes an epoch above every epoch in the log, so its key is
       new by construction and it starts the newest epoch;
     - an append continues the newest epoch in the log, which is the one this
-      run's full build started. Its own cycle already committed there is an
-      operator retry, which Delta skips as intended; a later cycle already
-      committed there cannot be this run's and is refused.
+      run's full build started, whatever the configured epoch reads. Its own
+      cycle already committed there is an operator retry, which Delta skips
+      as intended; a later cycle already committed there cannot be this
+      run's (a manual re-run of an earlier cycle) and is refused.
 
     ``committed`` maps epoch to last committed cycle (``committed_epochs``).
+    The configured epoch is used as is only by a table with no such keys.
     """
     newest = max(committed) if committed else None
     if not appending:
         return configured if newest is None else max(configured, newest + 1)
-    epoch = configured if newest is None else max(configured, newest)
+    epoch = configured if newest is None else newest
     last = committed.get(epoch)
     if last is not None and last > cycle:
         raise SilverAbort(

@@ -10,8 +10,8 @@ so a catalog entry and a Delta log outlive a job exactly as they outlive a
 driver on the cluster. Deleting the Derby directory stands in for a destroy
 that drops the metastore and keeps the bucket.
 
-A run is cycles 0..2 of a multi-cycle batch: cycle 0 is the full build,
-cycles 1 and 2 append with ``LB_SILVER_INCREMENTAL=true``. Each cycle's
+A run is cycles 0..n-1 of a multi-cycle batch: cycle 0 is the full build,
+later cycles append with ``LB_SILVER_INCREMENTAL=true``. Each cycle's
 bronze rows carry event ids no other cycle or run uses, so the scenario can
 report which cycles silver holds, not only how many rows.
 
@@ -52,6 +52,9 @@ def _submit_args(jar_dir, work):
             f"jdbc:derby:;databaseName={work}/metastore_db;create=true"
         ),
         "spark.driver.extraJavaOptions": f"-Dderby.system.home={work}",
+        # A checkpoint every 2 commits, so the transaction ids are also read
+        # back from checkpoints, as on a long-lived table (default 10).
+        "spark.databricks.delta.properties.defaults.checkpointInterval": "2",
     }
     parts = ["--master", "local[2]", "--jars", jars]
     for k, v in confs.items():
@@ -113,9 +116,17 @@ def silver_job(jar_dir, work, cycle, epoch, force=False, strategy="simple", log=
     return proc.returncode
 
 
+def _table_dir(work):
+    return f"{work}/warehouse/silver.db/customer_interactions_enriched"
+
+
+def checkpoints(work):
+    return len(glob.glob(f"{_table_dir(work)}/_delta_log/*.checkpoint*.parquet"))
+
+
 def silver_cycles(spark, work):
     """Which (run, cycle) pairs silver holds, with the row count of each."""
-    path = f"{work}/warehouse/silver.db/customer_interactions_enriched"
+    path = _table_dir(work)
     held = {}
     for r in spark.read.format("delta").load(path).select("id").collect():
         key = f"{r['id'] // 100_000 - 1}:{(r['id'] % 100_000) // 1_000}"
@@ -124,7 +135,7 @@ def silver_cycles(spark, work):
 
 
 def run(spark, jar_dir, work, run_no, epochs, force_cycle0=False, strategy="simple", log=None):
-    """Cycles 0..2 of one `lakebench run`; ``epochs`` is LB_REBUILD_EPOCH per cycle."""
+    """Cycles 0..n-1 of one `lakebench run`; ``epochs`` is LB_REBUILD_EPOCH per cycle."""
     rcs = []
     for cycle, epoch in enumerate(epochs):
         stage_bronze(spark, work, run_no, cycle)
@@ -175,16 +186,17 @@ def main():
 
     # 1. The epoch counter goes back to 0 while the catalog entry and the
     #    log survive (silver-state lost, or job.py's read falling back to 0),
-    #    and the next run is a --force-rebuild. Run 0 committed epoch 0 up to
-    #    cycle 2, so run 1's cycles 1 and 2 reuse those (appId, version) keys.
+    #    and the next run is a --force-rebuild. Run 0 committed epoch 0 at
+    #    cycle 1, so run 1's cycle 1 reuses that (appId, version) key.
     work = _fresh(root, "epoch-reset")
     log = []
-    first = run(spark, jar_dir, work, 0, [0, 0, 0], log=log)
+    first = run(spark, jar_dir, work, 0, [0, 0], log=log)
     _clear_bronze(work)
-    second = run(spark, jar_dir, work, 1, [0, 0, 0], force_cycle0=True, log=log)
+    second = run(spark, jar_dir, work, 1, [0, 0], force_cycle0=True, log=log)
     out["epoch_reset"] = {
         "rcs": [first, second],
         "held": silver_cycles(spark, work),
+        "checkpoints": checkpoints(work),
         "log": log,
     }
 
@@ -206,6 +218,7 @@ def main():
         "held": held_after_run,
         "retry_rc": retry_rc,
         "held_after_retry": silver_cycles(spark, work),
+        "checkpoints": checkpoints(work),
         "log": log,
     }
 
@@ -213,14 +226,28 @@ def main():
     #    bucket kept) and the next deployment starts again at epoch 0.
     work = _fresh(root, "catalog-lost")
     log = []
-    first = run(spark, jar_dir, work, 0, [0, 0, 0], log=log)
+    first = run(spark, jar_dir, work, 0, [0, 0], log=log)
     shutil.rmtree(os.path.join(work, "metastore_db"))
     _clear_bronze(work)
-    second = run(spark, jar_dir, work, 1, [0, 0, 0], log=log)
+    second = run(spark, jar_dir, work, 1, [0, 0], log=log)
+    refused = "already holds a Delta log" in log[-1]["tail"]
+    held_after_refusal = silver_cycles(spark, work)
+    # The refusal's remedy: delete the table directory. Cycle 1 then finds
+    # no table and builds it from the whole prefix (cycles 0 and 1 of run
+    # 1), a create carrying the key (0, 1); its operator retry is skipped.
+    shutil.rmtree(_table_dir(work))
+    stage_bronze(spark, work, 1, 1)
+    rebuild_rc = silver_job(jar_dir, work, 1, 0, log=log)
+    held_after_rebuild = silver_cycles(spark, work)
+    retry_rc = silver_job(jar_dir, work, 1, 0, log=log)
     out["catalog_lost"] = {
         "rcs": [first, second],
-        "held": silver_cycles(spark, work),
-        "refused_orphan_log": "already holds a Delta log" in log[-1]["tail"],
+        "refused_orphan_log": refused,
+        "held": held_after_refusal,
+        "rebuild_rc": rebuild_rc,
+        "held_after_rebuild": held_after_rebuild,
+        "retry_rc": retry_rc,
+        "held_after_retry": silver_cycles(spark, work),
         "log": log,
     }
 
