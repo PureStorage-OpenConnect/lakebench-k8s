@@ -2452,12 +2452,15 @@ def frame_fingerprint(df, cols):
     it is exact and cannot overflow under ANSI mode. Row order does not
     matter; a duplicated row changes both ``rows`` and ``fp``.
 
-    A top-level map column is hashed as its entries sorted by key
-    (``array_sort(map_entries(c))``), because Spark refuses to hash a map
-    and a map has no defined entry order. A map nested inside a struct or
-    an array is refused by Spark at analysis. NULLs nested inside a struct
-    or an array are skipped by xxhash64 and are not in the mask, so moving
-    a NULL between fields of one struct value is not detected.
+    Array, struct and map columns are hashed through a canonical form,
+    because xxhash64 chains nested values without their lengths or NULL
+    positions (``(["a","b"], [])`` and ``(["a"], ["b"])`` would collide, and
+    so would ``[a, NULL]`` and ``[NULL, a]``, or a struct whose value moves
+    to a NULL neighbour). Every nested value is paired with its own NULL
+    flag, every array and map carries its size, and a map becomes its
+    entries in sorted order (Spark refuses to hash a map, and a map has no
+    defined entry order). Values that compare equal hash equal: ``-0.0``
+    and ``0.0`` match, and so do all NaNs.
 
     Callers name the columns; AML time travel and reproduction pass every
     column of the snapshot schema, including ``_stream_id``, ``_batch_id``
@@ -2470,7 +2473,27 @@ def frame_fingerprint(df, cols):
     import hashlib
 
     from pyspark.sql import functions as F
-    from pyspark.sql.types import MapType
+    from pyspark.sql.types import ArrayType, MapType, StructField, StructType
+
+    def _flagged(c, dt):
+        return F.struct(c.isNull(), _canonical(c, dt))
+
+    def _canonical_array(c, element_type, sort):
+        elements = F.transform(c, lambda x: _flagged(x, element_type))
+        if sort:
+            elements = F.array_sort(elements)
+        size = F.when(c.isNull(), F.lit(-1)).otherwise(F.size(c))
+        return F.struct(size, elements)
+
+    def _canonical(c, dt):
+        if isinstance(dt, MapType):
+            entry = StructType([StructField("key", dt.keyType), StructField("value", dt.valueType)])
+            return _canonical_array(F.map_entries(c), entry, sort=True)
+        if isinstance(dt, ArrayType):
+            return _canonical_array(c, dt.elementType, sort=False)
+        if isinstance(dt, StructType):
+            return F.struct(*[_flagged(c.getField(f.name), f.dataType) for f in dt.fields])
+        return c
 
     cols = list(cols)
     if not cols:
@@ -2491,10 +2514,7 @@ def frame_fingerprint(df, cols):
     mask = F.lit(0).cast("long")
     for i, name in enumerate(cols):
         c = _ref(name)
-        if isinstance(fields[name].dataType, MapType):
-            hashed.append(F.array_sort(F.map_entries(c)))
-        else:
-            hashed.append(c)
+        hashed.append(_canonical(c, fields[name].dataType))
         bit = F.lit(1 << i).cast("long")
         mask = mask + F.when(c.isNull(), bit).otherwise(F.lit(0).cast("long"))
     h = F.xxhash64(F.lit(_FINGERPRINT_VERSION), *hashed, mask)

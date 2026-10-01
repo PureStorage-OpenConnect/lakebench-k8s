@@ -22,7 +22,14 @@ SCHEMA = (
     "txn_amount_usd decimal(18,2), txn_timestamp timestamp, txn_type string, "
     "correspondent_chain array<string>, cross_border boolean, value_date date, "
     "risk double, hop int, evidence map<string,string>, "
-    "_batch_id bigint, _stream_id string, ingest_ts timestamp"
+    "_batch_id bigint, _stream_id string, ingest_ts timestamp, "
+    # The other hash paths a consumer reaches: decimal(38,2) hashes through
+    # BigDecimal bytes, not a long; a struct (silver.entities.address); an
+    # array of longs (gold.alerts.related_entity_ids); timestamp_ntz,
+    # binary, float; and a map and a nested array inside a struct.
+    "balance decimal(38,2), address struct<street:string,town:string,country:string>, "
+    "related_ids array<bigint>, booked_ntz timestamp_ntz, raw binary, score float, "
+    "nested struct<tags:map<string,string>,hops:array<array<string>>>"
 )
 COLS = [part.strip().split(" ")[0] for part in SCHEMA.split(", ")]
 T0 = datetime(2024, 3, 4, 10, tzinfo=timezone.utc)
@@ -31,7 +38,7 @@ T0 = datetime(2024, 3, 4, 10, tzinfo=timezone.utc)
 # Spark legs (pyspark 4.0.1 and 4.1.1): the same frame must give the same
 # string on both, or a comparison across lines is meaningless. Recompute only
 # when _FINGERPRINT_VERSION is bumped.
-PINNED = (20, "50127608237909602974", "dac18745da552321")
+PINNED = (20, "-15137261750152360935", "fc56634d8e4fd01a")
 
 
 def _pinned_rows():
@@ -54,6 +61,15 @@ def _pinned_rows():
                 i // 5,
                 "batch" if i < 10 else "s-1",
                 T0 + timedelta(seconds=i),
+                Decimal(f"{i * 98765432109876.25:.2f}"),
+                None if i % 8 == 0 else (f"{i} Main St", None if i % 3 else "Town", "US"),
+                None if i % 9 == 0 else [i, None, -i] if i % 2 else [],
+                datetime(2024, 3, 4, 10) + timedelta(hours=i),
+                None if i % 5 == 1 else bytes([i, 255 - i, 0]),
+                i * 0.5,
+                None
+                if i % 10 == 3
+                else ({"k": str(i)} if i % 2 else {}, [[f"h{i}", None], []] if i % 3 else None),
             )
         )
     return rows
@@ -171,9 +187,80 @@ def test_bad_columns_raise(spark_session, frame, cols):
 
 
 def test_sixty_three_columns(spark_session):
-    """The largest mask: bit 62 set (column 63 NULL) stays a positive long."""
+    """The widest mask: a NULL moved between columns 61 and 62 (bits 61 and
+    62) is seen, and the mask stays a valid long."""
     cols = [f"c{i}" for i in range(63)]
     schema = ", ".join(f"{c} int" for c in cols)
-    full = spark_session.createDataFrame([tuple(range(63))], schema)
-    last_null = spark_session.createDataFrame([(*range(62), None)], schema)
-    assert _fp(full, cols)[1] != _fp(last_null, cols)[1]
+    left = spark_session.createDataFrame([(*range(61), None, 7)], schema)
+    right = spark_session.createDataFrame([(*range(61), 7, None)], schema)
+    assert _fp(left, cols)[1] != _fp(right, cols)[1]
+
+
+@pytest.mark.parametrize(
+    ("schema", "left", "right"),
+    [
+        ("a array<string>, b array<string>", (["a", "b"], []), (["a"], ["b"])),
+        ("a array<string>", (["a", None],), (["a"],)),
+        ("a array<string>", (["a", None],), ([None, "a"],)),
+        ("a array<string>", ([],), ([None],)),
+        ("a array<string>", ([],), (None,)),
+        ("s struct<a:string,b:string>", (("X", None),), ((None, "X"),)),
+        ("s struct<a:string,b:string>", ((None, None),), (None,)),
+        ("m map<string,string>", ({"a": "b"},), ({"a": None, "b": None},)),
+        ("m map<string,string>", ({},), (None,)),
+        ("s struct<t:array<string>>", ((["a", None],),), ((["a"],),)),
+        ("a array<struct<x:string,y:string>>", ([("X", None)],), ([(None, "X")],)),
+        ("a array<array<string>>", ([["a"], []],), ([[], ["a"]],)),
+        ("s struct<m:map<string,string>>", (({"a": None},),), (({"a": "x"},),)),
+    ],
+    ids=[
+        "adjacent-arrays",
+        "array-trailing-null",
+        "array-null-moved",
+        "empty-vs-null-element",
+        "empty-vs-null-array",
+        "struct-null-moved",
+        "struct-all-null-vs-null",
+        "map-null-values",
+        "empty-vs-null-map",
+        "nested-array-null",
+        "array-of-struct-null-moved",
+        "nested-array-boundary",
+        "map-in-struct",
+    ],
+)
+def test_nested_values_differ(spark_session, schema, left, right):
+    """Nested values that xxhash64 alone hashes the same (it chains
+    elements without their lengths or NULL positions) fingerprint apart."""
+    cols = [part.strip().split(" ")[0] for part in schema.split(", ")]
+    a = spark_session.createDataFrame([left], schema)
+    b = spark_session.createDataFrame([right], schema)
+    assert _fp(a, cols) != _fp(b, cols)
+
+
+def test_nested_values_equal_when_equal(spark_session):
+    """The canonical form is a function of the value: the same nested
+    values built in another order hash the same."""
+    schema = "m map<string,array<string>>, s struct<a:array<bigint>,b:string>"
+    rows = [({"x": ["1", None], "y": []}, ([1, None], None)), ({}, (None, "b"))]
+    a = spark_session.createDataFrame(rows, schema)
+    b = spark_session.createDataFrame(list(reversed(rows)), schema).repartition(2)
+    assert _fp(a, ["m", "s"]) == _fp(b, ["m", "s"])
+
+
+def test_signed_zero_and_nan_hash_as_their_values(spark_session):
+    """Documented: -0.0 equals 0.0 and NaNs are equal, as values."""
+    a = spark_session.createDataFrame([(0.0, float("nan"))], "x double, y double")
+    b = spark_session.createDataFrame([(-0.0, float("nan"))], "x double, y double")
+    assert _fp(a, ["x", "y"]) == _fp(b, ["x", "y"])
+
+
+def test_session_time_zone_does_not_matter(spark_session, frame):
+    """Timestamps hash as their stored instant, so a job in another session
+    zone fingerprints the same frame the same way."""
+    before = _fp(frame)
+    spark_session.conf.set("spark.sql.session.timeZone", "America/Denver")
+    try:
+        assert _fp(frame) == before
+    finally:
+        spark_session.conf.set("spark.sql.session.timeZone", "UTC")
