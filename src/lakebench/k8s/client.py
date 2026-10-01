@@ -424,6 +424,32 @@ class K8sClient:
             raise K8sResourceError(f"Error checking secret: {e}")  # noqa: B904
 
     @retry_k8s_api
+    def get_configmap_annotations(
+        self, name: str, namespace: str | None = None
+    ) -> dict[str, str] | None:
+        """Annotations of a ConfigMap, or None when it does not exist."""
+        ns = namespace or self.namespace
+        try:
+            cm = self._core_v1.read_namespaced_config_map(name, ns)
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+        return dict(cm.metadata.annotations or {})
+
+    @retry_k8s_api
+    def delete_configmap(self, name: str, namespace: str | None = None) -> bool:
+        """Delete a ConfigMap. True if deleted, False if it did not exist."""
+        ns = namespace or self.namespace
+        try:
+            self._core_v1.delete_namespaced_config_map(name, ns)
+        except ApiException as e:
+            if e.status == 404:
+                return False
+            raise
+        return True
+
+    @retry_k8s_api
     def apply_manifest(self, manifest: dict[str, Any], namespace: str | None = None) -> bool:
         """Apply a Kubernetes manifest (create or update).
 

@@ -1505,6 +1505,9 @@ class SparkJobManager:
         # Whether the streaming budget reserves datagen's cores. The
         # continuous CLI clears it once the datagen Job has finished (LB-158).
         self.datagen_running: bool = True
+        # Set by deploy_scripts_configmap: {"scripts_sha256", "scripts_maps"}
+        # for provenance (EVD-5). None until the maps are applied.
+        self.scripts_provenance: dict[str, Any] | None = None
 
         # Cache cluster capacity for streaming concurrent budget calculation
         try:
@@ -1921,7 +1924,7 @@ class SparkJobManager:
         script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
         # Use local:// to reference scripts already in the container filesystem
-        # (mounted from lakebench-spark-scripts ConfigMap)
+        # (projected from the lakebench-scripts-<role> ConfigMaps)
         main_file = f"local:///opt/spark/scripts/{script_map[job_type]}"
 
         # Build Spark configuration (start from user overrides, then apply profile)
@@ -2298,12 +2301,13 @@ class SparkJobManager:
         # when it has RBAC).  ConfigMap volumes MUST go through the
         # pod template because Spark's KubernetesVolumeUtils does not
         # support the configMap type.
+        from lakebench.modules.pipeline_engines.spark.scripts_maps import scripts_volume
+
         packages_str = ",".join(packages)
         _pod_template_volumes: list[dict[str, Any]] = [
-            {
-                "name": "spark-scripts",
-                "configMap": {"name": "lakebench-spark-scripts"},
-            },
+            # One projected volume over the per-role scripts ConfigMaps
+            # (scripts_maps.MOUNTS_BY_JOB_TYPE), flat at /opt/spark/scripts.
+            scripts_volume(job_type),
             {
                 "name": "spark-work-dir",
                 "emptyDir": {"sizeLimit": "20Gi"},
@@ -2994,146 +2998,81 @@ class SparkJobManager:
         return env
 
     def deploy_scripts_configmap(self) -> bool:
-        """Deploy the Spark scripts as a ConfigMap.
+        """Apply the Spark scripts ConfigMaps, one per role (DEP-1).
 
-        Creates lakebench-spark-scripts ConfigMap containing all pipeline scripts.
-        These are mounted at /opt/spark/scripts in driver/executor pods.
+        The maps are rendered by ``scripts_maps.build_script_configmaps`` and
+        mounted together at /opt/spark/scripts through one projected volume.
+        Each map is read back and its ``lakebench.io/scripts-sha256``
+        annotation compared with what was written, then the v1.6 single map
+        (``lakebench-spark-scripts``) is deleted if present.
 
         Returns:
-            True if successful
+            True when every map applied and read back unchanged. False on a
+            manifest or budget error (logged as one line naming the file or
+            map), an apply failure or a read-back mismatch; the caller exits
+            before any job is submitted.
         """
-        cfg = self.config
+        from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
 
-        # Load script files (supports dev, pip install, and PyInstaller)
-        from lakebench._resources import get_scripts_dir
-
-        scripts_dir = get_scripts_dir()
-        script_files = [
-            "common.py",
-            "bronze_verify.py",
-            "silver_build.py",
-            "gold_finalize.py",
-            "bronze_ingest.py",
-            "silver_stream.py",
-            "gold_refresh.py",
-            # Delta variants (same pipeline logic, Delta write API)
-            "silver_build_delta.py",
-            "gold_finalize_delta.py",
-            "gold_refresh_delta.py",
-            "bronze_ingest_delta.py",
-            "silver_stream_delta.py",
-            # Financial (FinServ-Crime, AML) pipeline scripts
-            "bronze_verify_financial.py",
-            "silver_build_financial.py",
-            "gold_finalize_financial.py",
-            "bronze_ingest_financial.py",
-            "silver_stream_financial.py",
-            "gold_refresh_financial.py",
-            "replay_financial.py",
-            "reproduce_financial.py",
-            "score_financial.py",
-            "score_financial_reference.py",
-            # Library module imported by replay_financial (not a Spark
-            # entry point but must be mounted alongside so the local
-            # import resolves inside the driver pod).
-            "detection_rules.py",
-            # Library module imported by score_financial_reference: the
-            # pre-registered AML gate features (shared with the local
-            # harness scripts/aml_gate.py).
-            "aml_features.py",
-            # Library module imported by gold_finalize_financial and
-            # gold_refresh_financial: the P10 operations layer. Executors
-            # import it too (the per-customer workflow replay runs there).
-            "tm_operations.py",
-        ]
-
-        # Build ConfigMap data
-        data = {}
-        for script_file in script_files:
-            script_path = scripts_dir / script_file
-            if script_path.exists():
-                data[script_file] = script_path.read_text()
-                logger.info(f"Loaded script: {script_file}")
-
-        # reference_score.py is the single source of truth for the leakage
-        # gate + reference-detector logic and lives in the lakebench.aml
-        # package (unit-tested there as lakebench.aml.reference_score). The
-        # apache/spark image has no lakebench install, so it is packaged flat
-        # into the ConfigMap next to the scripts and imported by
-        # score_financial_reference.py as a bare `from reference_score import`
-        # -- the same pattern common.py and detection_rules.py use. It is
-        # self-contained (stdlib + optional sklearn/pandas at call time), so a
-        # flat mount resolves with no lakebench package on the driver.
-        from lakebench._resources import _package_dir
-
-        # fidelity_gate.py (the pre-registered AML gate evaluation) ships the
-        # same way, for the same reason; it reads aml_preregistration.json,
-        # which the AML data loop below also mounts flat.
-        for _aml_mod in ("reference_score.py", "fidelity_gate.py"):
-            _mod_path = _package_dir() / "aml" / _aml_mod
-            if _mod_path.exists():
-                data[_aml_mod] = _mod_path.read_text()
-                logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
-        # The AML seed guard (stdlib only) ships flat too, so the reference
-        # job refuses a corpus from a spent or unregistered protected seed.
-        # Fail at build time, not three driver attempts later.
-        _seed_mod = _package_dir() / "config" / "datagen_seed.py"
-        if not _seed_mod.exists():
-            raise FileNotFoundError(f"AML seed guard missing from the package: {_seed_mod}")
-        data["datagen_seed.py"] = _seed_mod.read_text()
-
-        # AML reference JSON sidecars (sanctions, PEP, high-risk
-        # jurisdictions). Detection rules load these by filename via
-        # ``_load_reference`` in detection_rules.py; without them
-        # inside the driver, W5/W6/W7 silently return zero alerts,
-        # and W7 previously crashed with an opaque ImportError from
-        # ``import lakebench.spark.data`` because the lakebench
-        # package is not installed in the apache/spark image. The
-        # three files together are ~8 KB, well under the 1 MiB
-        # ConfigMap limit. ConfigMap keys cannot contain slashes so
-        # the files land flat next to the scripts under
-        # /opt/spark/scripts/; the reader's candidate-directory search
-        # finds them there.
-        from lakebench._resources import get_aml_data_dir
-
-        aml_data_dir = get_aml_data_dir()
-        if aml_data_dir is not None and aml_data_dir.is_dir():
-            for json_path in sorted(aml_data_dir.glob("*.json")):
-                data[json_path.name] = json_path.read_text()
-                logger.info(f"Loaded AML reference: {json_path.name}")
-
-        if not data:
-            logger.warning("No Spark scripts found")
-            return False
-
-        # Create ConfigMap manifest
-        configmap = {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {
-                "name": "lakebench-spark-scripts",
-                "namespace": self.namespace,
-                "labels": {
-                    "app.kubernetes.io/name": "lakebench",
-                    "app.kubernetes.io/instance": cfg.name,
-                    "app.kubernetes.io/component": "spark-scripts",
-                    "app.kubernetes.io/managed-by": "lakebench",
-                },
-            },
-            "data": data,
-        }
-
-        # Apply ConfigMap
         try:
-            success = self.k8s.apply_manifest(configmap)
-            if success:
-                logger.info("Deployed spark-scripts ConfigMap with %d scripts", len(data))
-            else:
-                logger.error("Failed to deploy spark-scripts ConfigMap (apply returned False)")
-            return success
-        except Exception as e:
-            logger.error("Failed to deploy spark-scripts ConfigMap: %s", e)
+            maps = sm.build_script_configmaps(self.config, self.namespace)
+        except (sm.ScriptsManifestError, sm.ScriptsBudgetError) as e:
+            logger.error("Spark scripts not deployed: %s", e)
             return False
+
+        written: dict[str, str] = {}
+        for cm in maps:
+            name = cm["metadata"]["name"]
+            want = cm["metadata"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION]
+            try:
+                if not self.k8s.apply_manifest(cm):
+                    logger.error("Failed to apply scripts ConfigMap %s", name)
+                    return False
+            except Exception as e:  # noqa: BLE001
+                logger.error("Failed to apply scripts ConfigMap %s: %s", name, e)
+                return False
+            written[name] = want
+            logger.info("Applied scripts ConfigMap %s (%d files)", name, len(cm["data"]))
+
+        for name, want in written.items():
+            try:
+                annotations = self.k8s.get_configmap_annotations(name, self.namespace)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Could not read back scripts ConfigMap %s: %s", name, e)
+                return False
+            got = (annotations or {}).get(sm.SCRIPTS_SHA256_ANNOTATION)
+            if got != want:
+                logger.error(
+                    "Scripts ConfigMap %s reads back with scripts-sha256 %s, not the %s "
+                    "just written; another writer changed it. Not submitting jobs.",
+                    name,
+                    got,
+                    want,
+                )
+                return False
+
+        # The v1.6 single map. Nothing mounts it any more; a 1.6 continuous
+        # pod that still does keeps its already-mounted files.
+        try:
+            if self.k8s.delete_configmap(sm.LEGACY_MAP_NAME, self.namespace):
+                logger.info("Deleted legacy ConfigMap %s", sm.LEGACY_MAP_NAME)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Could not delete legacy ConfigMap %s (%s); destroy removes it",
+                sm.LEGACY_MAP_NAME,
+                e,
+            )
+
+        self.scripts_provenance = {
+            "scripts_sha256": sm.scripts_sha256(maps),
+            "scripts_maps": {
+                cm["metadata"]["labels"][sm.ROLE_LABEL]: cm["metadata"]["annotations"][
+                    sm.SCRIPTS_SHA256_ANNOTATION
+                ]
+                for cm in maps
+            },
+        }
+        return True
 
     # Alias for backward compatibility
     def deploy_scripts(self) -> bool:

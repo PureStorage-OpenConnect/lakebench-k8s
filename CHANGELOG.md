@@ -4,6 +4,20 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+- **Spark scripts ship in one ConfigMap per role (DEP-1, LB-207).** The single
+  `lakebench-spark-scripts` ConfigMap, about 45 KB from the 1 MiB limit with
+  every AML addition, is replaced by six maps (`lakebench-scripts-common`,
+  `-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate`, `-aml-data`), projected
+  together at `/opt/spark/scripts`, so script paths and imports are unchanged.
+  Each map is refused above 80% of 1 MiB, measured on the bytes applied. A
+  script listed for shipping but missing from the installed package now stops
+  `run` before any job is submitted, where 1.6 skipped it and the driver
+  failed later with an ImportError. The first 1.7 `run` deletes the 1.6 map;
+  `destroy` deletes all scripts maps, also when `create_namespace: false`.
+
 ## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and

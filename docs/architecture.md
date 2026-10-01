@@ -163,13 +163,17 @@ register and serve Iceberg tables identically.
 Spark jobs are submitted as `SparkApplication` custom resources managed by the
 Kubeflow Spark Operator (v2.x). Lakebench does not rely on the operator's
 webhook for volumes, because it does not inject them from the
-SparkApplication spec. The scripts ConfigMap and emptyDir volumes are
+SparkApplication spec. The scripts ConfigMaps and emptyDir volumes are
 declared in driver and executor pod templates, and scratch PVCs are attached
 through `spark.kubernetes.*.volumes.persistentVolumeClaim.*` conf properties.
 See [component-spark.md](component-spark.md#spark-operator).
 
-Pipeline scripts are packaged into a `lakebench-spark-scripts` ConfigMap and
-mounted at `/opt/spark/scripts` in every Spark pod. The driver and executor
+Pipeline scripts ship in one ConfigMap per role (`lakebench-scripts-common`,
+`-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate` and `-aml-data`), projected
+together at `/opt/spark/scripts` in every Spark pod. `run` applies them before
+any job is submitted and refuses to start if a listed file is missing from the
+package or a map is over 80% of the 1 MiB ConfigMap limit; see
+[component-spark.md](component-spark.md). The driver and executor
 pods run as UID 185 (the `spark` user in the `apache/spark` base image).
 On OpenShift, an `anyuid` SCC is automatically bound to the
 `lakebench-spark-runner` service account.

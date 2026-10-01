@@ -1670,56 +1670,23 @@ class TestCycleEnv:
 
 
 class TestScriptsConfigMapDeltaScripts:
-    """Verify deploy_scripts_configmap includes Delta script files."""
+    """The scripts ConfigMaps ship the Delta script files (v1.2)."""
 
     def test_script_files_list_includes_delta_variants(self):
-        """The script_files list in deploy_scripts_configmap should include Delta scripts."""
-        config = _make_config()
-        k8s = _mock_k8s()
-        mgr = SparkJobManager(config, k8s)
+        from lakebench.modules.pipeline_engines.spark.scripts_maps import (
+            build_script_configmaps,
+        )
 
-        # Inspect the method source to verify the list, or call and check.
-        # We mock k8s.apply_manifest to capture the ConfigMap data.
-        k8s.apply_manifest.return_value = True
-
-        with patch("lakebench._resources.get_scripts_dir") as mock_dir:
-            import tempfile
-            from pathlib import Path
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp = Path(tmpdir)
-                # Create all expected script files
-                expected_delta_scripts = [
-                    "silver_build_delta.py",
-                    "gold_finalize_delta.py",
-                    "gold_refresh_delta.py",
-                    "bronze_ingest_delta.py",
-                    "silver_stream_delta.py",
-                ]
-                expected_iceberg_scripts = [
-                    "common.py",
-                    "bronze_verify.py",
-                    "silver_build.py",
-                    "gold_finalize.py",
-                    "bronze_ingest.py",
-                    "silver_stream.py",
-                    "gold_refresh.py",
-                ]
-                all_scripts = expected_iceberg_scripts + expected_delta_scripts
-                for script in all_scripts:
-                    (tmp / script).write_text(f"# {script}\nprint('hello')\n")
-                mock_dir.return_value = tmp
-
-                result = mgr.deploy_scripts_configmap()
-                assert result is True
-
-                # Verify the ConfigMap data includes Delta scripts
-                call_args = k8s.apply_manifest.call_args[0][0]
-                configmap_data = call_args["data"]
-                for delta_script in expected_delta_scripts:
-                    assert delta_script in configmap_data, (
-                        f"Delta script {delta_script} missing from ConfigMap"
-                    )
+        maps = build_script_configmaps(_make_config(), "test-ns")
+        shipped = {k for cm in maps for k in cm["data"]}
+        for delta_script in [
+            "silver_build_delta.py",
+            "gold_finalize_delta.py",
+            "gold_refresh_delta.py",
+            "bronze_ingest_delta.py",
+            "silver_stream_delta.py",
+        ]:
+            assert delta_script in shipped, f"Delta script {delta_script} missing from the maps"
 
 
 class TestFinancialScriptDispatch:
@@ -1800,14 +1767,14 @@ class TestReferenceScoreWiring:
         """deploy_scripts_configmap must ship BOTH score_financial_reference.py
         and reference_score.py (the self-contained module it imports) flat, so
         the bare `from reference_score import` resolves on the driver."""
-        config = _make_config()
-        k8s = _mock_k8s()
-        k8s.apply_manifest.return_value = True
-        mgr = SparkJobManager(config, k8s)
+        from tests.test_scripts_maps import FakeK8s
+
+        k8s = FakeK8s()
+        mgr = SparkJobManager(_make_config(), k8s)
 
         result = mgr.deploy_scripts_configmap()
         assert result is True
-        data = k8s.apply_manifest.call_args[0][0]["data"]
+        data = {k: v for cm in k8s.applied for k, v in cm["data"].items()}
         assert "score_financial_reference.py" in data, "reference Spark entry point not packaged"
         assert "reference_score.py" in data, (
             "reference_score.py module not packaged -- the driver has no lakebench "
