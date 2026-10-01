@@ -1,0 +1,784 @@
+{
+ "format": 1,
+ "case": "F0",
+ "image": "sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a",
+ "seed_ref": "43",
+ "runs": [
+  [
+   "--schema",
+   "financial",
+   "--scale",
+   "1.000000",
+   "--target-tb",
+   "0.008203",
+   "--mode",
+   "all",
+   "--delivery-mode",
+   "continuous",
+   "--file-size-mb",
+   "64",
+   "--bucket",
+   "lbref",
+   "--prefix",
+   "pacs008",
+   "--seed",
+   "43",
+   "--dirty-ratio",
+   "0.08",
+   "--total-nodes",
+   "4",
+   "--workers",
+   "0"
+  ]
+ ],
+ "nodes": 4,
+ "env": {
+  "CPU_LIMIT": "8"
+ },
+ "threads": [
+  [
+   8,
+   8,
+   8,
+   8
+  ]
+ ],
+ "excluded": [
+  "_corpus/"
+ ],
+ "excluded_objects": 0,
+ "pin_proof": {
+  "c360": {
+   "digest": 7884786140200387728,
+   "files": 5,
+   "trees": 2
+  },
+  "financial": {
+   "digest": 14946780858166320800,
+   "files": 179,
+   "trees": 1
+  },
+  "financial_perturbed": {
+   "digest": 2899328701438880645,
+   "files": 179,
+   "trees": 1
+  },
+  "financial_two_cycle": {
+   "digest": 6502905751768177657,
+   "files": 181,
+   "trees": 1
+  },
+  "c360_two_cycle": {
+   "digest": 9956579246127600639,
+   "files": 10,
+   "trees": 1
+  }
+ },
+ "objects": [
+  {
+   "key": "pacs008/bronze/account.parquet",
+   "size": 5958280,
+   "sha256": "b15fa3c00306fb41f42a8d82c825377e10e7ae08a2b5c94dbc63172770718b17"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000000.parquet",
+   "size": 66208748,
+   "sha256": "2f5d690d0a4e60db131d7bd49b4c605c09156bc2ab042ab3db7505db576d1e7f"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000001.parquet",
+   "size": 64336165,
+   "sha256": "85f454183219e5b5211db3fd8ec4f2243de8147174f68310bb65a367f2106d3e"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000002.parquet",
+   "size": 68247139,
+   "sha256": "c2c693c00088e0cd851aaba804b6837bbbdbcbd66097beb095246710a0a00184"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000003.parquet",
+   "size": 66788419,
+   "sha256": "1a1bae61b9dd8e12255590d5ffb0b726dff6001b15a9c980816dd108e474c2bc"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000004.parquet",
+   "size": 64338836,
+   "sha256": "cb3a84f4a9fa93086f3180483ad6a727a9605c1d865a4012cc7cf6798e7f3e16"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000005.parquet",
+   "size": 67425847,
+   "sha256": "8abb3b1595560d6c00463545d4349f7fa7977dcd5558be5d208c5708f6736dc0"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000006.parquet",
+   "size": 66367267,
+   "sha256": "cc4342a7daccb2d6a583b4263f9d37e381c1e4719d2267563d79f134f6bc9b62"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000007.parquet",
+   "size": 68055475,
+   "sha256": "898e8bed5aab754b89e6edaaea753674b75a6fdbdd2d2979f91caad4bf51adff"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000008.parquet",
+   "size": 66120874,
+   "sha256": "ca99ea86b4979e3e3a7408a35fbc51538f3193696dde85851cf4767715ef8523"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000009.parquet",
+   "size": 66119729,
+   "sha256": "edbf346ed86b0ae078dbaaeb1eec3e2f12641df5467cfdf471b91c48f0bd8112"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000010.parquet",
+   "size": 66736432,
+   "sha256": "cea8c7a8c17249d7ebd8e06c51b28f1d9556410df2eb855d4d4c0c2b65fe414a"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000011.parquet",
+   "size": 66252172,
+   "sha256": "8bc4ed7e2be3bc639c764c8f589a3f5cc6bc5d28a374804d2fed5aec5dcc922e"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000012.parquet",
+   "size": 66497324,
+   "sha256": "a12965a998f670826530354990bf7725fc79b24be4bc883969c970216b3a95e9"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000013.parquet",
+   "size": 66117287,
+   "sha256": "a53cb468c0dd2910ae7df0d28d42fb16fe64eaac4e92f01b321dae2870e05280"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000014.parquet",
+   "size": 66444385,
+   "sha256": "f32446f03c96f1d6bea04bf41a2bc58a8eae82de7c40d33debbc6cb8f8b53999"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000015.parquet",
+   "size": 66480631,
+   "sha256": "1a89af4fa466fc989fc5f797e05ce5d377a6296471a7eb3bab1486438dc0b9fd"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000016.parquet",
+   "size": 66723565,
+   "sha256": "ec8e206aee3a6117e32c306d6c4d3ce110af9f62987c8f60c85261715fb20b74"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000017.parquet",
+   "size": 66716334,
+   "sha256": "edbe7d56a1026a2f92125b27cbb1938b70d737745db5287957a7df35f5c0782e"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000018.parquet",
+   "size": 65906368,
+   "sha256": "9e2e181e18c721349d885f90b46986772b92000ecab288975e44b1b62386c8a5"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000019.parquet",
+   "size": 65923297,
+   "sha256": "5b50775aee871d1f33fb3c3c9b2ead11bbdc266048ccbfed942b54ba4dcd40ce"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000020.parquet",
+   "size": 67320557,
+   "sha256": "a18ab4caeaf2c0b0c3a807f89ebdca15e562cc5d074e3afc90cd8c575f280f73"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000021.parquet",
+   "size": 65873016,
+   "sha256": "d97740d9a96108d4e3c7103c14fa7819e31c2bdf6454985f0cdbcc68ca62af1f"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000022.parquet",
+   "size": 67017613,
+   "sha256": "9f55f9552cdc2523202102ff68ca3b48d9a545721356aa0d81a8adcfeb2181b6"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000023.parquet",
+   "size": 66147638,
+   "sha256": "79c915839249222be7a50cab3e8e06cfdf7a6f6abb463adbb0d4e1e5d52d4bb2"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000024.parquet",
+   "size": 65318420,
+   "sha256": "8a13601befd90c28eb1bb2cb509f23051d575b1a49c0c5d1ef198ba39676abe9"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000025.parquet",
+   "size": 67314642,
+   "sha256": "f472f556fa9407a81c428e7748aadec609c1a35c86c5abc5012d6b7f5e044204"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000026.parquet",
+   "size": 66591085,
+   "sha256": "e677df6e6bc683eb1e5d563bfcb636c9d4c8e10508345b172edbca5485cfde81"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000027.parquet",
+   "size": 67019665,
+   "sha256": "01e669baafec7c405e3ffc8ab14fc8e6ade248d779a902abcecbaecef3070dff"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000028.parquet",
+   "size": 65936597,
+   "sha256": "e78f4e8bd61802c6136c9c0f7df8262553c2c6896cfd2ed7eb6db6a35b6e921a"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000029.parquet",
+   "size": 66531542,
+   "sha256": "7a8b13026c4c3e646a474e9324d6125a44ca23061f0edf4e084e3a5e3fd066fb"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000030.parquet",
+   "size": 67154522,
+   "sha256": "66b9969dc68997148f968da73eb62b15616b4e86695e48d5638364e8941f8f71"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000031.parquet",
+   "size": 65764686,
+   "sha256": "2108833a544a57e26f60c0c5b0929a69d25aa9335c114d03ce38cca808580a82"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000032.parquet",
+   "size": 66297102,
+   "sha256": "b5e28a6ff6cf1b4a480c33ca7c859661b09f786e1779c5b7abb31f62cf173c7b"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000033.parquet",
+   "size": 64967842,
+   "sha256": "d5e5ce420190fc4070a7dc79276c50a8d1bae6013d0572eb9d8579655a6aa7fe"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000034.parquet",
+   "size": 66841974,
+   "sha256": "da2ff8d89e97aa8e2f7a90f42bf44caffc8895ee2665fe0b0a2fa5ec70d5594d"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000035.parquet",
+   "size": 65780668,
+   "sha256": "ccc7ffa22c6fb06308d2e3414b72f7edb3997fd38d82404da73f4d02abf19a1f"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000036.parquet",
+   "size": 69336093,
+   "sha256": "74ebbff1a93a41e9b8dfc7e4b74dd6715bd902bd3845c15f5b0efb89d3d14cc2"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000037.parquet",
+   "size": 65284780,
+   "sha256": "856578aae896f075b065c2356718932cabc940bfa200f286ed7fe63f1c3370f9"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000038.parquet",
+   "size": 66029900,
+   "sha256": "378f73df1e2292b1ba24b3cc0f0a5c6472b8cbf9a7a5862acab40445721c8816"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000039.parquet",
+   "size": 67327113,
+   "sha256": "57e72d9e41b23488ab207fdb612e4f3017d195680a4f64f933f0cd905d4d804a"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000040.parquet",
+   "size": 65856712,
+   "sha256": "610861d72df0e2534d92851183a0f71c2f255690f09faeee0d2723b1579929c6"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000041.parquet",
+   "size": 66030653,
+   "sha256": "043d5c8425f194c9b231f43e7554bc042fc4966921f094c9434c02fcf6c4fe1b"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000042.parquet",
+   "size": 67358383,
+   "sha256": "fc7118f4898797b114a733ab80932dd0da05328c7942ec6a26cbedd817ff6c2e"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000043.parquet",
+   "size": 66044204,
+   "sha256": "83d2bbfdf49b003494dd28362e122d1aca5e98cd6253d0fae151a96b5f25e2a5"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000044.parquet",
+   "size": 66767309,
+   "sha256": "04d41d1edaf93772001a64447022ea7b5786868435e40066e8a2d80bd4ff91f3"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000045.parquet",
+   "size": 66444229,
+   "sha256": "820fbe8afae63c7fc1e0b029aa7f9c7618f32442ca9b325ca6aa2b7465707edc"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000046.parquet",
+   "size": 65300453,
+   "sha256": "9aa9829d3ea15b7762d84b922d0cee4e199ab097781cd8347cdf4267c17aeffc"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000047.parquet",
+   "size": 67245248,
+   "sha256": "c9dee28715329af24deccb26e8bed2a87e6804614147013621f02f2af05c9ee2"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000048.parquet",
+   "size": 66919410,
+   "sha256": "1f44802f8d2d13b3009b7617b6b64c2df07efb70ab1edffd70213cf1ffb44477"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000049.parquet",
+   "size": 66587087,
+   "sha256": "bb1d0350aa9a99c537188fb8fdb2cc2d2da18e1c31ae9ce5afc68c495a173af8"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000050.parquet",
+   "size": 65735481,
+   "sha256": "e989b42cff75601d06ffb460eb61238ead2e5a9e35fa98cba4257c18e7d9adfb"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000051.parquet",
+   "size": 67012915,
+   "sha256": "93dbd709a09f0e23ae5da86a8b990aecd27e84a848b1164eea8dfd2f540670b6"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000052.parquet",
+   "size": 58893176,
+   "sha256": "9519086db4d5a7e945af6e28c11894df902a8791a3d640201c55bf5652ff941a"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000053.parquet",
+   "size": 73456468,
+   "sha256": "a1f4a71b4cbc14f4f937761802019cb60d2615a6f44ee7c1e2c1a27ab2c30184"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000054.parquet",
+   "size": 65799266,
+   "sha256": "fdd934ab0c6ac144de0044099fd49caf42712e060a0822d6526b1daec4b0e7ed"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000055.parquet",
+   "size": 67290526,
+   "sha256": "1f0fe50baae100e7866b4902637c0c317dddf96cea23ca8a7b0e226c2b75b322"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000056.parquet",
+   "size": 65356207,
+   "sha256": "846e84de0cfcae61170fc94659088c3d995a06321cc405a456262692ff7b7438"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000057.parquet",
+   "size": 67404918,
+   "sha256": "620085b7460b24ab28475a20ab147c5f3788ad5e916589cd6a1f1524485042ec"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000058.parquet",
+   "size": 67014520,
+   "sha256": "4e08515348050e600a0243d64481f5ea5a1746fadfc73a538837e30d2ae73918"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000059.parquet",
+   "size": 66354596,
+   "sha256": "da69546a1995ef2b85a4ae97802cc4cf20f56db46994616031199844bee64ca3"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000060.parquet",
+   "size": 66495009,
+   "sha256": "7c4275d9f4c35733ed3005dfe4eca0db95ece91f78fa78f4501e678553e135e8"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000061.parquet",
+   "size": 65982287,
+   "sha256": "d55fd75cd46f0551fc0a5cf136ee3531caabbf2372c01a1679e31dbceb50e0f5"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000062.parquet",
+   "size": 66929365,
+   "sha256": "bbe032623df878057aab05449c27380123b352f03ea97e8a27f44e71b9423f46"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000063.parquet",
+   "size": 66966989,
+   "sha256": "c45d22edc97a159c526ff1123c31daa9291186cf45362a24a51975ea3bfaa46b"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000064.parquet",
+   "size": 66350653,
+   "sha256": "f2048ec2b6949052e6f12a089f9426193302ceef2dd93baeb53d2091df300c06"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000065.parquet",
+   "size": 66100352,
+   "sha256": "975b59399dfdaf304d5a263ef27aa8e4fa2636118593a72a84a0b40e4f1766fd"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000066.parquet",
+   "size": 65888036,
+   "sha256": "71597b66585a35608299adab947194bb3929c3357eb3d894898db13535645b40"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000067.parquet",
+   "size": 65934993,
+   "sha256": "4169f414b3eb1fca0930b0310358750e7c869da19e091bc5ccfd40b76464ae06"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000068.parquet",
+   "size": 67640835,
+   "sha256": "41bdc08af3a3369ecacdc43f864655fc9f0980e95b2a8f9a3f0d10bdbdc8155b"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000069.parquet",
+   "size": 65900124,
+   "sha256": "04e308cd76fb6222f275b55a9c87bf63ecdf6d5f7ec7b6423bdebba18170829a"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000070.parquet",
+   "size": 66611335,
+   "sha256": "67f93c5a12992b66e1b3c6113d7a1face0e7d5f872864ed75c2cc2c7c6505000"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000071.parquet",
+   "size": 66926296,
+   "sha256": "d121216e0c19c9f69db6aee9344e83d8693d65c25fc800ac431140cd1124dc3b"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000072.parquet",
+   "size": 64409749,
+   "sha256": "0ffc488ff9af5c85cd8e045960b85fdcc4a499954b21596b09878bf82900b3ec"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000073.parquet",
+   "size": 67417574,
+   "sha256": "2c677791110a6a95b452303fca66318890122388d9e8b5c052eefbdfa9103cff"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000074.parquet",
+   "size": 67135545,
+   "sha256": "2de1ca483bb022cda6b009ff5f7e987893646fc5e5b0033d55f4699fb655d901"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000075.parquet",
+   "size": 66153141,
+   "sha256": "d570a09ffd947b15a9702442d2616fd019652e6bb771e7d773477084d1303c91"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000076.parquet",
+   "size": 65940565,
+   "sha256": "e019e9d98d79b19f772194e52d12d4455d6da958e7af127aa77483fcc546820e"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000077.parquet",
+   "size": 67439779,
+   "sha256": "c125474cb4a18792ef0ee3c4104a38cf65f46a24717fc2375ddb36b7bee62a40"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000078.parquet",
+   "size": 66023199,
+   "sha256": "bc9d05ad0c5c990982a37b12618b8d92bceab2bd690d265520a81b872e809149"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000079.parquet",
+   "size": 67278491,
+   "sha256": "2ac31c88f772a8119a1bec3931cddb5ee5f58e1bdaf2692de37fbdf737a8fa4f"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000080.parquet",
+   "size": 67033618,
+   "sha256": "ddaa57a51ae7af059f083f432eb421f6df8c2b1fcdc13eea827d438ea6e3be5d"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000081.parquet",
+   "size": 55844455,
+   "sha256": "b1ccbc8c1d309c65a27e1362fe50c397e8a990c1a5c2d618fc0b3cb9d4ae2235"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000082.parquet",
+   "size": 75259840,
+   "sha256": "21c2fa62610c6309396932435518961cf04f8a3444c883a79501bfdbf2a357ff"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000083.parquet",
+   "size": 66252700,
+   "sha256": "d26f9615b08a9ea9b635bf08f2b8cd0c5fb7f0211b6f5ec7745d2c10446f516e"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000084.parquet",
+   "size": 66143639,
+   "sha256": "d2bfd6ea3108f4182e3bbc485fef29496f3915a6bb3b7c05df0b2fdff5b5e1d3"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000085.parquet",
+   "size": 65861094,
+   "sha256": "78b05138b35cc569544b40cbec3589b84c90daca689bbf82e4a44dc1556debb0"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000086.parquet",
+   "size": 67049498,
+   "sha256": "5d531d3b3a4db5d1b64d80d2f796cbfd95ba3cb0e7c0b9279b3a05b1a9c92c9f"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000087.parquet",
+   "size": 66476112,
+   "sha256": "1ec32bb7739000de24d3fd74265b5fedf04f090913276191f808b56d48f1f2b5"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000088.parquet",
+   "size": 64968047,
+   "sha256": "9397a157943d57e7a307292706ac13db7b2d1d95e0e78cf6482e9e452352fab6"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000089.parquet",
+   "size": 67068251,
+   "sha256": "88e2e3f9a98a0753565283641d7b3229100189a276609d65b0f5ae5535907e98"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000090.parquet",
+   "size": 65460744,
+   "sha256": "9908b601b4fd8636f266768743f0e40d76c9dc80573d3fc125e7a7787c48061c"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000091.parquet",
+   "size": 69165273,
+   "sha256": "493cfa79255daf9c30c6a8eebcabecb9641394a47d14161da06e3616a35695df"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000092.parquet",
+   "size": 65554987,
+   "sha256": "c1919607601bb517d46f46094f05b37896e8e21bdd2f278cd7f5f617ad57bb16"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000093.parquet",
+   "size": 66463817,
+   "sha256": "1baa69f9e4a0760e57781fde34c58659d7c3bc8cb4719be717846e5fdcbc53de"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000094.parquet",
+   "size": 66740647,
+   "sha256": "c5de3d269099bb351f7629a7def5ef7d77df8b4278fc10f247218963a4e9a257"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000095.parquet",
+   "size": 66320386,
+   "sha256": "023072b9376ca836d1fc9ce4ca11c1643a5c5498ee7e5e6ec71ec59c6828c5e5"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000096.parquet",
+   "size": 65456122,
+   "sha256": "7fe32e80cc06a627a0f530dab6c2609900bc34ba32c046b050f31f677891b67c"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000097.parquet",
+   "size": 67453591,
+   "sha256": "aba8e1f9dea0caad7950c9f7891b616770d13a95ce52160806e53014e14a2f24"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000098.parquet",
+   "size": 65121512,
+   "sha256": "ef9824199c39c4f67d765180e573d25d2e4f9a4d1bc74ca5614bab7ec5fb195d"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000099.parquet",
+   "size": 66390968,
+   "sha256": "eb999761ec1a4b5c5e63cbe398df16f29a61793b2c83e429e2ab5b41beb609d4"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000100.parquet",
+   "size": 68008778,
+   "sha256": "7f93ee04f3bd84907faed336a5992b5891e9faa9e716cdf9da59b789b1a68527"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000101.parquet",
+   "size": 66597202,
+   "sha256": "f69b7e2bc54fe0ae25e4d924a16ec71bdd39d6bcfbf8a56c94f2fe1a009acdcc"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000102.parquet",
+   "size": 66626700,
+   "sha256": "582839eca1d7b8d9d7d66f3b21d7b71769ac66a405eb1296752c010e82a47b06"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000103.parquet",
+   "size": 64438470,
+   "sha256": "78bd270ce35c17025a872fa8cad0ae036faaa6e4da942735f8b782fef2d92853"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000104.parquet",
+   "size": 67432147,
+   "sha256": "4596ad423fb87dc8cd223d36bd4cc57c97189ba232d2ece5eabc178805fc390d"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000105.parquet",
+   "size": 66710485,
+   "sha256": "0f2a609f5e3da44cbbf4db080529764a0e25ec5ed18097332a52984d5b40c228"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000106.parquet",
+   "size": 66442378,
+   "sha256": "db10773be0fd6075995442850620701c157644f3db51f39e9e963461253831b3"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000107.parquet",
+   "size": 66517172,
+   "sha256": "d604d4af76064a4c6f4075ee4af8b97418ff256edd3a67500ce3ad62c8550737"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000108.parquet",
+   "size": 66541248,
+   "sha256": "30d633f9b9618c1a2f2f0d85fbed0390eb9a784002f2add0c302232f1d14afc6"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000109.parquet",
+   "size": 66229025,
+   "sha256": "47e3025940b171f6852befaf2cd87f7f3418f997ddbfa8347440195bb93d117c"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000110.parquet",
+   "size": 65580758,
+   "sha256": "0df980c88d2344ce171b35f153985292b62e9aa8b35c13f721fcf28b568ab953"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000111.parquet",
+   "size": 66871588,
+   "sha256": "c23487d8a72a693f38f8faf37c3fd161ea2a22f9019a5c71770b31b1c7cc1429"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000112.parquet",
+   "size": 66650031,
+   "sha256": "a25ca7852136d9a1cfada0fa9c7203720c3cb5fd4205deb47d1ef4d6a35c237d"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000113.parquet",
+   "size": 66124213,
+   "sha256": "8d50e8162835748b1a6bc7a9d3b0e0207ece180b9d6b20d54a9e48f0dd6f0dcf"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000114.parquet",
+   "size": 66664694,
+   "sha256": "983a7c6fc6f1e5de18f03ec0b3aa11a153639ba3ab2abe5ce49ceb8aa95df8b1"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000115.parquet",
+   "size": 66351584,
+   "sha256": "334934cd5adb430184bcbefab8f27931b2fb95425258454023bd15be24cf2791"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000116.parquet",
+   "size": 66603354,
+   "sha256": "9b21218f219292f7fa3a2fb3685afb4fe666b205c8b1188d4562cbddecd9adf1"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000117.parquet",
+   "size": 64816768,
+   "sha256": "2ae64d18a40ca2fafccb976f9391099953f92fb61191b8f32bceb3102f0a1df4"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000118.parquet",
+   "size": 68091321,
+   "sha256": "45365d5f5c8398d3a5a57b50b56e0b0098e30015b822f9f946a532f0e73a2c8b"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000119.parquet",
+   "size": 66296051,
+   "sha256": "e5ec393d28a8485ba787bdb7a42d7979d3536480a10e523a879a98bc893dae78"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000120.parquet",
+   "size": 66583026,
+   "sha256": "60650583af303ac7906806982d15488619b90faab005392c03641ea6158138ca"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000121.parquet",
+   "size": 67012182,
+   "sha256": "b1bcd07c38f4d9c9231cd540de9a76bfb10265405b2de7ad1d36eaf22e9ac5f9"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000122.parquet",
+   "size": 65762044,
+   "sha256": "14305c7834c15af3f7a2c91d3f2ee71b7032e7df95e1e885e8612c69da6fd93b"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000123.parquet",
+   "size": 66403398,
+   "sha256": "845753b0c67d5da25c2ba7787c95514bd5e0829cc89984b4f0bb89225e143f1d"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000124.parquet",
+   "size": 66694963,
+   "sha256": "e52b5d2f4a8299d27c55c652a889f001a1b88bfbc0e666a5ccb16915736eacf5"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000125.parquet",
+   "size": 66402124,
+   "sha256": "489787909f71baba7b358a07983d30e340bb9a28af6cef0fd85564e2c3443933"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000126.parquet",
+   "size": 64206443,
+   "sha256": "2540e44fb29814ec1d426618bb80d178ff8a2f9f05d27ee719821cc7ccfd6d8f"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000127.parquet",
+   "size": 68010067,
+   "sha256": "2f56592ffa9d5246f5fd81b55cf2cf78b555c4baa19f50eac6c541e428fc40a6"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000128.parquet",
+   "size": 67335118,
+   "sha256": "9e6b318a52a66cc6c996ac21e21f381405b51422299d26e5af9d42dddafd6ded"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000129.parquet",
+   "size": 65798139,
+   "sha256": "75b6bc25cd287678c99184d0581cc60ab202c61864fd0b1850f54adb57d51b85"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000130.parquet",
+   "size": 66534182,
+   "sha256": "a16292bfe19fe07e9335256abf714843da2c5eab0875a4f82555eae674c58214"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000131.parquet",
+   "size": 66149051,
+   "sha256": "0733f0407858631b7c81870c7cfc305d5209a69b01cb7acb057f47c830cdccc8"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000132.parquet",
+   "size": 66820041,
+   "sha256": "74432aa9b199a687657ea8379256c64e307f3ea68312b1b20af3a08f09c57c96"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000133.parquet",
+   "size": 65738172,
+   "sha256": "6314c1f6263905ad65df79bc2cc5372e54d30745613f34ce042cb3b831a10a43"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000134.parquet",
+   "size": 66258692,
+   "sha256": "9e536918033895aa55a29dd16f16540488d8556b40a70d5bb38264d2a73fd9ee"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000135.parquet",
+   "size": 66356053,
+   "sha256": "ccd71e84903a1ac14bfaeb35bbd3a65091b53856954e50b33b48083cf381e66f"
+  },
+  {
+   "key": "pacs008/bronze/pacs008/part-000136.parquet",
+   "size": 66162067,
+   "sha256": "0ba266d92ed7ac5ec117081a1198b8d827732c112d9ece14575955192f003ffe"
+  },
+  {
+   "key": "pacs008/bronze/party.parquet",
+   "size": 8684975,
+   "sha256": "b2c0e095c843d13546e99f16106209e8021e2010bf62fcaf53f74043c9b3e9ef"
+  },
+  {
+   "key": "pacs008/bronze/watchlist.parquet",
+   "size": 6743,
+   "sha256": "7a48de1340902b5114381278f899331f657c1d64f58b93735a2300cff2cef6d6"
+  },
+  {
+   "key": "pacs008/manifest/manifest.parquet",
+   "size": 1422828,
+   "sha256": "378927c120aff5f6588f0e76c1faadb994668ef794d041d08fe8240f668fdc36"
+  }
+ ]
+}

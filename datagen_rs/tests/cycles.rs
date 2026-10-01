@@ -1012,3 +1012,134 @@ fn financial_output_is_pinned_to_the_frozen_generator() {
         "financial generator output changed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CD-26 (DAT-2): three more pins, captured at integrate 77a65d2 source (equal
+// to the v1.6 release generator, which passes the two pins above). With the
+// two above they cover the paths the look-image changes touch: the
+// perturbation branch, and cycle slicing with cycle-suffixed keys on both
+// schemas. A change here is a generator output change: on financial it
+// voids the AML freeze (docs/internal/aml-protocol.md).
+// ---------------------------------------------------------------------------
+
+/// Run `generate` once per argv into one fresh local tree and digest it.
+fn pin_tree(tag: &str, runs: &[Vec<&str>]) -> (u64, usize) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-pin-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for argv in runs {
+        let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+            .env("DG_LOCAL_DIR", &dir)
+            .args(argv)
+            .output()
+            .expect("run generate");
+        assert!(
+            out.status.success(),
+            "generate {:?} failed: {}",
+            argv,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let got = tree_digest(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    got
+}
+
+/// The financial pin's argv (2 nodes, batch delivery) plus `extra`.
+fn financial_pin_runs<'a>(extra: &[&'a str]) -> Vec<Vec<&'a str>> {
+    ["0", "1"]
+        .iter()
+        .map(|node| {
+            let mut a = vec![
+                "--bucket",
+                "b",
+                "--seed",
+                "7777",
+                "--scale",
+                "0.02",
+                "--threads",
+                "2",
+                "--mode",
+                "all",
+                "--total-nodes",
+                "2",
+                "--node-id",
+                node,
+                "--file-size-mb",
+                "1",
+                "--delivery-mode",
+                "batch",
+            ];
+            a.extend_from_slice(extra);
+            a
+        })
+        .collect()
+}
+
+#[test]
+fn financial_perturbed_output_is_pinned() {
+    let got = pin_tree(
+        "fin-pert",
+        &financial_pin_runs(&["--robustness-perturbation"]),
+    );
+    assert_eq!(
+        got,
+        (2_899_328_701_438_880_645, 179),
+        "financial perturbed output changed"
+    );
+}
+
+#[test]
+fn financial_two_cycle_output_is_pinned() {
+    let mut runs = financial_pin_runs(&["--cycle", "0", "--cycles", "2"]);
+    runs.extend(financial_pin_runs(&["--cycle", "1", "--cycles", "2"]));
+    let got = pin_tree("fin-cyc", &runs);
+    assert_eq!(
+        got,
+        (6_502_905_751_768_177_657, 181),
+        "financial two-cycle output changed"
+    );
+}
+
+#[test]
+fn c360_two_cycle_output_is_pinned() {
+    // The c360 pin's argv as two cycles, with the windows the deployer gives
+    // two cycles over its default range.
+    let windows = [
+        ("0", "2024-01-01", "2024-12-31"),
+        ("1", "2024-12-31", "2025-12-31"),
+    ];
+    let runs: Vec<Vec<&str>> = windows
+        .iter()
+        .map(|(n, start, end)| {
+            vec![
+                "--schema",
+                "customer360",
+                "--bucket",
+                "b",
+                "--seed",
+                "43",
+                "--target-tb",
+                "0.00002",
+                "--file-size-mb",
+                "4",
+                "--threads",
+                "2",
+                "--timestamp-start",
+                start,
+                "--timestamp-end",
+                end,
+                "--cycle",
+                n,
+                "--cycles",
+                "2",
+            ]
+        })
+        .collect();
+    let got = pin_tree("c360-cyc", &runs);
+    assert_eq!(
+        got,
+        (9_956_579_246_127_600_639, 10),
+        "c360 two-cycle output changed"
+    );
+}
