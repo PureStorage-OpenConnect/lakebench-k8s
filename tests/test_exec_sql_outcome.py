@@ -285,7 +285,10 @@ class TestSustainedCallers:
         k8s.exec_in_pod.return_value = (0, "", "")
         j = MagicMock()
         _run_iceberg_compaction(_cfg(), k8s, Console(quiet=True), j, timeout=1800)
-        assert {c.kwargs["timeout"] for c in k8s.exec_in_pod.call_args_list} == {1800}
+        # The optimize statements get the compaction timeout; the silver
+        # table's partition read before them (LB-210) has its own.
+        optimize = [c for c in k8s.exec_in_pod.call_args_list if "optimize" in c.args[1][2]]
+        assert optimize and {c.kwargs["timeout"] for c in optimize} == {1800}
         d = _journal_details(j, "Iceberg compaction")
         assert "elapsed_seconds" in d and d["statement_timeout_seconds"] == 1800
 

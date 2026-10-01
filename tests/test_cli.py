@@ -724,12 +724,13 @@ class TestRunIcebergCompaction:
             mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
             _run_iceberg_compaction(cfg, k8s, console, j)
 
-        # 2 tables * 1 compaction operation = 2 exec_in_pod calls
-        assert k8s.exec_in_pod.call_count == 2
-        for call in k8s.exec_in_pod.call_args_list:
-            cmd = call[0][1]
-            assert cmd[0] == "trino"
-            assert "optimize" in cmd[2].lower()
+        # 2 tables * 1 compaction operation, after one partition read of
+        # the silver table (LB-210); the mock's output is unreadable, so
+        # silver falls back to one unchunked statement.
+        calls = [call[0][1] for call in k8s.exec_in_pod.call_args_list]
+        assert all(cmd[0] == "trino" for cmd in calls)
+        assert ["$partitions" in cmd[2] for cmd in calls] == [True, False, False]
+        assert all("optimize" in cmd[2].lower() for cmd in calls[1:])
 
     def test_skips_for_duckdb(self):
         """DuckDB is read-only -- compaction skipped."""

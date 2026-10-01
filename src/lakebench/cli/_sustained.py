@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -898,6 +899,37 @@ def _operative(sql: str) -> str:
     return last[0] if last else sql
 
 
+# kubectl's own notice on stderr when a pod has more than one container; it
+# comes before the engine's error and says nothing about it.
+_KUBECTL_NOTICE = re.compile(r"^Defaulted container ")
+_EXEC_PREFIX = re.compile(r"^(?:exec_sql|query_sql) failed \(rc=-?\d+\):\s*")
+
+
+def _error_line(text: str, limit: int = 300) -> str:
+    """The cause of an exec_sql or query_sql error on one line, at most
+    *limit* characters.
+
+    The message is "exec_sql failed (rc=N): <stdout> | <stderr>", and on a
+    live Trino pod stderr starts with kubectl's "Defaulted container ..."
+    notice (journal of run-20260929-204941-1d17f4), so the first line is
+    noise. The prefix and the notice are dropped, then
+    ``summarise_engine_error`` picks the line that states the failure
+    (Trino's "Query <id> failed:", beeline's "Error:" or "FAILED:", a
+    Python traceback's exception) over log lines printed before it.
+    """
+    from lakebench.benchmark.result import summarise_engine_error
+
+    lines: list[str] = []
+    for raw in (text or "").splitlines():
+        for part in raw.split(" | "):
+            line = _EXEC_PREFIX.sub("", part.rstrip())
+            if line.strip() and not _KUBECTL_NOTICE.match(line.strip()):
+                lines.append(line)
+    if not lines:
+        return ""
+    return " ".join(summarise_engine_error("\n".join(lines), limit=limit).split())[:limit]
+
+
 def _run_statements(
     plan: list[tuple[str, str]],
     *,
@@ -924,6 +956,8 @@ def _run_statements(
         "not_attempted": [],
         # Per plan entry: ok, failed, timed_out or not_attempted.
         "status": ["not_attempted"] * len(plan),
+        # Per failed statement: {table, statement, error (first line)}.
+        "failure_records": [],
     }
     for n, (table, sql) in enumerate(plan):
         if budget is not None and budget.exhausted():
@@ -953,6 +987,9 @@ def _run_statements(
         except Exception as e:
             out["status"][n] = "failed"
             out["failures"].append(f"{_operative(sql)} {table}: {e}")
+            out["failure_records"].append(
+                {"table": table, "statement": sql, "error": _error_line(str(e))}
+            )
             logger.warning("%s failed for %s: %s", what, table, e)
     return out
 
@@ -1363,6 +1400,12 @@ def _run_iceberg_compaction(
     all_tables = [f"{catalog}.{t}" for t in tables.workload_tables(schema, layers=layers)]
     table_names = _rotated(all_tables, start_at)
 
+    import time as _time
+
+    started = _time.monotonic()
+    notes: list[str] = []
+    from lakebench.deploy.iceberg import build_compaction_plan
+
     # Build SQL based on table format
     if table_format == "delta":
         from lakebench.deploy.delta_maintenance import build_delta_compaction_sql
@@ -1370,15 +1413,14 @@ def _run_iceberg_compaction(
         def build_sql(tbl):
             return build_delta_compaction_sql(engine, catalog, tbl)
     else:
-        from lakebench.deploy.iceberg import build_compaction_sql
 
         def build_sql(tbl):
-            return build_compaction_sql(engine, catalog, tbl, file_size_threshold)
-
-    import time as _time
+            partitions = _compaction_partitions(
+                engine, k8s, pod_name, namespace, tbl, budget, notes
+            )
+            return build_compaction_plan(engine, catalog, tbl, file_size_threshold, partitions)
 
     plan = [(table, sql) for table in table_names for sql in build_sql(table)]
-    started = _time.monotonic()
     out = _run_statements(
         plan,
         engine=engine,
@@ -1390,7 +1432,21 @@ def _run_iceberg_compaction(
         budget=budget,
     )
     elapsed = _time.monotonic() - started
-    _note_outcome(outcomes, "compaction", **_statement_outcome(out, len(plan), engine))
+    per_table = _table_outcome(plan, out)
+    _note_outcome(
+        outcomes,
+        "compaction",
+        unit="tables",
+        engine=engine,
+        **per_table,
+        statements_total=len(plan),
+        statements_succeeded=out["succeeded"],
+        statements_attempted=sum(1 for st in out["status"] if st != "not_attempted"),
+        failures=out["failure_records"],
+        # Attempted: succeeded, failed or timed out.
+        statements=[sql for n, (_t, sql) in enumerate(plan) if out["status"][n] != "not_attempted"],
+        **({"note": "; ".join(notes)} if notes else {}),
+    )
     _print_outcome(
         console,
         f"{table_format.title()} compaction ({engine}) on {len(table_names)} tables",
@@ -1412,6 +1468,79 @@ def _run_iceberg_compaction(
         },
     )
     return _next_start(all_tables, out)
+
+
+#: Seconds the Trino partition read before a chunked compaction may take.
+_PARTITION_READ_TIMEOUT = 120
+
+
+def _compaction_partitions(
+    engine: str,
+    k8s,
+    pod_name: str,
+    namespace: str,
+    table: str,
+    budget: MaintenanceBudget | None,
+    notes: list[str],
+) -> list[str | None] | None:
+    """The partition values a chunked Trino compaction of *table* needs, or None.
+
+    None (one unchunked statement) when the table is not on the partition
+    map, the engine is not Trino, the budget is already spent, or the read
+    fails; a failed read is added to *notes* for the effective maintenance
+    reasons (LB-210).
+    """
+    from lakebench.deploy.iceberg import query_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import (
+        build_partition_values_sql,
+        compaction_partition_column,
+        parse_partition_values,
+    )
+
+    column = compaction_partition_column(table)
+    if engine != "trino" or column is None:
+        return None
+    if budget is not None and budget.exhausted():
+        return None
+    read_timeout = _PARTITION_READ_TIMEOUT
+    if budget is not None:
+        read_timeout = budget.statement_timeout(_PARTITION_READ_TIMEOUT)
+    try:
+        output = query_sql(
+            engine,
+            k8s,
+            pod_name,
+            namespace,
+            build_partition_values_sql(table, column),
+            timeout=read_timeout,
+        )
+        return parse_partition_values(output)
+    except Exception as e:
+        notes.append(
+            f"partition read failed on {table}, ran one unchunked statement: {_error_line(str(e))}"
+        )
+        logger.warning("Compaction partition read failed for %s: %s", table, e)
+        return None
+
+
+def _table_outcome(plan: list[tuple[str, str]], out: dict) -> dict:
+    """Compaction counts per table: a table succeeds only when every one of
+    its statements (chunks) does. Otherwise it counts once, as failed, timed
+    out or not attempted, in that order of precedence."""
+    tables: dict[str, list[str]] = {}
+    for n, (table, _sql) in enumerate(plan):
+        tables.setdefault(table, []).append(out["status"][n])
+    counts = {"total": len(tables), "succeeded": 0, "failed": 0, "timed_out": 0, "not_attempted": 0}
+    for statuses in tables.values():
+        if all(st == "ok" for st in statuses):
+            counts["succeeded"] += 1
+        elif "failed" in statuses:
+            counts["failed"] += 1
+        elif "timed_out" in statuses:
+            counts["timed_out"] += 1
+        else:
+            counts["not_attempted"] += 1
+    return counts
 
 
 def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:

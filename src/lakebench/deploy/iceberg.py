@@ -5,6 +5,7 @@ Backward-compat re-export. Implementation moved to
 """
 
 from lakebench.modules.table_formats.iceberg.maintenance import (
+    build_compaction_plan,
     build_compaction_sql,
     build_drop_table_sql,
     build_maintenance_sql,
@@ -15,6 +16,7 @@ from lakebench.modules.table_formats.iceberg.maintenance import (
 )
 
 __all__ = [
+    "build_compaction_plan",
     "build_compaction_sql",
     "build_drop_table_sql",
     "build_maintenance_sql",
