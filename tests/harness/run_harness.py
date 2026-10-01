@@ -842,8 +842,11 @@ class _FakeBoto:
         self._rec.add("S3", "get_object", Bucket, Key)
         if not Bucket.startswith(f"{NAME}-"):
             raise self._rec.refuse(f"read from a bucket not of the deployment: {Bucket}")
+        # The key must name this run: run() exports LB_RUN_ID before the
+        # score stage, so a read of another run's sidecar is unscripted.
+        run_id = os.environ.get("LB_RUN_ID") or "<no run id>"
         for (bucket, key), body in self._rec.objects.items():
-            if bucket == Bucket and _RUN_ID.sub("<run_id>", Key) == key:
+            if bucket == Bucket and key.replace("<run_id>", run_id) == Key:
                 return {"Body": io.BytesIO(body)}
         raise self._rec.refuse(f"unscripted S3 object {Bucket}/{Key}")
 
@@ -1727,25 +1730,17 @@ def build_trace(
 
 
 def aml_section(metrics: dict[str, Any]) -> dict[str, Any]:
-    """What an AML run publishes about detection: per-rule alerts and skips
-    from gold-finalize, the folded-in scoring's alert total, typology
-    counts and rule statuses, and the TM operations verdict."""
+    """What an AML run publishes about detection: per-rule alerts, skips and
+    errors from gold-finalize, the whole folded-in scoring record (recall
+    per typology, false-positive rates, precision, chance and the control
+    floor), and the whole TM operations record (verdict, invariants, ops)."""
     gold = [j for j in metrics.get("jobs") or [] if j.get("job_type") == "gold-finalize"]
-    scoring = metrics.get("financial_scoring") or {}
-    tm = metrics.get("tm_operations") or {}
     return {
         "gold_alerts_by_rule": [j.get("alerts_by_rule") for j in gold],
         "gold_rules_skipped": [j.get("rules_skipped") for j in gold],
         "gold_rule_errors": [j.get("rule_errors") for j in gold],
-        "scoring_total_alerts": scoring.get("total_alerts"),
-        "scoring_typology_counts": scoring.get("typology_counts"),
-        "scoring_rules": [
-            [r.get("rule_id"), r.get("status"), r.get("reason"), r.get("alert_count")]
-            for r in scoring.get("rules") or []
-        ],
-        "tm": {
-            k: tm.get(k) for k in ("status", "reason", "problems", "cycles_ran", "cycles_not_run")
-        },
+        "financial_scoring": metrics.get("financial_scoring"),
+        "tm_operations": metrics.get("tm_operations"),
     }
 
 
