@@ -407,15 +407,35 @@ def _adopt_if_written(
     raise error
 
 
+def _as_own(state: LeaseState) -> LeaseHandle:
+    return LeaseHandle(
+        holder=state.holder,
+        acquired_at=state.acquired_at,
+        ttl_seconds=state.ttl_seconds,
+        resource_version=state.resource_version,
+        write_nonce=state.write_nonce,
+    )
+
+
 def _try_acquire_once(
     core_v1: Any,
     holder: str,
     ttl_seconds: int,
+    *,
+    adopt_own: bool = False,
 ) -> LeaseHandle | LeaseState:
     """Single acquire attempt.
 
     Returns a ``LeaseHandle`` on success, or a ``LeaseState`` describing
     the current holder if the lease is held with unexpired TTL.
+
+    With ``adopt_own`` (``holder`` is unique to this acquire, as
+    ``build_holder_id`` makes it), a lease already carrying ``holder`` is
+    ours: an earlier attempt's write that committed although its reply was
+    lost, or one the client re-sent after a read timeout (urllib3 retries a
+    PUT, and the retry then 409s on the stale resourceVersion). Without
+    this the acquire would wait on itself and then leave the lease held
+    until its TTL.
 
     Raises on transport errors so the caller's poll loop stops on
     non-retryable conditions (missing namespace after we created it,
@@ -423,8 +443,15 @@ def _try_acquire_once(
     """
     from kubernetes.client.exceptions import ApiException
 
+    def own(st: LeaseState | None) -> bool:
+        return adopt_own and st is not None and st.holder == holder
+
     now_epoch = time.time()
     state = read_cluster_lock(core_v1)
+    if own(state):
+        assert state is not None
+        logger.warning("cluster_lock: an earlier write of this acquire landed; keeping it")
+        return _as_own(state)
 
     if state is None:
         # No lease. Try create.
@@ -443,7 +470,7 @@ def _try_acquire_once(
                 if s2 is None:
                     # Deleted again in the gap. Signal caller to retry.
                     raise ClusterLockError("lease vanished mid-create; retry") from e
-                return s2
+                return _as_own(s2) if own(s2) else s2
             raise ClusterLockError(f"cannot create lease: {e}") from e
         except Exception as e:  # noqa: BLE001 -- transport: the write may have landed
             return _adopt_if_written(core_v1, holder, acquired_at, ttl_seconds, nonce, e)
@@ -473,7 +500,7 @@ def _try_acquire_once(
             s2 = read_cluster_lock(core_v1)
             if s2 is None:
                 raise ClusterLockError("lease vanished mid-steal; retry") from e
-            return s2
+            return _as_own(s2) if own(s2) else s2
         raise ClusterLockError(f"cannot steal expired lease: {e}") from e
     except Exception as e:  # noqa: BLE001 -- transport: the write may have landed
         return _adopt_if_written(core_v1, holder, acquired_at, ttl_seconds, nonce, e)
@@ -498,6 +525,7 @@ def acquire_cluster_lock(
     ttl_seconds: int = DEFAULT_TTL_SEC,
     timeout: float = DEFAULT_ACQUIRE_TIMEOUT_SEC,
     holder: str | None = None,
+    adopt_own: bool | None = None,
 ) -> LeaseHandle:
     """Acquire the cluster lease or raise.
 
@@ -511,6 +539,10 @@ def acquire_cluster_lock(
     _ensure_lock_namespace(core_v1)
 
     holder_id = holder or build_holder_id()
+    # A generated holder id is unique to this acquire, so a lease carrying
+    # it can only be one of our own writes (``_try_acquire_once``).
+    if adopt_own is None:
+        adopt_own = holder is None
     deadline = time.time() + max(0.0, timeout)
     delay = _POLL_INITIAL_SEC
     last_state: LeaseState | None = None
@@ -518,7 +550,7 @@ def acquire_cluster_lock(
 
     while True:
         try:
-            outcome = _try_acquire_once(core_v1, holder_id, ttl_seconds)
+            outcome = _try_acquire_once(core_v1, holder_id, ttl_seconds, adopt_own=adopt_own)
         except ClusterLockError as e:
             # ADR-F7: the internal "lease vanished mid-{create,steal}"
             # signals are benign contention: the winning holder released
@@ -713,35 +745,60 @@ _Handler = Callable[[int, Any], Any] | int | None
 class _SignalDeferral:
     """Holds back SIGINT/SIGTERM/SIGHUP while the lease is held (main thread).
 
-    The first signal is announced and held back; the second repeats the
+    Before the acquire (``guard_acquire``), SIGTERM and SIGHUP left at their
+    default raise ``LeaseAbort`` instead of killing the process, as SIGINT
+    raises ``KeyboardInterrupt``, so an acquire interrupted after its write
+    landed still releases the lease. While the lease is held (``install``)
+    the first signal is announced and held back; the second repeats the
     budget left; the third raises ``LeaseAbort`` at once. While the lease is
-    being released every signal is only recorded, so no interrupt can stop
-    the release half way and leave the lease held until its TTL. After the
-    release the saved handlers are restored and the first recorded signal
-    is sent again, so the handler that was installed before the lease
-    (Python's ``KeyboardInterrupt`` for SIGINT, or a command's own SIGTERM
-    handler) runs then. A signal its process ignores (``SIG_IGN``, as under
-    ``nohup``) stays ignored.
+    being released (``quiet``) every signal is only recorded, so no
+    interrupt can stop the release half way and leave the lease held until
+    its TTL. After the release the saved handlers are restored and the first
+    recorded signal is sent again, so the handler that was installed before
+    the lease (Python's ``KeyboardInterrupt`` for SIGINT, or a command's own
+    SIGTERM handler) runs then. A signal its process ignores (``SIG_IGN``,
+    as under ``nohup``) stays ignored.
     """
 
-    held: lease_state.HeldLease
+    held: lease_state.HeldLease | None = None
     saved: dict[int, _Handler] = field(default_factory=dict)
     received: list[int] = field(default_factory=list)
     aborted: bool = False
+    active: bool = False
 
-    def install(self) -> bool:
+    def _set(self, sig: int, handler: _Handler) -> bool:
+        """Install ``handler`` for ``sig``, first saving the original; False if ignored."""
+        if sig not in self.saved:
+            self.saved[sig] = signal.getsignal(sig)
+        if self.saved[sig] == signal.SIG_IGN:
+            return False
+        signal.signal(sig, handler)  # type: ignore[arg-type]
+        return True
+
+    def guard_acquire(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            return
+        self.active = True
+        for sig in _DEFERRED_SIGNALS:
+            if sig == getattr(signal, "SIGINT", None):
+                continue  # its default already raises KeyboardInterrupt
+            try:
+                if signal.getsignal(sig) == signal.SIG_DFL:
+                    self._set(sig, self._raise_now)
+            except (ValueError, OSError) as e:
+                logger.debug("cluster_lock: cannot guard %s during the acquire: %s", sig, e)
+
+    def install(self, held: lease_state.HeldLease) -> bool:
+        self.held = held
         if threading.current_thread() is not threading.main_thread():
             logger.warning(
                 "cluster_lock: held off the main thread; an interrupt can stop the shared change"
             )
             return False
+        self.active = True
         try:
             for sig in _DEFERRED_SIGNALS:
-                handler = signal.getsignal(sig)
-                if handler == signal.SIG_IGN:
-                    continue
-                self.saved[sig] = handler
-                signal.signal(sig, self._on_signal)
+                self._set(sig, self._on_signal)
         except (ValueError, OSError) as e:  # not the main interpreter, or unsupported
             logger.warning("cluster_lock: cannot defer signals: %s", e)
             self.restore()
@@ -750,9 +807,11 @@ class _SignalDeferral:
 
     def quiet(self) -> None:
         """Record, never raise, while the lease is released."""
-        for sig in self.saved:
+        if not self.active:
+            return
+        for sig in _DEFERRED_SIGNALS:
             try:
-                signal.signal(sig, self._record_only)
+                self._set(sig, self._record_only)
             except (ValueError, OSError) as e:
                 logger.debug("cluster_lock: could not quiet %s: %s", sig, e)
 
@@ -764,10 +823,18 @@ class _SignalDeferral:
                 logger.debug("cluster_lock: could not restore handler for %s: %s", sig, e)
 
     def _left(self) -> int:
+        if self.held is None:
+            return 0
         return max(0, math.ceil(self.held.deadline - time.monotonic()))
 
     def _record_only(self, signum: int, _frame: Any) -> None:
         self.received.append(signum)
+
+    def _raise_now(self, signum: int, _frame: Any) -> None:
+        # During the acquire nothing is held yet: stop now, releasing a lease
+        # this acquire may already have written (cluster_lock's finally).
+        self.aborted = True
+        raise LeaseAbort(signum)
 
     def _on_signal(self, signum: int, _frame: Any) -> None:
         self.received.append(signum)
@@ -833,50 +900,56 @@ def cluster_lock(
     holder_id = holder or build_holder_id()
     handle: LeaseHandle | None = None
     token = None
-    deferral: _SignalDeferral | None = None
+    pending: LeaseAbort | None = None
+    deferral = _SignalDeferral()
+    deferral.guard_acquire()
     try:
-        try:
-            handle = acquire_cluster_lock(
-                core_v1,
-                ttl_seconds=ttl_seconds,
-                timeout=timeout,
-                holder=holder_id,
-            )
-        except BaseException as e:
-            # An interrupt can land after our write committed and before the
-            # handle reaches this frame. The holder id is unique to this
-            # acquire (LB-178), so a lease carrying it is ours to release.
-            if holder is None and not isinstance(e, Exception):
-                _release_interrupted_acquire(core_v1, holder_id)
-            raise
+        handle = acquire_cluster_lock(
+            core_v1,
+            ttl_seconds=ttl_seconds,
+            timeout=timeout,
+            holder=holder_id,
+            adopt_own=holder is None,
+        )
         held, token = lease_state.enter(handle.holder, max_hold_s)
-        deferral = _SignalDeferral(held)
-        deferral.install()
+        deferral.install(held)
         yield handle
     finally:
-        if handle is not None:
-            if deferral is not None:
-                deferral.quiet()
-            try:
-                release_cluster_lock(core_v1, handle)
-            except Exception as e:  # noqa: BLE001
-                # Log but do not shadow whatever the body raised. Transport
-                # errors (urllib3 MaxRetryError and friends) are not
-                # ApiException and would otherwise replace the body's error.
-                logger.warning("cluster_lock: release failed on exit: %s", e)
-            finally:
+        # First, so a signal landing as the body ends cannot skip the release.
+        try:
+            deferral.quiet()
+        except LeaseAbort as e:
+            pending = e
+            deferral.quiet()
+        try:
+            if handle is not None:
                 try:
-                    if token is not None:
-                        lease_state.leave(token)
-                finally:
-                    if deferral is not None:
-                        deferral.restore()
-                        # After the release: the saved handler now sees the signal.
-                        deferral.redeliver()
+                    release_cluster_lock(core_v1, handle)
+                except Exception as e:  # noqa: BLE001
+                    # Log but do not shadow whatever the body raised.
+                    # Transport errors (urllib3 MaxRetryError and friends)
+                    # are not ApiException and would otherwise replace the
+                    # body's error.
+                    logger.warning("cluster_lock: release failed on exit: %s", e)
+            elif holder is None:
+                # The acquire failed or was interrupted, possibly after its
+                # write committed (a lost reply, a 504, a signal). The holder
+                # id is unique to this acquire (LB-178), so a lease carrying
+                # it is ours to release.
+                _release_interrupted_acquire(core_v1, holder_id)
+        finally:
+            try:
+                lease_state.leave(token)
+            finally:
+                deferral.restore()
+                # After the release: the saved handler now sees the signal.
+                deferral.redeliver()
+        if pending is not None:
+            raise pending
 
 
 def _release_interrupted_acquire(core_v1: Any, holder_id: str) -> None:
-    """Delete the lease if this acquire wrote it before it was interrupted.
+    """Delete the lease if this acquire wrote it before it failed or was interrupted.
 
     Only a lease whose holder equals ``holder_id``, which ``build_holder_id``
     makes unique to one acquire, is deleted, with the resourceVersion and
@@ -887,6 +960,9 @@ def _release_interrupted_acquire(core_v1: Any, holder_id: str) -> None:
         state = read_cluster_lock(core_v1)
         if state is not None and state.holder == holder_id:
             _delete_if_unchanged(core_v1, state.resource_version, state.uid)
-            logger.warning("cluster_lock: interrupted while acquiring; released the lease")
+            logger.warning("cluster_lock: the acquire did not complete; released its lease")
     except Exception as e:  # noqa: BLE001
-        logger.warning("cluster_lock: interrupted while acquiring; lease left to its TTL: %s", e)
+        logger.warning(
+            "cluster_lock: the acquire did not complete; any lease it wrote is left to its TTL: %s",
+            e,
+        )

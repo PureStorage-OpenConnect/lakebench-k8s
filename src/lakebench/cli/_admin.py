@@ -413,6 +413,7 @@ def install_scratch_storage_class(
     """
     from lakebench.deploy.cluster_lock import (
         ADMIN_MAX_HOLD_S,
+        LEASE_REQUEST_TIMEOUT,
         ClusterLockError,
         ClusterLockHeld,
         LeaseHoldExceeded,
@@ -439,7 +440,9 @@ def install_scratch_storage_class(
     try:
         with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
             try:
-                storage_v1.read_storage_class(scratch.storage_class)
+                storage_v1.read_storage_class(
+                    scratch.storage_class, _request_timeout=LEASE_REQUEST_TIMEOUT
+                )
                 print_info(f"StorageClass {scratch.storage_class!r} already exists; no-op")
                 return
             except ApiException as e:
@@ -460,7 +463,9 @@ def install_scratch_storage_class(
                 "parameters": scratch.parameters,
             }
             try:
-                storage_v1.create_storage_class(body=manifest)
+                storage_v1.create_storage_class(
+                    body=manifest, _request_timeout=LEASE_REQUEST_TIMEOUT
+                )
             except ApiException as e:
                 if e.status == 409:
                     # A third writer sneaked in (or a stale-cache read
@@ -762,12 +767,15 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
     """
     from kubernetes.client.exceptions import ApiException
 
+    from lakebench.k8s.lease_state import request_timeout_kw
+
     try:
         legacy = custom_api.get_cluster_custom_object(
             group="secrets.stackable.tech",
             version="v1alpha1",
             plural="secretclasses",
             name=legacy_name,
+            **request_timeout_kw(),
         )
     except ApiException as e:
         if e.status == 404:
@@ -793,6 +801,7 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
             version="v1alpha1",
             plural="secretclasses",
             name=new_name,
+            **request_timeout_kw(),
         )
         legacy_backend = legacy.get("spec", {}).get("backend")
         existing_backend = existing.get("spec", {}).get("backend")
@@ -829,6 +838,7 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
         version="v1alpha1",
         plural="secretclasses",
         body=body,
+        **request_timeout_kw(),
     )
 
 

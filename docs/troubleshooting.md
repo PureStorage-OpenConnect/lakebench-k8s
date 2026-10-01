@@ -151,11 +151,15 @@ again.
 
 **Destroy says "operator pods [...] still watch it".** Destroy removed the
 namespace from the Spark Operator watch list and restarted the operator, but
-a pod with the old `--namespaces=` list was still running after 120 s
-(usually one still terminating). Deleting the namespace then would crash-loop
-the operator for every deployment, so destroy kept it and exited 1. Check
-`kubectl get pods -n spark-operator`; once the old pods are gone, re-run
-`lakebench destroy`.
+a pod with the old `--namespaces=` list was still there after 120 s (usually
+one still terminating, or one a restart did not replace; destroy restarts
+the operator once more for that). Deleting the namespace then would
+crash-loop the operator for every deployment, so destroy kept it and exited
+1. Check `kubectl get pods -n spark-operator`; once the old pods are gone,
+re-run `lakebench destroy`. When the list names a `deployment/...`, an
+operator Deployment's pod template still lists the namespace, so its helm
+values and the Deployment disagree: run `lakebench admin repair-operator`
+first.
 
 **Ctrl-C does not stop the command at once.** If the command holds the
 cluster lease, it prints "interrupt received while holding the cluster

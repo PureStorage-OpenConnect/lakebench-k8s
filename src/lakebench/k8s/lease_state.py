@@ -15,7 +15,11 @@ from dataclasses import dataclass
 from typing import Any
 
 # (connect, read) seconds for every Kubernetes API call made while the lease
-# is held or acquired, so a deferred signal never waits on a hung request.
+# is held or acquired, so a deferred signal never waits on a request that
+# does not return. The bound is per attempt: the kubernetes client leaves
+# urllib3's default of 3 retries, which re-sends a GET, PUT or DELETE whose
+# read timed out, so one call can take up to about 4 x 70 s. A PUT that is
+# re-sent is why an acquire adopts a lease carrying its own holder id.
 LEASE_REQUEST_TIMEOUT: tuple[int, int] = (10, 60)
 
 
@@ -43,9 +47,17 @@ def enter(holder: str, max_hold_s: float) -> tuple[HeldLease, Token[HeldLease | 
     return held, _LEASE.set(held)
 
 
-def leave(token: Token[HeldLease | None]) -> None:
-    """Undo ``enter`` (``cluster_lock`` only)."""
-    _LEASE.reset(token)
+def leave(token: Token[HeldLease | None] | None) -> None:
+    """Undo ``enter`` (``cluster_lock`` only).
+
+    ``None``: an interrupt landed inside ``enter`` after the value was set
+    but before its token reached the caller, or ``enter`` never ran. The
+    lease is not reentrant, so clearing the value is the same as a reset.
+    """
+    if token is None:
+        _LEASE.set(None)
+    else:
+        _LEASE.reset(token)
 
 
 def lease_held() -> bool:

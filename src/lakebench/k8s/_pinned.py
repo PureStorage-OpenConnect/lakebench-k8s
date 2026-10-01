@@ -235,13 +235,19 @@ def _signal_child(proc: subprocess.Popen[Any], sig: int) -> None:
 def _stop_gently(proc: subprocess.Popen[Any]) -> tuple[Any, Any]:
     """SIGTERM, ``TERM_GRACE_S`` to stop, then SIGKILL; returns what it printed.
 
-    Bounded: at most ``TERM_GRACE_S + _DRAIN_S`` seconds.
+    Bounded: at most ``TERM_GRACE_S + _DRAIN_S`` seconds. An abort during
+    the grace sends SIGKILL at once and re-raises.
     """
     _signal_child(proc, signal.SIGTERM)
     try:
         return proc.communicate(timeout=TERM_GRACE_S)
     except subprocess.TimeoutExpired:
         pass
+    except BaseException:
+        # An abort (the third interrupt) during the grace: do not leave the
+        # child running, or Popen.__exit__ waits for it without a bound.
+        _signal_child(proc, getattr(signal, "SIGKILL", signal.SIGTERM))
+        raise
     _signal_child(proc, getattr(signal, "SIGKILL", signal.SIGTERM))
     try:
         return proc.communicate(timeout=_DRAIN_S)

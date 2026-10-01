@@ -316,6 +316,15 @@ _LEASED_FUNCTIONS = {
         "_operator_pods_listing",
         "_legacy_secretclass_cleanup_locked",
     },
+    # admin verbs' calls inside their lease, and the namespace stamp deploy
+    # and migrate-deployment make (inside the lease for the latter).
+    "cli/_admin.py": {
+        "install_scratch_storage_class",
+        "_migrate_secretclass",
+    },
+    "deploy/ownership.py": {
+        "stamp_namespace",
+    },
     # destroy's _delete_in_lease reads and deletes the namespace through these.
     "k8s/client.py": {
         "namespace_exists",
@@ -348,7 +357,8 @@ def test_leased_api_calls_have_timeouts():
                     continue
                 owner = ast.unparse(call.func.value)
                 if not (
-                    owner in ("core_v1", "self._core_v1", "custom_api") or owner.endswith("Api()")
+                    owner in ("core_v1", "self._core_v1", "custom_api", "apps_v1", "storage_v1")
+                    or owner.endswith("Api()")
                 ):
                     continue
                 kws = {k.arg for k in call.keywords}

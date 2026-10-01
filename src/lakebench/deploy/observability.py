@@ -12,7 +12,9 @@ cluster. It is installed once, in its own namespace
 on the cluster, and an existing release is never upgraded or modified by
 ``deploy``. ``destroy`` never uninstalls the shared release: deployment A's
 teardown must not remove deployment B's monitoring (DESIGN.md invariant 6).
-Each deployment's own PodMonitors live in its namespace and go with it.
+Each deployment's own PodMonitors and Pushgateway live in its namespace:
+they go with it, and when ``create_namespace: false`` keeps it, destroy's
+category1 step deletes them by name (``deploy/category1.py``).
 """
 
 from __future__ import annotations
@@ -235,7 +237,8 @@ DASHBOARD_TEMPLATE = "grafana/dashboard-configmap.yaml.j2"
 # Per-deployment Prometheus Pushgateway (Deployment + Service + PVC) and the
 # PodMonitor that scrapes it. Applied into the deployment namespace alongside
 # the PodMonitors, only when observability.pushgateway_enabled. Ownership
-# category 1: torn down with the namespace by `destroy`.
+# category 1: torn down with the namespace by `destroy`, or by its category1
+# step when the namespace survives.
 PUSHGATEWAY_TEMPLATES = [
     "pushgateway/pushgateway.yaml.j2",
     "pushgateway/podmonitor-pushgateway.yaml.j2",
@@ -314,11 +317,13 @@ class ObservabilityDeployer:
                         details=result.details,
                     )
             return result
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            # Under the lease the timeout comes from the hold budget, and the
+            # message (LeasedCommandTimeout) names the recovery.
             return DeploymentResult(
                 component="observability",
                 status=DeploymentStatus.FAILED,
-                message="Helm install timed out (360s)",
+                message=f"Helm install timed out ({e})",
                 elapsed_seconds=time.time() - start,
             )
         except Exception as e:
@@ -503,7 +508,8 @@ class ObservabilityDeployer:
         The kube-prometheus-stack release is shared by every deployment on
         the cluster; uninstalling it would remove other deployments'
         monitoring. This deployment's PodMonitors and Pushgateway are in its
-        own namespace and are removed with it; the shared dashboard ConfigMap
+        own namespace and are removed with it (or by destroy's category1 step
+        when the namespace survives); the shared dashboard ConfigMap
         in the observability namespace (LB-192) is left in place. The one release destroy
         removes is a pre-v1.6 release installed into this deployment's own
         namespace: it scrapes only that namespace, and deleting the namespace
