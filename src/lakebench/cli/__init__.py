@@ -1244,22 +1244,23 @@ def status(
     try:
         # The config's context, or (status --namespace with no config) the
         # kubeconfig's current context resolved by name and printed (SAF-7).
+        # get_k8s_client pins the process; the API objects below follow it.
         if cfg is not None:
-            k8s = get_k8s_client(context=cfg.platform.kubernetes.context, namespace=ns)
+            get_k8s_client(context=cfg.platform.kubernetes.context, namespace=ns)
         else:
             from lakebench.k8s.target import ClusterTarget
 
             target = ClusterTarget.current()
             print_info(f"Cluster context: {escape(target.label)}")
-            k8s = get_k8s_client(target=target, namespace=ns)
+            get_k8s_client(target=target, namespace=ns)
     except (K8sConnectionError, ConfigException) as e:
         raise _unreachable(e)  # noqa: B904
 
     deploy_hint = f"lakebench deploy {config_file}" if config_file else "lakebench deploy CONFIG"
     try:
-        exists = k8s.namespace_exists(ns)
-    except Exception as e:  # noqa: BLE001 -- K8sResourceError (403, 5xx) or transport
-        raise _unreadable(f"cannot read namespace {ns}: {e}")  # noqa: B904
+        exists = ops.namespace_exists(k8s_client.CoreV1Api(), ns)
+    except ops.ClusterReadError as e:
+        raise _unreadable(e)  # noqa: B904
     if not exists:
         raise LakebenchError(
             f"namespace {ns} does not exist",
@@ -1419,9 +1420,9 @@ def stop(
     console.print(Panel(f"{esc(verb)} jobs for: [bold]{esc(cfg.name)}[/bold]", expand=False))
 
     try:
-        exists = k8s.namespace_exists(namespace)
-    except Exception as e:  # noqa: BLE001 -- K8sResourceError (403, 5xx) or transport
-        print_error(f"Kubernetes connection failed: cannot read namespace {namespace}: {e}")
+        exists = ops.namespace_exists(k8s_client.CoreV1Api(), namespace)
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes API error: {e}")
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     if not exists:
         print_info(f"Namespace {namespace} does not exist; nothing to stop")

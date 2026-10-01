@@ -860,7 +860,7 @@ def _scenario_status_drift(monkeypatch, tmp_path):
 
 def _scenario_status_namespace_missing(monkeypatch, tmp_path):
     st = _ops_cluster(monkeypatch, tmp_path)
-    st.k8s.exists = False
+    st.core.ns_exists = False
     return _runner().invoke(app, ["status", str(st.config)])
 
 

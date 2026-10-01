@@ -67,6 +67,8 @@ class _Resp:
 
 class FakeCore:
     def __init__(self, pods=(), logs=None, list_error=None, read_errors=None):
+        self.ns_exists = True
+        self.ns_error: BaseException | None = None
         self.pods = list(pods)
         self.logs = logs or {}
         self.list_error = list_error
@@ -74,6 +76,14 @@ class FakeCore:
         self.selectors: list[str] = []
         self.reads: list[tuple[str, dict]] = []
         self.responses: list[_Resp] = []
+
+    def read_namespace(self, name, _request_timeout=None):
+        assert _request_timeout == ops.API_TIMEOUT
+        if self.ns_error is not None:
+            raise self.ns_error
+        if not self.ns_exists:
+            raise ApiException(status=404, reason="Not Found")
+        return SimpleNamespace(metadata=SimpleNamespace(name=name))
 
     def list_namespaced_pod(self, namespace, label_selector="", _request_timeout=None):
         assert _request_timeout == ops.API_TIMEOUT
@@ -176,14 +186,10 @@ class FakeCustom:
 
 
 class FakeK8s:
-    def __init__(self, exists=True, exists_error=None):
-        self.exists = exists
-        self.exists_error = exists_error
+    """The pinned client the commands build; `pre_stop` receives it."""
 
     def namespace_exists(self, name):
-        if self.exists_error is not None:
-            raise self.exists_error
-        return self.exists
+        raise AssertionError("the commands read the namespace through CoreV1Api")
 
 
 @pytest.fixture
@@ -562,6 +568,37 @@ def test_stop_leaves_finished_jobs_and_their_logs(cluster):
     assert "left in place: Job/lakebench-datagen (Complete)" in err
 
 
+@pytest.mark.parametrize(
+    ("state", "deleted"),
+    [
+        ("COMPLETED", False),
+        ("FAILED", False),
+        # The operator resubmits from these (restartPolicy Always / OnFailure
+        # with submission retries), or the app still runs.
+        ("SUBMISSION_FAILED", True),
+        ("PENDING_RERUN", True),
+        ("FAILING", True),
+        ("SUCCEEDING", True),
+        ("RUNNING", True),
+        ("UNKNOWN", True),
+        ("", True),  # no status yet
+    ],
+)
+def test_stop_deletes_every_app_state_but_completed_and_failed(cluster, state, deleted):
+    cluster.custom.apps = ["lakebench-silver-stream"]
+    if state:
+        cluster.custom.states = {"lakebench-silver-stream": state}
+    r = _invoke("stop", cluster.config)
+    assert r.exit_code == 0, r.output
+    assert (cluster.custom.deleted == ["lakebench-silver-stream"]) is deleted
+
+
+def test_logs_argument_too_long_for_a_path_is_not_a_traceback(cluster):
+    r = _invoke("logs", "x" * 300, "y" * 300)
+    assert r.exit_code == ExitCode.USAGE, r.output
+    assert "Traceback" not in r.output
+
+
 def test_stop_dry_run_with_a_list_failure_exits_1(cluster):
     cluster.custom.list_error = ApiException(status=403, reason="Forbidden")
     r = _invoke("stop", cluster.config, "--dry-run")
@@ -632,7 +669,7 @@ def test_stop_pre_stop_runs_first_and_a_failure_still_deletes(cluster, monkeypat
 
 
 def test_stop_missing_namespace_is_nothing_to_stop(cluster):
-    cluster.k8s.exists = False
+    cluster.core.ns_exists = False
     r = _invoke("stop", cluster.config)
     assert r.exit_code == 0, r.output
     assert "nothing to stop" in _stderr(r)
@@ -662,7 +699,7 @@ def test_status_ok_exits_0(cluster):
 
 
 def test_status_missing_ns_exit1(cluster):
-    cluster.k8s.exists = False
+    cluster.core.ns_exists = False
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.FAILED, r.output
     err = _stderr(r)
@@ -714,11 +751,18 @@ def test_status_unreachable_exits_4(cluster):
 
 
 def test_status_namespace_read_forbidden_exits_4(cluster):
-    from lakebench.k8s import K8sResourceError
-
-    cluster.k8s.exists_error = K8sResourceError("Error checking namespace: (403)")
+    cluster.core.ns_error = ApiException(status=403, reason="Forbidden")
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.PREREQUISITE, r.output
+    assert "Kubernetes API error: cannot read namespace ops: 403 Forbidden" in _stderr(r)
+
+
+def test_stop_namespace_read_forbidden_exits_4(cluster):
+    cluster.core.ns_error = ApiException(status=403, reason="Forbidden")
+    r = _invoke("stop", cluster.config)
+    assert r.exit_code == ExitCode.PREREQUISITE, r.output
+    assert "Kubernetes API error" in _stderr(r)
+    assert cluster.custom.deleted == []
 
 
 def test_status_namespace_only_absent_components_are_not_drift(cluster, monkeypatch):

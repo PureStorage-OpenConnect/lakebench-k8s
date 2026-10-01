@@ -85,9 +85,11 @@ LOG_COMPONENTS: dict[str, LogSource] = {
 }
 
 
-# Seconds for one API request, so a server that accepts the connection and
-# never answers cannot hang `logs`, `stop` or `status`. A followed log gets
-# the connect half only: it is meant to stay open.
+# Seconds for one API request attempt, so a server that accepts the
+# connection and never answers does not hang `logs`, `stop` or `status`.
+# urllib3's default retries still apply (the kubernetes client sets none),
+# so a call that stalls on every attempt takes a few multiples of this. A
+# followed log gets the connect half only: it is meant to stay open.
 API_TIMEOUT = 30
 FOLLOW_TIMEOUT = (API_TIMEOUT, None)
 
@@ -123,7 +125,12 @@ def api_message(e: ApiException) -> str:
 
 
 def _looks_like_config(arg: str) -> bool:
-    return arg.endswith((".yaml", ".yml")) or Path(arg).is_file()
+    if arg.endswith((".yaml", ".yml")):
+        return True
+    try:
+        return Path(arg).is_file()
+    except OSError:  # a name too long for the filesystem is not a file
+        return False
 
 
 def resolve_logs_args(
@@ -302,9 +309,14 @@ class StopOutcome:
     failures: list[str] = field(default_factory=list)
 
 
-# Spark Operator applicationState values after which nothing runs again
-# (lakebench submits with restartPolicy Never).
-FINISHED_APP_STATES = frozenset({"COMPLETED", "FAILED", "SUBMISSION_FAILED"})
+# Spark Operator (v2.5.1) applicationState values after which the operator
+# never submits the application again: its retry decision is taken in
+# FAILING and SUCCEEDING, before these. SUBMISSION_FAILED is not here:
+# lakebench submits streams with restartPolicy Always and batch stages with
+# OnFailure and onSubmissionFailureRetries 5 (spark/job.py), so the operator
+# resubmits from it. A stage in FAILING is deleted, and with it the driver's
+# logs, in the window before the operator moves it to FAILED or a retry.
+FINISHED_APP_STATES = frozenset({"COMPLETED", "FAILED"})
 
 
 def _app_state(item: dict[str, Any]) -> str:
@@ -318,6 +330,21 @@ def _job_finished(job: Any) -> str:
         if cond.type in ("Complete", "Failed") and str(cond.status) == "True":
             return str(cond.type)
     return ""
+
+
+def namespace_exists(core: Any, namespace: str) -> bool:
+    """True when *namespace* exists. A 404 is False; any other API error and
+    a transport failure raise ClusterReadError. Bounded by API_TIMEOUT.
+    """
+    try:
+        core.read_namespace(namespace, _request_timeout=API_TIMEOUT)
+        return True
+    except ApiException as e:
+        if e.status == 404:
+            return False
+        raise ClusterReadError(f"cannot read namespace {namespace}: {api_message(e)}") from e
+    except Urllib3HTTPError as e:
+        raise ClusterReadError(f"cluster unreachable: {e}") from e
 
 
 def stop_targets(custom: Any, batch: Any, namespace: str, out: StopOutcome) -> None:
