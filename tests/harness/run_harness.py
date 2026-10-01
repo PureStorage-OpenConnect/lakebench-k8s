@@ -97,6 +97,7 @@ _CREDENTIAL = re.compile(
 )
 _ENDPOINT = re.compile(r"(?i)endpoint\S*\s*[=:]\s*(\S+)")
 _BUCKET_URL = re.compile(r"\bs3a?://([A-Za-z0-9.\-]+)")
+_HTTP_HOST = re.compile(r"(?i)\bhttps?://([A-Za-z0-9.\-]+)")
 _IPV6 = re.compile(r"(?<![\w:])(?:[0-9a-fA-F]{1,4}:){4,7}[0-9a-fA-F]{1,4}(?![\w:])")
 
 
@@ -126,9 +127,10 @@ def scrub_driver_log(text: str, source_name: str, target_name: str = NAME) -> st
 
 
 def fixture_problems(text: str, name: str = NAME) -> list[str]:
-    """Why *text* may not be a committed fixture: an address other than the
-    placeholder, an endpoint, a bucket not of deployment *name*, or a
-    credential-looking value (anything but a ``${VAR}`` placeholder)."""
+    """Why *text* may not be a committed fixture: an address or URL host
+    other than the placeholder, an endpoint, a bucket not of deployment
+    *name*, or a credential-looking value (anything but a ``${VAR}``
+    placeholder)."""
     problems = [
         f"address {ip}" for ip in sorted(set(_IPV4.findall(text))) if ip not in _ALLOWED_IPS
     ]
@@ -139,6 +141,9 @@ def fixture_problems(text: str, name: str = NAME) -> list[str]:
     for m in _ENDPOINT.finditer(text):
         if PLACEHOLDER_HOST not in m.group(1):
             problems.append(f"endpoint {m.group(1)}")
+    for host in sorted(set(_HTTP_HOST.findall(text))):
+        if host not in _ALLOWED_IPS and host != "localhost":
+            problems.append(f"host {host}")
     for bucket in sorted(set(_BUCKET_URL.findall(text))):
         if not bucket.startswith(f"{name}-"):
             problems.append(f"bucket {bucket}")
@@ -168,6 +173,21 @@ class Recorder:
         """Record an unscripted call; the caller raises the result."""
         self.unscripted.append(message)
         return Unscripted(message)
+
+
+def _unbound(func: Callable[..., Any]) -> Callable[..., Any]:
+    """A module-level function as :func:`_checked` binds it (a leading
+    ``self`` slot), so free functions and methods are checked alike."""
+
+    def shim(self, *args, **kwargs):  # pragma: no cover - never called
+        raise AssertionError("signature shim")
+
+    params = [inspect.Parameter("self", inspect.Parameter.POSITIONAL_ONLY)]
+    shim.__signature__ = inspect.signature(func).replace(  # type: ignore[attr-defined]
+        parameters=params + list(inspect.signature(func).parameters.values())
+    )
+    shim.__qualname__ = func.__qualname__
+    return shim
 
 
 def _checked(rec: Recorder, real: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
@@ -486,9 +506,10 @@ class FakeS3:
     """``S3Client`` stand-in with fixed bucket sizes; its constructor
     arguments are recorded (endpoint and keys come from the config)."""
 
-    #: Bytes per bucket, from run-20260927-084902-fc1eb5 (the run the batch
+    #: Bytes per bucket, after run-20260927-084902-fc1eb5 (the run the batch
     #: C360 fixture logs come from): bronze 9.917 GiB, silver 9.762 GiB,
-    #: gold 64.5 KiB.
+    #: gold 64.5 KiB. Bronze and silver are rounded to 10 kB, so the traced
+    #: sizes differ from the record's in the fourth decimal; gold is exact.
     SIZES = {"bronze": 10_648_840_000, "silver": 10_482_310_000, "gold": 69_274}
 
     def __init__(self, rec: Recorder, *args, **kwargs) -> None:
@@ -839,9 +860,12 @@ def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     monkeypatch.setattr(
         lakebench.benchmark, "BenchmarkRunner", lambda *a, **k: FakeBenchmark(rec, *a, **k)
     )
-    monkeypatch.setattr(
-        lakebench.benchmark.executor, "get_executor", lambda cfg, ns=None: FakeExecutor(rec)
-    )
+
+    def get_executor(*args, **kwargs) -> FakeExecutor:
+        _checked(rec, _unbound(lakebench.benchmark.executor.get_executor), *args, **kwargs)
+        return FakeExecutor(rec)
+
+    monkeypatch.setattr(lakebench.benchmark.executor, "get_executor", get_executor)
     monkeypatch.setattr(
         lakebench.cli._prerequisites, "run_prerequisites", _passing_prerequisites(rec)
     )

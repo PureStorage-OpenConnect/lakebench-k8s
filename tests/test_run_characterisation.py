@@ -75,3 +75,25 @@ def test_fixture_logs_are_scrubbed(path):
     text = path.read_text()
     assert scrub_driver_log(text, "runchar") == text
     assert fixture_problems(text) == []
+
+
+def test_fixture_check_refuses_hosts_and_foreign_buckets():
+    """The scrub check refuses a URL host (named or numeric) other than the
+    placeholder and a bucket not of the harness deployment."""
+    assert fixture_problems("[lb] wrote http://10.0.1.50:80/x") == []
+    assert fixture_problems("[lb] wrote http://s3.lab.example:80/x") == ["host s3.lab.example"]
+    assert fixture_problems("[lb] read s3a://lab-bronze/x") == ["bucket lab-bronze"]
+
+
+def test_seam_fakes_refuse_calls_the_real_signature_would():
+    """A call the real ``get_executor`` would reject (a wrong keyword) is
+    unscripted in the harness too, never silently accepted."""
+    import lakebench.benchmark.executor as executor_mod
+    from tests.harness.run_harness import Recorder, Unscripted, _checked, _unbound
+
+    rec = Recorder()
+    real = _unbound(executor_mod.get_executor)
+    _checked(rec, real, object(), namespace="ns")
+    with pytest.raises(Unscripted):
+        _checked(rec, real, object(), ns="ns")
+    assert len(rec.unscripted) == 1
