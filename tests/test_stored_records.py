@@ -726,6 +726,18 @@ def test_no_message_carries_a_seed(monkeypatch) -> None:
             "token=${LAKEBENCH_CREDENTIAL} next_field=important",
         ),
         ("credentials:\n  user: x", "credentials:\n  user: x"),
+        # Third fix pass: a swallowed quoted pair leaked its value.
+        (
+            'accessKey=AKIDEXAMPLE,secretKey="abab abab" end',
+            "accessKey=${LAKEBENCH_S3_ACCESS_KEY} end",
+        ),
+        ('password=,token="realtoken" end', "password=${LAKEBENCH_CREDENTIAL} end"),
+        ("password=abc;token='tok en123' end", "password=${LAKEBENCH_CREDENTIAL} end"),
+        ("password:\n  hunter22\nuser: x", "password:\n  ${LAKEBENCH_CREDENTIAL}\nuser: x"),
+        (
+            "password: |\n  hunter22\n  more\nuser: x",
+            "password: |\n  ${LAKEBENCH_CREDENTIAL}\nuser: x",
+        ),
         (
             "access_key_id=${LAKEBENCH_S3_ACCESS_KEY} ok",
             "access_key_id=${LAKEBENCH_S3_ACCESS_KEY} ok",
@@ -744,3 +756,20 @@ def test_long_token_runs_scrub_in_linear_time() -> None:
     out = scrub.scrub_text(text)
     assert time.monotonic() - t0 < 2.0
     assert out.endswith("password=${LAKEBENCH_CREDENTIAL}")
+
+
+def test_url_userinfo_glued_to_a_timestamp_dropped() -> None:
+    out = scrub.scrub_text(
+        "2026-10-01T10:00:00Z-http://AKIAFAKE:sekrit@10.99.1.2/ -https://u:pw@h/x"
+    )
+    assert "sekrit" not in out and "u:pw" not in out
+
+
+def test_seed_cut_by_the_key_slice_is_not_printed(monkeypatch) -> None:
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "robustness"})
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["extra"] = {"a" * 25 + "10.99.1.2_987654": 1}
+    problems = scrub.check_clean(rec)
+    assert problems and not any("98765" in p for p in problems)
