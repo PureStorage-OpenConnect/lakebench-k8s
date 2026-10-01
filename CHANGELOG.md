@@ -14,12 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   name written to `.lakebench/state.json`; that file is only read. Because
   v1.6 gave every nameless config in a directory the name in that file,
   nothing ties a v1.6 deployment to any one of them, so `destroy`, `stop`,
-  `admin` and the read-only commands (`status`, `logs`, `report`,
-  `results`, `info`, `config show`, `config storage`, `config recommend`)
-  refuse a nameless config in such a directory, naming the v1.6 name and
-  any other nameless configs there: add `name:` with that name to the
-  config that deployed it. Without that file, `destroy`, `stop` and `admin`
-  refuse a nameless config.
+  `admin`, `status`, `logs`, `report` and `results` refuse a nameless
+  config in such a directory, naming the v1.6 name and any other nameless
+  configs there: add `name:` with that name to the config that deployed
+  it. `info` and `config show`, `storage`, `recommend` look at no
+  deployment and still load it under that name. Without that file,
+  `destroy`, `stop` and `admin` refuse a nameless config.
 - **Removed config keys are refused by the commands that change data**
   (the list above, except `config upgrade`), with what to do instead.
   `destroy`, `stop`, `status`, `logs`, `report`, `info`, `config show`,

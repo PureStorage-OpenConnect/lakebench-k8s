@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from ._load_context import (
     CHANGES_DATA,
     SKIPS_NAME_LENGTH,
+    TARGETS_DEPLOYMENT,
     LoadNotes,
     LoadPurpose,
     collecting_notes,
@@ -162,9 +163,10 @@ class ConfigNameRequired(ConfigValidationError):
     """A nameless config was loaded by a command that may not use it (SAF-2).
 
     The commands that change data refuse every nameless config. The teardown
-    and read commands refuse one that has only a suggested name (v1.7 never
+    commands also refuse one that has only a suggested name (v1.7 never
     deploys a nameless config, so a deployment under that name was made by
-    some other config file) and one whose name comes from the v1.6
+    some other config file). The teardown commands and the read commands
+    that look at a deployment refuse one whose name comes from the v1.6
     ``.lakebench/state.json``: v1.6 gave every nameless config in the
     directory that name, so nothing ties it to this one (SPEC SAF-2: a v1.6
     directory is refused without ``--name``). ``siblings`` lists the other
@@ -284,15 +286,16 @@ def load_config(
         path: Path to configuration YAML file
         purpose: What the calling command will do with the config (see
             ``LoadPurpose``). MUTATE and RUN refuse a config with no name and
-            a config that carries a removed key; TEARDOWN, READ and COMPARE
-            drop removed keys with a note and load a nameless config under
-            its resolved name, except that TEARDOWN refuses one whose name is
-            only a suggestion. Defaults to MUTATE, or to TEARDOWN when only
-            ``allow_long_names`` is given.
+            a config that carries a removed key; the others drop removed
+            keys with a note. A nameless config loads under its resolved
+            name, except that TEARDOWN refuses one whose name is only a
+            suggestion, and TEARDOWN and READ refuse one whose name comes
+            from the v1.6 state file. Defaults to MUTATE, or to TEARDOWN
+            when only ``allow_long_names`` is given.
         name_override: The name for a config that sets none (``--name``).
             It must equal the config's own name when the config has one.
         allow_long_names: Skip the derived-name length check (LB-153).
-            TEARDOWN and READ always skip it. Given alone it means TEARDOWN,
+            TEARDOWN, READ and INSPECT always skip it. Given alone it means TEARDOWN,
             as in v1.6; with an explicit purpose it only skips the length
             check, which ``clean`` and the perf gate use so a deployment
             whose namespace is too long to finish deploying can still be
@@ -332,9 +335,7 @@ def load_config(
             raise ConfigNameRequired(resolution, siblings=siblings, suggestion=suggested_name(path))
         if purpose == LoadPurpose.TEARDOWN and resolution.source == "suggested":
             raise ConfigNameRequired(resolution, teardown=True)
-        if purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ) and (
-            resolution.source == "legacy-state"
-        ):
+        if purpose in TARGETS_DEPLOYMENT and resolution.source == "legacy-state":
             # SAF-2: a v1.6 directory with no recorded nonce is refused
             # without --name. v1.6 gave every nameless config here this one
             # name, so destroy, stop, admin or status from any of them would

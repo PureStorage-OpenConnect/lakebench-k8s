@@ -44,7 +44,7 @@ def config_show(
         raw_keys = set(_flatten_keys(raw))
 
         # Load fully resolved config
-        cfg = load_config(config_file, purpose=LoadPurpose.READ)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
 
         console.print(
             Panel(
@@ -278,7 +278,7 @@ def config_storage(
     from lakebench.s3 import KNOWN_BACKENDS, CheckStatus, Severity, run_conformance
 
     try:
-        cfg = load_config(config_file, purpose=LoadPurpose.READ)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except Exception as e:
         console.print(f"[red]Could not load config: {e}[/red]")
         raise typer.Exit(1) from e
@@ -372,7 +372,7 @@ def config_recommend(
     # Extract pipeline mode from config to pass to recommend
     schema: str | None = None
     try:
-        cfg = load_config(config_file, purpose=LoadPurpose.READ)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
         mode = cfg.architecture.pipeline.mode.value
         schema = cfg.architecture.workload.schema_type.value
     except Exception:
@@ -525,9 +525,9 @@ def config_upgrade(
     from lakebench.config.loader import name_resolution
 
     try:
-        # READ, so an old config's removed keys are dropped rather than
+        # INSPECT, so an old config's removed keys are dropped rather than
         # refused: converting old configs is what this command is for.
-        cfg = load_config(config_file, purpose=LoadPurpose.READ)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except Exception as e:
         console.print(f"[red]Error loading config: {e}[/red]")
         raise typer.Exit(1) from None

@@ -108,10 +108,11 @@ def test_v16_state_name_read_verbatim(tmp_path):
             load_config(cfg_path, purpose=purpose)
         assert "name: lb-20260915-101530" in str(e.value)
         assert e.value.resolution.source == "legacy-state"
-    cfg = load_config(cfg_path, purpose=LoadPurpose.COMPARE)
-    assert cfg.name == "lb-20260915-101530"
-    res = name_resolution(cfg)
-    assert res is not None and res.source == "legacy-state"
+    for purpose in (LoadPurpose.COMPARE, LoadPurpose.INSPECT):
+        cfg = load_config(cfg_path, purpose=purpose)
+        assert cfg.name == "lb-20260915-101530"
+        res = name_resolution(cfg)
+        assert res is not None and res.source == "legacy-state"
     over = load_config(cfg_path, purpose=LoadPurpose.TEARDOWN, name_override="lb-20260915-101530")
     assert over.name == "lb-20260915-101530"
     assert (tmp_path / ".lakebench" / "state.json").read_bytes() == before
@@ -308,11 +309,14 @@ VERB_PURPOSES = [
     ("lakebench.cli._admin", ["admin", "doctor"], LoadPurpose.TEARDOWN, False),
     ("lakebench.cli", ["status"], LoadPurpose.READ, False),
     ("lakebench.cli", ["logs", "hive"], LoadPurpose.READ, False),
-    ("lakebench.cli", ["info"], LoadPurpose.READ, False),
+    ("lakebench.cli", ["info"], LoadPurpose.INSPECT, False),
     ("lakebench.cli", ["validate"], LoadPurpose.MUTATE, False),
-    ("lakebench.cli._config", ["config", "upgrade"], LoadPurpose.READ, False),
-    ("lakebench.cli._config", ["config", "storage"], LoadPurpose.READ, False),
-    ("lakebench.cli._config", ["config", "show"], LoadPurpose.READ, False),
+    ("lakebench.cli._config", ["config", "upgrade"], LoadPurpose.INSPECT, False),
+    ("lakebench.cli._config", ["config", "storage"], LoadPurpose.INSPECT, False),
+    ("lakebench.cli._config", ["config", "show"], LoadPurpose.INSPECT, False),
+    ("lakebench.cli._config", ["config", "recommend"], LoadPurpose.INSPECT, False),
+    ("lakebench.cli", ["report"], LoadPurpose.READ, False),
+    ("lakebench.cli", ["results"], LoadPurpose.READ, False),
     ("lakebench.cli._compare", ["compare", "CFG"], LoadPurpose.MUTATE, False),
     (
         "lakebench.cli._financial",

@@ -38,13 +38,14 @@ Before v1.7 a nameless config got a time-based name (`lb-YYYYMMDD-HHMMSS`)
 written to `.lakebench/state.json` in the config's directory, which every
 nameless config in that directory shared. That file is now only read, and
 nothing ties the name in it to any one config. The teardown commands
-(`destroy`, `stop`, `admin`) and the read-only commands (`status`, `logs`,
-`report`, `results`, `info`, `config show`, `config storage`, `config
-recommend`) therefore refuse a nameless config in a directory that has the
-file. The error gives the v1.6 name and lists the other nameless `*.yaml`
-and `*.yml` configs beside it. To inspect or tear down a deployment v1.6
-made, add `name:` with that name to the config that deployed it and use
-that config.
+(`destroy`, `stop`, `admin`) and the read-only commands that look at a
+deployment (`status`, `logs`, `report`, `results`) therefore refuse a
+nameless config in a directory that has the file. The error gives the v1.6
+name and lists the other nameless `*.yaml` and `*.yml` configs beside it. To
+inspect or tear down a deployment v1.6 made, add `name:` with that name to
+the config that deployed it and use that config. `info`, `config show`,
+`config storage` and `config recommend` look at no deployment, so they
+still load a nameless config under the v1.6 name.
 
 Without the file, `destroy`, `stop` and `admin` refuse a nameless config,
 because no deployment can be its own, and the read-only commands use a

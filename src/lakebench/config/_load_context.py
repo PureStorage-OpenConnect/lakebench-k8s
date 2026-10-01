@@ -4,11 +4,13 @@
 it to the schema validators in the Pydantic validation context. The purpose
 decides three things:
 
-- a removed key is refused (MUTATE, RUN) or dropped with a note (TEARDOWN,
-  READ, COMPARE), so a v1.6 config can still be destroyed and inspected;
-- the derived-name length check is skipped (TEARDOWN, READ);
-- a config with no ``name`` is refused (MUTATE, RUN) or loads under the name
-  ``deploy_state.resolve_name`` resolves (TEARDOWN, READ, COMPARE).
+- a removed key is refused (MUTATE, RUN) or dropped with a note (the
+  others), so a v1.6 config can still be destroyed and inspected;
+- the derived-name length check is skipped (TEARDOWN, READ, INSPECT);
+- a config with no ``name`` is refused (MUTATE, RUN), refused when its name
+  would be only a suggestion (TEARDOWN) or would come from the v1.6
+  ``.lakebench/state.json`` (TEARDOWN, READ), and otherwise loads under the
+  name ``deploy_state.resolve_name`` resolves.
 
 Deprecations, dropped keys and dead fields are collected into
 :class:`LoadNotes` while a load runs, instead of each validator logging on its
@@ -35,8 +37,9 @@ class LoadPurpose(str, Enum):
     MUTATE = "mutate"  # deploy, generate, benchmark, query, clean, financial, reproduce
     RUN = "run"  # run (and the perf gate's pinned configs): MUTATE plus run-only refusals
     TEARDOWN = "teardown"  # destroy, stop, admin
-    READ = "read"  # status, logs, report, results, config show, info
+    READ = "read"  # status, logs, report, results: read about a deployment
     COMPARE = "compare"  # compare's config resolution (read-only compare)
+    INSPECT = "inspect"  # config show, info, config storage/recommend/upgrade: no deployment
 
 
 #: Purposes under which a config may change data: removed keys and a
@@ -46,7 +49,14 @@ CHANGES_DATA = frozenset({LoadPurpose.MUTATE, LoadPurpose.RUN})
 #: Purposes that skip the derived-name length check (LB-153), so a
 #: deployment whose name is too long to finish deploying can be inspected
 #: and torn down.
-SKIPS_NAME_LENGTH = frozenset({LoadPurpose.TEARDOWN, LoadPurpose.READ})
+SKIPS_NAME_LENGTH = frozenset({LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.INSPECT})
+
+#: Purposes that act on or report a deployment by the config's name. They
+#: refuse a nameless config whose name would come from the v1.6
+#: ``.lakebench/state.json``, because v1.6 gave every nameless config in the
+#: directory that name (SPEC SAF-2). INSPECT loads it: it only reads the
+#: file.
+TARGETS_DEPLOYMENT = frozenset({LoadPurpose.TEARDOWN, LoadPurpose.READ})
 
 
 def purpose_from_context(context: object) -> LoadPurpose | None:

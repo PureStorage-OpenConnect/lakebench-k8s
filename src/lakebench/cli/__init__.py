@@ -1516,7 +1516,7 @@ def info(
     """
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file, purpose=LoadPurpose.READ)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904

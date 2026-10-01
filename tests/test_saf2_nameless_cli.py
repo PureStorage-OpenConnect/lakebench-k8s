@@ -165,3 +165,19 @@ def test_v16_name_refused_after_the_deploying_config_is_named(argv, tmp_path, mo
     assert result.exit_code != 0
     out = " ".join(result.output.split())
     assert "nothing ties that deployment to this config" in out
+
+
+@pytest.mark.parametrize("argv", [["config", "show"], ["info"]])
+def test_local_inspection_still_loads_a_v16_directory(argv, tmp_path, monkeypatch):
+    # config show and info look at no deployment, so the v1.6 name does not
+    # refuse them; they show it and write nothing.
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".lakebench").mkdir()
+    (tmp_path / ".lakebench" / "state.json").write_text('{"name": "lb-20260915-101530"}')
+    cfg = _write(tmp_path, NAMELESS)
+    before = _listing(tmp_path)
+    result = runner.invoke(app, [*argv, str(cfg)])
+    assert result.exit_code == 0, result.output
+    assert "lb-20260915-101530" in result.output
+    assert _listing(tmp_path) == before
