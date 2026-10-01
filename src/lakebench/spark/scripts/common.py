@@ -2373,6 +2373,142 @@ def sealed_txns_filter(spark, txns_df, catalog, versions_table):
     )
 
 
+class SealedFilterError(RuntimeError):
+    """``sealed_txns_filter_at`` could not read the versions table at the
+    requested snapshot (the snapshot is expired or never existed, or the
+    table is missing or unreadable). The caller decides the fallback; the
+    helper never returns the transactions unfiltered."""
+
+
+def sealed_txns_filter_at(spark, txns_df, catalog, versions_table, versions_snapshot):
+    """``sealed_txns_filter`` with the versions table read ``VERSION AS OF
+    versions_snapshot`` instead of at current state.
+
+    A detection tick and a scorer that pass the same versions snapshot see
+    the same sealed set, whatever is committed to the versions table later:
+    the snapshot id is part of the plan, so every action on the returned
+    frame reads the same versions rows.
+
+    Fails closed, unlike ``sealed_txns_filter``:
+
+    - ``versions_snapshot`` must be an ``int`` (not a bool). ``None``, the
+      string ``TTD_SNAPSHOT_UNKNOWN`` or any other value raises
+      ``TypeError`` before anything is read.
+    - The versions frame is built and analysed inside this call, so a
+      snapshot id the table does not have, or a missing or unreadable
+      versions table, raises ``SealedFilterError`` here, before the caller
+      runs any action.
+
+    It never returns ``txns_df`` unfiltered.
+    """
+    if isinstance(versions_snapshot, bool) or not isinstance(versions_snapshot, int):
+        raise TypeError(
+            "sealed_txns_filter_at needs an int versions snapshot id, got "
+            f"{type(versions_snapshot).__name__} {versions_snapshot!r}"
+        )
+    from pyspark.sql.functions import col as _col
+
+    versions_fq = f"{catalog}.{versions_table}"
+    try:
+        versions = spark.sql(
+            f"SELECT stream_id, batch_id FROM {versions_fq} VERSION AS OF {versions_snapshot}"
+        ).select(
+            _col("stream_id").alias("_sv_stream_id"),
+            _col("batch_id").alias("_sv_batch_id"),
+        )
+        # Classic pyspark analyses spark.sql eagerly; reading the schema
+        # forces analysis on a lazy client too, so the snapshot and the
+        # table are resolved here and not at the caller's first action.
+        versions.schema  # noqa: B018
+    except Exception as e:  # noqa: BLE001
+        raise SealedFilterError(
+            f"{versions_fq} not readable at snapshot {versions_snapshot}: {e}"
+        ) from e
+    return txns_df.join(
+        versions,
+        (txns_df["_stream_id"] == versions["_sv_stream_id"])
+        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
+        "left_semi",
+    )
+
+
+# Bumped when the fingerprint definition changes, so fingerprints made by two
+# definitions never compare equal. Hashed into every row.
+_FINGERPRINT_VERSION = 1
+
+
+def frame_fingerprint(df, cols):
+    """Order-independent fingerprint of ``df`` over the named columns.
+
+    Returns ``(rows, fp, cols_sha)``: the row count, the sum of one xxhash64
+    per row as a decimal string, and the first 16 hex digits of the sha256
+    of ``name:type`` for each column in the given order. Two frames match
+    only when all three match. One Spark action (one aggregate).
+
+    Each row's hash covers the definition version, every named column in
+    order, and a null mask (bit ``i`` set when column ``i`` is NULL). Spark's
+    xxhash64 skips NULL arguments, so without the mask ``(x, NULL)`` and
+    ``(NULL, x)`` would hash the same. The sum is taken as decimal(38,0), so
+    it is exact and cannot overflow under ANSI mode. Row order does not
+    matter; a duplicated row changes both ``rows`` and ``fp``.
+
+    A top-level map column is hashed as its entries sorted by key
+    (``array_sort(map_entries(c))``), because Spark refuses to hash a map
+    and a map has no defined entry order. A map nested inside a struct or
+    an array is refused by Spark at analysis. NULLs nested inside a struct
+    or an array are skipped by xxhash64 and are not in the mask, so moving
+    a NULL between fields of one struct value is not detected.
+
+    Callers name the columns; AML time travel and reproduction pass every
+    column of the snapshot schema, including ``_stream_id``, ``_batch_id``
+    and ``ingest_ts``, which decide sealed visibility.
+
+    Raises ``ValueError`` for no columns, more than 63 (the mask is a
+    signed long), a repeated name, or a name that is not a top-level
+    column of ``df``.
+    """
+    import hashlib
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import MapType
+
+    cols = list(cols)
+    if not cols:
+        raise ValueError("frame_fingerprint needs at least one column")
+    if len(cols) > 63:
+        raise ValueError(f"frame_fingerprint takes at most 63 columns, got {len(cols)}")
+    if len(set(cols)) != len(cols):
+        raise ValueError(f"frame_fingerprint: repeated column in {cols}")
+    fields = {f.name: f for f in df.schema.fields}
+    missing = [c for c in cols if c not in fields]
+    if missing:
+        raise ValueError(f"frame_fingerprint: {missing} not in {sorted(fields)}")
+
+    def _ref(name):
+        return F.col("`" + name.replace("`", "``") + "`")
+
+    hashed = []
+    mask = F.lit(0).cast("long")
+    for i, name in enumerate(cols):
+        c = _ref(name)
+        if isinstance(fields[name].dataType, MapType):
+            hashed.append(F.array_sort(F.map_entries(c)))
+        else:
+            hashed.append(c)
+        bit = F.lit(1 << i).cast("long")
+        mask = mask + F.when(c.isNull(), bit).otherwise(F.lit(0).cast("long"))
+    h = F.xxhash64(F.lit(_FINGERPRINT_VERSION), *hashed, mask)
+    row = df.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.sum(h.cast("decimal(38,0)")).alias("s"),
+    ).collect()[0]
+    rows = int(row["n"])
+    fp = str(int(row["s"])) if row["s"] is not None else "0"
+    spec = ",".join(f"{name}:{fields[name].dataType.simpleString()}" for name in cols)
+    cols_sha = hashlib.sha256(spec.encode("utf-8")).hexdigest()[:16]
+    return rows, fp, cols_sha
+
+
 def _s3_table_path(bucket_uri, fq_table):
     """Build the S3 path for an EXTERNAL Delta table.
 
