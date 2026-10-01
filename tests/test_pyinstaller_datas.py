@@ -55,10 +55,15 @@ def _package_data_files() -> list[str]:
         ).stdout.split()
     except (OSError, subprocess.CalledProcessError):
         out = [str(p.relative_to(ROOT)) for p in (ROOT / "src" / "lakebench").rglob("*")]
+    # py.typed is the PEP 561 marker for type checkers reading the installed
+    # package; nothing imports lakebench from inside the binary.
     return [
         f
         for f in out
-        if (ROOT / f).is_file() and not f.endswith((".py", ".pyc")) and "__pycache__" not in f
+        if (ROOT / f).is_file()
+        and not f.endswith((".py", ".pyc"))
+        and "__pycache__" not in f
+        and f != "src/lakebench/py.typed"
     ]
 
 

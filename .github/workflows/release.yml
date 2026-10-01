@@ -7,8 +7,9 @@ name: Release
 #
 # github-release and publish run only in the upstream repository. On a fork
 # they are skipped and release-dry-run downloads the same artifacts, lists
-# them and prints their checksums, so a tag on a fork exercises the build and
-# the artifact round trip without writing a release or uploading anywhere.
+# them, writes SHA256SUMS and runs install.sh against them, so a tag on a fork
+# exercises the build and the artifact round trip without writing a release
+# or uploading anywhere.
 # There is deliberately no workflow_dispatch trigger: a manual run in the
 # upstream repository would reach publish.
 #
@@ -224,9 +225,19 @@ jobs:
           done
           ls -la lakebench-*
 
+      # install.sh downloads this file from the same release and refuses a
+      # binary whose checksum does not match it.
+      - name: Write SHA256SUMS
+        run: |
+          sha256sum lakebench-* > SHA256SUMS
+          cat SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 3 || { echo "::error::SHA256SUMS does not list 3 binaries"; exit 1; }
+
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          files: lakebench-*
+          files: |
+            lakebench-*
+            SHA256SUMS
           generate_release_notes: true
 
   publish:
@@ -248,9 +259,10 @@ jobs:
 
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2 (the release/v1 branch on 2026-09-30)
 
-  # Forks only. Same downloads and rename as github-release and publish, then
-  # a listing and checksums. The build writes no SHA256SUMS file, so the
-  # checksums are computed and printed here rather than verified.
+  # Forks only. Same downloads, rename and SHA256SUMS as github-release and
+  # publish, then a listing, and install.sh run against those files served
+  # the way the release serves them, so a fork tag exercises the download,
+  # checksum and install path end to end.
   release-dry-run:
     name: Release dry run (fork)
     needs: [build-dist, build-binary-linux, build-binary-macos]
@@ -259,6 +271,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Only for install.sh; checked out to repo/ so the downloads below stay
+      # at the job root as in github-release.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: repo
+
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: lakebench-*
@@ -286,4 +304,26 @@ jobs:
             test -s "$f" || { echo "::error::missing release binary $f"; exit 1; }
           done
           ls dist/*.whl dist/*.tar.gz
-          sha256sum lakebench-* dist/*
+          sha256sum lakebench-* > SHA256SUMS
+          cat SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 3 || { echo "::error::SHA256SUMS does not list 3 binaries"; exit 1; }
+          sha256sum dist/*
+
+      # The release layout is <base>/<tag>/<asset>; install.sh reads
+      # LB_INSTALL_BASE_URL in place of the GitHub download base.
+      - name: install.sh round trip
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p "srv/${TAG}" "${RUNNER_TEMP}/lb-bin"
+          cp lakebench-* SHA256SUMS "srv/${TAG}/"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory srv &
+          for _ in $(seq 1 30); do
+            curl -fs -o /dev/null http://127.0.0.1:8765/ && break
+            sleep 1
+          done
+          curl -fs -o /dev/null http://127.0.0.1:8765/ \
+            || { echo "::error::the local http.server did not start"; exit 1; }
+          INSTALL_DIR="${RUNNER_TEMP}/lb-bin" VERSION="${TAG}" \
+            LB_INSTALL_BASE_URL=http://127.0.0.1:8765 bash repo/install.sh
+          cmp "${RUNNER_TEMP}/lb-bin/lakebench" lakebench-linux-amd64

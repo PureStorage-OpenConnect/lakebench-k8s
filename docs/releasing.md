@@ -12,13 +12,15 @@ A release is a `v*` tag on a commit that is on `main`. Pushing the tag runs
    `--require-all` (examples, version, changelog, em dashes, UAT results);
 4. the wheel and sdist, and the PyInstaller binaries for linux-amd64,
    macos-amd64 and macos-arm64, each smoke-tested;
-5. the GitHub Release with the binaries;
+5. the GitHub Release with the binaries and their `SHA256SUMS`, which
+   `install.sh` checks each download against;
 6. the PyPI upload, only after the GitHub Release exists, so a version on
    PyPI always has its binaries.
 
 Steps 5 and 6 run only in `PureStorage-OpenConnect/lakebench-k8s`. On a
 fork they are skipped and `release-dry-run` downloads the same artifacts,
-lists them and prints their SHA-256 checksums instead. A tag on a fork
+lists them, writes the same `SHA256SUMS` and runs `install.sh` against
+them instead. A tag on a fork
 therefore runs the build and artifact steps without publishing; the
 GitHub Release and PyPI upload actions themselves run only on a real tag. `release.yml` has no
 `workflow_dispatch` trigger, because a manual run in the upstream

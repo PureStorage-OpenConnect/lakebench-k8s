@@ -81,6 +81,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   continuous section is headed "Continuous Pipeline".
 - `docs/reproductions/c360-scale-0-1.yaml` is marked as a legacy package
   that `reproduce` refuses.
+- **`install.sh` detects a corrupted or incomplete download.** It downloads
+  the binary to a temporary directory, checks it against the `SHA256SUMS`
+  file that each release now publishes, and only then moves it into
+  `INSTALL_DIR`, so a failed, truncated or corrupted download leaves nothing
+  there. The checksum file comes from the same release, so it does not
+  prove who built the binary. The script refuses an `INSTALL_DIR` it cannot
+  write before downloading, installs the binary with mode 755, runs
+  `version` on the downloaded binary before it replaces anything (not on
+  the first `lakebench` on `PATH`), so a binary that does not run on the
+  machine leaves the installed one in place, and refuses Linux arm64 (never published) with the list of
+  available binaries. Releases before 1.7.0 have no `SHA256SUMS`, so
+  `VERSION=1.6.0` (or `latest` while 1.6 is the newest release) installs
+  unverified with a warning on stderr. A release at 1.7.0 or later without
+  `SHA256SUMS` is refused, and so is a checksum mismatch on any release.
+- The package ships a `py.typed` marker, so type checkers read its
+  annotations.
 ### Fixed
 
 - Trino compaction of the Customer 360 silver table no longer fails with
