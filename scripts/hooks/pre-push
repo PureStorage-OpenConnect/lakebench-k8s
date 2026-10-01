@@ -43,6 +43,13 @@ if ! git show "$cfg_ref:.gitleaks.toml" >"$cfg" 2>/dev/null || [ ! -s "$cfg" ]; 
   echo "pre-push: cannot read .gitleaks.toml from $cfg_ref; push refused" >&2
   exit 1
 fi
+# The baseline comes from the same ref as the config; none there means none.
+ignore="$tmpdir/gitleaksignore"
+git show "$cfg_ref:.gitleaksignore" >"$ignore" 2>/dev/null || : >"$ignore"
+gitdir=$(git rev-parse --path-format=absolute --git-dir) || {
+  echo "pre-push: cannot locate the git dir; push refused" >&2
+  exit 1
+}
 if ! command -v gitleaks >/dev/null 2>&1; then
   echo "pre-push: gitleaks is not installed; push refused" >&2
   exit 1
@@ -86,8 +93,14 @@ while read -r lref lsha rref rsha || [ -n "${lref:-}" ]; do
 
   report="$tmpdir/report.json"
   rm -f "$report"
-  gitleaks git . --config "$cfg" --redact --no-banner --exit-code 1 \
-    --log-opts="$range" --report-format json --report-path "$report" \
+  # Scan the repository by its git dir, from the temp dir, with the baseline
+  # from $cfg_ref: gitleaks reads .gitleaksignore from its source and its cwd,
+  # so scanning "." would let the pushing worktree allowlist its own finding.
+  # --remerge-diff scans what merge commits change; --ignore-gitleaks-allow
+  # stops an inline allow comment from hiding a finding.
+  (cd "$tmpdir" && gitleaks git "$gitdir" --config "$cfg" --redact --no-banner --exit-code 1 \
+    --gitleaks-ignore-path "$ignore" --ignore-gitleaks-allow \
+    --log-opts="--remerge-diff $range" --report-format json --report-path "$report") \
     >"$tmpdir/gitleaks.log" 2>&1
   status=$?
   if [ "$status" -eq 1 ] && [ ! -s "$report" ]; then
@@ -111,7 +124,8 @@ PY
   {
     git log --format=%B $range
     [ "$(git cat-file -t "$lsha")" = "tag" ] && git cat-file -p "$lsha"
-  } 2>/dev/null | gitleaks stdin --config "$cfg" --redact --no-banner --exit-code 1 \
+  } 2>/dev/null | (cd "$tmpdir" && gitleaks stdin --config "$cfg" --redact --no-banner --exit-code 1 \
+    --gitleaks-ignore-path "$ignore" --ignore-gitleaks-allow) \
     >"$tmpdir/msg.log" 2>&1
   if [ $? -ne 0 ]; then
     echo "pre-push: refused $lref -> $rref: a commit or tag message in $range matches a gitleaks rule" >&2
