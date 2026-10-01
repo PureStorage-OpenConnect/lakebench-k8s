@@ -108,21 +108,21 @@ The generator is a Rust crate. The files you are most likely to change:
 
 | File | Contents |
 |---|---|
-| `src/bin/generate.rs` | The `generate` binary: argument parsing, file-ID assignment per node (file `N` goes to node `N % total_nodes`), the rayon thread pool and the upload loop, for both schemas |
-| `src/schema.rs` | Arrow schemas: `customer360_schema()` (41 fields) and `pacs008_schema()` |
-| `src/customer360.rs` | `build_batch()`, which builds one Customer360 file: sessions, customer IDs, conditional nulls, dirty-data passes |
-| `src/customer360_realism.rs` | Customer360 value pools and weights (`INTERACTION_WEIGHTS`, `DATA_QUALITY_WEIGHTS`, `DATA_SOURCE_WEIGHTS`, `DIRTY_RATE_BY_SOURCE`, `CITIES`, `DIRTY_CITY_VARIANTS`, `DIRTY_STATE_VARIANTS`), the loyalty lookup (60% members, 70/20/10 tier split) and the truncated-Zipf `CustomerIdSampler` |
-| `src/writer.rs` | Parquet writer properties, `DG_COMPRESSION`, and the per-codec bytes-per-row tables that size files |
-| `src/model.rs`, `src/world.rs`, `src/typology.rs`, `src/party.rs` | The financial (AML) world model, planted typologies, party and account tables, and `MODEL_VERSION` |
-| `entrypoint.py` | Container entrypoint: maps the Kubernetes Job's arguments onto the binary, sizes threads from the pod CPU and memory limit, reads the node ID from `JOB_COMPLETION_INDEX` |
+| `datagen_rs/src/bin/generate.rs` | The `generate` binary: argument parsing, file-ID assignment per node (file `N` goes to node `N % total_nodes`), the rayon thread pool and the upload loop, for both schemas |
+| `datagen_rs/src/schema.rs` | Arrow schemas: `customer360_schema()` (41 fields) and `pacs008_schema()` |
+| `datagen_rs/src/customer360.rs` | `build_batch()`, which builds one Customer360 file: sessions, customer IDs, conditional nulls, dirty-data passes |
+| `datagen_rs/src/customer360_realism.rs` | Customer360 value pools and weights (`INTERACTION_WEIGHTS`, `DATA_QUALITY_WEIGHTS`, `DATA_SOURCE_WEIGHTS`, `DIRTY_RATE_BY_SOURCE`, `CITIES`, `DIRTY_CITY_VARIANTS`, `DIRTY_STATE_VARIANTS`), the loyalty lookup (60% members, 70/20/10 tier split) and the truncated-Zipf `CustomerIdSampler` |
+| `datagen_rs/src/writer.rs` | Parquet writer properties, `DG_COMPRESSION`, and the per-codec bytes-per-row tables that size files |
+| `datagen_rs/src/model.rs`, `datagen_rs/src/world.rs`, `datagen_rs/src/typology.rs`, `datagen_rs/src/party.rs` | The financial (AML) world model, planted typologies, party and account tables, and `MODEL_VERSION` |
+| `datagen_rs/entrypoint.py` | Container entrypoint: maps the Kubernetes Job's arguments onto the binary, sizes threads from the pod CPU and memory limit, reads the node ID from `JOB_COMPLETION_INDEX` |
 
 **To add a Customer360 column:** add the field to `customer360_schema()` in
-`src/schema.rs`, build the column in `build_batch()` in `src/customer360.rs`,
-and update the schema tests in `src/schema.rs`.
+`datagen_rs/src/schema.rs`, build the column in `build_batch()` in `datagen_rs/src/customer360.rs`,
+and update the schema tests in `datagen_rs/src/schema.rs`.
 
 **To change a distribution:** edit the weight arrays in
-`src/customer360_realism.rs`, or the transaction-amount log-normal parameters
-(mu 4.3, sigma 1.2) in `src/customer360.rs`.
+`datagen_rs/src/customer360_realism.rs`, or the transaction-amount log-normal parameters
+(mu 4.3, sigma 1.2) in `datagen_rs/src/customer360.rs`.
 
 The binary always writes the whole corpus up front; there is no separate
 continuous-mode path and no checkpoint-resume.

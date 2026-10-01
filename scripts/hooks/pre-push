@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Lakebench pre-push hook (QR-38). Shared by every worktree of this repository.
+#
+# 1. Refuses any pushed ref that reaches a pre-rewrite commit carrying the
+#    leaked FlashBlade keys, or the pre-rewrite integrate tip.
+# 2. Scans the pushed range with gitleaks, using the .gitleaks.toml from
+#    origin/integrate/v1.5.0, never the pushing branch's own copy (an old
+#    branch may predate the FlashBlade rule).
+#
+# Prints the refused ref and the rule, never a secret value.
+# LB_PREPUSH_EXTRA_BLOCK (space-separated shas) can only add to the list.
+# Do not bypass with --no-verify.
+
+set -u
+
+zero=0000000000000000000000000000000000000000
+blocked=(
+  36ca9b27662e0376668735ded650f3c61c5c7128
+  3619708eccec6566419a4071d46ddf0f9eefe190
+  476deeaec40a1c2e5adf2c550fd81ea7dd63e6e1
+  68b750c3e6479998269baab38c0fb76bf5a5d3d2
+)
+for extra in ${LB_PREPUSH_EXTRA_BLOCK:-}; do
+  if ! git cat-file -e "$extra^{commit}" 2>/dev/null; then
+    echo "pre-push: LB_PREPUSH_EXTRA_BLOCK entry $extra is not a commit here; push refused" >&2
+    exit 1
+  fi
+  blocked+=("$extra")
+done
+
+# Only a remote-tracking ref may supply the config, so a local branch or tag
+# named like it (or an override pointing at a weakened copy) cannot shadow it.
+cfg_ref="${LB_PREPUSH_CONFIG_REF:-refs/remotes/origin/integrate/v1.5.0}"
+case "$cfg_ref" in
+  refs/remotes/*) ;;
+  *) echo "pre-push: LB_PREPUSH_CONFIG_REF must be under refs/remotes/; push refused" >&2; exit 1 ;;
+esac
+tmpdir=$(mktemp -d) || { echo "pre-push: cannot create a temp dir; push refused" >&2; exit 1; }
+trap 'rm -rf "$tmpdir"' EXIT
+cfg="$tmpdir/gitleaks.toml"
+
+if ! git show "$cfg_ref:.gitleaks.toml" >"$cfg" 2>/dev/null || [ ! -s "$cfg" ]; then
+  echo "pre-push: cannot read .gitleaks.toml from $cfg_ref; push refused" >&2
+  exit 1
+fi
+# The baseline comes from the same ref as the config; none there means none.
+ignore="$tmpdir/gitleaksignore"
+git show "$cfg_ref:.gitleaksignore" >"$ignore" 2>/dev/null || : >"$ignore"
+gitdir=$(git rev-parse --path-format=absolute --git-dir) || {
+  echo "pre-push: cannot locate the git dir; push refused" >&2
+  exit 1
+}
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-push: gitleaks is not installed; push refused" >&2
+  exit 1
+fi
+
+rc=0
+while read -r lref lsha rref rsha || [ -n "${lref:-}" ]; do
+  [ -z "${lsha:-}" ] && continue
+  # A delete pushes no content.
+  [ "$lsha" = "$zero" ] && continue
+
+  # Only commits (or tags that peel to one) may be pushed. A tree or blob
+  # push would publish file contents that neither check below can see.
+  if ! git rev-parse -q --verify "$lsha^{commit}" >/dev/null 2>&1; then
+    echo "pre-push: refused $lref -> $rref: $lsha is not a commit" >&2
+    rc=1
+    continue
+  fi
+
+  for c in "${blocked[@]}"; do
+    # Exit 0: reaches the commit. Exit 1 or 128 (object gone): does not.
+    if git merge-base --is-ancestor "$c" "$lsha" 2>/dev/null; then
+      echo "pre-push: refused $lref -> $rref: it reaches pre-rewrite commit ${c:0:12} (leaked key history)" >&2
+      rc=1
+      continue 2
+    fi
+  done
+
+  if [ "$rsha" != "$zero" ] && git cat-file -e "$rsha^{commit}" 2>/dev/null; then
+    range="$rsha..$lsha"
+  else
+    # New branch, or the remote tip is not known locally.
+    range="$lsha --not --remotes"
+  fi
+
+  if ! git rev-list $range >/dev/null 2>&1; then
+    echo "pre-push: refused $lref -> $rref: cannot list commits in $range" >&2
+    rc=1
+    continue
+  fi
+
+  report="$tmpdir/report.json"
+  rm -f "$report"
+  # Scan the repository by its git dir, from the temp dir, with the baseline
+  # from $cfg_ref: gitleaks reads .gitleaksignore from its source and its cwd,
+  # so scanning "." would let the pushing worktree allowlist its own finding.
+  # --remerge-diff scans what merge commits change; --ignore-gitleaks-allow
+  # stops an inline allow comment from hiding a finding.
+  (cd "$tmpdir" && gitleaks git "$gitdir" --config "$cfg" --redact --no-banner --exit-code 1 \
+    --gitleaks-ignore-path "$ignore" --ignore-gitleaks-allow \
+    --log-opts="--remerge-diff $range" --report-format json --report-path "$report") \
+    >"$tmpdir/gitleaks.log" 2>&1
+  status=$?
+  if [ "$status" -eq 1 ] && [ ! -s "$report" ]; then
+    echo "pre-push: refused $lref -> $rref: gitleaks failed on $range:" >&2
+    grep -E "FTL|ERR" "$tmpdir/gitleaks.log" | sed 's/^/  /' >&2
+    rc=1
+  elif [ "$status" -eq 1 ]; then
+    echo "pre-push: refused $lref -> $rref: gitleaks findings in $range:" >&2
+    python3 - "$report" >&2 <<'PY' || echo "  (could not parse the report)" >&2
+import json, sys
+for f in json.load(open(sys.argv[1])):
+    print(f"  rule={f.get('RuleID')} file={f.get('File')}:{f.get('StartLine')} commit={str(f.get('Commit'))[:12]}")
+PY
+    rc=1
+  elif [ "$status" -ne 0 ]; then
+    echo "pre-push: refused $lref -> $rref: gitleaks failed (exit $status) on $range" >&2
+    rc=1
+  fi
+
+  # gitleaks git mode scans diffs only: scan commit and annotated-tag messages too.
+  {
+    git log --format=%B $range
+    [ "$(git cat-file -t "$lsha")" = "tag" ] && git cat-file -p "$lsha"
+  } 2>/dev/null | (cd "$tmpdir" && gitleaks stdin --config "$cfg" --redact --no-banner --exit-code 1 \
+    --gitleaks-ignore-path "$ignore" --ignore-gitleaks-allow) \
+    >"$tmpdir/msg.log" 2>&1
+  if [ $? -ne 0 ]; then
+    echo "pre-push: refused $lref -> $rref: a commit or tag message in $range matches a gitleaks rule" >&2
+    rc=1
+  fi
+done
+
+exit $rc

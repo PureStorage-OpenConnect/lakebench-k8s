@@ -3,12 +3,12 @@
 A config with no ``name:`` used to get a time-based name written to
 ``<config dir>/.lakebench/state.json`` on every load, including read-only
 ones, and every nameless config in a directory resolved to that same name.
-From v1.7 a nameless config cannot change data (SAF-2): the commands that
+From v1.7 a nameless config cannot change data: the commands that
 change data refuse it, and the read and teardown commands load it under the
 name :func:`resolve_name` resolves.
 
 Everything here only reads. Nothing in this module creates a file or a
-directory (CC-2 adds the state writer here).
+directory (a later change adds the state writer here).
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ LEGACY_STATE = Path(".lakebench") / "state.json"
 
 NameSource = Literal["config", "override", "legacy-state", "suggested"]
 
-#: The design's markers of a lakebench config (SAF-2 part c, check 1). The
+#: The markers of a lakebench config. The
 #: scan also counts the flat v2 keys (see :func:`_config_marker_keys`),
 #: because a v1.6 config can be built from flat keys alone.
 CONFIG_MARKER_KEYS = frozenset(
@@ -113,7 +113,7 @@ def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
 
     v1.6 gave every nameless config in a directory the one name in
     ``.lakebench/state.json``, so when there is more than one, that name
-    cannot be tied to any one of them (SAF-2 part c, check 1). Each
+    cannot be tied to any one of them. Each
     ``*.yaml`` and ``*.yml`` file beside the config is parsed with
     ``yaml.safe_load`` on its raw text, and counted when it is a mapping
     with a top-level config key and no name of its own. A file that cannot

@@ -158,6 +158,9 @@ jobs:
     needs: [verify-tag, gate]
     runs-on: ${{ matrix.runner }}
     strategy:
+      # Build both macOS binaries even if one fails, so a release attempt
+      # shows every broken platform at once.
+      fail-fast: false
       matrix:
         include:
           # macos-latest is arm64; the Intel binary needs an Intel runner.

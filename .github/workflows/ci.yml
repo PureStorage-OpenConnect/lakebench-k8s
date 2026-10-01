@@ -5,8 +5,10 @@ on:
   # which is how a credential reached a pushed branch unnoticed.
   push:
     branches: ['**']
+  # Pull requests to integrate/** (the v1.7 integration branches) get CI as
+  # well as pull requests to main.
   pull_request:
-    branches: [main]
+    branches: [main, 'integrate/**']
   # release.yml calls this workflow on the tagged commit and publishes only
   # if it passes. That binds only tags whose commit carries the current
   # release.yml; see docs/releasing.md for the repository settings that
@@ -15,6 +17,20 @@ on:
 
 permissions:
   contents: read
+
+# A newer push to the same lane/* branch or pull request cancels the older
+# run. Every other ref (main, integrate/**, train/*, tags, and any branch added
+# later) puts the run id in its group, so no run of it is ever cancelled: a
+# shared group would not do, because GitHub cancels a pending run when a newer
+# one joins the group even with cancel-in-progress off. A push runs CI on its
+# head commit only, so this keeps every pushed head's run, not a run for every
+# commit in a multi-commit push.
+concurrency:
+  group: >-
+    ci-${{ github.workflow }}-${{ github.ref }}${{
+    !(startsWith(github.ref, 'refs/heads/lane/') || startsWith(github.ref, 'refs/pull/'))
+    && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
 
 jobs:
   lint:
@@ -26,6 +42,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -39,6 +57,12 @@ jobs:
       - name: mypy
         run: mypy src/lakebench/
 
+      # Every tracked doc, script and top-level .md is linked from the docs
+      # index or read by code, tests or CI (tests/test_doc_readers.py runs
+      # the same check with its planted cases).
+      - name: Docs have readers
+        run: python scripts/check_doc_readers.py
+
       # Every action in .github/workflows is pinned by SHA and listed in
       # .github/action-runtimes.json with its runs.using value. This reads
       # each action.yml at its pinned SHA and fails if the map has drifted.
@@ -51,6 +75,9 @@ jobs:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-24.04
     strategy:
+      # One failing Python version must not cancel the other: both results
+      # are needed to tell a version-specific failure from a real one.
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
     steps:
@@ -59,6 +86,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -70,13 +99,23 @@ jobs:
       # floor check stop silently (tests/test_workflows.py checks this).
       - name: Run unit tests
         run: >-
-          pytest tests/ -x --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
+          pytest tests/ -rs --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
           ${{ matrix.python-version == '3.13' && '--cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered' || '' }}
 
       # Per-file floors on the scoring and metrics code (GOALS P8.3).
       - name: Coverage floors
         if: matrix.python-version == '3.13'
         run: python scripts/check_coverage.py --suite unit coverage-unit.json
+
+      # The per-file report, kept so a floor can be raised from a measured run.
+      - name: Upload coverage report
+        if: always() && matrix.python-version == '3.13'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: coverage-unit
+          path: coverage-unit.json
+          retention-days: 30
+          if-no-files-found: error
 
   secrets:
     name: Secret scan
@@ -102,6 +141,112 @@ jobs:
       # is a separate decision.
       - name: Scan working tree
         run: '"$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner --exit-code 1'
+
+  # History scan: every commit reachable from the pushed or merged HEAD
+  # (about 2 s), with --remerge-diff so what a merge commit itself changed is
+  # scanned (plain `git log -p` shows no diff for merges) and
+  # --ignore-gitleaks-allow so an inline allow comment hides nothing. The
+  # baseline and the config come from a trusted ref, origin/main or, until
+  # main has a baseline, origin/integrate/v1.5.0, never from the scanned
+  # branch: gitleaks reads a source tree's own .gitleaksignore, so the scan
+  # runs on the git dir from a temp directory. A second pass uses the
+  # branch's own config, so a rule a branch adds is enforced at once. A pull
+  # request to main uses its own baseline (the owner reviews it), and with no
+  # baseline on either ref the tree's own is used once, with a warning. This
+  # job runs the branch's own ci.yml, so it catches mistakes; protection on
+  # main and the pre-push hook are what stop a deliberate bypass. The job also
+  # runs the pre-push hook and baseline tests with the real gitleaks.
+  secrets-history:
+    name: Secret scan (history)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan history
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/gitleaks-history"
+          mkdir -p "$work"
+          ignore="$work/gitleaksignore"
+          cfg="$work/gitleaks.toml"
+          # The config always comes from a trusted ref when one has it, so an
+          # allowlist a branch (a pull request to main included) adds to its own
+          # .gitleaks.toml cannot hide a finding unnoticed. A branch can still
+          # edit this workflow; review of the pull request is that control.
+          cfg_ref=""
+          for ref in origin/main origin/integrate/v1.5.0; do
+            if git cat-file -e "$ref:.gitleaks.toml" 2>/dev/null; then
+              cfg_ref="$ref"
+              break
+            fi
+          done
+          trusted=""
+          if [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" = "main" ]; then
+            echo "::warning::pull request to main: its own baseline is used; the owner reviews it"
+            if git cat-file -e origin/main 2>/dev/null; then
+              echo "baseline and config changes against origin/main:"
+              git diff origin/main HEAD -- .gitleaksignore .gitleaks.toml || true
+            fi
+          else
+            for ref in origin/main origin/integrate/v1.5.0; do
+              if git cat-file -e "$ref:.gitleaksignore" 2>/dev/null; then
+                trusted="$ref"
+                break
+              fi
+            done
+            [ -n "$trusted" ] || echo "::warning::no trusted ref has a .gitleaksignore yet; using this tree's"
+          fi
+          if [ -n "$trusted" ]; then
+            git show "$trusted:.gitleaksignore" >"$ignore"
+            echo "baseline from $trusted"
+          else
+            cp .gitleaksignore "$ignore" 2>/dev/null || : >"$ignore"
+          fi
+          if [ -n "$cfg_ref" ]; then
+            git show "$cfg_ref:.gitleaks.toml" >"$cfg"
+            echo "config from $cfg_ref"
+          else
+            cp .gitleaks.toml "$cfg"
+          fi
+          # Commits (merge commits' own changes included), commit messages and
+          # tag messages; fails if gitleaks scanned nothing.
+          scan="$PWD/scripts/gitleaks_history.py"
+          for config in "$cfg" "$PWD/.gitleaks.toml"; do
+            echo "scanning with $config"
+            python "$scan" --repo . --config "$config" --ignore "$ignore"
+          done
+
+      - name: Pre-push hook and baseline tests
+        env:
+          LB_REQUIRE_GITLEAKS: "1"
+        run: |
+          pip install -e ".[dev]"
+          pytest tests/test_pre_push_hook.py tests/test_gitleaks_baseline.py tests/test_gitleaks_history.py -rs --tb=short
+          pytest tests/test_release_gate.py -k gitleaks_history -rs --tb=short
 
   rust:
     name: Rust datagen
@@ -136,9 +281,15 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      # The key adds ci.yml, which names the pyspark version, so this job's
+      # cache (with the built pyspark wheel) is not the lint job's.
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/workflows/ci.yml
 
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
@@ -152,7 +303,7 @@ jobs:
 
       - name: Run Spark tests
         run: >-
-          pytest tests/spark -q
+          pytest tests/spark -q -rs
           --cov=src/lakebench/spark/scripts --cov-report=json:coverage-spark.json
 
       # detection_rules.py is imported by path as a top-level module, so it
@@ -160,13 +311,90 @@ jobs:
       - name: Coverage floors
         run: python scripts/check_coverage.py --suite spark coverage-spark.json
 
-  build:
-    name: Build Package
+  # The AML statistics tests marked `slow` (the heavy fidelity-gate fits, the
+  # scale invariance check, and the Spark fidelity gate over silver), on the
+  # pinned reference libraries. It runs on every push to main, integrate/**,
+  # train/* (the merge trains, so a red result stops the train before
+  # integrate moves) and tags (so also in the release's ci call, where
+  # github.event_name is the caller's `push`), and on every pull request to
+  # integrate/** or main (a skipped job would satisfy a required check on the
+  # integrate-to-main pull request). A selection that finds no test exits 5, so the job cannot
+  # pass having run nothing.
+  aml-slow:
+    name: AML statistics (slow)
+    if: >-
+      github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/heads/integrate/')
+      || startsWith(github.ref, 'refs/heads/train/')
+      || startsWith(github.ref, 'refs/tags/')
+      || (github.event_name == 'pull_request' && startsWith(github.base_ref, 'integrate/'))
+      || (github.event_name == 'pull_request' && github.base_ref == 'main')
     runs-on: ubuntu-24.04
-    needs: [lint, test, secrets, rust, spark-tests]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/workflows/ci.yml
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]" "pyspark==4.0.1"
+
+      # Fails here, not in a statistics test, if the install drifted from
+      # REFERENCE_PY_DEPS (GITHUB_ACTIONS=true turns the drift skip into a failure).
+      - name: Reference pins
+        run: pytest tests/test_reference_pins.py -rs
+
+      - name: Slow unit tests
+        run: >-
+          pytest tests/ -rs --tb=short -m "slow and not e2e and not integration"
+          --ignore=tests/spark --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
+
+      - name: Slow Spark tests
+        run: pytest tests/spark -rs --tb=short -m slow
+
+      # test_power_sim_output_hash_is_recorded reruns the D8 power simulation
+      # and compares its output hash with the one the pre-registration records.
+      # That hash was produced with other numpy and scipy versions than the
+      # [aml] pins, so above it skips. Here it runs in a second venv with the
+      # recorded versions (read from the pre-registration), and the skip is a
+      # failure.
+      - name: Power simulation hash (recorded numpy and scipy)
+        env:
+          LB_REQUIRE_POWER_SIM_HASH: "1"
+        run: |
+          versions=$(python - <<'PY'
+          import json
+          p = json.load(open("src/lakebench/spark/data/aml/aml_preregistration.json"))
+          w = p["scale_invariance"]["power_sim"]["produced_with"]
+          print(f"numpy=={w['numpy']} scipy=={w['scipy']}")
+          PY
+          )
+          echo "installing $versions"
+          python -m venv "$RUNNER_TEMP/powersim"
+          "$RUNNER_TEMP/powersim/bin/pip" install -q -e ".[dev]"
+          "$RUNNER_TEMP/powersim/bin/pip" install -q $versions
+          "$RUNNER_TEMP/powersim/bin/python" -m pytest tests/test_aml_scale_invariance.py -rs \
+            --tb=short -k test_power_sim_output_hash_is_recorded
+
+  build:
+    name: Build Package
+    runs-on: ubuntu-24.04
+    needs: [lint, test, secrets, secrets-history, rust, spark-tests]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # No pip cache: it installs only `build`, and would share the lint key.
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"

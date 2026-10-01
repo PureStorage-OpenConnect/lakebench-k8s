@@ -1488,7 +1488,7 @@ def _compaction_partitions(
     None (one unchunked statement) when the table is not on the partition
     map, the engine is not Trino, the budget is already spent, or the read
     fails; a failed read is added to *notes* for the effective maintenance
-    reasons (LB-210).
+    reasons.
     """
     from lakebench.deploy.iceberg import query_sql
     from lakebench.modules.table_formats.iceberg.maintenance import (
@@ -2869,7 +2869,8 @@ def _run_sustained(
         _reset_continuous_state(cfg, clear_raw=not skip_generate)
         # Deploy the scripts ConfigMaps (includes streaming scripts) -- must
         # succeed. After the leftover streams are stopped: a changed map is not
-        # replaced while a live SparkApplication mounts it (DEP-1).
+        # replaced while a live SparkApplication mounts it, since the pod
+        # would read a mix of old and new scripts.
         print_info("Deploying Spark scripts...")
         try:
             scripts_ok = job_manager.deploy_scripts_configmap()

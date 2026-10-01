@@ -77,7 +77,7 @@ def _pinned_argv(tool: str, cfg_or_context: Any, args: list[str]) -> list[str]:
 # helm gives up (and records the failure) before Python ever stops it.
 HELM_TIMEOUT_MARGIN_S = 30
 # Kept back from a mutating helm call's subprocess timeout for the graceful
-# stop below and the status-and-rollback step SD-12 adds (DESIGN ch01 3.7).
+# stop below and a later status-and-rollback step (DESIGN ch01 3.7).
 HELM_RECOVERY_RESERVE_S = 60
 # A mutating helm call is not started with less than this left (3.7).
 HELM_MIN_START_S = 60

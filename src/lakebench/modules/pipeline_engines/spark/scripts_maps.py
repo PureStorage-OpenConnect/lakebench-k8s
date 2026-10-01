@@ -1,4 +1,4 @@
-"""What ships to Spark pods as scripts, and how (DEP-1, LB-207).
+"""What ships to Spark pods as scripts, and how.
 
 This module is the only definition of the files Lakebench mounts at
 ``/opt/spark/scripts``. They ship in one ConfigMap per role, so no single
@@ -192,7 +192,7 @@ def data_sha256(data: Mapping[str, str]) -> str:
 
 def scripts_sha256(maps: Iterable[Mapping[str, Any]]) -> str:
     """One hash over every map: sha256 of the sorted ``(name, scripts-sha256)``
-    pairs. For ``provenance.scripts_sha256`` (EVD-5, written by ER-6)."""
+    pairs. For ``provenance.scripts_sha256`` in the run record."""
     pairs = sorted(
         (m["metadata"]["name"], m["metadata"]["annotations"][SCRIPTS_SHA256_ANNOTATION])
         for m in maps
@@ -311,7 +311,7 @@ def scripts_label_selector(deployment_name: str) -> str:
     It keys on ``app.kubernetes.io/instance``, not ``lakebench.io/deployment``:
     the v1.6 map carries only the ``app.kubernetes.io/*`` labels, and a
     deployment made by 1.6 and destroyed by 1.7 without a 1.7 run must still
-    lose it. The Category-1 registry (SD-21) keeps this selector as is.
+    lose it. The Category-1 registry keeps this selector as is.
     """
     return (
         f"app.kubernetes.io/component={COMPONENT_LABEL},"

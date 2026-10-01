@@ -51,7 +51,7 @@ def _preflight_check(cfg) -> None:
         raise typer.Exit(1)
 
     # 2. Inline S3 credentials must be present (secret_ref is not consumed
-    # and a secret_ref-only config is refused at load, LB-190)
+    # and a secret_ref-only config is refused at load)
     if not (s3.access_key and s3.secret_key):
         print_error("S3 credentials not configured (set access_key and secret_key)")
         raise typer.Exit(1)
@@ -124,7 +124,7 @@ def _build_component_list(cfg) -> str:
     parts.append("Spark RBAC")
     # The operator step always runs: it verifies the shared operator and adds
     # this namespace to its watch list; install=true also installs it if
-    # missing (LB-191).
+    # missing, so the summary lists it either way.
     if cfg.platform.compute.spark.operator.install:
         parts.append("Spark Operator (installed if missing, namespace watched)")
     else:

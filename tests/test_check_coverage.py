@@ -45,3 +45,44 @@ def test_ci_checks_both_suites():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert "check_coverage.py --suite unit" in ci
     assert "check_coverage.py --suite spark" in ci
+
+
+def test_new_floor_fails_below():
+    """The 2026-10-01 floors are in force: one point under destroy.py's fails."""
+    pcts = dict.fromkeys(cc.FLOORS["unit"], 100.0)
+    pcts["lakebench/deploy/destroy.py"] = 78.0
+    failures, _ = cc.check(_report(**pcts), cc.FLOORS["unit"])
+    assert failures == ["lakebench/deploy/destroy.py: 78.00% is below the 79% floor"]
+    for name in (
+        "lakebench/deploy/ownership.py",
+        "lakebench/s3/client.py",
+        "lakebench/metrics/experiment.py",
+        "lakebench/metrics/c360_correctness.py",
+    ):
+        assert name in cc.FLOORS["unit"], name
+
+
+def test_slow_tests_import_no_floored_module():
+    """Deselecting the slow tests from the unit legs cannot lower a floored
+    number: the slow AML statistics modules import none of the floored ones."""
+    import subprocess
+    import sys
+
+    floored = sorted(
+        "lakebench." + k[len("lakebench/") : -len(".py")].replace("/", ".")
+        for k in cc.FLOORS["unit"]
+    )
+    code = (
+        "import sys\n"
+        "import lakebench.aml.fidelity_gate, lakebench.aml.scale_invariance\n"
+        "import lakebench.aml.d8_shards, lakebench.aml.predictions\n"
+        f"print([m for m in {floored!r} if m in sys.modules])\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env={"PYTHONPATH": str(ROOT / "src")},
+        check=True,
+    ).stdout.strip()
+    assert out == "[]", out

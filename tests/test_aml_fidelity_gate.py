@@ -29,6 +29,13 @@ RUNNER_SRC = ROOT / "scripts/aml_gate.py"
 D8_SRC = ROOT / "src/lakebench/aml/scale_invariance.py"
 D8_RUNNER_SRC = ROOT / "scripts/aml_d8.py"
 FEATURES_SRC = ROOT / "src/lakebench/spark/scripts/aml_features.py"
+
+# Tests that take 5 s or more on the pinned reference libraries (183 s for the
+# whole file, of which these are about 140 s, measured 2026-09-30). CI runs them
+# in the "AML statistics (slow)" job, and the unit legs still run them too until
+# the fast path (QA-6) deselects the mark there.
+SLOW = pytest.mark.slow
+
 PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
 TYPOLOGY_RS = ROOT / "datagen_rs/src/typology.rs"
 
@@ -110,6 +117,7 @@ def test_planted_separable_feature_gives_ap_one_and_trips_single_cap():
     assert rep["level2"]["holds_on_this_corpus"] is False
 
 
+@SLOW
 def test_noise_gives_ap_near_prevalence():
     df = _frame(n=4000, prev=0.08, separable=False)
     rep = fg.evaluate_gate(df, _prereg())
@@ -170,12 +178,14 @@ def test_too_few_positives_is_insufficient_not_a_crash():
     assert rep["level2"]["all_have_ap"] is False
 
 
+@SLOW
 def test_deterministic_given_the_seed():
     a = fg.evaluate_gate(_frame(separable=False), _prereg())
     b = fg.evaluate_gate(_frame(separable=False), _prereg())
     assert json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
 
 
+@SLOW
 def test_weights_restore_prevalence():
     """Downsampled negatives with inverse-fraction weights give the same AP
     as the full frame, within noise."""
@@ -211,6 +221,7 @@ def test_level2_n_must_match_behavioural_subset():
         fg.evaluate_gate(_frame(), p)
 
 
+@SLOW
 def test_timing_mixture_and_density():
     p = _prereg()
     tm = p["timing_mixture"]
@@ -235,6 +246,7 @@ def test_timing_mixture_and_density():
     assert rep["density"]["pass"] is False
 
 
+@SLOW
 def test_real_preregistration_runs_end_to_end():
     """The shipped JSON has every key the gate reads (small frame, all six
     typologies; the feature list is cut to keep the pair search short and is
@@ -483,6 +495,7 @@ def test_runner_version_check_reads_job_pins():
     }
 
 
+@SLOW
 def test_relative_cap_as_lift_over_prevalence():
     """Under the lift formula a weak full model does not fail every feature
     that edges above prevalence; a real shortcut still fails."""
@@ -600,6 +613,7 @@ def test_behavioural_six_and_empty_definitional_subset():
     assert "definitional_check" not in rep["typologies"]["defn"]
 
 
+@SLOW
 def test_model_outputs_scores_importance_and_card(tmp_path):
     df = _frame(n=1200)
     df["group"] = np.arange(len(df))
@@ -655,6 +669,7 @@ def _numbers(rep):
     }
 
 
+@SLOW
 def test_gate_numbers_do_not_depend_on_pulled_row_order(monkeypatch):
     """toPandas() row order depends on the partition count; the bootstrap and
     the model's binning subsample are positional, so the evaluator sorts by the
@@ -668,6 +683,7 @@ def test_gate_numbers_do_not_depend_on_pulled_row_order(monkeypatch):
     assert a != _numbers(fg.evaluate_gate(shuffled, _prereg()))
 
 
+@SLOW
 def test_importance_failure_keeps_the_gate_numbers(monkeypatch):
     def boom(*a, **k):
         raise MemoryError("no room")
@@ -688,6 +704,7 @@ def test_duplicate_units_are_refused():
         fg.evaluate_gate(df, _prereg())
 
 
+@SLOW
 def test_band_floor_cap_equals_lift_in_band_and_floors_below():
     """lift_over_prevalence_band_floor measures the shortcut against
     max(ap, band floor): a weak model no longer shrinks the cap to the
@@ -819,6 +836,7 @@ def _band_frame(n=20000, seed=5):
     )
 
 
+@SLOW
 def test_reference_model_pair_catches_what_a_depth2_tree_misses():
     rep = fg.evaluate_gate(_band_frame(), _prereg())
     pair = rep["typologies"]["beh"]["shortcuts"]["feature_pair"]
@@ -863,6 +881,7 @@ def test_nuisance_only_model_and_ablation_catch_a_nuisance_leak():
     }
 
 
+@SLOW
 def test_clean_nuisance_passes_ablation():
     """Signal in a behaviour feature, noise in the nuisance one: the
     nuisance-only model sits near prevalence and dropping it costs nothing."""
@@ -952,6 +971,7 @@ def test_secondary_lifetime_skips_the_new_fits():
     assert fg.lifetime_prereg(p)["shortcut_model"]["also_reference_model"] is True
 
 
+@SLOW
 def test_definitional_check_keeps_the_352_statistic():
     rep = fg.evaluate_gate(_band_frame(), _prereg())
     d = rep["typologies"]["defn"]

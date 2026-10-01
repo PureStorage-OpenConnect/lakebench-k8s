@@ -39,7 +39,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the other flat spellings still load, each with a note naming the nested
   key to write. Both spellings set: the flat value still wins, with a note.
 
+### Added
+- `[aml]` install extra (`pip install "lakebench-k8s[aml]"`) for running the
+  AML reference detector and the local AML gate. It pins numpy, scipy,
+  pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster
+  job installs, so a local gate fits the same model as the cluster.
+
 ### Changed
+- typer is capped below 0.28 (`typer>=0.12.0,<0.28`), so a new typer minor
+  cannot change the CLI without a tested raise of the cap.
+- The `[dev]` extra includes `[aml]`, so a development install now gets the
+  pinned AML libraries (scikit-learn 1.7.2, numpy 2.2.6, pandas 2.3.3, scipy
+  1.15.3) instead of the newest releases. These pins support Python 3.10 to
+  3.13.
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.
@@ -51,21 +63,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and `report` and `results` no longer create `lakebench-output/runs/`.
 - `platform.storage.s3.secret_ref` without `access_key` and `secret_key` is
   refused at load: nothing reads an existing Secret, so such a config
-  deployed empty S3 credentials (LB-190). `destroy`, `status` and `clean`
+  deployed empty S3 credentials. `destroy`, `status` and `clean`
   still load it, so an old deployment stays destroyable. Set alongside
   inline keys, it loads with a warning that it has no effect. `config
   validate` and the deploy preflight now ask for the inline keys only.
 - Run provenance and the Hive deploy result record Hive 3.1.3, the version
   the Stackable HiveCluster template renders, instead of the tag of
   `images.hive`. An `images.hive` naming another version warns at load that
-  it has no effect (LB-189).
+  it has no effect.
 - Setting `architecture.catalog.hive.thrift.*`,
   `architecture.catalog.polaris.version` or `observability.storage_class`
   to a non-default value warns that it has no effect; nothing reads them.
   The generated config template no longer carries them or `secret_ref`.
 - Deploy step labels say "Verifying scratch StorageClass" and "Checking
   Spark Operator and watch list", and the deploy summary lists the operator
-  step whether or not `operator.install` is set (LB-191). The HTML report's
+  step whether or not `operator.install` is set. The HTML report's
   continuous section is headed "Continuous Pipeline".
 - `docs/reproductions/c360-scale-0-1.yaml` is marked as a legacy package
   that `reproduce` refuses.
@@ -74,7 +86,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one
-  recorded continuous Customer 360 run did (LB-210, n=1). A silver table with more than 90 partitions is now
+  recorded continuous Customer 360 run did (n=1). A silver table with more than 90 partitions is now
   compacted in chunks of at most 90, after a read of its partition values.
   This also applies to batch runs, whose single statement happened to
   succeed (batch silver holds a few large files per partition): the
@@ -114,7 +126,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `lakebench-s3-ca-cert-class` used to run without it. The lease is taken
   only when one of them exists; if it stays held for 600 s the cleanup is
   skipped and they are kept.
-- **The cluster lease holder names the process (LB-178).** The `holder`
+- **The cluster lease holder names the process.** The `holder`
   field is now `<host>@<user>@<sha>#<pid>-<8 hex>`, unique to each acquire,
   and release matches the lease's write nonce, so a process never deletes a
   lease another run from the same host wrote in the same second. An acquire
@@ -122,14 +134,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a Ctrl-C, a SIGTERM) releases that lease instead of leaving it to the
   3600 s TTL, and an acquire whose own write comes back as a conflict adopts
   it instead of waiting on itself.
-- **`destroy` deletes the PostgreSQL data PVC when the namespace survives
-  (LB-187).** With `create_namespace: false`, `data-lakebench-postgres-<n>`
+- **`destroy` deletes the PostgreSQL data PVC when the namespace
+  survives.** With `create_namespace: false`, `data-lakebench-postgres-<n>`
   and the catalog metadata on it used to survive destroy, because the cleanup
   selected on a label the claim never carried; the next deploy then started
   on the old metastore. Destroy now deletes the claims by name. It no longer
   selects on `app.kubernetes.io/component=postgres`, which could only ever
   match another application's claim in a shared namespace.
-- **Spark scripts ship in one ConfigMap per role (DEP-1, LB-207).** The single
+- **Spark scripts ship in one ConfigMap per role.** The single
   `lakebench-spark-scripts` ConfigMap, about 45 KB from the 1 MiB limit with
   every AML addition, is replaced by six maps (`lakebench-scripts-common`,
   `-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate`, `-aml-data`), projected
@@ -164,7 +176,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   their next deploy; other combinations are unchanged.
 
 ### Added
-- **Corpus id v2 (EVD-6).** A run whose corpus observation was recorded
+- **Corpus id v2.** A run whose corpus observation was recorded
   (the generator's per-node markers and `series.json` under the datagen
   prefix, read once before the record is saved) gains in
   `experiment.corpus`: `id_v2` (null when it cannot be computed, with the
@@ -179,6 +191,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cycle, or come from different builds are corpus problems, which
   `compare` reads as not comparable. `corpus.id` (v1) is unchanged, and no
   stored id or identity digest moves.
+
+### Removed
+- `lbrun.py`, the run-from-a-checkout wrapper. Use
+  `PYTHONPATH=src python -m lakebench` instead.
 
 ## [1.6.0] - 2026-09-30
 

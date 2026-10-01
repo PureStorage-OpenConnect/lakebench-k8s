@@ -124,7 +124,7 @@ def effective_trickle(cfg: Any) -> int | None:
 
 def _stackable_hive(cfg: Any) -> str:
     """The Hive the Stackable operator runs: the HiveCluster productVersion
-    the template renders (STACKABLE_HIVE_VERSION, never images.hive, LB-189),
+    the template renders (STACKABLE_HIVE_VERSION, never images.hive),
     resolved by the operator with the SDP release to
     oci.stackable.tech/sdp/hive:<v>-stackable<sdp>. Derived from the rendered
     and configured versions, not read from the pod."""
@@ -683,7 +683,7 @@ def _corpus_v2(
     dg: Mapping[str, Any],
     fleet: Any = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Add corpus id v2 (EVD-6) from the persisted run-end observation and,
+    """Add corpus id v2 from the persisted run-end observation and,
     for a series repetition, the inherited block (metrics/corpus_identity).
     ``corpus.id`` (v1) is untouched. A record with neither input (every
     v1.6 record) is returned unchanged."""

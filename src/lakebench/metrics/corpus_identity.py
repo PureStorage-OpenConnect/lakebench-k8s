@@ -1,4 +1,4 @@
-"""Corpus id v2: the corpus as the generator wrote it (SPEC v1.7 EVD-6).
+"""Corpus id v2: the corpus as the generator wrote it.
 
 ``corpus.id`` (v1) hashes the config's datagen block and is never
 recomputed, so stored ids do not move. Corpus id v2 is taken from what the
@@ -12,14 +12,14 @@ generation therefore changes nothing about the id.
 The flow, per run:
 
 1. ``observe_corpus(cfg, s3)`` runs once, immediately before ``save_run``
-   (the ER-9h call site). It lists the datagen scope once, reads the
+   (the run-end call site). It lists the datagen scope once, reads the
    markers and ``series.json`` from that listing, and returns a plain dict
    that the run persists as ``config_snapshot.experiment_inputs.
    corpus_observation``. It never raises: a failed read is recorded as an
    ``error``.
 2. ``build_experiment`` calls ``corpus_v2_fields`` with that persisted dict
    (and, for repetitions 2 to N of a ``--repeat`` series, the inherited
-   block CC-30 persists as ``experiment_inputs.inherited_corpus``). Nothing
+   block the series persists as ``experiment_inputs.inherited_corpus``). Nothing
    here reads S3 at build time, so a later build sees what the run saw.
 
 ``corpus_v2_fields`` applies ch03 section 6 "Series corpus identity" in
@@ -52,12 +52,12 @@ Known limits:
 * The id binds the generator arguments and lineage, not the objects. An
   object deleted or added under the scope by hand leaves every marker in
   place, so the id is unchanged; ``bronze_listing_sha256`` in the
-  observation changes, and DAT-4 (CD-9, v1.8) is where object completeness
-  is checked against the markers.
+  observation changes, and object completeness against the markers is a
+  later check (v1.8).
 * Two images under one mutable tag, both without an observed digest, read
   as one ``declared:<tag>`` lineage; ``lineage_observed`` false says so.
 * A record without an observation (every v1.6 record, and v1.7 records
-  written before the ER-9h call site) gets no v2 fields at all, so a
+  written before the run-end call site) gets no v2 fields at all, so a
   re-saved v1.6 block keeps its shape.
 """
 
@@ -107,7 +107,7 @@ INHERITED_FORMAT = 1
 
 LINEAGE_FILE = Path(__file__).resolve().parents[1] / "config" / "datagen_lineage.yaml"
 
-#: Where CD-8's compare result for an image lives, relative to the repo root
+#: Where the datagen byte-compare result for an image lives, relative to the repo root
 #: (ch05 section 4.1). Not shipped in the wheel: only the CI test opens it.
 EVIDENCE_PATTERN = "tests/fixtures/datagen_reference/compare-{digest12}.json"
 
@@ -624,7 +624,7 @@ class CorpusV2:
 
 def inherited_corpus_from(record: Mapping[str, Any]) -> dict[str, Any]:
     """The ``experiment_inputs.inherited_corpus`` a ``--repeat`` series
-    (CC-30) persists for repetitions 2 to N, built from repetition 1's saved
+    persists for repetitions 2 to N, built from repetition 1's saved
     metrics.json dict: its whole ``experiment.corpus`` block, its run id and
     D1, the ``bronze_listing_sha256`` of the same record's run-end
     observation. Taking both from one saved record ties the block to the
@@ -643,7 +643,7 @@ def inherited_corpus_from(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 #: Declared corpus keys compared with ``series.json``'s ``generation`` for
-#: the display warning. CD-18's ``--skip-generate`` rule 2 refuses a run
+#: the display warning. The ``--skip-generate`` rule 2 refuses a run
 #: whose config disagrees with the whole generation block; this warning
 #: covers the keys the experiment block declares, for the runs rule 2 does
 #: not see (a single cycle with no series.json is not compared at all).

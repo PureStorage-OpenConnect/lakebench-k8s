@@ -113,7 +113,7 @@ def compare(
     # Load both configs. compare still deploys, runs and destroys each config,
     # so it loads them as MUTATE: a nameless config is refused here rather
     # than reaching the destroy step under a resolved name. LoadPurpose.COMPARE
-    # is for the read-only compare over stored records (EVD-8).
+    # is for the read-only compare over stored records.
     try:
         cfg_a = load_config(config_a, purpose=LoadPurpose.MUTATE)
         cfg_b = load_config(config_b, purpose=LoadPurpose.MUTATE)

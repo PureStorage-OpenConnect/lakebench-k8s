@@ -29,7 +29,7 @@ Policy history:
   files after commit (previous-versions-max 50). Tables created by an
   earlier version and reused keep their old properties.
 
-v1.7 (LB-210) keeps ``m2-2026-09-26``: Trino optimize on a table with more
+v1.7 keeps ``m2-2026-09-26``: Trino optimize on a table with more
 than 90 identity partitions runs as chunks of at most 90 partitions, so it
 no longer fails on the connector's 100-writer limit. The operation, its
 threshold and the tables it covers are what m2 already intended; only a
@@ -199,7 +199,7 @@ def effective_maintenance(
     (the table list) and ``compaction_statements`` (the statements
     attempted). ``failed`` still means no statement succeeded, so a table
     whose chunks partly succeeded is partial: it stays ``ran`` in ``id`` and
-    reads ``partial`` in ``detail_id`` (LB-210).
+    reads ``partial`` in ``detail_id``.
 
     ``ran_no_effect`` assumes the window is shorter than the 7 d retention;
     a longer continuous run under-claims (it reads no effect where VACUUM
@@ -303,7 +303,7 @@ def effective_maintenance(
                     reasons.append(f"{op}: never reached (the run ended before maintenance)")
                     continue
                 total = ok = 0
-                # Outcomes counted per table (v1.7, LB-210) still decide
+                # Outcomes counted per table (v1.7) still decide
                 # ``failed`` by statements, so the id rule is unchanged: a
                 # table whose chunks partly succeeded is partial, not failed.
                 stmt_total = stmt_ok = 0
@@ -355,7 +355,7 @@ def effective_maintenance(
             else "vacuum runs at Delta's 7 d default while streams are live: no file "
             "written in the window is eligible"
         )
-    # Which tables compaction failed on, and what ran (LB-210): a partial
+    # Which tables compaction failed on, and what ran: a partial
     # compaction stays out of ``id`` and is named here and in ``reasons``.
     compaction_detail: dict[str, Any] = {}
     compaction_records = [

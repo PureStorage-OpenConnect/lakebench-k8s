@@ -10,6 +10,7 @@ Offline: reads the workflow files and .github/action-runtimes.json only.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import re
 from pathlib import Path
@@ -215,3 +216,297 @@ def test_release_dry_run_only_on_forks():
     assert sorted(map(str, downloads(dry))) == sorted(map(str, real))
     runs = " ".join(str(s.get("run", "")) for s in dry["steps"])
     assert "ls -R" in runs and "sha256sum" in runs
+
+
+# -- QA-3: fail-fast, triggers, concurrency, pip cache, skip reasons ---------
+
+
+def _matrix_jobs():
+    for name, wf in _workflows().items():
+        for job_name, job in (wf.get("jobs") or {}).items():
+            if "matrix" in (job.get("strategy") or {}):
+                yield name, job_name, job
+
+
+def test_matrix_does_not_fail_fast():
+    jobs = list(_matrix_jobs())
+    assert jobs, "no matrix job found; the check reads nothing"
+    bad = [f"{n}:{j}" for n, j, job in jobs if job["strategy"].get("fail-fast") is not False]
+    # fail-fast defaults to true, so a sibling leg is cancelled and its result lost.
+    assert not bad, f"matrix jobs without `fail-fast: false`: {bad}"
+
+
+def test_prs_to_integrate_trigger_ci():
+    on = _on(_load("ci.yml"))
+    assert "integrate/**" in on["pull_request"]["branches"]
+    assert "main" in on["pull_request"]["branches"]
+    # Train and look branches are pushed, never opened as PRs, and need CI.
+    assert on["push"]["branches"] == ["**"]
+
+
+_TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|[()!,])|'((?:[^']|'')*)'|([A-Za-z_][\w.\-]*))")
+
+
+def _eval_expr(expr: str, ctx: dict[str, str]):
+    """Evaluate the GitHub expression subset the concurrency group uses:
+    string literals, context names, == != ! && || and startsWith/format."""
+    toks: list[tuple[str, str]] = []
+    pos = 0
+    expr = expr.strip()
+    while pos < len(expr):
+        m = _TOKEN.match(expr, pos)
+        assert m and m.end() > pos, f"cannot parse {expr[pos:]!r}"
+        op, lit, name = m.groups()
+        toks.append(
+            ("op", op)
+            if op
+            else ("str", lit.replace("''", "'"))
+            if lit is not None
+            else ("name", name)
+        )
+        pos = m.end()
+    toks.append(("end", ""))
+    i = 0
+
+    def peek(v=None):
+        return toks[i][1] == v if v else toks[i]
+
+    def take():
+        nonlocal i
+        i += 1
+        return toks[i - 1]
+
+    def primary():
+        kind, val = take()
+        if kind == "op" and val == "(":
+            v = disj()
+            assert take()[1] == ")"
+            return v
+        if kind == "op" and val == "!":
+            return not primary()
+        if kind == "str":
+            return val
+        assert kind == "name", (kind, val)
+        if peek("("):
+            take()
+            args = [disj()]
+            while peek(","):
+                take()
+                args.append(disj())
+            assert take()[1] == ")"
+            if val == "startsWith":
+                return str(args[0]).lower().startswith(str(args[1]).lower())
+            if val == "format":
+                return str(args[0]).format(*args[1:])
+            raise AssertionError(f"function {val} not supported")
+        return ctx[val]
+
+    def cmp():
+        v = primary()
+        while peek("==") or peek("!="):
+            op = take()[1]
+            r = primary()
+            # GitHub compares strings ignoring case.
+            a, b = (x.lower() if isinstance(x, str) else x for x in (v, r))
+            v = (a == b) if op == "==" else (a != b)
+        return v
+
+    def conj():
+        v = cmp()
+        while peek("&&"):
+            take()
+            r = cmp()
+            v = r if v else v
+        return v
+
+    def disj():
+        v = conj()
+        while peek("||"):
+            take()
+            r = conj()
+            v = v if v else r
+        return v
+
+    out = disj()
+    assert peek()[0] == "end", toks[i:]
+    return out
+
+
+def _render(template: str, ctx: dict[str, str]) -> str:
+    return re.sub(
+        r"\$\{\{(.*?)\}\}", lambda m: str(_eval_expr(m.group(1), ctx)), template, flags=re.S
+    )
+
+
+def test_expression_evaluator_follows_github_rules():
+    ctx = {"a": "x", "e": ""}
+    assert _eval_expr("a == 'x' && 'yes' || 'no'", ctx) == "yes"
+    assert _eval_expr("a == 'y' && 'yes' || 'no'", ctx) == "no"
+    assert _eval_expr("!(e) && startsWith('refs/heads/Main', 'refs/heads/main')", ctx) is True
+    assert _eval_expr("format('-{0}', a)", ctx) == "-x"
+    assert _eval_expr("a == 'X'", ctx) is True
+
+
+def test_concurrency_cancels_only_lane_and_pr_runs():
+    conc = _load("ci.yml")["concurrency"]
+    assert conc["cancel-in-progress"] is True
+
+    def group(ref: str, run_id: str, workflow: str = "CI") -> str:
+        ctx = {"github.workflow": workflow, "github.ref": ref, "github.run_id": run_id}
+        return _render(conc["group"], ctx).lower()  # GitHub matches groups ignoring case
+
+    # Two runs of a lane branch or a PR share a group, so the newer cancels the older.
+    for ref in ("refs/heads/lane/v17-x", "refs/heads/lane/ci-hygiene", "refs/pull/7/merge"):
+        assert group(ref, "1") == group(ref, "2"), ref
+    # Any other ref keeps every run: a shared group would cancel a pending one.
+    # Train runs are merge evidence; unknown branches default to kept.
+    for ref in (
+        "refs/heads/integrate/v1.5.0",
+        "refs/heads/main",
+        "refs/heads/train/1003-am",
+        "refs/heads/release/1.7",
+        "refs/heads/lanes-old",
+        "refs/tags/v1.7.0",
+    ):
+        assert group(ref, "1") != group(ref, "2"), ref
+    # release.yml calls ci.yml on a tag; github.workflow is then the caller's.
+    assert group("refs/tags/v1.7.0", "1", "Release") != group("refs/tags/v1.7.0", "2", "Release")
+    # Different refs never share a group.
+    assert group("refs/heads/lane/a", "1") != group("refs/heads/lane/b", "1")
+
+
+def _pip_cache_keys() -> dict[str, tuple]:
+    """{job: (python, dependency paths)} for each ci.yml job that installs
+    `.[dev]`; the paths are None when the job sets no pip cache."""
+    out = {}
+    for job_name, job in _load("ci.yml")["jobs"].items():
+        steps = job.get("steps") or []
+        if not any('".[dev]"' in str(s.get("run", "")) for s in steps):
+            continue
+        for step in steps:
+            if str(step.get("uses", "")).startswith("actions/setup-python@"):
+                w = step.get("with") or {}
+                paths = str(w.get("cache-dependency-path", "")).split() or None
+                out[job_name] = (
+                    str(w.get("python-version")),
+                    paths if w.get("cache") == "pip" else None,
+                )
+    return out
+
+
+def test_setup_python_caches_pip():
+    keys = _pip_cache_keys()
+    assert keys, "no job installs .[dev]; the check reads nothing"
+    bad = [j for j, (_, paths) in keys.items() if not paths or "pyproject.toml" not in paths]
+    assert not bad, f"jobs installing .[dev] without a pip cache keyed on pyproject.toml: {bad}"
+    # Caches are immutable and the first job to finish saves the key, so a job
+    # that installs more (pyspark) than another on the same Python needs its
+    # own key, or its extra packages are never cached.
+    by_key: dict[tuple, list[str]] = {}
+    for job, (py, paths) in keys.items():
+        by_key.setdefault((py, tuple(paths or ())), []).append(job)
+    for jobs in by_key.values():
+        extras = {
+            j: "pyspark"
+            in " ".join(str(s.get("run", "")) for s in _load("ci.yml")["jobs"][j]["steps"])
+            for j in jobs
+        }
+        assert len(set(extras.values())) == 1, (
+            f"jobs share a pip cache key but install different packages: {extras}"
+        )
+
+
+def test_unit_step_prints_skips_and_does_not_stop_early():
+    steps = _load("ci.yml")["jobs"]["test"]["steps"]
+    run = next(str(s["run"]) for s in steps if s.get("name") == "Run unit tests")
+    args = run.split()
+    # -x hides every failure after the first; -rs prints each skip reason.
+    assert "-x" not in args and "--exitfirst" not in args, run
+    assert "-rs" in args, run
+
+
+# -- QA-8: the AML statistics (slow) merge job --------------------------------
+
+
+def _slow_job_runs(event: str, ref: str, base_ref: str = "") -> bool:
+    cond = _load("ci.yml")["jobs"]["aml-slow"]["if"]
+    ctx = {"github.event_name": event, "github.ref": ref, "github.base_ref": base_ref}
+    return bool(_eval_expr(cond, ctx))
+
+
+def test_aml_slow_job_runs_on_integrate_main_tags_and_prs_to_integrate_and_main():
+    assert _slow_job_runs("push", "refs/heads/integrate/v1.5.0")
+    assert _slow_job_runs("push", "refs/heads/main")
+    assert _slow_job_runs("push", "refs/heads/train/1003-am")
+    # release.yml calls ci.yml; inside the call event_name is the caller's push.
+    assert _slow_job_runs("push", "refs/tags/v1.7.0")
+    assert _slow_job_runs("pull_request", "refs/pull/9/merge", "integrate/v1.5.0")
+    # A skipped job satisfies a required check, so the PR to main runs it too.
+    assert _slow_job_runs("pull_request", "refs/pull/9/merge", "main")
+    assert not _slow_job_runs("push", "refs/heads/lane/v17-x")
+    assert not _slow_job_runs("pull_request", "refs/pull/9/merge", "lane/v17-x")
+
+
+def test_aml_slow_job_selects_slow_tests_on_pinned_libraries():
+    job = _load("ci.yml")["jobs"]["aml-slow"]
+    assert job["name"] == "AML statistics (slow)"
+    assert int(job["timeout-minutes"]) <= 45
+    runs = [str(s.get("run", "")) for s in job["steps"]]
+    assert any("tests/test_reference_pins.py" in r for r in runs)
+    unit = next(r for r in runs if "--ignore=tests/spark" in r)
+    assert '-m "slow and not e2e and not integration"' in unit
+    assert "--ignore=tests/test_e2e.py" in unit and "--ignore=tests/test_integration.py" in unit
+    assert any(r.startswith("pytest tests/spark") and "-m slow" in r for r in runs)
+    # The power-simulation hash guard skips on the pins; its own step must not.
+    ps = [s for s in job["steps"] if "test_power_sim_output_hash_is_recorded" in str(s.get("run"))]
+    assert ps and ps[0]["env"]["LB_REQUIRE_POWER_SIM_HASH"] == "1"
+    # A skipped needed job would skip the build, so nothing needs aml-slow.
+    needs = [n for j in _load("ci.yml")["jobs"].values() for n in j.get("needs", [])]
+    assert "aml-slow" not in needs
+
+
+def _has_slow_mark(node) -> bool:
+    # `@pytest.mark.slow`, or a module alias such as `SLOW = pytest.mark.slow`.
+    return any("slow" in ast.unparse(d).lower() for d in getattr(node, "decorator_list", []))
+
+
+def test_aml_statistics_tests_are_marked_slow():
+    """The tests the slow job exists for carry the mark, so the job is not empty
+    and the fast path (QA-6) can deselect them."""
+    want = {
+        "tests/test_aml_scale_invariance.py": None,  # the whole module
+        "tests/test_aml_fidelity_gate.py": "test_real_preregistration_runs_end_to_end",
+        "tests/spark/test_score_reference_gate_spark.py": "test_fidelity_gate_over_silver",
+    }
+    for rel, func in want.items():
+        tree = ast.parse((ROOT / rel).read_text())
+        if func is None:
+            marks = [
+                ast.unparse(n.value)
+                for n in tree.body
+                if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in n.targets)
+            ]
+            assert any("slow" in m for m in marks), rel
+        else:
+            fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == func)
+            assert _has_slow_mark(fn), f"{rel}::{func}"
+
+
+# -- OSS-2: the history scan job ----------------------------------------------
+
+
+def test_secrets_history_job_scans_full_history_and_requires_gitleaks():
+    jobs = _load("ci.yml")["jobs"]
+    job = jobs["secrets-history"]
+    assert job["steps"][0]["with"]["fetch-depth"] == 0
+    scan = next(str(s["run"]) for s in job["steps"] if s.get("name") == "Scan history")
+    # The shared scanner (history with --remerge-diff, messages, no inline
+    # allow, fails on an empty scan) with a trusted ref's baseline.
+    assert 'scan="$PWD/scripts/gitleaks_history.py"' in scan
+    assert 'python "$scan" --repo . --config "$config" --ignore "$ignore"' in scan
+    assert 'git show "$cfg_ref:.gitleaks.toml"' in scan
+    tests = next(s for s in job["steps"] if "test_pre_push_hook.py" in str(s.get("run", "")))
+    # Without this the gitleaks-backed tests would skip and the step pass.
+    assert tests["env"]["LB_REQUIRE_GITLEAKS"] == "1"
+    assert "secrets-history" in jobs["build"]["needs"]

@@ -119,6 +119,7 @@ def _prereg_variant(tmp_path, monkeypatch, **unit):
     monkeypatch.setenv("LB_AML_PREREG_PATH", str(path))
 
 
+@pytest.mark.slow  # 430 to 450 s; the "AML statistics (slow)" CI job
 def test_fidelity_gate_over_silver(spark, tmp_path, monkeypatch):
     import score_financial_reference as ref
     from threadpoolctl import threadpool_limits

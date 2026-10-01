@@ -51,7 +51,28 @@ python scripts/release_gate.py --tag v<version> --require-all
 ```
 
 It needs `cargo` (Rust 1.98.1) and `gitleaks` on `PATH`, or `GITLEAKS`
-pointing at the binary.
+pointing at the binary, and a full clone: the `gitleaks-history` check scans
+every commit reachable from `HEAD`, and every commit and tag message, beyond
+the `.gitleaksignore` baseline (`scripts/gitleaks_history.py`, the scanner CI
+runs), and fails on a shallow clone, on git older than 2.36 (no
+`--remerge-diff`) and when gitleaks scanned no commit. The `pre-push-hook` check needs the hook from
+`scripts/hooks/pre-push` installed in the clone (see `docs/development.md`);
+without it the check is skipped, which `--require-all` fails. It checks the
+directory git runs hooks from (`core.hooksPath` when set).
+
+Once `main` carries `.gitleaksignore`, the baseline changes only through a
+pull request to `main`: CI scans every other branch with the baseline from
+`origin/main`, so a baseline change made elsewhere does not take effect, and
+a finding it was meant to cover fails CI, until it is on `main`. Until then
+the baseline comes from `origin/integrate/v1.5.0`, so a baseline change
+merged to integrate takes effect at that merge; the train review and the
+list pinned in `tests/test_gitleaks_baseline.py` are the control in that
+window. The history scan's `.gitleaks.toml` always comes from `origin/main`
+(or `origin/integrate/v1.5.0` if `main` has none), so a config change on any
+other branch, integrate included, applies to the trusted pass only once it is
+on `main`; the second pass uses the branch's own config, so a new rule
+applies at once. Main's required checks should include "Secret scan (history)" and
+"AML statistics (slow)".
 
 The version lives only in `src/lakebench/__init__.py`; `pyproject.toml`
 reads it through hatch. Set it to the release version (no `.dev` suffix),

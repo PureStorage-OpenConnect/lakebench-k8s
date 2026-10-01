@@ -159,7 +159,7 @@ class ConfigValidationError(ConfigError):
 
 
 class ConfigNameRequired(ConfigValidationError):
-    """A nameless config was loaded by a command that may not use it (SAF-2).
+    """A nameless config was loaded by a command that may not use it.
 
     The commands that change data refuse every nameless config. The teardown
     commands also refuse one that has only a suggested name (v1.7 never
@@ -167,8 +167,8 @@ class ConfigNameRequired(ConfigValidationError):
     some other config file). The teardown commands and the read commands
     that look at a deployment refuse one whose name comes from the v1.6
     ``.lakebench/state.json``: v1.6 gave every nameless config in the
-    directory that name, so nothing ties it to this one (SPEC SAF-2: a v1.6
-    directory is refused without ``--name``). ``siblings`` lists the other
+    directory that name, so nothing ties it to this one (a v1.6 directory
+    is refused; a ``--name`` way through is still to come). ``siblings`` lists the other
     nameless configs found there, for the message (None when the directory
     could not be listed).
     """
@@ -351,11 +351,11 @@ def _load_and_validate(
         if purpose == LoadPurpose.TEARDOWN and resolution.source == "suggested":
             raise ConfigNameRequired(resolution, teardown=True)
         if purpose in TARGETS_DEPLOYMENT and resolution.source == "legacy-state":
-            # SAF-2: a v1.6 directory with no recorded nonce is refused
+            # A v1.6 directory with no recorded nonce is refused
             # without --name. v1.6 gave every nameless config here this one
             # name, so destroy, stop, admin or status from any of them would
             # act on, or report, whichever deployment it names. Naming the
-            # config that deployed it (or CC-2's --name with the stamp
+            # config that deployed it (or, later, a --name with the stamp
             # check) is the way through.
             raise ConfigNameRequired(resolution, teardown=True, siblings=siblings)
         data["name"] = resolution.name
@@ -405,7 +405,7 @@ def _load_and_validate(
 
 
 def _explain_error(err: dict[str, Any]) -> dict[str, Any]:
-    """Name the nearest valid key or recipe in an error (CFG-4)."""
+    """Name the nearest valid key or recipe in an error."""
     from ._hints import unknown_key_hint
 
     if err.get("type") == "extra_forbidden":

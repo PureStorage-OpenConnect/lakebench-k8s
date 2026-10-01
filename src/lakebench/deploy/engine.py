@@ -573,7 +573,7 @@ class DeploymentEngine:
             # Images
             "postgres_image": cfg.images.postgres,
             "hive_image": cfg.images.hive,
-            # The HiveCluster productVersion. Fixed, not images.hive (LB-189).
+            # The HiveCluster productVersion. Fixed: images.hive does not select it.
             "hive_version": STACKABLE_HIVE_VERSION,
             "trino_image": cfg.images.trino,
             "spark_image": cfg.images.spark,

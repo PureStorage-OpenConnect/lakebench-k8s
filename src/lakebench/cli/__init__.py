@@ -677,7 +677,7 @@ def validate(
     config_file = resolve_config_path(config_file, file_option)
     console.print(Panel(f"Validating: [bold]{config_file}[/bold]", expand=False))
 
-    # validate is read-only: it opens no journal and writes no file (SAF-2 e).
+    # validate is read-only: it opens no journal and writes no file.
 
     # Track validation results
     checks_passed = 0
@@ -1201,7 +1201,7 @@ def status(
         config_file = resolve_config_path(config_file, file_option)
     if config_file:
         try:
-            cfg = load_config(config_file, purpose=LoadPurpose.READ)  # LB-153
+            cfg = load_config(config_file, purpose=LoadPurpose.READ)  # no name-length check
             ns = ns or cfg.get_namespace()
         except ConfigError as e:
             print_error(f"Config error: {e}")
@@ -1345,7 +1345,7 @@ def stop(
 
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)  # LB-153; stops only
+        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)  # no name-length check; stops
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -2152,7 +2152,7 @@ def logs(
     config_file = resolve_config_path(config_file, file_option)
 
     try:
-        cfg = load_config(config_file, purpose=LoadPurpose.READ)  # LB-153
+        cfg = load_config(config_file, purpose=LoadPurpose.READ)  # no name-length check
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904

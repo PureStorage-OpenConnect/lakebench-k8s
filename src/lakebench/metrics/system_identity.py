@@ -1,4 +1,4 @@
-"""The system a run ran on, as a fingerprint (SPEC v1.7 EVD-7, OD-2; SP-1).
+"""The system a run ran on, as a fingerprint.
 
 ``observe_system`` samples what the system is, never how loaded it is. Each
 part is one flat entry, so a gap is always a whole part:
@@ -26,8 +26,8 @@ cannot be read (RBAC, an unreachable endpoint, an unparseable node) is
 ``{"not_observed": reason}``, is left out of the hash, and sets ``partial``.
 ``type`` enters the hash. ``common_fingerprints(a, b)`` hashes two
 observations over the parts both observed, which is how two partial
-observations are compared, and ``same_system(a, b)`` is the one test ER-10b
-uses for "one system": equal over the common parts, and ``api_server_ca``
+observations are compared, and ``same_system(a, b)`` is the one test a
+repeat check uses for "one system": equal over the common parts, and ``api_server_ca``
 among them, since it is the only part that names one cluster rather than
 its shape.
 
@@ -152,7 +152,7 @@ def common_fingerprints(a: Mapping[str, Any], b: Mapping[str, Any]) -> tuple[str
     those part names. Each side hashes with its own type and version, so
     observations of different versions never compare equal. Equal
     fingerprints over no part of ``CLUSTER_PARTS`` are not evidence of one
-    system; the caller (ER-10b) must not read such a pair as a repeat."""
+    system; a caller must not read such a pair as a repeat."""
     pa, pb = a.get("parts") or {}, b.get("parts") or {}
     keys = sorted(observed_parts(pa) & observed_parts(pb))
     return (

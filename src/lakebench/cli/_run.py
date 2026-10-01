@@ -914,7 +914,7 @@ def _maintenance_statements_attempted(outcomes: list | None) -> int | None:
         if o.get("error") and not o.get("before_statements"):
             return None
         if "statements_attempted" in o:
-            # Compaction counts tables (LB-210); its statements are here.
+            # Compaction counts tables (it may run in chunks); its statements are here.
             attempted += int(o.get("statements_attempted") or 0)
         elif "total" in o:
             attempted += (

@@ -382,6 +382,98 @@ def check_gitleaks() -> Result:
     )
 
 
+def _is_shallow(root: Path) -> bool | None:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out == "true"
+
+
+#: The history scanner, shared with the secrets-history CI job.
+_HISTORY_SCAN = Path(__file__).resolve().parent / "gitleaks_history.py"
+
+
+def check_gitleaks_history() -> Result:
+    """Every commit reachable from HEAD, merges included, beyond the
+    .gitleaksignore baseline."""
+    exe = os.environ.get("GITLEAKS") or shutil.which("gitleaks")
+    if not exe:
+        return Result(
+            "gitleaks-history", SKIP, "gitleaks not installed (set GITLEAKS or add to PATH)"
+        )
+    shallow = _is_shallow(ROOT)
+    if shallow is None:
+        return Result("gitleaks-history", FAIL, "not a git checkout; the history cannot be scanned")
+    if shallow:
+        return Result(
+            "gitleaks-history",
+            FAIL,
+            "shallow clone: only part of the history would be scanned (git fetch --unshallow)",
+        )
+    if not (ROOT / ".gitleaksignore").is_file():
+        return Result("gitleaks-history", FAIL, ".gitleaksignore (the history baseline) is missing")
+    # The scanner CI's secrets-history job runs: every commit with
+    # --remerge-diff (a merge commit's own change), commit and tag messages,
+    # no inline allow, and a failure when gitleaks scanned nothing. The
+    # baseline is this release worktree's own.
+    return command_check(
+        "gitleaks-history",
+        [
+            sys.executable,
+            str(_HISTORY_SCAN),
+            "--repo",
+            str(ROOT),
+            "--config",
+            str(ROOT / ".gitleaks.toml"),
+            "--ignore",
+            str(ROOT / ".gitleaksignore"),
+            "--gitleaks",
+            exe,
+        ],
+        cwd=ROOT,
+    )
+
+
+def check_pre_push_hook() -> Result:
+    """The pre-push hook installed in this clone is the tracked one."""
+    tracked = ROOT / "scripts" / "hooks" / "pre-push"
+    try:
+        # The hooks directory git runs: core.hooksPath when set, otherwise the
+        # common directory's hooks/ (shared by every worktree).
+        hooks = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return Result("pre-push-hook", FAIL, "not a git checkout")
+    installed = Path(hooks) / "pre-push"
+    if not tracked.is_file():
+        return Result("pre-push-hook", FAIL, "scripts/hooks/pre-push is missing")
+    if not installed.is_file():
+        return Result(
+            "pre-push-hook",
+            SKIP,
+            f"no pre-push hook installed at {installed} (docs/development.md)",
+        )
+    if installed.read_bytes() != tracked.read_bytes():
+        return Result(
+            "pre-push-hook",
+            FAIL,
+            f"{installed} differs from scripts/hooks/pre-push; install the tracked copy",
+        )
+    return Result("pre-push-hook", PASS, f"{installed} equals scripts/hooks/pre-push")
+
+
 # Performance-regression gate (docs/perf-regression-gate.md). Candidate runs
 # are searched in the local runs directory (or $LAKEBENCH_PERF_RUNS_DIR) and
 # in uat/perf/, where a release checks in the metrics.json of its perf runs
@@ -467,6 +559,12 @@ def build_checks(tag: str | None = None, perf_runs: dict[str, str] | None = None
             "cargo test --release (datagen_rs)",
         ),
         Check("gitleaks", check_gitleaks, "secret scan of the working tree"),
+        Check(
+            "gitleaks-history",
+            check_gitleaks_history,
+            "secret scan of the history beyond .gitleaksignore",
+        ),
+        Check("pre-push-hook", check_pre_push_hook, "installed pre-push hook is the tracked one"),
         Check("examples", check_examples, "every examples/*.yaml validates"),
         Check("version", make_version_check(tag), "single version source; tag matches"),
         Check("changelog", check_changelog, "CHANGELOG.md has a section for the version"),
