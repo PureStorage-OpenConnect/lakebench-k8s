@@ -777,8 +777,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rule, score or query reads these two columns, and `passthrough_ratio`
   was already equal.
 ### Changed
-- **Stale bronze on buckets this deployment did not create is refused
-  (SAF-9).** `generate`, `run --generate` and a multi-cycle run's first cycle
+- **Stale bronze on buckets this deployment did not create is refused.**
+  `generate`, `run --generate` and a multi-cycle run's first cycle
   go through one gate. `--regenerate` now clears only the datagen prefix
   (aborting its incomplete multipart uploads) instead of the whole bronze
   bucket, and only on a bucket this deployment owns; on any other bucket it
@@ -794,11 +794,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   an owned prefix before cycle 0, and a `run` after `generate
   --allow-stale-bronze` still records the note.
 - **`destroy` clears the kept silver-state's data clock when it empties
-  bronze (LB-231).** With `create_namespace: false`, `lakebench-silver-state`
+  bronze.** With `create_namespace: false`, `lakebench-silver-state`
   survives destroy for its rebuild counters; its `bronze_data_clock` now
   goes when destroy empties the bronze bucket, and when a generate replaces
   bronze, so silver stages no longer read the old data's clock.
-- **Bucket ownership names the cluster (SAF-10).** Deploy stamps each bucket
+- **Bucket ownership names the cluster.** Deploy stamps each bucket
   it owns with `lakebench.cluster=<API-server fingerprint>` and refuses when it
   cannot compute the fingerprint. Deploy refuses, and destroy, `clean` and
   the continuous reset keep, a bucket another cluster stamped, so the same

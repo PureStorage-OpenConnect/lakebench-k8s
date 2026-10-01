@@ -69,7 +69,7 @@ TAG_WORKLOAD_SCHEMA = "lakebench.workload"
 # only when it carries this marker (or is listed in the namespace annotation
 # below); buckets deploy adopted are emptied but kept.
 TAG_CREATED_BY_LAKEBENCH = "lakebench.created"
-# SAF-10 (DESIGN ch01 section 4): the cluster that claimed a bucket. Tagged
+# DESIGN ch01 section 4: the cluster that claimed a bucket. Tagged
 # backends carry it as a tag, tagless ones (FlashBlade) in the owner marker
 # object. Without it, a deployment of the same name on another cluster that
 # shares the object store could adopt, and later empty, this one's bucket.
@@ -90,7 +90,7 @@ ANNOTATION_DEPLOY_NONCE = "lakebench.deployment/deploy-nonce"
 # directory's state. A v1.6 directory with no state is refused a
 # nameless teardown of a namespace carrying it: the deployment moved on.
 ANNOTATION_STATE_SCHEMA = "lakebench.deployment/state-schema"
-# SAF-10: how this deployment's owner markers were written ("conditional" or
+# How this deployment's owner markers were written ("conditional" or
 # "unconditional"), so a backend that ignores IfNoneMatch is on record (R12).
 ANNOTATION_MARKER_WRITE = "lakebench.deployment/marker-write"
 
@@ -114,23 +114,23 @@ class IdentityVerdict(str, Enum):
     #: ``NotImplemented`` on ``GetBucketTagging`` / ``PutBucketTagging``).
     #: Tag-based ownership is impossible; callers must fall back to a
     #: weaker check (name-prefix on buckets) or refuse. See LB-088.
-    #: Among the SAF-10 verdicts it means: tagless, no owner marker, and not
+    #: Among the ownership verdicts it means: tagless, no owner marker, and not
     #: in this namespace's created or adopted-empty record (row 7 of the
     #: matrix in ``verify_bucket_ownership``).
     UNSUPPORTED = "unsupported"
-    #: SAF-10 row 2 (and 5): the bucket is this deployment's by name but
+    #: Ownership row 2 (and 5): the bucket is this deployment's by name but
     #: was claimed from another cluster (or this cluster's API-server CA
     #: changed). Refuse; never empty it.
     FOREIGN_CLUSTER = "foreign_cluster"
-    #: SAF-10 row 3: no cluster stamp, but this namespace's created or
+    #: Ownership row 3: no cluster stamp, but this namespace's created or
     #: adopted-empty record proves this cluster made or adopted it. Stamp
     #: the cluster, then treat it as MATCH.
     LEGACY_PROVEN = "legacy_proven"
-    #: SAF-10 row 4: tagged with this deployment's name but no cluster stamp
+    #: Ownership row 4: tagged with this deployment's name but no cluster stamp
     #: and not in the record (a bucket an earlier lakebench adopted). Usable
     #: for reads and writes, never stamped, never emptied or deleted.
     LEGACY_UNPROVEN = "legacy_unproven"
-    #: SAF-10 row 8: the bucket carries a cluster stamp, but this run cannot
+    #: Ownership row 8: the bucket carries a cluster stamp, but this run cannot
     #: compute its own cluster fingerprint. Keep it.
     UNVERIFIED_CLUSTER = "unverified_cluster"
 
@@ -613,7 +613,7 @@ def write_bucket_ownership_tag(
 ) -> None:
     """Write the ownership tag and verify the round trip.
 
-    ``cluster`` (SAF-10) is this cluster's stamp (``cluster_stamp``); when
+    ``cluster`` is this cluster's stamp (``cluster_stamp``); when
     given it is written as ``lakebench.cluster`` and verified too. A row-4
     bucket (``LEGACY_UNPROVEN``) is never passed here.
 
@@ -794,7 +794,7 @@ def tagless_contents_are_ours(core_v1: Any, namespace: str, bucket: str) -> bool
 
     The name alone is not proof (deploy adopts a pre-existing bucket that
     merely prefix-matches). True only when the namespace records that
-    lakebench created the bucket (SAF-10: the adopted-empty record a 1.6
+    lakebench created the bucket (the adopted-empty record a 1.6
     deploy wrote is not proof; a 1.7 adoption carries an owner marker
     instead). Callers still apply the longest-prefix name check. Read errors
     propagate; the caller refuses on them.
@@ -816,7 +816,7 @@ def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> 
 
 
 # ---------------------------------------------------------------------------
-# SAF-10 owner marker on backends without bucket tagging (SD-18b)
+# Owner marker on backends without bucket tagging
 # ---------------------------------------------------------------------------
 
 # How this process writes markers, per S3 endpoint: "conditional" when the
@@ -903,7 +903,7 @@ def _marker_is_ours(marker: dict[str, Any] | None, identity: dict[str, Any]) -> 
 def write_owner_marker(
     boto_client: Any, bucket: str, identity: dict[str, Any], *, mode: str | None = None
 ) -> MarkerResult:
-    """Claim a tagless bucket with ``.lakebench/owner.json`` (SAF-10).
+    """Claim a tagless bucket with ``.lakebench/owner.json``.
 
     ``identity`` carries at least ``deployment`` and ``cluster`` (and the
     namespace, its uid, the time and the Lakebench version). The marker key
@@ -1001,7 +1001,7 @@ def bucket_may_be_emptied(
     created_record: Iterable[str],
     other_deployments: Iterable[str] | None,
 ) -> bool:
-    """The one rule for "may this deployment delete data in ``bucket``" (SAF-9, SAF-10).
+    """The one rule for "may this deployment delete data in ``bucket``".
 
     True for MATCH (this deployment's and this cluster's stamp: tag, or
     owner marker), and for LEGACY_PROVEN (no cluster stamp, in the created
@@ -1143,7 +1143,7 @@ def _cluster_verdict(
     *,
     tagged: bool,
 ) -> IdentityReport:
-    """Rows 1 to 5 and 8 of the SAF-10 matrix, for a bucket whose name stamp is ours."""
+    """Rows 1 to 5 and 8 of the ownership matrix, for a bucket whose name stamp is ours."""
     if found_cluster:
         mine = cluster_stamp(expected_cluster)
         if mine is None:
@@ -1233,12 +1233,12 @@ def verify_bucket_ownership(
     expected_cluster: str | None,
     created_record: Iterable[str],
 ) -> IdentityReport:
-    """Read a bucket's ownership stamp and return its SAF-10 verdict.
+    """Read a bucket's ownership stamp and return its ownership verdict.
 
     ``expected_cluster`` is this run's ``api_server_fingerprint`` (None when
     it cannot be computed); ``created_record`` is this namespace's
     created-buckets record. Only that record proves this cluster made a
-    bucket (SPEC SAF-10): the adopted-empty record is what 1.6 wrote when it
+    bucket (the cross-cluster ownership rule): the adopted-empty record is what 1.6 wrote when it
     adopted another cluster's empty bucket, so it proves nothing. The
     matrix (DESIGN ch01 section 4):
 
@@ -1327,7 +1327,7 @@ def _verify_tagless(
     record: set[str],
     unsupported_hint: str,
 ) -> IdentityReport:
-    """The SAF-10 verdict on a backend without tagging, from the owner marker."""
+    """The ownership verdict on a backend without tagging, from the owner marker."""
     from botocore.exceptions import ClientError
 
     try:

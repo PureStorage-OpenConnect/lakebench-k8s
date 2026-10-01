@@ -258,7 +258,7 @@ def compute_badge_status(
     pb = metrics.pipeline_benchmark
     is_sustained = _is_sustained(metrics)
 
-    # SAF-9: datagen wrote over objects it did not clear (--allow-stale-bronze).
+    # Datagen wrote over objects it did not clear (--allow-stale-bronze).
     stale = getattr(metrics, "datagen_stale_bronze", None)
     if stale:
         warnings.append(

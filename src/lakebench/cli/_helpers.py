@@ -244,7 +244,7 @@ def _journal_safe(fn, *args, **kwargs) -> None:
 def enforce_bronze_gate(
     cfg, regenerate: bool, allow_stale_bronze: bool = False, clear_owned: bool = False
 ):
-    """Run the SAF-9 bronze gate before datagen; exit 2 on a refusal.
+    """Run the bronze gate before datagen; exit 2 on a refusal.
 
     ``lakebench.deploy.datagen.bronze_prefix_gate`` decides (one table for
     every caller: ``generate``, ``run --generate``, the multi-cycle loop
@@ -287,7 +287,7 @@ def _stale_bronze_path(cfg) -> Path:
 
 
 def record_stale_bronze(cfg, record: dict | None) -> None:
-    """Keep the gate's ``datagen.stale_bronze`` for a later ``run`` (SAF-9).
+    """Keep the gate's ``datagen.stale_bronze`` for a later ``run``.
 
     ``generate`` writes no metrics, so a ``run`` after it reads the record
     from here; a generate that wrote over nothing removes it.

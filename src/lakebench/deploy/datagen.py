@@ -54,7 +54,7 @@ def bronze_datagen_prefix(config: LakebenchConfig) -> str:
 
 
 def clear_bronze_data_clock(namespace: str) -> None:
-    """Set ``lakebench-silver-state``'s ``bronze_data_clock`` to "" (LB-231).
+    """Set ``lakebench-silver-state``'s ``bronze_data_clock`` to "".
 
     The clock is bronze-verify's max(event_ts) of the bronze data; once that
     data is gone or replaced (destroy emptied bronze, ``clean bronze``, a
@@ -84,15 +84,15 @@ def _clear_clock_best_effort(cfg: Any) -> None:
         clear_bronze_data_clock(cfg.get_namespace())
     except Exception as e:  # noqa: BLE001
         if getattr(e, "status", None) != 404:
-            logger.warning("could not clear the bronze data clock (LB-231): %s", e)
+            logger.warning("could not clear the bronze data clock: %s", e)
 
 
 class StaleBronzeRefused(RuntimeError):
     """Datagen would write over objects in a bronze bucket this deployment may not empty.
 
     Raised by ``DatagenDeployer``'s cycle-0 path when the CLI gate was
-    skipped (SAF-9): stale ``part-*`` files there would be read by silver as
-    this run's data and over-counted (LB-185).
+    skipped: stale ``part-*`` files there would be read by silver as
+    this run's data and over-counted.
     """
 
 
@@ -112,7 +112,7 @@ def _s3_client_for(cfg: Any) -> Any:
 
 
 def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None) -> bool:
-    """Whether this deployment may delete data in ``bucket`` (SAF-9, SAF-10).
+    """Whether this deployment may delete data in ``bucket``.
 
     ``lakebench.deploy.ownership.deployment_may_empty``: the rule destroy
     uses to empty a bucket. Kept here as the gate's seam.
@@ -126,7 +126,7 @@ def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None) -> bool:
 
 @dataclass
 class BronzeGateResult:
-    """What ``bronze_prefix_gate`` decided before datagen (SAF-9)."""
+    """What ``bronze_prefix_gate`` decided before datagen."""
 
     proceed: bool
     bucket: str
@@ -160,7 +160,7 @@ def bronze_prefix_gate(
     s3: Any = None,
     clear_owned: bool = False,
 ) -> BronzeGateResult:
-    """The one bronze safety gate, on the CLI host before any datagen Job (SAF-9).
+    """The one bronze safety gate, on the CLI host before any datagen Job.
 
     ``owned`` is ``deployment_may_empty``; ``nonempty`` means the datagen
     prefix holds an object that is not Lakebench's own.
@@ -182,8 +182,8 @@ def bronze_prefix_gate(
     ``--regenerate`` deletes only the datagen prefix, aborting its incomplete
     multipart uploads (GOTCHAS 2); an empty prefix is refused, never widened
     to the bucket. A read failure refuses. The caller exits with the
-    result's ``exit_code``. Every "proceed" means bronze is about to be replaced, so the
-    silver-state data clock is cleared (LB-231).
+    result's ``exit_code``. Every "proceed" means bronze is about to be
+    replaced, so the silver-state data clock is cleared.
 
     ``clear_owned`` (the multi-cycle loop before cycle 0, which clears an
     owned prefix as 1.6 did): an owned non-empty prefix is cleared as with
@@ -526,13 +526,13 @@ class DatagenDeployer:
         A re-generate into a reused bronze bucket must not inherit part-*
         files a larger earlier generate left behind: they share the
         ``part-NNNNNN`` naming, so silver cannot tell them apart and
-        over-counts (LB-185). Append cycles (n > 0) keep earlier cycles'
+        over-counts. Append cycles (n > 0) keep earlier cycles'
         files. On a bucket this deployment may empty
         (``deployment_may_empty``) the datagen prefix is cleared, scoped by
         ``delete_prefix`` with its incomplete uploads aborted; a failure
         raises and fails the generate (invariant 3). On any other bucket a
         non-empty prefix raises ``StaleBronzeRefused`` unless the deployer was
-        built with ``allow_stale_bronze`` (SAF-9: the defence for a caller
+        built with ``allow_stale_bronze`` (the defence for a caller
         that skipped the CLI's ``bronze_prefix_gate``).
         """
         if cycle_index != 0:
@@ -542,7 +542,7 @@ class DatagenDeployer:
         s3 = _s3_client_for(self.config)
         if s3._init_error:
             raise RuntimeError(
-                f"LB-185: cannot check the bronze prefix s3://{bucket}/{prefix} before a "
+                f"cannot check the bronze prefix s3://{bucket}/{prefix} before a "
                 f"fresh generate: {s3._init_error}"
             )
         if not s3.bucket_exists(bucket):
@@ -560,7 +560,7 @@ class DatagenDeployer:
             n = s3.delete_prefix(bucket, prefix, abort_multipart=True)
             if n:
                 logger.info(
-                    "LB-185: cleared %d stale object(s) under s3://%s/%s before a fresh generate",
+                    "cleared %d stale object(s) under s3://%s/%s before a fresh generate",
                     n,
                     bucket,
                     prefix,

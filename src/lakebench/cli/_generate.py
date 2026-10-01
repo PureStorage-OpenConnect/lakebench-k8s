@@ -227,7 +227,7 @@ def generate(
                 _dt.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
             )
 
-        # SAF-9: refuse to write over an existing bronze prefix unless
+        # Refuse to write over an existing bronze prefix unless
         # --regenerate (owned bucket: clear the datagen prefix) or
         # --allow-stale-bronze (any other bucket).
         enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)

@@ -109,11 +109,11 @@ Every `ensure_buckets` call writes, on each bucket this deployment owns:
 - `lakebench.deployment=<cfg.name>`
 - `lakebench.workload=<cfg.workload_schema>`
 - `lakebench.created=true`, only on a bucket this deployment created
-- `lakebench.cluster=<fingerprint>`, this cluster's API-server fingerprint (SAF-10)
+- `lakebench.cluster=<fingerprint>`, this cluster's API-server fingerprint
 
 Then reads the tags back and verifies the round trip, the cluster tag included. Deploy refuses when it cannot compute the fingerprint (kubeconfig with no CA data).
 
-**The cluster stamp (SAF-10).** A deployment name alone is not unique across clusters that share an object store: a deployment of the same name on another cluster used to adopt this one's still-empty bucket and later empty it. Every verdict now also checks the cluster:
+**The cluster stamp.** A deployment name alone is not unique across clusters that share an object store: a deployment of the same name on another cluster used to adopt this one's still-empty bucket and later empty it. Every verdict now also checks the cluster:
 
 | Row | Stamp found | Verdict | Deploy | Destroy, clean, continuous reset |
 |---|---|---|---|---|

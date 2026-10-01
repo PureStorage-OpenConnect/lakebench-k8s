@@ -1323,7 +1323,7 @@ class DeploymentEngine:
         record destroy, clean and the continuous reset refuse to empty them
         on a tagless backend. An empty, unmarked bucket may be another
         cluster's bucket that has not been written yet; nothing visible from
-        here tells them apart (SAF-10 row 7, the cross-cluster hole). So one
+        here tells them apart (ownership row 7, the cross-cluster hole). So one
         is recorded as adopted while empty only with ``--force-legacy``, the
         operator's statement that no other cluster uses the name. Best
         effort: any failure just leaves it unrecorded, which is the safe side.
@@ -1410,7 +1410,7 @@ class DeploymentEngine:
             logger.warning("Could not record pre-provisioned empty buckets: %s", e)
 
     def _stamp_owner_marker(self, boto: Any, bucket: str, deployment: str, cluster: str) -> str:
-        """Write the SAF-10 owner marker on a tagless bucket; "" when it is ours.
+        """Write the owner marker on a tagless bucket; "" when it is ours.
 
         Returns the refusal text when the bucket turns out to carry another
         deployment's or another cluster's marker (a racing claim won).
@@ -1553,7 +1553,7 @@ class DeploymentEngine:
             self.config,
             context=self.config.platform.kubernetes.context or "",
         )
-        # SAF-10: every bucket this deployment claims carries this cluster's
+        # Every bucket this deployment claims carries this cluster's
         # stamp, so a deployment of the same name on another cluster sharing
         # the object store cannot adopt it.
         my_cluster = cluster_stamp(identity.api_server)
@@ -1627,7 +1627,7 @@ class DeploymentEngine:
             return _created_cache[0]
 
         for name in bucket_names:
-            # SAF-10: only the created record proves this cluster made a
+            # Only the created record proves this cluster made a
             # bucket (a 1.6 adopted-empty record does not).
             record = _recorded_created() | set(created)
             v = verify_bucket_ownership(
@@ -1648,7 +1648,7 @@ class DeploymentEngine:
                     elapsed_seconds=time.time() - start,
                 )
             if v.verdict is IdentityVerdict.LEGACY_UNPROVEN:
-                # SAF-10 row 4: ours by name, claimed by an earlier lakebench
+                # Ownership row 4: ours by name, claimed by an earlier lakebench
                 # without a cluster stamp, and nothing here proves this
                 # cluster made it. Use it as 1.6 did; never stamp it.
                 logger.warning("%s", v.hint)
@@ -1775,7 +1775,7 @@ class DeploymentEngine:
                     # The name does not prove ownership of a pre-existing
                     # bucket, so destroy will not empty it on name alone. An
                     # empty, unmarked one may be another cluster's bucket not
-                    # yet written (SAF-10 row 7): it is adopted (recorded as
+                    # yet written (ownership row 7): it is adopted (recorded as
                     # adopted while empty, so destroy may empty but never
                     # delete it) only with --force-legacy. Without the flag
                     # it is used but not owned.
@@ -1802,7 +1802,7 @@ class DeploymentEngine:
                     except Exception as e:  # noqa: BLE001
                         logger.warning("could not check whether bucket %s is empty: %s", name, e)
                 if stamp:
-                    # SAF-10: claim it for this deployment on this cluster
+                    # Claim it for this deployment on this cluster
                     # with the owner marker (created, recorded, or adopted
                     # empty with --force-legacy).
                     refused = self._stamp_owner_marker(boto, name, identity.name, my_cluster)

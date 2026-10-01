@@ -54,7 +54,8 @@ The continuous scenarios (``lakebench.cli._sustained._run_sustained``) add:
 - The ownership check before the continuous reset: the namespace carries the
   deployment's identity stamp and created-buckets record, the kubeconfig's
   cluster fingerprint (``deploy.ownership.api_server_fingerprint``) matches
-  it, and the backend has no bucket tagging (FlashBlade).
+  it, and the backend has no bucket tagging (FlashBlade), so each bucket
+  carries the owner marker deploy writes there (``.lakebench/owner.json``).
 - Streams: submitted streams are RUNNING on their first driver until deleted;
   their driver logs are the record's, cut at the fake cluster clock
   (:func:`log_until`), so the window and the settle wait see them grow.
@@ -1156,8 +1157,9 @@ def log_until(text: str, until: datetime) -> str:
 
 class _FakeBoto:
     """The boto3 client under ``S3Client.raw_client``: the backend has no
-    bucket tagging (FlashBlade answers NotImplemented), and the scenario
-    deployment's buckets are empty before its first run."""
+    bucket tagging (FlashBlade answers NotImplemented), so deploy claimed the
+    scenario deployment's buckets with the owner marker, and they are
+    otherwise empty before its first run."""
 
     def __init__(self, rec: Recorder) -> None:
         self._rec = rec
@@ -1171,12 +1173,20 @@ class _FakeBoto:
         )
 
     def get_object(self, Bucket, Key):  # noqa: N803 -- boto3 keywords
-        """An object the scenario serves (the AML recall.json sidecar)."""
+        """An object the scenario serves: the owner marker deploy writes on a
+        backend without tagging, and the AML recall.json sidecar."""
         import io
+
+        from lakebench.deploy.ownership import OWNER_MARKER_KEY, cluster_stamp
 
         self._rec.add("S3", "get_object", Bucket, Key)
         if not Bucket.startswith(f"{NAME}-"):
             raise self._rec.refuse(f"read from a bucket not of the deployment: {Bucket}")
+        if Key == OWNER_MARKER_KEY:
+            # What deploy's claim of a tagless bucket left (deployment name
+            # and this cluster's stamp).
+            marker = {"deployment": NAME, "cluster": cluster_stamp(API_SERVER_FP)}
+            return {"Body": io.BytesIO(json.dumps(marker, sort_keys=True).encode())}
         # The key must name this run: run() exports LB_RUN_ID before the
         # score stage, so a read of another run's sidecar is unscripted.
         run_id = os.environ.get("LB_RUN_ID") or "<no run id>"

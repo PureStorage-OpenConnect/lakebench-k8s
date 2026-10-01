@@ -2142,7 +2142,7 @@ def run(
 
                 from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
-                # SAF-9: refuse a non-empty bronze prefix unless --regenerate
+                # Refuse a non-empty bronze prefix unless --regenerate
                 # (owned bucket: clear the datagen prefix) or
                 # --allow-stale-bronze (any other bucket, recorded).
                 _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
@@ -2323,10 +2323,10 @@ def run(
                     )
                     raise typer.Exit(ExitCode.FAILED) from e
 
-        # SAF-9: a multi-cycle run's cycle 0 is a fresh write; the same gate
+        # A multi-cycle run's cycle 0 is a fresh write; the same gate
         # as generate, before the first cycle's datagen (unless the
         # single-cycle --generate path above already ran it). Cycle 0 of an
-        # owned bucket is cleared as 1.6 did (LB-185), so the gate runs with
+        # owned bucket is cleared as 1.6 did, so the gate runs with
         # regenerate on: only a bucket this deployment may not empty refuses.
         if total_cycles > 1 and not (include_datagen and not skip_generate):
             _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)

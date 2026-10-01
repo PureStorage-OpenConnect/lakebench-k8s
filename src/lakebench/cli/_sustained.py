@@ -180,7 +180,7 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
 
     my_cluster = api_server_fingerprint(cfg.platform.kubernetes.context or "")
     try:
-        # SAF-10: the created record only (not 1.6's adopted-empty one).
+        # The created record only (not 1.6's adopted-empty one).
         ns_record = read_created_buckets(core_v1, cfg.get_namespace())
     except Exception:  # noqa: BLE001 -- unreadable: nothing is proven by it
         ns_record = set()
@@ -192,8 +192,8 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
             continue
         if v.verdict is IdentityVerdict.LEGACY_PROVEN:
             if v.tagged:
-                continue  # SAF-10 row 3: the record proves this cluster made it
-            # Tagless: the record rule below decides, as before SAF-10.
+                continue  # ownership row 3: the record proves this cluster made it
+            # Tagless: the record rule below decides, as before cluster stamps.
             v = dataclasses.replace(v, verdict=IdentityVerdict.UNSUPPORTED)
         if v.verdict is IdentityVerdict.UNSUPPORTED:
             if others is None:

@@ -247,7 +247,7 @@ lakebench generate my-config.yaml --regenerate
 corpus instead, run the pipeline with `run --skip-generate`, or without
 `--generate`.
 
-The deployer applies the same rule before the first cycle (LB-185): it
+The deployer applies the same rule before the first cycle: it
 clears the datagen prefix of an owned bucket, so a smaller generate never
 inherits a larger earlier generate's `part-*` files, and refuses a non-empty
 prefix in any other bucket unless `--allow-stale-bronze` was passed. Before

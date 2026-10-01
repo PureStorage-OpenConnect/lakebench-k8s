@@ -1105,7 +1105,7 @@ def reclaim_bucket(
         raise typer.Exit(ExitCode.PREREQUISITE)
 
     workload_schema = getattr(cfg, "workload_schema", None)
-    # SAF-10: the claim names this cluster too, so the same deployment name on
+    # The claim names this cluster too, so the same deployment name on
     # another cluster sharing the object store reads it as foreign.
     from lakebench.deploy.ownership import api_server_fingerprint, cluster_stamp
 
@@ -1169,7 +1169,7 @@ def reclaim_bucket(
                     )
                     raise typer.Exit(ExitCode.PREREQUISITE) from None
                 if bucket_name_matches_deployment(bucket, cfg.name, others):
-                    # SAF-10: on a tagless backend the claim is the owner
+                    # On a tagless backend the claim is the owner
                     # marker. reclaim is the owner's override, so it replaces
                     # whatever marker is there, then reads it back.
                     import json as _json

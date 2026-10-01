@@ -503,7 +503,7 @@ def _delete_namespace_and_wait(
 
 
 def _stamp_legacy_proven(engine, s3, namespace: str, plan, guard) -> list[str]:
-    """Stamp this cluster on the plan's SAF-10 row-3 buckets; notes for failures.
+    """Stamp this cluster on the plan's ownership-row-3 buckets; notes for failures.
 
     Tagged: the ownership tags rewritten with ``lakebench.cluster`` (the
     created flag and workload kept). Tagless: the owner marker. A failure
@@ -596,7 +596,7 @@ def _delete_owned_buckets(
         if guard is not None:
             guard()
         try:
-            # The bucket is empty but for Lakebench's own keys (the SAF-10
+            # The bucket is empty but for Lakebench's own keys (the
             # owner marker); they go last, right before the bucket.
             s3.empty_bucket(bucket, before_batch=guard, keep_prefixes=())
             if s3.delete_bucket(bucket):
@@ -652,7 +652,7 @@ class _BucketPlan:
     owned_by_tag: list[str]
     owned_by_marker: list[str]
     unverified_cluster: list[str]
-    # SAF-10 row 3 buckets (name, tagged) the bucket step stamps.
+    # Ownership row 3 buckets (name, tagged) the bucket step stamps.
     legacy_proven: list[tuple[str, bool]]
     cluster_fp: str | None
     absent_buckets: list[str]
@@ -746,7 +746,7 @@ def _classify_buckets(
     )
 
     identity_name = engine.config.name
-    # SAF-10: the stamp a bucket must carry to be this deployment's on this
+    # The stamp a bucket must carry to be this deployment's on this
     # cluster. None (no CA data) keeps every stamped bucket (row 8);
     # --allow-unverified-cluster waives the namespace check, never this one.
     my_cluster = api_server_fingerprint(engine.config.platform.kubernetes.context or "")
@@ -808,13 +808,13 @@ def _classify_buckets(
     # Tagless buckets whose owner marker names this deployment and cluster.
     owned_by_marker: list[str] = []
     absent_buckets: list[str] = []
-    # SAF-10 refusals: another cluster's claim, an unproven 1.6 claim, or no
+    # Ownership refusals: another cluster's claim, an unproven 1.6 claim, or no
     # fingerprint for this run.
     foreign_cluster: list[str] = []
     legacy_unproven: list[str] = []
     unverified_cluster: list[str] = []
     legacy_proven: list[tuple[str, bool]] = []
-    # SAF-10: only the created record proves this cluster made a bucket; the
+    # Only the created record proves this cluster made a bucket; the
     # adopted-empty record is what a 1.6 deploy wrote when it adopted another
     # cluster's empty bucket (a 1.7 adoption carries an owner marker).
     record = created_record
@@ -831,7 +831,7 @@ def _classify_buckets(
             # stamped by the bucket step (a bucket destroy keeps then stays
             # this deployment's after the record goes with the namespace).
             # A tagged one is ours as a MATCH is; a tagless one takes the
-            # record branch below, as before SAF-10.
+            # record branch below, as before cluster stamps.
             legacy_proven.append((bucket, v.tagged))
             v = dataclasses.replace(
                 v,
@@ -1527,7 +1527,7 @@ def _category1_step(
     if that step then keeps the namespace (an operator pod still watching
     it, say), the deployment is still whole.
 
-    LB-231: ``lakebench-silver-state`` is kept (KEPT_ON_DESTROY), but its
+    ``lakebench-silver-state`` is kept (KEPT_ON_DESTROY), but its
     ``bronze_data_clock`` describes the bronze data. When this destroy
     emptied the bronze bucket, the clock is cleared (a 404, the namespace
     already gone, is fine), so a later deploy's silver stages do not read
@@ -2886,7 +2886,7 @@ def destroy_all(
             return stopped
 
     # Step 4: Clean S3 buckets (optional)
-    # LB-231: whether this destroy emptied the bronze bucket (its data clock
+    # Whether this destroy emptied the bronze bucket (its data clock
     # in lakebench-silver-state is then stale).
     bronze_emptied = False
     if clean_buckets and not data_steps_allowed:
@@ -2965,7 +2965,7 @@ def destroy_all(
                 # reuse the names and pass the same ownership checks.
                 guard = partial(_check_same_namespace, engine, namespace, namespace_token_at_start)
                 guard()
-                # SAF-10 row 3: stamp this cluster on the recorded legacy
+                # Ownership row 3: stamp this cluster on the recorded legacy
                 # buckets before anything else, so one destroy keeps
                 # (--keep-buckets, create_buckets false) is still provably
                 # this deployment's after the namespace and its record go.
@@ -2990,7 +2990,7 @@ def destroy_all(
                 for bucket in buckets:
                     guard()
                     try:
-                        # The owner marker (SAF-10) is kept: a bucket destroy
+                        # The owner marker is kept: a bucket destroy
                         # keeps stays this deployment's. It goes only with
                         # the bucket (_delete_owned_buckets).
                         deleted = s3.empty_bucket(bucket, before_batch=guard)
@@ -3192,8 +3192,8 @@ def destroy_all(
                 bucket_status = (
                     DeploymentStatus.FAILED if delete_failed else DeploymentStatus.SUCCESS
                 )
-                # SAF-10 row 8 is a refusal with its own exit code
-                # (CC-9's REFUSAL_DETAIL key), when it is the only refusal.
+                # Ownership row 8 is a refusal with its own exit code
+                # (the REFUSAL_DETAIL key), when it is the only refusal.
                 bucket_details: dict = {}
                 if bucket_refused_only:
                     bucket_details[REFUSAL_DETAIL] = (

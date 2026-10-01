@@ -404,7 +404,7 @@ class PipelineMetrics:
     # Shape: dict from FleetSummary.to_dict().
     datagen_fleet: dict[str, Any] | None = None
 
-    # SAF-9: set when datagen wrote over objects already in the datagen
+    # Set when datagen wrote over objects already in the datagen
     # prefix of a bronze bucket this deployment did not create
     # (--allow-stale-bronze): {allowed, objects_before, bucket, prefix}.
     # Serialised as ``datagen.stale_bronze``.

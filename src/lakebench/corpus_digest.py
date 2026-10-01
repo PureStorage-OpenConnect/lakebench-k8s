@@ -129,21 +129,22 @@ RESERVED_PREFIX = ".lakebench/"
 
 
 def list_scope(client: Any, bucket: str, scope: str) -> list[dict[str, Any]]:
-    """Every object under *scope* in *bucket*, through the boto3
-    ``list_objects_v2`` paginator. Lakebench's own bucket objects (the
+    """Every object under *scope* in *bucket*, through
+    ``s3.client.list_user_objects``. Lakebench's own bucket objects (the
     owner marker under ``RESERVED_PREFIX``, at the bucket root) are never
     counted: a scope is never empty (``datagen_scope``) nor under that
     prefix (refused here), and only keys inside the scope are kept, even
     from a backend that returns others. Errors propagate to the caller."""
     if scope.startswith(RESERVED_PREFIX):
         raise ValueError(f"a corpus scope is never under {RESERVED_PREFIX}")
-    out: list[dict[str, Any]] = []
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=scope):
-        for obj in page.get("Contents") or []:
-            if str(obj.get("Key", "")).startswith(scope):
-                out.append(dict(obj))
-    return out
+    # Imported here so this module's own imports stay standard-library only.
+    from lakebench.s3.client import list_user_objects
+
+    return [
+        obj
+        for obj in list_user_objects(client, bucket, scope)
+        if str(obj.get("Key", "")).startswith(scope)
+    ]
 
 
 def listing_digest(client: Any, bucket: str, prefix: str) -> str | None:

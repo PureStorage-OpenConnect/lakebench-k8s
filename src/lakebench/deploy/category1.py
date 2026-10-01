@@ -296,6 +296,6 @@ KEPT_ON_DESTROY: tuple[KeptObject, ...] = (
         "buckets this deployment does not own); a reset counter makes Delta skip "
         "writes as already committed. Deploy backfills it and keeps its values. "
         "Its bronze_data_clock is cleared when the destroy empties the bronze "
-        "bucket (LB-231), so a later deploy does not read the old data's clock",
+        "bucket, so a later deploy does not read the old data's clock",
     ),
 )

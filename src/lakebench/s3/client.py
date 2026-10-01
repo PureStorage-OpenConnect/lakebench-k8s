@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError, EndpointConnectionError, NoCredenti
 
 logger = logging.getLogger(__name__)
 
-# Lakebench's own bookkeeping keys (the SAF-10 owner marker
+# Lakebench's own bookkeeping keys (the owner marker
 # ``.lakebench/owner.json``). They are never user data: every emptiness
 # check, count and size skips them, and every emptying keeps them except
 # destroy's release of a bucket (DESIGN ch01 section 4).
@@ -66,6 +66,18 @@ def has_user_objects(boto_client: Any, bucket: str, prefix: str = "") -> bool:
         return True
     # The backend ignored StartAfter: a full listing decides (never a guess).
     return bool(list_user_keys(boto_client, bucket, prefix, limit=1))
+
+
+def list_user_objects(boto_client: Any, bucket: str, prefix: str) -> list[dict[str, Any]]:
+    """Every ``list_objects_v2`` entry under ``prefix`` (key, size, ETag and
+    the rest) except Lakebench's own keys. Raises on listing errors."""
+    out: list[dict[str, Any]] = []
+    paginator = boto_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            if not is_lakebench_key(str(obj.get("Key", ""))):
+                out.append(dict(obj))
+    return out
 
 
 def list_user_keys(boto_client: Any, bucket: str, prefix: str = "", limit: int = 50) -> list[str]:
@@ -542,7 +554,7 @@ class S3Client:
 
         Keys under ``keep_prefixes`` are kept, and are not counted when the
         loop verifies the bucket empty: by default Lakebench's own
-        ``.lakebench/`` keys (the SAF-10 owner marker), so ``clean`` and
+        ``.lakebench/`` keys (the owner marker), so ``clean`` and
         ``--regenerate`` leave the bucket owned. Only destroy releasing a
         bucket passes ``keep_prefixes=()``.
 
