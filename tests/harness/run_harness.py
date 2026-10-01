@@ -204,7 +204,10 @@ class FakeTrino:
 
     The data file counts are those of run-20260927-084902-fc1eb5 (silver 366,
     one per interaction date; gold 1), before and after its compaction,
-    which changed none (a no-op, recorded with a note).
+    which changed none (a no-op, recorded with a note). The silver table's
+    partitions are those dates: every day of the 2024 corpus window, in the
+    Trino CLI's quoted CSV, as the compaction plan's partition read gets
+    them.
     """
 
     def __init__(self, rec: Recorder, silver_files: int = 366, gold_files: int = 1) -> None:
@@ -212,8 +215,22 @@ class FakeTrino:
         self.silver_files = silver_files
         self.gold_files = gold_files
 
+    @staticmethod
+    def silver_partitions() -> list[str]:
+        day = datetime(2024, 1, 1)
+        out = []
+        while day.year == 2024:
+            out.append(day.strftime("%Y-%m-%d"))
+            day += timedelta(days=1)
+        return out
+
     def answer(self, sql: str) -> tuple[int, str, str]:
         low = sql.lower()
+        if (
+            low.startswith("select distinct partition.interaction_date from")
+            and '.silver."customer_interactions_enriched$partitions"' in low
+        ):
+            return 0, "".join(f'"{d}"\n' for d in self.silver_partitions()), ""
         if "execute optimize" in low:
             return 0, "", ""
         if "execute expire_snapshots" in low or "execute remove_orphan_files" in low:
