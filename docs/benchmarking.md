@@ -1037,7 +1037,8 @@ different jars) are not like-for-like. Records written before 1.7 carry no
 system identity, and two of them are assumed to share a system. A record
 with a system identity against one without counts as a different system,
 as does a 1.7 run whose system could not be sampled, or two observations
-with no part in common. A pair whose observations agree on every part both
+with no part in common; such a pair is confounded when the architecture
+also differs, and is never called a system differential. A pair whose observations agree on every part both
 read but cannot show one cluster (an API server CA that could not be read),
 or two `--local` runs, which record no part, is treated as one system but
 never as a repeat of the same experiment. Each

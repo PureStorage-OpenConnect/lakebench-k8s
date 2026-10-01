@@ -444,15 +444,15 @@ class TestSystemRelation:
         """The design rule: identity absent on one side only counts as
         different (a run whose start sample timed out included)."""
         rel, note = cmp.system_relation(self._c(SYSID), self._c())
-        assert rel == "different" and "one side only" in note
+        assert rel == cmp.UNOBSERVED and "one side only" in note
 
     def test_no_common_part_is_different(self):
         a = copy.deepcopy(SYSID)
         a["parts"] = {"api_server_ca": {"not_observed": "x"}}
         b = copy.deepcopy(SYSID)
         b["parts"] = {"kubernetes": {"not_observed": "x"}}
-        # Nothing was compared: different, never assumed the same.
-        assert cmp.system_relation(self._c(a), self._c(b))[0] == "different"
+        # Nothing was compared: never assumed the same.
+        assert cmp.system_relation(self._c(a), self._c(b))[0] == cmp.UNOBSERVED
 
     def test_same_fingerprint_with_ca_is_same(self):
         assert cmp.system_relation(self._c(SYSID), self._c(copy.deepcopy(SYSID))) == ("same", None)
@@ -644,7 +644,7 @@ class TestLadder:
         an architecture difference CONFOUNDED (never credited to the
         architecture)."""
         b = _rec(new_id="b", experiment__system_identity=_sys())
-        assert _verdict(_rec(), b).attribution == "system differential"
+        assert _verdict(_rec(), b).attribution == "system not established"
         b["experiment"]["architecture"]["recipe"] = "other"
         assert _verdict(_rec(), b).verdict == cmp.CONFOUNDED
 
@@ -923,7 +923,7 @@ class TestUnsampledV17:
         a = _rec(experiment__v2_unavailable=["corpus id v2", "system identity"])
         b = _rec(new_id="b", experiment__v2_unavailable=["corpus id v2", "system identity"])
         v = _verdict(a, b)
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system differential")
+        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system not established")
         b["experiment"]["architecture"]["recipe"] = "other"
         assert _verdict(a, b).verdict == cmp.CONFOUNDED
 
@@ -937,8 +937,39 @@ class TestUnsampledV17:
             cmp.system_relation(cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b))[
                 0
             ]
-            == "different"
+            == cmp.UNOBSERVED
         )
+
+
+class TestRelationFolding:
+    @pytest.mark.parametrize("order", ["a1a2", "a2a1"])
+    def test_relation_folds_over_every_member(self, order):
+        """A side holding a run not shown to be on the system is never a
+        repeat, whatever the member order (same_system is not transitive)."""
+        a1 = _rec(new_id="a1", experiment__system_identity=_sys())
+        a2 = _rec(new_id="a2", experiment__system_identity=_sys(ca={"not_observed": "no CA"}))
+        b1 = _rec(new_id="b1", experiment__system_identity=_sys())
+        side = [a1, a2] if order == "a1a2" else [a2, a1]
+        v = _verdict(side, [b1])
+        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system not established")
+
+    def test_non_transitive_same_system_is_caught(self):
+        a1 = _rec(new_id="a1", experiment__system_identity=_sys(kubernetes="v1.31.6"))
+        b1 = _rec(new_id="b1", experiment__system_identity=_sys())
+        b1["experiment"]["system_identity"]["parts"] = {"api_server_ca": "c" * 12}
+        b2 = _rec(new_id="b2", experiment__system_identity=_sys(kubernetes="v1.32.0"))
+        v = _verdict([a1], [b1, b2])
+        assert v.attribution != "repeat"
+
+    def test_stub_identity_is_not_v2(self):
+        from lakebench.metrics import system_identity as si
+
+        run = _fresh()
+        run.config_snapshot["experiment_inputs"]["system_identity"] = si._unobserved_identity(
+            "cluster", "x"
+        )
+        e = run.to_dict()["experiment"]
+        assert e["schema"] == "exp1" and "system identity" in e["v2_unavailable"]
 
 
 class TestWrappers:
@@ -980,3 +1011,18 @@ class TestWrappers:
         b["experiment"]["workload"]["version"] = None
         prov, _, _ = ex.refusals(_rec(), b)
         assert prov[0] == "identity incomplete: workload version not recorded on b"
+
+
+def test_reference_with_no_observed_system_is_refused():
+    """A v2 reference whose system fingerprint is the no-part constant
+    would match any unsampled run on any cluster: refused."""
+    from lakebench.metrics import system_identity as si
+
+    run = _fresh().to_dict()["experiment"]
+    baseline = ex.identity(run)
+    baseline["system fingerprint"] = si._unobserved_identity("cluster", "x")["fingerprint"]
+    refs = ex.stored_identity_refusals(baseline, ex.result_fingerprints(run), run, "baseline")
+    assert refs == [
+        "not comparable: the reference observed no part of its system; "
+        "the baseline cannot be matched to a system"
+    ]

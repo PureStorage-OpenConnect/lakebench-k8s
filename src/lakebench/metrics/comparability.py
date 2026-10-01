@@ -535,17 +535,26 @@ def diff_group(a: Classified, b: Classified, group: str, *, skip: Any = ()) -> l
     return out
 
 
+UNOBSERVED = "unobserved"
+
+#: How strongly a relation says "not one system", for folding several.
+_RELATION_ORDER = {"same": 0, "unknown": 1, UNOBSERVED: 2, "different": 3}
+
+
 def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
-    """``("same" | "different" | "unknown", note)`` for the System group.
+    """``(relation, note)`` for the System group, the relation one of
+    ``same``, ``different``, ``unobserved`` or ``unknown``.
 
     Different system strings (cluster against local) are different. With
     no fingerprint on either side (every exp1 record from before 1.7) the
     systems are assumed the same, with a note. With both,
     ``system_identity.same_system`` decides (equal over the parts both
     observed, the API server CA among them), and observations that differ
-    on a common part are different. A fingerprint on one side only is
-    different, as is a pair of cluster observations with no part in common
-    (nothing was compared). ``unknown``, with the reason, is the case in
+    on a common part are different. ``unobserved`` is a pair nothing could
+    be compared for: a fingerprint on one side only, a 1.7 record that did
+    not sample its system, or cluster observations with no part in common;
+    the ladder treats it as different, but never names a system
+    differential on it. ``unknown``, with the reason, is the case in
     between: cluster observations that agree on every common part but not
     on the CA, or two local runs (which record no part). The ladder reads
     ``unknown`` as the same system with the note, and never as a repeat."""
@@ -560,11 +569,11 @@ def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
         if unsampled:
             # A 1.7 run without one failed to sample it: nothing says where
             # it ran.
-            return "different", "system identity not sampled on " + ", ".join(unsampled)
+            return UNOBSERVED, "system identity not sampled on " + ", ".join(unsampled)
         return "same", "system identity not recorded; assumed the same"
     if ia is None or ib is None:
         missing = a.run_id if ia is None else b.run_id
-        return "different", f"system identity recorded on one side only (not on {missing})"
+        return UNOBSERVED, f"system identity recorded on one side only (not on {missing})"
     if same_system(ia, ib):
         return "same", None
     fa, fb, keys = common_fingerprints(ia, ib)
@@ -576,7 +585,7 @@ def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
     if not keys:
         if sa == "local":
             return "unknown", "system identity not established: local runs record no part"
-        return "different", "system identity not comparable: no part observed on both sides"
+        return UNOBSERVED, "system identity not comparable: no part observed on both sides"
     return "unknown", (
         "system identity not established: the observations agree on "
         + (", ".join(keys) or "no part")
@@ -806,7 +815,7 @@ def pair_verdict(
             for group in (WORKLOAD, CORPUS, ARCHITECTURE, CONDITIONS):
                 within += [str(d) for d in diff_group(first, c, group)]
             within_rel, within_why = system_relation(first, c)
-            if within_rel == "different":
+            if within_rel in ("different", UNOBSERVED):
                 within.append(f"system: {within_why}")
             elif within_why and within_why not in notes:
                 notes.append(within_why)
@@ -880,7 +889,19 @@ def pair_verdict(
 
     arch = diff_group(ca, cb, ARCHITECTURE)
     cond = diff_group(ca, cb, CONDITIONS)
-    rel, rel_note = system_relation(ca, cb)
+    # The System relation of the pair is the weakest link over every member
+    # of A against every member of B (same_system is not transitive), and
+    # no stronger than "unknown" when a side's members were only unknown.
+    rel, rel_note = "same", None
+    for a_c in classified[label_a]:
+        for b_c in classified[label_b]:
+            r, n = system_relation(a_c, b_c)
+            if _RELATION_ORDER[r] > _RELATION_ORDER[rel]:
+                rel, rel_note = r, n
+            if n and n not in notes and r == "same":
+                notes.append(n)
+    if rel == "same" and any("not established" in n for n in notes):
+        rel = "unknown"
     why = rel_note or ""
     if rel_note and rel_note not in notes:
         notes.append(rel_note)
@@ -895,7 +916,7 @@ def pair_verdict(
         )
 
     # Step 6: architecture and system both differ.
-    if arch and rel == "different":
+    if arch and rel in ("different", UNOBSERVED):
         return verdict(
             CONFOUNDED,
             "6",
@@ -922,7 +943,7 @@ def pair_verdict(
         attribution = "architecture differential"
     elif rel == "different":
         attribution = "system differential"
-    elif rel == "unknown":
+    elif rel in ("unknown", UNOBSERVED):
         attribution = "system not established"
     else:
         attribution = "repeat"

@@ -30,8 +30,9 @@ nothing measured under this one):
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
 present: corpus id v2 (from the generator's markers), the run-start
-``identity_version`` and an observed system identity. Otherwise it is
-``exp1`` and names what was missing in ``v2_unavailable``. ``identity()``
+``identity_version`` and a system identity with at least one observed
+part. Otherwise it is ``exp1`` and names what was missing in
+``v2_unavailable``. ``identity()``
 reads exp1 blocks with the frozen ``_identity_v1`` and exp2 blocks with
 ``_identity_v2``; a stored block is never rebuilt
 (``PipelineMetrics.experiment_block``), so no stored id or digest moves.
@@ -843,7 +844,11 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
             corpus["id_v2_unavailable"] = NOT_OBSERVED
         if corpus.get("id_v2") is None:
             missing.append("corpus id v2")
-        if sysid is None:
+        from lakebench.metrics.system_identity import observed_parts
+
+        if sysid is None or not observed_parts(sysid.get("parts") or {}):
+            # A stub from a failed sample is kept as evidence, but it is not
+            # an observed system identity.
             missing.append("system identity")
         from lakebench.metrics.comparability import access_paths
 
@@ -1311,6 +1316,13 @@ def stored_identity_refusals(
     version_refusal = _identity_version_refusal(expected_identity, full_actual, actual, what)
     if version_refusal:
         return [version_refusal]
+    unobserved = (
+        _unobserved_system(expected_identity.get("system fingerprint"), actual)
+        if full_actual.get("identity version") == IDENTITY_VERSION
+        else None
+    )
+    if unobserved:
+        return [f"not comparable: {unobserved}; the {what} cannot be matched to a system"]
     actual_identity = {k: v for k, v in full_actual.items() if k not in OUTCOME_CONDITION_KEYS}
     # An optional key (set only when non-default) absent from the reference
     # is a difference in that key, not an older identity.
@@ -1355,6 +1367,24 @@ def stored_identity_refusals(
     want = {n: f for n, f in (expected_fingerprints or {}).items() if n not in skip}
     reasons.extend(diff_fingerprints(want, got, what, "run"))
     return reasons
+
+
+def _unobserved_system(expected_fingerprint: Any, actual: Mapping[str, Any]) -> str | None:
+    """Why a v2 reference or run names no observed system, or None. The
+    fingerprint of an identity with no observed part is one constant per
+    system type, so two such runs on different clusters would match."""
+    from lakebench.metrics.system_identity import PARTS, fingerprint_of, observed_parts
+
+    sysid = actual.get("system_identity")
+    if isinstance(sysid, Mapping) and not observed_parts(sysid.get("parts") or {}):
+        return "the run observed no part of its system"
+    blank = {
+        fingerprint_of({p: {"not_observed": ""} for p in PARTS}, system_type=t)
+        for t in ("cluster", "local")
+    }
+    if expected_fingerprint in blank:
+        return "the reference observed no part of its system"
+    return None
 
 
 def _identity_version_refusal(
