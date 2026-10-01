@@ -1,0 +1,12 @@
+[lb] 2026-10-01T18:01:32.014616 - ============================================================
+[lb] 2026-10-01T18:01:32.014834 - Financial recall scoring
+[lb] 2026-10-01T18:01:32.014895 - Manifest: s3a://runchar-bronze/pacs008/manifest/manifest*.parquet
+[lb] 2026-10-01T18:01:32.014923 - Output:   s3a://runchar-gold/scoring/20261001-114528-37810a/recall.parquet
+[lb] 2026-10-01T18:01:32.014939 - ============================================================
+[lb] 2026-10-01T18:01:40.853666 - Manifest typology instances: 7,300
+[lb] 2026-10-01T18:02:37.475306 - [score] subject-customer-check status=ok subjects=7300 unmapped=0 not_customer=0 failing=-
+[lb] 2026-10-01T18:02:37.475396 - gold.alerts rows (run_id=20261001-114528-37810a-c1): 719,433
+[lb] 2026-10-01T18:02:37.475428 - Alerts: total=719,433 FP=709,589 FP_rate=0.9863
+[lb] 2026-10-01T18:02:37.475468 - Random-control floor (incidental recall of 'random'): 0.1766029246344207
+[lb] 2026-10-01T18:02:50.323403 - Wrote recall.parquet: 17 typology rows
+[lb] 2026-10-01T18:03:00.661557 - Wrote recall.json sidecar: s3a://runchar-gold/scoring/20261001-114528-37810a/recall.json

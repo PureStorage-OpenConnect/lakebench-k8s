@@ -41,7 +41,10 @@ Seams (each records its calls into one ordered list):
 - The storage settle wait's clock and sleep (``wait_for_settle``'s keyword
   defaults) advance a fake clock, so the wait costs no wall time.
 
-The continuous scenario (``lakebench.cli._sustained._run_sustained``) adds:
+The batch AML scenario adds the score stage's recall.json sidecar, served by
+the fake boto client from the record, and the AML query set's row counts.
+
+The continuous scenarios (``lakebench.cli._sustained._run_sustained``) add:
 
 - :class:`FakeClock` for ``time`` and ``datetime`` in ``cli._sustained`` and
   ``utc_now`` there and in the collector, started where the record's window
@@ -237,6 +240,10 @@ class Recorder:
     clock: FakeClock | None = None
     #: Stream SparkApplications submitted and not yet deleted.
     live_streams: set[str] = field(default_factory=set)
+    #: Bucket bytes per layer for FakeS3 (None: the batch C360 record's).
+    sizes: dict[str, int] | None = None
+    #: S3 objects the scenario's fake boto client serves, by (bucket, key).
+    objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
 
     def add(self, *entry: Any) -> None:
         self.calls.append(list(entry))
@@ -828,6 +835,18 @@ class _FakeBoto:
             {"Error": {"Code": "NotImplemented", "Message": "Not implemented"}}, "GetBucketTagging"
         )
 
+    def get_object(self, Bucket, Key):  # noqa: N803 -- boto3 keywords
+        """An object the scenario serves (the AML recall.json sidecar)."""
+        import io
+
+        self._rec.add("S3", "get_object", Bucket, Key)
+        if not Bucket.startswith(f"{NAME}-"):
+            raise self._rec.refuse(f"read from a bucket not of the deployment: {Bucket}")
+        for (bucket, key), body in self._rec.objects.items():
+            if bucket == Bucket and _RUN_ID.sub("<run_id>", Key) == key:
+                return {"Body": io.BytesIO(body)}
+        raise self._rec.refuse(f"unscripted S3 object {Bucket}/{Key}")
+
     def list_objects_v2(self, Bucket, Prefix="", MaxKeys=1000, **kw):  # noqa: N803
         self._rec.add("S3", "list_objects_v2", Bucket, Prefix, MaxKeys)
         return {"KeyCount": 0, "Contents": []}
@@ -880,7 +899,7 @@ class FakeS3:
         bucket_name = bound.arguments["bucket_name"]
         self._rec.add("S3", "get_bucket_size", bucket_name, bound.arguments["prefix"])
         layer = bucket_name.rsplit("-", 1)[-1]
-        sizes = self.CONTINUOUS_SIZES if self._rec.clock is not None else self.SIZES
+        sizes = self._rec.sizes or self.SIZES
         if layer not in sizes:
             raise self._rec.refuse(f"unscripted bucket {bucket_name}")
         return BucketInfo(name=bucket_name, exists=True, object_count=100, size_bytes=sizes[layer])
@@ -917,6 +936,22 @@ C360_ROWS = {
     "Q7": 5,
     "Q8": 1,
     "Q9": 30,
+}
+#: Row counts per AML query (FQ and the investigator IQ set), from
+#: run-20261001-114528-37810a.
+AML_ROWS = {
+    "FQ1": 1,
+    "FQ2": 100,
+    "FQ6": 500,
+    "FQ3": 200,
+    "FQ7": 100,
+    "FQ4": 878356,
+    "FQ5": 17,
+    "FQ8": 100,
+    "IQ1": 1,
+    "IQ2": 12,
+    "IQ3": 500,
+    "IQ4": 21,
 }
 #: Seconds every fake query takes.
 _QUERY_SECONDS = 2.0
@@ -972,7 +1007,7 @@ class FakeBenchmark:
         return QueryResult(
             query=query,
             elapsed_seconds=seconds,
-            rows_returned=C360_ROWS.get(prefix, 1),
+            rows_returned={**C360_ROWS, **AML_ROWS}.get(prefix, 1),
             success=True,
             samples=[seconds] * iterations,
             result_fingerprint=fp,
@@ -1323,10 +1358,74 @@ SCENARIOS = {
         },
     ),
 }
+#: AML batch on hive-iceberg-spark-trino, scale 1, seed 43, as the record
+#: run-20261001-114528-37810a ran it (its config, without images and
+#: storage classes, which no fake reads).
+_AML_TABLES = {
+    "bronze": "default.pacs008_raw",
+    "silver": "silver.transactions",
+    "silver_entities": "silver.entities",
+    "silver_accounts": "silver.accounts",
+    "silver_counterparty_edges": "silver.counterparty_edges",
+    "gold": "gold.daily_dashboards",
+    "gold_alerts": "gold.alerts",
+    "gold_risk_scores": "gold.risk_scores",
+    "gold_entity_clusters": "gold.entity_clusters",
+    "gold_daily_dashboards": "gold.daily_dashboards",
+}
+SCENARIOS["batch_aml"] = Scenario(
+    name="batch_aml",
+    argv=["--skip-generate", "--timeout", "1200", "--yes"],
+    config=base_config(
+        architecture={
+            "pipeline": {
+                "mode": "batch",
+                "medallion": {"bronze": {"format": "parquet", "path_template": "pacs008"}},
+            },
+            "tables": _AML_TABLES,
+        },
+        workload={
+            "schema": "financial",
+            "retention_workload": True,
+            "retention_months": 60,
+            "datagen": {"scale": 1, "seed": 43},
+        },
+    ),
+    logs="batch_aml",
+    # The record's silver and gold data files before and after compaction
+    # total 65 and 61 (scores.pre/post_compaction_file_count); the split is
+    # the harness's: one gold file, the rest silver.
+    trino={"silver_files": (64, 60), "gold_files": 1},
+)
+
+# The same run with --skip-generate: datagen is not deployed and the raw
+# corpus is neither listed nor cleared; everything after is the record's.
+SCENARIOS["continuous_c360_skip_generate"] = Scenario(
+    name="continuous_c360_skip_generate",
+    argv=["--skip-generate", "--timeout", "1200", "--yes"],
+    config=SCENARIOS["continuous_c360"].config,
+    logs="continuous_c360",
+    clock_start=_CONTINUOUS_START,
+    trino=SCENARIOS["continuous_c360"].trino,
+)
+
+
+#: Bucket bytes of each scenario's record, where it is not batch C360.
+_SCENARIO_SIZES = {
+    "continuous_c360": FakeS3.CONTINUOUS_SIZES,
+    "continuous_c360_skip_generate": FakeS3.CONTINUOUS_SIZES,
+    # run-20261001-114528-37810a: 8.4901, 9.0947 and 0.6576 GiB.
+    "batch_aml": {"bronze": 9_116_144_816, "silver": 9_765_373_653, "gold": 706_137_988},
+}
 
 
 def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     """Replace every seam ``lakebench run`` reaches (module docstring)."""
+    rec.sizes = _SCENARIO_SIZES.get(scenario.name)
+    recall = FIXTURES / scenario.logs / "recall.json"
+    if recall.exists():
+        # The score stage's sidecar, at the key the run reads.
+        rec.objects[(f"{NAME}-gold", "scoring/<run_id>/recall.json")] = recall.read_bytes()
     import kubernetes.client
     import kubernetes.config
 
@@ -1622,7 +1721,32 @@ def build_trace(
     }
     if metrics.get("continuous") is not None:
         trace.update(continuous_sections(metrics))
+    if metrics.get("financial_scoring") is not None or metrics.get("tm_operations") is not None:
+        trace["aml"] = aml_section(metrics)
     return normalise(trace, workdir)
+
+
+def aml_section(metrics: dict[str, Any]) -> dict[str, Any]:
+    """What an AML run publishes about detection: per-rule alerts and skips
+    from gold-finalize, the folded-in scoring's alert total, typology
+    counts and rule statuses, and the TM operations verdict."""
+    gold = [j for j in metrics.get("jobs") or [] if j.get("job_type") == "gold-finalize"]
+    scoring = metrics.get("financial_scoring") or {}
+    tm = metrics.get("tm_operations") or {}
+    return {
+        "gold_alerts_by_rule": [j.get("alerts_by_rule") for j in gold],
+        "gold_rules_skipped": [j.get("rules_skipped") for j in gold],
+        "gold_rule_errors": [j.get("rule_errors") for j in gold],
+        "scoring_total_alerts": scoring.get("total_alerts"),
+        "scoring_typology_counts": scoring.get("typology_counts"),
+        "scoring_rules": [
+            [r.get("rule_id"), r.get("status"), r.get("reason"), r.get("alert_count")]
+            for r in scoring.get("rules") or []
+        ],
+        "tm": {
+            k: tm.get(k) for k in ("status", "reason", "problems", "cycles_ran", "cycles_not_run")
+        },
+    }
 
 
 #: Per-stream published fields that do not depend on the wall clock.

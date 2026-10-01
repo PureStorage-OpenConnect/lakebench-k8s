@@ -1,0 +1,58 @@
+[lb] 2026-10-01T17:51:34.976743 - ============================================================
+[lb] 2026-10-01T17:51:34.976826 - Gold Finalize (Financial)
+[lb] 2026-10-01T17:51:34.976848 - Run ID: 20261001-114528-37810a-c1
+[lb] 2026-10-01T17:51:34.977633 - Session TZ: UTC
+[lb] 2026-10-01T17:51:34.977725 - ============================================================
+[lb] 2026-10-01T17:51:38.226782 - Bootstrapped gold.alerts
+[lb] 2026-10-01T17:51:38.386296 - Bootstrapped gold.risk_scores
+[lb] 2026-10-01T17:51:38.506313 - Bootstrapped gold.entity_clusters
+[lb] 2026-10-01T17:51:38.625958 - Bootstrapped gold.daily_dashboards
+[lb] 2026-10-01T17:51:38.845093 - Bootstrapped gold.detection_status
+[lb] 2026-10-01T17:52:01.752800 - Wrote gold.daily_dashboards baseline rows
+[lb] 2026-10-01T17:52:02.149852 - ============================================================
+[lb] 2026-10-01T17:52:02.149939 - Running detection rules: ['W5_sanctions_match', 'W6_pep_counterparty', 'W2_structuring', 'W3_round_tripping', 'W17_layering_chain', 'W4_risk_propagation', 'W7_cross_border_high_risk', 'W8_dormant_reactivation', 'W1_connected_components']
+[lb] 2026-10-01T17:52:02.149959 - ============================================================
+[lb] 2026-10-01T17:52:04.061072 - [detection] wrote gold.detection_status (9 rule rows)
+[lb] 2026-10-01T17:52:04.266613 - [detection] cleared gold.alerts rows from runs other than 20261001-114528-37810a-c1
+[lb] 2026-10-01T17:53:26.273890 - [detection] W5_sanctions_match: alerts=126 prior=0 elapsed=82.0s
+[lb] 2026-10-01T17:54:16.877424 - [detection] W6_pep_counterparty: alerts=2011 prior=0 elapsed=50.6s
+[lb] 2026-10-01T17:54:28.747694 - [detection] W2_structuring: alerts=2353 prior=0 elapsed=11.9s
+[lb] 2026-10-01T17:56:53.793865 - [detection] W3_round_tripping: alerts=1620 prior=0 elapsed=145.0s
+[lb] 2026-10-01T17:58:37.007701 - [detection] W17_layering_chain: alerts=46228 prior=0 elapsed=103.1s
+[lb] 2026-10-01T17:59:00.687740 - [detection] W4_risk_propagation: alerts=98765 prior=0 elapsed=23.6s
+[lb] 2026-10-01T17:59:06.478198 - [detection] W7_cross_border_high_risk: alerts=509768 prior=0 elapsed=5.8s
+[lb] 2026-10-01T17:59:16.264030 - [detection] W8_dormant_reactivation: alerts=58562 prior=0 elapsed=9.8s
+[lb] 2026-10-01T18:00:03.835874 - [detection] W1_connected_components: skipped=giant-component detail=1 component(s) above max_cluster_size=1000 (largest 113713 entities, 100% of vertices); connected components over the full transaction graph cannot isolate typologies elapsed=47.6s
+[lb] 2026-10-01T18:00:03.847374 - [detection] total alerts written: 719433
+[lb] 2026-10-01T18:00:04.516802 - [detection] wrote gold.detection_status (9 rule rows)
+[lb] 2026-10-01T18:00:04.901942 - [derived] wrote gold.entity_clusters from W1 alerts (0 rows)
+[lb] 2026-10-01T18:00:05.428015 - [derived] wrote gold.risk_scores from W4 alerts (98765 rows)
+[lb] 2026-10-01T18:00:05.756803 - Bootstrapped gold.tm_reconciliation
+[lb] 2026-10-01T18:00:05.849595 - Bootstrapped gold.scenario_coverage
+[lb] 2026-10-01T18:00:05.943946 - Bootstrapped gold.alert_dispositions
+[lb] 2026-10-01T18:00:06.036134 - Bootstrapped gold.cases
+[lb] 2026-10-01T18:00:22.255421 - [tm-status] status=started cycle=1 reason=writing the TM tables
+[lb] 2026-10-01T18:00:49.211696 - [tm-status] status=ran cycle=1 reason=ok
+[lb] 2026-10-01T18:00:49.211725 - [tm-invariant] monitored_population: status=pass cycle=1 detail=55733 customers of the reporting FI, 20030443 monitored payments
+[lb] 2026-10-01T18:00:49.211733 - [tm-invariant] reconciliation: status=pass cycle=1 detail=monitored 20030443 + excluded 6641403 = 26671846 vs source 26671846
+[lb] 2026-10-01T18:00:49.211739 - [tm-invariant] every_alert_dispositioned: status=pass cycle=1 detail=alerts 719433, disposition rows for them 719433
+[lb] 2026-10-01T18:00:49.211745 - [tm-invariant] one_row_per_alert_identity: status=pass cycle=1 detail=719433 disposition rows, 719433 distinct alert identities
+[lb] 2026-10-01T18:00:49.211751 - [tm-invariant] no_null_disposition: status=pass cycle=1 detail=0 disposition rows with no disposition
+[lb] 2026-10-01T18:00:49.211757 - [tm-invariant] noncustomer_alerts_declared: status=pass cycle=1 detail=0 alerts on non-customers from scenarios not declared customer-and-counterparty (72405 non-customer alerts in all)
+[lb] 2026-10-01T18:00:49.211763 - [tm-invariant] escalated_le_alerts: status=pass cycle=1 detail=escalated 60050 <= customer alerts 647028
+[lb] 2026-10-01T18:00:49.211768 - [tm-invariant] cases_le_escalated: status=pass cycle=1 detail=alert-driven cases 60050 <= escalated 60050
+[lb] 2026-10-01T18:00:49.211774 - [tm-invariant] sars_le_cases: status=pass cycle=1 detail=SARs 7662 <= cases 66777
+[lb] 2026-10-01T18:00:49.211780 - [tm-invariant] one_open_case_per_customer: status=pass cycle=1 detail=most open cases on one customer: 1
+[lb] 2026-10-01T18:00:49.211786 - [tm-invariant] funnel_monotone: status=pass cycle=1 detail=payments 26671846 >= monitored 20030443 >= alerts 647028 >= escalated 60050 >= cases 60050 >= sars 7220
+[lb] 2026-10-01T18:00:49.211791 - [tm-invariant] continuing_review_fires: status=pass cycle=1 detail=0 SARs past their 90-day review date with no review (7039 due, 0 deferred behind a case waiting to file)
+[lb] 2026-10-01T18:00:49.211797 - [tm-invariant] review_not_folded_into_determined: status=pass cycle=1 detail=0 reviews credited to a case already determined before the review was due
+[lb] 2026-10-01T18:00:49.211972 - [tm-ops] {"alert_aging_open": {"0-30": 11555, "31-60": 603, "61-90": 7, "90+": 0}, "alert_sla_breaches": 5693, "alerts_by_disposition": {"attached": 79152, "closed_nfa": 498961, "escalated": 60050, "out_of_scope": 72405, "pending_l1": 8865}, "alerts_by_priority": {"critical": 202709, "high": 255569, "low": 26367, "medium": 162383}, "alerts_noncustomer_undeclared": 0, "alerts_out_of_scope": 72405, "alerts_over_capacity": 0, "alerts_total": 719433, "alerts_withdrawn_carried": 0, "as_of_date": "2026-01-01", "cases_by_status": {"closed": 64932, "open": 1758, "pending_filing": 87}, "cases_by_type": {"alert_escalation": 60050, "continuing_activity": 6727}, "continuing_reviews_deferred": 0, "continuing_reviews_due": 7039, "continuing_reviews_folded": 285, "continuing_reviews_opened": 6727, "continuing_reviews_superseded": 27, "continuing_sars_over_120_days": 9, "cycle": 1, "elapsed_seconds": 43.6, "filed_late": 219, "filed_over_30_days_pct": 0.049986948577394934, "filing_days_median": 15, "filing_days_p95": 30, "funnel": {"alerts": 647028, "cases": 60050, "escalated": 60050, "monitored": 20030443, "payments": 26671846, "sars": 7220}, "invariants": {"cases_le_escalated": {"detail": "alert-driven cases 60050 <= escalated 60050", "status": "pass"}, "continuing_review_fires": {"detail": "0 SARs past their 90-day review date with no review (7039 due, 0 deferred behind a case waiting to file)", "status": "pass"}, "escalated_le_alerts": {"detail": "escalated 60050 <= customer alerts 647028", "status": "pass"}, "every_alert_dispositioned": {"detail": "alerts 719433, disposition rows for them 719433", "status": "pass"}, "funnel_monotone": {"detail": "payments 26671846 >= monitored 20030443 >= alerts 647028 >= escalated 60050 >= cases 60050 >= sars 7220", "status": "pass"}, "monitored_population": {"detail": "55733 customers of the reporting FI, 20030443 monitored payments", "status": "pass"}, "no_null_disposition": {"detail": "0 disposition rows with no disposition", "status": "pass"}, "noncustomer_alerts_declared": {"detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72405 non-customer alerts in all)", "status": "pass"}, "one_open_case_per_customer": {"detail": "most open cases on one customer: 1", "status": "pass"}, "one_row_per_alert_identity": {"detail": "719433 disposition rows, 719433 distinct alert identities", "status": "pass"}, "reconciliation": {"detail": "monitored 20030443 + excluded 6641403 = 26671846 vs source 26671846", "status": "pass"}, "review_not_folded_into_determined": {"detail": "0 reviews credited to a case already determined before the review was due", "status": "pass"}, "sars_le_cases": {"detail": "SARs 7662 <= cases 66777", "status": "pass"}}, "l1_decided": 559011, "l1_escalation_rate": 0.1074218575305316, "open_cases": 1845, "open_cases_over_60_days": 21, "qa_disagreement_rate": 0.1410752993852386, "qa_sample": 28141, "reconciliation": {"completeness.bronze": 26671846, "completeness.customers": 55733, "completeness.excluded": 6641403, "completeness.monitored": 20030443, "completeness.silver": 26671846, "completeness.source": 26671846, "dq.dq_missing_agent_bic": 0, "dq.dq_nonpositive_amount": 0, "dq.dq_self_transfer": 0, "dq.dq_unconvertible_currency": 0, "exclusion.dq_unconvertible_currency": 0, "exclusion.no_customer_party": 6641403, "funnel.alerts": 647028, "funnel.alerts_noncustomer_undeclared": 0, "funnel.alerts_out_of_scope": 72405, "funnel.cases": 60050, "funnel.continuing_review_cases": 6727, "funnel.continuing_sars": 442, "funnel.escalated": 60050, "funnel.sars": 7220}, "sars_by_limit": {"120_day_continuing": {"filed": 442, "late": 9}, "30_day": {"filed": 6858, "late": 197}, "60_day_no_suspect": {"filed": 362, "late": 13}}, "sars_filed": 7662, "sars_no_suspect": 362, "scenarios": {"W17_layering_chain": {"alerts": 23361, "escalated": 2655, "productive_rate": 0.1287670053383847, "sar_conversion": 0.047857540345019475}, "W2_structuring": {"alerts": 2353, "escalated": 163, "productive_rate": 0.09792924935289042, "sar_conversion": 0.03612409689757756}, "W3_round_tripping": {"alerts": 1199, "escalated": 527, "productive_rate": 0.6390977443609023, "sar_conversion": 0.5963302752293578}, "W4_risk_propagation": {"alerts": 49648, "escalated": 5647, "productive_rate": 0.1270997437600835, "sar_conversion": 0.040545439896873994}, "W5_sanctions_match": {"alerts": 126, "escalated": 46, "productive_rate": 0.4426229508196721, "sar_conversion": 0.3333333333333333}, "W6_pep_counterparty": {"alerts": 2011, "escalated": 234, "productive_rate": 0.13330004992511232, "sar_conversion": 0.057682744903033316}, "W7_cross_border_high_risk": {"alerts": 509768, "escalated": 44440, "productive_rate": 0.09932575741103497, "sar_conversion": 0.019530453068847004}, "W8_dormant_reactivation": {"alerts": 58562, "escalated": 6338, "productive_rate": 0.10991267732026369, "sar_conversion": 0.0181346265496397}}, "simulation": {"alert_sla_days": 60, "analyst_accuracy": 0.9, "continuous_interval_seconds": 1800, "counterparty_scenarios": ["W1_connected_components", "W3_round_tripping", "W4_risk_propagation", "W17_layering_chain"], "enabled": true, "investigator_accuracy": 0.95, "late_filing_rate": 0.03, "lookback_months": 12, "max_alerts_per_customer": 50000, "no_suspect_rate": 0.05, "note": "dispositions simulated from datagen ground truth", "qa_sample_rate": 0.05, "seed": 20260924}}
+[lb] 2026-10-01T18:00:49.212201 - ============================================================
+[lb] 2026-10-01T18:00:49.212221 - Gold finalize complete in 554.2s
+[lb] 2026-10-01T18:00:49.212227 - ============================================================
+[lb] 2026-10-01T18:00:49.909731 - === JOB METRICS: gold-finalize ===
+[lb] 2026-10-01T18:00:49.909813 - input_size_gb: 3.304
+[lb] 2026-10-01T18:00:49.909835 - input_rows: 26671846
+[lb] 2026-10-01T18:00:49.909851 - output_rows: 719433
+[lb] 2026-10-01T18:00:49.909867 - elapsed_seconds: 554.2
+[lb] 2026-10-01T18:00:49.909884 - ============================================================

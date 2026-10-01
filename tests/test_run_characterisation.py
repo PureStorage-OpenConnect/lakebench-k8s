@@ -141,3 +141,13 @@ def test_stream_logs_are_cut_at_the_cluster_clock():
         "[lb] 2026-10-01T15:06:30.000000 - batch 1",
     ]
     assert log_until(text, datetime(2026, 10, 1, 15, 0)) == ""
+
+
+def test_batch_aml(tmp_path, monkeypatch):
+    trace = run_scenario("batch_aml", tmp_path, monkeypatch)
+    assert_trace_equal(trace, load_golden("batch_aml"))
+
+
+def test_continuous_c360_skip_generate(tmp_path, monkeypatch):
+    trace = run_scenario("continuous_c360_skip_generate", tmp_path, monkeypatch)
+    assert_trace_equal(trace, load_golden("continuous_c360_skip_generate"))
