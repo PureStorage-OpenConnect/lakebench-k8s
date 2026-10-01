@@ -18,19 +18,22 @@ import numpy as np
 import pytest
 
 from lakebench.config import datagen_seed as ds
+from tests.fixtures import heldout_test_seeds as ts
 
 ROOT = Path(__file__).resolve().parents[1]
 PREREG = json.loads((ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json").read_text())
 CORPORA = PREREG["corpora"]
+# The plaintext held-out keys are dropped so no assertion can print them.
+for _k in ("evaluation_seed", "robustness_seed"):
+    CORPORA.pop(_k, None)
 REPLICATES = CORPORA["calibration_replicate_seeds"]
-FIXED = sorted(
-    {
-        CORPORA["calibration_seed"],
-        CORPORA["evaluation_seed"],
-        CORPORA["robustness_seed"],
-        *CORPORA["spent_seeds"],
-    }
-)
+# The evaluation and robustness seeds are known only as salted hashes, so the
+# arithmetic checks below cover the calibration and spent seeds; the
+# replicates were checked against the held-out seeds when prereg 3.6.0
+# registered them, and test_replicates_are_not_held_out checks them by hash.
+FIXED = sorted({CORPORA["calibration_seed"], *CORPORA["spent_seeds"]})
+# Test-only held-out seeds (tests/fixtures/heldout_test.json) for the look record.
+EV, RB = ts.TEST_EVALUATION_SEED, ts.TEST_ROBUSTNESS_SEED
 TID_SEED_STRIDE = 100_000_000  # datagen_rs::typology::TID_SEED_STRIDE
 N_TIDS = 15  # datagen_rs typology tids 0..=14
 SALT_SPAN = 2048  # datagen salts are seed + offsets below this (world.rs, kyc.rs, realism.rs)
@@ -40,6 +43,16 @@ POPULATION_BITS = 24  # 2^24 > round(111111 x 100) entities at scale 100
 def _gap_ok(a: int, b: int) -> bool:
     r = abs(a - b) % TID_SEED_STRIDE
     return min(r, TID_SEED_STRIDE - r) >= PREREG["seed_guard"]["max_n_inst_scale100"]
+
+
+@pytest.fixture(autouse=True)
+def _fixture_heldout(monkeypatch):
+    ts.use_fixture(monkeypatch)
+
+
+def test_replicates_are_not_held_out():
+    for s in REPLICATES:
+        assert ds.heldout_role(s, ds.load_heldout()) is None
 
 
 def test_replicates_are_four_distinct_new_seeds():
@@ -122,7 +135,7 @@ def test_tracked_record_exists_and_is_empty_before_any_look():
 
 
 def test_claim_then_complete_spends_the_seed(record):
-    ev = CORPORA["evaluation_seed"]
+    ev = EV
     ds.claim_look("evaluation", ev, {"out": "/x/gate.json"}, path=record)
     assert ev in ds.recorded_seeds(record)
     merged = ds.with_recorded_looks(CORPORA, record)
@@ -137,14 +150,14 @@ def test_claim_then_complete_spends_the_seed(record):
 
 
 def test_complete_without_a_started_look_is_refused(record):
-    rb = CORPORA["robustness_seed"]
+    rb = RB
     with pytest.raises(ValueError, match="no started look"):
         ds.complete_look("robustness", rb, "c" * 64, "/x/r.json", path=record)
     assert ds.recorded_seeds(record) == frozenset()
 
 
 def test_role_mismatch_and_calibration_are_refused(record):
-    ev = CORPORA["evaluation_seed"]
+    ev = EV
     ds.claim_look("evaluation", ev, path=record)
     with pytest.raises(ValueError, match="claimed as"):
         ds.complete_look("robustness", ev, "d" * 64, "/x", path=record)
@@ -153,7 +166,7 @@ def test_role_mismatch_and_calibration_are_refused(record):
 
 
 def test_malformed_or_missing_record_fails_closed(record, monkeypatch, tmp_path):
-    record.write_text(json.dumps({"looks": [{"seed": "50000043", "role": "evaluation"}]}))
+    record.write_text(json.dumps({"looks": [{"seed": str(EV), "role": "evaluation"}]}))
     with pytest.raises(ValueError, match="malformed"):
         ds.load_looks(record)
     record.write_text(json.dumps({"looks": {}}))
@@ -175,7 +188,7 @@ def test_registered_look_records_the_hash_before_printing_the_verdict(
     record, tmp_path, monkeypatch
 ):
     mod = _runner()
-    ev = CORPORA["evaluation_seed"]
+    ev = EV
     ds.claim_look("evaluation", ev, path=record)
     real_complete = ds.complete_look
     monkeypatch.setattr(
@@ -223,7 +236,7 @@ def test_registered_look_withholds_the_verdict_when_the_record_fails(tmp_path, m
         {"verdict": "ok"},
         tmp_path / "gate.json",
         "evaluation",
-        CORPORA["evaluation_seed"],
+        EV,
         summary,
         print_fn=lambda *a, **k: printed.append(a[0]),
         predictions_sha="p" * 64,
@@ -235,7 +248,7 @@ def test_registered_look_withholds_the_verdict_when_predictions_change(
     record, tmp_path, monkeypatch
 ):
     mod = _runner()
-    ev = CORPORA["evaluation_seed"]
+    ev = EV
     ds.claim_look("evaluation", ev, path=record)
     monkeypatch.setattr(ds, "load_predictions", lambda *a, **k: ({}, "q" * 64))
     printed = []
@@ -338,8 +351,8 @@ def test_registered_look_needs_a_clean_checkout(monkeypatch):
 def test_out_of_tree_ledger_keeps_a_seed_spent(tmp_path, monkeypatch):
     mod = _runner()
     monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "ledger.jsonl"))
-    ev = CORPORA["evaluation_seed"]
+    ev = EV
     assert mod.seed_ever_recorded(ev) is None  # no ledger, no commit of the record
     mod.append_ledger({"role": "evaluation", "seed": ev})
     assert "ledger" in mod.seed_ever_recorded(ev)
-    assert mod.seed_ever_recorded(CORPORA["robustness_seed"]) is None
+    assert mod.seed_ever_recorded(RB) is None

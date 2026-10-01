@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from lakebench.config import datagen_seed as ds
 from tests.conftest import make_config
+from tests.fixtures import heldout_test_seeds as ts
 
 PREREG = (
     Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml/aml_preregistration.json"
@@ -28,9 +29,10 @@ def test_spent_seeds_come_from_the_preregistration():
     corpora = json.loads(PREREG.read_text())["corpora"]
     assert ds.spent_seeds() == frozenset(corpora["spent_seeds"])
     assert 42 in ds.spent_seeds()
-    # The live roles are never spent.
-    for role in ("calibration_seed", "evaluation_seed", "robustness_seed"):
-        assert corpora[role] not in ds.spent_seeds(), role
+    # The calibration seed is never spent; the held-out seeds are known only by
+    # hash, and none of the spent seeds hashes to one.
+    assert corpora["calibration_seed"] not in ds.spent_seeds()
+    assert not any(ds.heldout_role(s) for s in ds.spent_seeds())
 
 
 def test_unset_seed_resolves_per_schema():
@@ -103,7 +105,21 @@ def test_reference_job_reports_the_configured_seed(monkeypatch):
 # ---------------------------------------------------------------------------
 
 _CORPORA = json.loads(PREREG.read_text())["corpora"]
-EVAL, ROBUST = _CORPORA["evaluation_seed"], _CORPORA["robustness_seed"]
+# The plaintext held-out keys are dropped so no assertion can print them.
+for _k in ("evaluation_seed", "robustness_seed"):
+    _CORPORA.pop(_k, None)
+# Test-only held-out seeds, registered in tests/fixtures/heldout_test.json.
+EVAL, ROBUST = ts.TEST_EVALUATION_SEED, ts.TEST_ROBUSTNESS_SEED
+
+
+@pytest.fixture(autouse=True)
+def _fixture_heldout(monkeypatch):
+    ts.use_fixture(monkeypatch)
+
+
+def _no_plain(corpora: dict) -> dict:
+    """``corpora`` without the plaintext held-out keys, so no assertion prints them."""
+    return {k: v for k, v in corpora.items() if k not in ("evaluation_seed", "robustness_seed")}
 
 
 def _cfg_role(seed, role, perturb=None):
@@ -124,14 +140,14 @@ def test_protected_seed_refused_without_its_role(seed):
 @pytest.fixture
 def looks_open(monkeypatch):
     """The pre-registration after the freeze: registered looks open."""
-    opened = {**ds._corpora(), "registered_looks_open": True}
+    opened = {**_no_plain(ds._corpora()), "registered_looks_open": True}
     monkeypatch.setattr(ds, "_corpora", lambda: opened)
 
 
 def test_registered_looks_are_closed_until_the_freeze(monkeypatch):
     # Open since the freeze (AML-GOALS #52); a closed pre-registration still refuses.
     assert _CORPORA.get("registered_looks_open") is True
-    closed = {**ds._corpora(), "registered_looks_open": False}
+    closed = {**_no_plain(ds._corpora()), "registered_looks_open": False}
     monkeypatch.setattr(ds, "_corpora", lambda: closed)
     with pytest.raises(ValidationError, match="closed"):
         _cfg_role(EVAL, "evaluation")
@@ -140,8 +156,9 @@ def test_registered_looks_are_closed_until_the_freeze(monkeypatch):
 @pytest.mark.parametrize(("seed", "role"), [(EVAL, "evaluation"), (ROBUST, "robustness")])
 def test_protected_seed_allowed_with_its_role(seed, role, looks_open):
     assert ds.config_seed(_cfg_role(seed, role)) == seed
-    # The role alone selects its registered seed.
-    assert ds.config_seed(_cfg_role(None, role)) == seed
+    # The role alone cannot fill the seed: there is no plaintext to fill it from.
+    with pytest.raises(ValidationError, match="names its seed in datagen.seed"):
+        _cfg_role(None, role)
 
 
 @pytest.mark.parametrize(
@@ -149,7 +166,7 @@ def test_protected_seed_allowed_with_its_role(seed, role, looks_open):
     [(EVAL, "robustness"), (ROBUST, "evaluation"), (7777, "evaluation"), (EVAL, "calibration")],
 )
 def test_role_must_match_its_registered_seed(seed, role):
-    with pytest.raises(ValidationError, match="registered for seed"):
+    with pytest.raises(ValidationError, match="registered for"):
         _cfg_role(seed, role)
 
 
@@ -180,7 +197,7 @@ def test_reference_job_records_the_declared_role(monkeypatch, looks_open):
             for e in mgr._build_env_vars(JobType.SCORE_FINANCIAL_REFERENCE)
         }
 
-    e = env(_cfg_role(None, "evaluation"))
+    e = env(_cfg_role(EVAL, "evaluation"))
     assert (e["LB_DATAGEN_SEED"], e["LB_DATAGEN_CORPUS_ROLE"]) == (str(EVAL), "evaluation")
     assert "LB_DATAGEN_CORPUS_ROLE" not in env(_cfg("financial", 7777))
 
@@ -259,12 +276,14 @@ def test_gate_refuses_before_spark_starts():
 
 def test_flat_copy_imports_without_lakebench(tmp_path):
     # On the driver the module sits flat next to the scripts with no
-    # lakebench package: it must import and work from the corpora dict alone.
+    # lakebench package: it must import and work from the corpora dict and
+    # the hash file mounted next to it.
     import subprocess
     import sys
 
     src = Path(ds.__file__).read_text()
     (tmp_path / "datagen_seed.py").write_text(src)
+    (tmp_path / ds.HELDOUT_FILENAME).write_text(ts.FIXTURE.read_text())
     code = (
         "import json,sys; sys.path.insert(0, '.');"
         "from datagen_seed import aml_seed_error;"
@@ -284,7 +303,7 @@ def test_registered_run_needs_a_verified_corpus(looks_open):
     assert "not verified" in g.seed_guard_error(EVAL, "evaluation", [], claim_verified=False)
     assert g.seed_guard_error(EVAL, "evaluation", [EVAL], claim_verified=True) is None
     # Generation time (no corpus yet) is not a verification failure.
-    assert ds.aml_seed_error(ds._corpora(), EVAL, "evaluation") is None
+    assert ds.aml_seed_error(_no_plain(ds._corpora()), EVAL, "evaluation") is None
 
 
 def test_cluster_refusal_runs_before_anything_is_written():
@@ -301,10 +320,15 @@ def test_robustness_look_allowed_now_the_perturbation_exists(looks_open):
     # registered robustness look is no longer refused on that ground.
     assert ds.ROBUSTNESS_PERTURBATION_IMPLEMENTED is True
     assert (
-        ds.aml_seed_error(ds._corpora(), ROBUST, "robustness", [ROBUST], claim_verified=True)
+        ds.aml_seed_error(
+            _no_plain(ds._corpora()), ROBUST, "robustness", [ROBUST], claim_verified=True
+        )
         is None
     )
-    assert ds.aml_seed_error(ds._corpora(), EVAL, "evaluation", [EVAL], claim_verified=True) is None
+    assert (
+        ds.aml_seed_error(_no_plain(ds._corpora()), EVAL, "evaluation", [EVAL], claim_verified=True)
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -350,7 +374,7 @@ def test_registered_look_gets_no_operator_retry(looks_open):
         m = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
         return m["spec"]["restartPolicy"]
 
-    reg = policy(_cfg_role(None, "evaluation"))
+    reg = policy(_cfg_role(EVAL, "evaluation"))
     assert reg["onFailureRetries"] == 0 and reg["onSubmissionFailureRetries"] == 5
     assert policy(_cfg("financial", 7777))["type"] == "OnFailure"
 

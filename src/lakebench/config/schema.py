@@ -1218,8 +1218,8 @@ class DatagenConfig(ConfigModel):
     seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
     # AML corpus role (financial only). The evaluation and robustness seeds are
     # refused unless the run declares its role here: each is generated once,
-    # as the registered gate run for that role. Set without a seed, the role's
-    # registered seed is used.
+    # as the registered gate run for that role. An evaluation or robustness
+    # role needs the seed set: it is checked against heldout_hashes.json.
     corpus_role: Literal["calibration", "evaluation", "robustness"] | None = None
     # Robustness corpus (financial only; AML-GOALS R3(b)): datagen shifts the
     # nuisance parameters by corpora.robustness_perturbation in the

@@ -10,7 +10,7 @@ Structured-Streaming variant of silver_build_financial. For each micro-batch:
    recompute; the previous design paid ~2x per-batch by re-running the
    flatten from bronze inside the edges MERGE.
 
-Retry idempotency (LB-109 fix):
+Retry idempotency:
 Structured Streaming retries the entire `foreachBatch` handler on failure,
 re-running with the same batchId. The prior design did an `append()` to
 silver.transactions plus a MERGE into silver.counterparty_edges as two
@@ -623,7 +623,7 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
     genuinely new rows (WHEN NOT MATCHED path). The A1 driver-side
     progress gate treats a batch that inserted zero new dimensions as
     non-progress on the dimensions themselves; ``_merge_batch``'s
-    return value (silver.transactions row count) is the LB-044 gate.
+    return value (silver.transactions row count) is the progress gate.
 
     Instrumentation: publishes ``dim_merge_elapsed_ms`` for entities and
     accounts separately via ``log_job_metrics`` so the E1/E2 live gate
@@ -1119,7 +1119,7 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         n_txns = tagged_txns.count()
         log(f"[batch {batch_id}] {n_txns} txns")
         if n_txns == 0:
-            # Collector line format (LB-136); counts the batch, adds no rows.
+            # Collector line format; counts the batch, adds no rows.
             log(f"Batch {batch_id}: empty, skipping")
             return 0, 0
         log(f"Batch {batch_id}: transforming {n_txns:,} rows")
@@ -1264,7 +1264,7 @@ def main() -> None:
     # run but the cap is labelled, not hidden.
     emit_stream_scale_admission(measured_envelope_scale=10)
 
-    # LB-127: create the silver tables if absent. In CONTINUOUS mode
+    # Create the silver tables if absent. In CONTINUOUS mode
     # silver_build never runs, so nothing else creates silver.transactions /
     # silver.counterparty_edges (and the dimensions) -- the per-batch
     # writeTo(...).append() below requires them to exist, and without this
@@ -1306,7 +1306,7 @@ def main() -> None:
         spark.sql(_ddl)
         log(f"[startup] bootstrapped silver.{_name}")
 
-    # LB-109: guarantee the idempotency-key column exists on the target
+    # Guarantee the idempotency-key column exists on the target
     # tables before the first micro-batch fires. Idempotent on re-runs.
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_batch_id", "BIGINT")
@@ -1364,7 +1364,7 @@ def main() -> None:
         for name, sql_type in columns:
             ensure_column(spark, f"{CATALOG}.{table}", name, sql_type.upper())
 
-    # LB-127: the bronze table carries an OVERWRITE snapshot from the
+    # The bronze table carries an OVERWRITE snapshot from the
     # bronze-verify preflight (LB_REGISTER_TABLE=1 does a full CTAS/register
     # of the pacs.008 corpus). Iceberg's streaming source refuses overwrite
     # (and delete) snapshots by default and throws
