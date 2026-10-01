@@ -2384,7 +2384,7 @@ class NamespaceWatch:
 
     def _strike(self, error: str) -> str | None:
         self.failures += 1
-        now = time.monotonic()
+        now = time.time()
         if self._first_failure is None:
             self._first_failure = now
         logger.warning(

@@ -130,7 +130,7 @@ def watch(monkeypatch):
     import lakebench.cli._sustained as sustained
 
     clock = SimpleNamespace(t=0.0)
-    monkeypatch.setattr(sustained, "time", SimpleNamespace(monotonic=lambda: clock.t))
+    monkeypatch.setattr(sustained, "time", SimpleNamespace(time=lambda: clock.t))
 
     def make(*answers):
         api = MagicMock()
