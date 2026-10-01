@@ -25,6 +25,7 @@ from ._helpers import (
     check_datagen_scale,
     console,
     enforce_bronze_regenerate,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -104,7 +105,7 @@ def generate(
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {loc}: {err['msg']}")
+            console.print(f"  [red]*[/red] {esc(loc)}: {esc(err['msg'])}")
         raise typer.Exit(1)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
@@ -226,7 +227,7 @@ def generate(
             raise typer.Exit(1)
 
         print_success("Datagen job submitted")
-        console.print(f"  Parallelism: {result.details.get('parallelism', '?')} pods")
+        console.print(f"  Parallelism: {esc(result.details.get('parallelism', '?'))} pods")
         target_tb = float(result.details.get("target_tb", 0))
         console.print(f"  Target: {target_tb * 1024:.0f} GB")
 

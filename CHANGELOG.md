@@ -223,6 +223,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a datagen timeout keep those codes until they are converted; the table
   lists them.
 
+- **Errors are one line and markup-safe; machine output is plain (CLI-2).**
+  `ERROR`, `WARN`, `OK` and progress lines now go to stderr, and their text
+  is printed verbatim: a value such as `s3a://b/[x]/y` or `[/tmp]` no longer
+  vanishes or crashes the command with a Rich `MarkupError`, and a long
+  message is not wrapped. `query --format json|csv`, `results --format
+  json|csv` and `compare --format json|csv` (without `-o`, which used to
+  print the table instead) write to plain stdout, with notices such as
+  "N rows in Xs" on stderr, so the output pipes into a parser. urllib3
+  retry lines and warnings are silenced. A config whose top level is not a
+  YAML mapping is refused with one line naming the problem instead of an
+  `AttributeError`.
+
 ### Removed
 - **`config upgrade` refuses (SAF-3).** It rewrote configs lossily, in place
   by default, and wrote the S3 secret key into the result in plaintext. It

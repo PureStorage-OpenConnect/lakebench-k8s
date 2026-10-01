@@ -220,7 +220,7 @@ def test_existing_state_refuses_without_force_reset(monkeypatch, tmp_path, capsy
         monkeypatch, tmp_path, _c360_cfg(), existing=["c-s/", "c-b/customer/interactions/"]
     )
     assert events == ["ownership"]  # nothing stopped, deleted or submitted
-    out = capsys.readouterr().out
+    out = "".join(capsys.readouterr())
     assert "--force-reset" in out and "silver.customer_interactions_enriched" in out
     assert "c-b/customer/interactions/" in out
 
@@ -304,7 +304,7 @@ def test_fresh_generate_on_never_run_deployment_proceeds(monkeypatch, tmp_path, 
     )
     assert events[:4] == ["ownership", "stop-streams", "reset-s3:clear_raw=True", "datagen"]
     assert any(e.startswith("submit:bronze-ingest") for e in events)
-    out = " ".join(capsys.readouterr().out.split())
+    out = " ".join("".join(capsys.readouterr()).split())
     assert "Refusing" not in out and "a separate generate is not needed" in out
 
 
@@ -330,7 +330,7 @@ def test_raw_only_but_unsafe_to_replace_still_refuses(monkeypatch, tmp_path, cap
         raw_problem="a lakebench-datagen Job is still running",
     )
     assert events == ["ownership"]
-    out = " ".join(capsys.readouterr().out.split())
+    out = " ".join("".join(capsys.readouterr()).split())
     assert "still running" in out and "--force-reset" in out
 
 

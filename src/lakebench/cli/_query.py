@@ -15,7 +15,11 @@ from rich.table import Table
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
+    emit_data,
+    err_console,
+    esc,
     journal_open,
+    markup,
     print_error,
     print_info,
     print_warning,
@@ -201,7 +205,7 @@ def _run_query_repl(
                 import json
 
                 data = [row.split("\t") for row in rows]
-                console.print(json.dumps({"rows": data, "count": len(data)}, indent=2))
+                emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
             elif output_format == "csv":
                 import csv
                 import io
@@ -210,16 +214,16 @@ def _run_query_repl(
                 writer = csv.writer(buf)
                 for row in rows:
                     writer.writerow(row.split("\t"))
-                console.print(buf.getvalue().strip())
+                emit_data(buf.getvalue())
             else:  # table
                 for line in rows[:50]:
-                    console.print(line)
+                    console.print(line, markup=False, highlight=False)
                 if row_count > 50:
-                    console.print(f"[dim]... ({row_count - 50} more rows)[/dim]")
+                    console.print(f"[dim]... ({esc(row_count - 50)} more rows)[/dim]")
 
-        console.print(f"[green]{row_count} rows in {result.duration_seconds:.2f}s[/green]")
+        err_console.print(f"[green]{esc(row_count)} rows in {result.duration_seconds:.2f}s[/green]")
 
-    console.print(f"\n[dim]Executed {query_count} queries. Goodbye![/dim]")
+    console.print(f"\n[dim]Executed {esc(query_count)} queries. Goodbye![/dim]")
 
 
 def query(
@@ -387,8 +391,8 @@ def query(
     j.begin_command(CommandName.QUERY, {"query_name": query_name})
 
     if show_query or example:
-        console.print(f"\n[dim]Query ({query_name}):[/dim]")
-        console.print(f"[dim]{sql}[/dim]\n")
+        console.print(f"\n[dim]Query ({esc(query_name)}):[/dim]")
+        console.print(f"[dim]{esc(sql)}[/dim]\n")
 
     # Execute via QueryExecutor
     from lakebench.benchmark.executor import get_executor
@@ -417,7 +421,7 @@ def query(
     if not result.success:
         print_error(f"Query failed ({elapsed:.2f}s)")
         if result.error:
-            console.print(f"[red]{result.error}[/red]")
+            console.print(f"[red]{esc(result.error)}[/red]")
         _journal_safe(
             j.record,
             EventType.QUERY_EXECUTED,
@@ -450,7 +454,7 @@ def query(
                 ]
             else:
                 data = [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
-            console.print(json.dumps({"rows": data, "count": len(data)}, indent=2))
+            emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
         elif output_format == "csv":
             import csv
             import io
@@ -460,15 +464,15 @@ def query(
             for row in rows:
                 if row.strip():
                     writer.writerow([c.strip().strip('"') for c in row.split("\t")])
-            console.print(buf.getvalue().strip())
+            emit_data(buf.getvalue())
         else:  # table (default)
             console.print()
             for line in rows[:50]:
-                console.print(line)
+                console.print(line, markup=False, highlight=False)
             if row_count > 50:
-                console.print(f"[dim]... ({row_count - 50} more rows)[/dim]")
+                console.print(f"[dim]... ({esc(row_count - 50)} more rows)[/dim]")
 
-    console.print(f"\n[green]{row_count} rows in {elapsed:.2f}s[/green]")
+    err_console.print(f"\n[green]{esc(row_count)} rows in {elapsed:.2f}s[/green]")
 
     _journal_safe(
         j.record,
@@ -517,8 +521,8 @@ def _display_power_results(result: Any) -> None:
         status = "[green]PASS[/green]" if qr.success else "[red]FAIL[/red]"
         name_padded = f"{qr.query.name[:4]}  {qr.query.display_name}"
         console.print(
-            f"  {name_padded:<40} {qr.elapsed_seconds:>7.2f}s   "
-            f"{qr.rows_returned:>6} rows   {status}"
+            f"  {esc(name_padded):<40} {qr.elapsed_seconds:>7.2f}s   "
+            f"{esc(qr.rows_returned):>6} rows   {markup(status)}"
         )
 
     console.print(f"\n  Total: {result.total_seconds:.2f}s")
@@ -528,12 +532,12 @@ def _display_power_results(result: Any) -> None:
 def _display_throughput_results(result: Any) -> None:
     """Display throughput benchmark results."""
     console.print()
-    console.print(f"  [bold]Throughput run: {result.streams} streams[/bold]")
+    console.print(f"  [bold]Throughput run: {esc(result.streams)} streams[/bold]")
     for sr in result.stream_results:
         status = "[green]PASS[/green]" if sr.success else "[red]FAIL[/red]"
         console.print(
-            f"    Stream {sr.stream_id}:  {len(sr.queries):>2} queries  "
-            f"{sr.total_seconds:>7.1f}s  {status}"
+            f"    Stream {esc(sr.stream_id)}:  {len(sr.queries):>2} queries  "
+            f"{sr.total_seconds:>7.1f}s  {markup(status)}"
         )
     console.print(f"\n  Wall clock: {result.total_seconds:.1f}s")
     console.print(f"  [bold]Throughput QpH: {result.qph:.1f}[/bold]")

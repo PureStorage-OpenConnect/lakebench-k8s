@@ -16,6 +16,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from lakebench.cli._helpers import esc, print_error
+
 logger = logging.getLogger(__name__)
 
 config_app = typer.Typer(
@@ -154,7 +156,7 @@ def config_show(
         console.print(table)
 
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
+        print_error(e)
         raise typer.Exit(1) from None
 
 
@@ -204,7 +206,7 @@ def _validate_local(config_file: Path) -> None:
         console.print("  [green]+[/green] Config syntax valid")
         passed += 1
     except Exception as e:
-        console.print(f"  [red]x[/red] Config invalid: {e}")
+        console.print(f"  [red]x[/red] Config invalid: {esc(e)}")
         raise typer.Exit(1)  # noqa: B904
 
     try:
@@ -212,23 +214,23 @@ def _validate_local(config_file: Path) -> None:
         console.print("  [green]+[/green] Table format supported locally (Iceberg)")
         passed += 1
     except LocalModeError as e:
-        console.print(f"  [red]x[/red] {e}")
+        console.print(f"  [red]x[/red] {esc(e)}")
         failed += 1
 
     try:
         cli = detect_container_cli()
-        console.print(f"  [green]+[/green] Container runtime available ({cli})")
+        console.print(f"  [green]+[/green] Container runtime available ({esc(cli)})")
         passed += 1
     except ContainerRuntimeError as e:
-        console.print(f"  [red]x[/red] {e}")
+        console.print(f"  [red]x[/red] {esc(e)}")
         failed += 1
 
     advisory = scale_advisory(cfg)
     if advisory:
-        console.print(f"  [yellow]![/yellow] {advisory}")
+        console.print(f"  [yellow]![/yellow] {esc(advisory)}")
     else:
         scale = cfg.architecture.workload.datagen.scale
-        console.print(f"  [green]+[/green] Scale {scale} is sized for one host")
+        console.print(f"  [green]+[/green] Scale {esc(scale)} is sized for one host")
         passed += 1
 
     console.print()
@@ -281,12 +283,12 @@ def config_storage(
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except Exception as e:
-        console.print(f"[red]Could not load config: {e}[/red]")
+        print_error(f"Could not load config: {e}")
         raise typer.Exit(1) from e
 
     s3 = cfg.platform.storage.s3
     if not s3.endpoint:
-        console.print("[red]No S3 endpoint configured.[/red]")
+        print_error("No S3 endpoint configured.")
         raise typer.Exit(1)
 
     console.print(
@@ -332,30 +334,30 @@ def config_storage(
     console.print(table)
 
     if report.degraded:
-        console.print(f"\n[yellow]Degraded run:[/yellow] {report.degraded_reason}")
+        console.print(f"\n[yellow]Degraded run:[/yellow] {esc(report.degraded_reason)}")
 
     for check in report.blocking_failures:
         if check.impact:
-            console.print(f"\n[red]Impact:[/red] {check.impact}")
+            console.print(f"\n[red]Impact:[/red] {esc(check.impact)}")
 
     for check in report.checks:
         if check.status is CheckStatus.PASS and check.severity is Severity.ADVISORY:
             if check.impact:
-                console.print(f"\n[yellow]Note:[/yellow] {check.impact}")
+                console.print(f"\n[yellow]Note:[/yellow] {esc(check.impact)}")
 
     known = KNOWN_BACKENDS.get(report.backend)
     if known and known.get("notes"):
-        console.print(f"\n[dim]{known['label']}: {known['notes']}[/dim]")
+        console.print(f"\n[dim]{esc(known['label'])}: {esc(known['notes'])}[/dim]")
 
     console.print()
     if report.passed and not report.degraded:
-        console.print(f"[green]Backend supported.[/green] {report.summary()}")
+        console.print(f"[green]Backend supported.[/green] {esc(report.summary())}")
     elif report.passed and report.degraded:
         console.print(
-            f"[yellow]No blocking failures, but coverage was partial.[/yellow] {report.summary()}"
+            f"[yellow]No blocking failures, but coverage was partial.[/yellow] {esc(report.summary())}"
         )
     else:
-        console.print(f"[red]Backend not usable by lakebench.[/red] {report.summary()}")
+        print_error(f"Backend not usable by lakebench. {report.summary()}")
         raise typer.Exit(1)
 
 
@@ -413,8 +415,7 @@ def config_recipes(
     if name:
         if name not in RECIPES:
             available = ", ".join(sorted(n for n in RECIPES if n != "default"))
-            console.print(f"[red]Unknown recipe:[/red] {name}")
-            console.print(f"  Available: {available}")
+            print_error(f"Unknown recipe: {name}. Available: {available}")
             raise typer.Exit(1)
         _print_recipe_detail(name)
         return
@@ -497,14 +498,14 @@ def _print_recipe_detail(name: str) -> None:
             continue
         label = WORKLOAD_LABELS.get(row["workload"], row["workload"])
         console.print(
-            f"  {label} {row['mode']}: {_state_markup(row['state'])} -- {escape(row['basis'])}"
+            f"  {esc(label)} {esc(row['mode'])}: {_state_markup(row['state'])} -- {escape(row['basis'])}"
         )
 
     if note and note.caveats:
         console.print()
         console.print("[bold]Caveats[/bold]")
         for caveat in note.caveats:
-            console.print(f"  [yellow]*[/yellow] {caveat}")
+            console.print(f"  [yellow]*[/yellow] {esc(caveat)}")
     console.print()
 
 

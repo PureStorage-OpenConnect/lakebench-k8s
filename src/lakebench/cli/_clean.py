@@ -15,6 +15,7 @@ from lakebench.cli._helpers import (
     _journal_safe,
     console,
     deprecated_short_f_force,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -133,7 +134,7 @@ def clean(
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {loc}: {err['msg']}")
+            console.print(f"  [red]*[/red] {esc(loc)}: {esc(err['msg'])}")
         raise typer.Exit(1)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
@@ -321,7 +322,7 @@ def clean(
                 raise typer.Exit(1)
 
             def _clean_progress(bkt: str, count: int) -> None:
-                console.print(f"  Deleting from s3://{bkt}/... ({count:,} objects so far)")
+                console.print(f"  Deleting from s3://{esc(bkt)}/... ({count:,} objects so far)")
 
             # F-1: ownership check per bucket before touching contents.
             # Foreign-tagged buckets always refuse; legacy (untagged)

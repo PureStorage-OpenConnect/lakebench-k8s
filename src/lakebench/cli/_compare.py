@@ -18,7 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
-from lakebench.cli._helpers import EXIT_DECLINED
+from lakebench.cli._helpers import EXIT_DECLINED, emit_data, err_console, esc, print_error
 from lakebench.config import LoadPurpose, load_config
 
 logger = logging.getLogger(__name__)
@@ -83,8 +83,8 @@ def compare(
     # file says, contradicting the displayed plan. The option stays parked
     # until it is wired end-to-end. Refuse loudly rather than silently mislead.
     if scale is not None:
-        console.print(
-            "[red]--scale is not supported by `compare`.[/red] Edit "
+        print_error(
+            "--scale is not supported by `compare`. Edit "
             "architecture.workload.datagen.scale in each config file so the "
             "subprocess runs see the scale you asked for."
         )
@@ -97,15 +97,15 @@ def compare(
     _SUPPORTED_FORMATS = {"table", "json", "csv"}
     _requested_format = output_format.lower()
     if _requested_format == "html":
-        console.print(
-            "[red]--format html is not supported by `compare`.[/red] Use "
+        print_error(
+            "--format html is not supported by `compare`. Use "
             "`lakebench report --render` to build an HTML report from a run's "
             "metrics.json (or --format json / --format csv here)."
         )
         raise typer.Exit(2)
     if _requested_format not in _SUPPORTED_FORMATS:
-        console.print(
-            f"[red]--format {output_format!r} is not supported.[/red] "
+        print_error(
+            f"--format {output_format!r} is not supported. "
             f"Use one of: {', '.join(sorted(_SUPPORTED_FORMATS))}."
         )
         raise typer.Exit(2)
@@ -118,7 +118,7 @@ def compare(
         cfg_a = load_config(config_a, purpose=LoadPurpose.MUTATE)
         cfg_b = load_config(config_b, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
-        console.print(f"[red]Config error: {e}[/red]")
+        print_error(f"Config error: {e}")
         raise typer.Exit(1) from None
 
     # Different workloads, corpora, seeds, scales or modes are different
@@ -171,8 +171,8 @@ def compare(
         # Local stacks are keyed by config name: same name means the same
         # workdir, the same Garage container, and the same buckets, so B would
         # run against A's data and the comparison would be meaningless.
-        console.print(
-            f"[red]Both configs are named '{cfg_a.name}'.[/red] "
+        print_error(
+            f"Both configs are named '{cfg_a.name}'. "
             "Local comparison needs distinct names -- they key the workdir, "
             "the container, and the buckets."
         )
@@ -180,12 +180,12 @@ def compare(
 
     # Run A
     console.print()
-    console.print(f"[bold]== Running configuration A: {cfg_a.name} ==[/bold]")
+    console.print(f"[bold]== Running configuration A: {esc(cfg_a.name)} ==[/bold]")
     metrics_a = _run_single(config_a, timeout, skip_benchmark, keep, local, generate)
 
     # Run B
     console.print()
-    console.print(f"[bold]== Running configuration B: {cfg_b.name} ==[/bold]")
+    console.print(f"[bold]== Running configuration B: {esc(cfg_b.name)} ==[/bold]")
     metrics_b = _run_single(config_b, timeout, skip_benchmark, keep, local, generate)
 
     # Destroy failures were captured by _run_single; surface them before
@@ -196,19 +196,22 @@ def compare(
         if isinstance(m, dict):
             err = m.pop("_destroy_error", None)
             if err:
-                console.print(f"[red]Destroy for run {label} failed: {err}[/red]")
+                console.print(f"[red]Destroy for run {esc(label)} failed: {esc(err)}[/red]")
                 destroy_failures.append(label)
 
     # Build comparison
     comparison = _build_comparison(cfg_a.name, metrics_a, cfg_b.name, metrics_b)
 
-    # Display
-    if output_format == "table" or output is None:
+    # Display. JSON and CSV without -o are machine output on plain stdout;
+    # every notice below goes to stderr so the stream stays parseable.
+    if _requested_format == "table":
         _print_comparison_table(comparison)
+    elif output is None:
+        emit_data(_comparison_text(comparison, _requested_format))
 
     # Save if requested
     if output:
-        _save_comparison(comparison, output, output_format)
+        _save_comparison(comparison, output, _requested_format)
 
     # Save to standard output directory
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -216,14 +219,13 @@ def compare(
     compare_dir.mkdir(parents=True, exist_ok=True)
     with open(compare_dir / "comparison.json", "w") as f:
         json.dump(comparison, f, indent=2)
-    console.print(f"\n[dim]Comparison saved to {compare_dir}[/dim]")
+    err_console.print(f"\n[dim]Comparison saved to {esc(compare_dir)}[/dim]")
     if destroy_failures:
         # A destroy failure leaves cluster or bucket state behind that the
         # next run of the same config will collide with; surfacing this via
         # exit code is what a UAT script or CI job will actually notice.
-        console.print(
-            f"[red]compare: destroy failed for {', '.join(destroy_failures)}; "
-            "see messages above.[/red]"
+        print_error(
+            f"compare: destroy failed for {', '.join(destroy_failures)}; see messages above."
         )
         raise typer.Exit(1)
     if (
@@ -634,12 +636,16 @@ def _print_comparison_table(comparison: dict) -> None:
     name_b = comparison["config_b"]["name"]
 
     if comparison["config_a"].get("error"):
-        console.print(f"[red]Config A ({name_a}) failed: {comparison['config_a']['error']}[/red]")
+        console.print(
+            f"[red]Config A ({esc(name_a)}) failed: {esc(comparison['config_a']['error'])}[/red]"
+        )
     if comparison["config_b"].get("error"):
-        console.print(f"[red]Config B ({name_b}) failed: {comparison['config_b']['error']}[/red]")
+        console.print(
+            f"[red]Config B ({esc(name_b)}) failed: {esc(comparison['config_b']['error'])}[/red]"
+        )
 
     for warning in comparison.get("warnings") or []:
-        console.print(f"[yellow]Warning: {warning}[/yellow]")
+        console.print(f"[yellow]Warning: {esc(warning)}[/yellow]")
 
     refused = comparison.get("refusals") or {}
     reasons = []
@@ -694,7 +700,9 @@ def _print_comparison_table(comparison: dict) -> None:
         explained = "; ".join(
             f"{s}: {meaning.get(s, s)}" for s in dict.fromkeys((a_state, b_state))
         )
-        console.print(f"Support state: A {a_state}, B {b_state} [dim]({explained})[/dim]")
+        console.print(
+            f"Support state: A {esc(a_state)}, B {esc(b_state)} [dim]({esc(explained)})[/dim]"
+        )
     if not_comparable:
         title = "Comparison Results -- NOT COMPARABLE"
     elif verdict == "not_established":
@@ -787,8 +795,8 @@ def _print_comparison_table(comparison: dict) -> None:
     refused = comparison.get("qph_refused")
     if refused:
         console.print(
-            f"[yellow]QpH not compared ({', '.join(refused['metrics'])}): "
-            f"{refused['reason']}. QpH is queries per hour over one query set.[/yellow]"
+            f"[yellow]QpH not compared ({esc(', '.join(refused['metrics']))}): "
+            f"{esc(refused['reason'])}. QpH is queries per hour over one query set.[/yellow]"
         )
     console.print(
         f"[dim]Delta is B relative to A. Differences under {_NOISE_FLOOR_PCT:g}% are within "
@@ -809,31 +817,33 @@ def _fmt(val: Any) -> str:
     return str(val)
 
 
-def _save_comparison(comparison: dict, path: Path, fmt: str) -> None:
-    """Save comparison to file in the requested format."""
-    if fmt == "json":
-        with open(path, "w") as f:
-            json.dump(comparison, f, indent=2)
-    elif fmt == "csv":
-        import csv
+def _comparison_text(comparison: dict, fmt: str) -> str:
+    """The comparison as JSON, or as CSV when *fmt* is ``csv``."""
+    if fmt != "csv":
+        return json.dumps(comparison, indent=2)
+    import csv
+    import io
 
-        with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f, fieldnames=["metric", "config_a", "config_b", "comparable", "like_for_like"]
-            )
-            writer.writeheader()
-            for row in comparison["metrics"]:
-                writer.writerow(
-                    {
-                        "metric": row["metric"],
-                        "config_a": row["config_a"],
-                        "config_b": row["config_b"],
-                        "comparable": not row.get("not_comparable"),
-                        "like_for_like": bool(comparison.get("like_for_like")),
-                    }
-                )
-    else:
-        # Default to JSON for unsupported formats
-        with open(path, "w") as f:
-            json.dump(comparison, f, indent=2)
-    console.print(f"[green]Comparison saved to {path}[/green]")
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf, fieldnames=["metric", "config_a", "config_b", "comparable", "like_for_like"]
+    )
+    writer.writeheader()
+    for row in comparison["metrics"]:
+        writer.writerow(
+            {
+                "metric": row["metric"],
+                "config_a": row["config_a"],
+                "config_b": row["config_b"],
+                "comparable": not row.get("not_comparable"),
+                "like_for_like": bool(comparison.get("like_for_like")),
+            }
+        )
+    return buf.getvalue()
+
+
+def _save_comparison(comparison: dict, path: Path, fmt: str) -> None:
+    """Save comparison to file in the requested format (JSON unless ``csv``)."""
+    with open(path, "w", newline="") as f:
+        f.write(_comparison_text(comparison, fmt))
+    err_console.print(f"[green]Comparison saved to {esc(path)}[/green]")

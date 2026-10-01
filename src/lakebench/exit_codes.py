@@ -471,6 +471,18 @@ def render_markdown() -> str:
     ]
     for p in sorted(live, key=lambda p: (int(p.code), p.name)):
         lines.append(f"| `{p.name}` | {int(p.code)} | {_cell(p.when)} |")
+    lines += [
+        "",
+        "## Errors and output",
+        "",
+        "Errors, warnings and progress lines go to stderr. An error starts with",
+        "one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`",
+        "(the fix) and `Where` lines when they apply. No error prints a",
+        "traceback; set `LAKEBENCH_DEBUG=1` to get one for an error Lakebench",
+        "does not classify. Machine output (`--format json` and `--format csv`",
+        "on `query`, `results` and `compare`) goes to plain stdout, unwrapped, so",
+        "it can be piped to a parser.",
+    ]
     if LEGACY_CODES:
         lines += [
             "",

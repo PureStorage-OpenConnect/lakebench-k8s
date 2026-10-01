@@ -36,6 +36,7 @@ from rich.table import Table
 
 from lakebench.cli._helpers import (
     console,
+    esc,
     print_error,
     print_info,
     print_success,
@@ -767,7 +768,7 @@ def _print_comparison(rows: list[dict[str, Any]], exit_code: int) -> None:
     for row in rows:
         if row["status"] == "incomparable":
             console.print(
-                f"[yellow]{row['metric']} not compared: {row.get('reason')}. "
+                f"[yellow]{esc(row['metric'])} not compared: {esc(row.get('reason'))}. "
                 "Re-record the package on the current query set.[/yellow]"
             )
 

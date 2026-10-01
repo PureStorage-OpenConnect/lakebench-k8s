@@ -25,7 +25,10 @@ from lakebench.cli._helpers import (
     _journal_safe,
     _strip_ansi,
     console,
+    emit_data,
+    esc,
     journal_open,
+    markup,
     print_error,
     print_info,
     print_success,
@@ -83,7 +86,7 @@ def _version_callback(value: bool) -> None:
     circuits subcommand dispatch (and works before any subcommand-
     validation errors would fire)."""
     if value:
-        console.print(f"Lakebench version {__version__}")
+        console.print(f"Lakebench version {esc(__version__)}")
         raise typer.Exit()
 
 
@@ -250,7 +253,7 @@ def _print_report_summary(metrics) -> None:
     if scores:
         console.print()
         for s in scores:
-            console.print(f"  {s}")
+            console.print(f"  {markup(s)}")
     console.print()
 
 
@@ -262,7 +265,7 @@ def _print_report_summary(metrics) -> None:
 @app.command()
 def version() -> None:
     """Show version information."""
-    console.print(f"Lakebench version {__version__}")
+    console.print(f"Lakebench version {esc(__version__)}")
 
 
 @app.command()
@@ -554,8 +557,8 @@ def _write_local_config(output: Path, name: str, scale: float, workload_schema: 
     print_info(f"Scale: {scale} (~{scale * 10.0:.1f} GB bronze)")
     console.print()
     console.print("  Next:")
-    console.print(f"    [bold]lakebench deploy {output} --local[/bold]")
-    console.print(f"    [bold]lakebench run {output} --local --generate --yes[/bold]")
+    console.print(f"    [bold]lakebench deploy {esc(output)} --local[/bold]")
+    console.print(f"    [bold]lakebench run {esc(output)} --local --generate --yes[/bold]")
     console.print("  (--generate populates bronze on the first local run.)")
 
 
@@ -692,7 +695,7 @@ def validate(
 
     def _section_start(title: str) -> None:
         _section_items.clear()
-        console.print(f"\n [bold]{title}[/bold]")
+        console.print(f"\n [bold]{esc(title)}[/bold]")
 
     def _check_ok(msg: str, *, hint: str | None = None) -> None:
         _section_items.append(("ok", msg, hint))
@@ -708,17 +711,17 @@ def validate(
         ok = fail = warn = 0
         for status, msg, hint in _section_items:
             if status == "ok":
-                console.print(f"   [green]+[/green] {msg}")
+                console.print(f"   [green]+[/green] {esc(msg)}")
                 ok += 1
             elif status == "fail":
-                console.print(f"   [red]x[/red] {msg}")
+                console.print(f"   [red]x[/red] {esc(msg)}")
                 fail += 1
             else:
-                console.print(f"   [yellow]![/yellow] {msg}")
+                console.print(f"   [yellow]![/yellow] {esc(msg)}")
                 warn += 1
             if hint:
                 for line in hint.split("\n"):
-                    console.print(f"     [dim]{line}[/dim]")
+                    console.print(f"     [dim]{esc(line)}[/dim]")
         _section_items.clear()
         return ok, fail, warn
 
@@ -739,7 +742,7 @@ def validate(
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]x[/red] {loc}: {err['msg']}")
+            console.print(f"  [red]x[/red] {esc(loc)}: {esc(err['msg'])}")
         raise typer.Exit(1)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
@@ -1311,8 +1314,8 @@ def status(
             if active > 0 or succeeded < completions:
                 console.print()
                 console.print(
-                    f"[bold]Datagen:[/bold] {succeeded}/{completions} pods completed, "
-                    f"{active} active"
+                    f"[bold]Datagen:[/bold] {esc(succeeded)}/{esc(completions)} pods completed, "
+                    f"{esc(active)} active"
                 )
         except k8s_client.rest.ApiException as e:
             if e.status != 404:
@@ -1659,7 +1662,7 @@ def info(
     console.print(Panel(formatted, title=f"Lakebench: {cfg.name}", expand=False))
 
     if guidance.warning:
-        console.print(f"  [yellow]Warning: {guidance.warning}[/yellow]")
+        console.print(f"  [yellow]Warning: {esc(guidance.warning)}[/yellow]")
 
     # Check cluster feasibility
     try:
@@ -1674,13 +1677,13 @@ def info(
 
         if cluster_cores >= needed_cores and cluster_gb >= needed_gb:
             console.print(
-                f"  [green]Cluster OK:[/green] {cluster_cores} cores / {cluster_gb} GB "
-                f"allocatable; peak request {needed_cores} cores / {needed_gb} GB"
+                f"  [green]Cluster OK:[/green] {esc(cluster_cores)} cores / {esc(cluster_gb)} GB "
+                f"allocatable; peak request {esc(needed_cores)} cores / {esc(needed_gb)} GB"
             )
         else:
             console.print(
-                f"  [red]Cluster undersized:[/red] {cluster_cores} cores / {cluster_gb} GB "
-                f"allocatable; peak request {needed_cores} cores / {needed_gb} GB"
+                f"  [red]Cluster undersized:[/red] {esc(cluster_cores)} cores / {esc(cluster_gb)} GB "
+                f"allocatable; peak request {esc(needed_cores)} cores / {esc(needed_gb)} GB"
             )
             console.print(
                 "  [dim]Run 'lakebench config recommend' to find max feasible scale[/dim]"
@@ -1902,14 +1905,14 @@ def report(
     # Not run_dir(): that creates the directory, and report only reads here.
     delivered = storage.metrics_dir / f"run-{metrics.run_id}" / "report.html"
     if delivered.exists():
-        console.print(f"[dim]Delivered report: {delivered}[/dim]")
+        console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")
         console.print(
             "[dim]Run 'lakebench report --render' to write a fresh HTML "
             "at lakebench-output/reports/.[/dim]"
         )
     else:
         console.print(
-            f"[dim]No delivered report at {delivered}. "
+            f"[dim]No delivered report at {esc(delivered)}. "
             "Run 'lakebench report --render' to generate one.[/dim]"
         )
 
@@ -2002,10 +2005,10 @@ def results(
         print_info("Pipeline benchmark is generated for runs after this feature was added.")
         raise typer.Exit(1)
 
-    # Machine-readable formats go to stdout with plain print: Rich wraps long
-    # lines at the terminal width and inserts markup, which breaks parsers.
+    # Machine-readable formats go to plain stdout (emit_data): Rich wraps
+    # long lines at the terminal width and parses markup, which breaks parsers.
     if output_format == "json":
-        print(_json.dumps(pb.to_dict(), indent=2))
+        emit_data(_json.dumps(pb.to_dict(), indent=2))
         return
 
     if output_format == "csv":
@@ -2024,7 +2027,7 @@ def results(
         for key in metric_keys:
             row = [key] + [matrix[stage].get(key, "") for stage in matrix]
             writer.writerow(row)
-        print(buf.getvalue(), end="")
+        emit_data(buf.getvalue())
         return
 
     # Table format (default)
@@ -2076,7 +2079,7 @@ def results(
     if pb.query_benchmark:
         qb = pb.query_benchmark
         console.print(
-            f"\n  Query Benchmark: {qb.mode} mode | QpH: {qb.qph:.1f} | {qb.total_seconds:.1f}s"
+            f"\n  Query Benchmark: {esc(qb.mode)} mode | QpH: {qb.qph:.1f} | {qb.total_seconds:.1f}s"
         )
 
     console.print(
@@ -2164,7 +2167,7 @@ def logs(
     label_selector, container = COMPONENT_SELECTORS[component]
 
     console.print(
-        f"Fetching logs for [bold]{component}[/bold] in namespace [bold]{namespace}[/bold]"
+        f"Fetching logs for [bold]{esc(component)}[/bold] in namespace [bold]{esc(namespace)}[/bold]"
     )
 
     # Build kubectl logs args (the "kubectl" itself is added by the pinned
@@ -2660,12 +2663,12 @@ def recommend(
                     detected_mem = int(cap.total_memory_bytes / (1024**3))
                 cluster_source = f"detected ({cap.node_count} nodes)"
         except Exception as e:
-            console.print(f"[yellow]Could not detect cluster capacity: {e}[/yellow]")
+            console.print(f"[yellow]Could not detect cluster capacity: {esc(e)}[/yellow]")
             console.print("[dim]Use --cores and --memory to specify manually[/dim]\n")
 
     if detected_cores is None or detected_mem is None:
         mode_label = "continuous" if is_sustained else "batch"
-        console.print(f"[bold]Cluster Sizing Reference[/bold] (mode: {mode_label})\n")
+        console.print(f"[bold]Cluster Sizing Reference[/bold] (mode: {esc(mode_label)})\n")
         console.print(
             "[dim]Tip: Connect to a cluster or use --cores/--memory for max scale calculation[/dim]\n"
         )
@@ -2695,15 +2698,15 @@ def recommend(
     max_scale_slow = find_max_scale(detected_cores, detected_mem, use_slow_datagen=True)
 
     mode_label = "continuous" if is_sustained else "batch"
-    console.print(f"[bold]Cluster Capacity[/bold] ({cluster_source}, mode: {mode_label})")
-    console.print(f"  CPU cores: [bold]{detected_cores}[/bold]")
-    console.print(f"  Memory:    [bold]{detected_mem} GB[/bold]\n")
+    console.print(f"[bold]Cluster Capacity[/bold] ({esc(cluster_source)}, mode: {esc(mode_label)})")
+    console.print(f"  CPU cores: [bold]{esc(detected_cores)}[/bold]")
+    console.print(f"  Memory:    [bold]{esc(detected_mem)} GB[/bold]\n")
 
     if max_scale == 0:
         console.print("[yellow]Cluster is below minimum requirements for scale 1.[/yellow]")
         reqs = compute_cluster_requirements(1)
         console.print(
-            f"[dim]Minimum for scale 1: {reqs['total_cores']} cores, {reqs['total_mem_gi']} GB RAM[/dim]"
+            f"[dim]Minimum for scale 1: {esc(reqs['total_cores'])} cores, {esc(reqs['total_mem_gi'])} GB RAM[/dim]"
         )
         return
 
@@ -2716,18 +2719,18 @@ def recommend(
             "[bold yellow]Slow datagen:[/bold yellow] Datagen runs with reduced parallelism (slower generation, same compute resources)\n"
         )
         console.print(
-            f"[green]Maximum scale (slow datagen):[/green] [bold]{max_scale_slow:,}[/bold] ({format_data_size(slow_reqs['data_gb'])})"
+            f"[green]Maximum scale (slow datagen):[/green] [bold]{max_scale_slow:,}[/bold] ({esc(format_data_size(slow_reqs['data_gb']))})"
         )
         console.print(
-            f"[dim]Standard max:              {max_scale_standard:,} ({format_data_size(std_reqs['data_gb'])})[/dim]\n"
+            f"[dim]Standard max:              {max_scale_standard:,} ({esc(format_data_size(std_reqs['data_gb']))})[/dim]\n"
         )
     else:
         console.print(
-            f"[green]Maximum scale:[/green] [bold]{max_scale_standard:,}[/bold] ({format_data_size(std_reqs['data_gb'])})"
+            f"[green]Maximum scale:[/green] [bold]{max_scale_standard:,}[/bold] ({esc(format_data_size(std_reqs['data_gb']))})"
         )
         if max_scale_slow > max_scale_standard:
             console.print(
-                f"[dim]With --slow-datagen:        {max_scale_slow:,} ({format_data_size(slow_reqs['data_gb'])})[/dim]"
+                f"[dim]With --slow-datagen:        {max_scale_slow:,} ({esc(format_data_size(slow_reqs['data_gb']))})[/dim]"
             )
         console.print()
 
@@ -2797,7 +2800,7 @@ def recommend(
     console.print()
     if use_slow_datagen:
         console.print("[dim]Slow datagen: generation runs slower to fit cluster resources[/dim]")
-    console.print(f"[dim]Next: lakebench init --scale {max_scale}[/dim]")
+    console.print(f"[dim]Next: lakebench init --scale {esc(max_scale)}[/dim]")
 
 
 # =============================================================================

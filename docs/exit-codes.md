@@ -41,6 +41,16 @@ the CLI down every path listed here and checks the code.
 | `confirm.non_tty` | 5 | a confirmation prompt got no answer (no terminal, end of input) or was declined |
 | `sigint` | 130 | any command interrupted with Ctrl-C |
 
+## Errors and output
+
+Errors, warnings and progress lines go to stderr. An error starts with
+one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`
+(the fix) and `Where` lines when they apply. No error prints a
+traceback; set `LAKEBENCH_DEBUG=1` to get one for an error Lakebench
+does not classify. Machine output (`--format json` and `--format csv`
+on `query`, `results` and `compare`) goes to plain stdout, unwrapped, so
+it can be piped to a parser.
+
 ## Codes still in transition
 
 These commands still exit with their 1.6 code, which means something

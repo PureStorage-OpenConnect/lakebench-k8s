@@ -12,7 +12,10 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
+from rich.text import Text
 
+from lakebench.exit_codes import LakebenchError
 from lakebench.journal import Journal
 
 logger = logging.getLogger(__name__)
@@ -66,7 +69,9 @@ def resolve_config_path(
     if default.exists():
         return default
 
-    console.print(f"[red]ERROR[/red] No config file specified and ./{DEFAULT_CONFIG} not found")
+    console.print(
+        f"[red]ERROR[/red] No config file specified and ./{esc(DEFAULT_CONFIG)} not found"
+    )
     console.print("[blue]INFO[/blue] Create one with: lakebench init")
     raise typer.Exit(1)
 
@@ -86,19 +91,75 @@ def journal_open(config_path: Path | None, config_name: str = "") -> Journal:
     return j
 
 
-def print_success(message: str) -> None:
-    """Print a success message."""
-    console.print(f"[green]OK[/green] {message}")
+def esc(value: object) -> str:
+    """``str(value)`` with Rich markup escaped.
+
+    For values interpolated into an f-string that goes to ``console.print``:
+    without it ``[/tmp]`` raises ``MarkupError`` and ``[main]`` vanishes.
+    """
+    return escape(str(value))
 
 
-def print_error(message: str) -> None:
-    """Print an error message."""
-    console.print(f"[red]ERROR[/red] {message}")
+def markup(text: str) -> str:
+    """Mark *text* as Rich markup on purpose (identity).
+
+    The markup-safety lint accepts an f-string value wrapped in ``markup()``
+    (or in a function whose name ends in ``_markup``); use it only for text
+    built from literals, such as a coloured PASS/FAIL label.
+    """
+    return text
 
 
-def print_warning(message: str) -> None:
-    """Print a warning message."""
-    console.print(f"[yellow]WARN[/yellow] {message}")
+def _status_line(prefix: str, style: str, message: object) -> None:
+    """``prefix message`` on stderr; the message is never parsed as markup.
+
+    ``soft_wrap`` keeps a long message on one line, so a pipe or a log grep
+    sees it whole.
+    """
+    line = Text(prefix, style=style)
+    line.append(" ")
+    line.append(str(message))
+    err_console.print(line, soft_wrap=True)
+
+
+def print_success(message: object) -> None:
+    """Print a success message on stderr (text is printed verbatim)."""
+    _status_line("OK", "green", message)
+
+
+def print_error(message: object) -> None:
+    """Print an error message on stderr (text is printed verbatim)."""
+    _status_line("ERROR", "red", message)
+
+
+def print_warning(message: object) -> None:
+    """Print a warning message on stderr (text is printed verbatim)."""
+    _status_line("WARN", "yellow", message)
+
+
+def emit_error(err: LakebenchError) -> None:
+    """Print *err* on stderr in the TUD 11.1 shape, at most four lines.
+
+    ``ERROR what``, then ``Why``, ``Next`` and ``Where`` only when set. No
+    field is parsed as markup and none is wrapped.
+    """
+    for label, text in err.lines():
+        line = Text(label.ljust(6), style="red" if label == "ERROR" else "bold")
+        line.append(" ")
+        line.append(text)
+        err_console.print(line, soft_wrap=True)
+
+
+def emit_data(text: str) -> None:
+    """Write machine output (JSON, CSV) to plain stdout.
+
+    Not through Rich: Rich wraps at the terminal width and parses markup,
+    which breaks parsers on long values or brackets.
+    """
+    import sys
+
+    sys.stdout.write(text if text.endswith("\n") else text + "\n")
+    sys.stdout.flush()
 
 
 def check_datagen_scale(cfg: object) -> None:
@@ -131,7 +192,7 @@ def warn_deprecated_short_f(new_spelling: str) -> None:
     Goes to stderr so that, for example, ``results -f json | jq`` still parses.
     """
     err_console.print(
-        f"[yellow]WARN[/yellow] '-f' here is deprecated: use {new_spelling}. In a future "
+        f"[yellow]WARN[/yellow] '-f' here is deprecated: use {esc(new_spelling)}. In a future "
         "release '-f' will mean --file (the config path), as it does on every other command."
     )
 
@@ -170,16 +231,16 @@ def deprecated_short_f_force(new_spelling: str, force_given: bool) -> bool:
         warn_deprecated_short_f(new_spelling)
         return True
     err_console.print(
-        f"[red]ERROR[/red] '-f' no longer skips confirmation here: use {new_spelling}. "
+        f"[red]ERROR[/red] '-f' no longer skips confirmation here: use {esc(new_spelling)}. "
         "'-f' will mean --file (the config path), as it does on every other command. "
-        f"Set {LEGACY_SHORT_F_ENV}=1 to keep the old meaning for this release."
+        f"Set {esc(LEGACY_SHORT_F_ENV)}=1 to keep the old meaning for this release."
     )
     raise typer.Exit(2)
 
 
-def print_info(message: str) -> None:
-    """Print an info message."""
-    console.print(f"[blue]...[/blue] {message}")
+def print_info(message: object) -> None:
+    """Print an info message on stderr (text is printed verbatim)."""
+    _status_line("...", "blue", message)
 
 
 def _journal_safe(fn, *args, **kwargs) -> None:

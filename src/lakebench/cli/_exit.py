@@ -62,7 +62,7 @@ __all__ = [
     "error_for",
     "exit_code_for",
     "path_code",
-    "print_error_shape",
+    "quiet_urllib3",
 ]
 
 DEBUG_ENV = "LAKEBENCH_DEBUG"
@@ -160,28 +160,30 @@ def exit_code_for(exc: BaseException) -> ExitCode | None:
     return None if err is None else err.code
 
 
-def print_error_shape(err: LakebenchError) -> None:
-    """Print *err* on stderr in the ERROR / Why / Next / Where shape.
+def quiet_urllib3() -> None:
+    """Silence urllib3's retry log lines and warnings for this process.
 
-    Text is never parsed as Rich markup, so ``[/tmp]`` or ``[main]`` in a
-    message prints verbatim.
+    An unreachable API server otherwise prints a "Retrying (Retry(...))"
+    trace per attempt before the one-line error (CLI-2).
     """
-    from rich.text import Text
+    import logging
+    import warnings
 
-    from lakebench.cli._helpers import err_console
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+    warnings.filterwarnings("ignore", module="urllib3")
+    try:
+        import urllib3
 
-    styles = {"ERROR": "red"}
-    for label, text in err.lines():
-        line = Text(label.ljust(6), style=styles.get(label, "bold"))
-        line.append(" ")
-        line.append(text)
-        err_console.print(line, soft_wrap=True)
+        urllib3.disable_warnings()
+    except ImportError:  # pragma: no cover -- a dependency of kubernetes and boto3
+        pass
 
 
 class LakebenchGroup(TyperGroup):
     """Root group: maps exceptions from any command to the documented codes."""
 
     def invoke(self, ctx: Any) -> Any:
+        quiet_urllib3()
         try:
             return super().invoke(ctx)
         except BaseException as exc:
@@ -193,5 +195,7 @@ class LakebenchGroup(TyperGroup):
             if isinstance(exc, (KeyboardInterrupt, EOFError, _click_exceptions().Abort)):
                 # A prompt cut off by EOF or Ctrl-C leaves the cursor after it.
                 sys.stderr.write("\n")
-            print_error_shape(err)
+            from lakebench.cli._helpers import emit_error
+
+            emit_error(err)
             raise typer.Exit(int(err.code)) from exc
