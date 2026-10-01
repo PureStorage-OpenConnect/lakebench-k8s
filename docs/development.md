@@ -159,15 +159,19 @@ The hooks do not run the tests; run `pytest tests/ -x` yourself.
 ## What CI Runs
 
 `.github/workflows/ci.yml` runs on every branch push and on pull requests to
-`main`. The lint job runs `ruff check src/ tests/ scripts/`,
+`main` and `integrate/**`. A newer push to the same `lane/*` branch or pull
+request cancels the older run; on every other branch and on tags each pushed
+head's run finishes. The lint job runs `ruff check src/ tests/ scripts/`,
 `ruff format --check src/ tests/ scripts/` and `mypy src/lakebench/` on
 Python 3.11, and `scripts/check_action_runtimes.py --verify`, which reads
 each action's `action.yml` at its pinned SHA and fails if
 `.github/action-runtimes.json` no longer matches it. The test job runs
-`pytest tests/ -x` (excluding `tests/test_e2e.py` and
+`pytest tests/ -rs` (excluding `tests/test_e2e.py` and
 `tests/test_integration.py`) on Python 3.10 and 3.13, the oldest and newest
-supported versions, and on 3.13 checks per-file coverage floors with
-`scripts/check_coverage.py --suite unit`. A Spark job runs `pytest tests/spark`
+supported versions. It runs to the end rather than stopping at the first
+failure, prints every skip reason, and a failure on one Python version does
+not cancel the other (`fail-fast: false`). On 3.13 it checks per-file
+coverage floors with `scripts/check_coverage.py --suite unit`. A Spark job runs `pytest tests/spark`
 with `pyspark==4.0.1` on Java 17 and checks its own floors with
 `scripts/check_coverage.py --suite spark`. The Rust job runs `cargo fmt
 --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test
