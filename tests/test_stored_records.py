@@ -695,3 +695,52 @@ def test_non_credential_pairs_in_text_left_alone() -> None:
         "fs.s3a.aws.credentials.provider=org.apache.Simple v1.10.0.0.1"
     )
     assert scrub.scrub_text(text) == text
+
+
+def test_no_message_carries_a_seed(monkeypatch) -> None:
+    """Second fix pass: check_clean, bucket refusals and scrub_text built
+    messages from paths and keys that can hold a held-out seed."""
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "robustness"})
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["extra"] = {"987654": {"host": "10.99.1.2"}, "10.1.2.3-987654": 1}
+    problems = scrub.check_clean(rec)
+    assert problems and not any("987654" in p for p in problems)
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["buckets"]["gold"] = "lb-987654-x"
+    rec["config_snapshot"]["extra"] = {"note": "lb-987654-x"}
+    with pytest.raises(scrub.ScrubError) as exc:
+        scrub.scrub_text("x", rec)
+    assert "987654" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password=$3cr3tValue end", "password=${LAKEBENCH_CREDENTIAL} end"),
+        ('password="my secret pass" end', 'password="${LAKEBENCH_CREDENTIAL}" end'),
+        ("password=abc,def end", "password=${LAKEBENCH_CREDENTIAL} end"),
+        (
+            "token=secret=" + "x" * 40 + " next_field=important",
+            "token=${LAKEBENCH_CREDENTIAL} next_field=important",
+        ),
+        ("credentials:\n  user: x", "credentials:\n  user: x"),
+        (
+            "access_key_id=${LAKEBENCH_S3_ACCESS_KEY} ok",
+            "access_key_id=${LAKEBENCH_S3_ACCESS_KEY} ok",
+        ),
+    ],
+)
+def test_text_credential_values_taken_whole(text: str, expected: str) -> None:
+    assert scrub.scrub_text(text) == expected
+
+
+def test_long_token_runs_scrub_in_linear_time() -> None:
+    import time
+
+    text = "a" * 50_000 + " password=x"
+    t0 = time.monotonic()
+    out = scrub.scrub_text(text)
+    assert time.monotonic() - t0 < 2.0
+    assert out.endswith("password=${LAKEBENCH_CREDENTIAL}")

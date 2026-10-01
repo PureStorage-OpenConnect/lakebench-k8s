@@ -81,7 +81,7 @@ from pathlib import Path
 from typing import Any
 
 #: Bump when a rule changes; recorded in tests/fixtures/records/MANIFEST.json.
-SCRUBBER_VERSION = 5
+SCRUBBER_VERSION = 6
 
 #: The documented placeholder host for the lab S3 address.
 PLACEHOLDER_HOST = "10.0.1.50"
@@ -107,7 +107,8 @@ _EVIDENCE_KEYS = frozenset(
 # full stop after an address does not hide it.
 _IPV4 = re.compile(r"(?<!\d)(?<!\d\.)(\d{1,3}(?:\.\d{1,3}){3})(?!\d|\.\d)")
 _URL = re.compile(
-    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/@\s\"']*@)?"
+    # The lookbehind keeps a long run of word characters linear, not quadratic.
+    r"(?<![a-zA-Z0-9+.-])(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/@\s\"']*@)?"
     r"(?P<host>\[[^\]]*\]|[^/:?#\s\"'@]+)"
 )
 
@@ -120,9 +121,13 @@ _URL = re.compile(
 #: a JSON key (``_is_cred_key``), so camel, dotted and prefixed names
 #: (``trustStorePassword``, ``fs.s3a.secret.key``, ``s3SecretKey``) are
 #: credentials and ``password_policy`` is not. The key pattern does not
-#: consume the value, so ``config: secretKey: X`` still finds ``secretKey``.
-_ASSIGN_KEY = re.compile(r"""([A-Za-z0-9_.-]+)["']?\s*[:=]\s*["']?""")
-_ASSIGN_VALUE = re.compile(r"""[^\s"',;&}\]]+""")
+#: consume the value, so ``config: secretKey: X`` still finds ``secretKey``;
+#: it never crosses a line. A quoted value runs to its closing quote, an
+#: unquoted one to the next whitespace or quote (so ``abc,def`` is taken
+#: whole, which can take a following pair with it: that fails safe).
+_ASSIGN_KEY = re.compile(r"""(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)["']?[ \t]*[:=][ \t]*(["']?)""")
+_UNQUOTED_VALUE = re.compile(r"""[^\s"']+""")
+_PLACEHOLDER = re.compile(r"\$\{[A-Za-z0-9_]+\}")
 
 #: Value patterns that are credentials wherever they appear (the formats
 #: .gitleaks.toml adds, including its k8s-inline-env rule, plus the AWS key
@@ -141,7 +146,19 @@ _TOKEN_AFTER = r"(?![A-Za-z0-9_-])"
 
 
 class ScrubError(ValueError):
-    """A record that cannot become a fixture."""
+    """A record that cannot become a fixture. The message never carries a
+    held-out seed, wherever it was built (paths come from dict keys)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(_redact_seeds(message))
+
+
+def _redact_seeds(text: str) -> str:
+    """*text* with every digit run equal to a held-out seed replaced."""
+    from lakebench.config import datagen_seed
+
+    protected = datagen_seed.protected_seeds()
+    return _DIGITS.sub(lambda m: "<seed>" if int(m.group(0)) in protected else m.group(0), text)
 
 
 def norm_key(key: str | None) -> str:
@@ -160,13 +177,24 @@ def _is_cred_key(key: str | None) -> bool:
 def _text_credentials(text: str) -> list[tuple[int, int, str]]:
     """(start, end, key) of each credential value assigned inside *text*
     that is not already a placeholder."""
-    found = []
+    found: list[tuple[int, int, str]] = []
+    taken = 0  # end of the last value: a key inside a value is not a key
     for m in _ASSIGN_KEY.finditer(text):
-        if not _is_cred_key(m.group(1)):
+        if m.start() < taken or not _is_cred_key(m.group(1)):
             continue
-        v = _ASSIGN_VALUE.match(text, m.end())
-        if v and not v.group(0).startswith("$"):
-            found.append((v.start(), v.end(), m.group(1)))
+        start = m.end()
+        quote = m.group(2)
+        if quote:
+            close = text.find(quote, start)
+            newline = text.find("\n", start)
+            end = min(e for e in (close, newline, len(text)) if e >= 0)
+        else:
+            v = _UNQUOTED_VALUE.match(text, start)
+            end = v.end() if v else start
+        value = text[start:end]
+        if value and not _PLACEHOLDER.fullmatch(value):
+            found.append((start, end, m.group(1)))
+            taken = end
     return found
 
 
@@ -452,15 +480,8 @@ def _seed_problems(record: Any) -> list[str]:
     # Only the live held-out roles refuse. Spent seeds are retired, and the
     # calibration seed is the public development seed 43.
     protected = datagen_seed.protected_seeds()
-
-    def redact(path: str) -> str:
-        # A path is built from dict keys, which can hold a seed themselves.
-        return _DIGITS.sub(lambda m: "<seed>" if int(m.group(0)) in protected else m.group(0), path)
-
     hits = [
-        f"{redact(path)} holds the {protected[n]} seed"
-        for path, n in _numbers(record)
-        if n in protected
+        f"{path} holds the {protected[n]} seed" for path, n in _numbers(record) if n in protected
     ]
     return sorted(set(hits))
 
@@ -485,7 +506,7 @@ def check_clean(obj: Any) -> list[str]:
     """Problems that make *obj* (a parsed record) unfit for a tracked file:
     a private address, URL user-info, an unscrubbed endpoint host, credential
     or bucket name, a credential format in a value or key, or a protected
-    seed. Empty when clean."""
+    seed. Empty when clean. No message carries a held-out seed."""
     problems: list[str] = []
     for path, key in _keys(obj):
         problems.extend(_text_problems(f"{path} key {key[:40]!r}", key))
@@ -506,7 +527,8 @@ def check_clean(obj: Any) -> list[str]:
     else:
         problems.extend(f"bucket name {n!r} is not scrubbed" for n in sensitive.buckets)
     problems.extend(_seed_problems(obj))
-    return problems
+    # Paths and keys can hold a held-out seed: redact every message.
+    return [_redact_seeds(p) for p in problems]
 
 
 # ---------------------------------------------------------------------------
