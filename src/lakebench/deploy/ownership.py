@@ -813,6 +813,183 @@ def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> 
     core_v1.patch_namespace(namespace, body)
 
 
+# ---------------------------------------------------------------------------
+# SAF-10 owner marker on backends without bucket tagging (SD-18b)
+# ---------------------------------------------------------------------------
+
+# How this process writes markers, per S3 endpoint: "conditional" when the
+# backend enforced IfNoneMatch on the probe, "unconditional" otherwise.
+_MARKER_WRITE_MODE: dict[str, str] = {}
+# Codes a backend that has no conditional writes answers with.
+_NO_CONDITIONAL_CODES = frozenset({"NotImplemented", "InvalidArgument", "InvalidRequest"})
+# Fallback (no conditional writes): wait this long and read the marker again,
+# so a second cluster writing in the same window is seen by at least one.
+MARKER_FALLBACK_WAIT_S = 2.0
+_marker_sleep = time.sleep
+
+
+@dataclass(frozen=True)
+class MarkerResult:
+    """What ``write_owner_marker`` found: whose marker the bucket now carries."""
+
+    ours: bool
+    marker: dict[str, Any] | None
+    mode: str  # "conditional" or "unconditional"
+
+
+def _error_code(e: Exception) -> str:
+    response = getattr(e, "response", None) or {}
+    return str(response.get("Error", {}).get("Code", ""))
+
+
+def _http_status(e: Exception) -> int:
+    response = getattr(e, "response", None) or {}
+    try:
+        return int(response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _endpoint_of(boto_client: Any) -> str:
+    return str(getattr(getattr(boto_client, "meta", None), "endpoint_url", "") or "")
+
+
+def probe_conditional_put(boto_client: Any, bucket: str) -> bool:
+    """Whether the backend enforces ``IfNoneMatch="*"`` on PutObject.
+
+    Writes a throwaway key, ``.lakebench/probe-<uuid4>``, twice with the
+    header: enforced means 200 then 412. The probe key is deleted after. It
+    never touches the owner marker, so it cannot overwrite a marker another
+    cluster wrote meanwhile (DESIGN ch01 d3 N2).
+    """
+    import uuid
+
+    from botocore.exceptions import ClientError
+
+    key = f"{MARKER_PREFIX}probe-{uuid.uuid4().hex}"
+    try:
+        try:
+            boto_client.put_object(Bucket=bucket, Key=key, Body=b"", IfNoneMatch="*")
+        except ClientError as e:
+            if _error_code(e) in _NO_CONDITIONAL_CODES:
+                return False
+            raise
+        try:
+            boto_client.put_object(Bucket=bucket, Key=key, Body=b"", IfNoneMatch="*")
+        except ClientError as e:
+            if _error_code(e) == "PreconditionFailed" or _http_status(e) == 412:
+                return True
+            if _error_code(e) in _NO_CONDITIONAL_CODES:
+                return False
+            raise
+        return False  # a second 200: the header was ignored
+    finally:
+        try:
+            boto_client.delete_object(Bucket=bucket, Key=key)
+        except Exception as e:  # noqa: BLE001 -- a leftover probe key is harmless
+            logger.debug("could not delete probe key %s/%s: %s", bucket, key, e)
+
+
+def _marker_is_ours(marker: dict[str, Any] | None, identity: dict[str, Any]) -> bool:
+    return (
+        marker is not None
+        and marker.get("deployment") == identity["deployment"]
+        and marker.get("cluster") == identity["cluster"]
+    )
+
+
+def write_owner_marker(
+    boto_client: Any, bucket: str, identity: dict[str, Any], *, mode: str | None = None
+) -> MarkerResult:
+    """Claim a tagless bucket with ``.lakebench/owner.json`` (SAF-10).
+
+    ``identity`` carries at least ``deployment`` and ``cluster`` (and the
+    namespace, its uid, the time and the Lakebench version). The marker key
+    is written once per attempt:
+
+    - ``conditional`` (the backend enforces ``IfNoneMatch``, proved by
+      ``probe_conditional_put`` on a throwaway key): a conditional PUT; a 412
+      means a marker already exists, and that marker decides. Two clusters
+      racing for one empty bucket get one winner.
+    - ``unconditional`` (no conditional writes): read first and stop on a
+      foreign marker, then a plain PUT, a read and compare, a
+      ``MARKER_FALLBACK_WAIT_S`` wait and a second read. Two clusters writing
+      inside that window can both believe they won (open risk R12).
+
+    ``mode`` skips the probe (the caller's cached answer); otherwise the
+    answer is cached per endpoint for this process. Returns whose marker the
+    bucket carries afterwards. Read and write errors raise.
+    """
+    import json
+
+    from botocore.exceptions import ClientError
+
+    endpoint = _endpoint_of(boto_client)
+    if mode is None:
+        mode = _MARKER_WRITE_MODE.get(endpoint)
+    if mode is None:
+        mode = "conditional" if probe_conditional_put(boto_client, bucket) else "unconditional"
+        _MARKER_WRITE_MODE[endpoint] = mode
+        if mode == "unconditional":
+            logger.warning(
+                "S3 endpoint %s does not enforce conditional writes; owner markers are "
+                "written with a read-back check only (two clusters claiming one empty "
+                "bucket at the same moment could both believe they won)",
+                endpoint or "(default)",
+            )
+    body = json.dumps(identity, sort_keys=True).encode("utf-8")
+    if mode == "conditional":
+        try:
+            boto_client.put_object(
+                Bucket=bucket,
+                Key=OWNER_MARKER_KEY,
+                Body=body,
+                IfNoneMatch="*",
+                ContentType="application/json",
+            )
+        except ClientError as e:
+            if not (_error_code(e) == "PreconditionFailed" or _http_status(e) == 412):
+                raise
+            existing = read_owner_marker(boto_client, bucket)
+            return MarkerResult(_marker_is_ours(existing, identity), existing, mode)
+        got = read_owner_marker(boto_client, bucket)
+        return MarkerResult(_marker_is_ours(got, identity), got, mode)
+    existing = read_owner_marker(boto_client, bucket)
+    if existing is not None and not _marker_is_ours(existing, identity):
+        return MarkerResult(False, existing, mode)
+    boto_client.put_object(
+        Bucket=bucket, Key=OWNER_MARKER_KEY, Body=body, ContentType="application/json"
+    )
+    got = read_owner_marker(boto_client, bucket)
+    if not _marker_is_ours(got, identity):
+        return MarkerResult(False, got, mode)
+    _marker_sleep(MARKER_FALLBACK_WAIT_S)
+    got = read_owner_marker(boto_client, bucket)
+    return MarkerResult(_marker_is_ours(got, identity), got, mode)
+
+
+def owner_marker_identity(
+    deployment: str, cluster: str, namespace: str, namespace_uid: str = ""
+) -> dict[str, Any]:
+    """The marker body for this deployment on this cluster."""
+    from datetime import datetime, timezone
+
+    try:
+        from importlib.metadata import version
+
+        lb_version = version("lakebench")
+    except Exception:  # noqa: BLE001 -- informational only
+        lb_version = "unknown"
+    return {
+        "deployment": deployment,
+        "cluster": cluster,
+        "namespace": namespace,
+        "namespace_uid": namespace_uid,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "lakebench_version": lb_version,
+    }
+
+
 def write_deploy_nonce(core_v1: Any, namespace: str, nonce: str | None = None) -> str:
     """Stamp a deploy nonce on the namespace and return it.
 

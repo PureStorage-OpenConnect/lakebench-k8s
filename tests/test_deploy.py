@@ -1482,11 +1482,13 @@ class TestTaglessAdoptionRecord:
             "td-silver": False,
             "td-gold": True,
         }
-        client.raw_client.list_objects_v2.side_effect = lambda Bucket, MaxKeys: {
-            "KeyCount": 1 if Bucket == "td-silver" else 0
-        }
+        client.raw_client.list_objects_v2.side_effect = lambda Bucket, MaxKeys, **_k: (
+            {"KeyCount": 1, "Contents": [{"Key": "d/1"}]} if Bucket == "td-silver" else {}
+        )
         with (
             patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False),
+            # The marker itself is tested on the S3 fake (test_owner_marker.py).
+            patch("lakebench.deploy.engine.DeploymentEngine._stamp_owner_marker", return_value=""),
             patch("lakebench.s3.S3Client", return_value=client),
             patch(
                 "lakebench.deploy.ownership.verify_bucket_ownership",
@@ -1526,11 +1528,10 @@ def test_preprovisioned_empty_tagless_buckets_are_recorded(force_legacy):
     engine = DeploymentEngine(config, k8s_client=_mock_k8s())
     client = MagicMock()
     client._init_error = None
-    client.raw_client.list_objects_v2.side_effect = lambda Bucket, MaxKeys: {
-        "KeyCount": 1 if Bucket == "td-gold" else 0
-    }
+    client.has_user_objects.side_effect = lambda bucket: bucket == "td-gold"
     with (
         patch("lakebench.s3.S3Client", return_value=client),
+        patch("lakebench.deploy.engine.DeploymentEngine._stamp_owner_marker", return_value=""),
         patch(
             "lakebench.deploy.ownership.verify_bucket_ownership",
             side_effect=lambda _b, name, _id, **_k: IdentityReport(

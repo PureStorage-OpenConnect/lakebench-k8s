@@ -864,8 +864,7 @@ def _classify_buckets(
                 continue
             if prefix_ok and bucket in recorded_only_set:
                 try:
-                    resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
-                    holds = int(resp.get("KeyCount", 0)) > 0
+                    holds = s3.has_user_objects(bucket)
                 except Exception:  # noqa: BLE001
                     holds = True
             else:
@@ -1310,8 +1309,7 @@ def _buckets_hold_data(engine) -> bool | None:
         for bucket in (s3_cfg.buckets.bronze, s3_cfg.buckets.silver, s3_cfg.buckets.gold):
             if not s3.bucket_exists(bucket):
                 continue
-            resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
-            if int(resp.get("KeyCount", 0)) > 0:
+            if s3.has_user_objects(bucket):
                 return True
         return False
     except Exception as e:  # noqa: BLE001
@@ -2906,7 +2904,9 @@ def destroy_all(
                 for bucket in buckets:
                     guard()
                     try:
-                        deleted = s3.empty_bucket(bucket, before_batch=guard)
+                        # Destroy releases the bucket: its owner marker goes
+                        # too (SAF-10), so a later claim starts from scratch.
+                        deleted = s3.empty_bucket(bucket, before_batch=guard, keep_prefixes=())
                     except S3BucketVanished:
                         # A concurrent destroy of this deployment deleted
                         # it mid-empty. That run owns the rest of the

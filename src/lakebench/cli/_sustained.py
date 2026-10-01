@@ -414,16 +414,18 @@ def _c360_existing_state(cfg, *, clear_raw: bool) -> list[str]:
 
         raw = bronze_datagen_prefix(cfg).strip("/")
         prefixes.append((b.bronze, f"{raw}/"))
+    from lakebench.s3.client import has_user_objects
+
     found = []
     for bucket, prefix in prefixes:
         try:
-            resp = raw_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+            holds = has_user_objects(raw_client, bucket, prefix)
         except Exception as e:  # noqa: BLE001
             if "NoSuchBucket" in str(e):
                 continue
             found.append(f"{bucket}/{prefix} (could not list: {e})")
             continue
-        if resp.get("KeyCount", len(resp.get("Contents", []))):
+        if holds:
             found.append(f"{bucket}/{prefix}")
     return found
 
@@ -2108,16 +2110,16 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
     deadline = _t.time() + timeout_seconds
     interval = 5.0
     while _t.time() < deadline:
+        from lakebench.s3.client import list_user_keys
+
         try:
-            resp = raw.list_objects_v2(Bucket=bronze, MaxKeys=50)
+            keys = list_user_keys(raw, bronze, limit=50)
         except Exception as e:  # noqa: BLE001
-            logger.warning("list_objects_v2 on %s failed: %s", bronze, e)
+            logger.warning("listing s3://%s failed: %s", bronze, e)
             _t.sleep(interval)
             continue
-        for item in resp.get("Contents") or []:
-            key = item.get("Key", "")
-            if key.endswith(".parquet"):
-                return True
+        if any(key.endswith(".parquet") for key in keys):
+            return True
         _t.sleep(interval)
     logger.warning(
         "No parquet under s3://%s/ after %ds; running preflight anyway (it will "

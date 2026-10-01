@@ -791,6 +791,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (FlashBlade), deploy adopts a pre-existing empty bucket, or a
   pre-provisioned one with `create_buckets: false`, only with
   `--force-legacy`; without it the bucket is used but destroy leaves its data.
+  There the stamp is an owner marker object, `.lakebench/owner.json`, written
+  with a conditional PUT where the backend enforces it. `.lakebench/` keys
+  are never counted as data, and `clean` and `--regenerate` keep them. The
+  `boto3` floor rises to 1.35.2, the first release whose botocore accepts
+  `IfNoneMatch` on PutObject.
 - **`destroy` removes what it used to leave in a surviving namespace.** With
   `create_namespace: false`, destroy left the PostgreSQL ServiceAccount, the
   `lakebench-ca-certificate` Secret (with `s3.ca_cert`) and, with

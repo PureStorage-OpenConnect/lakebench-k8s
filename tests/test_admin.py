@@ -248,6 +248,7 @@ class TestReclaimBucket:
         s3 = MagicMock()
         s3._init_error = None
         s3.raw_client.list_objects_v2.return_value = {"KeyCount": key_count, "Contents": []}
+        s3.has_user_objects.return_value = key_count > 0
         cfg = MagicMock()
         cfg.name = "new-owner"
         cfg.platform.storage.s3 = MagicMock()

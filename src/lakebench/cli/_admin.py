@@ -1127,11 +1127,11 @@ def reclaim_bucket(
             # bucket. Inside the lease every reclaim serialises.
             if not force_nonempty:
                 try:
-                    r = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+                    holds = s3.has_user_objects(bucket)
                 except Exception as e:  # noqa: BLE001
                     print_error(f"cannot list {bucket!r}: {e}")
                     raise typer.Exit(ExitCode.FAILED) from e
-                if r.get("KeyCount", 0) > 0 or r.get("Contents"):
+                if holds:
                     print_error(
                         f"bucket {bucket!r} has objects; refusing to rewrite "
                         "ownership tag. Pass --force-nonempty to acknowledge that "
@@ -1169,21 +1169,39 @@ def reclaim_bucket(
                     )
                     raise typer.Exit(ExitCode.PREREQUISITE) from None
                 if bucket_name_matches_deployment(bucket, cfg.name, others):
+                    # SAF-10: on a tagless backend the claim is the owner
+                    # marker. reclaim is the owner's override, so it replaces
+                    # whatever marker is there, then reads it back.
+                    import json as _json
+
+                    from lakebench.deploy.ownership import (
+                        OWNER_MARKER_KEY,
+                        owner_marker_identity,
+                        read_owner_marker,
+                    )
+
+                    marker = owner_marker_identity(cfg.name, my_cluster, cfg.get_namespace())
+                    s3.raw_client.put_object(
+                        Bucket=bucket,
+                        Key=OWNER_MARKER_KEY,
+                        Body=_json.dumps(marker, sort_keys=True).encode("utf-8"),
+                        ContentType="application/json",
+                    )
+                    got = read_owner_marker(s3.raw_client, bucket) or {}
+                    if (got.get("deployment"), got.get("cluster")) != (cfg.name, my_cluster):
+                        print_error(
+                            f"bucket {bucket!r}: the owner marker did not read back as "
+                            f"{cfg.name!r} on this cluster (read {got!r})"
+                        )
+                        raise typer.Exit(1) from None
                     print_success(
-                        f"bucket {bucket!r} on a backend that does not "
-                        "support tagging: nothing to write, and the "
-                        f"name grants deployment {cfg.name!r} a "
-                        "longest-prefix claim over any sibling "
-                        "deployment on the cluster. Destroy empties and "
-                        "deletes it only if this deployment's "
-                        "created-buckets record lists it (deploy "
-                        "created it), and empties it without deleting "
-                        "if deploy recorded adopting it empty; otherwise "
-                        "destroy leaves it in place. Before considering "
-                        "--force-legacy as a last resort, first check "
-                        "your cluster context with `oc whoami && kubectl "
-                        "config current-context` and confirm it matches "
-                        "the deployment's expected cluster."
+                        f"bucket {bucket!r} on a backend that does not support tagging: "
+                        f"wrote its owner marker ({OWNER_MARKER_KEY}) for deployment "
+                        f"{cfg.name!r} on this cluster. The name also grants it a "
+                        "longest-prefix claim over any sibling deployment on the cluster, "
+                        "so deploy, destroy and clean treat the bucket as this "
+                        "deployment's; destroy deletes it only if this deployment "
+                        "created it."
                     )
                     raise typer.Exit(0) from None
                 print_error(

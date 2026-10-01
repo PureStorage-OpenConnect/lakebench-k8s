@@ -229,8 +229,10 @@ def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
     refusing the deploy for a different reason and cleanup is
     best-effort.
     """
+    from lakebench.s3.client import has_user_objects
+
     try:
-        r = boto_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        holds = has_user_objects(boto_client, bucket)
     except Exception:  # noqa: BLE001
         logger.warning(
             "orphan bucket %s: could not verify empty before delete; "
@@ -239,7 +241,7 @@ def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
             exc_info=True,
         )
         return
-    if r.get("KeyCount", 0) > 0 or r.get("Contents"):
+    if holds:
         logger.warning(
             "orphan bucket %s: contains objects (a concurrent process "
             "wrote between our CreateBucket and our ownership refusal). "
@@ -1340,6 +1342,7 @@ class DeploymentEngine:
                 IdentityVerdict,
                 api_server_fingerprint,
                 bucket_name_matches_deployment,
+                cluster_stamp,
                 list_lakebench_deployment_names,
                 record_adopted_empty_buckets,
                 verify_bucket_ownership,
@@ -1384,12 +1387,44 @@ class DeploymentEngine:
                     continue
                 if not bucket_name_matches_deployment(name, self.config.name, others):
                     continue
-                resp = s3.raw_client.list_objects_v2(Bucket=name, MaxKeys=1)
-                if int(resp.get("KeyCount", 0)) == 0:
+                if not s3.has_user_objects(name):
                     empty.append(name)
             record_adopted_empty_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), empty)
+            stamp = cluster_stamp(fp)
+            for name in empty:
+                if stamp is None:
+                    break
+                refused = self._stamp_owner_marker(s3.raw_client, name, self.config.name, stamp)
+                if refused:
+                    logger.warning("pre-provisioned bucket not claimed: %s", refused)
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not record pre-provisioned empty buckets: %s", e)
+
+    def _stamp_owner_marker(self, boto: Any, bucket: str, deployment: str, cluster: str) -> str:
+        """Write the SAF-10 owner marker on a tagless bucket; "" when it is ours.
+
+        Returns the refusal text when the bucket turns out to carry another
+        deployment's or another cluster's marker (a racing claim won).
+        """
+        from lakebench.deploy.ownership import owner_marker_identity, write_owner_marker
+
+        namespace = self.config.get_namespace()
+        try:
+            uid = self.k8s.get_namespace_uid(namespace)
+        except Exception:  # noqa: BLE001 -- informational in the marker
+            uid = ""
+        identity = owner_marker_identity(
+            deployment, cluster, namespace, uid if isinstance(uid, str) else ""
+        )
+        result = write_owner_marker(boto, bucket, identity)
+        if result.ours:
+            return ""
+        found = result.marker or {}
+        return (
+            f"bucket {bucket!r} is claimed by deployment {found.get('deployment')!r} on "
+            f"cluster {found.get('cluster')!r} (.lakebench/owner.json), not by "
+            f"{deployment!r} on this cluster"
+        )
 
     def _deploy_buckets(self, force_legacy: bool = False) -> DeploymentResult:
         """Create S3 buckets if create_buckets is enabled.
@@ -1494,6 +1529,7 @@ class DeploymentEngine:
             verify_bucket_ownership,
             write_bucket_ownership_tag,
         )
+        from lakebench.s3.client import has_user_objects
 
         identity = build_identity_from_config(
             self.config,
@@ -1714,13 +1750,14 @@ class DeploymentEngine:
                         identity.name,
                     )
                     unsupported_warned = True
+                stamp = was_created or name in _recorded_created() or name in adopted_record
                 if was_created:
                     logger.info(
                         "bucket %s: created under name-prefix ownership; "
                         "no tag written (backend unsupported).",
                         name,
                     )
-                elif name not in _recorded_created() and name not in adopted_record:
+                elif not stamp:
                     # The name does not prove ownership of a pre-existing
                     # bucket, so destroy will not empty it on name alone. An
                     # empty, unmarked one may be another cluster's bucket not
@@ -1738,9 +1775,9 @@ class DeploymentEngine:
                         )
                         continue
                     try:
-                        resp = boto.list_objects_v2(Bucket=name, MaxKeys=1)
-                        if int(resp.get("KeyCount", 0)) == 0:
+                        if not has_user_objects(boto, name):
                             adopted_empty.append(name)
+                            stamp = True
                         else:
                             logger.warning(
                                 "bucket %s already holds objects and the backend has no "
@@ -1750,6 +1787,18 @@ class DeploymentEngine:
                             )
                     except Exception as e:  # noqa: BLE001
                         logger.warning("could not check whether bucket %s is empty: %s", name, e)
+                if stamp:
+                    # SAF-10: claim it for this deployment on this cluster
+                    # with the owner marker (created, recorded, or adopted
+                    # empty with --force-legacy).
+                    refused = self._stamp_owner_marker(boto, name, identity.name, my_cluster)
+                    if refused:
+                        return DeploymentResult(
+                            component="s3-buckets",
+                            status=DeploymentStatus.FAILED,
+                            message=f"Bucket ownership refused: {refused}",
+                            elapsed_seconds=time.time() - start,
+                        )
                 continue
             # LB-159: keep the created-by-lakebench marker across redeploys
             # (the tag set is rewritten each time) and add it on create.
