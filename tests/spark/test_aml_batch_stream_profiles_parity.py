@@ -110,9 +110,9 @@ def profiles(spark, load_script_module):
     for one bronze corpus built once by each path."""
     import silver_stream_financial as ss
 
-    # Build a shared bronze corpus: 10 transactions among five entities;
+    # Build a shared bronze corpus: 11 transactions among five entities;
     # amounts spread enough that stddev is non-zero. A, Z, B and Y both send
-    # and receive (T9, T10); C only sends.
+    # and receive (T9 to T11); C only sends.
     base = datetime(2024, 6, 1)
     corpus = [
         _row("T1", "A", "Z", base + timedelta(days=0), "100.00"),
@@ -125,6 +125,7 @@ def profiles(spark, load_script_module):
         _row("T8", "C", "Y", base + timedelta(days=7), "175.00"),
         _row("T9", "Z", "A", base + timedelta(days=8), "60.00"),
         _row("T10", "Y", "B", base + timedelta(days=9), "90.00"),
+        _row("T11", "Z", "Y", base + timedelta(days=10), "45.00"),
     ]
     bronze = spark.createDataFrame(corpus, _PACS_SCHEMA)
 
@@ -144,9 +145,12 @@ def profiles(spark, load_script_module):
 
     # --- Stream path: feed the same corpus as two micro-batches through
     # _merge_batch (proxy for the streaming trigger; the MERGE code path
-    # is identical). The first batch takes the MERGE's INSERT branch for
-    # every entity; the second takes the UPDATE branch, where the Welford
-    # parallel merge runs, for every entity the first batch saw. streaming_query_id is monkey-patched: Spark only
+    # is identical). Batch 0 (T1 to T5) inserts A, B, Y and Z; batch 1 (T6
+    # to T11) inserts C and updates the other four. In the UPDATE, the
+    # Welford arms run as: B sends in both batches (the general arm with the
+    # cross-term); Z only received in batch 0 and sends twice in batch 1
+    # (the receive-then-send arm, and stddev at exactly two sends); A sends
+    # only in batch 0 (the keep arm). streaming_query_id is monkey-patched: Spark only
     # binds the query id inside a real foreachBatch and a direct call
     # would otherwise raise from streaming_query_id().
     #
@@ -277,11 +281,13 @@ def test_batch_and_stream_produce_equivalent_profiles(profiles):
             )
         # avg_amount_usd is a mean; tolerance same as stddev.
         if b["avg_amount_usd"] is None:
-            assert s["avg_amount_usd"] is None
+            assert s["avg_amount_usd"] is None, (
+                f"{eid}.avg: batch NULL vs stream {s['avg_amount_usd']}"
+            )
         else:
             assert math.isclose(
                 float(b["avg_amount_usd"]),
                 float(s["avg_amount_usd"]),
                 rel_tol=1e-9,
                 abs_tol=1e-9,
-            )
+            ), f"{eid}.avg drifted: batch={b['avg_amount_usd']}, stream={s['avg_amount_usd']}"
