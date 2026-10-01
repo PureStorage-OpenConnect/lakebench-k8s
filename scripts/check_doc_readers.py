@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every tracked doc has a reader (PRC-5), and the docs' links resolve.
+"""Every tracked doc has a reader, and the docs' links resolve.
 
 A file in the universe (every tracked ``*.md``, every tracked file under
 ``docs/`` and ``scripts/``, and the top-level ``*.py`` and ``*.sh``) passes

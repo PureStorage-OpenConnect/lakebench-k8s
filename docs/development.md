@@ -202,7 +202,11 @@ under `docs/` or `scripts/`, or top-level script that is neither linked from
 comment or docstring does not count); link a new page from `docs/README.md`.
 `tests/test_doc_links.py` checks that every relative link, `#anchor` and
 backticked `src/`, `tests/`, `scripts/` or `datagen_rs/` path in the docs
-resolves. The test job runs
+resolves. `tests/test_citations.py` fails when a shipped file (under `src/`,
+`docs/`, `scripts/`, `datagen_rs/` or `examples/`, or the README) gains a
+bug id, an internal plan, requirement or work-item id, or a gotcha number,
+none of which a reader of the package can look up; state the reason in
+words instead. The test job runs
 `pytest tests/ -rs` (excluding `tests/test_e2e.py` and
 `tests/test_integration.py`) on Python 3.10 and 3.13, the oldest and newest
 supported versions. It runs to the end rather than stopping at the first
