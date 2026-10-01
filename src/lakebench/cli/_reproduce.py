@@ -982,7 +982,7 @@ def _verify(
         ).architecture.benchmark.iterations
     except ConfigError as e:
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.USAGE) from None
     _mismatch = _sample_mismatch(meta, _iterations)
     if _mismatch:
         print_error(_mismatch)

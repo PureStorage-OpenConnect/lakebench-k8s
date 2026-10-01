@@ -59,7 +59,7 @@ def _load_config(config_path: Path):
     except ConfigError as e:
         # One line, not a traceback.
         console.print(f"[red]ERROR[/red] {escape(str(e))}")
-        raise typer.Exit(1) from None
+        raise typer.Exit(ExitCode.USAGE) from None  # config.validation, config.name_required
     _assert_financial_schema(cfg)
     return cfg
 

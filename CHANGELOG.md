@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
-  add; `config upgrade` refuses one too. A nameless config no longer gets a
+  add (`config upgrade` is removed, see Removed). A nameless config no longer gets a
   name written to `.lakebench/state.json`; that file is only read. Because
   v1.6 gave every nameless config in a directory the name in that file,
   nothing ties a v1.6 deployment to any one of them, so `destroy`, `stop`,
@@ -21,9 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deployment and still load it under that name. Without that file,
   `destroy`, `stop` and `admin` refuse a nameless config.
 - **Removed config keys are refused by the commands that change data**
-  (the list above, except `config upgrade`), with what to do instead.
-  `destroy`, `stop`, `status`, `logs`, `report`, `info`, `config show`,
-  `config upgrade` and `admin` still load such a config and list the
+  (the list above), with what to do instead.
+  `destroy`, `stop`, `status`, `logs`, `report`, `info`, `config show`
+  and `admin` still load such a config and list the
   dropped keys in one "Upgrade notes" block on stderr. An old
   `datagen.file_size` is treated the same way.
 - **Counts are bounded at load.** `trino.worker.replicas` 1 to 256,
@@ -271,6 +271,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   YAML mapping is refused with one line naming the problem instead of an
   `AttributeError`.
 
+### Fixed
+
+- Trino compaction of the Customer 360 silver table no longer fails with
+  "Exceeded limit of 100 open writers for partitions" when it rewrites files
+  in more than 100 `interaction_date` partitions, as the silver of the one
+  recorded continuous Customer 360 run did (LB-210, n=1). A silver table with more than 90 partitions is now
+  compacted in chunks of at most 90, after a read of its partition values.
+  This also applies to batch runs, whose single statement happened to
+  succeed (batch silver holds a few large files per partition): the
+  pre-benchmark maintenance of a batch Customer 360 run on Trino now runs
+  one partition read and several `optimize` statements where it ran one,
+  which can change the recorded maintenance time. Compaction outcomes count
+  tables, not statements, and `experiment.effective_maintenance` names each
+  table whose compaction failed in `reasons` and
+  `detail.compaction_failures`. The maintenance policy id and the effective
+  maintenance `id` are unchanged.
 ### Removed
 - **`config upgrade` refuses (SAF-3).** It rewrote configs lossily, in place
   by default, and wrote the S3 secret key into the result in plaintext. It

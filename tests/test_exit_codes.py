@@ -559,6 +559,11 @@ def _scenario_config_validation(monkeypatch, tmp_path):
     return _runner().invoke(app, ["info", str(tmp_path / "c.yaml")])
 
 
+def _scenario_config_name_required(monkeypatch, tmp_path):
+    (tmp_path / "c.yaml").write_text("recipe: hive-iceberg-spark-trino\n")
+    return _runner().invoke(app, ["deploy", str(tmp_path / "c.yaml"), "--yes"])
+
+
 def _scenario_config_unsupported(monkeypatch, tmp_path):
     monkeypatch.setattr("lakebench.cli._run._run_local_mode", lambda *a, **k: None)
     cfg = _init_config(tmp_path)
@@ -796,6 +801,7 @@ SCENARIOS = {
     "financial.k8s_unreachable": _scenario_financial_k8s_unreachable,
     "config.validation": _scenario_config_validation,
     "config.unsupported": _scenario_config_unsupported,
+    "config.name_required": _scenario_config_name_required,
     "cli.bad_argument": _scenario_cli_bad_argument,
     "k8s.unreachable": _scenario_k8s_unreachable,
     "s3.unreachable": _scenario_s3_unreachable,
@@ -847,6 +853,7 @@ EXPECTED_OUTPUT = {
     "run.pass": "Local mode is sized",
     "run.verdict_failed": "Local mode is sized",
     "config.validation": "Config error",
+    "config.name_required": "config has no name, so it cannot change data",
     "reproduce.commit_drift": "Commit drift",
     "reproduce.drift": "scale_ratio",
 }

@@ -311,7 +311,6 @@ VERB_PURPOSES = [
     ("lakebench.cli", ["logs", "hive"], LoadPurpose.READ, False),
     ("lakebench.cli", ["info"], LoadPurpose.INSPECT, False),
     ("lakebench.cli", ["validate"], LoadPurpose.MUTATE, False),
-    ("lakebench.cli._config", ["config", "upgrade"], LoadPurpose.INSPECT, False),
     ("lakebench.cli._config", ["config", "storage"], LoadPurpose.INSPECT, False),
     ("lakebench.cli._config", ["config", "show"], LoadPurpose.INSPECT, False),
     ("lakebench.cli._config", ["config", "recommend"], LoadPurpose.INSPECT, False),
