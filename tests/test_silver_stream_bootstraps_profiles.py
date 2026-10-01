@@ -7,14 +7,13 @@ imported and its SQL is executed at startup.
 
 from __future__ import annotations
 
-import sys
 import types
 from pathlib import Path
 
 import pytest
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(_SCRIPTS_DIR))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def test_stream_imports_ddl_profiles():

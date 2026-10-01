@@ -36,7 +36,7 @@ pytest.importorskip("pyspark")
 _HERE = Path(__file__).resolve().parent
 _SCRIPTS = _HERE.parents[1] / "src/lakebench/spark/scripts"
 
-sys.path.insert(0, str(_HERE))
+pytestmark = pytest.mark.usefixtures("load_script")
 from _d_full_helpers import iceberg_jar  # noqa: E402
 
 

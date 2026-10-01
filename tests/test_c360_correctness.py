@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ast
 import json
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -311,12 +310,8 @@ def test_kpi_averages_are_conditional():
     assert 'count("support_ticket_id").alias("support_tickets_created")' in body
 
 
-def test_c360_bronze_path(monkeypatch):
-    sys.path.insert(0, str(SCRIPTS))
-    try:
-        from common import c360_bronze_path
-    finally:
-        sys.path.remove(str(SCRIPTS))
+def test_c360_bronze_path(monkeypatch, load_script):
+    c360_bronze_path = load_script("common").c360_bronze_path
     base = "s3a://b/customer/interactions/"
     monkeypatch.delenv("LB_BRONZE_CYCLE", raising=False)
     assert c360_bronze_path("s3a://b/", appending=True) == base
@@ -328,12 +323,8 @@ def test_c360_bronze_path(monkeypatch):
     assert c360_bronze_path("s3a://b/", appending=False) == base + "part-[0-9]*.parquet"
 
 
-def test_c360_bronze_run_path(monkeypatch):
-    sys.path.insert(0, str(SCRIPTS))
-    try:
-        from common import c360_bronze_run_path
-    finally:
-        sys.path.remove(str(SCRIPTS))
+def test_c360_bronze_run_path(monkeypatch, load_script):
+    c360_bronze_run_path = load_script("common").c360_bronze_run_path
     base = "s3a://b/customer/interactions/"
     monkeypatch.delenv("LB_BRONZE_CYCLE", raising=False)
     assert c360_bronze_run_path("s3a://b/") == base

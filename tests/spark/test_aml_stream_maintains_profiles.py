@@ -41,9 +41,10 @@ def _have_jars() -> bool:
     return any(n.startswith("iceberg-spark-runtime") for n in names)
 
 
-pytestmark = pytest.mark.skipif(
-    not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"
-)
+pytestmark = [
+    pytest.mark.skipif(not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"),
+    pytest.mark.usefixtures("load_script"),
+]
 
 
 _PACS_SCHEMA = (
@@ -150,8 +151,6 @@ def _bootstrap_stream(spark, ss):
 
 
 def test_stream_maintains_profiles_monotone_across_five_batches(spark, tmp_path):
-    scripts = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
-    sys.path.insert(0, str(scripts))
     import silver_stream_financial as ss
 
     _bootstrap_stream(spark, ss)

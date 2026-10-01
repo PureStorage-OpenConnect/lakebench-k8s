@@ -43,9 +43,10 @@ def _have_jars() -> bool:
     return any(n.startswith("iceberg-spark-runtime") for n in names)
 
 
-pytestmark = pytest.mark.skipif(
-    not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"
-)
+pytestmark = [
+    pytest.mark.skipif(not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"),
+    pytest.mark.usefixtures("load_script"),
+]
 
 
 _PACS_SCHEMA = (
@@ -152,8 +153,6 @@ def test_profiles_replay_is_self_idempotent_on_stream_id_batch_id(spark):
     because the phase-4 MERGE's self-idempotency is what actually stops
     the double-count.
     """
-    scripts = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
-    sys.path.insert(0, str(scripts))
     import silver_stream_financial as ss
     from common import _RUNS_STARTED
 

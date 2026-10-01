@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import ast
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(SCRIPTS))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 ICEBERG_SCRIPTS = sorted(p for p in SCRIPTS.glob("*.py") if not p.stem.endswith("_delta"))
 

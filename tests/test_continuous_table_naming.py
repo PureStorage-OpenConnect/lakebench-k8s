@@ -89,9 +89,8 @@ def _env(manifest: dict) -> dict[str, str]:
 
 
 @pytest.fixture()
-def scripts(monkeypatch):
+def scripts(monkeypatch, load_script):
     """Import the pipeline scripts with pyspark stubbed out."""
-    monkeypatch.syspath_prepend(str(SCRIPTS))
     pyspark = types.ModuleType("pyspark")
     sql = types.ModuleType("pyspark.sql")
     sql.SparkSession = MagicMock()  # type: ignore[attr-defined]
@@ -103,11 +102,6 @@ def scripts(monkeypatch):
         ("pyspark.sql.functions", functions),
     ):
         monkeypatch.setitem(sys.modules, name, mod)
-    for m in ("common", "bronze_verify", "bronze_ingest_delta"):
-        sys.modules.pop(m, None)
-    yield
-    for m in ("common", "bronze_verify", "bronze_ingest_delta"):
-        sys.modules.pop(m, None)
 
 
 def _use_env(monkeypatch, manifest: dict) -> None:

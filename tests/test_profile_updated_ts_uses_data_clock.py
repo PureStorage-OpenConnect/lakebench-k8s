@@ -16,7 +16,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 _SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
+
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def test_build_entity_profiles_does_not_call_current_timestamp():
@@ -59,9 +63,7 @@ def test_build_entity_profiles_signature_takes_data_clock():
 
     pytest.importorskip("pyspark")
     import inspect
-    import sys
 
-    sys.path.insert(0, str(_SCRIPTS))
     import silver_build_financial as sbf
 
     sig = inspect.signature(sbf.build_entity_profiles)
@@ -79,13 +81,10 @@ def test_build_entity_profiles_uses_data_clock_expression():
 
     pytest.importorskip("pyspark")
 
-    import sys
     from datetime import date, datetime
 
-    from pyspark.sql import Row, SparkSession
-
-    sys.path.insert(0, str(_SCRIPTS))
     import silver_build_financial as sbf
+    from pyspark.sql import Row, SparkSession
 
     spark = (
         SparkSession.builder.master("local[1]")

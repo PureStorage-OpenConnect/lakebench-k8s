@@ -31,10 +31,12 @@ def _find_jar() -> str | None:
 
 
 _JAR = _find_jar()
-pytestmark = pytest.mark.skipif(
-    _JAR is None, reason="no Iceberg runtime jar in LB_TEST_ICEBERG_JAR / LB_SPARK_TEST_JARS"
-)
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+pytestmark = [
+    pytest.mark.skipif(
+        _JAR is None, reason="no Iceberg runtime jar in LB_TEST_ICEBERG_JAR / LB_SPARK_TEST_JARS"
+    ),
+    pytest.mark.usefixtures("load_script"),
+]
 
 
 def _session(warehouse):
@@ -213,6 +215,7 @@ def _check_late_entity(spark):
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     _spark = _session(sys.argv[1])
     try:

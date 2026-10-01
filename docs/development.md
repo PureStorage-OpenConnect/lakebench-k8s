@@ -54,6 +54,29 @@ pytest tests/ -v -m "integration"    # Integration tests (K8s + S3)
 pytest tests/ -v -m "e2e"            # Full deploy/run/destroy workflow
 ```
 
+### Testing the Spark scripts
+
+The scripts in `src/lakebench/spark/scripts/` import each other by plain
+name (`from common import ...`), as they do in the driver pod. Tests load
+them through the `load_script` fixture in `tests/conftest.py`, which gives
+each test a private copy of every script it imports, `common` included:
+
+```python
+def test_gate(load_script):
+    sbf, common = load_script("silver_build_financial", extra=("common",))
+```
+
+A module whose tests import scripts inside the test body can mark itself
+with `pytestmark = pytest.mark.usefixtures("load_script")`; while a test
+runs, `import common` resolves to that test's copy. `load_script_module`
+keeps one copy per test module, for module-scoped fixtures that run script
+code. Do not put the scripts directory on `sys.path` or pop script modules
+out of `sys.modules`: `tests/test_script_loader_static.py` fails on it, and
+a teardown hook in `tests/conftest.py` fails the test that leaves the
+scripts directory on `sys.path` or a script module in `sys.modules`. A child
+process (a test file run as `python tests/spark/test_x.py`) sets its own
+path in its `if __name__ == "__main__":` block.
+
 ### Test Markers
 
 Tests are organized with pytest markers defined in `pyproject.toml`:

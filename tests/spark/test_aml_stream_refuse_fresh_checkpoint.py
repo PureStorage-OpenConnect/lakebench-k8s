@@ -27,9 +27,10 @@ def _have_jars() -> bool:
     return all(any(n.startswith(k) for n in names) for k in _NEEDED)
 
 
-pytestmark = pytest.mark.skipif(
-    not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"
-)
+pytestmark = [
+    pytest.mark.skipif(not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"),
+    pytest.mark.usefixtures("load_script"),
+]
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +61,6 @@ def spark(tmp_path_factory):
 
 def test_refuse_fresh_checkpoint_over_populated_aml_silver(spark, tmp_path):
     """Populated silver.transactions + fresh checkpoint -> SilverAbort."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     from common import SilverAbort, refuse_fresh_checkpoint_over_data
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")
@@ -78,7 +78,6 @@ def test_refuse_fresh_checkpoint_over_populated_aml_silver(spark, tmp_path):
 
 def test_refuse_accepts_single_str_arg(spark, tmp_path):
     """Backwards compatibility: str signature still works."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     from common import SilverAbort, refuse_fresh_checkpoint_over_data
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")
@@ -90,7 +89,6 @@ def test_refuse_accepts_single_str_arg(spark, tmp_path):
 
 def test_refuse_no_op_when_all_tables_empty(spark, tmp_path):
     """Empty tables + fresh checkpoint: no refusal."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     from common import refuse_fresh_checkpoint_over_data
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")

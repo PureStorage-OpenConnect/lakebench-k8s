@@ -6,8 +6,6 @@ gold adapters (Iceberg + Delta) must apply it.
 
 from __future__ import annotations
 
-import importlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -16,14 +14,8 @@ _SCRIPTS = Path(__file__).resolve().parents[1] / "src" / "lakebench" / "spark" /
 
 
 @pytest.fixture
-def common():
-    p = str(_SCRIPTS)
-    if p not in sys.path:
-        sys.path.insert(0, p)
-    sys.modules.pop("common", None)
-    mod = importlib.import_module("common")
-    yield mod
-    sys.modules.pop("common", None)
+def common(load_script):
+    return load_script("common")
 
 
 def test_match_returns_none(common):

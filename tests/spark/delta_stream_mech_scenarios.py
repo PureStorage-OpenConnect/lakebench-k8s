@@ -28,9 +28,6 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 from c360_stream_scenarios import bronze_df  # noqa: E402
 
 
@@ -218,4 +215,5 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     main()

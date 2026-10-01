@@ -26,8 +26,6 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
-
 
 class SimulatedCrash(RuntimeError):
     pass
@@ -364,4 +362,5 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     main()

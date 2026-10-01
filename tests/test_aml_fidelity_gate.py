@@ -468,11 +468,9 @@ def test_report_records_groups_and_libraries():
 
 
 def test_runner_version_check_reads_job_pins():
-    import importlib.util
+    from tests.conftest import exec_repo_script
 
-    spec = importlib.util.spec_from_file_location("aml_gate_runner", RUNNER_SRC)
-    runner = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(runner)
+    runner = exec_repo_script(RUNNER_SRC, "aml_gate_runner")
     pins = runner.pinned_deps()
     assert pins["scikit-learn"] and pins["numpy"]
     same = {"numpy": pins["numpy"], "scipy": pins["scipy"], "pandas": pins["pandas"]}

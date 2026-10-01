@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 from datetime import date
-from pathlib import Path
 
 import pytest
 
@@ -12,7 +10,7 @@ from lakebench.metrics.collector import MetricsCollector
 from lakebench.spark.job import JobType, SparkJobManager
 from tests.test_spark import _make_config, _mock_k8s
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def _env(config, job_type):

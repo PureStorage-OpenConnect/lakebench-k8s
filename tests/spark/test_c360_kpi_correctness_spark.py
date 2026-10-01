@@ -17,8 +17,9 @@ import pytest
 
 pytest.importorskip("pyspark")
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parents[1] / "src/lakebench/spark/scripts"))
-sys.path.insert(0, str(_HERE))
+# Module-scoped fixtures below run scripts, so the module shares one
+# private script namespace.
+pytestmark = pytest.mark.usefixtures("load_script_module")
 
 # 40,000 rows over 20 days: about 2,000 rows and 360 purchases a day, dense
 # enough for every per-day and every-day-present check to apply.
@@ -58,7 +59,7 @@ def _bronze(spark, rows=ROWS, seed=7, ticket_space=90_000):
 
 
 @pytest.fixture(scope="module")
-def pipeline(spark):
+def pipeline(load_script_module, spark):
     from common import apply_silver_transformations_anchored, get_daily_kpi_aggregations
 
     bronze = _bronze(spark).cache()

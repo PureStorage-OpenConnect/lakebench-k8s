@@ -10,11 +10,13 @@ batch 0 from stream B.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
+import pytest
+
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent / "src/lakebench/spark/scripts"))
+
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def test_delete_predicate_composes_stream_id_and_batch_id():

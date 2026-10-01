@@ -11,14 +11,13 @@ Import- and call-shape test only. Delta jar path is exercised by
 
 from __future__ import annotations
 
-import sys
 import types
 from pathlib import Path
 
 import pytest
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(_SCRIPTS_DIR))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 _SRC = (

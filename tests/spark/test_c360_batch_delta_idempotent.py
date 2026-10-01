@@ -32,9 +32,10 @@ def _have_jars() -> bool:
     return all(any(n.startswith(k) for n in names) for k in _NEEDED)
 
 
-pytestmark = pytest.mark.skipif(
-    not _have_jars(), reason="LB_SPARK_TEST_JARS with Delta jars not set"
-)
+pytestmark = [
+    pytest.mark.skipif(not _have_jars(), reason="LB_SPARK_TEST_JARS with Delta jars not set"),
+    pytest.mark.usefixtures("load_script"),
+]
 
 
 @pytest.fixture(scope="module")
@@ -80,7 +81,6 @@ def _rows(spark, n, start=0):
 
 def test_repeated_cycle_appends_are_delta_no_ops(spark, tmp_path):
     """cycles 0/1/2 each submitted twice; final count matches single-run sequence."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     from common import delta_batch_txn_options
 
     tbl = "spark_catalog.default.delta_idem_txn"
@@ -124,7 +124,6 @@ def test_repeated_cycle_appends_are_delta_no_ops(spark, tmp_path):
 
 def test_new_rebuild_epoch_moves_appid_namespace():
     """A cycle 0 under epoch 1 has a different appId than under epoch 0."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     from common import delta_batch_txn_options
 
     a = delta_batch_txn_options("lb-silver-build", 0, 0)
