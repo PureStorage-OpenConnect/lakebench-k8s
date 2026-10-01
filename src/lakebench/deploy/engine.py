@@ -485,8 +485,8 @@ class DeploymentEngine:
         Format-aware: uses Iceberg or Delta packages depending on the
         configured table format.
         """
+        from lakebench.modules.pipeline_engines.spark.job import iceberg_runtime_suffix_for
         from lakebench.spark.job import (
-            _ICEBERG_RUNTIME_SUFFIX,
             _delta_spark_artifact,
             _parse_spark_major,
             _parse_spark_major_minor,
@@ -508,8 +508,12 @@ class DeploymentEngine:
                 packages.append(f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}")
         else:
             iceberg_version = cfg.architecture.table_format.iceberg.version
+            # The same choice the jobs make (job.py _build_manifest): Iceberg
+            # 1.11+ on Spark 4.1 has a native 4.1 runtime. Reading the
+            # fallback table directly put the 4.0 runtime on Thrift while the
+            # jobs loaded 4.1 (UX D2).
             key = _parse_spark_major_minor(cfg.images.spark)
-            iceberg_suffix = _ICEBERG_RUNTIME_SUFFIX.get(key, f"{key[0]}.{key[1]}")
+            iceberg_suffix = iceberg_runtime_suffix_for(key, iceberg_version)
             packages = [
                 f"org.apache.iceberg:iceberg-spark-runtime-{iceberg_suffix}{scala_suffix}:{iceberg_version}",
                 f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
