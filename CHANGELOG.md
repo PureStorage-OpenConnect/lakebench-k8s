@@ -4,6 +4,16 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **Spark Thrift on Spark 4.1 with Iceberg 1.11 loaded the 4.0 runtime.**
+  Thrift picked the Iceberg runtime from the Spark version alone, so it loaded
+  `iceberg-spark-runtime-4.0` while the pipeline jobs loaded the native
+  `iceberg-spark-runtime-4.1`. Thrift now makes the same choice as the jobs.
+  Thrift deployments on Spark 4.1 with Iceberg 1.11 change runtime jar on
+  their next deploy; other combinations are unchanged.
+
 ## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and

@@ -166,7 +166,9 @@ the artifact depends on both versions:
 | 4.1.x | `4.0_2.13` (borrowed) | `4.1_2.13` (native) |
 
 Spark 4.1 borrows the 4.0 runtime on Iceberg 1.10.x because no 4.1 artifact
-exists there. 1.11.0 publishes one, so 4.1 uses it directly.
+exists there. 1.11.0 publishes one, so 4.1 uses it directly. The Spark jobs
+and the Spark Thrift server choose the runtime the same way, so both load one
+runtime jar.
 
 Example:
 ```yaml
