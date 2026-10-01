@@ -626,7 +626,8 @@ class PairVerdict:
     #: Between-side differences by group (filled from step 6 on, and for
     #: the Workload and Corpus groups at step 3).
     differences: dict[str, list[Difference]] = field(default_factory=dict)
-    #: ``same``, ``different`` or ``unknown`` (``system_relation``); None
+    #: ``same``, ``different``, ``unobserved`` or ``unknown``
+    #: (``system_relation``); None
     #: when the ladder stopped before the System group was read.
     system: str | None = None
     #: For LIKE-FOR-LIKE: architecture differential, system differential,
@@ -807,18 +808,33 @@ def pair_verdict(
         for c in classified[label]:
             notes += [n for n in c.notes if n not in notes]
 
-    # Step 2: each side is one experiment.
+    # Step 2: each side is one experiment. The System is checked over every
+    # pair of members (same_system is not transitive); the rest against the
+    # first member, whose keys equality makes transitive.
+    for label, members in sides:
+        cs = classified[label]
+        for i, ci in enumerate(cs):
+            for cj, rj in zip(cs[i + 1 :], members[i + 1 :], strict=True):
+                pair_rel, pair_why = system_relation(ci, cj)
+                if pair_rel in ("different", UNOBSERVED):
+                    return PairVerdict(
+                        NOT_COMPARABLE,
+                        "2",
+                        [
+                            f"side {label} is not one experiment "
+                            f"({_rid(members[i])} vs {_rid(rj)}):",
+                            f"system: {pair_why}",
+                        ],
+                        notes=notes,
+                    )
+                if pair_why and pair_why not in notes:
+                    notes.append(pair_why)
     for label, members in sides:
         first, first_rec = classified[label][0], members[0]
         for c, rec in zip(classified[label][1:], members[1:], strict=True):
             within: list[str] = []
             for group in (WORKLOAD, CORPUS, ARCHITECTURE, CONDITIONS):
                 within += [str(d) for d in diff_group(first, c, group)]
-            within_rel, within_why = system_relation(first, c)
-            if within_rel in ("different", UNOBSERVED):
-                within.append(f"system: {within_why}")
-            elif within_why and within_why not in notes:
-                notes.append(within_why)
             within += _results_differences(
                 first_rec["experiment"], rec["experiment"], _rid(first_rec), _rid(rec)
             )

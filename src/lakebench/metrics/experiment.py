@@ -846,9 +846,12 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
             missing.append("corpus id v2")
         from lakebench.metrics.system_identity import observed_parts
 
-        if sysid is None or not observed_parts(sysid.get("parts") or {}):
+        if sysid is None or (
+            sysid.get("type") != "local" and not observed_parts(sysid.get("parts") or {})
+        ):
             # A stub from a failed sample is kept as evidence, but it is not
-            # an observed system identity.
+            # an observed system identity. A local run's identity observes no
+            # part by design and is complete as recorded.
             missing.append("system identity")
         from lakebench.metrics.comparability import access_paths
 

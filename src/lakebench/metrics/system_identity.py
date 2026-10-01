@@ -406,6 +406,13 @@ def observe_system(
     parts["storage_backend"] = _safely("storage_backend", lambda: _storage_backend(cfg))
     parts["storage_server"] = _safely("storage_server", lambda: _storage_server(cfg, s3_client))
     parts["scratch"] = _safely("scratch", lambda: _scratch(cfg))
+    for name, value in parts.items():
+        # A part is recorded in metrics.json: anything that is not plain
+        # JSON (a client returning an unexpected object) is a gap.
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            parts[name] = not_observed(f"{name}: not a plain value ({type(value).__name__})")
     return {
         "type": system_type,
         "version": SYSTEM_IDENTITY_VERSION,
@@ -758,9 +765,13 @@ def _unsampled(why: str) -> dict[str, Any]:
 def _record_load(inputs: dict[str, Any], when: str, sample: Mapping[str, Any]) -> None:
     """``observed = {allocatable: {start, end}, cotenant_requested: {start,
     end}, cotenant_pending: {start, end}}``, each leaf the half of one
-    sample with its ``at``."""
+    sample with its ``at``. A half that is not plain JSON is a gap."""
     observed = inputs.setdefault("observed", {})
     for half in ("allocatable", "cotenant_requested", "cotenant_pending"):
         leaf = dict(sample.get(half) or not_observed("not sampled"))
+        try:
+            json.dumps(leaf)
+        except (TypeError, ValueError):
+            leaf = not_observed(f"{half}: not a plain value")
         leaf["at"] = sample.get("at")
         observed.setdefault(half, {})[when] = leaf

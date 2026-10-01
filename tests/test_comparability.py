@@ -640,9 +640,9 @@ class TestLadder:
         assert any("not established" in n for n in v.notes)
 
     def test_identity_on_one_side_only_counts_as_different(self):
-        """A 1.6 record against a 1.7 one: a system differential, and with
-        an architecture difference CONFOUNDED (never credited to the
-        architecture)."""
+        """A 1.6 record against a 1.7 one: not a system differential and not
+        a repeat, and with an architecture difference CONFOUNDED (never
+        credited to the architecture)."""
         b = _rec(new_id="b", experiment__system_identity=_sys())
         assert _verdict(_rec(), b).attribution == "system not established"
         b["experiment"]["architecture"]["recipe"] = "other"
@@ -970,6 +970,41 @@ class TestRelationFolding:
         )
         e = run.to_dict()["experiment"]
         assert e["schema"] == "exp1" and "system identity" in e["v2_unavailable"]
+
+
+class TestWithinSideSystem:
+    @pytest.mark.parametrize("order", [(0, 1, 2), (1, 0, 2), (2, 1, 0)])
+    def test_every_pair_within_a_side(self, order):
+        """a1 observed only the CA; a2 and a3 observed different nodes.
+        a1 matches both, but a2 and a3 are not one system: the side is
+        refused in any order."""
+
+        def rec(i, nodes):
+            ident = _sys(nodes=nodes) if nodes else _sys()
+            if not nodes:
+                ident["parts"].pop("kubernetes")
+                from lakebench.metrics.system_identity import fingerprint_of
+
+                ident["fingerprint"] = fingerprint_of(ident["parts"])
+            return _rec(new_id=f"a{i}", experiment__system_identity=ident)
+
+        members = [
+            rec(1, None),
+            rec(2, [{"cpu": 8, "count": 1}]),
+            rec(3, [{"cpu": 16, "count": 1}]),
+        ]
+        side = [members[i] for i in order]
+        v = _verdict(side, [_rec(new_id="b", experiment__system_identity=_sys())])
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
+
+
+def test_local_identity_does_not_block_exp2():
+    from lakebench.metrics import system_identity as si
+
+    run = _fresh()
+    run.config_snapshot["experiment_inputs"]["system_identity"] = si._local_identity(None)
+    e = run.to_dict()["experiment"]
+    assert e["schema"] == "exp2"
 
 
 class TestWrappers:

@@ -719,3 +719,17 @@ def test_local_identity_names_nothing() -> None:
     ident = si._local_identity(None)
     assert ident["type"] == "local" and ident["partial"] is True
     assert not si.observed_parts(ident["parts"])
+
+
+def test_non_plain_values_are_gaps() -> None:
+    """A client returning objects (a test double) never puts a non-JSON
+    value into the record."""
+    from unittest import mock
+
+    k8s = mock.MagicMock()
+    ident = si.observe_system(k8s, _cfg(), s3_client=_S3())
+    json.dumps(ident)
+    inputs: dict[str, Any] = {}
+    si._record_load(inputs, "start", {"at": "t", "allocatable": {"cpu": mock.MagicMock()}})
+    json.dumps(inputs)
+    assert "not a plain value" in inputs["observed"]["allocatable"]["start"]["not_observed"]
