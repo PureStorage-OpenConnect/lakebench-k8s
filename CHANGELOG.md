@@ -4,6 +4,20 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- `[aml]` install extra (`pip install "lakebench-k8s[aml]"`) for running the
+  AML reference detector and the local AML gate. It pins numpy, scipy,
+  pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster
+  job installs, so a local gate fits the same model as the cluster.
+
+### Changed
+- The `[dev]` extra includes `[aml]`, so a development install now gets the
+  pinned AML libraries (scikit-learn 1.7.2, numpy 2.2.6, pandas 2.3.3, scipy
+  1.15.3) instead of the newest releases. These pins support Python 3.10 to
+  3.13.
+
 ## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and

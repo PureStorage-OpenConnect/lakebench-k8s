@@ -30,6 +30,14 @@ This installs:
   Jinja2, PyYAML
 - **Dev dependencies:** pytest, pytest-cov, ruff, mypy, moto (AWS mocking),
   pre-commit
+- **The `[aml]` extra:** numpy, scipy, pandas, scikit-learn, joblib and
+  threadpoolctl at exactly the versions the cluster's AML reference detector
+  installs (`REFERENCE_PY_DEPS` in
+  `src/lakebench/modules/pipeline_engines/spark/job.py`), plus pyarrow.
+  `tests/test_reference_pins.py` fails in CI if the extra and the tuple
+  drift, or if the installed versions differ from them. Outside CI it reports
+  a drifted install as a skip; set `LB_REQUIRE_REFERENCE_PINS=1` to make it
+  fail. The pins have wheels for Python 3.10 to 3.13.
 
 The `pre-commit install` step registers Git hooks that run the secret scan,
 linting and formatting automatically before each commit. You can also set up the full
@@ -173,7 +181,15 @@ failure, prints every skip reason, and a failure on one Python version does
 not cancel the other (`fail-fast: false`). On 3.13 it checks per-file
 coverage floors with `scripts/check_coverage.py --suite unit`. A Spark job runs `pytest tests/spark`
 with `pyspark==4.0.1` on Java 17 and checks its own floors with
-`scripts/check_coverage.py --suite spark`. The Rust job runs `cargo fmt
+`scripts/check_coverage.py --suite spark`. The "AML statistics (slow)" job runs
+the tests marked `slow` (the heavy fidelity-gate fits, the scale invariance
+check and the Spark fidelity gate over silver) on Python 3.11 with the pinned
+`[aml]` libraries, on every push to `main`, `integrate/**`, `train/*` and
+tags and on every pull request to `integrate/**`; it is not run on other
+branch pushes. It also reruns the D8 power simulation in a second
+environment with the numpy and scipy versions the pre-registration recorded
+its output hash with, since that guard skips on the `[aml]` pins.
+The Rust job runs `cargo fmt
 --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test
 --release --locked` in `datagen_rs/`. A gitleaks job scans the working tree
 for credentials. The package build runs only after all of these pass.

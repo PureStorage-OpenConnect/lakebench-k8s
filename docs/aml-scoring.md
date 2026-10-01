@@ -306,7 +306,9 @@ nuisance-only model and a nuisance ablation against the pre-registered
 leakage caps. It writes `aml_gate_report.json` (the full report) and
 `reference_metrics.parquet` (one aggregate row and one row per typology)
 under the output prefix. scikit-learn is not on the Spark image; the job
-installs it per run.
+installs it per run, at the versions pinned in `REFERENCE_PY_DEPS`. To run
+the detector or the local gate yourself, install
+`pip install "lakebench-k8s[aml]"`, which pins the same versions.
 
 The older `train_reference_gbt` in `src/lakebench/aml/reference_score.py`
 (a `GradientBoostingClassifier` on five amount and hour features) is no
