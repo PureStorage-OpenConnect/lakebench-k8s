@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -121,12 +122,18 @@ def compare(
         print_error(f"Config error: {e}")
         raise typer.Exit(1) from None
 
+    # With --format json|csv and no -o, stdout carries only the data: every
+    # Panel, header and the child runs' own output go to stderr.
+    machine = _requested_format != "table" and output is None
+    human = err_console if machine else console
+    child_stdout = sys.stderr if machine else None
+
     # Different workloads, corpora, seeds, scales or modes are different
     # experiments; say so before hours are spent running them. The runs still
     # happen (the evidence is shown), and the command exits 1 at the end.
     differences = config_identity_differences(cfg_a, cfg_b)
     if differences:
-        console.print(
+        human.print(
             Panel(
                 "[bold red]NOT COMPARABLE[/bold red]: the two configs describe different "
                 "experiments, so their performance numbers will not be compared.\n  "
@@ -136,7 +143,7 @@ def compare(
         )
     conditions = config_condition_differences(cfg_a, cfg_b)
     if conditions:
-        console.print(
+        human.print(
             Panel(
                 "[bold yellow]Not like-for-like[/bold yellow]: the configs will execute under "
                 "different conditions; matching results will be shown as comparable, not "
@@ -147,23 +154,23 @@ def compare(
 
     # Show comparison plan
     where = "local (podman/docker)" if local else "Kubernetes"
-    console.print(
+    human.print(
         Panel(
             f"[bold]Comparing two configurations:[/bold]\n\n"
-            f"  A: [cyan]{cfg_a.name}[/cyan] ({config_a})\n"
-            f"     Recipe: {_recipe_summary(cfg_a)}\n"
-            f"     Scale: {cfg_a.architecture.workload.datagen.scale}\n\n"
-            f"  B: [cyan]{cfg_b.name}[/cyan] ({config_b})\n"
-            f"     Recipe: {_recipe_summary(cfg_b)}\n"
-            f"     Scale: {cfg_b.architecture.workload.datagen.scale}\n\n"
-            f"  Target: {where}, run one after the other\n",
+            f"  A: [cyan]{esc(cfg_a.name)}[/cyan] ({esc(config_a)})\n"
+            f"     Recipe: {esc(_recipe_summary(cfg_a))}\n"
+            f"     Scale: {esc(cfg_a.architecture.workload.datagen.scale)}\n\n"
+            f"  B: [cyan]{esc(cfg_b.name)}[/cyan] ({esc(config_b)})\n"
+            f"     Recipe: {esc(_recipe_summary(cfg_b))}\n"
+            f"     Scale: {esc(cfg_b.architecture.workload.datagen.scale)}\n\n"
+            f"  Target: {esc(where)}, run one after the other\n",
             title="lakebench compare",
             border_style="blue",
         )
     )
 
     if not yes:
-        confirm = typer.confirm("Proceed with comparison?")
+        confirm = typer.confirm("Proceed with comparison?", err=machine)
         if not confirm:
             raise typer.Exit(EXIT_DECLINED)
 
@@ -179,14 +186,18 @@ def compare(
         raise typer.Exit(1)
 
     # Run A
-    console.print()
-    console.print(f"[bold]== Running configuration A: {esc(cfg_a.name)} ==[/bold]")
-    metrics_a = _run_single(config_a, timeout, skip_benchmark, keep, local, generate)
+    human.print()
+    human.print(f"[bold]== Running configuration A: {esc(cfg_a.name)} ==[/bold]")
+    metrics_a = _run_single(
+        config_a, timeout, skip_benchmark, keep, local, generate, child_stdout=child_stdout
+    )
 
     # Run B
-    console.print()
-    console.print(f"[bold]== Running configuration B: {esc(cfg_b.name)} ==[/bold]")
-    metrics_b = _run_single(config_b, timeout, skip_benchmark, keep, local, generate)
+    human.print()
+    human.print(f"[bold]== Running configuration B: {esc(cfg_b.name)} ==[/bold]")
+    metrics_b = _run_single(
+        config_b, timeout, skip_benchmark, keep, local, generate, child_stdout=child_stdout
+    )
 
     # Destroy failures were captured by _run_single; surface them before
     # building the comparison so they cannot be hidden by a nice-looking
@@ -196,7 +207,7 @@ def compare(
         if isinstance(m, dict):
             err = m.pop("_destroy_error", None)
             if err:
-                console.print(f"[red]Destroy for run {esc(label)} failed: {esc(err)}[/red]")
+                human.print(f"[red]Destroy for run {esc(label)} failed: {esc(err)}[/red]")
                 destroy_failures.append(label)
 
     # Build comparison
@@ -306,10 +317,13 @@ def _run_single(
     keep: bool,
     local: bool = False,
     generate: bool = False,
+    child_stdout: Any = None,
 ) -> dict[str, Any]:
     """Run a single configuration through deploy -> generate -> run -> destroy.
 
     Returns the metrics dict, or an error dict if the run failed.
+    ``child_stdout`` redirects the child commands' stdout (to stderr when the
+    caller's stdout carries machine output).
     """
     import subprocess
     import sys
@@ -319,7 +333,7 @@ def _run_single(
     if local:
         deploy = subprocess.run(
             [sys.executable, "-m", "lakebench", "deploy", str(config_path), "--local", "--yes"],
-            capture_output=False,
+            stdout=child_stdout,
             timeout=900,
         )
         if deploy.returncode != 0:
@@ -334,7 +348,7 @@ def _run_single(
         cmd.append("--generate")
 
     try:
-        result = subprocess.run(cmd, capture_output=False, timeout=timeout + 300)
+        result = subprocess.run(cmd, stdout=child_stdout, timeout=timeout + 300)
         if result.returncode != 0:
             return {"error": f"Run failed with exit code {result.returncode}"}
     except subprocess.TimeoutExpired:
@@ -665,7 +679,7 @@ def _print_comparison_table(comparison: dict) -> None:
                 "[bold yellow]COMPARABILITY NOT ESTABLISHED[/bold yellow]: no checked benchmark "
                 "results on both sides, so nothing shows the two runs did equivalent work. The "
                 "raw numbers are shown; no deltas or winner.\n"
-                + "\n".join(f"  {r}" for r in comparison.get("not_established") or []),
+                + "\n".join(f"  {esc(r)}" for r in comparison.get("not_established") or []),
                 border_style="yellow",
             )
         )
@@ -683,7 +697,7 @@ def _print_comparison_table(comparison: dict) -> None:
                 "[bold yellow]COMPARABLE, NOT LIKE-FOR-LIKE[/bold yellow]: the benchmark "
                 "results match, but the runs executed under different conditions, so a "
                 "difference below may come from those rather than the architecture.\n"
-                + "\n".join(f"  {d}" for d in comparison["condition_differences"]),
+                + "\n".join(f"  {esc(d)}" for d in comparison["condition_differences"]),
                 border_style="yellow",
             )
         )

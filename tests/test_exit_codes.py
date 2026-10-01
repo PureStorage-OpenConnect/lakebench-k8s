@@ -208,7 +208,7 @@ def _kubeconfig_error():
         (_k8s_error, 4),
         (_kubeconfig_error, 4),
         (lambda: typer.Abort(), 5),
-        (lambda: EOFError(), 5),
+        (lambda: EOFError(), 1),
         (lambda: KeyboardInterrupt(), 130),
         (lambda: RuntimeError("unexpected"), 1),
         (lambda: typer.Exit(7), 7),
@@ -224,7 +224,7 @@ def _kubeconfig_error():
         "k8s-connection",
         "kubeconfig",
         "abort",
-        "eof",
+        "bare-eof-is-unclassified",
         "keyboard-interrupt",
         "unhandled",
         "typer-exit-passes-through",
@@ -276,6 +276,70 @@ def test_typed_error_prints_its_shape():
 def test_root_app_uses_the_handler():
     cmd = typer.main.get_command(app)
     assert isinstance(cmd, cli_exit.LakebenchGroup)
+    assert app.pretty_exceptions_enable is False
+
+
+def test_broken_pipe_passes_through_quietly():
+    result = _runner().invoke(_probe_app(lambda: BrokenPipeError(32, "Broken pipe")), ["boom"])
+    assert result.exit_code == 1  # Typer's own EPIPE branch, no message
+    assert "ERROR" not in result.output
+
+
+class _GoneStream:
+    """A stderr that cannot be written (EIO). Not EPIPE: Rich answers that by
+    dup2-ing /dev/null over fd 1, which would hit the test process."""
+
+    def write(self, _text):
+        raise OSError(5, "Input/output error")
+
+    def flush(self):
+        pass
+
+
+def test_exit_code_survives_a_closed_stderr(monkeypatch):
+    from rich.console import Console
+
+    from lakebench.cli import _helpers
+
+    # A throwaway console: Rich keeps buffer state after a failed write.
+    monkeypatch.setattr(_helpers, "err_console", Console(stderr=True))
+
+    kept = []
+
+    def closed_then_refuse():
+        # Keep CliRunner's wrapper alive: collecting it would close its buffer.
+        kept.append(sys.stderr)
+        sys.stderr = _GoneStream()  # CliRunner restores its own streams afterwards
+        return SafetyRefusal("refused")
+
+    result = _runner().invoke(_probe_app(closed_then_refuse), ["boom"])
+    assert result.exit_code == 3
+
+
+def test_exit_code_survives_rich_broken_pipe_exit(monkeypatch):
+    from lakebench.cli import _helpers
+
+    def rich_broken_pipe(_err):
+        raise SystemExit(1)  # what Console.on_broken_pipe does
+
+    monkeypatch.setattr(_helpers, "emit_error", rich_broken_pipe)
+    result = _runner().invoke(_probe_app(lambda: SafetyRefusal("refused")), ["boom"])
+    assert result.exit_code == 3
+
+
+def test_config_validation_details_go_on_the_why_line():
+    result = _runner().invoke(_probe_app(_config_validation_error), ["boom"])
+    assert "Why    name: required; a.0: bad" in _stderr(result)
+
+
+def test_prompt_abort_starts_on_a_new_line():
+    result = _runner().invoke(_probe_app(lambda: typer.Abort()), ["boom"])
+    assert _stderr(result).startswith("\nERROR  Not confirmed")
+
+
+def test_v16_codes_differ_from_the_new_code():
+    same = [p.name for p in PATHS if p.v16_code is not None and p.v16_code == int(p.code)]
+    assert not same
 
 
 # -- named paths on the real CLI -----------------------------------------------
@@ -312,6 +376,28 @@ def _scenario_confirm_non_tty(monkeypatch, tmp_path):
     return runner.invoke(app, ["deploy", str(tmp_path / "c.yaml")], input="")
 
 
+def _scenario_financial_k8s_unreachable(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import lakebench.cli._financial as fin
+    import lakebench.k8s as k8s_mod
+    from lakebench.k8s import K8sConnectionError
+
+    cfg = SimpleNamespace(
+        platform=SimpleNamespace(kubernetes=SimpleNamespace(context=None)),
+        get_namespace=lambda: "ns-x",
+    )
+    monkeypatch.setattr(fin, "_load_config", lambda path: cfg)
+
+    def unreachable(**_k):
+        raise K8sConnectionError("connection refused")
+
+    monkeypatch.setattr(k8s_mod, "get_k8s_client", unreachable)
+    (tmp_path / "c.yaml").write_text("name: x\n")
+    argv = ["financial", "score", str(tmp_path / "c.yaml"), "--manifest", "s3://m"]
+    return _runner().invoke(app, [*argv, "--output", "s3://o"])
+
+
 def _scenario_sigint(monkeypatch, tmp_path):
     import lakebench.cli as cli
 
@@ -335,6 +421,7 @@ SCENARIOS = {
     "unhandled_exception": _scenario_unhandled_exception,
     "confirm.non_tty": _scenario_confirm_non_tty,
     "sigint": _scenario_sigint,
+    "financial.k8s_unreachable": _scenario_financial_k8s_unreachable,
 }
 
 # The line each path must print on stderr, where it prints one.
@@ -343,6 +430,7 @@ EXPECTED_STDERR = {
     "unhandled_exception": "ERROR  RuntimeError: unexpected [/tmp] failure",
     "confirm.non_tty": "ERROR  Not confirmed",
     "sigint": "ERROR  Interrupted.",
+    "financial.k8s_unreachable": "ERROR  Cannot reach the Kubernetes cluster: connection refused",
 }
 
 

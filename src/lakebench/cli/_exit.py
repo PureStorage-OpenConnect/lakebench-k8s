@@ -13,8 +13,10 @@ Mapping (``exit_code_for``):
 - ``LakebenchError``: its own code;
 - ``ConfigError`` (including ``ConfigValidationError``): 2;
 - ``K8sConnectionError`` and ``kubernetes.config.ConfigException``: 4;
-- Click ``Abort`` (a declined ``typer.confirm(abort=True)``, or end of
-  input with no terminal) and ``EOFError``: 5;
+- Click ``Abort`` (a declined ``typer.confirm(abort=True)``, end of input
+  with no terminal, or Ctrl-C at a prompt): 5;
+- a broken stdout pipe (``lakebench ... | head``) passes through to Typer,
+  which exits 1 without a message;
 - ``KeyboardInterrupt``: 130;
 - anything else: 1, printed as one line; ``LAKEBENCH_DEBUG=1`` adds the
   traceback.
@@ -22,6 +24,7 @@ Mapping (``exit_code_for``):
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 import traceback
@@ -94,11 +97,13 @@ def error_for(exc: BaseException) -> LakebenchError | None:
     ce = _click_exceptions()
     if isinstance(exc, (ce.Exit, ce.ClickException, SystemExit, GeneratorExit)):
         return None
+    if isinstance(exc, BrokenPipeError) or (isinstance(exc, OSError) and exc.errno == errno.EPIPE):
+        return None  # the reader went away; Typer exits 1 quietly
     if isinstance(exc, LakebenchError):
         return exc
     if isinstance(exc, KeyboardInterrupt):
         return LakebenchError("Interrupted.", path="sigint", code=ExitCode.INTERRUPTED)
-    if isinstance(exc, (ce.Abort, EOFError)):
+    if isinstance(exc, ce.Abort):
         return LakebenchError(
             "Not confirmed: the prompt was declined or there was no terminal to answer it.",
             next="Answer the prompt, or pass --yes where the command offers it.",
@@ -169,6 +174,8 @@ def quiet_urllib3() -> None:
     import logging
     import warnings
 
+    if _debug():
+        return  # LAKEBENCH_DEBUG=1 keeps the retry trace for diagnosis
     logging.getLogger("urllib3").setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", module="urllib3")
     try:
@@ -176,6 +183,25 @@ def quiet_urllib3() -> None:
 
         urllib3.disable_warnings()
     except ImportError:  # pragma: no cover -- a dependency of kubernetes and boto3
+        pass
+
+
+def _report(exc: BaseException, err: LakebenchError) -> None:
+    """Print *err*; never raise, so the exit code survives a closed stderr."""
+    try:
+        if err.path == "unhandled_exception" and _debug():
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+        if isinstance(exc, (KeyboardInterrupt, _click_exceptions().Abort)):
+            # A prompt cut off by EOF or Ctrl-C leaves the cursor after it.
+            sys.stderr.write("\n")
+        from lakebench.cli._helpers import emit_error
+
+        emit_error(err)
+    except (OSError, AttributeError, ValueError):  # stderr closed, None or gone
+        pass
+    except SystemExit:
+        # Rich answers a BrokenPipeError on stderr by pointing stdout at
+        # /dev/null and raising SystemExit(1); keep our code instead.
         pass
 
 
@@ -190,12 +216,5 @@ class LakebenchGroup(TyperGroup):
             err = error_for(exc)
             if err is None:
                 raise
-            if err.path == "unhandled_exception" and _debug():
-                traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
-            if isinstance(exc, (KeyboardInterrupt, EOFError, _click_exceptions().Abort)):
-                # A prompt cut off by EOF or Ctrl-C leaves the cursor after it.
-                sys.stderr.write("\n")
-            from lakebench.cli._helpers import emit_error
-
-            emit_error(err)
+            _report(exc, err)
             raise typer.Exit(int(err.code)) from exc

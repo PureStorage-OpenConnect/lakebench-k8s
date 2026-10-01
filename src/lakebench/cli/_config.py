@@ -51,7 +51,7 @@ def config_show(
 
         console.print(
             Panel(
-                f"[bold]Resolved configuration:[/bold] {config_file}",
+                f"[bold]Resolved configuration:[/bold] {esc(config_file)}",
                 border_style="blue",
             )
         )
@@ -195,7 +195,7 @@ def _validate_local(config_file: Path) -> None:
     from lakebench.runtime.container import ContainerRuntimeError, detect_container_cli
 
     console.print()
-    console.print(Panel(f"Validating for local mode:\n{config_file}", expand=False))
+    console.print(Panel(f"Validating for local mode:\n{esc(config_file)}", expand=False))
     console.print()
 
     passed, failed = 0, 0
@@ -237,7 +237,7 @@ def _validate_local(config_file: Path) -> None:
     if failed:
         console.print(
             Panel(
-                f"[red]{passed} passed, {failed} failed[/red]",
+                f"[red]{esc(passed)} passed, {esc(failed)} failed[/red]",
                 title="Validation Failed",
                 expand=False,
             )
@@ -246,7 +246,7 @@ def _validate_local(config_file: Path) -> None:
 
     console.print(
         Panel(
-            f"[green]{passed} passed[/green]\n\nRun: lakebench deploy {config_file} --local",
+            f"[green]{esc(passed)} passed[/green]\n\nRun: lakebench deploy {esc(config_file)} --local",
             title="Ready",
             expand=False,
         )
@@ -293,7 +293,7 @@ def config_storage(
 
     console.print(
         Panel(
-            f"[bold]Storage conformance[/bold]\nEndpoint: {s3.endpoint}",
+            f"[bold]Storage conformance[/bold]\nEndpoint: {esc(s3.endpoint)}",
             border_style="blue",
         )
     )

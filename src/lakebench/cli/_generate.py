@@ -176,11 +176,11 @@ def generate(
 
     console.print(
         Panel(
-            f"Generating data for: [bold]{cfg.name}[/bold]\n\n"
-            f"Scale: {dims.scale}\n"
+            f"Generating data for: [bold]{esc(cfg.name)}[/bold]\n\n"
+            f"Scale: {esc(dims.scale)}\n"
             f"Customers: {dims.customers:,}\n"
-            f"Parallelism: {datagen_cfg.parallelism} pods\n"
-            f"Bucket: {cfg.platform.storage.s3.buckets.bronze}",
+            f"Parallelism: {esc(datagen_cfg.parallelism)} pods\n"
+            f"Bucket: {esc(cfg.platform.storage.s3.buckets.bronze)}",
             expand=False,
         )
     )
@@ -402,11 +402,11 @@ def generate(
             console.print(
                 Panel(
                     f"[green]Data generation complete![/green]\n\n"
-                    f"Succeeded: {completion_result.details.get('succeeded', '?')} pods\n"
+                    f"Succeeded: {esc(completion_result.details.get('succeeded', '?'))} pods\n"
                     # Whole wait, not the finalizer's own check (which is ~0s
                     # when the polling loop already saw the job finish).
                     f"Elapsed: {time.time() - start:.0f}s\n\n"
-                    f"Data written to: s3://{cfg.platform.storage.s3.buckets.bronze}/{written_prefix}"
+                    f"Data written to: s3://{esc(cfg.platform.storage.s3.buckets.bronze)}/{esc(written_prefix)}"
                     f"\n\nNext: [bold]lakebench run[/bold]  to execute the pipeline",
                     title="Generation Complete",
                     expand=False,
@@ -428,7 +428,7 @@ def generate(
 
             console.print(
                 Panel(
-                    f"[red]Data generation failed![/red]\n\n{completion_result.message}",
+                    f"[red]Data generation failed![/red]\n\n{esc(completion_result.message)}",
                     title="Generation Failed",
                     expand=False,
                 )

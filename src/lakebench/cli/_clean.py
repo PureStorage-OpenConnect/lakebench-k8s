@@ -181,7 +181,7 @@ def clean(
             print_info("Clean cancelled")
             raise typer.Exit(EXIT_DECLINED)
 
-    console.print(Panel(f"Cleaning: [bold]{target}[/bold]", expand=False))
+    console.print(Panel(f"Cleaning: [bold]{esc(target)}[/bold]", expand=False))
 
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
@@ -504,7 +504,7 @@ def clean(
         console.print(
             Panel(
                 f"[red]{len(errors)} error(s)[/red] during clean\n\n"
-                + "\n".join(f"  - {e}" for e in errors),
+                + "\n".join(f"  - {esc(e)}" for e in errors),
                 title="Clean Incomplete",
                 expand=False,
             )

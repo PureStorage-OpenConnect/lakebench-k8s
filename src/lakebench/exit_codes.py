@@ -156,12 +156,15 @@ class ExitPath:
 
     ``owner`` is empty when the path is produced today; otherwise it is the
     v1.7 work item that makes the command exit with ``code`` on this path.
+    ``v16_code`` is the code Lakebench 1.6 exited with on this path, when it
+    differs; the UPGRADING table of renumbered codes is built from it.
     """
 
     name: str
     code: ExitCode
     when: str
     owner: str = ""
+    v16_code: int | None = None
 
     @property
     def live(self) -> bool:
@@ -184,12 +187,13 @@ PATHS: tuple[ExitPath, ...] = (
         "an error Lakebench does not classify; one line, with the traceback only "
         "under LAKEBENCH_DEBUG=1",
     ),
+    ExitPath("run.verdict_failed", _C.FAILED, "`run` finished with a failing verdict", "CC-9"),
     ExitPath(
-        "run.verdict_failed",
+        "run.datagen_timeout",
         _C.FAILED,
-        "`run` finished with a failing verdict, including a datagen timeout "
-        '(recorded as "datagen timed out" in verdict.reasons)',
+        'datagen did not finish in time; the record says "datagen timed out" in verdict.reasons',
         "CC-9",
+        v16_code=5,
     ),
     ExitPath("run.namespace_gone", _C.FAILED, "the namespace disappeared during `run`", "CD-17"),
     ExitPath(
@@ -212,7 +216,9 @@ PATHS: tuple[ExitPath, ...] = (
     ),
     # 2
     ExitPath("click.usage", _C.USAGE, "an unknown flag, a missing argument or a bad value"),
-    ExitPath("config.validation", _C.USAGE, "the config fails to load or validate", "CC-9"),
+    ExitPath(
+        "config.validation", _C.USAGE, "the config fails to load or validate", "CC-9", v16_code=1
+    ),
     ExitPath(
         "config.name_required",
         _C.USAGE,
@@ -224,6 +230,7 @@ PATHS: tuple[ExitPath, ...] = (
         "config.upgrade_refused",
         _C.USAGE,
         "`config upgrade` is removed; the message names `init --from`",
+        v16_code=0,
     ),
     ExitPath(
         "run.protected_corpus",
@@ -252,6 +259,7 @@ PATHS: tuple[ExitPath, ...] = (
         _C.REFUSED,
         "`reproduce` would reuse a namespace or bucket that already exists",
         "CC-4",
+        v16_code=2,
     ),
     ExitPath(
         "reproduce.nonce_changed",
@@ -270,6 +278,7 @@ PATHS: tuple[ExitPath, ...] = (
         _C.REFUSED,
         '"Destroy NOT completed": the namespace now belongs to a newer deployment',
         "CC-9",
+        v16_code=1,
     ),
     ExitPath(
         "nameless.nonce_mismatch",
@@ -298,12 +307,14 @@ PATHS: tuple[ExitPath, ...] = (
         _C.REFUSED,
         "the namespace or a bucket is owned by another deployment",
         "CC-9",
+        v16_code=1,
     ),
     ExitPath(
         "run.bronze_nonempty",
         _C.REFUSED,
         "datagen would write over a non-empty bronze prefix without --regenerate",
         "CC-9",
+        v16_code=2,
     ),
     ExitPath(
         "series.corpus_changed",
@@ -325,7 +336,9 @@ PATHS: tuple[ExitPath, ...] = (
         "SD-10",
     ),
     # 4
-    ExitPath("run.prereq_failed", _C.PREREQUISITE, "a `run` preflight check failed", "CC-9"),
+    ExitPath(
+        "run.prereq_failed", _C.PREREQUISITE, "a `run` preflight check failed", "CC-9", v16_code=1
+    ),
     ExitPath(
         "capacity.shortfall",
         _C.PREREQUISITE,
@@ -344,7 +357,15 @@ PATHS: tuple[ExitPath, ...] = (
         "`plan` finds the scratch StorageClass missing",
         "CC-23",
     ),
-    ExitPath("k8s.unreachable", _C.PREREQUISITE, "the Kubernetes API is unreachable", "CC-9"),
+    ExitPath(
+        "k8s.unreachable", _C.PREREQUISITE, "the Kubernetes API is unreachable", "CC-9", v16_code=1
+    ),
+    ExitPath(
+        "financial.k8s_unreachable",
+        _C.PREREQUISITE,
+        "a `financial` command cannot reach the Kubernetes API",
+        v16_code=1,
+    ),
     ExitPath(
         "financial.reproduce.snapshot_gone",
         _C.PREREQUISITE,
@@ -362,13 +383,21 @@ PATHS: tuple[ExitPath, ...] = (
         "confirm.non_tty",
         _C.NOT_CONFIRMED,
         "a confirmation prompt got no answer (no terminal, end of input) or was declined",
+        v16_code=1,
     ),
-    ExitPath("confirm.declined", _C.NOT_CONFIRMED, "a confirmation prompt was answered no", "CC-9"),
+    ExitPath(
+        "confirm.declined",
+        _C.NOT_CONFIRMED,
+        "a confirmation prompt was answered no",
+        "CC-9",
+        v16_code=3,
+    ),
     ExitPath(
         "run.namespace_missing_no_yes",
         _C.NOT_CONFIRMED,
         "`run` would create a missing namespace and was not given --yes",
         "CC-9",
+        v16_code=1,
     ),
     # 6
     ExitPath(
@@ -376,6 +405,7 @@ PATHS: tuple[ExitPath, ...] = (
         _C.INCOMPLETE,
         "`destroy` finished its steps but the namespace is still terminating",
         "CC-9",
+        v16_code=4,
     ),
     # 10 to 14
     ExitPath("compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict", "ER-11"),
@@ -391,7 +421,11 @@ PATHS: tuple[ExitPath, ...] = (
         "ER-13",
     ),
     # 130
-    ExitPath("sigint", _C.INTERRUPTED, "any command interrupted with Ctrl-C"),
+    ExitPath(
+        "sigint",
+        _C.INTERRUPTED,
+        "a command interrupted with Ctrl-C outside a prompt (Ctrl-C at a prompt is 5)",
+    ),
     ExitPath(
         "run.interrupted",
         _C.INTERRUPTED,
@@ -408,9 +442,15 @@ PATHS_BY_NAME: dict[str, ExitPath] = {p.name: p for p in PATHS}
 # EXIT_NAMESPACE_STILL_TERMINATING (cli/_destroy.py), and empties this; a test
 # keeps it equal to those constants until then.
 LEGACY_CODES: dict[int, str] = {
-    3: "a declined confirmation prompt (`init`, `destroy`, `clean`, `compare`)",
+    3: (
+        "a declined confirmation prompt in `init`, `destroy`, `compare` and the "
+        "first `clean` prompt (other prompts exit 5)"
+    ),
     4: "`destroy`: the namespace is still terminating",
-    5: "`run`: datagen did not finish in time",
+    5: (
+        "`run`: datagen did not finish in time (a declined or unanswered `run` "
+        "prompt is also 5, meaning not confirmed)"
+    ),
 }
 
 
@@ -475,11 +515,12 @@ def render_markdown() -> str:
         "",
         "## Errors and output",
         "",
-        "Errors, warnings and progress lines go to stderr. An error starts with",
+        "Status lines (`ERROR`, `WARN`, `OK` and `...`) go to stderr; panels,",
+        "tables and stage headers are still on stdout. An error starts with",
         "one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`",
-        "(the fix) and `Where` lines when they apply. No error prints a",
-        "traceback; set `LAKEBENCH_DEBUG=1` to get one for an error Lakebench",
-        "does not classify. Machine output (`--format json` and `--format csv`",
+        "(the fix) and `Where` lines when they apply. An error Lakebench does",
+        "not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`",
+        "to get the traceback. Machine output (`--format json` and `--format csv`",
         "on `query`, `results` and `compare`) goes to plain stdout, unwrapped, so",
         "it can be piped to a parser.",
     ]

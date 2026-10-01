@@ -681,7 +681,7 @@ def validate(
     - Kubernetes namespace is accessible or can be created
     """
     config_file = resolve_config_path(config_file, file_option)
-    console.print(Panel(f"Validating: [bold]{config_file}[/bold]", expand=False))
+    console.print(Panel(f"Validating: [bold]{esc(config_file)}[/bold]", expand=False))
 
     # validate is read-only: it opens no journal and writes no file.
 
@@ -1129,8 +1129,8 @@ def validate(
             warn_s = "s" if checks_warned > 1 else ""
             console.print(
                 Panel(
-                    f"[green]{checks_passed} passed[/green], "
-                    f"[yellow]{checks_warned} warning{warn_s}[/yellow]\n"
+                    f"[green]{esc(checks_passed)} passed[/green], "
+                    f"[yellow]{esc(checks_warned)} warning{esc(warn_s)}[/yellow]\n"
                     f"Run [bold]lakebench deploy[/bold] to deploy",
                     title="Validation Passed",
                     expand=False,
@@ -1139,7 +1139,7 @@ def validate(
         else:
             console.print(
                 Panel(
-                    f"[green]All {checks_passed} checks passed[/green]\n"
+                    f"[green]All {esc(checks_passed)} checks passed[/green]\n"
                     f"Run [bold]lakebench deploy[/bold] to deploy",
                     title="Validation Successful",
                     expand=False,
@@ -1148,7 +1148,7 @@ def validate(
     else:
         console.print(
             Panel(
-                f"[green]{checks_passed} passed[/green], [red]{checks_failed} failed[/red]\n"
+                f"[green]{esc(checks_passed)} passed[/green], [red]{esc(checks_failed)} failed[/red]\n"
                 f"Fix the issues above before deploying",
                 title="Validation Failed",
                 expand=False,
@@ -1226,7 +1226,7 @@ def status(
         print_error("Specify --namespace or provide a config file")
         raise typer.Exit(1)
 
-    console.print(Panel(f"Status for namespace: [bold]{ns}[/bold]", expand=False))
+    console.print(Panel(f"Status for namespace: [bold]{esc(ns)}[/bold]", expand=False))
 
     try:
         k8s = get_k8s_client(namespace=ns)
@@ -1300,7 +1300,7 @@ def status(
                 if e.status == 404:
                     table.add_row(name, kind, "Not found", "[dim]-[/dim]")
                 else:
-                    table.add_row(name, kind, f"Error: {e.reason}", "[red]ERROR[/red]")
+                    table.add_row(name, kind, f"Error: {esc(e.reason)}", "[red]ERROR[/red]")
 
         console.print(table)
 
@@ -1370,7 +1370,7 @@ def stop(
 
     console.print(
         Panel(
-            f"Stopping streaming jobs for: [bold]{cfg.name}[/bold]",
+            f"Stopping streaming jobs for: [bold]{esc(cfg.name)}[/bold]",
             expand=False,
         )
     )
@@ -1659,7 +1659,7 @@ def info(
         f"[dim]{label + ':':<{max_label + 1}}[/dim] [bold]{value}[/bold]" for label, value in lines
     )
 
-    console.print(Panel(formatted, title=f"Lakebench: {cfg.name}", expand=False))
+    console.print(Panel(formatted, title=f"Lakebench: {esc(cfg.name)}", expand=False))
 
     if guidance.warning:
         console.print(f"  [yellow]Warning: {esc(guidance.warning)}[/yellow]")
@@ -1801,7 +1801,7 @@ def report(
             print_warning(f"No runs found in {metrics_dir}")
             return
 
-        console.print(Panel(f"Available runs in [bold]{metrics_dir}[/bold]", expand=False))
+        console.print(Panel(f"Available runs in [bold]{esc(metrics_dir)}[/bold]", expand=False))
 
         table = Table()
         table.add_column("Run ID", style="cyan")
@@ -1881,7 +1881,7 @@ def report(
         console.print(
             Panel(
                 f"[green]Report rendered[/green]\n\n"
-                f"Output: {report_path}\n\n"
+                f"Output: {esc(report_path)}\n\n"
                 f"The delivered run directory report.html is unchanged.",
                 title="Report Rendered",
                 expand=False,
@@ -2034,8 +2034,8 @@ def results(
     console.print()
     console.print(
         Panel(
-            f"[bold]Pipeline Benchmark:[/bold] {pb.deployment_name} (run {pb.run_id})\n"
-            f"Mode: {pb.pipeline_mode} | "
+            f"[bold]Pipeline Benchmark:[/bold] {esc(pb.deployment_name)} (run {esc(pb.run_id)})\n"
+            f"Mode: {esc(pb.pipeline_mode)} | "
             f"Time-to-Value: {pb.time_to_value_seconds:.1f}s | "
             f"Throughput: {pb.pipeline_throughput_gb_per_second:.3f} GB/s",
             expand=False,
@@ -2275,7 +2275,7 @@ def journal(
             print_warning(f"No events found for session {session_id}")
             return
 
-        console.print(Panel(f"Session: [bold]{session_id}[/bold]", expand=False))
+        console.print(Panel(f"Session: [bold]{esc(session_id)}[/bold]", expand=False))
         table = Table()
         table.add_column("Time", style="dim", width=19)
         table.add_column("Event", style="cyan")
@@ -2629,17 +2629,17 @@ def recommend(
 
         console.print(
             Panel(
-                f"[bold]Scale {target_scale:,}[/bold] ({format_data_size(reqs['data_gb'])})\n\n"
-                f"[dim]Tier:[/dim]             {reqs['tier']}\n"
+                f"[bold]Scale {target_scale:,}[/bold] ({esc(format_data_size(reqs['data_gb']))})\n\n"
+                f"[dim]Tier:[/dim]             {esc(reqs['tier'])}\n"
                 f"[dim]Rows:[/dim]             {dims.approx_rows:,}\n"
-                f"[dim]Mode:[/dim]             {mode_label}\n\n"
+                f"[dim]Mode:[/dim]             {esc(mode_label)}\n\n"
                 f"[yellow]Minimum Cluster Requirements:[/yellow]\n"
                 f"  CPU cores:       [bold]{reqs['total_cores']:,}[/bold]\n"
                 f"  Memory:          [bold]{reqs['total_mem_gi']:,} GB[/bold]\n\n"
                 f"[dim]Breakdown:[/dim]\n"
-                f"{workload_line}\n"
-                f"  Datagen:         {reqs['datagen_pods']} pods\n"
-                f"  Trino:           {reqs['trino_workers']} workers\n"
+                f"{esc(workload_line)}\n"
+                f"  Datagen:         {esc(reqs['datagen_pods'])} pods\n"
+                f"  Trino:           {esc(reqs['trino_workers'])} workers\n"
                 f"  + infra overhead",
                 title="Cluster Requirements",
                 expand=False,

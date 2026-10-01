@@ -154,9 +154,9 @@ def _run_query_repl(
 
     console.print(
         Panel(
-            f"Lakebench SQL REPL ({executor.engine_name()})\n"
-            f"Namespace: {namespace}\n"
-            f"Format: {output_format} | Timeout: {timeout}s\n"
+            f"Lakebench SQL REPL ({esc(executor.engine_name())})\n"
+            f"Namespace: {esc(namespace)}\n"
+            f"Format: {esc(output_format)} | Timeout: {esc(timeout)}s\n"
             f"Type 'exit', 'quit', or Ctrl+D to quit",
             expand=False,
         )
@@ -391,8 +391,9 @@ def query(
     j.begin_command(CommandName.QUERY, {"query_name": query_name})
 
     if show_query or example:
-        console.print(f"\n[dim]Query ({esc(query_name)}):[/dim]")
-        console.print(f"[dim]{esc(sql)}[/dim]\n")
+        # stderr: with --format json|csv, stdout carries only the data.
+        err_console.print(f"\n[dim]Query ({esc(query_name)}):[/dim]")
+        err_console.print(f"[dim]{esc(sql)}[/dim]\n", soft_wrap=True)
 
     # Execute via QueryExecutor
     from lakebench.benchmark.executor import get_executor
@@ -419,9 +420,8 @@ def query(
     elapsed = result.duration_seconds
 
     if not result.success:
-        print_error(f"Query failed ({elapsed:.2f}s)")
-        if result.error:
-            console.print(f"[red]{esc(result.error)}[/red]")
+        detail = f": {result.error}" if result.error else ""
+        print_error(f"Query failed ({elapsed:.2f}s){detail}")
         _journal_safe(
             j.record,
             EventType.QUERY_EXECUTED,
@@ -679,12 +679,13 @@ def benchmark(
     console.print(
         Panel(
             f"Lakebench Query Benchmark\n"
-            f"{'=' * 25}\n"
-            f"Scale: {scale}\n"
-            f"Mode: {effective_mode}"
-            + (f" ({effective_streams} streams)" if effective_mode != "power" else "")
-            + f" ({iterations} iteration{'s' if iterations > 1 else ''})\n"
-            f"Cache: {effective_cache}" + (f"\nClass: {query_class}" if query_class else ""),
+            f"{esc('=' * 25)}\n"
+            f"Scale: {esc(scale)}\n"
+            f"Mode: {esc(effective_mode)}"
+            + (f" ({esc(effective_streams)} streams)" if effective_mode != "power" else "")
+            + f" ({esc(iterations)} iteration{esc('s' if iterations > 1 else '')})\n"
+            f"Cache: {esc(effective_cache)}"
+            + (f"\nClass: {esc(query_class)}" if query_class else ""),
             expand=False,
         )
     )

@@ -174,8 +174,10 @@ def test_no_traceback_on_list_config(tmp_path, monkeypatch):
     assert "top level is a YAML list" in errors[0]
 
 
-def test_group_silences_urllib3(monkeypatch):
+def test_group_silences_urllib3(monkeypatch, _restore_urllib3_logger):
     from lakebench.cli import _exit
+
+    monkeypatch.delenv(_exit.DEBUG_ENV, raising=False)
 
     logging.getLogger("urllib3").setLevel(logging.NOTSET)
     with warnings.catch_warnings():
@@ -209,20 +211,21 @@ _RICH_TAG = re.compile(
 )
 _PRINT_HELPERS = {"print_error", "print_warning", "print_info", "print_success"}
 
-# Unescaped f-string values per file in modules other lanes own (SEQUENCING
-# 2.3). A ratchet: the count must match exactly, so a new site fails and a
-# fixed site must lower the number. Owners convert their files on touch with
-# esc() (lakebench.cli._helpers); init_wizard.py is deleted by CC-16.
+# Rich-parsed f-strings with an unescaped value, per file, in modules other
+# lanes own (SEQUENCING 2.3). A ratchet: a file may not go above its number,
+# so a new unescaped site fails; fixing sites lowers the count (then lower the
+# number). Owners convert their files on touch with esc() from
+# lakebench.cli._helpers; init_wizard.py is deleted by CC-16.
 FOREIGN_BASELINE = {
     "cli/_admin.py": 5,
-    "cli/_deploy.py": 3,
-    "cli/_destroy.py": 7,
+    "cli/_deploy.py": 8,
+    "cli/_destroy.py": 13,
     "cli/_financial.py": 11,
-    "cli/_local.py": 4,
-    "cli/_run.py": 31,
-    "cli/_sustained.py": 25,
+    "cli/_local.py": 8,
+    "cli/_run.py": 34,
+    "cli/_sustained.py": 30,
     "config/loader.py": 1,
-    "init_wizard.py": 11,
+    "init_wizard.py": 14,
 }
 
 
@@ -252,24 +255,44 @@ def _literal_text(node: ast.AST) -> str:
     return ""
 
 
+def _rich_text_args(node: ast.Call) -> list[ast.AST]:
+    """Arguments of *node* that Rich parses as markup, or [] for other calls."""
+    func = node.func
+    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+    receiver = (
+        func.value.id
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+        else ""
+    )
+    if name == "print" and receiver in ("console", "err_console"):
+        return list(node.args)
+    if name == "Panel":
+        return node.args[:1] + [k.value for k in node.keywords if k.arg in ("title", "subtitle")]
+    if name == "add_row":
+        return list(node.args)
+    return []
+
+
 def _scan(tree: ast.AST) -> tuple[int, list[int]]:
+    """(f-strings Rich parses with an unescaped value, lines of print_* with markup)."""
+    seen: set[int] = set()
     unescaped = 0
     markup_in_helper: list[int] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr == "print"
-            and isinstance(func.value, ast.Name)
-            and func.value.id in ("console", "err_console")
-        ):
-            for arg in node.args:
-                if isinstance(arg, ast.JoinedStr) and any(
-                    isinstance(v, ast.FormattedValue) and not _value_is_safe(v) for v in arg.values
+        for arg in _rich_text_args(node):
+            if isinstance(arg, ast.Call):
+                continue  # a nested Panel(...) is visited as its own call
+            for js in (x for x in ast.walk(arg) if isinstance(x, ast.JoinedStr)):
+                if id(js) in seen:
+                    continue
+                seen.add(id(js))
+                if any(
+                    isinstance(v, ast.FormattedValue) and not _value_is_safe(v) for v in js.values
                 ):
                     unescaped += 1
+        func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
         if name in _PRINT_HELPERS and any(_RICH_TAG.search(_literal_text(a)) for a in node.args):
             markup_in_helper.append(node.lineno)
@@ -288,17 +311,115 @@ def test_markup_safety_lint():
     assert not helper_markup, f"print_* prints text verbatim; drop the markup: {helper_markup}"
     owned_or_new = {f: n for f, n in counts.items() if f not in FOREIGN_BASELINE}
     assert not owned_or_new, (
-        "console.print f-string interpolates a value without esc(): "
+        "a console.print, Panel or add_row f-string interpolates a value without esc(): "
         f"{owned_or_new}. Wrap it in esc(), or markup() if it is markup on purpose."
     )
-    drift = {f: (counts.get(f, 0), n) for f, n in FOREIGN_BASELINE.items() if counts.get(f, 0) != n}
-    assert not drift, f"(found, baseline) per file; update FOREIGN_BASELINE downward: {drift}"
+    over = {f: (counts.get(f, 0), n) for f, n in FOREIGN_BASELINE.items() if counts.get(f, 0) > n}
+    assert not over, f"(found, allowed) per file: wrap the new value in esc(): {over}"
 
 
 def test_lint_catches_an_unescaped_value():
-    bad = ast.parse('console.print(f"[red]{e}[/red]")\nprint_error("[bold]x[/bold]")\n')
-    assert _scan(bad) == (1, [2])
+    bad = ast.parse(
+        'console.print(f"[red]{e}[/red]")\nprint_error("[bold]x[/bold]")\n'
+        'console.print(Panel(f"a {x}" + "\\n".join(f"{r}" for r in rs)))\n'
+        't.add_row(f"Error: {e.reason}")\n'
+    )
+    assert _scan(bad) == (4, [2])
     good = ast.parse(
         'console.print(f"{esc(e)} {n:,} {x:.2f} {len(y)} {markup(s)}")\nprint_error("[x] ok")\n'
     )
     assert _scan(good) == (0, [])
+
+
+# -- review follow-ups ---------------------------------------------------------
+
+
+@pytest.fixture
+def _restore_urllib3_logger():
+    logger = logging.getLogger("urllib3")
+    level = logger.level
+    yield
+    logger.setLevel(level)
+
+
+def test_debug_keeps_urllib3_output(monkeypatch, _restore_urllib3_logger):
+    from lakebench.cli import _exit
+
+    monkeypatch.setenv(_exit.DEBUG_ENV, "1")
+    logging.getLogger("urllib3").setLevel(logging.NOTSET)
+    _exit.quiet_urllib3()
+    assert logging.getLogger("urllib3").level == logging.NOTSET
+
+
+def test_example_query_json_stdout_is_only_json(monkeypatch, tmp_path):
+    """`query --example count --format json` (the docstring's own example)."""
+    import lakebench.benchmark.executor as executor_mod
+    import lakebench.metrics as metrics_mod
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(app, ["init", "--output", "c.yaml"]).exit_code == 0
+    raw = "table_name\trow_count\nsilver.x\t10"
+    monkeypatch.setattr(executor_mod, "get_executor", lambda cfg, ns: _FakeExecutor(raw))
+
+    class _NoRuns:
+        def get_latest_run_for_deployment(self, *_a, **_k):
+            return None
+
+    monkeypatch.setattr(metrics_mod, "MetricsStorage", _NoRuns)
+    result = runner.invoke(app, ["query", "c.yaml", "--example", "count", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(_stdout(result))["count"] == 1
+    assert "Query (count)" in _stderr(result)
+
+
+def test_failed_query_detail_is_on_the_error_line(monkeypatch, tmp_path):
+    import lakebench.benchmark.executor as executor_mod
+
+    class _Failing:
+        def execute_query(self, sql, timeout=None):
+            return SimpleNamespace(
+                success=False,
+                raw_output="",
+                rows_returned=0,
+                duration_seconds=0.1,
+                error="line 1:8: Table [main].x does not exist",
+            )
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(app, ["init", "--output", "c.yaml"]).exit_code == 0
+    monkeypatch.setattr(executor_mod, "get_executor", lambda cfg, ns: _Failing())
+    result = runner.invoke(app, ["query", "c.yaml", "--sql", "SELECT 1", "--format", "json"])
+    assert result.exit_code == 1
+    assert _stdout(result) == ""
+    assert "ERROR Query failed (0.10s): line 1:8: Table [main].x does not exist" in _stderr(result)
+
+
+@pytest.mark.parametrize("fmt", ["json", "csv"])
+def test_compare_machine_output_is_only_data(fmt, monkeypatch, tmp_path):
+    from unittest import mock
+
+    from tests.conftest import make_config
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.yaml").write_text("name: a\n")
+    (tmp_path / "b.yaml").write_text("name: b\n")
+    with (
+        mock.patch(
+            "lakebench.cli._compare.load_config",
+            side_effect=[make_config(name="a"), make_config(name="b")],
+        ),
+        mock.patch(
+            "lakebench.cli._compare._run_single",
+            side_effect=[{"error": "run [a] failed"}, {"error": "run [b] failed"}],
+        ) as run_single,
+    ):
+        result = CliRunner().invoke(app, ["compare", "a.yaml", "b.yaml", "--format", fmt, "--yes"])
+    out = _stdout(result)
+    if fmt == "json":
+        assert json.loads(out)["config_a"]["error"] == "run [a] failed"
+    else:
+        assert out.splitlines()[0] == "metric,config_a,config_b,comparable,like_for_like"
+    assert "Running configuration A" in _stderr(result)
+    assert run_single.call_args.kwargs["child_stdout"] is not None

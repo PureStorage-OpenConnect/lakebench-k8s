@@ -17,7 +17,7 @@ path yet says so.
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception` |
 | 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.upgrade_refused` |
 | 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | no command yet |
-| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | no command yet |
+| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `financial.k8s_unreachable` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | no command yet |
 | 10 | `COMPARE_NOT_COMPARABLE` | compare: NOT COMPARABLE. | no command yet |
@@ -38,16 +38,18 @@ the CLI down every path listed here and checks the code.
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `click.usage` | 2 | an unknown flag, a missing argument or a bad value |
 | `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
+| `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
 | `confirm.non_tty` | 5 | a confirmation prompt got no answer (no terminal, end of input) or was declined |
-| `sigint` | 130 | any command interrupted with Ctrl-C |
+| `sigint` | 130 | a command interrupted with Ctrl-C outside a prompt (Ctrl-C at a prompt is 5) |
 
 ## Errors and output
 
-Errors, warnings and progress lines go to stderr. An error starts with
+Status lines (`ERROR`, `WARN`, `OK` and `...`) go to stderr; panels,
+tables and stage headers are still on stdout. An error starts with
 one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`
-(the fix) and `Where` lines when they apply. No error prints a
-traceback; set `LAKEBENCH_DEBUG=1` to get one for an error Lakebench
-does not classify. Machine output (`--format json` and `--format csv`
+(the fix) and `Where` lines when they apply. An error Lakebench does
+not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`
+to get the traceback. Machine output (`--format json` and `--format csv`
 on `query`, `results` and `compare`) goes to plain stdout, unwrapped, so
 it can be piped to a parser.
 
@@ -58,6 +60,6 @@ else in the table above, until they are converted:
 
 | Code | 1.6 meaning |
 |---|---|
-| 3 | a declined confirmation prompt (`init`, `destroy`, `clean`, `compare`) |
+| 3 | a declined confirmation prompt in `init`, `destroy`, `compare` and the first `clean` prompt (other prompts exit 5) |
 | 4 | `destroy`: the namespace is still terminating |
-| 5 | `run`: datagen did not finish in time |
+| 5 | `run`: datagen did not finish in time (a declined or unanswered `run` prompt is also 5, meaning not confirmed) |
