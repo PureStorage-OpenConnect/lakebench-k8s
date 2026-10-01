@@ -253,8 +253,8 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         )
     ),
     # DEP-2 (SD-4a creates them; SD-6 owns their ordering): last in the
-    # category1 step, so a destroy-time job could still reach the server, and
-    # the Deployment before its claim so pvc-protection lets the claim go.
+    # category1 step (design s11), and the Deployment before its claim so
+    # pvc-protection lets the claim go once the pod is gone.
     *_named("apps_v1", "deployments", CATEGORY1_STEP, "lb-deps", owner="SD-4a"),
     *_named("core_v1", "services", CATEGORY1_STEP, "lb-deps", owner="SD-4a"),
     *_named("core_v1", "configmaps", CATEGORY1_STEP, "lb-deps-manifest", owner="SD-4a"),

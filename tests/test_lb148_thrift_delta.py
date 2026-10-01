@@ -179,7 +179,8 @@ def test_delta_thrift_default_size():
     resolve_auto_sizing(cfg, None)
     thrift = cfg.architecture.query_engine.spark_thrift
     assert (thrift.cores, thrift.memory) == (DELTA_THRIFT_CORES, f"{DELTA_THRIFT_MEMORY_GI}g")
-    assert _co_resident_cpu_m(cfg) == DELTA_THRIFT_CORES * 1000 + 1000
+    # Hive/Postgres 1000m and the lb-deps pod's 1000m reservation (DEP-2).
+    assert _co_resident_cpu_m(cfg) == DELTA_THRIFT_CORES * 1000 + 1000 + 1000
 
 
 def test_delta_thrift_default_rendered():

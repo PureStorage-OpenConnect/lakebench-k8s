@@ -18,8 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   present, the one table-format runtime the jobs use, no unlisted jar
   shadowing an image jar), and records it in the `lb-deps-manifest`
   ConfigMap and the namespace annotation `lakebench.deployment/deps-set`.
-  The step removes the annotation first and writes it last, so a deploy
-  whose `deps` step fails leaves none. A cold resolve adds one to a few
+  The step removes the annotation before anything else and writes it last,
+  and removes it again when the step fails, so a failed `deps` step leaves
+  none. A cold resolve adds one to a few
   minutes to the first deploy; an unchanged redeploy renders the same pod
   template and does not restart the server. `destroy` removes the server's
   objects and the annotation, also when `create_namespace: false`.

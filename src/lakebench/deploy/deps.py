@@ -49,6 +49,7 @@ TEMPLATES = ("deps/pvc.yaml.j2", "deps/service.yaml.j2", "deps/deployment.yaml.j
 READY_TIMEOUT_S = 900  # SD-1: one cold row resolves in about 1 min
 PVC_GONE_TIMEOUT_S = 120
 NO_CLASS_GRACE_S = 30
+STALE_REPLICA_FAILURE_GRACE_S = 120
 SHOW_TIMEOUT_S = 120
 MIRROR_HINT = (
     "set platform.deps.maven_repository and platform.deps.pypi_index "
@@ -109,14 +110,22 @@ class DependencyServerDeployer:
         try:
             handle = self._deploy(request)
         except deploy_deadline.DeployTimeout:
+            self._clear_annotation_quietly()
             raise
         except DepsStepFailed as e:
+            self._clear_annotation_quietly()
             return self._failed(start, str(e))
         except Exception as e:  # noqa: BLE001 -- one FAILED result, logged
             from lakebench.deploy.engine import DeploymentEngine
 
-            if DeploymentEngine._is_transient_error(e):
-                raise  # _run_steps retries the step once
+            self._clear_annotation_quietly()
+            # apply_manifest wraps the API error; _run_steps retries the step
+            # once on the transient one underneath.
+            inner: BaseException | None = e
+            while inner is not None:
+                if isinstance(inner, Exception) and DeploymentEngine._is_transient_error(inner):
+                    raise inner from e
+                inner = inner.__cause__ or inner.__context__
             logger.exception("dependency server deploy failed")
             return self._failed(start, f"dependency server deploy failed: {e}")
         self.engine.deps = handle
@@ -160,6 +169,7 @@ class DependencyServerDeployer:
 
         core = k8s_client.CoreV1Api()
         sha = request.request_sha256
+        self.warnings = []  # the engine may retry the step on this deployer
 
         # First: the annotation must never name a set this deploy has not
         # verified, whatever fails below.
@@ -237,6 +247,16 @@ class DependencyServerDeployer:
             return str(json.loads((cm.data or {})["manifest.json"])["request_sha256"])
         except (KeyError, TypeError, ValueError):
             return ""
+
+    def _clear_annotation_quietly(self) -> None:
+        """After a failure: another deploy of this namespace may have written
+        the annotation meanwhile for a server this one then replaced."""
+        try:
+            from kubernetes import client as k8s_client
+
+            self._remove_annotation(k8s_client.CoreV1Api())
+        except Exception as e:  # noqa: BLE001 -- the step has already failed
+            logger.warning("could not clear %s: %s", m.ANNOTATION_DEPS_SET, e)
 
     def _remove_annotation(self, core: Any) -> None:
         ns = core.read_namespace(self.namespace)
@@ -587,10 +607,14 @@ class DependencyServerDeployer:
 
         dep = apps.read_namespaced_deployment(m.SERVER_NAME, self.namespace)
         failure = self._replica_failure(dep)
-        if failure is not None and not self._stale_replica_failure:
-            # Only once the controller has seen this generation: a condition
-            # left from an earlier attempt clears when the ReplicaSet retries.
-            raise WaitTerminal(self._replica_failure_message(failure))
+        if failure is not None:
+            # Only once the controller has seen this generation. A condition
+            # that predates this attempt may clear when the ReplicaSet retries
+            # (an admin fixed the SCC or quota); it fails after a grace.
+            first = self._first_seen.setdefault("replica-failure", time.monotonic())
+            waited = time.monotonic() - first
+            if not self._stale_replica_failure or waited >= STALE_REPLICA_FAILURE_GRACE_S:
+                raise WaitTerminal(self._replica_failure_message(failure))
         pods = self._server_pods(core, sha)
         for pod in pods:
             if pod.metadata.uid not in stale:
@@ -648,6 +672,10 @@ class DependencyServerDeployer:
                 "ServiceAccount, which needs the anyuid SCC on OpenShift; check the "
                 "rbac step's output"
             )
+        text += (
+            ". Once the cause is fixed the ReplicaSet retries on its own backoff; "
+            "re-run deploy then"
+        )
         return text
 
     def _raise_on_pod_failure(self, core: Any, pod: Any) -> None:
