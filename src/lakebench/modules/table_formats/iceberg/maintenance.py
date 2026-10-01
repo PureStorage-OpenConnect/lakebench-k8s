@@ -13,6 +13,7 @@ there would only cost time.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -102,8 +103,6 @@ def _parse_threshold_seconds(retention_threshold: str) -> int:
 
     Supports ``s`` (seconds), ``m`` (minutes), ``h`` (hours), ``d`` (days).
     """
-    import re
-
     m = re.fullmatch(r"\s*(\d+)\s*([smhdSMHD])\s*", retention_threshold or "")
     if not m:
         # Never guess: an unknown unit used to read as minutes ("7D" -> 7 min).
@@ -228,6 +227,126 @@ def build_compaction_sql(
     return []
 
 
+# Lakebench-created tables with a single identity partition column, taken
+# from Lakebench's own DDL (silver_build.py and silver_stream.py both create
+# customer_interactions_enriched partitioned by interaction_date). Keyed by
+# the bare table name; a renamed table falls back to one statement.
+_COMPACTION_PARTITION_COLUMN = {"customer_interactions_enriched": "interaction_date"}
+
+# Partitions per Trino optimize statement. Trino's Iceberg connector refuses
+# a write that opens more than max_partitions_per_writer (default 100)
+# writers: "Exceeded limit of 100 open writers for partitions: 101" (LB-210,
+# run-20260929-204941-1d17f4). What trips it is the number of partitions one
+# optimize rewrites, not the number the table holds: batch C360 s1 silver
+# (366 interaction_date partitions, a few large files each) compacted in one
+# statement (run-20260929-212900-5105a0), while continuous silver, with small
+# micro-batch files in every partition, did not. The plan chunks every table
+# above 90 partitions anyway, so a run never depends on how many of them hold
+# small files; 90 leaves 10 writers of margin below the default. (Both runs
+# had 366 distinct interaction dates, c360_correctness distinct_dates.)
+COMPACTION_CHUNK_PARTITIONS = 90
+
+_DATE_VALUE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def compaction_partition_column(table: str) -> str | None:
+    """The identity partition column compaction chunks *table* by, or None."""
+    return _COMPACTION_PARTITION_COLUMN.get(table.rsplit(".", 1)[-1].strip('"'))
+
+
+def _system_table_ref(table: str, suffix: str) -> str:
+    """'catalog.schema.table' -> 'catalog.schema."table$<suffix>"'."""
+    parts = table.rsplit(".", 1)
+    if len(parts) == 2:
+        return f'{parts[0]}."{parts[1]}${suffix}"'
+    return f'"{table}${suffix}"'
+
+
+def build_partition_values_sql(table: str, column: str) -> str:
+    """Trino query listing *table*'s values of identity partition *column*."""
+    ref = _system_table_ref(table, "partitions")
+    return f"SELECT DISTINCT partition.{column} FROM {ref} ORDER BY 1"
+
+
+def parse_partition_values(output: str) -> list[str | None]:
+    """Partition values from the Trino CLI's CSV output of
+    :func:`build_partition_values_sql`, sorted, with None last for a NULL
+    partition (the CLI prints NULL as an empty field).
+
+    Raises ``ValueError`` on any line that is not a ``YYYY-MM-DD`` date, so
+    an unexpected format never turns into statements that miss partitions.
+    """
+    values: list[str | None] = []
+    for raw in (output or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        value = line.strip('"')
+        if value == "":
+            values.append(None)
+        elif _DATE_VALUE.fullmatch(value):
+            values.append(value)
+        else:
+            raise ValueError(f"unexpected partition value {line!r}")
+    dated = sorted({v for v in values if v is not None})
+    return [*dated, *([None] if None in values else [])]
+
+
+def build_compaction_plan(
+    engine: str,
+    catalog: str,
+    table: str,
+    file_size_threshold: str = "128MB",
+    partitions: list[str | None] | None = None,
+) -> list[str]:
+    """Compaction statements for *table*.
+
+    On Trino, a table on ``_COMPACTION_PARTITION_COLUMN`` whose *partitions*
+    (from :func:`parse_partition_values`) number more than
+    ``COMPACTION_CHUNK_PARTITIONS`` is compacted in runs of at most that many
+    sorted partition values, one ``optimize ... WHERE`` per run: run n
+    covers ``col > <last value of run n-1> AND col <= <its last value>``,
+    the first is open below and the last open above, plus ``WHERE col IS
+    NULL`` when a NULL partition exists. Trino writer settings are not changed, so worker memory stays
+    where a single successful optimize already runs (raising
+    max_partitions_per_writer instead grows writer memory with the
+    partition count; LB-041). Every other case, including ``partitions``
+    None (not read, or the read failed), is :func:`build_compaction_sql`.
+    """
+    column = compaction_partition_column(table)
+    if (
+        engine != "trino"
+        or column is None
+        or partitions is None
+        or len(partitions) <= COMPACTION_CHUNK_PARTITIONS
+    ):
+        return build_compaction_sql(engine, catalog, table, file_size_threshold)
+    dated = [p for p in partitions if p is not None]
+    head = f"ALTER TABLE {table} EXECUTE optimize(file_size_threshold => '{file_size_threshold}')"
+    runs = [
+        dated[i : i + COMPACTION_CHUNK_PARTITIONS]
+        for i in range(0, len(dated), COMPACTION_CHUNK_PARTITIONS)
+    ]
+    plan: list[str] = []
+    for n, run in enumerate(runs):
+        # Chunk n covers (last value of chunk n-1, its own last value], the
+        # first is open below and the last open above, so together they
+        # cover every non-NULL value, including one a live stream adds after
+        # the read, and no two overlap.
+        if len(runs) == 1:
+            where = f"{column} IS NOT NULL"
+        elif n == 0:
+            where = f"{column} <= DATE '{run[-1]}'"
+        elif n == len(runs) - 1:
+            where = f"{column} > DATE '{runs[n - 1][-1]}'"
+        else:
+            where = f"{column} > DATE '{runs[n - 1][-1]}' AND {column} <= DATE '{run[-1]}'"
+        plan.append(f"{head} WHERE {where}")
+    if len(dated) < len(partitions):
+        plan.append(f"{head} WHERE {column} IS NULL")
+    return plan
+
+
 def build_table_health_sql(
     engine: str,
     table: str,
@@ -332,6 +451,7 @@ def query_sql(
     pod_name: str,
     namespace: str,
     sql: str,
+    timeout: int = 30,
 ) -> str:
     """Execute a SQL query and return stdout.
 
@@ -343,6 +463,7 @@ def query_sql(
             pod_name,
             ["trino", "--execute", sql],
             namespace,
+            timeout=timeout,
         )
     elif engine == "spark-thrift":
         rc, stdout, stderr = k8s.exec_in_pod(
@@ -359,6 +480,7 @@ def query_sql(
             ],
             namespace,
             container="spark-thrift",
+            timeout=timeout,
         )
     else:
         raise ValueError(f"Unsupported engine for query_sql: {engine}")
