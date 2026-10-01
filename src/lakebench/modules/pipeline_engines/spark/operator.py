@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from lakebench.deploy import deadline as deploy_deadline
 from lakebench.k8s import pinned_helm, pinned_kubectl, pinned_oc
 from lakebench.k8s.lease_state import LeaseHoldExceeded
 from lakebench.modules.pipeline_engines.spark.operator_scratch import (
@@ -37,6 +38,16 @@ class _DeploymentReadError(Exception):
 # about 5 minutes; a 30 s acquire made concurrent deploys and destroys fail
 # instead of queueing, which parallel UAT hit.
 _WATCH_LIST_LOCK_TIMEOUT_S = 600
+# Waits after a shared mutation is committed (helm upgrade done, operator
+# restarted). They are bounded by their own timeout, never cut by the deploy
+# deadline (DEP-6): stopping half way would release the lease with the shared
+# operator mid-restart and its watch list unverified, which every other
+# deployment then works against. Today only these bounds and the lease TTL
+# hold them; SD-12 adds a lease hold budget.
+_POST_UPGRADE_ROLLOUT_S = 180
+_POST_UPGRADE_RESTART_S = 120
+_POST_UPGRADE_READY_S = 120
+_POST_UPGRADE_VERIFY_S = 15
 
 
 class _WatchListReadError(Exception):
@@ -756,6 +767,7 @@ class SparkOperatorManager:
         # Step 1: Remove the namespace so Helm deletes the Role/RoleBinding
         without_ns = [ns for ns in watched if ns != namespace]
         ns_set_without = ",".join(without_ns) if without_ns else "default"
+        deploy_deadline.check("helm upgrade of the Spark Operator watch list")
         cmd = [
             "helm",
             "upgrade",
@@ -792,8 +804,9 @@ class SparkOperatorManager:
             namespace,
         )
 
-        # Step 2: Re-add the namespace -- Helm will create fresh RBAC
-        return self._add_namespace_to_watch_impl(namespace)
+        # Step 2: Re-add the namespace -- Helm will create fresh RBAC. Mid-
+        # sequence after the removal, so the deploy deadline does not cut it.
+        return self._add_namespace_to_watch_impl(namespace, _deadline_gate=False)
 
     def remove_namespace_from_watch(
         self,
@@ -1140,12 +1153,18 @@ class SparkOperatorManager:
             )
             return None, "unlocked"
 
-        lease_cm = cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S)
+        # No shared mutation starts once the deploy deadline has passed, and
+        # the wait for the lease counts against it (DEP-6).
+        deploy_deadline.check("the cluster lease for the Spark Operator watch list")
+        lease_cm = cluster_lock(core_v1, timeout=deploy_deadline.clamp(_WATCH_LIST_LOCK_TIMEOUT_S))
         try:
             lease_cm.__enter__()
             return lease_cm, "locked"
         except ClusterLockHeld as e:
             logger.warning("spark-operator watch-list: lease held by %s", e.holder)
+            deploy_deadline.check(
+                "the cluster lease for the Spark Operator watch list", f"held by {e.holder}"
+            )
             return None, "refuse"
         except ClusterLockError as e:
             # RBAC denial, API failure managing the lease namespace,
@@ -1198,7 +1217,9 @@ class SparkOperatorManager:
             )
             return None, "refuse"
 
-    def _add_namespace_to_watch_impl(self, namespace: str, _retry_on_eviction: bool = True) -> bool:
+    def _add_namespace_to_watch_impl(
+        self, namespace: str, _retry_on_eviction: bool = True, _deadline_gate: bool = True
+    ) -> bool:
         """Non-lease-gated body of ``_add_namespace_to_watch``.
 
         Split out so ADR-F5's lease acquisition wraps only the mutation
@@ -1260,6 +1281,10 @@ class SparkOperatorManager:
                 return True
 
             ns_set = ",".join(new_list)
+
+            if _deadline_gate:
+                # Before the shared mutation, never after it (DEP-6).
+                deploy_deadline.check("helm upgrade of the Spark Operator watch list")
 
             cmd = [
                 "helm",
@@ -1342,7 +1367,7 @@ class SparkOperatorManager:
         # never reconciles this namespace's SparkApplications -- so treat a
         # missing namespace here as contention to be retried, not as a
         # terminal error.
-        if not self._verify_namespace_watched(namespace, timeout=15):
+        if not self._verify_namespace_watched(namespace, timeout=_POST_UPGRADE_VERIFY_S):
             if _retry_on_eviction:
                 logger.warning(
                     "Namespace '%s' was dropped from spark.jobNamespaces after a "
@@ -1350,7 +1375,10 @@ class SparkOperatorManager:
                     namespace,
                 )
                 # We already hold the cluster lease; do not re-acquire.
-                return self._add_namespace_to_watch_impl(namespace, _retry_on_eviction=False)
+                # Mid-sequence: the deadline does not cut a re-add.
+                return self._add_namespace_to_watch_impl(
+                    namespace, _retry_on_eviction=False, _deadline_gate=False
+                )
             logger.error(
                 "Operator restarted but deployment spec does not include namespace '%s'",
                 namespace,
@@ -1399,7 +1427,7 @@ class SparkOperatorManager:
                     f"deployment/{deploy}",
                     "-n",
                     self.namespace,
-                    "--timeout=120s",
+                    f"--timeout={_POST_UPGRADE_RESTART_S}s",
                 ],
                 capture_output=True,
                 text=True,
@@ -1654,8 +1682,10 @@ class SparkOperatorManager:
         """The controller's /tmp volume; raises _DeploymentReadError."""
         return tmp_volume(self._controller_deployment())
 
-    def _wait_for_rollout(self, timeout_s: int = 180) -> bool:
-        """Wait for both operator Deployments to finish rolling out."""
+    def _rollout_status_after_upgrade(self) -> bool:
+        """Wait for both operator Deployments to finish rolling out after a
+        committed helm upgrade: bounded by _POST_UPGRADE_ROLLOUT_S, never cut
+        by the deploy deadline (DEP-6)."""
         for deploy in (self.CONTROLLER_DEPLOYMENT, "spark-operator-webhook"):
             result = self._run(
                 [
@@ -1665,7 +1695,7 @@ class SparkOperatorManager:
                     f"deployment/{deploy}",
                     "-n",
                     self.namespace,
-                    f"--timeout={timeout_s}s",
+                    f"--timeout={_POST_UPGRADE_ROLLOUT_S}s",
                 ],
                 capture_output=True,
                 text=True,
@@ -1747,7 +1777,7 @@ class SparkOperatorManager:
         if self._is_openshift():
             self._assign_openshift_scc()
             self._patch_openshift_deployments()
-        if not self._wait_for_rollout():
+        if not self._rollout_status_after_upgrade():
             return False
         return self._verify_tmp_size(tmp_size)
 
@@ -1800,6 +1830,9 @@ class SparkOperatorManager:
         if is_openshift:
             logger.info("OpenShift detected -- will assign anyuid SCC after install")
 
+        # A fresh install or upgrade of the shared operator does not start
+        # after the deploy deadline (DEP-6).
+        deploy_deadline.check("helm install of the Spark Operator")
         try:
             # Add Helm repo
             self._run(
@@ -1865,7 +1898,9 @@ class SparkOperatorManager:
                 for key, value in values.items():
                     cmd.extend(["--set", f"{key}={value}"])
 
-            # Run install
+            # Run install; not after the deadline, which the repo update above
+            # may have used up.
+            deploy_deadline.check("helm install of the Spark Operator")
             result = self._run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
@@ -1880,9 +1915,9 @@ class SparkOperatorManager:
 
             # readyReplicas alone can still count the old pod during an
             # upgrade; wait for the new ReplicaSets.
-            if exists and not self._wait_for_rollout():
+            if exists and not self._rollout_status_after_upgrade():
                 return False
-            if not self._wait_for_ready(timeout=120):
+            if not self._wait_for_ready(timeout=_POST_UPGRADE_READY_S, cut_by_deadline=False):
                 return False
             return self._verify_tmp_size(tmp_size)
 
@@ -1890,7 +1925,7 @@ class SparkOperatorManager:
             logger.error(f"Failed to install Spark Operator: {e}")
             return False
 
-    def _wait_for_ready(self, timeout: int = 120) -> bool:
+    def _wait_for_ready(self, timeout: float = 120, cut_by_deadline: bool = True) -> bool:
         """Wait for Spark Operator to become ready.
 
         Args:
@@ -1900,14 +1935,18 @@ class SparkOperatorManager:
             True if operator becomes ready
         """
         start = time.time()
+        last = ""
 
         while time.time() - start < timeout:
             status = self.check_status()
             if status.ready:
                 logger.info("Spark Operator is ready")
                 return True
+            last = status.message
             time.sleep(5)
 
+        if cut_by_deadline:  # not after a committed install
+            deploy_deadline.check("Spark Operator ready", last)
         logger.error(f"Spark Operator not ready after {timeout}s")
         return False
 
@@ -1969,7 +2008,7 @@ class SparkOperatorManager:
                 return self.check_status()
             return status
         logger.info("Spark Operator not ready, waiting for it to recover...")
-        if self._wait_for_ready(timeout=120):
+        if self._wait_for_ready(timeout=deploy_deadline.clamp(120)):
             status = self.check_status()
             if (
                 not _after_wait

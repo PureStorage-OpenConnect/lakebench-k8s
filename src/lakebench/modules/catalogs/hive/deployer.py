@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from lakebench.config.schema import STACKABLE_HIVE_VERSION
+from lakebench.deploy import deadline as deploy_deadline
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 from lakebench.k8s import WaitResult, WaitStatus
 
@@ -135,6 +136,8 @@ class HiveDeployer:
         version = op_cfg.version
 
         for i, op in enumerate(self._INSTALL_ORDER):
+            # Not after the deploy deadline: each install is a shared change.
+            deploy_deadline.check(f"helm install of Stackable {op}")
             chart = f"oci://oci.stackable.tech/sdp-charts/{op}"
             cmd = [
                 "install",
@@ -180,6 +183,7 @@ class HiveDeployer:
         for _ in range(30):
             if self._is_stackable_available():
                 return True
+            deploy_deadline.check("Stackable CRDs to register")
             time.sleep(2)
 
         logger.error("Stackable CRDs did not appear after install")
@@ -292,7 +296,9 @@ class HiveDeployer:
                         self.k8s.apply_manifest(doc, namespace=namespace)
 
             # Wait for HiveCluster to be ready
-            result = self._wait_for_hivecluster(namespace, timeout_seconds=600)
+            result = self._wait_for_hivecluster(
+                namespace, timeout_seconds=deploy_deadline.clamp(600)
+            )
 
             if result.status != WaitStatus.READY:
                 return DeploymentResult(
@@ -331,7 +337,7 @@ class HiveDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _wait_for_hivecluster(self, namespace: str, timeout_seconds: int = 300) -> WaitResult:
+    def _wait_for_hivecluster(self, namespace: str, timeout_seconds: float = 300) -> WaitResult:
         """Wait for Stackable HiveCluster to be ready.
 
         Args:
@@ -398,11 +404,14 @@ class HiveDeployer:
 
                 time.sleep(10)
 
+            deploy_deadline.check("HiveCluster lakebench-hive", "not Available")
             elapsed = time.time() - (deadline - timeout_seconds)
             return WaitResult(
                 WaitStatus.TIMEOUT, f"HiveCluster not ready after {timeout_seconds}s", elapsed, 0
             )
 
+        except deploy_deadline.DeployTimeout:
+            raise
         except Exception as e:
             return WaitResult(WaitStatus.FAILED, str(e), 0.0, 0)
 
