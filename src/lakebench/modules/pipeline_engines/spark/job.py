@@ -949,14 +949,14 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
 # No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
 # the 4.1 jar there throws IncompatibleClassChangeError -- see LB-069.
 
-# Additional Maven repositories to include in ``spark.jars.repositories`` /
+# Additional Maven repository for ``spark.jars.repositories`` /
 # ``--repositories`` on every job. Google mirrors Maven Central at
 # ``maven-central.storage-download.googleapis.com`` and rate-limits
 # independently, so when Central returns HTTP 429 to the cluster's egress
 # IP (which happens after a burst of UAT deploys) Ivy falls to the mirror
-# and the driver still resolves cleanly. Ordered mirror-first: Ivy tries
-# resolvers in list order, and Central 429s register as "not found" which
-# is exactly the signal that triggers the next resolver.
+# and the driver still resolves cleanly. Spark's default Ivy chain tries
+# Central and repos.spark-packages.org first and this entry last; a Central
+# 429 registers as "not found", which moves Ivy on down the chain.
 _MAVEN_MIRROR_REPOS = "https://maven-central.storage-download.googleapis.com/maven2/"
 
 # Python packages the AML reference detector (D9) needs on the driver. The
@@ -1950,65 +1950,30 @@ class SparkJobManager:
 
         # Parse Spark version from image tag (e.g., apache/spark:3.5.4 -> 3.5)
         spark_image_tag = cfg.images.spark.split(":")[-1]
-        major_minor_key = _parse_spark_major_minor(cfg.images.spark)
-        scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
-        # Iceberg runtime artifact suffix. Depends on the Iceberg version too:
-        # only 1.11.0+ publishes a native Spark 4.1 runtime.
-        iceberg_runtime_suffix = iceberg_runtime_suffix_for(
-            major_minor_key, cfg.architecture.table_format.iceberg.version
-        )
 
         # Catalog type needed for packages and catalog config
         catalog_name = cfg.architecture.query_engine.trino.catalog_name
         catalog_type = cfg.architecture.catalog.type.value
 
-        # Build spark.jars.packages and extensions based on table format
+        # Packages come from deps.request, the one definition shared with
+        # Spark Thrift (DEP-2, UX D2).
+        from lakebench.deps.request import jar_coordinates
+
+        packages = jar_coordinates(cfg)
+        spark_conf["spark.jars.packages"] = ",".join(packages)
+        # Central rate-limits per-egress-IP (HTTP 429), and a burst of
+        # UAT deploys can silently starve a fresh driver pod's Ivy
+        # resolve. Google's Central mirror at
+        # ``maven-central.storage-download.googleapis.com`` is
+        # rate-limited independently and works with a plain
+        # ``--repositories`` entry -- Ivy falls to it when Central
+        # returns 429 as "not found". Adding as spark_conf so both
+        # the SparkApplication CR and the ivy-warmer init container
+        # (which reads spark.jars.* from the same conf) see it.
+        spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
         if table_format == "delta":
-            delta_version = cfg.architecture.table_format.delta.version
-            packages = [
-                _delta_spark_artifact(scala_suffix, delta_version),
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-            if spark_major < 4:
-                packages.append(
-                    f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
-                )
-            if catalog_type == "unity":
-                unity_version = cfg.architecture.catalog.unity.spark_connector_version
-                packages.append(
-                    f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
-                )
-            spark_conf["spark.jars.packages"] = ",".join(packages)
-            spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
             spark_conf["spark.sql.extensions"] = "io.delta.sql.DeltaSparkSessionExtension"
         else:
-            # Iceberg (default)
-            iceberg_version = cfg.architecture.table_format.iceberg.version
-            packages = [
-                f"org.apache.iceberg:iceberg-spark-runtime-{iceberg_runtime_suffix}{scala_suffix}:{iceberg_version}",
-                f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-            if spark_major < 4:
-                packages.append(
-                    f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
-                )
-            if catalog_type == "unity":
-                unity_version = cfg.architecture.catalog.unity.spark_connector_version
-                packages.append(
-                    f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
-                )
-            spark_conf["spark.jars.packages"] = ",".join(packages)
-            # Central rate-limits per-egress-IP (HTTP 429), and a burst of
-            # UAT deploys can silently starve a fresh driver pod's Ivy
-            # resolve. Google's Central mirror at
-            # ``maven-central.storage-download.googleapis.com`` is
-            # rate-limited independently and works with a plain
-            # ``--repositories`` entry -- Ivy falls to it when Central
-            # returns 429 as "not found". Adding as spark_conf so both
-            # the SparkApplication CR and the ivy-warmer init container
-            # (which reads spark.jars.* from the same conf) see it.
-            spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
             spark_conf["spark.sql.extensions"] = (
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
             )
