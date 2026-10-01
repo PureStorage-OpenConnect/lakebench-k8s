@@ -1,4 +1,4 @@
-"""The corpus hashes several modules must compute the same way (stdlib only).
+"""The corpus markers and hashes several modules must read the same way.
 
 One definition each, so the writers and readers of a corpus never disagree:
 
@@ -12,10 +12,15 @@ One definition each, so the writers and readers of a corpus never disagree:
 * ``corpus_series_sha256(markers)``: ch05 section 3.1's multi-cycle form of
   the generator's ``corpus_args_sha256``, sha256 over the canonical JSON
   array of the per-cycle hashes in cycle order, or None when the per-node
-  markers do not describe one complete corpus.
+  markers do not describe one complete corpus;
+* ``read_corpus_markers(client, bucket, prefix) -> MarkerSet``: the one
+  parser of the generator's per-node markers and of ``series.json`` (ch05
+  sections 3.1 and 7.1), from one listing of the scope. ch03 ER-9 persists
+  ``MarkerSet.to_dict()``; ch05 CD-18's ``read_node_markers`` and DAT-4's
+  completeness check wrap ``MarkerSet.markers``.
 
-It imports nothing from Lakebench, so ``s3/``, ``deploy/`` and ``metrics/``
-can all use it without import cycles.
+It imports nothing from Lakebench (stdlib only), so ``s3/``, ``deploy/``
+and ``metrics/`` can all use it without import cycles.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 #: Directory under the datagen prefix that holds the generator's per-node
@@ -34,6 +40,12 @@ MARKER_DIR = "_corpus"
 MARKER_NAME = re.compile(r"^c(\d{3})-node-(\d{4})\.json$")
 
 SERIES_NAME = "series.json"
+
+#: Marker file format this reader understands (ch05 section 3.1).
+MARKER_FORMAT = 1
+
+#: More markers than this is not a datagen corpus; reading stops.
+MAX_MARKERS = 10_000
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -55,6 +67,18 @@ def _node_ids(markers: Sequence[Mapping[str, Any]]) -> list[int] | None:
             return None
         out.append(node)
     return out
+
+
+def _key(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def distinct(values: Iterable[Any]) -> list[Any]:
+    """Distinct JSON values in a stable order (lists and dicts included)."""
+    seen: dict[str, Any] = {}
+    for v in values:
+        seen.setdefault(_key(v), v)
+    return [seen[k] for k in sorted(seen)]
 
 
 def is_sha256_hex(value: Any) -> bool:
@@ -131,10 +155,10 @@ def corpus_series_sha256(markers: Mapping[int, Sequence[Mapping[str, Any]]]) -> 
     """
     if not markers:
         return None
-    declared = {m.get("cycles") for ms in markers.values() for m in ms}
+    declared = distinct(m.get("cycles") for ms in markers.values() for m in ms)
     if len(declared) != 1:
         return None
-    cycles = _positive_int(next(iter(declared)))
+    cycles = _positive_int(declared[0])
     if cycles is None:
         return None
     if sorted(markers) != list(range(cycles)):
@@ -142,18 +166,212 @@ def corpus_series_sha256(markers: Mapping[int, Sequence[Mapping[str, Any]]]) -> 
     hashes: list[str] = []
     for cycle in range(cycles):
         ms = markers[cycle]
-        totals = {m.get("total_nodes") for m in ms}
+        totals = distinct(m.get("total_nodes") for m in ms)
         if len(totals) != 1:
             return None
-        total = _positive_int(next(iter(totals)))
+        total = _positive_int(totals[0])
         if total is None:
             return None
         nodes = _node_ids(ms)
         if nodes is None or sorted(nodes) != list(range(total)):
             return None
-        values = {m.get("corpus_args_sha256") for m in ms}
-        value = next(iter(values))
-        if len(values) != 1 or not is_sha256_hex(value):
+        values = distinct(m.get("corpus_args_sha256") for m in ms)
+        if len(values) != 1 or not is_sha256_hex(values[0]):
             return None
-        hashes.append(str(value))
+        hashes.append(str(values[0]))
     return hashlib.sha256(canonical_json(hashes).encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Reading the markers (S3, once per run)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MarkerSet:
+    """What one listing of a datagen scope found."""
+
+    scope: str = ""
+    markers: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    series: dict[str, Any] | None = None
+    bronze_listing_sha256: str | None = None
+    objects: int = 0
+    problems: list[str] = field(default_factory=list)
+    #: Markers refused for a format this reader does not know.
+    unreadable_format: int = 0
+    series_check: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """The persisted form (ch03 section 0.1): per cycle the nodes found
+        and the distinct values of the fields identity reads. Marker bodies
+        (``corpus_args``, ``seed_ref``) are never persisted."""
+        cycles = []
+        for cycle in sorted(self.markers):
+            ms = self.markers[cycle]
+            cycles.append(
+                {
+                    "cycle": cycle,
+                    "nodes_found": sorted(int(m["node_id"]) for m in ms),
+                    "total_nodes": distinct(m.get("total_nodes") for m in ms),
+                    "cycles": distinct(m.get("cycles") for m in ms),
+                    "corpus_args_sha256": distinct(m.get("corpus_args_sha256") for m in ms),
+                    "model_version": distinct(m.get("model_version") for m in ms),
+                    "build_commit": distinct(m.get("build_commit") for m in ms),
+                }
+            )
+        return {
+            "format": 1,
+            "scope": self.scope,
+            "cycles": cycles,
+            "corpus_series_sha256": corpus_series_sha256(self.markers),
+            "objects": self.objects,
+            "problems": list(self.problems),
+            "unreadable_format": self.unreadable_format,
+            "series_check": self.series_check,
+            "error": self.error,
+        }
+
+
+def _reason(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _get_json(client: Any, bucket: str, key: str) -> Any:
+    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    return json.loads(body)
+
+
+def read_corpus_markers(client: Any, bucket: str, prefix: str) -> MarkerSet:
+    """One ``list_objects_v2`` pass over ``datagen_scope(prefix)`` in
+    *bucket* (a boto3 client), then a GET per marker and of ``series.json``.
+
+    The listing digest covers every object in the scope, ``_corpus/``
+    included. The first failed S3 call stops the read and is recorded as
+    ``error``, so an outage costs one call's retries (the boto3 client's
+    own timeouts and retry count), not one per marker. Never raises.
+    """
+    out = MarkerSet()
+    try:
+        _read_into(out, client, bucket, prefix)
+    except Exception as e:  # noqa: BLE001 -- recorded, never raised from a save
+        out.error = f"reading the corpus markers failed: {_reason(e)}"
+    return out
+
+
+def _read_into(out: MarkerSet, client: Any, bucket: str, prefix: str) -> None:
+    try:
+        out.scope = datagen_scope(prefix)
+    except ValueError as e:
+        out.error = str(e)
+        return
+    try:
+        objects = list_scope(client, bucket, out.scope)
+    except Exception as e:  # noqa: BLE001
+        out.error = f"listing {out.scope} failed: {_reason(e)}"
+        return
+    out.objects = len(objects)
+    out.bronze_listing_sha256 = listing_sha256(objects)
+
+    marker_dir = f"{out.scope}{MARKER_DIR}/"
+    marker_keys: list[tuple[str, int, int]] = []
+    series_at = None
+    for obj in objects:
+        key = str(obj["Key"])
+        if not key.startswith(marker_dir):
+            continue
+        name = key[len(marker_dir) :]
+        if name == SERIES_NAME:
+            series_at = key
+            continue
+        m = MARKER_NAME.match(name)
+        if m:
+            marker_keys.append((key, int(m.group(1)), int(m.group(2))))
+    if len(marker_keys) > MAX_MARKERS:
+        out.error = (
+            f"{len(marker_keys)} corpus markers under {marker_dir} (more than {MAX_MARKERS})"
+        )
+        return
+
+    for key, cycle, node in sorted(marker_keys):
+        name = key[len(marker_dir) :]
+        try:
+            body = _get_json(client, bucket, key)
+        except ValueError:  # JSONDecodeError and UnicodeDecodeError
+            out.problems.append(f"corpus marker {name} is not valid JSON")
+            continue
+        except Exception as e:  # noqa: BLE001
+            out.error = f"reading corpus marker {name} failed: {_reason(e)}"
+            return
+        if not isinstance(body, dict):
+            out.problems.append(f"corpus marker {name} is not a JSON object")
+            continue
+        if body.get("format") != MARKER_FORMAT:
+            out.unreadable_format += 1
+            out.problems.append(
+                f"corpus marker {name} has format {body.get('format')!r}; "
+                f"this Lakebench reads format {MARKER_FORMAT}"
+            )
+            continue
+        if body.get("cycle") != cycle or body.get("node_id") != node:
+            out.problems.append(
+                f"corpus marker {name} does not match its content "
+                f"(cycle {body.get('cycle')!r}, node {body.get('node_id')!r})"
+            )
+            continue
+        out.markers.setdefault(cycle, []).append(body)
+
+    if series_at is not None:
+        try:
+            series = _get_json(client, bucket, series_at)
+        except ValueError:
+            out.problems.append("the series marker series.json is not valid JSON")
+            series = None
+        except Exception as e:  # noqa: BLE001
+            out.error = f"reading series.json failed: {_reason(e)}"
+            return
+        if series is not None and (
+            not isinstance(series, dict) or not isinstance(series.get("generation", {}), dict)
+        ):
+            out.problems.append("the series marker series.json is not in the series format")
+            series = None
+        out.series = series
+    out.series_check = series_check(out.series, out.markers)
+
+
+#: series.json ``generation`` keys that must equal the markers' resolved
+#: ``corpus_args`` when both carry them (ch05 sections 3.1 and 7.1).
+_SERIES_ARGS = ("scale", "file_size_mb", "customer_id_max")
+
+
+def _same(a: Any, b: Any) -> bool:
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) <= 1e-6 * max(1.0, abs(float(a)))
+    return _key(a) == _key(b)
+
+
+def series_check(
+    series: Mapping[str, Any] | None, markers: Mapping[int, Sequence[Mapping[str, Any]]]
+) -> str | None:
+    """Why ``series.json`` does not describe the generate the node markers
+    came from (None when it does, or when either is absent). A series left
+    by an earlier generate must not lend the markers its lineage."""
+    if not series or not markers:
+        return None
+    gen = series.get("generation") or {}
+    bodies = [m for ms in markers.values() for m in ms]
+    if "seed_ref" in gen and {str(m.get("seed_ref")) for m in bodies} != {str(gen["seed_ref"])}:
+        return "series.json names another seed than the corpus markers"
+    if "cycles_total" in series and distinct(m.get("cycles") for m in bodies) != [
+        series["cycles_total"]
+    ]:
+        return "series.json names another cycle count than the corpus markers"
+    for name in _SERIES_ARGS:
+        if gen.get(name) is None:
+            continue
+        for m in bodies:
+            args = m.get("corpus_args")
+            seen = args.get(name) if isinstance(args, dict) else None
+            if seen is not None and not _same(seen, gen[name]):
+                return f"series.json names another {name} than the corpus markers"
+    return None

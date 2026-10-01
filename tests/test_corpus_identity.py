@@ -122,11 +122,21 @@ def bucket(markers=(), series_body=None, data=("part-0.parquet", "part-1.parquet
     return FakeBoto(objs)
 
 
-def observe(markers=(), series_body=None, **kw):
+def observe(markers=(), series_body=None, lineage_path=None, **kw):
     """observe_corpus over a fake bucket, through a real config."""
     boto = bucket(markers, series_body, **kw)
     cfg = _cfg()
-    return ci.observe_corpus(cfg, SimpleNamespace(raw_client=boto)), boto
+    obs = ci.observe_corpus(cfg, SimpleNamespace(raw_client=boto), lineage_path=lineage_path)
+    return obs, boto
+
+
+def table_file(tmp_path, text):
+    p = tmp_path / "lineage.yaml"
+    p.write_text(text)
+    return p
+
+
+COMMIT = "abc1234" + "0" * 33
 
 
 def two_nodes(h=H1, **kw):
@@ -342,7 +352,6 @@ class TestLineage:
         obs, _ = observe(two_nodes(), None)
         corpus = corpus_of(obs=obs)
         assert corpus["lineage"] == f"declared:{TAG}" and corpus["lineage_observed"] is False
-        assert corpus["observed"] is False and "not observed" in corpus["observed_note"]
         observed, _ = observe(two_nodes(), series())
         assert corpus["id_v2"] != corpus_of(obs=observed)["id_v2"]
 
@@ -353,12 +362,16 @@ class TestLineage:
         assert corpus["lineage"] == "declared:reg/dg:old"
         assert "different images" in corpus["lineage_notes"][0]
 
-    def test_stale_fleet_sidecar_does_not_set_lineage(self):
+    def test_fleet_naming_another_image_gives_declared_lineage(self):
+        """The fleet sidecar is never the lineage source, and when it
+        contradicts series.json neither is trusted (the safe side)."""
         obs, _ = observe(two_nodes(), series(digest=D))
         fleet = {"image": TAG, "image_ids": [f"reg@{X}"]}
         corpus = corpus_of(obs=obs, fleet=fleet)
-        assert corpus["lineage"] == D
+        assert corpus["lineage"] == f"declared:{TAG}" and corpus["lineage_observed"] is False
         assert any("fleet record names" in n for n in corpus["lineage_notes"])
+        same = corpus_of(obs=obs, fleet={"image": TAG, "image_ids": [f"reg@{D}"]})
+        assert same["lineage"] == D
 
     def test_series_from_another_generate_lends_no_lineage(self):
         obs, _ = observe(two_nodes(), series(seed_ref="7"))
@@ -367,53 +380,97 @@ class TestLineage:
         assert "another seed" in corpus["lineage_notes"][0]
 
     def test_build_commit_mismatch_is_problem(self, tmp_path):
-        table = tmp_path / "lineage.yaml"
-        table.write_text(
-            f"lineage:\n  - digest: {D}\n    canonical: {D}\n    build_commit: fff0000\n"
+        table = table_file(
+            tmp_path,
+            f'lineage:\n  - digest: {D}\n    canonical: {D}\n    build_commit: "{"f" * 40}"\n',
         )
-        obs, _ = observe(two_nodes(), series())
-        v2 = ci.corpus_v2_fields(
-            {"generator_image": TAG},
-            obs=obs,
-            inherited=None,
-            model_version=None,
-            lineage_path=table,
+        obs, _ = observe(two_nodes(), series(), lineage_path=table)
+        corpus = corpus_of(obs=obs)
+        assert any("built from ffffffffffff" in p for p in corpus["problems"])
+        assert corpus["lineage_observed"] is False
+
+    def test_build_commit_matches_by_prefix(self, tmp_path):
+        table = table_file(
+            tmp_path,
+            f'lineage:\n  - digest: {D}\n    canonical: {D}\n    build_commit: "{COMMIT}"\n',
         )
-        assert any("built from fff0000" in p for p in v2.problems)
-        assert v2.fields["lineage_observed"] is False
+        obs, _ = observe(two_nodes(), series(), lineage_path=table)
+        corpus = corpus_of(obs=obs)
+        assert corpus["lineage"] == D and "problems" not in corpus
+
+    def test_markers_without_a_commit_give_declared_not_a_problem(self, tmp_path):
+        table = table_file(
+            tmp_path,
+            f'lineage:\n  - digest: {D}\n    canonical: {D}\n    build_commit: "{COMMIT}"\n',
+        )
+        obs, _ = observe(two_nodes(build_commit=None), series(), lineage_path=table)
+        corpus = corpus_of(obs=obs)
+        assert corpus["lineage"].startswith("declared:") and "problems" not in corpus
+
+    def test_different_builds_are_a_problem(self):
+        obs, _ = observe([marker(node=0), marker(node=1, build_commit="def5678")], series())
+        corpus = corpus_of(obs=obs)
+        assert any("different generator builds" in p for p in corpus["problems"])
+        assert corpus["lineage"].startswith("declared:")
 
     def test_mapped_digest_takes_its_root(self, tmp_path):
-        root = "sha256:" + "2" * 64
-        table = tmp_path / "lineage.yaml"
-        table.write_text(
-            "lineage:\n"
-            f"  - digest: {root}\n    canonical: {root}\n"
-            f"  - digest: {D}\n    canonical: {root}\n"
-            f"    evidence: tests/fixtures/datagen_reference/compare-{'1' * 12}.json\n"
-            f'    evidence_sha256: "{"0" * 64}"\n'
-        )
-        obs, _ = observe(two_nodes(), series())
-        v2 = ci.corpus_v2_fields(
-            {"generator_image": TAG},
-            obs=obs,
-            inherited=None,
-            model_version=None,
-            lineage_path=table,
-        )
-        assert v2.fields["lineage"] == root
+        obs, _ = observe(two_nodes(), series(), lineage_path=_mapping_table(tmp_path))
+        assert corpus_of(obs=obs)["lineage"] == ROOT_DIGEST
 
-    def test_unreadable_table_gives_declared_lineage(self, tmp_path):
-        table = tmp_path / "lineage.yaml"
-        table.write_text("lineage: [")
+    def test_id_v2_does_not_move_when_the_table_changes(self, tmp_path, monkeypatch):
+        """The lineage is resolved at observation and persisted: a row added
+        later (ER-9L) never moves the id of a record already observed, even
+        while to_dict still rebuilds the block."""
         obs, _ = observe(two_nodes(), series())
-        v2 = ci.corpus_v2_fields(
-            {"generator_image": TAG},
-            obs=obs,
-            inherited=None,
-            model_version=None,
-            lineage_path=table,
-        )
-        assert v2.fields["lineage"] == f"declared:{TAG}"
+        before = corpus_of(obs=obs)
+        monkeypatch.setattr(ci, "LINEAGE_FILE", _mapping_table(tmp_path))
+        after = corpus_of(obs=json.loads(json.dumps(obs)))
+        assert after["id_v2"] == before["id_v2"] and after["lineage"] == D
+
+    def test_unreadable_table_is_a_problem(self, tmp_path):
+        table = table_file(tmp_path, "lineage: [")
+        obs, _ = observe(two_nodes(), series(), lineage_path=table)
+        corpus = corpus_of(obs=obs)
+        assert corpus["lineage"] == f"declared:{TAG}"
+        assert any("cannot read" in p for p in corpus["problems"])
+
+    def test_non_sha_series_digest_gives_declared(self):
+        obs, _ = observe(two_nodes(), series(digest="sha256:short"))
+        assert corpus_of(obs=obs)["lineage"].startswith("declared:")
+
+    @pytest.mark.parametrize(
+        "change, needle",
+        [
+            ({"cycles_total": 2}, "cycle count"),
+            ({"scale": 10.0}, "scale"),
+            ({"file_size_mb": 128}, "file_size_mb"),
+        ],
+    )
+    def test_series_disagreeing_with_marker_args_lends_no_lineage(self, change, needle):
+        body = series()
+        if "cycles_total" in change:
+            body["cycles_total"] = change["cycles_total"]
+        else:
+            body["generation"].update(change)
+        obs, _ = observe(two_nodes(corpus_args={"scale": 1.0, "file_size_mb": 64}), body)
+        corpus = corpus_of(obs=obs)
+        assert corpus["lineage"].startswith("declared:")
+        assert needle in corpus["lineage_notes"][0]
+
+
+ROOT_DIGEST = "sha256:" + "2" * 64
+
+
+def _mapping_table(tmp_path):
+    """A table mapping D to another root (its evidence is not checked here)."""
+    return table_file(
+        tmp_path,
+        "lineage:\n"
+        f"  - digest: {ROOT_DIGEST}\n    canonical: {ROOT_DIGEST}\n"
+        f"  - digest: {D}\n    canonical: {ROOT_DIGEST}\n"
+        f"    evidence: tests/fixtures/datagen_reference/compare-{'1' * 12}.json\n"
+        f'    evidence_sha256: "{"0" * 64}"\n',
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -422,11 +479,13 @@ class TestLineage:
 
 
 def _inherit(rep1_corpus, obs):
-    return {
-        "corpus": rep1_corpus,
-        "from_run_id": "20261006-120000-aaaaaa",
-        "bronze_listing_sha256": obs["bronze_listing_sha256"],
+    """What CC-30 persists, built the one way: from repetition 1's record."""
+    record = {
+        "run_id": "20261006-120000-aaaaaa",
+        "experiment": {"corpus": rep1_corpus},
+        "config_snapshot": {"experiment_inputs": {"corpus_observation": obs}},
     }
+    return ci.inherited_corpus_from(record)
 
 
 class TestSeries:
@@ -489,6 +548,27 @@ class TestSeries:
         assert {
             k: v for k, v in rep2.items() if k not in ("inherited_from", "bronze_listing_sha256")
         } == rep1
+
+    def test_inherited_block_keeps_repetition_1_problems(self):
+        obs, _ = observe((), None)
+        mixed = {"image": TAG, "image_ids": [f"reg@{D}"], "data_quality": "mixed"}
+        rep1 = corpus_of(obs=obs, fleet=mixed)
+        assert rep1["problems"]
+        rep2 = corpus_of(obs=obs, inherited=_inherit(rep1, obs))
+        assert rep2["problems"] == rep1["problems"]
+
+    def test_bare_block_is_a_contract_problem_only(self):
+        obs, _ = observe(two_nodes(), series())
+        rep1 = corpus_of(obs=obs)
+        rep2 = corpus_of(
+            obs=obs,
+            inherited={"corpus": rep1, "bronze_listing_sha256": obs["bronze_listing_sha256"]},
+        )
+        assert rep2["problems"] == [
+            "the inherited corpus is not in the series contract shape "
+            "(build it with corpus_identity.inherited_corpus_from)"
+        ]
+        assert rep2["id_v2"] == rep1["id_v2"]
 
 
 # ---------------------------------------------------------------------------
@@ -620,4 +700,101 @@ class TestLineageEvidence:
         table = tmp_path / "lineage.yaml"
         table.write_text(f"lineage:\n  - digest: {A}\n    canonical: {A}\n{row}")
         with pytest.raises(ci.LineageError, match=needle):
+            ci.load_lineage(table)
+
+
+class TestReviewCases:
+    """One case per path the first review showed untested."""
+
+    def test_unhashable_marker_values_never_raise(self):
+        obs, _ = observe([marker(node=0, cycles=[1]), marker(node=1, cycles=[1])], series())
+        assert obs["markers"]["corpus_series_sha256"] is None
+        corpus = corpus_of(obs=obs)
+        assert corpus["id_v2"] is None and corpus["problems"]
+
+    @pytest.mark.parametrize("generation", ["not a mapping", ["x"]])
+    def test_malformed_series_is_a_problem_not_a_crash(self, generation):
+        body = series()
+        body["generation"] = generation
+        obs, _ = observe((), body)
+        assert obs["series"] is None
+        assert "not in the series format" in obs["markers"]["problems"][0]
+        corpus = corpus_of(obs=obs)
+        assert corpus["id_v2"] is None
+
+    def test_invalid_json_marker_is_a_problem(self):
+        boto = bucket(two_nodes())
+        boto.objects[cd.marker_key(SCOPE, 0, 1)] = b"{not json"
+        ms = cd.read_corpus_markers(boto, BUCKET, SCOPE)
+        assert "c000-node-0001.json is not valid JSON" in ms.problems[0]
+        assert ms.error is None and len(boto.gets) == 2
+
+    def test_newer_marker_format_has_its_own_reason(self):
+        obs, _ = observe(two_nodes(format=2), series())
+        corpus = corpus_of(obs=obs)
+        assert corpus["id_v2_unavailable"] == ci.UNREADABLE_MARKER
+        assert any("format 2" in p for p in corpus["problems"])
+
+    def test_too_many_markers_stops_the_read(self, monkeypatch):
+        monkeypatch.setattr(cd, "MAX_MARKERS", 1)
+        ms = cd.read_corpus_markers(bucket(two_nodes()), BUCKET, SCOPE)
+        assert "more than 1" in ms.error and not ms.markers
+
+    def test_cycles_key_enters_the_id_body_above_one(self):
+        three = [marker(c, n, cycles=3) for c in range(3) for n in range(2)]
+        obs, _ = observe(three, series(cycles_total=3))
+        series_hash = obs["markers"]["corpus_series_sha256"]
+        body = {"args": series_hash, "model_version": None, "lineage": D, "cycles": 3}
+        assert ci.corpus_id_v2(obs, None, D) == (ex._short_hash(body), None)
+
+    def test_extra_cycle_is_a_problem(self):
+        markers = [marker(0, 0, total=1, cycles=1), marker(1, 0, total=1, cycles=1)]
+        obs, _ = observe(markers, series())
+        problems = corpus_of(obs=obs)["problems"]
+        assert any("beyond the corpus's 1 cycles" in p for p in problems)
+
+    def test_uppercase_hash_is_not_a_corpus_hash(self):
+        obs, _ = observe(two_nodes(h="A" * 64), series())
+        corpus = corpus_of(obs=obs)
+        assert corpus["id_v2"] is None
+        assert any("different arguments" in p for p in corpus["problems"])
+
+    @pytest.mark.parametrize(
+        "changes, needle",
+        [
+            ({"F0": {"digest_b": X}}, "digests differ"),
+            ({"top": {"format": 2}}, "format 2"),
+            ({"C0": {"objects": 0}}, "compared no objects"),
+            ({"F1": {"excluded": ["_corpus/", ""]}}, "exactly"),
+            ({"F2": {"argv_canonical": []}}, "argv_canonical"),
+        ],
+    )
+    def test_compare_file_rules(self, tmp_path, changes, needle):
+        table = ci.load_lineage(lineage_tree(tmp_path, compare_file(**changes)))
+        errors = ci.check_lineage_evidence(table, tmp_path)
+        assert any(needle in e for e in errors), errors
+
+    def test_salted_seed_ref_accepted_when_lakebench_has_seed_ref(self, tmp_path, monkeypatch):
+        from lakebench.config import datagen_seed
+
+        monkeypatch.setattr(
+            datagen_seed, "seed_ref", lambda schema, seed: f"h:{schema}:{seed}", raising=False
+        )
+        data = compare_file(F0={"seed_ref": "h:financial:43"})
+        table = ci.load_lineage(lineage_tree(tmp_path, data))
+        assert ci.check_lineage_evidence(table, tmp_path) == []
+
+    def test_canonical_that_is_not_a_root_is_refused(self, tmp_path):
+        mid = "sha256:" + "6" * 64
+        rel = "tests/fixtures/datagen_reference/compare-{}.json"
+        table = table_file(
+            tmp_path,
+            "lineage:\n"
+            f"  - digest: {A}\n    canonical: {A}\n"
+            f"  - digest: {mid}\n    canonical: {A}\n    evidence: {rel.format('6' * 12)}\n"
+            f'    evidence_sha256: "{"0" * 64}"\n'
+            f"  - digest: {B}\n    canonical: {mid}\n    evidence: {rel.format('4' * 12)}\n"
+            f'    evidence_sha256: "{"0" * 64}"\n',
+        )
+        with pytest.raises(ci.LineageError, match="not a root row"):
             ci.load_lineage(table)

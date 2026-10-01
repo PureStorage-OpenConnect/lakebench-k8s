@@ -89,14 +89,18 @@ lineage. Two consequences for a custom image:
 
 - An image built from `datagen_rs/` older than the v1.7 generator writes no
   markers. Its runs record `corpus.id_v2: null` with the reason in
-  `corpus.id_v2_unavailable`, and compare them by the v1 corpus id only.
+  `corpus.id_v2_unavailable`; only the v1 corpus id identifies their
+  corpus.
 - Lineage is the image digest the run read from `_corpus/series.json`,
-  mapped through `src/lakebench/config/datagen_lineage.yaml`. A digest not
-  listed there is its own lineage, so a rebuilt image, even an
-  output-identical one, gives a different corpus id until a row with
-  byte-compare evidence maps it to the image it re-pins. Without an
-  observed digest the lineage reads `declared:<image tag>`, which never
-  equals an observed one.
+  mapped through `src/lakebench/config/datagen_lineage.yaml` when the run
+  is observed. A digest not listed there is its own lineage, so a rebuilt
+  image, even an output-identical one, gives a different corpus id. A row
+  that maps a rebuilt digest to the image it re-pins needs byte-compare
+  evidence: the five-case result file
+  `tests/fixtures/datagen_reference/compare-<first 12 hex>.json`, whose
+  sha256 the row pins (`evidence_sha256`) and which the unit suite checks.
+  Without an observed digest the lineage reads `declared:<image tag>`,
+  which never equals an observed one.
 
 ## Anatomy of `datagen_rs/`
 
