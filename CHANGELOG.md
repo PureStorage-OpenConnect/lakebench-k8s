@@ -7,19 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
-- **One cluster context per command (SAF-7).** A command resolves its
-  cluster context once, from `platform.kubernetes.context` or, when that is
-  empty, from the kubeconfig's current context by name, and every API
-  client and every `kubectl`, `helm` and `oc` call it makes uses that
-  context. Switching the current context while a long run is in progress
-  no longer moves the rest of the run to the other cluster. A second
-  context in one process is refused, and so is a context whose API server
-  changed in the kubeconfig while the command ran. `admin` commands without a config,
-  `status --namespace` and `recommend` print the context they resolved.
-  A context name that is not in the kubeconfig is refused (`admin`
-  commands used to fall back to in-cluster credentials), and in-cluster
-  credentials are used only when no kubeconfig exists (before, a command
-  with no configured context tried them first).
+- **One cluster context per process (SAF-7).** A `lakebench` command
+  resolves its cluster context once, at its first cluster call, from
+  `platform.kubernetes.context` or, when that is empty, from the
+  kubeconfig's current context by name. Every API client and every
+  `kubectl`, `helm` and `oc` call in that process then uses it, so
+  switching the current context during a long run no longer moves the rest
+  of the run to another cluster. A second context in one process is
+  refused, and so is a context whose API server changes in the kubeconfig
+  while the command runs. `admin` commands without a config,
+  `status --namespace` and `recommend` print the context they resolved. A
+  context name that is not in the kubeconfig is refused (`admin` commands
+  used to fall back to in-cluster credentials), and in-cluster credentials
+  are used only when no kubeconfig file exists (before, a command with no
+  configured context tried them first). `compare` still runs each config
+  in its own `lakebench` process, each resolving its own context, until it
+  becomes read-only (EVD-8).
 
 ## [1.6.0] - 2026-09-30
 

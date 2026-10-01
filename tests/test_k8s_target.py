@@ -177,6 +177,36 @@ def test_cli_args_refuses_a_second_context(kubeconfig) -> None:
         cli_args("helm", "A")
 
 
+def test_cli_args_refuses_when_the_pinned_context_moved_server(kubeconfig) -> None:
+    """kubectl re-reads the kubeconfig per call: a rewritten server for the
+    pinned name must stop the subprocess, not send it to the new cluster."""
+    ClusterTarget.resolve(context="A").activate()
+    assert cli_args("kubectl", None) == ["--context", "A"]
+    doc = yaml.safe_load(kubeconfig.read_text())
+    for cl in doc["clusters"]:
+        if cl["name"] == "cl-A":
+            cl["cluster"]["server"] = "https://127.0.0.1:3/"
+    kubeconfig.write_text(yaml.safe_dump(doc))
+    with pytest.raises(ContextConflictError, match="127.0.0.1:3"):
+        cli_args("helm", None)
+
+
+def test_pin_command_raises_on_a_broken_kubeconfig(tmp_path, monkeypatch) -> None:
+    """An existing kubeconfig that cannot be resolved stops the command;
+    it never runs unpinned."""
+    from lakebench.benchmark.executor import get_executor
+    from lakebench.k8s.target import pin_command
+    from tests.conftest import make_config
+
+    path = tmp_path / "kubeconfig"
+    path.write_text("apiVersion: v1\nkind: Config\ncontexts: []\nclusters: []\nusers: []\n")
+    point_kubeconfig_at(monkeypatch, path)
+    with pytest.raises(ConfigException):
+        pin_command(None)
+    with pytest.raises(ValueError, match="cannot pin the cluster context"):
+        get_executor(make_config())
+
+
 def test_pin_command_without_any_credentials_pins_nothing(tmp_path, monkeypatch) -> None:
     from lakebench.k8s.target import pin_command
 

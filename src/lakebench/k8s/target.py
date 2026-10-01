@@ -108,18 +108,22 @@ class ClusterTarget:
         context ``admin``) is refused, not followed.
         """
         global _ACTIVE
-        with _LOCK:
-            if _ACTIVE is not None and _ACTIVE._key() != self._key():
-                raise ContextConflictError(
-                    "one cluster context per process: "
-                    f"{_ACTIVE.label} is active, refusing {self.label}"
-                )
-            scratch = _k8s_client.Configuration()
+        _refuse_other(self)
+        # Load outside the lock: an exec credential plugin can take a while,
+        # and concurrent benchmark streams read the active target meanwhile.
+        scratch = _k8s_client.Configuration()
+        try:
             if self.in_cluster:
                 _k8s_config.load_incluster_config(client_configuration=scratch)
             else:
                 _k8s_config.load_kube_config(context=self.context, client_configuration=scratch)
-            host = str(scratch.host or "")
+        except ConfigException:
+            raise
+        except Exception as e:  # noqa: BLE001 -- yaml, permission, exec plugin
+            raise ConfigException(f"cannot load cluster context {self.label}: {e}") from e
+        host = str(scratch.host or "")
+        with _LOCK:
+            _refuse_other(self, locked=True)
             if _ACTIVE is not None and _ACTIVE.api_server and host != _ACTIVE.api_server:
                 raise ContextConflictError(
                     "one cluster context per process: "
@@ -139,6 +143,15 @@ class ClusterTarget:
 
 _LOCK = threading.Lock()
 _ACTIVE: ClusterTarget | None = None
+
+
+def _refuse_other(target: ClusterTarget, *, locked: bool = False) -> None:
+    """Raise when a different target is already active."""
+    active = _ACTIVE if locked else active_target()
+    if active is not None and active._key() != target._key():
+        raise ContextConflictError(
+            f"one cluster context per process: {active.label} is active, refusing {target.label}"
+        )
 
 
 def config_context(cfg: Any) -> str | None:
@@ -187,6 +200,17 @@ def cli_args(tool: str, explicit: Any = None) -> list[str]:
                 f"one cluster context per process: {active.label} is active, "
                 f"refusing {tool} --context {name}"
             )
+        if not active.in_cluster and active.context and active.api_server:
+            # The tool re-reads the kubeconfig on every call; refuse when the
+            # pinned name now points at another server (the API clients
+            # would stay on the pinned one).
+            server = _kubeconfig_server(active.context)
+            if server is not None and server != active.api_server:
+                raise ContextConflictError(
+                    f"one cluster context per process: {active.label} is active, and "
+                    f"context {active.context!r} now points at {server}; the kubeconfig "
+                    "changed under this command"
+                )
         return active.cli_args(tool)
     if name:
         return context_flag(tool, name)
@@ -197,13 +221,14 @@ def pin_command(cfg: Any = None) -> ClusterTarget | None:
     """Pin this process to ``cfg``'s target at the start of a command.
 
     For commands whose first cluster call is a subprocess. Returns None
-    (and pins nothing) when neither a kubeconfig nor in-cluster credentials
-    exist; the command's first ``kubectl`` then fails on its own.
+    (and pins nothing) only when neither a kubeconfig file nor in-cluster
+    credentials exist; the command's first ``kubectl`` then fails on its
+    own. Any other failure to resolve or load the context raises
+    :class:`ConfigException`, so the command never runs unpinned.
     """
-    try:
-        return ClusterTarget.resolve(cfg).activate()
-    except ConfigException:
+    if not _kubeconfig_exists() and not _in_cluster_available():
         return None
+    return ClusterTarget.resolve(cfg).activate()
 
 
 def _in_cluster_available() -> bool:
@@ -222,12 +247,49 @@ def _kubeconfig_exists() -> bool:
     )
 
 
+def _unwrap(node: Any) -> Any:
+    return node.value if hasattr(node, "value") else node
+
+
+def _kubeconfig_server(context: str) -> str | None:
+    """The API server the kubeconfig names for ``context`` now, or None.
+
+    Read without running any credential plugin. None when the file or the
+    context cannot be read; the caller then keeps the pinned server.
+    """
+    try:
+        merged = _k8s_config.kube_config.KubeConfigMerger(
+            _k8s_config.kube_config.KUBE_CONFIG_DEFAULT_LOCATION
+        ).config
+    except Exception:  # noqa: BLE001
+        return None
+    raw = _unwrap(merged)
+    if not isinstance(raw, dict):
+        return None
+    cluster_name = None
+    for entry in raw.get("contexts") or []:
+        e = _unwrap(entry)
+        if isinstance(e, dict) and e.get("name") == context:
+            cluster_name = (_unwrap(e.get("context")) or {}).get("cluster")
+            break
+    if not cluster_name:
+        return None
+    for entry in raw.get("clusters") or []:
+        e = _unwrap(entry)
+        if isinstance(e, dict) and e.get("name") == cluster_name:
+            server = (_unwrap(e.get("cluster")) or {}).get("server")
+            return str(server).rstrip("/") if server else None
+    return None
+
+
 def _from_kubeconfig(explicit: str | None) -> ClusterTarget:
     if explicit is None and not _kubeconfig_exists() and _in_cluster_available():
         return ClusterTarget(context=None, in_cluster=True)
     try:
         contexts, current = _k8s_config.list_kube_config_contexts()
-    except OSError as e:
+    except ConfigException:
+        raise
+    except Exception as e:  # noqa: BLE001 -- unreadable or malformed file
         raise ConfigException(f"cannot read kubeconfig: {e}") from e
     names = [c.get("name") for c in contexts or []]
     if explicit is not None:

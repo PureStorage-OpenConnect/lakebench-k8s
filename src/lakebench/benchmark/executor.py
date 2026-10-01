@@ -59,9 +59,14 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
     query runs as a ``kubectl exec`` subprocess, and without an active
     target each one would read the kubeconfig's current context afresh.
     """
+    from kubernetes.config import ConfigException
+
     from lakebench.k8s.target import pin_command
 
-    pin_command(config)
+    try:
+        pin_command(config)
+    except ConfigException as e:
+        raise ValueError(f"cannot pin the cluster context: {e}") from e
     ns = namespace or config.get_namespace()
     engine_type = config.architecture.query_engine.type.value
     table_format = config.architecture.table_format.type.value

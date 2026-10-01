@@ -2200,7 +2200,11 @@ def logs(
     # logs runs only kubectl; pin the context before the first call (SAF-7).
     from lakebench.k8s.target import pin_command
 
-    pin_command(cfg)
+    try:
+        pin_command(cfg)
+    except ConfigException as e:
+        print_error(f"Kubernetes context: {e}")
+        raise typer.Exit(1)  # noqa: B904
 
     console.print(
         f"Fetching logs for [bold]{component}[/bold] in namespace [bold]{namespace}[/bold]"
