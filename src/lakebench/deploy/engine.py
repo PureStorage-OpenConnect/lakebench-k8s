@@ -13,7 +13,12 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from lakebench.config import LakebenchConfig
-from lakebench.config.schema import CatalogType, QueryEngineType, require_polaris_client_secret
+from lakebench.config.schema import (
+    STACKABLE_HIVE_VERSION,
+    CatalogType,
+    QueryEngineType,
+    require_polaris_client_secret,
+)
 from lakebench.k8s import K8sClient, K8sResourceError
 
 logger = logging.getLogger(__name__)
@@ -564,6 +569,8 @@ class DeploymentEngine:
             # Images
             "postgres_image": cfg.images.postgres,
             "hive_image": cfg.images.hive,
+            # The HiveCluster productVersion. Fixed, not images.hive (LB-189).
+            "hive_version": STACKABLE_HIVE_VERSION,
             "trino_image": cfg.images.trino,
             "spark_image": cfg.images.spark,
             "jmx_exporter_image": cfg.images.jmx_exporter,
@@ -739,13 +746,17 @@ class DeploymentEngine:
                 "Creating S3 buckets",
                 lambda: self._deploy_buckets(force_legacy=force_legacy),
             ),
-            ("scratch-sc", "Creating scratch StorageClass", self._deploy_scratch_storageclass),
+            ("scratch-sc", "Verifying scratch StorageClass", self._deploy_scratch_storageclass),
             ("postgres", "Deploying PostgreSQL", postgres.deploy),
             ("hive", "Deploying Hive Metastore", hive.deploy),
             ("polaris", "Deploying Polaris Catalog", polaris.deploy),
             ("rbac", "Creating Spark RBAC", rbac.deploy),
             ("unity", "Deploying Unity Catalog", unity.deploy),
-            ("spark-operator", "Installing Spark Operator", self._deploy_spark_operator),
+            (
+                "spark-operator",
+                "Checking Spark Operator and watch list",
+                self._deploy_spark_operator,
+            ),
             ("trino", "Deploying Trino", trino.deploy),
             ("spark-thrift", "Deploying Spark Thrift Server", spark_thrift.deploy),
             ("duckdb", "Deploying DuckDB", duckdb.deploy),

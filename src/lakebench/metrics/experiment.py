@@ -123,13 +123,14 @@ def effective_trickle(cfg: Any) -> int | None:
 
 
 def _stackable_hive(cfg: Any) -> str:
-    """The Hive the Stackable operator runs: images.hive is only the
-    HiveCluster productVersion, and the image is resolved by the operator
-    from it and the SDP release (oci.stackable.tech/sdp/hive:<v>-stackable<sdp>).
-    Derived from the configured versions, not read from the pod."""
-    from lakebench.deploy.engine import image_tag
+    """The Hive the Stackable operator runs: the HiveCluster productVersion
+    the template renders (STACKABLE_HIVE_VERSION, never images.hive, LB-189),
+    resolved by the operator with the SDP release to
+    oci.stackable.tech/sdp/hive:<v>-stackable<sdp>. Derived from the rendered
+    and configured versions, not read from the pod."""
+    from lakebench.config.schema import STACKABLE_HIVE_VERSION
 
-    version = image_tag(cfg.images.hive)
+    version = STACKABLE_HIVE_VERSION
     sdp = cfg.architecture.catalog.hive.operator.version
     return f"oci.stackable.tech/sdp/hive:{version}-stackable{sdp} (derived, not read from the pod)"
 

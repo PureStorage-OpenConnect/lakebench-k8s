@@ -86,22 +86,23 @@ thrift://lakebench-hive-metastore.<namespace>.svc.cluster.local:9083
 
 ## YAML Configuration
 
-All Hive settings live under `architecture.catalog` and `images.hive`. Below
-are the configurable fields with their defaults.
+All Hive settings live under `architecture.catalog`. Below are the
+configurable fields with their defaults.
 
 ### Image Override
 
 ```yaml
 images:
-  hive: "apache/hive:3.1.3"        # Hive version (Stackable productVersion)
+  hive: "apache/hive:3.1.3"        # Not read: the HiveCluster always runs 3.1.3
 ```
 
 This is not a container image reference. The metastore runs Stackable's own
 Hive image (`oci.stackable.tech/sdp/hive:3.1.3-stackable<sdp-version>`), and
 the HiveCluster template renders `productVersion: "3.1.3"`. Hive 3.1.3 is
 deliberate: Stackable recommends it because Hive 4 breaks Iceberg
-(`get_table` TApplicationException) and Trino ANALYZE. The tag of
-`images.hive` is what lakebench records as the Hive version in run output.
+(`get_table` TApplicationException) and Trino ANALYZE. Run output records
+3.1.3, the version the template renders. `images.hive` does not select it: a
+value naming any other version loads with a warning that it has no effect.
 
 ### Catalog Selection and Tuning
 
@@ -123,8 +124,9 @@ architecture:
 The `resources` fields are applied to the HiveCluster. The `thrift` fields
 are defined in the configuration schema, but the current HiveCluster template
 hardcodes `min.threads=10`, `max.threads=50` and `socket.timeout=300s`, so
-changing them has no effect yet. The thrift thread pool defaults are tuned
-for moderate concurrency (up to 50 simultaneous catalog operations).
+changing them has no effect, and a non-default value warns at load. The
+thrift thread pool defaults are tuned for moderate concurrency (up to 50
+simultaneous catalog operations).
 
 ### Operator-Injected Configuration
 

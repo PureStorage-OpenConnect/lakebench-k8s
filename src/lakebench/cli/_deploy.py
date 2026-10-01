@@ -50,11 +50,10 @@ def _preflight_check(cfg) -> None:
         print_info("Run 'lakebench config validate' for detailed diagnostics")
         raise typer.Exit(1)
 
-    # 2. S3 credentials must be present (inline or secret_ref)
-    has_inline = bool(s3.access_key and s3.secret_key)
-    has_ref = bool(getattr(s3, "secret_ref", None))
-    if not has_inline and not has_ref:
-        print_error("S3 credentials not configured (set access_key/secret_key or secret_ref)")
+    # 2. Inline S3 credentials must be present (secret_ref is not consumed
+    # and a secret_ref-only config is refused at load, LB-190)
+    if not (s3.access_key and s3.secret_key):
+        print_error("S3 credentials not configured (set access_key and secret_key)")
         raise typer.Exit(1)
 
     # 3. Check Stackable CRDs if catalog=hive
@@ -123,8 +122,13 @@ def _build_component_list(cfg) -> str:
     elif engine == "duckdb":
         parts.append("DuckDB")
     parts.append("Spark RBAC")
+    # The operator step always runs: it verifies the shared operator and adds
+    # this namespace to its watch list; install=true also installs it if
+    # missing (LB-191).
     if cfg.platform.compute.spark.operator.install:
-        parts.append("Spark Operator")
+        parts.append("Spark Operator (installed if missing, namespace watched)")
+    else:
+        parts.append("Spark Operator watch list")
     if cfg.observability.enabled:
         if cfg.observability.prometheus_stack_enabled:
             parts.append("Prometheus")

@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from lakebench.deploy.engine import DeploymentResult, DeploymentStatus, image_tag
+from lakebench.config.schema import STACKABLE_HIVE_VERSION
+from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 from lakebench.k8s import WaitResult, WaitStatus
 
 logger = logging.getLogger(__name__)
@@ -303,7 +304,8 @@ class HiveDeployer:
 
             pod_name = self._get_hive_pod_name(namespace)
 
-            hive_version = image_tag(self.config.images.hive)
+            # The version the template rendered, not images.hive (LB-189).
+            hive_version = STACKABLE_HIVE_VERSION
             return DeploymentResult(
                 component="hive",
                 status=DeploymentStatus.SUCCESS,

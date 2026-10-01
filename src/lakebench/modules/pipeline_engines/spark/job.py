@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 # MINIMUM CLUSTER REQUIREMENTS (per executor, non-negotiable):
 #
 #   bronze-verify:  2 cores,  6g total (4g + 2g overhead),  50Gi Portworx PVC
-#   silver-build:   4 cores, 60g total (48g + 12g overhead), 150Gi Portworx PVC
+#   silver-build:   4 cores, 60g total (48g + 12g overhead), 300Gi Portworx PVC
 #   gold-finalize:  4 cores, 40g total (32g + 8g overhead),  300Gi Portworx PVC
 #
 # The silver job is the bottleneck -- at scale 100 (~1TB) it requests
-# 19 executors × 60g = ~1.14 TB RAM + 19 × 150Gi = 2.85 TB scratch PVC.
+# 19 executors × 60g = ~1.14 TB RAM + 19 × 300Gi = 5.7 TB scratch PVC.
 # The cluster must have enough capacity to schedule all executors plus
 # the driver (4 cores, 8g) and existing infra (Trino, Hive, Postgres).
 #
@@ -2460,8 +2460,8 @@ class SparkJobManager:
         scratch = cfg.platform.storage.scratch
         if scratch.enabled and scratch.storage_class:
             # Dynamic PVC for executor local storage
-            # Use per-job profile PVC size -- silver needs 150Gi,
-            # gold needs 100Gi, bronze-verify needs 50Gi.
+            # Use per-job profile PVC size -- silver-build and
+            # gold-finalize need 300Gi, bronze-verify needs 50Gi.
             pvc_size = profile["scratch_size"]
             spark_conf.update(
                 {

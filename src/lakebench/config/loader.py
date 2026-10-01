@@ -688,10 +688,9 @@ platform:
       #   AWS S3: https://s3.us-east-1.amazonaws.com
       endpoint: ""
 
-      # REQUIRED: S3 credentials (either inline or secret_ref)
+      # REQUIRED: S3 credentials (env-var substitution keeps them out of the file)
       access_key: ""
       secret_key: ""
-      # secret_ref: ""               # OR: name of existing K8s Secret
 
       # region: us-east-1
       # path_style: true             # true for FlashBlade/MinIO, false for AWS S3
@@ -775,17 +774,12 @@ architecture:
     #                                # listener, secret, and hive operators.
     #     namespace: stackable
     #     version: "25.7.0"
-    #   thrift:
-    #     min_threads: 10
-    #     max_threads: 50
-    #     client_timeout: 300s
     #   resources:
     #     cpu_min: 500m
     #     cpu_max: "2"
     #     memory: 4Gi
     ## Polaris REST catalog settings (used when type: polaris)
     # polaris:
-    #   version: 1.6.0                # Min 1.3.0 for FlashBlade/MinIO
     #   port: 8181
     #   resources:
     #     cpu: "1"
@@ -923,7 +917,6 @@ workload:
 #   dashboards_enabled: true         # Grafana dashboards
 #   retention: 7d                    # Prometheus data retention
 #   storage: 10Gi                    # Prometheus PVC size
-#   storage_class: ""                # PVC storage class (empty = default)
 
 # ============================================================================
 # SPARK CONFIGURATION OVERRIDES

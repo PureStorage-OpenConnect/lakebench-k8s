@@ -19,7 +19,6 @@ platform:
       path_style: true                   # Required for FlashBlade, MinIO
       access_key: ""                     # Inline S3 access key
       secret_key: ""                     # Inline S3 secret key
-      secret_ref: ""                     # OR: name of existing K8s Secret
       ca_cert: ""                        # PEM CA cert path (for HTTPS with self-signed CA)
       verify_ssl: true                   # Set false to skip SSL verification (dev only)
       buckets:
@@ -38,7 +37,7 @@ platform:
 | `path_style` | bool | `true` | Use path-style bucket addressing (`http://endpoint/bucket`) instead of virtual-hosted style (`http://bucket.endpoint`). Must be `true` for FlashBlade and MinIO. |
 | `access_key` | string | `""` | S3 access key provided inline. |
 | `secret_key` | string | `""` | S3 secret key provided inline. |
-| `secret_ref` | string | `""` | Name of an existing Kubernetes Secret containing `accessKey` and `secretKey` data fields. See [Credential Management](#credential-management): not yet consumed by deploy. |
+| `secret_ref` | string | `""` | Not supported. Refused at load without inline keys; with them it warns that it has no effect. See [Credential Management](#credential-management). |
 | `buckets.bronze` | string | `<name>-bronze` | Bucket name for the bronze (raw) data layer. When unset, derived from the deployment `name`. |
 | `buckets.silver` | string | `<name>-silver` | Bucket name for the silver (enriched) data layer. When unset, derived from the deployment `name`. |
 | `buckets.gold` | string | `<name>-gold` | Bucket name for the gold (aggregated) data layer. When unset, derived from the deployment `name`. |
@@ -48,13 +47,11 @@ platform:
 
 ## Credential Management
 
-Lakebench supports two credential strategies:
+Lakebench reads S3 credentials only from `access_key` and `secret_key`. `deploy` renders the `lakebench-s3-credentials` Secret from them and the CLI's S3 client uses the same fields. To keep keys out of the file, use `${VAR}` environment substitution in the YAML (for example `access_key: "${S3_ACCESS_KEY}"`).
 
-1. **Inline credentials** -- Set `access_key` and `secret_key` directly in the YAML file. Convenient for development but exposes secrets in plaintext.
+`secret_ref` (the name of an existing Kubernetes Secret) is not supported: nothing reads an existing Secret. A config that sets `secret_ref` without inline keys is refused at load, because it would deploy empty credentials. Set alongside inline keys, it loads with a warning that it has no effect.
 
-2. **Kubernetes Secret reference** -- `secret_ref` names a pre-existing Secret with `accessKey` and `secretKey` data fields. Today it only satisfies the credential-presence check: `deploy` renders the `lakebench-s3-credentials` Secret from `access_key`/`secret_key`, and the CLI's S3 client reads the same inline fields, so a config with only `secret_ref` deploys empty credentials. Use inline credentials, or `${VAR}` environment substitution in the YAML (for example `access_key: "${S3_ACCESS_KEY}"`) to keep keys out of the file.
-
-If neither inline credentials nor a `secret_ref` is provided, the config still loads, and `lakebench deploy` refuses to start.
+If no credentials are provided, the config still loads, and `lakebench deploy` refuses to start.
 
 ## Minimum S3 Permissions (IAM Policy)
 

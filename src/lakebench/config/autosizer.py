@@ -332,10 +332,11 @@ def resolve_auto_sizing(
 
     # -- Schema-specific overrides (ENG-2C.10) --
     # Workload schemas that differ from Customer360 on baseline resource shape
-    # override defaults here. Currently just the silver-build scratch PVC
-    # size for Financial (200Gi vs Customer360's 150Gi) per spec §2C.21;
-    # workload-specific stage profiles (W1-W7) are applied by ENG-2C.3
-    # at manifest-build time, not autosizer time.
+    # override defaults here. Financial sets platform.storage.scratch.size to
+    # 200Gi and, on Spark Thrift, raises its memory. Per-executor scratch PVCs do
+    # not come from that field: they are _JOB_PROFILES["scratch_size"]
+    # (silver-build 300Gi) with _SCHEMA_PROFILE_OVERRIDES on top, applied at
+    # manifest-build time in modules/pipeline_engines/spark/job.py.
     # -- Spark Thrift on Delta (LB-148) --
     # Runs before the schema overrides so the financial 24g heap still wins.
     delta_change = _apply_delta_thrift_default(config, cluster_capacity)

@@ -1935,9 +1935,9 @@ class ReportGenerator:
 
         return f"""
         <section>
-            <h2>Streaming Pipeline</h2>
+            <h2>Continuous Pipeline</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                {len(metrics.streaming)} streaming jobs | {total_rows:,} total rows processed
+                {len(metrics.streaming)} continuous jobs | {total_rows:,} total rows processed
             </div>
             <table>
                 <thead>

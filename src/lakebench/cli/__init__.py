@@ -767,8 +767,8 @@ def validate(
     else:
         _check_ok(f"Endpoint: {s3.endpoint}")
 
-    if not cfg.has_inline_s3_credentials() and not cfg.has_s3_secret_ref():
-        _check_fail("Credentials not configured (neither inline nor secret_ref)")
+    if not cfg.has_inline_s3_credentials():
+        _check_fail("Credentials not configured (set access_key and secret_key)")
     else:
         _check_ok("Credentials configured")
 
@@ -795,25 +795,6 @@ def validate(
                 _check_ok(f"Buckets: {', '.join(results['buckets'])}")
         elif results["endpoint_reachable"]:
             _check_fail(results["credentials_message"])
-
-    # Secret ref validation
-    if cfg.has_s3_secret_ref():
-        secret_name = cfg.platform.storage.s3.secret_ref
-        try:
-            k8s = get_k8s_client(
-                context=cfg.platform.kubernetes.context,
-                namespace=cfg.get_namespace(),
-            )
-            if k8s.secret_exists(secret_name, cfg.get_namespace()):
-                _check_ok(f"Secret '{secret_name}' exists")
-            else:
-                _check_fail(
-                    f"Secret '{secret_name}' not found in namespace '{cfg.get_namespace()}'"
-                )
-        except K8sConnectionError:
-            _check_warn("Cannot verify S3 secret (K8s not connected yet)")
-        except Exception as e:
-            _check_warn(f"Cannot verify S3 secret: {e}")
 
     # Bucket name overlap
     bucket_names = [s3.buckets.bronze, s3.buckets.silver, s3.buckets.gold]

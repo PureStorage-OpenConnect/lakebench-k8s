@@ -49,6 +49,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   workload does not read it.
 - Read-only commands create no files: `validate` no longer opens a journal,
   and `report` and `results` no longer create `lakebench-output/runs/`.
+- `platform.storage.s3.secret_ref` without `access_key` and `secret_key` is
+  refused at load: nothing reads an existing Secret, so such a config
+  deployed empty S3 credentials (LB-190). `destroy`, `status` and `clean`
+  still load it, so an old deployment stays destroyable. Set alongside
+  inline keys, it loads with a warning that it has no effect. `config
+  validate` and the deploy preflight now ask for the inline keys only.
+- Run provenance and the Hive deploy result record Hive 3.1.3, the version
+  the Stackable HiveCluster template renders, instead of the tag of
+  `images.hive`. An `images.hive` naming another version warns at load that
+  it has no effect (LB-189).
+- Setting `architecture.catalog.hive.thrift.*`,
+  `architecture.catalog.polaris.version` or `observability.storage_class`
+  to a non-default value warns that it has no effect; nothing reads them.
+  The generated config template no longer carries them or `secret_ref`.
+- Deploy step labels say "Verifying scratch StorageClass" and "Checking
+  Spark Operator and watch list", and the deploy summary lists the operator
+  step whether or not `operator.install` is set (LB-191). The HTML report's
+  continuous section is headed "Continuous Pipeline".
+- `docs/reproductions/c360-scale-0-1.yaml` is marked as a legacy package
+  that `reproduce` refuses.
 ### Fixed
 
 - Trino compaction of the Customer 360 silver table no longer fails with

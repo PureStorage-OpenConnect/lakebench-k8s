@@ -129,11 +129,18 @@ class TestLakebenchConfig:
         assert config.has_inline_s3_credentials()
         assert not config.has_s3_secret_ref()
 
-        # Secret ref
-        config = LakebenchConfig(
-            name="test", platform={"storage": {"s3": {"secret_ref": "my-secret"}}}
-        )
-        assert not config.has_inline_s3_credentials()
+        # Secret ref alongside inline keys: loads (and warns, LB-190). A
+        # secret_ref-only config is refused; see test_config_honesty_v16.
+        with pytest.warns(DeprecationWarning, match="secret_ref"):
+            config = LakebenchConfig(
+                name="test",
+                platform={
+                    "storage": {
+                        "s3": {"access_key": "k", "secret_key": "s", "secret_ref": "my-secret"}
+                    }
+                },
+            )
+        assert config.has_inline_s3_credentials()
         assert config.has_s3_secret_ref()
 
     def test_s3_tls_fields_defaults(self):

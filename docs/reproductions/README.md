@@ -52,7 +52,7 @@ credentials the referenced config resolves at run time.
 
 | File | Recipe | Scale | Mode | Notes |
 |---|---|---|---|---|
-| `c360-scale-0-1.yaml` | polaris-iceberg-spark-trino | 0.1 | batch | Baseline c360 sanity run; cannot verify, see below |
+| `c360-scale-0-1.yaml` | polaris-iceberg-spark-trino | 0.1 | batch | **Legacy, verify refuses it (exit 2).** Kept for history; see below |
 
 Add rows to this table when you land a new package.
 
@@ -61,7 +61,7 @@ A package records the `maintenance_policy_id` of its source run, and
 differs from the policy of the running version. `reproduce --record`
 refuses a source run from another policy.
 
-**`c360-scale-0-1.yaml` cannot verify on this version.** Every attempt
+**`c360-scale-0-1.yaml` is a legacy package that `lakebench reproduce` refuses.** Every attempt
 exits 2, for several independent reasons:
 
 - It was recorded at commit `ead6722`, so any other HEAD is commit drift
