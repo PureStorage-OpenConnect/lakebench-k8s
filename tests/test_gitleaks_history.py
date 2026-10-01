@@ -107,6 +107,14 @@ def test_key_in_a_tag_message_fails(repo, ignore):
     assert res.returncode == 1, res.stdout + res.stderr
 
 
+def test_a_tag_name_cannot_allowlist_its_message(repo, ignore):
+    """gitleaks' default path allowlist matches gitleaks.toml anywhere in a path."""
+    _gitleaks()
+    _git(repo, "tag", "-a", "fix-gitleaks.toml", "-m", f"release {_key('Z')}")
+    res = _run(repo, ignore)
+    assert res.returncode == 1, res.stdout + res.stderr
+
+
 def test_key_in_a_merge_commit_only_fails(repo, ignore):
     _gitleaks()
     _git(repo, "checkout", "-q", "-b", "side")
@@ -213,3 +221,8 @@ def test_a_message_that_is_not_utf8_is_scanned(repo, ignore, tmp_path):
     _git(repo, "commit", "-q", "--allow-empty", "-F", str(msg))  # stored as raw bytes
     res = _run(repo, ignore)
     assert res.returncode == 0, res.stdout + res.stderr
+    # A key next to the invalid byte is still found.
+    msg.write_bytes(b"caf\xe9 " + _key("Q").encode() + b"\n")
+    _git(repo, "commit", "-q", "--allow-empty", "-F", str(msg))
+    res = _run(repo, ignore)
+    assert res.returncode == 1, res.stdout + res.stderr
