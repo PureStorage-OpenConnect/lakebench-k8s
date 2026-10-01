@@ -310,6 +310,12 @@ _LEASED_FUNCTIONS = {
         "_namespace_is_terminating",
         "_filter_existing_namespaces",
     },
+    # destroy, inside the lease: the SAF-4 operator pod list (3.3) and the
+    # legacy SecretClass refcount and deletes (3.2).
+    "deploy/destroy.py": {
+        "_operator_pods_listing",
+        "_legacy_secretclass_cleanup_locked",
+    },
     # destroy's _delete_in_lease reads and deletes the namespace through these.
     "k8s/client.py": {
         "namespace_exists",
@@ -341,7 +347,9 @@ def test_leased_api_calls_have_timeouts():
                 ):
                     continue
                 owner = ast.unparse(call.func.value)
-                if not (owner in ("core_v1", "self._core_v1") or owner.endswith("Api()")):
+                if not (
+                    owner in ("core_v1", "self._core_v1", "custom_api") or owner.endswith("Api()")
+                ):
                     continue
                 kws = {k.arg for k in call.keywords}
                 if "_request_timeout" not in kws and None not in kws:  # None: **kwargs

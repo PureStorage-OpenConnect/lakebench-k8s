@@ -80,6 +80,7 @@ class TestLegacySecretClassRefcountInline:
             assert sorted(_legacy_deletes(rec)) == sorted(LEGACY)
             # The deployment's own SecretClasses go too (proves the step ran).
             rec.assert_recorded(verb="delete", kind="secretclasses", name=OWN_SC[0])
+            rec.assert_clean()  # the legacy deletes ran inside the lease (SAF-4)
 
     @pytest.mark.parametrize(
         "other",
@@ -99,6 +100,7 @@ class TestLegacySecretClassRefcountInline:
             rec.assert_recorded(verb="delete", kind="secretclasses", name=OWN_SC[0])
             assert _legacy_deletes(rec) == []
             assert ("secretclasses", None, LEGACY[0]) in rec.store
+            rec.assert_clean()
 
     def test_unrelated_namespace_does_not_count(self):
         with recording(allow_delete=[f"secretclasses/{n}" for n in LEGACY]) as rec:
@@ -106,6 +108,7 @@ class TestLegacySecretClassRefcountInline:
             rec.add_namespace("someone-else", labels={"app.kubernetes.io/managed-by": "helm"})
             _destroy(rec)
             assert sorted(_legacy_deletes(rec)) == sorted(LEGACY)
+            rec.assert_clean()
 
     def test_kept_when_the_namespace_list_fails(self):
         with recording() as rec:

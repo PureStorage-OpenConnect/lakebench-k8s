@@ -66,6 +66,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `detail.compaction_failures`. The maintenance policy id and the effective
   maintenance `id` are unchanged.
 ### Changed
+- **`destroy` keeps a namespace an operator pod still watches.** After it
+  removes the namespace from the Spark Operator watch list and the operator
+  restarts, destroy waits inside the cluster lease (up to 120 s) for every
+  running operator pod whose `--namespaces=` still lists the namespace to go.
+  If one is still there it keeps the namespace and exits 1 with "operator pods
+  [...] still watch it; re-run destroy after they roll", because the operator
+  crash-loops on a watched namespace that no longer exists.
+- **The legacy SecretClass cleanup in `destroy` runs under the cluster
+  lease.** The cluster-wide count of other lakebench namespaces and the
+  deletes of `lakebench-s3-credentials-class` and
+  `lakebench-s3-ca-cert-class` used to run without it. The lease is taken
+  only when one of them exists; if it stays held for 600 s the cleanup is
+  skipped and they are kept.
+- **The cluster lease holder names the process (LB-178).** The `holder`
+  field is now `<host>@<user>@<sha>#<pid>-<8 hex>`, unique to each acquire,
+  and release matches the lease's write nonce, so a process never deletes a
+  lease another run from the same host wrote in the same second. An
+  interrupt inside the acquire releases the lease it wrote instead of
+  leaving it to the 3600 s TTL.
 - **`destroy` deletes the PostgreSQL data PVC when the namespace survives
   (LB-187).** With `create_namespace: false`, `data-lakebench-postgres-<n>`
   and the catalog metadata on it used to survive destroy, because the cleanup

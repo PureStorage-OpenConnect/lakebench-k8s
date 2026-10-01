@@ -796,23 +796,24 @@ def test_real_destroy_is_recorded_and_scoped():
         }
         legacy = [c for c in rec.mutations() if c.name in _LEGACY_SECRETCLASSES]
         assert [c.scope for c in legacy] == [SHARED, SHARED]
-        # Foreign deletes whatever the lease says; SD-11's test names them in
-        # allow_delete once they run inside the lease.
+        # Foreign deletes whatever the lease says; the leased test below names
+        # them in allow_delete.
         foreign = {v.call.name for v in rec.violations() if v.reason == REASON_FOREIGN_DELETE}
         assert foreign == set(_LEGACY_SECRETCLASSES)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="SAF-4 defect at integrate 46cc3f4: destroy deletes the legacy "
-    "SecretClasses without the cluster lease (destroy.py:2952-3009). SD-11 "
-    "moves the cleanup into the lease; this then passes and the marker goes.",
-)
 def test_real_destroy_legacy_secretclass_delete_is_leased():
-    with recording() as rec:
+    """SAF-4: the legacy SecretClass deletes run inside the cluster lease.
+
+    Failed at integrate 46cc3f4 (a strict xfail until SD-11): destroy deleted
+    them without the lease. With them named in allow_delete the recorder
+    finds nothing else wrong.
+    """
+    with recording(allow_delete=[f"secretclasses/{n}" for n in _LEGACY_SECRETCLASSES]) as rec:
         _destroy_under_recorder(rec)
         legacy = [c for c in rec.mutations() if c.name in _LEGACY_SECRETCLASSES]
         assert legacy and all(c.lease_held for c in legacy), [c.describe() for c in legacy]
+        rec.assert_clean()
 
 
 # ---------------------------------------------------------------------------

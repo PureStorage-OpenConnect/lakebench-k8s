@@ -51,10 +51,9 @@ While the lease is held (cluster-safety 2, DESIGN ch01 3.6):
   waits on a request that does not return; a write whose reply timed out
   but which landed is kept (``_adopt_if_written``).
 
-Not covered: SIGKILL and a lost host. The TTL reclaims the lease. A signal
-between the acquire returning and the ``try`` (a few bytecodes) can still
-leave the lease to its TTL; releasing it safely there needs a holder id
-unique to the process (LB-178, SD-11).
+Not covered: SIGKILL and a lost host. The TTL reclaims the lease. An
+interrupt inside the acquire, after the lease was written, releases it:
+the holder id is unique to each acquire (LB-178).
 """
 
 from __future__ import annotations
@@ -163,18 +162,21 @@ class ClusterLockNotHeld(ClusterLockError):
 class LeaseHandle:
     """Opaque token proving ownership of the lease.
 
-    ``holder`` is the ``<hostname>@<user>@<git-sha>`` string written at
-    acquire time. ``resource_version`` is the ConfigMap resourceVersion
-    at acquire time. Release matches on holder and acquired-at, then
-    deletes with a resourceVersion precondition taken from that same
-    read, so a steal landing between the read and the delete makes the
-    delete fail instead of removing the new holder's lease.
+    ``holder`` is the ``<hostname>@<user>@<git-sha>#<pid>-<8 hex>`` string
+    written at acquire time (``build_holder_id``). ``resource_version`` is
+    the ConfigMap resourceVersion at acquire time. ``write_nonce`` is the
+    random ``write-nonce`` of this acquire's write. Release matches on
+    holder, acquired-at and, when set, the write nonce, then deletes with a
+    resourceVersion precondition taken from that same read, so a steal
+    landing between the read and the delete makes the delete fail instead
+    of removing the new holder's lease.
     """
 
     holder: str
     acquired_at: str
     ttl_seconds: int
     resource_version: str
+    write_nonce: str = ""
 
 
 @dataclass(frozen=True)
@@ -217,10 +219,15 @@ def _git_sha_short() -> str:
 
 
 def build_holder_id() -> str:
-    """Return ``<hostname>@<user>@<git-sha>`` for the lease's holder field.
+    """Return ``<hostname>@<user>@<git-sha>#<pid>-<8 hex>`` for the holder field.
 
-    All three components are best-effort so the holder line is never
-    empty. This is a diagnostic string, not a security identifier.
+    The first three components are best-effort so the holder line is never
+    empty. The suffix (LB-178) names the process for ``admin status`` and
+    makes the id unique to one acquire: two runs from the same tree on the
+    same host, in the same second, no longer write the same holder, and
+    ``cluster_lock`` can tell its own lease from anyone else's after an
+    interrupt inside the acquire. A diagnostic string, not a security
+    identifier.
     """
     try:
         host = socket.gethostname() or "unknown-host"
@@ -230,7 +237,7 @@ def build_holder_id() -> str:
         user = getpass.getuser()
     except Exception:  # noqa: BLE001
         user = os.environ.get("USER", "unknown-user")
-    return f"{host}@{user}@{_git_sha_short()}"
+    return f"{host}@{user}@{_git_sha_short()}#{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +402,7 @@ def _adopt_if_written(
             acquired_at=acquired_at,
             ttl_seconds=ttl_seconds,
             resource_version=state.resource_version,
+            write_nonce=write_nonce,
         )
     raise error
 
@@ -444,6 +452,7 @@ def _try_acquire_once(
             acquired_at=acquired_at,
             ttl_seconds=ttl_seconds,
             resource_version=created.metadata.resource_version,
+            write_nonce=nonce,
         )
 
     if not state.is_expired(now_epoch):
@@ -479,6 +488,7 @@ def _try_acquire_once(
         acquired_at=acquired_at,
         ttl_seconds=ttl_seconds,
         resource_version=replaced.metadata.resource_version,
+        write_nonce=nonce,
     )
 
 
@@ -584,7 +594,11 @@ def release_cluster_lock(core_v1: Any, handle: LeaseHandle) -> None:
             raise ClusterLockError(f"cannot read lease for release: {e}") from e
 
         data = cm.data or {}
-        if data.get("holder") != handle.holder or data.get("acquired-at") != handle.acquired_at:
+        if (
+            data.get("holder") != handle.holder
+            or data.get("acquired-at") != handle.acquired_at
+            or (handle.write_nonce and data.get("write-nonce") != handle.write_nonce)
+        ):
             logger.warning(
                 "cluster_lock: release skipped; lease no longer ours "
                 "(current holder=%r acquired_at=%r)",
@@ -816,35 +830,63 @@ def cluster_lock(
         raise ValueError("max_hold_s must be positive")
     # The hold budget never outlives the lease itself.
     max_hold_s = min(max_hold_s, ttl_seconds)
-    handle = acquire_cluster_lock(
-        core_v1,
-        ttl_seconds=ttl_seconds,
-        timeout=timeout,
-        holder=holder,
-    )
+    holder_id = holder or build_holder_id()
+    handle: LeaseHandle | None = None
     token = None
     deferral: _SignalDeferral | None = None
     try:
+        try:
+            handle = acquire_cluster_lock(
+                core_v1,
+                ttl_seconds=ttl_seconds,
+                timeout=timeout,
+                holder=holder_id,
+            )
+        except BaseException as e:
+            # An interrupt can land after our write committed and before the
+            # handle reaches this frame. The holder id is unique to this
+            # acquire (LB-178), so a lease carrying it is ours to release.
+            if holder is None and not isinstance(e, Exception):
+                _release_interrupted_acquire(core_v1, holder_id)
+            raise
         held, token = lease_state.enter(handle.holder, max_hold_s)
         deferral = _SignalDeferral(held)
         deferral.install()
         yield handle
     finally:
-        if deferral is not None:
-            deferral.quiet()
-        try:
-            release_cluster_lock(core_v1, handle)
-        except Exception as e:  # noqa: BLE001
-            # Log but do not shadow whatever the body raised. Transport
-            # errors (urllib3 MaxRetryError and friends) are not
-            # ApiException and would otherwise replace the body's error.
-            logger.warning("cluster_lock: release failed on exit: %s", e)
-        finally:
+        if handle is not None:
+            if deferral is not None:
+                deferral.quiet()
             try:
-                if token is not None:
-                    lease_state.leave(token)
+                release_cluster_lock(core_v1, handle)
+            except Exception as e:  # noqa: BLE001
+                # Log but do not shadow whatever the body raised. Transport
+                # errors (urllib3 MaxRetryError and friends) are not
+                # ApiException and would otherwise replace the body's error.
+                logger.warning("cluster_lock: release failed on exit: %s", e)
             finally:
-                if deferral is not None:
-                    deferral.restore()
-                    # After the release: the saved handler now sees the signal.
-                    deferral.redeliver()
+                try:
+                    if token is not None:
+                        lease_state.leave(token)
+                finally:
+                    if deferral is not None:
+                        deferral.restore()
+                        # After the release: the saved handler now sees the signal.
+                        deferral.redeliver()
+
+
+def _release_interrupted_acquire(core_v1: Any, holder_id: str) -> None:
+    """Delete the lease if this acquire wrote it before it was interrupted.
+
+    Only a lease whose holder equals ``holder_id``, which ``build_holder_id``
+    makes unique to one acquire, is deleted, with the resourceVersion and
+    uid of the read as preconditions. Best effort: an error is logged and
+    the TTL reclaims the lease.
+    """
+    try:
+        state = read_cluster_lock(core_v1)
+        if state is not None and state.holder == holder_id:
+            _delete_if_unchanged(core_v1, state.resource_version, state.uid)
+            logger.warning("cluster_lock: interrupted while acquiring; released the lease")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("cluster_lock: interrupted while acquiring; lease left to its TTL: %s", e)
