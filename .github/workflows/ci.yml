@@ -19,11 +19,11 @@ permissions:
 jobs:
   lint:
     name: Lint & Type Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
@@ -39,40 +39,50 @@ jobs:
       - name: mypy
         run: mypy src/lakebench/
 
+      # Every action in .github/workflows is pinned by SHA and listed in
+      # .github/action-runtimes.json with its runs.using value. This reads
+      # each action.yml at its pinned SHA and fails if the map has drifted.
+      - name: Action runtimes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/check_action_runtimes.py --verify
+
   test:
     name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      # Coverage is collected on 3.11 only: the floors are checked on one
+      # Coverage is collected on 3.13 only: the floors are checked on one
       # interpreter so line-counting differences between versions do not move
-      # the number, and the other entries skip the tracing overhead.
+      # the number, and the other entries skip the tracing overhead. The
+      # version named here must be in the matrix above, or coverage and the
+      # floor check stop silently (tests/test_workflows.py checks this).
       - name: Run unit tests
         run: >-
           pytest tests/ -x --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
-          ${{ matrix.python-version == '3.11' && '--cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered' || '' }}
+          ${{ matrix.python-version == '3.13' && '--cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered' || '' }}
 
       # Per-file floors on the scoring and metrics code (GOALS P8.3).
       - name: Coverage floors
-        if: matrix.python-version == '3.11'
+        if: matrix.python-version == '3.13'
         run: python scripts/check_coverage.py --suite unit coverage-unit.json
 
   secrets:
     name: Secret scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # gitleaks binary rather than gitleaks-action, which needs a paid licence
       # for organisation repos. Version and checksum are pinned.
@@ -95,19 +105,19 @@ jobs:
 
   rust:
     name: Rust datagen
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: datagen_rs
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master on 2026-09-30 (the action has no release tags)
         with:
           toolchain: "1.98.1"
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: datagen_rs
 
@@ -122,15 +132,15 @@ jobs:
 
   spark-tests:
     name: Spark (executed tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: "17"
@@ -152,12 +162,12 @@ jobs:
 
   build:
     name: Build Package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [lint, test, secrets, rust, spark-tests]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 

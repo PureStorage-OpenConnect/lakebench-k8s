@@ -78,7 +78,7 @@ those belong in the PR description and rot as the codebase evolves.
 
 ## Setup
 
-You need Python 3.10 or newer (CI tests 3.10 to 3.13) and, for the data
+You need Python 3.10 or newer (CI tests 3.10 and 3.13) and, for the data
 generator, Rust 1.98.1 (the version CI pins; `rustup toolchain install
 1.98.1`).
 

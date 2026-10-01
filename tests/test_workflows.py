@@ -1,0 +1,217 @@
+"""CI and release workflow hygiene (QA-11, QA-3).
+
+Runner labels are pinned so a GitHub move of ``ubuntu-latest`` cannot change
+the build mid-release; every action is pinned by SHA and has a recorded
+runtime so a retired Node version shows up here and not on a release day;
+the coverage leg must be a matrix entry or coverage stops silently; and the
+release jobs that write anywhere run only in the upstream repository.
+Offline: reads the workflow files and .github/action-runtimes.json only.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import re
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+WF = ROOT / ".github" / "workflows"
+UPSTREAM = "PureStorage-OpenConnect/lakebench-k8s"
+
+_spec = importlib.util.spec_from_file_location(
+    "check_action_runtimes", ROOT / "scripts" / "check_action_runtimes.py"
+)
+car = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(car)
+
+_FLOATING = re.compile(r"^(ubuntu|macos|windows)-latest\b")
+
+
+def _load(name: str) -> dict:
+    return yaml.safe_load((WF / name).read_text())
+
+
+def _workflows() -> dict[str, dict]:
+    return {p.name: yaml.safe_load(p.read_text()) for p in sorted(WF.glob("*.y*ml"))}
+
+
+def _on(wf: dict) -> dict:
+    # PyYAML reads the bare key `on` as boolean True.
+    return wf.get("on", wf.get(True)) or {}
+
+
+def _strings(node) -> list[str]:
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for v in node.values() for s in _strings(v)]
+    if isinstance(node, list):
+        return [s for v in node for s in _strings(v)]
+    return []
+
+
+def test_no_floating_runner_labels():
+    bad = []
+    for name, wf in _workflows().items():
+        for job_name, job in (wf.get("jobs") or {}).items():
+            # runs-on may be a label, a list, or a matrix expression whose
+            # values live under strategy.matrix (including include entries).
+            labels = _strings(job.get("runs-on")) + _strings(
+                (job.get("strategy") or {}).get("matrix")
+            )
+            bad += [f"{name}:{job_name}: {lab}" for lab in labels if _FLOATING.match(lab)]
+    assert not bad, bad
+
+
+def test_actions_pinned_by_sha():
+    pinned = re.compile(r"^\s*-?\s*uses:\s*[\w.-]+/[\w./-]+@[0-9a-f]{40} # \S")
+    bad = []
+    for path in sorted(WF.glob("*.y*ml")):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            m = re.match(r"^\s*-?\s*uses:\s*(\S+)", line)
+            if not m or m.group(1).startswith(("./", "docker://")):
+                continue
+            if not pinned.match(line):
+                bad.append(f"{path.name}:{n}: {line.strip()}")
+    assert not bad, "want `owner/repo@<40-hex sha> # <tag or ref>`: " + repr(bad)
+
+
+def test_every_action_has_a_runtime_entry():
+    uses = car.workflow_uses(WF)
+    runtimes = car.load_runtimes()
+    missing = sorted(set(uses) - set(runtimes))
+    stale = sorted(set(runtimes) - set(uses))
+    assert not missing, f"no entry in .github/action-runtimes.json: {missing}"
+    assert not stale, f"entries no workflow uses: {stale}"
+
+
+def test_no_node20_actions():
+    runtimes = car.load_runtimes()
+    bad = {}
+    for ref in car.workflow_uses(WF):
+        using = runtimes.get(ref)
+        if using is None or using in car.RETIRED_RUNTIMES:
+            bad[ref] = using
+    assert not bad, f"unknown or retired runtime: {bad}"
+    assert not [v for v in runtimes.values() if v in car.RETIRED_RUNTIMES]
+
+
+def test_runtime_script_offline_check_passes():
+    assert car.offline_problems(car.workflow_uses(WF), car.load_runtimes()) == []
+
+
+def test_runtime_verify_reports_drift():
+    runtimes = {"actions/checkout@" + "a" * 40: "node24", "x/y@" + "b" * 40: "composite"}
+    served = {"actions/checkout@" + "a" * 40: "node20", "x/y@" + "b" * 40: "composite"}
+    problems = car.verify_problems(runtimes, served.__getitem__)
+    assert len(problems) == 1 and "node20" in problems[0]
+
+
+def test_runtime_verify_skips_without_token(monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert car.main(["--verify"]) == 0
+    assert "SKIP" in capsys.readouterr().out
+    # In CI a missing token must fail, or the lint step passes having read nothing.
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert car.main(["--verify"]) == 1
+
+
+def _unit_matrix(ci: dict) -> list[str]:
+    return [str(v) for v in ci["jobs"]["test"]["strategy"]["matrix"]["python-version"]]
+
+
+def _coverage_versions(ci: dict) -> set[str]:
+    """Python versions named in the test job's coverage conditions."""
+    found: set[str] = set()
+    for step in ci["jobs"]["test"]["steps"]:
+        text = f"{step.get('if', '')} {step.get('run', '')}"
+        if "--cov" in text or "check_coverage.py" in text:
+            found |= set(re.findall(r"matrix\.python-version\s*==\s*'([\d.]+)'", text))
+    return found
+
+
+def _coverage_leg_problems(ci: dict) -> list[str]:
+    versions = _coverage_versions(ci)
+    if not versions:
+        return ["no coverage condition names a matrix Python version"]
+    matrix = set(_unit_matrix(ci))
+    return [
+        f"coverage runs on {v}, which is not in the matrix {sorted(matrix)}"
+        for v in versions - matrix
+    ]
+
+
+def test_coverage_leg_is_in_matrix():
+    assert _coverage_leg_problems(_load("ci.yml")) == []
+
+    # The silent case: the matrix loses 3.11 but the coverage conditions
+    # still name it, so coverage and the floor check never run and CI is green.
+    fixture = yaml.safe_load(
+        """
+jobs:
+  test:
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - name: Run unit tests
+        run: >-
+          pytest tests/
+          ${{ matrix.python-version == '3.11' && '--cov=lakebench' || '' }}
+      - name: Coverage floors
+        if: matrix.python-version == '3.11'
+        run: python scripts/check_coverage.py --suite unit coverage-unit.json
+"""
+    )
+    assert _coverage_leg_problems(fixture)
+
+
+def test_unit_matrix_is_310_and_313():
+    assert _unit_matrix(_load("ci.yml")) == ["3.10", "3.13"]
+
+
+_GUARD = f"github.repository == '{UPSTREAM}'"
+
+
+def test_publish_jobs_guarded_by_repository():
+    jobs = _load("release.yml")["jobs"]
+    for name in ("github-release", "publish"):
+        cond = str(jobs[name].get("if", ""))
+        assert _GUARD in cond, (name, cond)
+        # An `||` would let a fork through on the other branch, and a status
+        # function would run the job after a failed build.
+        for bad in ("||", "always()", "cancelled()", "failure()"):
+            assert bad not in cond, (name, cond)
+
+
+def test_release_has_no_workflow_dispatch():
+    assert "workflow_dispatch" not in _on(_load("release.yml"))
+    # The check reads the trigger the way GitHub does.
+    assert "workflow_dispatch" in _on(yaml.safe_load("on:\n  workflow_dispatch:\n"))
+
+
+def test_release_dry_run_only_on_forks():
+    jobs = _load("release.yml")["jobs"]
+    dry = jobs["release-dry-run"]
+    assert str(dry["if"]).strip() == f"github.repository != '{UPSTREAM}'"
+    assert set(dry["needs"]) == set(jobs["github-release"]["needs"])
+    assert (dry.get("permissions") or {}).get("contents") != "write"
+    uses = [str(s.get("uses", "")) for s in dry["steps"]]
+    assert not [u for u in uses if u.startswith(("softprops/", "pypa/"))], uses
+
+    # It downloads exactly what the real jobs download, with the same inputs.
+    def downloads(job: dict) -> list[dict]:
+        return [
+            s["with"]
+            for s in job["steps"]
+            if str(s.get("uses", "")).startswith("actions/download-artifact@")
+        ]
+
+    real = downloads(jobs["github-release"]) + downloads(jobs["publish"])
+    assert sorted(map(str, downloads(dry))) == sorted(map(str, real))
+    runs = " ".join(str(s.get("run", "")) for s in dry["steps"])
+    assert "ls -R" in runs and "sha256sum" in runs
