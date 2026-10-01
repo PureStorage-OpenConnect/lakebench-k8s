@@ -10,6 +10,7 @@ Offline: reads the workflow files and .github/action-runtimes.json only.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import re
 from pathlib import Path
@@ -422,3 +423,69 @@ def test_unit_step_prints_skips_and_does_not_stop_early():
     # -x hides every failure after the first; -rs prints each skip reason.
     assert "-x" not in args and "--exitfirst" not in args, run
     assert "-rs" in args, run
+
+
+# -- QA-8: the AML statistics (slow) merge job --------------------------------
+
+
+def _slow_job_runs(event: str, ref: str, base_ref: str = "") -> bool:
+    cond = _load("ci.yml")["jobs"]["aml-slow"]["if"]
+    ctx = {"github.event_name": event, "github.ref": ref, "github.base_ref": base_ref}
+    return bool(_eval_expr(cond, ctx))
+
+
+def test_aml_slow_job_runs_on_integrate_main_tags_and_prs_to_integrate():
+    assert _slow_job_runs("push", "refs/heads/integrate/v1.5.0")
+    assert _slow_job_runs("push", "refs/heads/main")
+    assert _slow_job_runs("push", "refs/heads/train/1003-am")
+    # release.yml calls ci.yml; inside the call event_name is the caller's push.
+    assert _slow_job_runs("push", "refs/tags/v1.7.0")
+    assert _slow_job_runs("pull_request", "refs/pull/9/merge", "integrate/v1.5.0")
+    assert not _slow_job_runs("push", "refs/heads/lane/v17-x")
+    assert not _slow_job_runs("pull_request", "refs/pull/9/merge", "main")
+
+
+def test_aml_slow_job_selects_slow_tests_on_pinned_libraries():
+    job = _load("ci.yml")["jobs"]["aml-slow"]
+    assert job["name"] == "AML statistics (slow)"
+    assert int(job["timeout-minutes"]) <= 45
+    runs = [str(s.get("run", "")) for s in job["steps"]]
+    assert any("tests/test_reference_pins.py" in r for r in runs)
+    unit = next(r for r in runs if "--ignore=tests/spark" in r)
+    assert '-m "slow and not e2e and not integration"' in unit
+    assert "--ignore=tests/test_e2e.py" in unit and "--ignore=tests/test_integration.py" in unit
+    assert any(r.startswith("pytest tests/spark") and "-m slow" in r for r in runs)
+    # The power-simulation hash guard skips on the pins; its own step must not.
+    ps = [s for s in job["steps"] if "test_power_sim_output_hash_is_recorded" in str(s.get("run"))]
+    assert ps and ps[0]["env"]["LB_REQUIRE_POWER_SIM_HASH"] == "1"
+    # A skipped needed job would skip the build, so nothing needs aml-slow.
+    needs = [n for j in _load("ci.yml")["jobs"].values() for n in j.get("needs", [])]
+    assert "aml-slow" not in needs
+
+
+def _has_slow_mark(node) -> bool:
+    # `@pytest.mark.slow`, or a module alias such as `SLOW = pytest.mark.slow`.
+    return any("slow" in ast.unparse(d).lower() for d in getattr(node, "decorator_list", []))
+
+
+def test_aml_statistics_tests_are_marked_slow():
+    """The tests the slow job exists for carry the mark, so the job is not empty
+    and the fast path (QA-6) can deselect them."""
+    want = {
+        "tests/test_aml_scale_invariance.py": None,  # the whole module
+        "tests/test_aml_fidelity_gate.py": "test_real_preregistration_runs_end_to_end",
+        "tests/spark/test_score_reference_gate_spark.py": "test_fidelity_gate_over_silver",
+    }
+    for rel, func in want.items():
+        tree = ast.parse((ROOT / rel).read_text())
+        if func is None:
+            marks = [
+                ast.unparse(n.value)
+                for n in tree.body
+                if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in n.targets)
+            ]
+            assert any("slow" in m for m in marks), rel
+        else:
+            fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == func)
+            assert _has_slow_mark(fn), f"{rel}::{func}"
