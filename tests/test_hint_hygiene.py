@@ -363,89 +363,81 @@ def test_prerequisites_namespace_hint_no_kubectl_create() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Declined-prompt exit code (C3, v1.6). A user who answers "n" to a
-# confirmation prompt must exit with EXIT_DECLINED (3), distinct from 0
-# (success) and 1 (failure), so wrapper scripts can tell "user cancelled"
-# apart from either.
+# Declined-prompt exit code (C3, v1.6; renumbered by CLI-1). A user who
+# answers "n" to a confirmation prompt exits 5 (not confirmed), distinct from
+# 0 (success), 1 (failure), 2 (usage) and 3 (refused), so wrapper scripts can
+# tell "user cancelled" apart from the rest.
 # ---------------------------------------------------------------------------
 
 
-def test_exit_declined_is_three() -> None:
-    """``EXIT_DECLINED`` is 3."""
-    from lakebench.cli._helpers import EXIT_DECLINED
+def test_declined_code_is_not_confirmed() -> None:
+    """A declined prompt is ``ExitCode.NOT_CONFIRMED`` (5); the 1.6 constant is gone."""
+    import lakebench.cli._helpers as helpers
+    from lakebench.exit_codes import ExitCode
 
-    assert EXIT_DECLINED == 3
+    assert ExitCode.NOT_CONFIRMED == 5
+    assert not hasattr(helpers, "EXIT_DECLINED")
 
 
-def test_declined_confirm_exits_three_via_clirunner() -> None:
-    """A ``typer.confirm`` that returns False and raises ``typer.Exit(EXIT_DECLINED)``
-    surfaces exit code 3 through Typer's ``CliRunner``.
+def test_declined_confirm_exits_five_via_clirunner() -> None:
+    """A declined ``typer.confirm`` exits 5 through Typer's ``CliRunner``.
 
-    Uses a mini in-process Typer app rather than driving a real lakebench
-    command (which needs live cluster access to reach the prompt) so the
-    test stays hermetic.
+    Uses a mini in-process Typer app on the lakebench group class rather than
+    driving a real command (which needs live cluster access to reach the
+    prompt) so the test stays hermetic.
     """
     import typer
     from typer.testing import CliRunner
 
-    from lakebench.cli._helpers import EXIT_DECLINED
+    from lakebench.cli._exit import LakebenchGroup
+    from lakebench.exit_codes import ExitCode
 
-    app = typer.Typer()
+    app = typer.Typer(cls=LakebenchGroup)
 
     @app.command()
     def cancellable() -> None:
         if not typer.confirm("Proceed?"):
-            raise typer.Exit(EXIT_DECLINED)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
+
+    @app.command()
+    def other() -> None:  # a second command keeps Typer in group mode
+        pass
 
     runner = CliRunner()
-    result = runner.invoke(app, [], input="n\n")
-    assert result.exit_code == 3, f"expected 3, got {result.exit_code}: {result.output!r}"
+    result = runner.invoke(app, ["cancellable"], input="n\n")
+    assert result.exit_code == 5, f"expected 5, got {result.exit_code}: {result.output!r}"
 
 
-def test_cli_confirm_sites_use_exit_declined() -> None:
+def test_cli_confirm_sites_use_not_confirmed() -> None:
     """Every ``typer.confirm(...)`` in ``src/lakebench/cli/`` whose ``False``
-    branch immediately calls ``raise typer.Exit(...)`` must pass
-    ``EXIT_DECLINED`` (not a literal 0 or 1).
+    branch exits must exit ``ExitCode.NOT_CONFIRMED`` (5), by
+    ``typer.Exit(ExitCode.NOT_CONFIRMED)`` or ``raise NotConfirmed(...)``.
 
     Missed sites are the whole point of standardising this exit code:
-    scripts that check for 3 to distinguish cancellation would silently
-    treat one that still exits 0 as success.
+    scripts that check for 5 to distinguish cancellation would silently
+    treat one that still exits 0 or 1 as something else.
     """
-    # Match the pattern:
-    #     confirm = typer.confirm(...)     OR     if not typer.confirm(...):
-    #     if not confirm:                          <indented block>
-    #         ... print_info(...)                  raise typer.Exit(<code>)
-    #         raise typer.Exit(<code>)
-    # We scan for a `raise typer.Exit(N)` (where N is a bare integer literal
-    # 0 or 1) that appears within 8 non-blank lines after a `typer.confirm(`
-    # call in the same file. That window catches the "print then exit" pair
-    # every CLI in this tree uses.
     cli_dir = SRC_ROOT / "cli"
     offenders: list[str] = []
     for path in sorted(cli_dir.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         lines = text.split("\n")
         for m in re.finditer(r"typer\.confirm\s*\(", text):
-            # Allow the case where the confirm was called with abort=True:
-            # click.Abort produces its own exit (1) and the Exit(...) we
-            # see later is unrelated to the declined branch.
+            # A confirm with abort=True raises click.Abort, which the
+            # top-level handler maps to 5.
             head_end_of_call = text.find(")", m.end())
             call_args = text[m.end() : head_end_of_call] if head_end_of_call != -1 else ""
             if "abort=True" in call_args:
                 continue
             line_no = text.count("\n", 0, m.end()) + 1
-            # Only inspect the 3 lines immediately after the confirm.
-            # The declined branch in this tree is either an ``if not
-            # typer.confirm(): raise typer.Exit(...)`` two-liner or a
-            # three-liner with an intervening ``print_info``; a wider
-            # window catches unrelated ``Exit(1)`` calls in the same
-            # function's except-blocks and false-fails.
+            # The declined branch is the 3 lines after the confirm: an
+            # ``if not typer.confirm(): raise ...`` two-liner, or a
+            # three-liner with an intervening ``print_info``.
             snippet = "\n".join(lines[line_no - 1 : line_no + 3])
-            bad = re.search(r"typer\.Exit\(\s*[01]\s*\)", snippet)
-            if bad:
+            exits = re.search(r"typer\.Exit\(|raise \w+\(", snippet)
+            if exits and not re.search(r"ExitCode\.NOT_CONFIRMED|NotConfirmed\(", snippet):
                 offenders.append(
-                    f"{path.relative_to(SRC_ROOT)}:{line_no}: typer.confirm() "
-                    f"followed by literal typer.Exit(0) or typer.Exit(1). "
-                    f"Use typer.Exit(EXIT_DECLINED)."
+                    f"{path.relative_to(SRC_ROOT)}:{line_no}: typer.confirm() declined "
+                    "branch does not exit ExitCode.NOT_CONFIRMED."
                 )
     assert not offenders, "declined-prompt exit not standardised:\n  " + "\n  ".join(offenders)

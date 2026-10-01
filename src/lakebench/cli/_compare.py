@@ -21,8 +21,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
-from lakebench.cli._helpers import EXIT_DECLINED, emit_data, err_console, esc, print_error
+from lakebench.cli._helpers import emit_data, err_console, esc, print_error
 from lakebench.config import LoadPurpose, load_config
+from lakebench.exit_codes import ExitCode
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ def compare(
             "architecture.workload.datagen.scale in each config file so the "
             "subprocess runs see the scale you asked for."
         )
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Unknown --format used to silently fall back to JSON via
     # _save_comparison's else branch. `report --render` is the HTML path;
@@ -105,13 +106,13 @@ def compare(
             "`lakebench report --render` to build an HTML report from a run's "
             "metrics.json (or --format json / --format csv here)."
         )
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     if _requested_format not in _SUPPORTED_FORMATS:
         print_error(
             f"--format {output_format!r} is not supported. "
             f"Use one of: {', '.join(sorted(_SUPPORTED_FORMATS))}."
         )
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Load both configs. compare still deploys, runs and destroys each config,
     # so it loads them as MUTATE: a nameless config is refused here rather
@@ -122,7 +123,7 @@ def compare(
         cfg_b = load_config(config_b, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1) from None
+        raise typer.Exit(ExitCode.USAGE) from None
 
     # With --format json|csv and no -o, stdout carries only the data: every
     # Panel, header and the child runs' own output go to stderr.
@@ -174,7 +175,7 @@ def compare(
     if not yes:
         confirm = typer.confirm("Proceed with comparison?", err=machine)
         if not confirm:
-            raise typer.Exit(EXIT_DECLINED)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
     if local and cfg_a.name == cfg_b.name:
         # Local stacks are keyed by config name: same name means the same
@@ -185,7 +186,7 @@ def compare(
             "Local comparison needs distinct names -- they key the workdir, "
             "the container, and the buckets."
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Run A
     human.print()
@@ -240,7 +241,7 @@ def compare(
         print_error(
             f"compare: destroy failed for {', '.join(destroy_failures)}; see messages above."
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
     if (
         comparison.get("verdict", "not_comparable" if comparison.get("comparable") is False else "")
         == "not_comparable"
@@ -248,7 +249,7 @@ def compare(
         # Owner decision 2026-09-26: a non-comparable pair exits non-zero.
         # A pair whose comparability is not established exits 0: nothing
         # shows it differs.
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
 
 def config_identity_differences(cfg_a, cfg_b) -> list[str]:

@@ -580,6 +580,7 @@ class MetricsStorage:
             maintenance_policy_id=recorded_policy(data),
             provenance=data.get("provenance"),
             benchmark_error=data.get("benchmark_error"),
+            failure_reasons=[str(r) for r in data.get("failure_reasons") or []],
             autosize_cuts=data.get("autosize_cuts"),
             maintenance_outcomes=data.get("maintenance_outcomes"),
             continuous=data.get("continuous"),

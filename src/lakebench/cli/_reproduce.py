@@ -42,6 +42,7 @@ from lakebench.cli._helpers import (
     print_success,
     print_warning,
 )
+from lakebench.exit_codes import ExitCode
 
 logger = logging.getLogger(__name__)
 
@@ -459,7 +460,7 @@ def _record(run_id: str, write: Path, config_reference: str | None) -> None:
     metrics = storage.load_run(run_id)
     if metrics is None:
         print_error(f"Run {run_id!r} not found in {storage.metrics_dir}")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     try:
         package = _build_package(
@@ -469,7 +470,7 @@ def _record(run_id: str, write: Path, config_reference: str | None) -> None:
         )
     except ReproduceError as e:
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.USAGE) from None
 
     write.parent.mkdir(parents=True, exist_ok=True)
     with write.open("w") as f:
@@ -918,7 +919,7 @@ def _verify(
         package = _load_package(package_path)
     except ReproduceError as e:
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.USAGE) from None
 
     meta = package["reproduction_metadata"]
     expected = meta["expected_numbers"]
@@ -957,13 +958,13 @@ def _verify(
                 "The measured code path is not the one this package claims. "
                 f"Check out {recorded_sha} or pass --allow-commit-drift."
             )
-            raise typer.Exit(2)
+            raise typer.Exit(ExitCode.USAGE)
 
     try:
         config_file = _resolve_config_path(package, config_override, package_path)
     except ReproduceError as e:
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.USAGE) from None
     print_info(f"  config: {config_file}")
 
     # Refuse before a multi-hour run that would be refused afterwards, and
@@ -981,13 +982,13 @@ def _verify(
     _mismatch = _sample_mismatch(meta, _iterations)
     if _mismatch:
         print_error(_mismatch)
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
     _mismatch = _policy_refusal(meta, MAINTENANCE_POLICY_ID)
     if _mismatch:
         print_error(_mismatch)
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     if not meta.get("experiment_identity"):
         from lakebench.metrics.experiment import NO_PROVENANCE
 
@@ -995,7 +996,7 @@ def _verify(
             f"The package cannot be verified: {NO_PROVENANCE} (it was recorded before "
             "packages carried an experiment identity); record it again from a current run."
         )
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     if dry_run:
         print_warning("--dry-run set: package validation only, no pipeline run")
@@ -1007,7 +1008,7 @@ def _verify(
         metrics = _run_pipeline(config_file, timeout, keep)
     except ReproduceError as e:
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.USAGE) from None
 
     _mismatch = (
         _sample_mismatch(meta, _benchmark_samples(metrics))
@@ -1016,7 +1017,7 @@ def _verify(
     )
     if _mismatch:
         print_error(_mismatch)
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     actual = _measure_actual_numbers(metrics)
     rows, exit_code = _compare(
@@ -1128,17 +1129,17 @@ def reproduce(
     if record is not None or write is not None:
         if record is None or write is None:
             print_error("Record mode requires both --record RUN_ID and --write PATH")
-            raise typer.Exit(2)
+            raise typer.Exit(ExitCode.USAGE)
         if package is not None:
             print_error("Positional PACKAGE cannot be combined with --record")
-            raise typer.Exit(2)
+            raise typer.Exit(ExitCode.USAGE)
         _record(record, write, config_reference)
         return
 
     # Verify mode -- positional package required.
     if package is None:
         print_error("Verify mode requires a PACKAGE path (or use --record/--write)")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     _verify(
         package_path=package,

@@ -30,6 +30,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 
 # =============================================================================
@@ -135,14 +136,14 @@ def _run_query_repl(
 
     if not sys.stdin.isatty():
         print_error("Interactive mode requires a terminal")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     config_file = resolve_config_path(config_file)
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     namespace = cfg.get_namespace()
 
@@ -150,7 +151,7 @@ def _run_query_repl(
         executor = get_executor(cfg, namespace)
     except ValueError as e:
         print_error(str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     console.print(
         Panel(
@@ -325,7 +326,7 @@ def query(
     sources = sum(1 for x in [sql, example, sql_file, interactive] if x)
     if sources > 1:
         print_error("Specify only one of: --sql, --example, --sql-file, --interactive")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Handle interactive mode early
     if interactive:
@@ -338,7 +339,7 @@ def query(
         if str(sql_file) == "-":
             if sys.stdin.isatty():
                 print_error("No input from stdin (pipe SQL or use --sql/--example)")
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.USAGE)
             sql = sys.stdin.read().strip()
             query_name = "stdin"
         else:
@@ -347,15 +348,15 @@ def query(
                 query_name = sql_file.stem
             except FileNotFoundError:
                 print_error(f"File not found: {sql_file}")
-                raise typer.Exit(1)  # noqa: B904
+                raise typer.Exit(ExitCode.USAGE)  # noqa: B904
             except Exception as e:
                 print_error(f"Error reading file: {e}")
-                raise typer.Exit(1)  # noqa: B904
+                raise typer.Exit(ExitCode.FAILED)  # noqa: B904
     elif example:
         if example not in EXAMPLE_QUERIES:
             print_error(f"Unknown example: {example}")
             print_info(f"Available: {', '.join(EXAMPLE_QUERIES.keys())}")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.USAGE)
         query_name = example
         _, sql = EXAMPLE_QUERIES[example]
     elif not sql:
@@ -375,14 +376,14 @@ def query(
 
     if not sql:
         print_error("No SQL query provided")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Load config
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     namespace = cfg.get_namespace()
 
@@ -403,19 +404,19 @@ def query(
     except ValueError as e:
         print_error(str(e))
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     try:
         result = executor.execute_query(sql, timeout=query_timeout)
     except FileNotFoundError:
         print_error("kubectl not found on PATH")
         _journal_safe(j.end_command, success=False, message="kubectl not found")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     except RuntimeError as e:
         print_error(str(e))
         print_info("Is the query engine deployed? Run: lakebench status")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
 
     elapsed = result.duration_seconds
 
@@ -434,7 +435,7 @@ def query(
             },
         )
         _journal_safe(j.end_command, success=False, message="Query failed")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
     # Parse and display results
     output = result.raw_output
@@ -664,7 +665,7 @@ def benchmark(
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     scale = cfg.architecture.workload.datagen.get_effective_scale()
     cache_mode = "cold" if cold else None  # None = let runner use config default
@@ -727,7 +728,7 @@ def benchmark(
     except RuntimeError as e:
         print_error(str(e))
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
 
     # Handle composite (returns tuple) vs single result. Track the
     # throughput half separately so the composite qph=0 gate below can
@@ -788,7 +789,7 @@ def benchmark(
             success=False,
             message="benchmark gate failed: " + "; ".join(gate_problems),
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
     # Save to latest metrics if available. Scope by deployment name so a
     # parallel deployment's newer run cannot be rewritten with this

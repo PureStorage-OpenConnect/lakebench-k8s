@@ -41,6 +41,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode
 from lakebench.modules.pipeline_engines.spark.operator_scratch import (
     DEFAULT_CONTROLLER_TMP_SIZE,
 )
@@ -81,7 +82,7 @@ def _get_core_v1(context: str | None = None):
         return k8s_client.CoreV1Api()
     except Exception as e:  # noqa: BLE001
         print_error(f"cannot open Kubernetes client: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.PREREQUISITE) from e
 
 
 def _load_cfg(config_file: Path | None, file_option: Path | None):
@@ -95,16 +96,16 @@ def _load_cfg(config_file: Path | None, file_option: Path | None):
         return load_config(path, purpose=LoadPurpose.TEARDOWN)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.USAGE) from e
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
             console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.USAGE) from e
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.USAGE) from e
 
 
 def _read_operator_scratch(core_v1, operator_ns: str):
@@ -206,7 +207,7 @@ def status(
         ns_list = core_v1.list_namespace()
     except Exception as e:  # noqa: BLE001
         print_error(f"cannot list namespaces: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.PREREQUISITE) from e
 
     table = Table(show_header=True, header_style="bold cyan")
     table.add_column("namespace")
@@ -367,10 +368,10 @@ def release_lock(
             "release itself, re-run with --force as a last resort and "
             "type y/N to confirm."
         )
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.REFUSED) from e
     except ClusterLockError as e:
         print_error(f"cannot release lease: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
 
     if state is None:
         print_info("no lease was held")
@@ -439,7 +440,7 @@ def install_scratch_storage_class(
             except ApiException as e:
                 if e.status != 404:
                     print_error(f"cannot read StorageClass: {e}")
-                    raise typer.Exit(1) from e
+                    raise typer.Exit(ExitCode.FAILED) from e
 
             manifest = {
                 "apiVersion": "storage.k8s.io/v1",
@@ -464,18 +465,18 @@ def install_scratch_storage_class(
                     print_info(f"StorageClass {scratch.storage_class!r} already exists; no-op")
                     return
                 print_error(f"cannot create StorageClass: {e}")
-                raise typer.Exit(1) from e
+                raise typer.Exit(ExitCode.FAILED) from e
     except ClusterLockHeld as e:
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.REFUSED) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
     except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
         # A command inside the lease ran out of its hold budget; the lease
         # has been released.
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
 
     print_success(
         f"created StorageClass {scratch.storage_class!r} "
@@ -532,7 +533,7 @@ def install_spark_operator(
             validate_size(controller_tmp_size)
     except ValueError as e:
         print_error(f"--controller-tmp-size: {e}")
-        raise typer.Exit(2) from e
+        raise typer.Exit(ExitCode.USAGE) from e
     from lakebench.deploy.cluster_lock import (
         ADMIN_MAX_HOLD_S,
         ClusterLockError,
@@ -562,19 +563,19 @@ def install_spark_operator(
             ok = mgr.install(version=v, tmp_size=controller_tmp_size)
     except ClusterLockHeld as e:
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.REFUSED) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
     except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
         # A command inside the lease ran out of its hold budget; the lease
         # has been released.
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
 
     if not ok:
         print_error("Spark Operator install/upgrade failed. See logs above.")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
     print_success(
         f"Spark Operator install/upgrade ok (namespace={ns}, "
         f"version={v or 'installed chart'}, "
@@ -663,7 +664,7 @@ def migrate_deployment(
             print_error(f"namespace {namespace!r} does not exist")
         else:
             print_error(f"cannot read namespace {namespace!r}: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.USAGE if e.status == 404 else ExitCode.FAILED) from e
 
     # Already migrated?
     anns = ns_obj.metadata.annotations or {}
@@ -690,7 +691,7 @@ def migrate_deployment(
             "cannot determine api-server fingerprint (kubeconfig missing?). "
             "Pass --api-server-fingerprint explicitly."
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     custom_api = k8s_client.CustomObjectsApi()
 
@@ -723,15 +724,15 @@ def migrate_deployment(
             )
     except ClusterLockHeld as e:
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.REFUSED) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
     except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
         # A command inside the lease ran out of its hold budget; the lease
         # has been released.
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
 
     from lakebench.deploy.ownership import IdentityVerdict
 
@@ -740,7 +741,7 @@ def migrate_deployment(
             f"stamp refused: another deployment claimed {namespace!r} "
             f"during migration: {report.hint}"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.REFUSED)
     print_success(
         f"migrated {namespace!r}: stamped {ANNOTATION_DEPLOYMENT_NAME}={expected_name}, "
         f"{ANNOTATION_API_SERVER}={expected_api}, {ANNOTATION_COMMITTED_SHA}={committed}"
@@ -896,7 +897,7 @@ def repair_operator(
         validate_size(controller_tmp_size)
     except ValueError as e:
         print_error(f"--controller-tmp-size: {e}")
-        raise typer.Exit(2) from e
+        raise typer.Exit(ExitCode.USAGE) from e
 
     ns = "spark-operator"
     v: str | None = None
@@ -930,7 +931,7 @@ def repair_operator(
         watched = mgr._get_watched_namespaces()  # noqa: SLF001 -- reconciliation needs live state
     except _WatchListReadError as e:
         print_error(f"Cannot read the Spark Operator watch list: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
 
     to_drop: list[str] = []
     reconciled: list[str] = []
@@ -999,24 +1000,24 @@ def repair_operator(
                         "may still be inconsistent. Retry after investigating "
                         "Helm state."
                     )
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.FAILED)
             if resize_from is not None and not mgr.apply_controller_tmp_size(controller_tmp_size):
                 print_error(
                     "could not resize the controller /tmp emptyDir; see the log above. "
                     "The watch list repair (if any) was applied."
                 )
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.FAILED)
     except ClusterLockHeld as e:
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.REFUSED) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
     except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
         # A command inside the lease ran out of its hold budget; the lease
         # has been released.
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
 
     if to_drop:
         print_success(f"reconciled Spark Operator watch list: {reconciled}")
@@ -1093,7 +1094,7 @@ def reclaim_bucket(
     )
     if s3._init_error:  # noqa: SLF001
         print_error(f"S3 client init failed: {s3._init_error}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.PREREQUISITE)
 
     workload_schema = getattr(cfg, "workload_schema", None)
     try:
@@ -1110,14 +1111,14 @@ def reclaim_bucket(
                     r = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
                 except Exception as e:  # noqa: BLE001
                     print_error(f"cannot list {bucket!r}: {e}")
-                    raise typer.Exit(1) from e
+                    raise typer.Exit(ExitCode.FAILED) from e
                 if r.get("KeyCount", 0) > 0 or r.get("Contents"):
                     print_error(
                         f"bucket {bucket!r} has objects; refusing to rewrite "
                         "ownership tag. Pass --force-nonempty to acknowledge that "
                         "another team's data may be under this name."
                     )
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.REFUSED)
             try:
                 write_bucket_ownership_tag(
                     s3.raw_client,
@@ -1146,7 +1147,7 @@ def reclaim_bucket(
                         "cluster-wide `list namespaces` to this token "
                         "and try again."
                     )
-                    raise typer.Exit(1) from None
+                    raise typer.Exit(ExitCode.PREREQUISITE) from None
                 if bucket_name_matches_deployment(bucket, cfg.name, others):
                     print_success(
                         f"bucket {bucket!r} on a backend that does not "
@@ -1177,18 +1178,18 @@ def reclaim_bucket(
                     "config current-context`, pass --force-legacy on "
                     "destroy (operator assertion)."
                 )
-                raise typer.Exit(1) from None
+                raise typer.Exit(ExitCode.REFUSED) from None
     except ClusterLockHeld as e:
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.REFUSED) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
     except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
         # A command inside the lease ran out of its hold budget; the lease
         # has been released.
         print_error(str(e))
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
 
     print_success(
         f"bucket {bucket!r} now owned by deployment {cfg.name!r} (workload={workload_schema})"

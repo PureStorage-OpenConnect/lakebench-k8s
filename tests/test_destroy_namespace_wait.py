@@ -687,9 +687,9 @@ class TestCliExitCode:
         with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
             return CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
 
-    def test_still_terminating_exits_4(self, monkeypatch, tmp_path):
-        from lakebench.cli._destroy import EXIT_NAMESPACE_STILL_TERMINATING
+    def test_still_terminating_exits_incomplete(self, monkeypatch, tmp_path):
         from lakebench.deploy.engine import DeploymentResult
+        from lakebench.exit_codes import ExitCode
 
         results = [
             DeploymentResult("postgres", DeploymentStatus.SUCCESS, "removed"),
@@ -701,8 +701,9 @@ class TestCliExitCode:
             ),
         ]
         out = self._invoke(results, monkeypatch, tmp_path)
-        assert EXIT_NAMESPACE_STILL_TERMINATING == 4
-        assert out.exit_code == 4, out.output
+        # CLI-1: incomplete and safe to re-run is 6 (it was 4 in 1.6).
+        assert ExitCode.INCOMPLETE == 6
+        assert out.exit_code == 6, out.output
         assert "Destroy Complete\n" not in out.output
 
     def test_clean_destroy_exits_0(self, monkeypatch, tmp_path):

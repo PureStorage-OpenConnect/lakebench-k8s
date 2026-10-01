@@ -12,6 +12,7 @@ Mapping (``exit_code_for``):
   unchanged (Click prints a usage error and exits 2);
 - ``LakebenchError``: its own code;
 - ``ConfigError`` (including ``ConfigValidationError``): 2;
+- ``ClusterLockHeld`` (another process holds the cluster lease): 3;
 - ``K8sConnectionError`` and ``kubernetes.config.ConfigException``: 4;
 - Click ``Abort`` (a declined ``typer.confirm(abort=True)``, end of input
   with no terminal, or Ctrl-C at a prompt): 5;
@@ -65,6 +66,8 @@ __all__ = [
     "exit_code_for",
     "path_code",
     "quiet_urllib3",
+    "refused_path",
+    "refused_result_code",
 ]
 
 DEBUG_ENV = "LAKEBENCH_DEBUG"
@@ -94,6 +97,65 @@ def _is_abort(exc: BaseException) -> bool:
         c.__name__ == "Abort" and c.__module__.split(".")[0] in _CLICK_ROOTS
         for c in type(exc).__mro__
     )
+
+
+# Deploy and destroy report a safety refusal as a FAILED step result, not an
+# exception. These are the texts those results start with, or contain; a
+# command whose failed steps are refusals exits 3 instead of 1. The texts are
+# kept verbatim because the parallel-safety scenarios grep them (CLI-2), and
+# tests/test_exit_codes.py pins each against its producer.
+REFUSAL_PREFIXES: dict[str, str] = {
+    # deploy/destroy.py: the namespace is now a newer deployment
+    "Destroy NOT completed": "destroy.redeployed",
+    # modules/pipeline_engines/spark/operator.py: another process holds the lease
+    "another lakebench process holds the cluster lock": "lease.held",
+    # deploy/engine.py: the namespace belongs to another deployment
+    "Namespace ownership refused": "deploy.identity_foreign",
+}
+REFUSAL_FRAGMENTS: dict[str, str] = {
+    # deploy/engine.py (deploy) and deploy/destroy.py (destroy, inside the
+    # bucket step's notes): a bucket belongs to another deployment or carries
+    # no lakebench tag, so it is not claimed or emptied
+    "Bucket ownership refused": "deploy.identity_foreign",
+    # deploy/engine.py: an untagged namespace or bucket is not claimed
+    "exists without lakebench identity annotations": "deploy.identity_foreign",
+    "exists without a lakebench ownership tag": "deploy.identity_foreign",
+}
+# Failed steps that follow from a refused one rather than failing on their
+# own: destroy keeps the namespace, the ownership record of a bucket it did
+# not empty (deploy/destroy.py).
+CONSEQUENCE_FRAGMENTS: tuple[str, ...] = ("NOT deleted because emptying the S3 buckets failed",)
+
+
+def refused_path(message: str) -> str | None:
+    """The ``PATHS`` name of the refusal a step result's *message* reports."""
+    for prefix, name in REFUSAL_PREFIXES.items():
+        if message.startswith(prefix):
+            return name
+    for fragment, name in REFUSAL_FRAGMENTS.items():
+        if fragment in message:
+            return name
+    return None
+
+
+def refused_result_code(results: Any) -> ExitCode | None:
+    """``REFUSED`` when the failed deploy or destroy steps were safety refusals.
+
+    *results* are ``DeploymentResult``s. Every failed step must be a refusal
+    or a consequence of one; a failure of any other kind keeps the caller's
+    code (1), so a refusal never hides a real failure. None when no failed
+    step is a refusal.
+    """
+    refused = False
+    for r in results:
+        if getattr(getattr(r, "status", None), "value", None) != "failed":
+            continue
+        message = getattr(r, "message", "") or ""
+        if refused_path(message):
+            refused = True
+        elif not any(f in message for f in CONSEQUENCE_FRAGMENTS):
+            return None
+    return ExitCode.REFUSED if refused else None
 
 
 def _debug() -> bool:
@@ -127,6 +189,15 @@ def error_for(exc: BaseException) -> LakebenchError | None:
         return LakebenchError("Interrupted.", path="sigint", code=ExitCode.INTERRUPTED)
     if not isinstance(exc, Exception):
         return None
+
+    from lakebench.deploy.cluster_lock import ClusterLockHeld
+
+    if isinstance(exc, ClusterLockHeld):
+        return LakebenchError(
+            f"Refused: {_first_line(str(exc))}",
+            path="lease.held",
+            code=ExitCode.REFUSED,
+        )
 
     from lakebench.config import ConfigError, ConfigValidationError
 

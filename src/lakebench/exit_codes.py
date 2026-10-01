@@ -176,7 +176,7 @@ _C = ExitCode
 PATHS: tuple[ExitPath, ...] = (
     # 0
     ExitPath("version.ok", _C.OK, "`lakebench version` prints the version"),
-    ExitPath("run.pass", _C.OK, "`run` finished and its verdict passed", "CC-9"),
+    ExitPath("run.pass", _C.OK, "`run` finished and its verdict passed"),
     ExitPath("compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like", "ER-11"),
     ExitPath("status.ok", _C.OK, "`status` finds the deployment as configured", "CC-27"),
     ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity", "CC-23"),
@@ -187,12 +187,11 @@ PATHS: tuple[ExitPath, ...] = (
         "an error Lakebench does not classify; one line, with the traceback only "
         "under LAKEBENCH_DEBUG=1",
     ),
-    ExitPath("run.verdict_failed", _C.FAILED, "`run` finished with a failing verdict", "CC-9"),
+    ExitPath("run.verdict_failed", _C.FAILED, "`run` finished with a failing verdict"),
     ExitPath(
         "run.datagen_timeout",
         _C.FAILED,
         'datagen did not finish in time; the record says "datagen timed out" in verdict.reasons',
-        "CC-9",
         v16_code=5,
     ),
     ExitPath("run.namespace_gone", _C.FAILED, "the namespace disappeared during `run`", "CD-17"),
@@ -216,8 +215,20 @@ PATHS: tuple[ExitPath, ...] = (
     ),
     # 2
     ExitPath("click.usage", _C.USAGE, "an unknown flag, a missing argument or a bad value"),
+    ExitPath("config.validation", _C.USAGE, "the config fails to load or validate", v16_code=1),
     ExitPath(
-        "config.validation", _C.USAGE, "the config fails to load or validate", "CC-9", v16_code=1
+        "config.unsupported",
+        _C.USAGE,
+        "the workload, recipe and mode combination is unsupported, or the scale is "
+        "above the workload's datagen ceiling",
+        v16_code=1,
+    ),
+    ExitPath(
+        "cli.bad_argument",
+        _C.USAGE,
+        "a command refuses an argument it checks itself: an unknown recipe, component, "
+        "stage or example, a missing file, conflicting options",
+        v16_code=1,
     ),
     ExitPath(
         "config.name_required",
@@ -276,7 +287,6 @@ PATHS: tuple[ExitPath, ...] = (
         "destroy.redeployed",
         _C.REFUSED,
         '"Destroy NOT completed": the namespace now belongs to a newer deployment',
-        "CC-9",
         v16_code=1,
     ),
     ExitPath(
@@ -305,14 +315,12 @@ PATHS: tuple[ExitPath, ...] = (
         "deploy.identity_foreign",
         _C.REFUSED,
         "the namespace or a bucket is owned by another deployment",
-        "CC-9",
         v16_code=1,
     ),
     ExitPath(
         "run.bronze_nonempty",
         _C.REFUSED,
         "datagen would write over a non-empty bronze prefix without --regenerate",
-        "CC-9",
         v16_code=2,
     ),
     ExitPath(
@@ -321,7 +329,7 @@ PATHS: tuple[ExitPath, ...] = (
         "the corpus changed between repetitions of `run --repeat`",
         "CC-30",
     ),
-    ExitPath("lease.held", _C.REFUSED, "another command holds the cluster lock lease", "CC-9"),
+    ExitPath("lease.held", _C.REFUSED, "another command holds the cluster lock lease", v16_code=1),
     ExitPath(
         "destroy.unverified_cluster",
         _C.REFUSED,
@@ -335,9 +343,7 @@ PATHS: tuple[ExitPath, ...] = (
         "SD-10",
     ),
     # 4
-    ExitPath(
-        "run.prereq_failed", _C.PREREQUISITE, "a `run` preflight check failed", "CC-9", v16_code=1
-    ),
+    ExitPath("run.prereq_failed", _C.PREREQUISITE, "a `run` preflight check failed", v16_code=1),
     ExitPath(
         "capacity.shortfall",
         _C.PREREQUISITE,
@@ -356,8 +362,12 @@ PATHS: tuple[ExitPath, ...] = (
         "`plan` finds the scratch StorageClass missing",
         "CC-23",
     ),
+    ExitPath("k8s.unreachable", _C.PREREQUISITE, "the Kubernetes API is unreachable", v16_code=1),
     ExitPath(
-        "k8s.unreachable", _C.PREREQUISITE, "the Kubernetes API is unreachable", "CC-9", v16_code=1
+        "s3.unreachable",
+        _C.PREREQUISITE,
+        "`generate` or `run --generate` cannot read the bronze bucket to check it is empty",
+        v16_code=2,
     ),
     ExitPath(
         "financial.k8s_unreachable",
@@ -388,14 +398,12 @@ PATHS: tuple[ExitPath, ...] = (
         "confirm.declined",
         _C.NOT_CONFIRMED,
         "a confirmation prompt was answered no",
-        "CC-9",
         v16_code=3,
     ),
     ExitPath(
         "run.namespace_missing_no_yes",
         _C.NOT_CONFIRMED,
         "`run` would create a missing namespace and was not given --yes",
-        "CC-9",
         v16_code=1,
     ),
     # 6
@@ -403,7 +411,6 @@ PATHS: tuple[ExitPath, ...] = (
         "destroy.namespace_terminating",
         _C.INCOMPLETE,
         "`destroy` finished its steps but the namespace is still terminating",
-        "CC-9",
         v16_code=4,
     ),
     # 10 to 14
@@ -435,22 +442,10 @@ PATHS: tuple[ExitPath, ...] = (
 
 PATHS_BY_NAME: dict[str, ExitPath] = {p.name: p for p in PATHS}
 
-# v1.6 codes that unconverted commands still produce, with what they mean
-# there. They clash with the table above. CC-9 converts those sites, deletes
-# EXIT_DECLINED and EXIT_DATAGEN_TIMEOUT (cli/_helpers.py) and
-# EXIT_NAMESPACE_STILL_TERMINATING (cli/_destroy.py), and empties this; a test
-# keeps it equal to those constants until then.
-LEGACY_CODES: dict[int, str] = {
-    3: (
-        "a declined confirmation prompt in `init`, `destroy`, `compare` and the "
-        "first `clean` prompt (other prompts exit 5)"
-    ),
-    4: "`destroy`: the namespace is still terminating",
-    5: (
-        "`run`: datagen did not finish in time (a declined or unanswered `run` "
-        "prompt is also 5, meaning not confirmed)"
-    ),
-}
+# v1.6 codes that an unconverted command still produced, with what they meant
+# there. CC-9 converted every command, so this is empty; ``render_markdown``
+# prints a transition section only while it has entries.
+LEGACY_CODES: dict[int, str] = {}
 
 
 def path_code(name: str) -> ExitCode:

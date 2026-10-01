@@ -41,7 +41,7 @@ class TestReleaseLock:
             ),
         ):
             r = runner.invoke(admin_app, ["release-lock"])
-        assert r.exit_code == 1
+        assert r.exit_code == 3  # refused: the lease is live (lease.held)
         assert "prod@host@abc" in r.output
 
     def test_force_releases_live(self):
@@ -111,7 +111,7 @@ class TestMigrateDeployment:
             patch("kubernetes.client.CustomObjectsApi", return_value=custom),
         ):
             r = runner.invoke(admin_app, ["migrate-deployment", "gone"])
-        assert r.exit_code == 1
+        assert r.exit_code == 2  # the namespace argument names nothing
         assert "does not exist" in r.output
 
     def test_noop_when_already_migrated(self):
@@ -263,7 +263,7 @@ class TestReclaimBucket:
             patch("lakebench.s3.S3Client", return_value=s3),
         ):
             r = runner.invoke(admin_app, ["reclaim-bucket", "some-bucket", str(yaml_path)])
-        assert r.exit_code == 1
+        assert r.exit_code == 3  # refused: the bucket holds objects
         assert "has objects" in r.output
         assert "--force-nonempty" in r.output
 

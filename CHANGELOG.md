@@ -217,11 +217,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   A top-level handler maps errors to the table: a confirmation prompt with no
   answer (`deploy` and `generate` off a terminal without `--yes`, end of
   input, or a declined `abort` prompt) now exits 5 instead of 1; an error
+- **Exit codes follow one table (CLI-1).** `lakebench` has a single
+  exit-code enum, `lakebench.exit_codes.ExitCode`, importable without loading
+  the CLI, and the table in `docs/exit-codes.md` is generated from it. Every
+  command now exits with a code from that table: 1 a failed run or step, 2 a
+  usage or config error, 3 a refusal by the safety model, 4 a missing
+  prerequisite, 5 not confirmed, 6 incomplete and safe to re-run. An error
   Lakebench does not classify prints one `ERROR` line instead of a traceback
-  and exits 1 (`LAKEBENCH_DEBUG=1` prints the traceback). Commands that still
-  exit 3 for a declined prompt, 4 for a namespace still terminating and 5 for
-  a datagen timeout keep those codes until they are converted; the table
-  lists them.
+  and exits 1 (`LAKEBENCH_DEBUG=1` prints the traceback). Scripts that test
+  exit codes need these changes:
+  - a declined confirmation prompt exits 5 (was 3), and so does a prompt
+    with no answer (`deploy` and `generate` off a terminal without `--yes`,
+    end of input), `destroy` without `--force` off a terminal, and `run`
+    without `--yes` when the namespace does not exist (all were 1);
+  - `destroy` with the namespace still terminating exits 6 (was 4);
+  - a datagen timeout in `run` exits 1 (was 5); the run record keeps the
+    distinction: its `verdict.reasons` contains "datagen timed out";
+  - a config that fails to load or validate, an unsupported workload,
+    recipe and mode combination, and an argument a command checks itself
+    (an unknown recipe, component, stage or example, a missing file,
+    conflicting options) exit 2 (were 1);
+  - a non-empty bronze prefix without `--regenerate` exits 3 (was 2), and a
+    bronze bucket that cannot be read to check it exits 4 (was 2);
+  - refusals by the safety model exit 3 (were 1): a namespace or bucket
+    owned by another deployment, an untagged bucket `destroy` will not
+    empty, "Destroy NOT completed" because the namespace is a newer
+    deployment, a cluster lease another process holds, a continuous run
+    that would reset data without `--force-reset`, a non-empty bucket
+    `admin reclaim-bucket` will not retag;
+  - an unreachable Kubernetes API or S3 endpoint, a failed `run`
+    prerequisite or a Spark Operator that is not ready exits 4 (were 1).
 
 - **Errors are one line and markup-safe; machine output is plain (CLI-2).**
   `ERROR`, `WARN`, `OK` and progress lines now go to stderr, and their text

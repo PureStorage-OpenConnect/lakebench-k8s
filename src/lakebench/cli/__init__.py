@@ -21,7 +21,6 @@ from lakebench.cli._helpers import (
 )
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
-    EXIT_DECLINED,
     _journal_safe,
     _strip_ansi,
     console,
@@ -49,6 +48,7 @@ from lakebench.config import (
     parse_spark_memory,
 )
 from lakebench.config.schema import is_continuous_mode
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
 from lakebench.k8s import (
@@ -392,7 +392,7 @@ def init(
     if output.exists() and not force:
         print_error(f"File already exists: {output}")
         print_info("Use --force to overwrite")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Local mode short-circuits the wizard: there are no S3 credentials to
     # collect (Garage mints its own), no namespace, and only one supported
@@ -441,7 +441,7 @@ def init(
         console.print()
         if not _typer.confirm(f"  Write configuration to {output}?", default=True):
             console.print("[yellow]Cancelled.[/yellow]")
-            raise typer.Exit(EXIT_DECLINED)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
         output.write_text(result.config_yaml)
         console.print()
@@ -737,16 +737,16 @@ def validate(
             _check_ok(f"Name: {cfg.name}, Namespace: {cfg.get_namespace()}")
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
             console.print(f"  [red]x[/red] {esc(loc)}: {esc(err['msg'])}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     p, f, w = _section_end()
     checks_passed += p
     checks_failed += f
@@ -1154,7 +1154,7 @@ def validate(
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
 
 @app.command()
@@ -1211,20 +1211,20 @@ def status(
             ns = ns or cfg.get_namespace()
         except ConfigError as e:
             print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     if local:
         from lakebench.cli._local import print_local_status, status_local
 
         if cfg is None:
             print_error("Local status needs a config file")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.USAGE)
         print_local_status(status_local(cfg, workdir=workdir))
         return
 
     if not ns:
         print_error("Specify --namespace or provide a config file")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     console.print(Panel(f"Status for namespace: [bold]{esc(ns)}[/bold]", expand=False))
 
@@ -1323,7 +1323,7 @@ def status(
 
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
 
 
 @app.command()
@@ -1354,7 +1354,7 @@ def stop(
         cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)  # no name-length check; stops
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     namespace = cfg.get_namespace()
     k8s = get_k8s_client(
@@ -1506,7 +1506,7 @@ def info(
         cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     # Auto-size resources based on scale (tier guidance only)
     from lakebench.config.autosizer import resolve_auto_sizing
@@ -1792,7 +1792,7 @@ def report(
             deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
         except ConfigError as e:
             print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     # List runs mode
     if list_runs:
@@ -1833,16 +1833,16 @@ def report(
     # make sense with --render: they are opt-ins to a regenerate action.
     if force and not render:
         print_error("--force requires --render")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     if output_path is not None and not render:
         print_error("--output requires --render")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     # --force only makes sense with --output: the default timestamped path
     # is collision-free in practice, so --force there is a no-op that only
     # confuses the caller. Matches the help text.
     if force and output_path is None:
         print_error("--force requires --output (the default timestamped path is collision-free)")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     if render:
         try:
@@ -1861,11 +1861,14 @@ def report(
                 print_info("Pass --force to overwrite the file at --output.")
             else:
                 print_info("Retry in a moment; the timestamp will differ.")
-            raise typer.Exit(1)  # noqa: B904
+            # An existing --output file is a usage error; a default-path
+            # collision is a transient failure.
+            code = ExitCode.USAGE if output_path is not None else ExitCode.FAILED
+            raise typer.Exit(code)  # noqa: B904
         except ValueError as e:
             print_error(str(e))
             print_info("Use 'lakebench report --list' to see available runs")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
         # Also print the summary when asked; keep the default quiet so
         # scripts that watch stdout for the path have a clean output.
@@ -1898,7 +1901,8 @@ def report(
     if metrics is None:
         print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
         print_info("Use 'lakebench report --list' to see available runs")
-        raise typer.Exit(1)
+        # An unknown run id is a bad argument; no runs at all is a failed lookup.
+        raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
 
     _print_report_summary(metrics)
 
@@ -1969,7 +1973,7 @@ def results(
         warn_deprecated_short_f("--format / -o")
         if output_format is not None and output_format != format_short_f:
             print_error(f"both --format {output_format} and -f {format_short_f} given")
-            raise typer.Exit(2)
+            raise typer.Exit(ExitCode.USAGE)
         output_format = format_short_f
     if output_format is None:
         output_format = "table"
@@ -1987,7 +1991,7 @@ def results(
             deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
         except ConfigError as e:
             print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     if run_id:
         metrics = storage.load_run(run_id)
@@ -1997,13 +2001,14 @@ def results(
     if metrics is None:
         print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
         print_info("Use 'lakebench report --list' to see available runs")
-        raise typer.Exit(1)
+        # An unknown run id is a bad argument; no runs at all is a failed lookup.
+        raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
 
     pb = metrics.pipeline_benchmark
     if pb is None:
         print_warning("This run does not have pipeline benchmark data.")
         print_info("Pipeline benchmark is generated for runs after this feature was added.")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
     # Machine-readable formats go to plain stdout (emit_data): Rich wraps
     # long lines at the terminal width and parses markup, which breaks parsers.
@@ -2153,7 +2158,7 @@ def logs(
     if component not in COMPONENT_SELECTORS:
         print_error(f"Unknown component: {component}")
         print_info(f"Valid components: {', '.join(COMPONENT_SELECTORS.keys())}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     config_file = resolve_config_path(config_file, file_option)
 
@@ -2161,7 +2166,7 @@ def logs(
         cfg = load_config(config_file, purpose=LoadPurpose.READ)  # no name-length check
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     namespace = cfg.get_namespace()
     label_selector, container = COMPONENT_SELECTORS[component]

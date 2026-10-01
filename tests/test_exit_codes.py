@@ -137,20 +137,145 @@ def test_owned_paths_name_a_work_item():
     assert not bad
 
 
-def test_legacy_codes_match_the_unconverted_constants():
-    """LEGACY_CODES documents exactly the v1.6 constants still in the tree."""
+def test_legacy_codes_are_gone():
+    """CC-9 converted every command: no 1.6 constant and no transition table."""
     from lakebench.cli import _destroy, _helpers
 
-    present = {
-        getattr(mod, name)
-        for mod, name in (
-            (_helpers, "EXIT_DECLINED"),
-            (_helpers, "EXIT_DATAGEN_TIMEOUT"),
-            (_destroy, "EXIT_NAMESPACE_STILL_TERMINATING"),
-        )
-        if hasattr(mod, name)
-    }
-    assert set(LEGACY_CODES) == present
+    assert LEGACY_CODES == {}
+    for mod, name in (
+        (_helpers, "EXIT_DECLINED"),
+        (_helpers, "EXIT_DATAGEN_TIMEOUT"),
+        (_destroy, "EXIT_NAMESPACE_STILL_TERMINATING"),
+    ):
+        assert not hasattr(mod, name), name
+
+
+def _is_exit_call(func) -> bool:
+    """``typer.Exit``/``_typer.Exit``, ``SystemExit`` or ``sys.exit``."""
+    import ast
+
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        if func.attr == "Exit" and func.value.id in ("typer", "_typer"):
+            return True
+        if func.attr == "exit" and func.value.id == "sys":
+            return True
+    return isinstance(func, ast.Name) and func.id == "SystemExit"
+
+
+def literal_exit_sites(root: Path) -> list[str]:
+    """Exit calls under *root* given a literal other than 0 (CLI-1)."""
+    import ast
+
+    sites = []
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call) and _is_exit_call(node.func)):
+                continue
+            args = list(node.args) + [kw.value for kw in node.keywords if kw.arg == "code"]
+            if args and isinstance(args[0], ast.Constant) and args[0].value not in (0, None):
+                sites.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
+    return sites
+
+
+def test_no_literal_exit_codes():
+    """Every exit under cli/ names its code (``ExitCode.X``) or a typed error."""
+    sites = literal_exit_sites(SRC / "lakebench" / "cli")
+    assert not sites, "use ExitCode.<NAME> or a typed error:\n  " + "\n  ".join(sites)
+
+
+def test_literal_exit_lint_sees_each_spelling(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "import sys, typer\n"
+        "typer.Exit(1)\ntyper.Exit(code=2)\nSystemExit(3)\nsys.exit(4)\n"
+        "typer.Exit(0)\ntyper.Exit()\ntyper.Exit(ExitCode.USAGE)\n"
+    )
+    assert len(literal_exit_sites(tmp_path)) == 4
+
+
+# -- refusals reported as failed step results ---------------------------------
+
+# Each refusal text and the file that produces it. A reworded producer must
+# fail here, not silently turn a refusal (3) back into a failure (1).
+_REFUSAL_PRODUCERS = {
+    "Destroy NOT completed": "deploy/destroy.py",
+    "another lakebench process holds the cluster lock": "modules/pipeline_engines/spark/operator.py",
+    "Namespace ownership refused": "deploy/engine.py",
+    "Bucket ownership refused": "deploy/engine.py",
+    "exists without lakebench identity annotations": "deploy/engine.py",
+    "exists without a lakebench ownership tag": "deploy/engine.py",
+}
+
+
+_CONSEQUENCE_PRODUCERS = {
+    "NOT deleted because emptying the S3 buckets failed": "deploy/destroy.py",
+}
+
+
+def test_refusal_texts_match_their_producers():
+    texts = {**cli_exit.REFUSAL_PREFIXES, **cli_exit.REFUSAL_FRAGMENTS}
+    assert set(texts) == set(_REFUSAL_PRODUCERS)
+    assert set(cli_exit.CONSEQUENCE_FRAGMENTS) == set(_CONSEQUENCE_PRODUCERS)
+    producers = {**_REFUSAL_PRODUCERS, **_CONSEQUENCE_PRODUCERS}
+    for text, rel in producers.items():
+        source = (SRC / "lakebench" / rel).read_text(encoding="utf-8")
+        # The producers build the text from adjacent literals and f-strings.
+        flat = re.sub(r'"\s*\n\s*f?"', "", source)
+        assert text in flat, f"{rel} no longer produces {text!r}"
+
+
+def _result(component: str, status: str, message: str):
+    from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+
+    return DeploymentResult(component, DeploymentStatus(status), message)
+
+
+@pytest.mark.parametrize(
+    ("message", "path"),
+    [
+        ("Destroy NOT completed: namespace x is now a newer deployment", "destroy.redeployed"),
+        ("another lakebench process holds the cluster lock (h@u@s); wait", "lease.held"),
+        ("Namespace ownership refused: owned by deployment 'b'", "deploy.identity_foreign"),
+        ("Bucket ownership refused: tag-mismatch", "deploy.identity_foreign"),
+        ("Namespace 'x' exists without lakebench identity annotations.", "deploy.identity_foreign"),
+        (
+            "Bucket 'b' exists without a lakebench ownership tag. Refusing",
+            "deploy.identity_foreign",
+        ),
+    ],
+)
+def test_refusal_results_exit_refused(message, path):
+    assert cli_exit.refused_path(message) == path
+    results = [_result("postgres", "success", "ok"), _result("namespace", "failed", message)]
+    assert cli_exit.refused_result_code(results) == ExitCode.REFUSED
+
+
+def test_a_real_failure_is_never_hidden_by_a_refusal():
+    refused = _result("s3-buckets", "failed", "Emptied 2 S3 buckets (Bucket ownership refused; x)")
+    kept = _result(
+        "namespace",
+        "failed",
+        "Namespace 'x' NOT deleted because emptying the S3 buckets failed; the namespace is",
+    )
+    broken = _result("trino", "failed", "helm uninstall failed")
+    assert cli_exit.refused_result_code([refused, kept]) == ExitCode.REFUSED
+    assert cli_exit.refused_result_code([refused, broken]) is None
+    assert cli_exit.refused_result_code([kept]) is None  # a consequence alone is a failure
+
+
+def test_other_failures_and_successes_are_not_refusals():
+    assert cli_exit.refused_result_code([_result("trino", "failed", "timed out")]) is None
+    # A refusal text on a step that did not fail is not a refusal.
+    ok = _result("namespace", "success", "Destroy NOT completed earlier; retried")
+    assert cli_exit.refused_result_code([ok]) is None
+    assert cli_exit.refused_path("ERROR: Destroy NOT completed") is None  # prefix only
+
+
+def test_cluster_lock_held_maps_to_refused():
+    from lakebench.deploy.cluster_lock import ClusterLockHeld
+
+    exc = ClusterLockHeld("h@u@s", "2026-10-01T00:00:00Z", 300, "2026-10-01T00:05:00Z")
+    err = cli_exit.error_for(exc)
+    assert err is not None and err.code == ExitCode.REFUSED and err.path == "lease.held"
 
 
 # -- the handler, on a throwaway app that uses the same group class ----------
@@ -414,6 +539,205 @@ def _scenario_config_upgrade_refused(monkeypatch, tmp_path):
     return _runner().invoke(app, ["config", "upgrade", str(tmp_path / "c.yaml")])
 
 
+def _init_config(tmp_path) -> Path:
+    init = _runner().invoke(app, ["init", "--output", str(tmp_path / "c.yaml")])
+    assert init.exit_code == 0, init.output
+    return tmp_path / "c.yaml"
+
+
+def _scenario_config_validation(monkeypatch, tmp_path):
+    (tmp_path / "c.yaml").write_text("name: x\nplatform: 5\n")
+    return _runner().invoke(app, ["info", str(tmp_path / "c.yaml")])
+
+
+def _scenario_config_unsupported(monkeypatch, tmp_path):
+    monkeypatch.setattr("lakebench.cli._run._run_local_mode", lambda *a, **k: None)
+    cfg = _init_config(tmp_path)
+    return _runner().invoke(app, ["run", str(cfg), "--local", "--continuous"])
+
+
+def _scenario_cli_bad_argument(monkeypatch, tmp_path):
+    return _runner().invoke(app, ["config", "recipes", "no-such-recipe"])
+
+
+def _scenario_k8s_unreachable(monkeypatch, tmp_path):
+    import lakebench.cli as cli
+    from lakebench.k8s import K8sConnectionError
+
+    def unreachable(**_k):
+        raise K8sConnectionError("connection refused")
+
+    monkeypatch.setattr(cli, "get_k8s_client", unreachable)
+    return _runner().invoke(app, ["status", str(_init_config(tmp_path))])
+
+
+def _destroy_with(monkeypatch, results):
+    from unittest.mock import MagicMock
+
+    engine = MagicMock()
+    engine.destroy_all.return_value = results
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda *a, **k: engine)
+    fixture = ROOT / "tests" / "fixtures" / "v14user.yaml"
+    return _runner().invoke(app, ["destroy", str(fixture), "--force"])
+
+
+def _scenario_destroy_redeployed(monkeypatch, tmp_path):
+    msg = (
+        "Destroy NOT completed: namespace v14user is now a newer deployment with "
+        "the same name (a redeploy); it was left alone"
+    )
+    return _destroy_with(monkeypatch, [_result("namespace", "failed", msg)])
+
+
+def _scenario_lease_held(monkeypatch, tmp_path):
+    msg = (
+        "another lakebench process holds the cluster lock (h@u@sha); wait for it, or "
+        "run `lakebench admin release-lock` once its lease has expired."
+    )
+    return _destroy_with(monkeypatch, [_result("spark-operator-watch", "failed", msg)])
+
+
+def _scenario_destroy_namespace_terminating(monkeypatch, tmp_path):
+    from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+
+    pending = DeploymentResult(
+        "namespace",
+        DeploymentStatus.SKIPPED,
+        "Namespace v14user is still terminating after 600s",
+        details={"still_terminating": True},
+    )
+    return _destroy_with(monkeypatch, [_result("postgres", "success", "removed"), pending])
+
+
+def _scenario_deploy_identity_foreign(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    import lakebench.cli._deploy as deploy_mod
+
+    cfg = _init_config(tmp_path)
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
+    engine = MagicMock()
+    engine.deploy_all.return_value = [
+        _result(
+            "namespace",
+            "failed",
+            "Namespace ownership refused: namespace 'x' is owned by another lakebench deployment",
+        )
+    ]
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda *a, **k: engine)
+    return _runner().invoke(app, ["deploy", str(cfg), "--yes"])
+
+
+def _fake_s3(monkeypatch, *, info=None, init_error=None):
+    from tests import test_datagen_timeout_and_regenerate as dg
+
+    monkeypatch.setattr(dg._FakeS3, "instances", [])
+    monkeypatch.setattr(dg._FakeS3, "_next_info", info)
+    monkeypatch.setattr(dg._FakeS3, "_next_init_error", init_error)
+    monkeypatch.setattr("lakebench.s3.S3Client", dg._FakeS3)
+    return dg
+
+
+_RUN_GENERATE = ["--generate", "--skip-preflight", "--skip-benchmark", "--skip-maintenance"]
+
+
+def _scenario_run_bronze_nonempty(monkeypatch, tmp_path):
+    from lakebench.s3.client import BucketInfo
+
+    dg = _fake_s3(monkeypatch, info=BucketInfo(name="b", exists=True, object_count=9, size_bytes=9))
+    dg._stub_full_run(monkeypatch)
+    cfg = dg._write_cfg(tmp_path)
+    return _runner().invoke(app, ["run", str(cfg), *_RUN_GENERATE, "--yes"])
+
+
+def _scenario_s3_unreachable(monkeypatch, tmp_path):
+    dg = _fake_s3(monkeypatch, init_error="endpoint unreachable")
+    dg._stub_run_deps(monkeypatch)
+    cfg = dg._write_cfg(tmp_path)
+    return _runner().invoke(app, ["generate", str(cfg), "--yes"])
+
+
+def _scenario_run_datagen_timeout(monkeypatch, tmp_path):
+    import time as _time
+
+    dg = _fake_s3(monkeypatch)
+    dg._stub_full_run(monkeypatch)
+    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", dg._FakeDatagenDeployer)
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(_time, "time", lambda: clock["t"])
+
+    def _sleep(seconds: float) -> None:
+        clock["t"] += max(float(seconds), 0.001)
+
+    monkeypatch.setattr(_time, "sleep", _sleep)
+    cfg = dg._write_cfg(tmp_path)
+    return _runner().invoke(app, ["run", str(cfg), *_RUN_GENERATE, "--timeout", "60", "--yes"])
+
+
+def _scenario_run_prereq_failed(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    report = SimpleNamespace(checks=[], all_passed=False)
+    monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", lambda *a, **k: report)
+    return _runner().invoke(app, ["run", str(_init_config(tmp_path))])
+
+
+def _scenario_run_namespace_missing_no_yes(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from tests import test_datagen_timeout_and_regenerate as dg
+
+    stubs = dg._stub_full_run(monkeypatch)
+    stubs["k8s"].namespace_exists.return_value = False
+    report = SimpleNamespace(checks=[], all_passed=True)
+    monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", lambda *a, **k: report)
+    return _runner().invoke(app, ["run", str(dg._write_cfg(tmp_path))])
+
+
+def _local_run(monkeypatch, tmp_path, success: bool):
+    from types import SimpleNamespace
+
+    import lakebench.cli._local as local
+    import lakebench.cli._run as run_mod
+
+    stack = SimpleNamespace()
+    monkeypatch.setattr(local, "check_local_supported", lambda *a, **k: None)
+    monkeypatch.setattr(local, "deploy_local", lambda *a, **k: stack)
+    monkeypatch.setattr(
+        local,
+        "run_local",
+        lambda *a, **k: SimpleNamespace(success=success, stages=[], elapsed_seconds=1.0),
+    )
+    monkeypatch.setattr(local, "print_local_summary", lambda *a, **k: None)
+    monkeypatch.setattr(run_mod, "_record_local_jobs", lambda *a, **k: None)
+    monkeypatch.setattr(run_mod, "_save_local_metrics", lambda *a, **k: None)
+    cfg = _init_config(tmp_path)
+    return _runner().invoke(app, ["run", str(cfg), "--local", "--skip-benchmark", "--yes"])
+
+
+def _scenario_run_pass(monkeypatch, tmp_path):
+    return _local_run(monkeypatch, tmp_path, success=True)
+
+
+def _scenario_run_verdict_failed(monkeypatch, tmp_path):
+    return _local_run(monkeypatch, tmp_path, success=False)
+
+
+def _scenario_confirm_declined(monkeypatch, tmp_path):
+    a = _init_config(tmp_path)
+    b = tmp_path / "b.yaml"
+    b.write_text(a.read_text().replace(f"name: {_config_name(a)}", "name: other-side", 1))
+    return _runner().invoke(app, ["compare", str(a), str(b)], input="n\n")
+
+
+def _config_name(path: Path) -> str:
+    for line in path.read_text().splitlines():
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip()
+    raise AssertionError(f"no name in {path}")
+
+
 SCENARIOS = {
     "config.upgrade_refused": _scenario_config_upgrade_refused,
     "version.ok": _scenario_version_ok,
@@ -422,6 +746,22 @@ SCENARIOS = {
     "confirm.non_tty": _scenario_confirm_non_tty,
     "sigint": _scenario_sigint,
     "financial.k8s_unreachable": _scenario_financial_k8s_unreachable,
+    "config.validation": _scenario_config_validation,
+    "config.unsupported": _scenario_config_unsupported,
+    "cli.bad_argument": _scenario_cli_bad_argument,
+    "k8s.unreachable": _scenario_k8s_unreachable,
+    "s3.unreachable": _scenario_s3_unreachable,
+    "destroy.redeployed": _scenario_destroy_redeployed,
+    "lease.held": _scenario_lease_held,
+    "destroy.namespace_terminating": _scenario_destroy_namespace_terminating,
+    "deploy.identity_foreign": _scenario_deploy_identity_foreign,
+    "run.bronze_nonempty": _scenario_run_bronze_nonempty,
+    "run.datagen_timeout": _scenario_run_datagen_timeout,
+    "run.prereq_failed": _scenario_run_prereq_failed,
+    "run.namespace_missing_no_yes": _scenario_run_namespace_missing_no_yes,
+    "run.pass": _scenario_run_pass,
+    "run.verdict_failed": _scenario_run_verdict_failed,
+    "confirm.declined": _scenario_confirm_declined,
 }
 
 # The line each path must print on stderr, where it prints one.
@@ -431,12 +771,35 @@ EXPECTED_STDERR = {
     "confirm.non_tty": "ERROR  Not confirmed",
     "sigint": "ERROR  Interrupted.",
     "financial.k8s_unreachable": "ERROR  Cannot reach the Kubernetes cluster: connection refused",
+    "k8s.unreachable": "ERROR Kubernetes connection failed: connection refused",
+    "run.bronze_nonempty": "Refusing to generate over it",
+    "s3.unreachable": "refusing to generate",
+    "run.prereq_failed": "ERROR Prerequisites not met",
+    "run.namespace_missing_no_yes": "does not exist",
+    "cli.bad_argument": "ERROR Unknown recipe: no-such-recipe",
+    "config.unsupported": "Unsupported combination, refused",
 }
 
 
 def test_scenarios_cover_exactly_the_live_paths():
     """A live path needs a scenario; a path with a scenario must not keep an owner."""
     assert set(SCENARIOS) == {p.name for p in PATHS if p.live}
+
+
+# Text in the combined output that shows the scenario took its named path,
+# where the code alone has more than one producer.
+EXPECTED_OUTPUT = {
+    "run.datagen_timeout": "wait budget",
+    "destroy.redeployed": "Destroy Incomplete",
+    "lease.held": "Destroy Incomplete",
+    "destroy.namespace_terminating": "still terminating",
+    "deploy.identity_foreign": "Deployment Failed",
+    "run.pass": "Local mode is sized",
+    "run.verdict_failed": "Local mode is sized",
+    "config.validation": "Config error",
+}
+# Text that must not appear: a declined prompt is not an unanswered one.
+UNEXPECTED_OUTPUT = {"confirm.declined": "Not confirmed", "run.verdict_failed": "ERROR"}
 
 
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
@@ -448,6 +811,10 @@ def test_exit_code_paths(name, monkeypatch, tmp_path):
     assert "Traceback" not in result.output
     if name in EXPECTED_STDERR:
         assert EXPECTED_STDERR[name] in _stderr(result), result.output
+    if name in EXPECTED_OUTPUT:
+        assert EXPECTED_OUTPUT[name] in result.output, result.output
+    if name in UNEXPECTED_OUTPUT:
+        assert UNEXPECTED_OUTPUT[name] not in result.output, result.output
 
 
 # -- generated table -----------------------------------------------------------

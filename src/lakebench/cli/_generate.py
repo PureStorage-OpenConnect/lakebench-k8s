@@ -17,6 +17,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError, get_k8s_client
 
@@ -79,7 +80,7 @@ def generate(
             "--regenerate",
             help=(
                 "Empty the bronze bucket before generating. Without this "
-                "flag, a non-empty bronze prefix is refused (exit 2) so "
+                "flag, a non-empty bronze prefix is refused (exit 3) so "
                 "existing datagen output is never overwritten silently."
             ),
         ),
@@ -100,16 +101,16 @@ def generate(
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
             console.print(f"  [red]*[/red] {esc(loc)}: {esc(err['msg'])}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     check_datagen_scale(cfg)
 
@@ -224,7 +225,7 @@ def generate(
         if result.status != DeploymentStatus.SUCCESS:
             print_error(f"Failed to submit job: {result.message}")
             _journal_safe(j.end_command, success=False, message=result.message)
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
         print_success("Datagen job submitted")
         console.print(f"  Parallelism: {esc(result.details.get('parallelism', '?'))} pods")
@@ -279,7 +280,7 @@ def generate(
                     if prog.get("error"):
                         progress_bar.stop()
                         print_error(prog["error"])
-                        raise typer.Exit(1)
+                        raise typer.Exit(ExitCode.FAILED)
                     # Mark complete
                     progress_bar.update(task, completed=total_completions)
                     break
@@ -290,7 +291,7 @@ def generate(
                     print_error(f"OOMKilled: {', '.join(prog['oom_pods'])}")
                     print_info("Increase datagen memory or reduce parallelism")
                     _journal_safe(j.end_command, success=False, message="OOMKilled pods detected")
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.FAILED)
                 if prog.get("crash_pods"):
                     # A crash-looping generator never finishes; waiting out the
                     # timeout (hours at large scale) only hides the failure.
@@ -305,7 +306,7 @@ def generate(
                     _journal_safe(
                         j.end_command, success=False, message="Datagen pods crash-looping"
                     )
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.FAILED)
                 if prog.get("pending_pods"):
                     progress_bar.console.print(
                         f"  [yellow]{len(prog['pending_pods'])} pod(s) pending[/yellow]"
@@ -433,9 +434,9 @@ def generate(
                     expand=False,
                 )
             )
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904

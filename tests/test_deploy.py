@@ -1169,7 +1169,7 @@ class TestOwnershipHooksFire:
                 force_legacy=False,
                 metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
-        assert exc.value.exit_code == 1
+        assert exc.value.exit_code == 3  # refused: the bucket belongs to another deployment
 
         # empty_bucket must never fire on any bucket.
         assert s3.empty_bucket.call_count == 0

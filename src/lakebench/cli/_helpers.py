@@ -15,26 +15,13 @@ from rich.console import Console
 from rich.markup import escape
 from rich.text import Text
 
-from lakebench.exit_codes import LakebenchError
+from lakebench.exit_codes import ExitCode, LakebenchError
 from lakebench.journal import Journal
 
 logger = logging.getLogger(__name__)
 
 # Default config file name for auto-discovery
 DEFAULT_CONFIG = "lakebench.yaml"
-
-# Exit code for a declined interactive confirmation prompt (C3, v1.6).
-# Distinct from 0 (success) and 1 (failure) so wrapper scripts can tell a
-# "user said no" apart from either. Every CLI site that reaches a
-# ``typer.confirm`` and takes the "no" branch exits with this code.
-EXIT_DECLINED = 3
-
-# Exit code when datagen exceeds its wait budget (A4, v1.6). Distinct from
-# 1 (generic failure), 2 (usage/refusal), 3 (declined prompt) and 4
-# (EXIT_NAMESPACE_STILL_TERMINATING in cli/_destroy.py). A wrapper that
-# retries on 4 must not retry on this; a wrapper that watches for 5 must
-# not treat it as namespace-still-terminating.
-EXIT_DATAGEN_TIMEOUT = 5
 
 # ANSI escape code stripper for log output
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -73,7 +60,7 @@ def resolve_config_path(
         f"[red]ERROR[/red] No config file specified and ./{esc(DEFAULT_CONFIG)} not found"
     )
     console.print("[blue]INFO[/blue] Create one with: lakebench init")
-    raise typer.Exit(1)
+    raise typer.Exit(ExitCode.USAGE)
 
 
 def get_journal() -> Journal:
@@ -176,7 +163,7 @@ def check_datagen_scale(cfg: object) -> None:
     state, basis = band
     if state == UNSUPPORTED:
         print_error(f"Unsupported scale, refused: {basis}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
     print_warning(f"Unverified scale: {basis}")
 
 
@@ -235,7 +222,7 @@ def deprecated_short_f_force(new_spelling: str, force_given: bool) -> bool:
         "'-f' will mean --file (the config path), as it does on every other command. "
         f"Set {esc(LEGACY_SHORT_F_ENV)}=1 to keep the old meaning for this release."
     )
-    raise typer.Exit(2)
+    raise typer.Exit(ExitCode.USAGE)
 
 
 def print_info(message: object) -> None:
@@ -261,8 +248,8 @@ def enforce_bronze_regenerate(cfg, regenerate: bool) -> None:
     datagen straight onto whatever was in bronze; the deployer's LB-185
     clear ran only for buckets this deployment recorded creating, so any
     other case silently over-wrote existing part-* files. This gate is the
-    CLI-level counterpart: without ``--regenerate`` the command exits 2 and
-    names the prefix, so the operator opts in explicitly instead of
+    CLI-level counterpart: without ``--regenerate`` the command exits 3
+    (refused, ``run.bronze_nonempty``) and names the prefix, so the operator opts in explicitly instead of
     discovering the wipe later. With ``--regenerate`` the whole bronze
     bucket is emptied via ``S3Client.empty_bucket`` (which also aborts
     dangling multipart uploads on FlashBlade) before datagen submits.
@@ -290,13 +277,13 @@ def enforce_bronze_regenerate(cfg, regenerate: bool) -> None:
             f"Cannot check bronze bucket {bucket} for existing data "
             f"({s3._init_error}); refusing to generate."
         )
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.PREREQUISITE)
     try:
         list_prefix = prefix_norm + "/" if prefix_norm else ""
         info = s3.get_bucket_size(bucket, prefix=list_prefix)
     except Exception as e:  # noqa: BLE001
         print_error(f"Could not list bronze prefix s3://{bucket}/{prefix}: {e}")
-        raise typer.Exit(2) from e
+        raise typer.Exit(ExitCode.PREREQUISITE) from e
     object_count = info.object_count or 0
     if not info.exists or object_count == 0:
         return
@@ -309,7 +296,7 @@ def enforce_bronze_regenerate(cfg, regenerate: bool) -> None:
             "bronze bucket first, or --skip-generate to reuse the existing "
             "data."
         )
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.REFUSED)
     # empty_bucket does NOT accept a Prefix filter today (LB-185's helper
     # aborts multipart uploads across the bucket to catch FlashBlade
     # ghosts, so the wipe is bucket-wide). Anything else the bronze bucket
@@ -327,7 +314,7 @@ def enforce_bronze_regenerate(cfg, regenerate: bool) -> None:
         deleted = s3.empty_bucket(bucket)
     except Exception as e:
         print_error(f"--regenerate: could not empty s3://{bucket}: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(ExitCode.FAILED) from e
     print_success(f"--regenerate: removed {deleted} object(s) from s3://{bucket}")
 
 

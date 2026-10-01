@@ -80,7 +80,7 @@ configs first. With `--local` it deploys each stack itself before the run.
 | `--format` | | `table` | Output format: table, json, csv, html |
 | `--skip-benchmark` | | `false` | Skip benchmark phase |
 | `--local` | | `false` | Run both configs on this host with podman/docker |
-| `--generate` | | `false` | Generate data before each run. On a cluster, a side whose bronze prefix already holds data fails when its run reaches datagen (the inner `run` exits 2, and `compare` reports that side as failed); empty it first with `lakebench clean bronze <config>` |
+| `--generate` | | `false` | Generate data before each run. On a cluster, a side whose bronze prefix already holds data fails when its run reaches datagen (the inner `run` exits 3, refused, and `compare` reports that side as failed); empty it first with `lakebench clean bronze <config>` |
 | `--timeout` | | `7200` | Per-run timeout in seconds |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
@@ -246,7 +246,7 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 |---|---|---|---|
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting; `0` computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--regenerate` | | `false` | Empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 2) so existing datagen output is never overwritten silently. |
+| `--regenerate` | | `false` | Empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. |
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
@@ -276,7 +276,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
 | `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
 | `--skip-generate` | | `false` | Skip datagen even with `--generate` |
-| `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 2) so existing datagen output is never overwritten silently. No effect without `--generate`. |
+| `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. No effect without `--generate`. |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace |
 | `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
@@ -489,7 +489,7 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--local` | | `false` | Tear down the local stack instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
-| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 4 unless the namespace is already gone |
+| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 6 unless the namespace is already gone |
 | `--keep-buckets` | | `false` | Empty the S3 buckets but do not delete them |
 | `--force-legacy` | | `false` | Proceed on a namespace or bucket with no lakebench ownership annotation or tag. Foreign-owned namespaces and buckets are refused regardless |
 | `--allow-unverified-cluster` | | `false` | Bypass the API-server fingerprint match when it cannot be computed |

@@ -17,8 +17,17 @@ from rich.panel import Panel
 from rich.table import Table
 
 from lakebench.cli._helpers import esc, print_error
+from lakebench.exit_codes import ExitCode
 
 logger = logging.getLogger(__name__)
+
+
+def _load_failure_code(exc: BaseException) -> ExitCode:
+    """2 for a config that fails to load or validate; 1 for anything else."""
+    from lakebench.config import ConfigError
+
+    return ExitCode.USAGE if isinstance(exc, ConfigError) else ExitCode.FAILED
+
 
 config_app = typer.Typer(
     name="config",
@@ -157,7 +166,7 @@ def config_show(
 
     except Exception as e:
         print_error(e)
-        raise typer.Exit(1) from None
+        raise typer.Exit(_load_failure_code(e)) from None
 
 
 @config_app.command("validate")
@@ -207,7 +216,7 @@ def _validate_local(config_file: Path) -> None:
         passed += 1
     except Exception as e:
         console.print(f"  [red]x[/red] Config invalid: {esc(e)}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(_load_failure_code(e))  # noqa: B904
 
     try:
         check_local_supported(cfg)
@@ -242,7 +251,7 @@ def _validate_local(config_file: Path) -> None:
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
     console.print(
         Panel(
@@ -284,12 +293,12 @@ def config_storage(
         cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except Exception as e:
         print_error(f"Could not load config: {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(_load_failure_code(e)) from e
 
     s3 = cfg.platform.storage.s3
     if not s3.endpoint:
         print_error("No S3 endpoint configured.")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     console.print(
         Panel(
@@ -358,7 +367,7 @@ def config_storage(
         )
     else:
         print_error(f"Backend not usable by lakebench. {report.summary()}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
 
 @config_app.command("recommend")
@@ -416,7 +425,7 @@ def config_recipes(
         if name not in RECIPES:
             available = ", ".join(sorted(n for n in RECIPES if n != "default"))
             print_error(f"Unknown recipe: {name}. Available: {available}")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.USAGE)
         _print_recipe_detail(name)
         return
 

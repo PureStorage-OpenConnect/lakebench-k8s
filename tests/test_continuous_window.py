@@ -914,7 +914,7 @@ def test_a_refused_trickle_starts_nothing(monkeypatch, tmp_path, capsys):
         _sustained._run_sustained(
             _cont_cfg(1, max_files_per_trigger=50), tmp_path / "c.yaml", 60, True, 900
         )
-    assert exc.value.exit_code == 1
+    assert exc.value.exit_code == 2  # usage: the window and trickle do not fit
     op.check_status.assert_not_called()
     assert "max_files_per_trigger" in "".join(capsys.readouterr())
 

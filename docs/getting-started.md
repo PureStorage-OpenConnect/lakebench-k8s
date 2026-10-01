@@ -496,7 +496,7 @@ idempotent -- components that already exist are skipped.
 from the beginning, and because the failed run left partial data in bronze,
 the re-run needs `--regenerate` (`lakebench generate lakebench.yaml
 --regenerate`), which empties the bronze bucket first. Without it `generate`
-exits 2 and names the non-empty prefix.
+exits 3 (refused) and names the non-empty prefix.
 
 **A pipeline stage fails:** Re-run just that stage:
 

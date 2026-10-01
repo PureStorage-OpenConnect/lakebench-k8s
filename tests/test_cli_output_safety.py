@@ -167,7 +167,7 @@ def test_no_traceback_on_list_config(tmp_path, monkeypatch):
     cfg.write_text("- a\n- b\n")
     result = CliRunner().invoke(app, ["status", str(cfg)])
     # 1 until CC-9 converts the load-error sites; the path is config.validation (2).
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 2, result.output  # config.validation
     assert "Traceback" not in result.output
     errors = [ln for ln in _stderr(result).splitlines() if ln.startswith("ERROR")]
     assert len(errors) == 1

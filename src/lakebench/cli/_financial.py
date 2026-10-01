@@ -27,6 +27,8 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
+from lakebench.exit_codes import ExitCode, LakebenchError
+
 logger = logging.getLogger(__name__)
 
 financial_app = typer.Typer(
@@ -81,9 +83,9 @@ def _get_job_manager(cfg):
         scripts_ok = job_manager.deploy_scripts_configmap()
     except ScriptsMapError as e:
         console.print(f"Spark scripts not deployed: {e}", style="red", markup=False)
-        raise typer.Exit(1) from None
+        raise typer.Exit(ExitCode.FAILED) from None
     if not scripts_ok:
-        raise typer.Exit("Failed to deploy Spark scripts ConfigMap")
+        raise LakebenchError("Failed to deploy Spark scripts ConfigMap")
     return job_manager
 
 
@@ -187,7 +189,7 @@ def replay(
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-replay-financial")
         console.print(f"[bold]replay result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("reproduce")
@@ -213,7 +215,7 @@ def reproduce(
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-reproduce-financial")
         console.print(f"[bold]reproduce result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("score")
@@ -240,7 +242,7 @@ def score(
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial")
         console.print(f"[bold]score result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("reference-score")
@@ -293,4 +295,4 @@ def reference_score(
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial-reference")
         console.print(f"[bold]reference-score result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
