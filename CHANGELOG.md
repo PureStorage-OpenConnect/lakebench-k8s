@@ -21,13 +21,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not load. `--access-key` and `--secret-key` are refused with exit 2 and
   the values are never echoed; `--interactive`, `-i` and `--advanced` print
   one line and write the default. `--overwrite` is the new spelling of
-  `--force`. The 330-line commented template (`generate_example_config_yaml`)
+  `--force`; overwriting a config keeps its `name:` unless `--name` is
+  given. The 330-line commented template (`generate_example_config_yaml`)
   is removed; docs/configuration.md is the key reference.
 - **A component that contradicts its recipe is refused at load.**
   `architecture.catalog.type`, `table_format.type`, `pipeline_engine` and
   `query_engine.type` may be left out under a recipe or written with the
-  recipe's value; another value fails naming both keys. v1.6 let the
-  written value win silently. Images and engine resources stay overridable.
+  recipe's value; another value fails `deploy`, `run` and the other
+  commands that change data, naming both keys and the recipe a v1.6
+  deployment from that file actually used. v1.6 let the written value win
+  silently. `destroy`, `status`, `report` and the inspect commands still
+  load such a config as v1.6 did, with a note. Images and engine resources
+  stay overridable.
+- **`${VAR}` is substituted into parsed values, not the file text.** A
+  secret holding `#`, a leading `!` or `*`, quotes or only digits used to be
+  truncated, fail the parse with the value in the error, or become a
+  number; it now arrives verbatim. A `${VAR}` in a comment is no longer
+  required to be set. A value that is only `${VAR}` is now a string, which
+  numeric and boolean keys still accept.
 - **A config with no `recipe:`, or `recipe: default`, is deprecated.** It
   still resolves as before (to `hive-iceberg-spark-trino` when it sets no
   component, otherwise to the components it sets) and loads with a note

@@ -52,7 +52,6 @@ _EXIT_REFUSED = 2
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # A YAML plain scalar that reads back as this same string: no quoting needed.
 _PLAIN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}")
-_YAML_SPECIAL = {"true", "false", "yes", "no", "on", "off", "null", "none", "~"}
 
 _WIZARD_REMOVED = "the init wizard is removed; init writes a default config (see init --help)"
 
@@ -90,20 +89,18 @@ def _scalar(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     text = str(value)
-    if _PLAIN.fullmatch(text) and text.lower() not in _YAML_SPECIAL and not _is_number(text):
-        return text
+    # Plain only when YAML reads it back as this same string: '0x1f',
+    # '2024-01-01', 'yes' or 'a: b' would come back as something else.
+    if _PLAIN.fullmatch(text):
+        try:
+            if yaml.safe_load(text) == text:
+                return text
+        except yaml.YAMLError:
+            pass
     # A JSON string is a valid YAML double-quoted scalar.
     import json
 
     return json.dumps(text)
-
-
-def _is_number(text: str) -> bool:
-    try:
-        float(text)
-    except ValueError:
-        return False
-    return True
 
 
 def emit(tree: dict[str, Any], comments: dict[str, str] | None = None) -> list[str]:
@@ -228,7 +225,10 @@ def config_problem(text: str, credentials_env: str) -> str | None:
     except ValidationError as e:
         problems = []
         for err in e.errors():
-            loc = ".".join(str(x) for x in err["loc"])
+            parts = [str(x) for x in err["loc"]]
+            if parts[:2] == ["architecture", "workload"]:
+                parts = parts[1:]  # the file writes it at the top level
+            loc = ".".join(parts)
             msg = str(err["msg"]).removeprefix("Value error, ")
             problems.append(f"{loc}: {msg}" if loc else msg)
         return "; ".join(problems)
@@ -383,18 +383,26 @@ def init(
         print_error(f"File already exists: {output}")
         print_info("Use --overwrite to replace it")
         raise typer.Exit(1)
+    kept_name = None if name else _existing_name(output)
+
+    from lakebench.config.support import recipe_names, workloads
+
+    if workload and workload not in workloads():
+        _refuse(f"unknown workload {workload!r}; valid: {', '.join(workloads())}")
 
     if local:
         # 1 is the cluster default; a laptop gets 0.1 unless a scale was given.
-        _write_local_config(
+        local_text = _local_config_text(
             output,
-            name or "local-lakehouse",
+            name or kept_name or "local-lakehouse",
             0.1 if scale is None else scale,
             workload_schema=workload,
         )
+        problem = config_problem(local_text, credentials_env)
+        if problem:
+            _refuse(f"nothing written: this config would not load: {problem}")
+        _write_local_config(output, local_text, 0.1 if scale is None else scale)
         return
-
-    from lakebench.config.support import recipe_names, workloads
 
     recipe = recipe or DEFAULT_RECIPE
     if recipe == "default":
@@ -409,9 +417,9 @@ def init(
         hint = f"did you mean '{near}'?" if near else "valid: " + ", ".join(recipe_names())
         _refuse(f"unknown recipe {recipe!r}; {hint}")
     workload = workload or DEFAULT_WORKLOAD
-    if workload not in workloads():
-        _refuse(f"unknown workload {workload!r}; valid: {', '.join(workloads())}")
-    name = name or default_name()
+    # Overwriting a config keeps its name, so a deployment made from it is
+    # still the one this file names (a new random name would orphan it).
+    name = name or kept_name or default_name()
     scale = DEFAULT_SCALE if scale is None else scale
 
     text = first_day_config(
@@ -429,7 +437,7 @@ def init(
     output.write_text(text)
 
     _say(f"wrote {output}")
-    _say(f"  name:        {name}")
+    _say(f"  name:        {name}" + (" (kept from the file it replaced)" if kept_name else ""))
     _say(f"  recipe:      {recipe}")
     _say(f"  workload:    {workload}")
     _say(f"  scale:       {_scalar(scale)}")
@@ -489,20 +497,36 @@ platform:
 """
 
 
-def _write_local_config(output: Path, name: str, scale: float, workload_schema: str = "") -> None:
-    """Write a ready-to-run local mode config."""
+def _existing_name(path: Path) -> str | None:
+    """The ``name:`` of the config about to be overwritten, if it has one."""
+    if not path.is_file():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return None
+    value = data.get("name") if isinstance(data, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _local_config_text(output: Path, name: str, scale: float, workload_schema: str = "") -> str:
+    """The text of a ready-to-run local mode config."""
     prefix = "".join(c if c.isalnum() or c == "-" else "-" for c in name).strip("-").lower()
     # When the user picked a workload, emit `schema:` under `workload:`; the
     # bare `workload:` block otherwise falls back to the customer360 default.
     schema_line = f"\n  schema: {workload_schema}" if workload_schema else ""
-    content = _LOCAL_CONFIG_TEMPLATE.format(
+    return _LOCAL_CONFIG_TEMPLATE.format(
         output=output,
-        name=name,
+        name=_scalar(name),
         scale=scale,
         approx_gb=scale * 10.0,
         prefix=prefix or "lakebench",
         schema_line=schema_line,
     )
+
+
+def _write_local_config(output: Path, content: str, scale: float) -> None:
+    """Write a local mode config and print the next steps."""
     output.write_text(content)
 
     print_success(f"Created local configuration: {output}")

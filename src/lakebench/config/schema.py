@@ -1683,8 +1683,9 @@ def workload_compatibility_problem(workload: str, table_format: str, mode: str) 
             f"The {label} workload supports table_format {', '.join(formats)}, not "
             f"{table_format}. Its stage scripts and table DDL are written for "
             f"{' and '.join(formats)} only, so this combination would not run the "
-            f"workload it names. Set architecture.table_format.type to "
-            f"{formats[0]} (for example recipe: polaris-{formats[0]}-spark-trino)."
+            f"workload it names. Use an {formats[0]} recipe (for example recipe: "
+            f"polaris-{formats[0]}-spark-trino), or with no recipe set "
+            f"architecture.table_format.type to {formats[0]}."
         )
     modes = WORKLOAD_MODES.get(workload)
     if modes is not None and mode not in modes:
@@ -2468,23 +2469,6 @@ def _is_recipe_shaped(name: str, recipes: Any) -> bool:
     return len(parts) == 4 and all(p in slots[i] for i, p in enumerate(parts))
 
 
-class _InjectedPaths(frozenset[str]):
-    """The leaf paths a recipe filled in: provenance, not configuration.
-
-    It compares equal to any other set of paths, so two configs with the
-    same values stay equal (a config rebuilt from ``model_dump`` has no
-    injected paths, since every field is then written).
-    """
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, frozenset)
-
-    def __ne__(self, other: object) -> bool:
-        return not self.__eq__(other)
-
-    __hash__ = frozenset.__hash__
-
-
 class LakebenchConfig(ConfigModel):
     """Root configuration for Lakebench.
 
@@ -2523,11 +2507,11 @@ class LakebenchConfig(ConfigModel):
     _name_resolution: Any = PrivateAttr(default=None)
     # The dotted leaf paths the recipe filled in (apply_recipe_defaults);
     # recipes.user_set subtracts them.
-    _recipe_injected: frozenset[str] = PrivateAttr(default_factory=_InjectedPaths)
+    _recipe_injected: frozenset[str] = PrivateAttr(default=frozenset())
 
     @model_validator(mode="wrap")
     @classmethod
-    def apply_recipe_defaults(cls, data: object, handler: Any) -> Any:
+    def apply_recipe_defaults(cls, data: object, handler: Any, info: ValidationInfo) -> Any:
         """Expand recipe defaults into the config dict.
 
         Recipe defaults are merged via ``_deep_setdefault``, so images and
@@ -2576,12 +2560,38 @@ class LakebenchConfig(ConfigModel):
                 )
             conflicts = recipe_conflicts(data, recipe_name)
             if conflicts:
-                raise PydanticCustomError(
-                    "recipe_conflict", "{text}", {"text": "; ".join(conflicts)}
+                from lakebench.config.recipes import written_recipe
+
+                # v1.6 let the written component win, so a deployment made
+                # from this file runs what the components say.
+                written = written_recipe(data, recipe_name)
+                purpose = purpose_from_context(info.context)
+                if purpose is None or purpose in CHANGES_DATA:
+                    keep = (
+                        f". v1.6 used the written value, so a deployment made from "
+                        f"this file is {written}: to keep it, write recipe: {written}"
+                        if written
+                        else ""
+                    )
+                    raise PydanticCustomError(
+                        "recipe_conflict", "{text}", {"text": "; ".join(conflicts) + keep}
+                    )
+                # Destroy, status, report and the inspect commands load it as
+                # v1.6 did, so a deployment made from it can still be found
+                # and torn down (SAF-2's rule for removed keys).
+                as_loaded = written or recipe_name
+                emit_note(
+                    f"{'; '.join(conflicts)}. Loaded as {as_loaded}, as v1.6 did; "
+                    f"deploy and run refuse it: write recipe: {as_loaded}",
+                    kind="conflict",
+                    category=None,
                 )
+                if written:
+                    data["recipe"] = written
+                    defaults = RECIPES[written]
             _deep_setdefault(data, defaults, injected)
         model = handler(data)
-        model._recipe_injected = _InjectedPaths(injected)
+        model._recipe_injected = frozenset(injected)
         return model
 
     @property

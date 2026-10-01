@@ -79,4 +79,10 @@ def test_docs_config_block_loads(data, env, tmp_path, monkeypatch):
     path.write_text(yaml.safe_dump(data))
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
+        # Most blocks are fragments that show one section, so a missing
+        # recipe (CFG-8's note) is allowed here; a block that names a recipe
+        # must still agree with it, or the load fails.
+        warnings.filterwarnings(
+            "ignore", message=r"(no recipe|recipe 'default'): ", category=DeprecationWarning
+        )
         load_config(path)

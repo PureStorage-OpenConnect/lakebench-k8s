@@ -370,12 +370,15 @@ def test_recipe_expansion_never_aliases_the_recipe_table():
     )
 
 
-def test_dump_round_trip_stays_equal():
+def test_dump_round_trip_keeps_the_values():
     cfg = LakebenchConfig.model_validate({"name": "t", "recipe": "polaris-iceberg-spark-trino"})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         again = LakebenchConfig.model_validate(cfg.model_dump(mode="json"))
-    assert again == cfg
+    assert again.model_dump() == cfg.model_dump()
+    # The dump writes every field, so nothing is recipe-injected any more.
+    assert again._recipe_injected == frozenset()
+    assert user_set(again, "images.spark") and not user_set(cfg, "images.spark")
 
 
 # -- CFG-8: no recipe, or recipe: default ------------------------------------
@@ -408,3 +411,113 @@ def test_named_recipe_has_no_default_note(tmp_path):
     p.write_text("name: r-t\nrecipe: hive-iceberg-spark-trino\n")
     cfg = load_config(p)
     assert not any("v1.8" in t for t in cfg._load_notes.texts())
+
+
+# -- review fixes ------------------------------------------------------------
+
+V16_POLARIS_INIT = (
+    # What v1.6 `init --recipe polaris-iceberg-spark-trino` wrote: the recipe
+    # plus an uncommented catalog line from the template. v1.6 deployed Hive.
+    "name: v16-pol\n"
+    "recipe: polaris-iceberg-spark-trino\n"
+    "architecture:\n"
+    "  catalog:\n"
+    "    type: hive\n"
+)
+
+
+def test_v16_conflicting_config_refused_for_deploy_with_the_recipe_to_keep(tmp_path):
+    p = tmp_path / "v16.yaml"
+    p.write_text(V16_POLARIS_INIT)
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(p)
+    msg = str(exc.value)
+    assert "sets 'polaris'" in msg
+    assert "a deployment made from this file is hive-iceberg-spark-trino" in msg
+    assert "write recipe: hive-iceberg-spark-trino" in msg
+    assert exc.value.errors[0]["loc"] == ("recipe",)
+
+
+@pytest.mark.parametrize("purpose", ["teardown", "read", "inspect", "compare"])
+def test_v16_conflicting_config_loads_as_deployed_for_destroy_and_status(tmp_path, purpose):
+    from lakebench.config import LoadPurpose
+
+    p = tmp_path / "v16.yaml"
+    p.write_text(V16_POLARIS_INIT)
+    cfg = load_config(p, purpose=LoadPurpose(purpose))
+    # The architecture v1.6 deployed, not the one the recipe name says.
+    assert _components(cfg) == recipe_components("hive-iceberg-spark-trino")
+    assert cfg.recipe == "hive-iceberg-spark-trino"
+    (note,) = [n for n in cfg._load_notes if n.kind == "conflict"]
+    assert "Loaded as hive-iceberg-spark-trino" in note.text
+    assert "deploy and run refuse it" in note.text
+
+
+@pytest.mark.parametrize(
+    "secret", ["x #tail", "!abc", "*star", '"quoted', "'single", "123456", "a: b", "{brace}"]
+)
+def test_secret_with_yaml_syntax_arrives_verbatim(tmp_path, monkeypatch, secret):
+    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "ak")
+    monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", secret)
+    p = tmp_path / "s.yaml"
+    p.write_text(first_day_config(name="sec-t"))
+    assert load_config(p).platform.storage.s3.secret_key == secret
+
+
+def test_env_reference_in_a_comment_is_not_required(tmp_path, monkeypatch):
+    monkeypatch.delenv("NOT_SET_ANYWHERE", raising=False)
+    monkeypatch.setenv("LB_TEST_SCALE", "3")
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "name: c-t\nrecipe: hive-iceberg-spark-trino\n"
+        "# old: ${NOT_SET_ANYWHERE}\n"
+        "workload:\n  datagen:\n    scale: ${LB_TEST_SCALE}\n"
+        "platform:\n  storage:\n    s3:\n      endpoint: ${LB_TEST_EP:-http://s3:80}\n"
+    )
+    cfg = load_config(p)
+    assert cfg.architecture.workload.datagen.scale == 3
+    assert cfg.platform.storage.s3.endpoint == "http://s3:80"
+
+
+def test_unresolved_env_vars_are_all_named(tmp_path, monkeypatch):
+    from lakebench.config import ConfigError
+
+    monkeypatch.delenv("LB_MISSING_A", raising=False)
+    monkeypatch.delenv("LB_MISSING_B", raising=False)
+    p = tmp_path / "u.yaml"
+    p.write_text("name: ${LB_MISSING_A}\ndescription: x-${LB_MISSING_B}\n")
+    with pytest.raises(ConfigError, match="LB_MISSING_A, LB_MISSING_B"):
+        load_config(p)
+
+
+def test_overwrite_keeps_the_existing_name(tmp_path):
+    out = tmp_path / "o.yaml"
+    out.write_text("name: my-lakehouse\nrecipe: hive-iceberg-spark-trino\n")
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
+    assert r.exit_code == 0, r.output
+    assert yaml.safe_load(out.read_text())["name"] == "my-lakehouse"
+    assert "kept from the file it replaced" in r.stderr
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--name", "other-n"])
+    assert yaml.safe_load(out.read_text())["name"] == "other-n"
+
+
+def test_local_output_is_validated(tmp_path):
+    out = tmp_path / "l.yaml"
+    r = runner.invoke(app, ["init", "--local", "-o", str(out), "-w", "iot"])
+    assert r.exit_code == 2 and not out.exists()
+
+
+@pytest.mark.parametrize("name", ["0x1f", "2024-01-01", "yes", "null", "12"])
+def test_names_yaml_would_retype_are_quoted(name):
+    text = first_day_config(name=name)
+    assert yaml.safe_load(text)["name"] == name
+
+
+def test_workload_format_hint_recommends_a_recipe():
+    with pytest.raises(ValueError) as exc:
+        LakebenchConfig.model_validate(
+            {"name": "t", "recipe": "hive-delta-spark-trino", "workload": {"schema": "financial"}}
+        )
+    assert "Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino)" in str(
+        exc.value
+    )

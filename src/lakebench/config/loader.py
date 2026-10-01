@@ -236,8 +236,8 @@ class ConfigNameRequired(ConfigValidationError):
 def load_yaml(path: Path) -> dict[str, Any]:
     """Load YAML file and return as dictionary.
 
-    Performs ``${VAR}`` / ``${VAR:-default}`` env-var substitution on
-    the raw YAML text before parsing.
+    Performs ``${VAR}`` / ``${VAR:-default}`` env-var substitution on the
+    parsed string values (``_substitute_in_tree``), never on the raw text.
 
     Args:
         path: Path to YAML file
@@ -256,11 +256,48 @@ def load_yaml(path: Path) -> dict[str, Any]:
     try:
         with open(path) as f:
             raw = f.read()
-        text = _substitute_env_vars(raw)
-        content = yaml.safe_load(text)
-        return content if content else {}
+        content = yaml.safe_load(raw)
     except yaml.YAMLError as e:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
+    if not content:
+        return {}
+    unresolved: list[str] = []
+    content = _substitute_in_tree(content, unresolved)
+    if unresolved:
+        names = ", ".join(dict.fromkeys(unresolved))
+        raise ConfigError(
+            f"Unresolved environment variables: {names}. "
+            f"Set them or provide defaults with ${{VAR:-default}} syntax."
+        )
+    return content  # type: ignore[no-any-return]
+
+
+def _substitute_in_tree(node: Any, unresolved: list[str]) -> Any:
+    """Substitute ``${VAR}`` in every string value of a parsed YAML tree.
+
+    Substitution runs after parsing, on values only, so a secret holding
+    YAML syntax (``x #y``, a leading ``!`` or ``*``, quotes, all digits)
+    arrives verbatim as a string: on the raw text it was truncated at
+    `` #``, failed the parse with the secret in the error, or became an int.
+    A ``${VAR}`` in a comment is no longer read. Keys are not substituted.
+    """
+    if isinstance(node, dict):
+        return {k: _substitute_in_tree(v, unresolved) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_substitute_in_tree(v, unresolved) for v in node]
+    if isinstance(node, str) and "${" in node:
+
+        def _replace(m: re.Match) -> str:
+            value = os.environ.get(m.group(1))
+            if value is not None:
+                return value
+            if m.group(2) is not None:
+                return str(m.group(2))
+            unresolved.append(m.group(1))
+            return str(m.group(0))
+
+        return _ENV_PATTERN.sub(_replace, node)
+    return node
 
 
 def load_config(
@@ -467,7 +504,7 @@ def _explain_error(err: dict[str, Any]) -> dict[str, Any]:
             user_loc = ("architecture", "pipeline", "continuous", *loc[3:])
         hint = unknown_key_hint(loc, user_loc)
         err["msg"] = f"unknown key; {hint}" if hint else "unknown key"
-    elif err.get("type") == "unknown_recipe":
+    elif err.get("type") in ("unknown_recipe", "recipe_conflict"):
         err["loc"] = ("recipe",)
     return err
 

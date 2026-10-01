@@ -135,7 +135,11 @@ workload:
     scale: ${LAKEBENCH_SCALE:-10}
 ```
 
-Unresolved variables without defaults produce a clear error.
+Unresolved variables without defaults produce one error naming all of them.
+Substitution runs on the parsed values, not on the file text: a secret that
+contains YAML syntax (`#`, a leading `!` or `*`, quotes, only digits) arrives
+verbatim as a string, and a `${VAR}` inside a comment is not read. Keys are
+never substituted.
 
 ### Nested Config (v1.2 Compatible)
 
@@ -1016,8 +1020,12 @@ A recipe sets `architecture.catalog.type`, `architecture.table_format.type`,
 config may leave them out or write the value the recipe sets; any other
 value is refused at load with both keys named, for example
 `architecture.catalog.type is 'hive' but recipe 'polaris-iceberg-spark-trino'
-sets 'polaris'; delete one of them`. Images and engine resources stay
-overridable under a recipe.
+sets 'polaris'; delete one of them`. The message also names the recipe a
+v1.6 deployment from that file used (v1.6 let the written value win), so a
+deployment made from it can be kept by writing that recipe. `deploy`, `run`
+and the other commands that change data refuse such a config; `destroy`,
+`status`, `report` and the inspect commands load it as v1.6 did, with a
+note. Images and engine resources stay overridable under a recipe.
 
 A config with no `recipe:`, or `recipe: default`, resolves as in v1.6: to
 `hive-iceberg-spark-trino` when it sets no component, otherwise to the

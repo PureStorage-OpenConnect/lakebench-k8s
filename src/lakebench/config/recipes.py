@@ -317,6 +317,19 @@ def recipe_conflicts(data: Mapping[str, Any], recipe: str) -> list[str]:
     return problems
 
 
+def written_recipe(data: Mapping[str, Any], recipe: str) -> str | None:
+    """The recipe the components resolve to when *data*'s written ones win
+    over *recipe*'s (v1.6 precedence), or None when no recipe has them."""
+    from lakebench.config.support import recipe_for
+
+    merged = recipe_components(recipe)
+    for dotted in merged:
+        got = _raw_value(data, dotted)
+        if got is not _MISSING and got is not None:
+            merged[dotted] = str(getattr(got, "value", got))
+    return recipe_for(*(merged[k] for k in RECIPE_OWNED_KEYS))
+
+
 def _leaf_paths(value: Any, prefix: tuple[str, ...]) -> list[str]:
     if isinstance(value, dict) and value:
         out: list[str] = []
