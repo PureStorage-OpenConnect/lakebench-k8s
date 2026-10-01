@@ -150,7 +150,7 @@ def test_no_jars_resolve_to_nothing(harness):
 def test_submit_args_put_the_delta_python_package_on_the_path(harness, tmp_path):
     jars = harness.resolve_jars({"LB_SPARK_TEST_JARS": _jars(tmp_path, *LEG_40)}, leg="4.0")
     args = jars.submit_args()
-    assert args.startswith(f"--jars {jars.classpath} ")
+    assert args.startswith(f"--driver-memory 3g --jars {jars.classpath} ")
     assert f"--py-files {tmp_path / LEG_40[1]}" in args and args.endswith(" pyspark-shell")
 
 
@@ -407,7 +407,8 @@ def test_submit_args_carry_the_jars_and_a_foreign_preset_is_refused(
         "import os\n\n"
         "def test_args():\n"
         "    args = os.environ['PYSPARK_SUBMIT_ARGS']\n"
-        "    assert args.startswith('--jars ') and args.endswith(' pyspark-shell')\n"
+        "    assert args.startswith('--driver-memory 3g --jars ')\n"
+        "    assert args.endswith(' pyspark-shell')\n"
         "    assert '--py-files ' in args and 'delta-spark' in args.split('--py-files ')[1]\n"
     )
     res = _session(pytester, monkeypatch, body, LB_SPARK_TEST_JARS=jars)
@@ -473,3 +474,111 @@ def test_static_conf_mismatch_sees_a_catalog_left_in_the_jvm(harness):
     assert harness.static_conf_mismatch(
         want, dict(want, **{"spark.default.parallelism": "1"}), extra
     )
+
+
+# --- known_bug ---------------------------------------------------------------
+
+
+def _inner_leg(harness) -> str:
+    """The Spark line the inner session sees: the fake pyspark is 4.0."""
+    return (harness.pyspark_leg() or "4.0") if importlib.util.find_spec("pyspark") else "4.0"
+
+
+def _other_leg(leg: str) -> str:
+    return "4.1" if leg == "4.0" else "4.0"
+
+
+def test_known_bug_on_this_leg_is_a_strict_xfail(harness, pytester, monkeypatch):
+    leg = _inner_leg(harness)
+    body = (
+        "import pytest\n\n"
+        f"@pytest.mark.known_bug('LB-193', match='No plan', legs=('{leg}',), reason='temp view')\n"
+        "def test_still_broken():\n    raise RuntimeError('No plan for TableReference')\n\n"
+        f"@pytest.mark.known_bug('LB-193', match='No plan', legs=('{leg}',))\n"
+        "def test_fixed_upstream():\n    pass\n"
+    )
+    res = _session(pytester, monkeypatch, body, "-rxX", LB_REQUIRE_JARS="1")
+    res.assert_outcomes(xfailed=1, failed=1)
+    out = res.stdout.str()
+    assert f"LB-193 on Spark {leg}: temp view" in out
+    assert "XPASS(strict)" in out
+
+
+def test_known_bug_on_another_leg_runs_the_test(harness, pytester, monkeypatch):
+    other = _other_leg(_inner_leg(harness))
+    body = (
+        "import pytest\n\n"
+        f"@pytest.mark.known_bug('LB-193', match='.', legs=('{other}',))\n"
+        "def test_broken_here_too():\n    assert False\n"
+    )
+    res = _session(pytester, monkeypatch, body)
+    res.assert_outcomes(failed=1)
+
+
+def test_known_bug_on_both_legs_by_default(pytester, monkeypatch):
+    body = (
+        "import pytest\n\n"
+        "@pytest.mark.known_bug('QR-6', match='TABLE_OR_VIEW', reason='stale names')\n"
+        "def test_x():\n    raise ValueError('[TABLE_OR_VIEW_NOT_FOUND] lh.x')\n"
+    )
+    res = _session(pytester, monkeypatch, body)
+    res.assert_outcomes(xfailed=1)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        "'see BUGS', match='x'",
+        "'LB-193', match='x', legs=('3.5',)",
+        "'LB-193', match='x', leg='4.1'",
+        "'LB-193'",
+        "'LB-193', match='('",
+        "",
+    ],
+)
+def test_known_bug_with_bad_arguments_refuses_to_run(pytester, monkeypatch, args):
+    body = f"import pytest\n\n@pytest.mark.known_bug({args})\ndef test_x():\n    pass\n"
+    res = _session(pytester, monkeypatch, body)
+    assert res.ret == pytest.ExitCode.USAGE_ERROR
+    assert "known_bug" in res.stderr.str()
+
+
+def test_known_bug_does_not_cover_another_failure(pytester, monkeypatch):
+    """A test marked for one bug that fails some other way is a failure."""
+    body = (
+        "import pytest\n\n"
+        "@pytest.mark.known_bug('LB-195', match='queryId is not set')\n"
+        "def test_other_cause():\n    raise KeyError('W5_sanctions_match')\n\n"
+        "@pytest.fixture\n"
+        "def broken():\n    raise RuntimeError('ClassNotFoundException: org.apache.iceberg')\n\n"
+        "@pytest.mark.known_bug('LB-195', match='queryId is not set')\n"
+        "def test_setup_error(broken):\n    pass\n"
+    )
+    res = _session(pytester, monkeypatch, body)
+    res.assert_outcomes(failed=1, errors=1)
+    assert res.stdout.str().count("known_bug LB-195 does not cover this failure") == 2
+
+
+def test_known_bug_does_not_cover_a_missing_jar(pytester, monkeypatch):
+    body = (
+        "import pytest\n\n"
+        "@pytest.mark.known_bug('LB-195', match='.')\n"
+        "@pytest.mark.requires_jars('iceberg')\n"
+        "def test_x():\n    pass\n"
+    )
+    res = _session(pytester, monkeypatch, body, LB_REQUIRE_JARS="1")
+    assert res.ret == 1
+    res.assert_outcomes(errors=1)
+    assert "LB-JARS missing: iceberg" in res.stdout.str()
+
+
+def test_known_bug_does_not_cover_a_jar_failure_inside_the_test(pytester, monkeypatch):
+    body = (
+        "import pytest\n\n"
+        "@pytest.mark.known_bug('LB-195', match='.')\n"
+        "def test_x():\n"
+        "    pytest.fail('LB-JARS missing: delta (set LB_SPARK_TEST_JARS)')\n"
+    )
+    res = _session(pytester, monkeypatch, body)
+    res.assert_outcomes(failed=1)
+    assert "it needs a jar that is missing" in res.stdout.str()

@@ -119,11 +119,14 @@ All must pass before any commit that touches the affected code path.
 ways that race under parallel execution.
 
 The PySpark tests under `tests/spark/` skip unless PySpark is installed,
-and need a Java 17 runtime on `PATH` when it is. To run them:
+and need a Java 17 runtime on `PATH` when it is. Tests that need Iceberg or
+Delta also need the pinned test jars. To run them as CI does (CI runs
+`pyspark==4.0.1` and `pyspark==4.1.1`):
 
 ```bash
 pip install "pyspark==4.0.1" pyarrow
-pytest tests/spark -q
+jars=$(python scripts/fetch_test_jars.py --leg auto --print-env) && export "$jars"
+LB_REQUIRE_JARS=1 pytest tests/spark -q -rs
 ```
 
 `python scripts/release_gate.py` runs every check above plus the example

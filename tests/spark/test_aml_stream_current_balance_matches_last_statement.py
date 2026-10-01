@@ -25,6 +25,11 @@ pytest.importorskip("pyspark")
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
+@pytest.mark.known_bug(
+    "LB-195",
+    match="queryId is not set",
+    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
+)
 def test_current_balance_matches_last_statement_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])

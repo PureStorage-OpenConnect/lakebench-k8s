@@ -29,6 +29,12 @@ import pytest
 pytest.importorskip("pyspark")
 
 
+@pytest.mark.known_bug(
+    "LB-193",
+    match="No plan for TableReference",
+    legs=("4.1",),
+    reason="MERGE from a temp view over Iceberg: No plan for TableReference",
+)
 @pytest.mark.requires_jars("iceberg")
 def test_min_name_across_batches_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)

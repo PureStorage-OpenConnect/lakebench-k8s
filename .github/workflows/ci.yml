@@ -304,13 +304,28 @@ jobs:
         run: cargo test --release --locked
 
   spark-tests:
-    name: Spark (executed tests)
+    name: Spark (pyspark ${{ matrix.pyspark }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: "4.0"
+            pyspark: "4.0.1"
+            cov: --cov=src/lakebench/spark/scripts --cov-report=json:coverage-spark.json
+          - leg: "4.1"
+            pyspark: "4.1.1"
+            cov: ""
+    env:
+      # Any test that needs a jar fails without it, and any jar-reason skip
+      # fails the run (tests/spark/conftest.py).
+      LB_REQUIRE_JARS: "1"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      # The key adds ci.yml, which names the pyspark version, so this job's
-      # cache (with the built pyspark wheel) is not the lint job's.
+      # The key adds ci.yml, which names the pyspark versions, so this job's
+      # cache (with the built pyspark wheels) is not the lint job's.
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
@@ -324,20 +339,60 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # The jars change only with the lock, so the key does too. Restore and
+      # save are separate steps so a red leg still saves the jars it fetched.
+      - name: Restore the test jar cache
+        id: jar-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lakebench-test-jars
+          key: test-jars-${{ matrix.leg }}-${{ hashFiles('tests/spark/jars.lock.json') }}
+
       # The detection, scoring and silver logic is PySpark; these tests run it
       # on a local Spark session instead of inspecting source text.
       - name: Install dependencies
-        run: pip install -e ".[dev]" "pyspark==4.0.1" pyarrow
+        run: pip install -e ".[dev]" "pyspark==${{ matrix.pyspark }}" pyarrow
+
+      # The Iceberg and Delta jars pinned in tests/spark/jars.lock.json,
+      # checked by sha256.
+      - name: Fetch the test jars
+        id: fetch
+        run: python scripts/fetch_test_jars.py --leg ${{ matrix.leg }} --print-env >> "$GITHUB_ENV"
+
+      - name: Save the test jar cache
+        if: steps.fetch.outcome == 'success' && steps.jar-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lakebench-test-jars
+          key: test-jars-${{ matrix.leg }}-${{ hashFiles('tests/spark/jars.lock.json') }}
 
       - name: Run Spark tests
         run: >-
-          pytest tests/spark -q -rs
-          --cov=src/lakebench/spark/scripts --cov-report=json:coverage-spark.json
+          pytest tests/spark -q -rsxX -p no:cacheprovider
+          --basetemp="${{ runner.temp }}/spark-forward" ${{ matrix.cov }}
+
+      # The same tests in reverse order: a test that passes only after (or
+      # only before) another one fails here.
+      - name: Run Spark tests in reverse order
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        run: >-
+          pytest tests/spark -q -rsxX -p no:cacheprovider --lb-reverse
+          --basetemp="${{ runner.temp }}/spark-reverse"
 
       # detection_rules.py is imported by path as a top-level module, so it
       # is measured here and not in the unit job.
       - name: Coverage floors
+        if: matrix.leg == '4.0'
         run: python scripts/check_coverage.py --suite spark coverage-spark.json
+
+      # A failing Spark child writes its whole output to spark-subprocess.log.
+      - name: Upload Spark child logs
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: spark-subprocess-logs-${{ matrix.leg }}
+          path: ${{ runner.temp }}/spark-*/**/spark-subprocess.log
+          if-no-files-found: ignore
 
   # The AML statistics tests marked `slow` (the heavy fidelity-gate fits, the
   # scale invariance check, and the Spark fidelity gate over silver), on the

@@ -108,8 +108,9 @@ this in your PR description so maintainers can run the appropriate tests.
    mypy src/lakebench/
    pytest tests/ -x --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
    ```
-   If you changed a Spark script, also run `pytest tests/spark` (needs
-   `pyspark==4.0.1` and Java 17). If you changed `datagen_rs/`, run
+   If you changed a Spark script, also run `pytest tests/spark` on
+   `pyspark==4.0.1` and `pyspark==4.1.1` with Java 17 and the test jars
+   (see [the Spark tier](development.md#the-spark-tier-and-its-jars)). If you changed `datagen_rs/`, run
    `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`
    and `cargo test --release --locked` there. CI also enforces per-file
    coverage floors (`scripts/check_coverage.py`) and a gitleaks secret scan;

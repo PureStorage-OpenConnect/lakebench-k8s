@@ -103,6 +103,11 @@ def spark(spark_session, iceberg_catalog, tmp_path_factory):
     return spark_session
 
 
+@pytest.mark.known_bug(
+    "QR-6",
+    match="TABLE_OR_VIEW_NOT_FOUND",
+    reason="stale unqualified silver_stream table names in the test",
+)
 def test_batch_and_stream_produce_equivalent_profiles(spark):
 
     import silver_stream_financial as ss

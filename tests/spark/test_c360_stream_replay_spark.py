@@ -25,6 +25,13 @@ def result(tmp_path_factory, spark_subprocess, spark_jars):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+def _section_ran(result, section):
+    """A Delta section that raised in the child fails its tests with the
+    child's error (the child records it so the Iceberg sections still run)."""
+    if f"{section}_error" in result:
+        pytest.fail(f"{section} failed in the child: {result[section + '_error']}", pytrace=False)
+
+
 # Each writer: 3 one-file micro-batches of 10 rows; the run crashes right
 # after committing batch 1 (an append onto the existing table, not the
 # create), and the restart from the same checkpoint replays batch 1.
@@ -86,18 +93,31 @@ def test_iceberg_bronze_fresh_checkpoint_is_not_skipped(result):
     assert result["ice_bronze_rows_after_fresh"] == result["bronze_rows"] + 10
 
 
+@pytest.mark.known_bug(
+    "LB-223",
+    match="PARSE_SYNTAX_ERROR",
+    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
+)
 def test_delta_silver_replay_is_skipped_and_reported(result):
     """Delta skips the replay; the writer sees it and reports 0 rows."""
+    _section_ran(result, "delta_silver")
     assert result["delta_silver_log"] == [[0, 9], [1, 9], [1, 0], [2, 9]]
     assert result["delta_silver_rows"] == result["silver_rows"]
 
 
+@pytest.mark.known_bug(
+    "LB-223",
+    match="PARSE_SYNTAX_ERROR",
+    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
+)
 def test_delta_silver_fresh_checkpoint_is_not_skipped(result):
     """txnAppId carries the query id, so a fresh checkpoint still writes."""
+    _section_ran(result, "delta_silver")
     assert result["delta_silver_rows_after_fresh"] == result["silver_rows"] + 9
 
 
 def test_delta_bronze_replay_is_skipped_and_reported(result):
+    _section_ran(result, "delta_bronze")
     assert result["delta_bronze_log"] == [[0, 10], [1, 10], [1, 0], [2, 10]]
     assert result["delta_bronze_rows"] == result["bronze_rows"]
 

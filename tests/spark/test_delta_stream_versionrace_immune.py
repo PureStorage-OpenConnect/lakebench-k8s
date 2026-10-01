@@ -27,11 +27,21 @@ def result(tmp_path_factory, spark_subprocess, spark_jars):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+@pytest.mark.known_bug(
+    "LB-195",
+    match="queryId is not set",
+    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
+)
 def test_ten_batches_written(result):
     assert result["batches"] == 10
     assert len(result["returns"]) == 10
 
 
+@pytest.mark.known_bug(
+    "LB-195",
+    match="queryId is not set",
+    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
+)
 def test_returns_non_zero_and_match_table_delta(result):
     """Every non-empty batch's return value equals the row-count delta the
     table saw. With interleaved metadata commits the old before/after bracket

@@ -95,7 +95,12 @@ Spark line:
 | pyspark 4.0.1 | `iceberg-spark-runtime-4.0_2.13-1.11.0.jar`, `delta-spark_2.13-4.0.0.jar`, `delta-storage-4.0.0.jar` |
 | pyspark 4.1.1 | `iceberg-spark-runtime-4.1_2.13-1.11.0.jar`, `delta-spark_4.1_2.13-4.1.0.jar`, `delta-storage-4.1.0.jar` |
 
-These are the product defaults in `modules/pipeline_engines/spark/job.py`.
+These are the product defaults in `modules/pipeline_engines/spark/job.py`;
+`tests/test_spark_jars_lock.py` fails when the lock and the defaults differ.
+After a default changes, `python scripts/fetch_test_jars.py --update-lock`
+rebuilds the lock: it confirms each coordinate by its POM, takes
+`delta-storage` from the delta-spark POM, and checks the bytes against
+Central's `.sha1` before writing the sha256 values.
 The harness (`tests/spark/conftest.py`) checks each jar against the
 installed line with the product's own rules, so a jar built for the other
 line, a missing file or a directory fails the tests that need jars instead
@@ -110,8 +115,13 @@ refuses to start if pyspark itself cannot be imported. Under
 jars, Iceberg or Delta, on any xfail whose reason mentions jars, and on any
 other skip not listed in `tests/spark/skip_allowance.txt` (which is empty):
 
+`scripts/fetch_test_jars.py` downloads the jars pinned for a line in
+`tests/spark/jars.lock.json` (Maven Central, with the Google mirror as the
+fallback), checks each against its sha256 and caches them in
+`~/.cache/lakebench-test-jars`; `--print-env` prints the variable:
+
 ```bash
-export LB_SPARK_TEST_JARS=/path/iceberg-spark-runtime-4.0_2.13-1.11.0.jar,/path/delta-spark_2.13-4.0.0.jar,/path/delta-storage-4.0.0.jar
+jars=$(python scripts/fetch_test_jars.py --leg auto --print-env) && export "$jars"
 LB_REQUIRE_JARS=1 pytest tests/spark -q -rs
 pytest tests/spark -q --lb-reverse   # the same tests in reverse order
 ```
@@ -289,9 +299,13 @@ failure, prints every skip reason, and a failure on one Python version does
 not cancel the other (`fail-fast: false`). On 3.13 it checks per-file
 coverage floors with `scripts/check_coverage.py --suite unit` and keeps the
 per-file report as the `coverage-unit` artifact for 30 days; floors are
-raised from that report, never lowered. A Spark job runs `pytest tests/spark`
-with `pyspark==4.0.1` on Java 17 and checks its own floors with
-`scripts/check_coverage.py --suite spark`. The "AML statistics (slow)" job runs
+raised from that report, never lowered. The Spark job runs on two legs,
+`pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17. Each leg fetches the jars
+pinned in `tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py` and
+runs `pytest tests/spark` with `LB_REQUIRE_JARS=1`, once forward and once
+with `--lb-reverse`; the 4.0 leg checks its own coverage floors with
+`scripts/check_coverage.py --suite spark`. A failing leg uploads every
+`spark-subprocess.log`. The "AML statistics (slow)" job runs
 the tests marked `slow` (the heavy fidelity-gate fits, the scale invariance
 check and the Spark fidelity gate over silver) on Python 3.11 with the pinned
 `[aml]` libraries, on every push to `main`, `integrate/**`, `train/*` and

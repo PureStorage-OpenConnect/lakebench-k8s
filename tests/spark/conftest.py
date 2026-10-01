@@ -40,6 +40,10 @@ DELTA_EXTENSION = "io.delta.sql.DeltaSparkSessionExtension"
 DELTA_CATALOG = "org.apache.spark.sql.delta.catalog.DeltaCatalog"
 
 JAR_KINDS = ("iceberg", "delta")
+# Heap of the pytest process's JVM and of each Spark child. Spark's 1g default
+# ran out on the 4.1 line after a few hundred tests in one process ("Not
+# enough memory to build and broadcast the table"), and 2g did once in CI.
+DRIVER_MEMORY = "3g"
 SKIP_PREFIX = "LB-JARS missing:"
 # Any skip reason that talks about jars, whatever words a test used.
 _JAR_SKIP_RE = re.compile(r"(?i)LB-JARS|jar|iceberg|delta|LB_SPARK_TEST_JARS|LB_TEST_ICEBERG_JAR")
@@ -98,7 +102,9 @@ class SparkJars:
 
     def submit_args(self) -> str:
         """``PYSPARK_SUBMIT_ARGS`` for a JVM with these jars."""
-        args = f"--jars {self.classpath}"
+        if not self.paths:
+            return f"--driver-memory {DRIVER_MEMORY} pyspark-shell"
+        args = f"--driver-memory {DRIVER_MEMORY} --jars {self.classpath}"
         if self.python_files:
             args += " --py-files " + ",".join(str(p) for p in self.python_files)
         return args + " pyspark-shell"
@@ -260,6 +266,13 @@ def pytest_configure(config: pytest.Config) -> None:
         "spark_static_conf(conf): extra static Spark conf for the module's spark_session "
         "(module-level pytestmark only)",
     )
+    config.addinivalue_line(
+        "markers",
+        "known_bug(id, match=regex, legs=('4.0', '4.1'), reason=''): a known product or "
+        "test bug on these Spark lines; the test is a strict xfail there when it fails with "
+        "a message matching match, any other failure stays a failure, and a fix turns the run "
+        "red until the marker goes",
+    )
     if os.environ.get("LB_REQUIRE_JARS") == "1" and pyspark_leg() is None:
         # Every jar module importorskips pyspark, so without it the run would
         # skip them all at collection and still exit 0.
@@ -272,8 +285,6 @@ def pytest_configure(config: pytest.Config) -> None:
     try:
         jars = resolve_jars()
     except JarError:
-        return
-    if not jars.paths:
         return
     preset = os.environ.get("PYSPARK_SUBMIT_ARGS")
     if preset is None:
@@ -370,9 +381,71 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pyte
             terminalreporter.line(line)
 
 
+_KNOWN_BUG_ID = re.compile(r"^(LB|QR)-\d+$")
+_LEGS = ("4.0", "4.1")
+
+
+_KNOWN_BUG = pytest.StashKey[tuple[str, str]]()
+
+
+def known_bug_xfail(mark: pytest.Mark, leg: str | None) -> pytest.MarkDecorator | None:
+    """The strict xfail a ``known_bug`` mark means on the Spark line *leg*,
+    or None when the bug is not known on that line. The id is a BUGS.md
+    ``LB-NNN``, or the ``QR-NN`` work item that fixes a stale test; *match*
+    is a regex the failure must show (see pytest_runtest_makereport)."""
+    if len(mark.args) != 1 or not _KNOWN_BUG_ID.match(str(mark.args[0])):
+        raise pytest.UsageError(f"known_bug takes one LB-NNN or QR-NN id, got {mark.args}")
+    legs = tuple(mark.kwargs.get("legs", _LEGS))
+    unknown = set(legs) - set(_LEGS)
+    if unknown or set(mark.kwargs) - {"legs", "reason", "match"} or not mark.kwargs.get("match"):
+        raise pytest.UsageError(
+            f"known_bug {mark.args[0]}: needs match= and takes legs= and reason=, got {mark.kwargs}"
+        )
+    try:
+        re.compile(mark.kwargs["match"])
+    except re.error as err:
+        raise pytest.UsageError(f"known_bug {mark.args[0]}: bad match regex: {err}") from err
+    if leg not in legs:
+        return None
+    why = mark.kwargs.get("reason", "")
+    reason = f"{mark.args[0]} on Spark {leg}" + (f": {why}" if why else "")
+    return pytest.mark.xfail(strict=True, reason=reason)
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    leg = pyspark_leg()
+    for item in items:
+        for mark in item.iter_markers("known_bug"):
+            xfail = known_bug_xfail(mark, leg)
+            if xfail is not None:
+                item.add_marker(xfail)
+                item.stash[_KNOWN_BUG] = (mark.args[0], mark.kwargs["match"])
     if config.getoption("--lb-reverse", default=False):
         items.reverse()
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Any:
+    """A known_bug xfail only covers the failure it names: a test that
+    fails with a message that does not match the marker's *match* (another
+    bug, a missing jar, a harness break) is reported as a failure."""
+    rep = yield
+    bug = item.stash.get(_KNOWN_BUG, None)
+    if bug is None or not hasattr(rep, "wasxfail") or call.excinfo is None:
+        return rep
+    # The exception only: the report's traceback shows the test's source,
+    # decorators included, so it would always contain the match text.
+    text = call.excinfo.exconly()
+    if call.excinfo.errisinstance(pytest.fail.Exception) and SKIP_PREFIX in text:
+        why = "it needs a jar that is missing"
+    elif re.search(bug[1], text):
+        return rep
+    else:
+        why = f"not with /{bug[1]}/"
+    rep.outcome = "failed"
+    del rep.wasxfail
+    rep.longrepr = f"known_bug {bug[0]} does not cover this failure ({why}):\n{rep.longrepr}"
+    return rep
 
 
 def _jar_kinds(marks: Iterator[pytest.Mark]) -> set[str]:

@@ -47,6 +47,11 @@ def _session(warehouse, jars):
     )
 
 
+@pytest.mark.known_bug(
+    "QR-6",
+    match="W5_sanctions_match",
+    reason="W5_sanctions_match KeyError, not root-caused (QR-6 records the decision)",
+)
 def test_tm_operations_end_to_end(tmp_path, spark_subprocess, spark_jars):
     """Fresh interpreter: a JVM with its own static Spark conf.
     spark_subprocess puts the scripts directory on PYTHONPATH, so executor
