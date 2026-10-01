@@ -680,6 +680,7 @@ def _corpus_v2(
     problems: list[str],
     inputs: Mapping[str, Any],
     dg: Mapping[str, Any],
+    fleet: Any = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Add corpus id v2 (EVD-6) from the persisted run-end observation and,
     for a series repetition, the inherited block (metrics/corpus_identity).
@@ -695,6 +696,7 @@ def _corpus_v2(
         inherited=inherited if isinstance(inherited, Mapping) else None,
         model_version=(inputs.get("workload") or {}).get("generator_model_version"),
         fleet_digest=dg.get("digest"),
+        fleet=fleet if isinstance(fleet, Mapping) else None,
     )
     if v2 is None:
         return corpus, problems
@@ -800,7 +802,9 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     dg = _datagen(metrics, inputs)
     corpus, corpus_problems = _observed_corpus(dict(inputs.get("corpus") or {}), dg)
     corpus["datagen"] = dg
-    corpus, corpus_problems = _corpus_v2(corpus, corpus_problems, inputs, dg)
+    corpus, corpus_problems = _corpus_v2(
+        corpus, corpus_problems, inputs, dg, getattr(metrics, "datagen_fleet", None)
+    )
     if corpus_problems:
         corpus["problems"] = corpus_problems
     return {

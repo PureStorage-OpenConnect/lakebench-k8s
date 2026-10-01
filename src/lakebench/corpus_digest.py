@@ -220,10 +220,13 @@ class MarkerSet:
                     "build_commit": distinct(m.get("build_commit") for m in ms),
                 }
             )
+        first, last = completed_range(self.markers)
         return {
             "format": 1,
             "scope": self.scope,
             "cycles": cycles,
+            "completed_first": first,
+            "completed_last": last,
             "corpus_series_sha256": corpus_series_sha256(self.markers),
             "objects": self.objects,
             "problems": list(self.problems),
@@ -336,18 +339,74 @@ def _read_into(out: MarkerSet, client: Any, bucket: str, prefix: str) -> None:
             out.problems.append("the series marker series.json is not in the series format")
             series = None
         out.series = series
-    out.series_check = series_check(out.series, out.markers)
+    try:
+        out.series_check = series_check(out.series, out.markers)
+    except Exception as e:  # noqa: BLE001 -- a bad series lends no lineage, nothing more
+        out.series_check = f"series.json could not be checked against the markers ({_reason(e)})"
 
 
 #: series.json ``generation`` keys that must equal the markers' resolved
-#: ``corpus_args`` when both carry them (ch05 sections 3.1 and 7.1).
-_SERIES_ARGS = ("scale", "file_size_mb", "customer_id_max")
+#: ``corpus_args`` when both carry them (ch05 sections 3.1 and 7.1), per
+#: schema. Customer 360 pods are never given ``--scale`` (the template
+#: passes it to financial only), so their resolved scale is the generator's
+#: default while series.json records the config's; their size is
+#: ``customer_id_max``.
+_SERIES_ARGS = {
+    "financial": ("scale", "file_size_mb"),
+    "customer360": ("file_size_mb", "customer_id_max"),
+}
+
+#: Clock allowance between the CLI host (series.json ``updated_utc``) and
+#: the datagen pods (marker ``completed_utc``).
+SERIES_CLOCK_SKEW_S = 60.0
+
+
+def _num(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, str)):
+        try:
+            out = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return out if out == out and abs(out) != float("inf") else None
+    return None
 
 
 def _same(a: Any, b: Any) -> bool:
-    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return abs(float(a) - float(b)) <= 1e-6 * max(1.0, abs(float(a)))
+    """Equal as numbers (``"1.000000"`` equals ``1.0``), else as JSON."""
+    na, nb = _num(a), _num(b)
+    if na is not None and nb is not None:
+        return abs(na - nb) <= 1e-6 * max(1.0, abs(na))
     return _key(a) == _key(b)
+
+
+def _utc(value: Any) -> float | None:
+    from datetime import datetime, timezone
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def completed_range(markers: Mapping[int, Sequence[Mapping[str, Any]]]) -> tuple[Any, Any]:
+    """The earliest and latest marker ``completed_utc`` (ISO strings, or
+    None when any marker lacks a readable one)."""
+    stamps = [
+        (m.get("completed_utc"), _utc(m.get("completed_utc")))
+        for ms in markers.values()
+        for m in ms
+    ]
+    if not stamps or any(t is None for _, t in stamps):
+        return None, None
+    stamps.sort(key=lambda p: p[1])  # type: ignore[arg-type, return-value]
+    return stamps[0][0], stamps[-1][0]
 
 
 def series_check(
@@ -360,13 +419,24 @@ def series_check(
         return None
     gen = series.get("generation") or {}
     bodies = [m for ms in markers.values() for m in ms]
+    # Written after the markers: record_cycle runs once the datagen Job
+    # completed, so a series older than the last marker is from an earlier
+    # generate (a failed series write leaves the old one in place).
+    last = completed_range(markers)[1]
+    written = _utc(series.get("updated_utc"))
+    if last is None or written is None:
+        return "series.json or the corpus markers carry no readable completion time"
+    if written + SERIES_CLOCK_SKEW_S < (_utc(last) or 0.0):
+        return "series.json was written before the corpus markers (an earlier generate)"
     if "seed_ref" in gen and {str(m.get("seed_ref")) for m in bodies} != {str(gen["seed_ref"])}:
         return "series.json names another seed than the corpus markers"
     if "cycles_total" in series and distinct(m.get("cycles") for m in bodies) != [
         series["cycles_total"]
     ]:
         return "series.json names another cycle count than the corpus markers"
-    for name in _SERIES_ARGS:
+    schemas = distinct(m.get("schema") for m in bodies)
+    keys = _SERIES_ARGS.get(schemas[0], ()) if len(schemas) == 1 else ()
+    for name in keys:
         if gen.get(name) is None:
             continue
         for m in bodies:

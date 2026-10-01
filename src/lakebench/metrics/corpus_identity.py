@@ -538,36 +538,70 @@ def resolve_lineage(
     }
 
 
+def _utc(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+
+
 def _lineage_at_build(
-    obs: Mapping[str, Any], declared_image: str | None, fleet_digest: str | None
+    obs: Mapping[str, Any],
+    declared_image: str | None,
+    fleet: Mapping[str, Any] | None,
+    fleet_digest: str | None,
 ) -> dict[str, Any]:
-    """The persisted lineage, downgraded to declared when this record's
-    datagen fleet record names another image than series.json did."""
+    """The persisted lineage, checked for shape, and downgraded to declared
+    when a datagen fleet record from this corpus's generate (written no
+    earlier than the first marker) names another image than series.json.
+    An older fleet record is a stale per-namespace sidecar and is ignored."""
     raw = obs.get("lineage")
-    if not isinstance(raw, Mapping) or not isinstance(raw.get("value"), str):
-        series = obs.get("series") if isinstance(obs.get("series"), Mapping) else {}
-        gen = (series or {}).get("generation")
-        tag = (gen.get("image") if isinstance(gen, Mapping) else None) or declared_image
+    series = obs.get("series") if isinstance(obs.get("series"), Mapping) else {}
+    gen = (series or {}).get("generation")
+    fallback_tag = (gen.get("image") if isinstance(gen, Mapping) else None) or declared_image
+
+    def declared(tag: Any, note: str, problems: Sequence[str] = ()) -> dict[str, Any]:
         return {
-            "value": f"declared:{tag}",
+            "value": f"declared:{tag or '<no image tag>'}",
             "observed": False,
-            "problems": [],
-            "notes": ["the observation carries no resolved lineage; lineage is declared"],
+            "problems": list(problems),
+            "notes": [note],
         }
-    out = {
-        "value": raw["value"],
-        "observed": raw.get("observed") is True,
-        "problems": list(raw.get("problems") or []),
-        "notes": list(raw.get("notes") or []),
+
+    if not isinstance(raw, Mapping):
+        return declared(fallback_tag, "the observation carries no resolved lineage")
+    value, observed = raw.get("value"), raw.get("observed") is True
+    problems = [str(p) for p in raw.get("problems") or []]
+    notes = [str(n) for n in raw.get("notes") or []]
+    tag = raw.get("tag") or fallback_tag
+    if observed and not (isinstance(value, str) and _DIGEST.match(value)):
+        return declared(tag, "the persisted lineage is not a digest", problems)
+    if not observed and not (isinstance(value, str) and value.startswith("declared:")):
+        return declared(tag, "the persisted lineage is not a declared lineage", problems)
+    out: dict[str, Any] = {
+        "value": value,
+        "observed": observed,
+        "problems": problems,
+        "notes": notes,
     }
     digest = raw.get("digest")
-    if out["observed"] and fleet_digest and digest and fleet_digest != digest:
-        out["value"] = f"declared:{raw.get('tag')}"
-        out["observed"] = False
-        out["notes"].append(
-            f"the datagen fleet record names {fleet_digest[:19]} but series.json "
-            f"{str(digest)[:19]}; lineage is declared"
-        )
+    if observed and fleet_digest and digest and fleet_digest != digest:
+        first = _utc((obs.get("markers") or {}).get("completed_first"))
+        written = _utc((fleet or {}).get("written_at"))
+        if first is not None and written is not None and written + 60.0 < first:
+            notes.append(
+                f"the datagen fleet record ({fleet_digest[:19]}) predates this corpus; ignored"
+            )
+        else:
+            return declared(
+                tag,
+                f"the datagen fleet record names {fleet_digest[:19]} but series.json "
+                f"{str(digest)[:19]}; lineage is declared",
+                problems,
+            )
     return out
 
 
@@ -632,7 +666,7 @@ def _declared_differs(declared: Mapping[str, Any], series: Any) -> list[str]:
             try:
                 if abs(float(a) - float(b)) <= 1e-6:
                     continue
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, ArithmeticError):
                 pass
         elif str(a) == str(b):
             continue
@@ -673,6 +707,7 @@ def corpus_v2_fields(
     inherited: Mapping[str, Any] | None,
     model_version: str | None,
     fleet_digest: str | None = None,
+    fleet: Mapping[str, Any] | None = None,
 ) -> CorpusV2 | None:
     """ch03 section 6 "Series corpus identity" steps 3 and 4, from persisted
     inputs only.
@@ -710,7 +745,7 @@ def corpus_v2_fields(
 
     if obs:
         out.problems += marker_problems(markers, model_version)
-    lineage = _lineage_at_build(obs or {}, declared.get("generator_image"), fleet_digest)
+    lineage = _lineage_at_build(obs or {}, declared.get("generator_image"), fleet, fleet_digest)
     if has_markers:
         out.problems += lineage["problems"]
     id_v2, unavailable = corpus_id_v2(obs, model_version, lineage["value"])

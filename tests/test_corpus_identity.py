@@ -57,10 +57,13 @@ def marker(cycle=0, node=0, total=2, cycles=1, h=H1, **kw):
     return body
 
 
-def series(digest=D, image=TAG, seed_ref="42", cycles_total=1, **gen):
+def series(
+    digest=D, image=TAG, seed_ref="42", cycles_total=1, updated="2026-10-06T00:01:00Z", **gen
+):
     return {
         "format": 1,
         "schema": "customer360",
+        "updated_utc": updated,
         "cycles_total": cycles_total,
         "cycles_complete": list(range(cycles_total)),
         "generation": {
@@ -442,7 +445,7 @@ class TestLineage:
         "change, needle",
         [
             ({"cycles_total": 2}, "cycle count"),
-            ({"scale": 10.0}, "scale"),
+            ({"customer_id_max": 5}, "customer_id_max"),
             ({"file_size_mb": 128}, "file_size_mb"),
         ],
     )
@@ -452,7 +455,8 @@ class TestLineage:
             body["cycles_total"] = change["cycles_total"]
         else:
             body["generation"].update(change)
-        obs, _ = observe(two_nodes(corpus_args={"scale": 1.0, "file_size_mb": 64}), body)
+        args = {"scale": 1.0, "file_size_mb": 64, "customer_id_max": 100000}
+        obs, _ = observe(two_nodes(corpus_args=args), body)
         corpus = corpus_of(obs=obs)
         assert corpus["lineage"].startswith("declared:")
         assert needle in corpus["lineage_notes"][0]
@@ -798,3 +802,67 @@ class TestReviewCases:
         )
         with pytest.raises(ci.LineageError, match="not a root row"):
             ci.load_lineage(table)
+
+
+class TestFixPassCases:
+    """Cases from the fix-pass review (series timing, C360 scale, fleet age,
+    persisted lineage shape)."""
+
+    def test_series_older_than_the_markers_lends_no_lineage(self):
+        """A series.json from an earlier generate whose args all match (the
+        new generate's series write failed): its image did not write these
+        markers."""
+        obs, _ = observe(two_nodes(), series(updated="2026-10-05T23:00:00Z"))
+        corpus = corpus_of(obs=obs)
+        assert corpus["lineage"].startswith("declared:")
+        assert "written before the corpus markers" in corpus["lineage_notes"][0]
+
+    def test_series_within_the_clock_allowance_is_trusted(self):
+        obs, _ = observe(two_nodes(), series(updated="2026-10-05T23:59:30Z"))
+        assert corpus_of(obs=obs)["lineage"] == D
+
+    def test_c360_scale_is_not_compared(self):
+        """C360 pods get no --scale, so the marker records the generator's
+        default while series.json records the config's."""
+        body = series()
+        body["generation"]["scale"] = 10.0
+        obs, _ = observe(two_nodes(corpus_args={"scale": 1.0}), body)
+        assert corpus_of(obs=obs)["lineage"] == D
+
+    def test_financial_scale_compares_as_numbers(self):
+        body = series()
+        body["generation"]["scale"] = "1.000000"
+        markers = two_nodes(schema="financial", corpus_args={"scale": 1.0})
+        obs, _ = observe(markers, body)
+        assert corpus_of(obs=obs)["lineage"] == D
+        body["generation"]["scale"] = 2.0
+        obs, _ = observe(markers, body)
+        assert "another scale" in corpus_of(obs=obs)["lineage_notes"][0]
+
+    def test_stale_fleet_sidecar_is_ignored(self):
+        obs, _ = observe(two_nodes(), series(digest=D))
+        fleet = {"image": TAG, "image_ids": [f"reg@{X}"], "written_at": "2026-09-01T00:00:00Z"}
+        corpus = corpus_of(obs=obs, fleet=fleet)
+        assert corpus["lineage"] == D
+        assert any("predates this corpus" in n for n in corpus["lineage_notes"])
+
+    def test_huge_numbers_never_raise(self):
+        body = series()
+        body["generation"]["scale"] = 10**400
+        obs, _ = observe(two_nodes(schema="financial", corpus_args={"scale": 1.0}), body)
+        corpus = corpus_of(cfg=_cfg("financial"), obs=obs)
+        assert corpus["lineage"].startswith("declared:")
+
+    @pytest.mark.parametrize(
+        "lineage",
+        [
+            {"value": "garbage", "observed": True},
+            {"value": D, "observed": False},
+            "not a mapping",
+        ],
+    )
+    def test_persisted_lineage_is_checked(self, lineage):
+        obs, _ = observe(two_nodes(), series())
+        obs["lineage"] = lineage
+        corpus = corpus_of(obs=obs)
+        assert corpus["lineage"] == f"declared:{TAG}" and corpus["lineage_observed"] is False
