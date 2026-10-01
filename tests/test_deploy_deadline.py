@@ -210,27 +210,175 @@ def test_thrift_wait_is_cut_by_the_deadline(clock, monkeypatch):
     assert clock.now - 1000.0 <= 50
 
 
-def test_operator_rollout_timeout_is_clamped(clock):
+def test_post_upgrade_rollout_is_not_cut_by_the_deadline(clock):
+    from lakebench.modules.pipeline_engines.spark import operator as op
+
+    m = op.SparkOperatorManager.__new__(op.SparkOperatorManager)
+    m.namespace = "spark-operator"
+    m._run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+    with deadline.deploy_deadline(5):
+        clock.sleep(10)
+        assert m._rollout_status_after_upgrade()
+    args = [c.args[0] for c in m._run.call_args_list]
+    assert len(args) == 2 and all(f"--timeout={op._POST_UPGRADE_ROLLOUT_S}s" in a for a in args)
+
+
+# --- the shared watch list: gate before the mutation, never after ------------------
+
+
+def _operator(clock):
     from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
     m = SparkOperatorManager.__new__(SparkOperatorManager)
     m.namespace = "spark-operator"
-    m._run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
-    with deadline.deploy_deadline(50):
-        assert m._wait_for_rollout(timeout_s=deadline.clamp(180))
-        args = [c.args[0] for c in m._run.call_args_list]
-        assert all("--timeout=50s" in a for a in args), args
-        clock.sleep(50)
-        m._run.reset_mock()
+    m._get_watched_namespaces = MagicMock(return_value=["other-ns"])
+    m._namespace_is_terminating = MagicMock(return_value=False)
+    m._filter_existing_namespaces = MagicMock(side_effect=lambda ns: list(ns))
+    m._watch_list_pin = MagicMock(return_value=[])
+    m._is_openshift = MagicMock(return_value=False)
+    m._verify_namespace_watched = MagicMock(return_value=True)
+    m._restart_operator = MagicMock(return_value=True)
+    return m
+
+
+def test_no_shared_upgrade_after_the_deadline(clock):
+    m = _operator(clock)
+    m._run = MagicMock()
+    with deadline.deploy_deadline(10):
+        clock.sleep(10)
         with pytest.raises(deadline.DeployTimeout):
-            m._wait_for_rollout(timeout_s=180)
-        m._run.assert_not_called()
+            m._add_namespace_to_watch_impl("mine")
+    m._run.assert_not_called()
+
+
+def test_a_committed_upgrade_is_restarted_and_verified_past_the_deadline(clock):
+    """The deadline passing during the helm upgrade must not release the
+    lease with the shared operator mid-restart and unverified."""
+    m = _operator(clock)
+
+    def slow_helm(*a, **k):
+        clock.sleep(20)  # the upgrade outlives the deadline
+        return MagicMock(returncode=0, stderr="")
+
+    m._run = MagicMock(side_effect=slow_helm)
+    with deadline.deploy_deadline(10):
+        assert m._add_namespace_to_watch_impl("mine") is True
+    m._restart_operator.assert_called_once()
+    m._verify_namespace_watched.assert_called_once()
+    from lakebench.modules.pipeline_engines.spark import operator as op
+
+    assert m._verify_namespace_watched.call_args.kwargs["timeout"] == op._POST_UPGRADE_VERIFY_S
+
+
+def test_lease_wait_counts_against_the_deadline(clock, monkeypatch):
+    from lakebench.deploy import cluster_lock as cl
+    from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
+
+    seen = {}
+
+    class Held:
+        def __enter__(self):
+            clock.sleep(seen["timeout"])
+            raise cl.ClusterLockHeld("holder-b", "t0", 60, "t1")
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_lock(core, timeout):
+        seen["timeout"] = timeout
+        return Held()
+
+    monkeypatch.setattr(cl, "cluster_lock", fake_lock)
+    m = SparkOperatorManager.__new__(SparkOperatorManager)
+    with patch("kubernetes.client.CoreV1Api"), deadline.deploy_deadline(30):
+        clock.sleep(20)
+        with pytest.raises(deadline.DeployTimeout) as e:
+            m._acquire_watch_lease()
+    assert seen["timeout"] == 10
+    assert "held by holder-b" in str(e.value)
+
+
+def test_transient_error_is_not_retried_after_the_deadline(clock):
+    from kubernetes.client.rest import ApiException
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        clock.sleep(11)
+        raise ApiException(status=503)
+
+    with deadline.deploy_deadline(10):
+        results = _engine()._run_steps([("trino", "Deploying Trino", flaky)], None)
+    assert len(calls) == 1
+    assert results[0].status == DeploymentStatus.FAILED
+
+
+def test_no_stackable_install_after_the_deadline(clock):
+    from lakebench.modules.catalogs.hive import deployer as hive
+
+    d = hive.HiveDeployer.__new__(hive.HiveDeployer)
+    d.config = MagicMock()
+    with patch("lakebench.k8s.pinned_helm") as helm, deadline.deploy_deadline(5):
+        clock.sleep(5)
+        with pytest.raises(deadline.DeployTimeout) as e:
+            d._install_stackable_operators()
+    helm.assert_not_called()
+    assert "helm install of Stackable commons-operator" in str(e.value)
+
+
+def test_scc_retry_stops_at_the_deadline(clock, monkeypatch):
+    from lakebench.k8s import security
+
+    v = security.SecurityVerifier.__new__(security.SecurityVerifier)
+    v.k8s = None
+    monkeypatch.setattr(
+        security, "pinned_oc", MagicMock(return_value=MagicMock(returncode=1, stderr="x"))
+    )
+    monkeypatch.setattr(security.time, "sleep", clock.sleep)
+    v._scc_binding_has_subject = MagicMock(return_value=False)
+    with deadline.deploy_deadline(1):
+        clock.sleep(1)
+        with pytest.raises(deadline.DeployTimeout):
+            v._add_scc("anyuid", "sa", "ns")
+    assert security.pinned_oc.call_count == 1
 
 
 # --- static guard -------------------------------------------------------------------
 
 _TIMEOUT_KW = {"timeout", "timeout_s", "timeout_seconds"}
 _CLAMPS = {"clamp", "lease_clamp", "clamp_whole_seconds"}
+_CHECKS = _CLAMPS | {"check"}
+# Waits after a committed shared mutation: bounded by their own timeout,
+# never by the deploy deadline (operator.py _POST_UPGRADE_*).
+_POST_UPGRADE = re.compile(r"^_POST_UPGRADE_\w+_S$")
+# Files whose code never runs inside deploy_all, so no deploy deadline is set.
+_OUTSIDE_DEPLOY = {"deploy/destroy.py", "deploy/datagen.py", "deploy/garage.py", "deploy/local.py"}
+# Functions on the destroy path inside the scanned files (no deploy deadline).
+_DESTROY_PATH = {
+    ("modules/pipeline_engines/spark/operator.py", "_remove_namespace_from_watch_locked"),
+    ("modules/pipeline_engines/spark/operator.py", "_remove_namespace_from_watch_unlocked"),
+}
+# Sleep loops in the scanned files that need not consult the deadline, and why.
+_SLEEP_LOOP_ALLOWED = {
+    (
+        "deploy/cluster_lock.py",
+        "acquire_cluster_lock",
+    ): "its timeout is clamped at each deploy-path call site",
+    ("deploy/ownership.py", "stamp_namespace"): "409 retry, 0.2 s steps, bounded attempts",
+    (
+        "modules/pipeline_engines/spark/operator.py",
+        "_namespace_is_terminating",
+    ): "fixed short read backoff before the gated upgrade",
+    (
+        "modules/pipeline_engines/spark/operator.py",
+        "_remove_namespace_from_watch_unlocked",
+    ): "destroy path",
+    (
+        "modules/pipeline_engines/spark/operator.py",
+        "_verify_namespace_watched",
+    ): "post-upgrade verify, deliberately not cut",
+}
 
 
 def _callee(call: ast.Call) -> str:
@@ -251,7 +399,14 @@ def _scanned() -> list[Path]:
     files = sorted((SRC / "deploy").glob("*.py"))
     files += sorted((SRC / "modules").glob("*/*/deployer.py"))
     files.append(SRC / "modules" / "pipeline_engines" / "spark" / "operator.py")
-    return files
+    files.append(SRC / "k8s" / "security.py")
+    return [f for f in files if str(f.relative_to(SRC)) not in _OUTSIDE_DEPLOY]
+
+
+def _bounded(value: ast.expr) -> bool:
+    if isinstance(value, ast.Call) and _callee(value) in _CLAMPS:
+        return True
+    return isinstance(value, ast.Name) and bool(_POST_UPGRADE.match(value.id))
 
 
 def test_wait_py_waits_all_go_through_wait_for_condition():
@@ -265,26 +420,31 @@ def test_wait_py_waits_all_go_through_wait_for_condition():
 
 
 def test_every_deploy_wait_is_clamped():
-    """A call to a wait function in the deploy path passes a timeout derived
-    from clamp (or SD-12's lease_clamp), or is a k8s/wait.py wait, which
-    wait_for_condition clamps. A kubectl rollout status never carries a
-    literal --timeout."""
+    """In the deploy path: a call to a wait function or to cluster_lock
+    passes a clamped timeout (or a post-upgrade constant), or is a
+    k8s/wait.py wait, which wait_for_condition clamps; a kubectl rollout
+    status --timeout is clamped or post-upgrade; and every function with a
+    sleep loop consults the deadline or is listed with its reason."""
     exempt = _wait_py_functions()
     bad = []
     for path in _scanned():
         tree = ast.parse(path.read_text())
-        rel = path.relative_to(SRC)
+        rel = str(path.relative_to(SRC))
+        destroy_calls = {
+            id(c)
+            for fn in ast.walk(tree)
+            if isinstance(fn, ast.FunctionDef) and (rel, fn.name) in _DESTROY_PATH
+            for c in ast.walk(fn)
+        }
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
+            if isinstance(node, ast.Call) and id(node) not in destroy_calls:
                 name = _callee(node)
-                if re.match(r"^_?wait_for", name) and name not in exempt:
-                    ok = any(
-                        kw.arg in _TIMEOUT_KW
-                        and isinstance(kw.value, ast.Call)
-                        and _callee(kw.value) in _CLAMPS
-                        for kw in node.keywords
-                    )
-                    if not ok:
+                if (
+                    re.match(r"^_?wait_for", name) and name not in exempt
+                ) or name == "cluster_lock":
+                    if not any(
+                        kw.arg in _TIMEOUT_KW and _bounded(kw.value) for kw in node.keywords
+                    ):
                         bad.append(f"{rel}:{node.lineno} {name}(...) without a clamped timeout")
             if isinstance(node, ast.List):
                 consts = [
@@ -300,12 +460,35 @@ def test_every_deploy_wait_is_clamped():
                             if isinstance(c, ast.Constant) and isinstance(c.value, str)
                         ]
                         if any(t.startswith("--timeout") for t in text):
-                            clamped = any(
-                                isinstance(c, ast.Call) and _callee(c) in _CLAMPS
-                                for c in ast.walk(e)
-                            )
-                            if not clamped:
+                            if not any(_bounded(c) for c in ast.walk(e) if isinstance(c, ast.expr)):
                                 bad.append(
                                     f"{rel}:{e.lineno} kubectl rollout status with an unclamped --timeout"
                                 )
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                loops = [n for n in ast.walk(node) if isinstance(n, (ast.While, ast.For))]
+                sleeps = any(
+                    isinstance(c, ast.Call) and _callee(c) == "sleep"
+                    for lp in loops
+                    for c in ast.walk(lp)
+                )
+                uses = any(
+                    isinstance(c, ast.Call) and _callee(c) in _CHECKS for c in ast.walk(node)
+                )
+                if sleeps and not uses and (rel, node.name) not in _SLEEP_LOOP_ALLOWED:
+                    bad.append(
+                        f"{rel}:{node.lineno} {node.name} sleeps in a loop without the deploy deadline"
+                    )
     assert not bad, "\n".join(bad)
+
+
+def test_sleep_loop_allowlist_is_current():
+    """An allowlisted function that is gone or now consults the deadline is
+    removed from the list, so the list cannot hide a new loop by name."""
+    present = set()
+    for path in _scanned():
+        rel = str(path.relative_to(SRC))
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                present.add((rel, node.name))
+    assert set(_SLEEP_LOOP_ALLOWED) <= present
+    assert _DESTROY_PATH <= present

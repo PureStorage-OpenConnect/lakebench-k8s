@@ -133,10 +133,13 @@ def check(waiting_for: str, last_state: str = "", component_name: str | None = N
     d = DEPLOY_DEADLINE.get()
     if d is None or time.monotonic() < d.at - _SLACK_S:
         return
+    # Within the slack the deadline is treated as reached; report it as such
+    # rather than "reached after N-1 s".
+    elapsed = max(time.monotonic() - d.started, d.timeout)
     raise DeployTimeout(
         component_name if component_name is not None else CURRENT_COMPONENT.get(),
         waiting_for,
-        time.monotonic() - d.started,
+        elapsed,
         d.timeout,
         last_state,
     )
