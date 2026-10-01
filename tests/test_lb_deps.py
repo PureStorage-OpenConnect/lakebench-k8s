@@ -256,17 +256,47 @@ def test_constants_match_request_module():
     }
 
 
+_AB = {"jars": [{"file": "b.jar", "sha256": "2" * 64}, {"file": "a.jar", "sha256": "1" * 64}]}
+
+
 @pytest.mark.parametrize(
-    "groups",
+    ("groups", "order"),
     [
-        {"jars": [{"file": "b.jar", "sha256": "2" * 64}, {"file": "a.jar", "sha256": "1" * 64}]},
-        {"duckdb-ext": [{"file": "v1/linux_amd64/x\u00e9.duckdb_extension", "sha256": "3" * 64}]},
-        {"jars": [{"file": "a.jar", "sha256": "1" * 64}], "py-reference": []},
-        {"jars": [{"file": "a.jar", "sha256": "1" * 64}, {"file": "a.jar", "sha256": "1" * 64}]},
+        (_AB, ["b.jar", "a.jar"]),
+        (_AB, ["a.jar", "b.jar"]),
+        (
+            {
+                "duckdb-ext": [
+                    {"file": "v1/linux_amd64/x\u00e9.duckdb_extension", "sha256": "3" * 64}
+                ]
+            },
+            [],
+        ),
+        ({"jars": [{"file": "a.jar", "sha256": "1" * 64}], "py-reference": []}, ["a.jar"]),
     ],
 )
-def test_pinset_matches_request_module(groups):
-    assert lb_deps.pinset_sha256(groups) == req_mod.pinset_sha256(groups)
+def test_pinset_matches_request_module(groups, order):
+    assert lb_deps.pinset_sha256(groups, order) == req_mod.pinset_sha256(groups, order)
+
+
+@pytest.mark.parametrize(
+    "order", [["a.jar"], ["a.jar", "b.jar", "c.jar"], ["a.jar", "a.jar"], ["a.jar", "c.jar"]]
+)
+def test_pinset_refuses_an_order_that_is_not_the_jars_group(order):
+    for fn in (lb_deps.pinset_sha256, req_mod.pinset_sha256):
+        with pytest.raises(ValueError):
+            fn(_AB, order)
+
+
+def test_reordered_set_changes_the_pinset():
+    """The same files in another order load other classes first, so they are
+    another set (main lane decision 10-01)."""
+    assert lb_deps.pinset_sha256(_AB, ["a.jar", "b.jar"]) != lb_deps.pinset_sha256(
+        _AB, ["b.jar", "a.jar"]
+    )
+    assert req_mod.pinset_sha256(_AB, ["a.jar", "b.jar"]) != req_mod.pinset_sha256(
+        _AB, ["b.jar", "a.jar"]
+    )
 
 
 def test_python38_grammar():
@@ -322,11 +352,16 @@ def test_resolve_writes_set_pointer_and_order(env, capsys):
     sd = env.set_dir(r["sha"])
     man = json.loads((sd / "manifest.json").read_text())
     # The set's manifest is content only.
-    assert set(man) == {"pinset_sha256", "groups"}
-    assert man["pinset_sha256"] == req_mod.pinset_sha256(man["groups"]) == ptr["pinset_sha256"]
+    assert set(man) == {"pinset_sha256", "groups", "jar_order"}
+    assert (
+        man["pinset_sha256"]
+        == req_mod.pinset_sha256(man["groups"], man["jar_order"])
+        == ptr["pinset_sha256"]
+    )
+    assert "jar_order" not in ptr
     want = [lb_deps.coordinate_jar(c) for c in COORDS + TRANSITIVE]
     # Spark's own order (direct coordinates first), not sorted.
-    assert ptr["jar_order"] == want
+    assert man["jar_order"] == want
     assert want != sorted(want)
     assert sorted(e["file"] for e in man["groups"]["jars"]) == sorted(want)
     assert ptr["repositories"] == r["repositories"]
@@ -699,7 +734,8 @@ def test_verify_set_refuses_unsafe_paths_and_dir_symlinks(env, tmp_path):
     (sd / "jars" / "sub").unlink()
     man = json.loads((sd / "manifest.json").read_text())
     man["groups"]["jars"].append({"file": "../manifest.json", "sha256": "0" * 64, "size": 1})
-    man["pinset_sha256"] = req_mod.pinset_sha256(man["groups"])
+    man["jar_order"].append("../manifest.json")
+    man["pinset_sha256"] = req_mod.pinset_sha256(man["groups"], man["jar_order"])
     bad = env.root / "sets" / man["pinset_sha256"]
     sd.rename(bad)
     (bad / "manifest.json").write_text(json.dumps(man))
@@ -1062,7 +1098,7 @@ def test_show_prints_record_and_entries(env, capsys):
     assert env.run("show") == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["request_sha256"] == r["sha"]
-    assert shown["pinset_sha256"] == req_mod.pinset_sha256(shown["groups"])
+    assert shown["pinset_sha256"] == req_mod.pinset_sha256(shown["groups"], shown["jar_order"])
     assert shown["jar_order"][0] == lb_deps.coordinate_jar(ICE)
 
 
@@ -1175,8 +1211,10 @@ def test_fetch_keeps_already_verified_files(served_set, tmp_path, monkeypatch):
 
 def test_fetch_refuses_unsafe_paths(served_set, tmp_path):
     m = json.loads(served_set["man"].read_text())
+    old = m["groups"]["jars"][0]["file"]
     m["groups"]["jars"][0]["file"] = "../escape.jar"
-    m["pinset_sha256"] = req_mod.pinset_sha256(m["groups"])
+    m["jar_order"] = ["../escape.jar" if f == old else f for f in m["jar_order"]]
+    m["pinset_sha256"] = req_mod.pinset_sha256(m["groups"], m["jar_order"])
     served_set["man"].write_text(json.dumps(m))
     url = served_set["url"].rsplit("/", 1)[0] + "/" + m["pinset_sha256"]
     assert _fetch(served_set, tmp_path / "o", url) == lb_deps.EXIT_HASH
@@ -1285,3 +1323,24 @@ def test_publish_leaves_other_requests_staging(env):
 
 def test_idle_connections_cannot_hold_shutdown():
     assert 0 < lb_deps.SetHandler.timeout <= 120
+
+
+def test_a_reordered_set_on_the_pvc_fails_verification(env, capsys):
+    """Editing only the order in a set's manifest is caught: the pinset
+    names the order too."""
+    r = env.request()
+    assert env.run("resolve", "spark") == 0
+    sd = env.set_dir(r["sha"])
+    man = json.loads((sd / "manifest.json").read_text())
+    man["jar_order"] = list(reversed(man["jar_order"]))
+    (sd / "manifest.json").write_text(json.dumps(man))
+    assert "does not hash" in lb_deps.verify_set(sd.name)
+    capsys.readouterr()
+    assert env.run("serve", "--port", "0") == lb_deps.EXIT_HASH
+
+
+def test_fetch_refuses_a_reordered_manifest(served_set, tmp_path):
+    m = json.loads(served_set["man"].read_text())
+    m["jar_order"] = list(reversed(m["jar_order"]))
+    served_set["man"].write_text(json.dumps(m))
+    assert _fetch(served_set, tmp_path / "o") == lb_deps.EXIT_HASH

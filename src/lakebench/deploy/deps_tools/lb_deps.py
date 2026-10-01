@@ -21,13 +21,14 @@ Subcommands:
 
 On-disk layout of the PVC at ``LB_DEPS_ROOT`` (default ``/deps``):
 
-``sets/<pinset>/``            the set; ``manifest.json`` holds only the pinset
-                              and its file entries, so a set that a later
+``sets/<pinset>/``            the set; ``manifest.json`` holds only content:
+                              the pinset, its file entries and the jar order
+                              (both enter the pinset), so a set that a later
                               request reuses carries nothing from the request
                               that built it
 ``requests/<request>.json``   the pointer: the request-scoped record
-                              (repositories, Python versions, jar order,
-                              coordinates, overlaps), written last
+                              (repositories, Python versions, coordinates,
+                              overlaps), written last
 ``staging/<request>/``        a resolve in progress; never served
 ``.resolve.lock``             held for a whole resolve container
 
@@ -204,10 +205,28 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def pinset_sha256(groups: dict[str, list[dict[str, Any]]]) -> str:
-    """Same bytes as ``lakebench.deps.request.pinset_sha256``."""
+def pinset_sha256(groups: dict[str, list[dict[str, Any]]], jar_order: list[str]) -> str:
+    """Same bytes as ``lakebench.deps.request.pinset_sha256``: the sorted
+    file triples and the jar order. Raises ValueError when ``jar_order`` is
+    not an ordering of the jars group."""
     triples = sorted([g, e["file"], e["sha256"]] for g, entries in groups.items() for e in entries)
-    return hashlib.sha256(json.dumps(triples, separators=(",", ":")).encode()).hexdigest()
+    order = list(jar_order)
+    jars = sorted(e["file"] for e in groups.get("jars", ()))
+    if sorted(order) != jars or len(set(order)) != len(order):
+        raise ValueError(f"jar_order {order} is not an ordering of the jars group {jars}")
+    return hashlib.sha256(
+        json.dumps(
+            {"files": triples, "jar_order": order}, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+
+
+def manifest_pinset(man: dict[str, Any], where: str) -> str:
+    """The pinset a manifest's own entries and jar order hash to."""
+    try:
+        return pinset_sha256(man["groups"], man["jar_order"])
+    except (ValueError, KeyError, TypeError) as e:
+        fail(EXIT_HASH, f"manifest {where} is malformed: {e}")
 
 
 def write_json(path: str, obj: Any) -> None:
@@ -281,7 +300,7 @@ def verify_set(pinset: str) -> str | None:
     try:
         man = read_json(mpath)
         groups = man["groups"]
-        if man.get("pinset_sha256") != pinset or pinset_sha256(groups) != pinset:
+        if man.get("pinset_sha256") != pinset or pinset_sha256(groups, man["jar_order"]) != pinset:
             return "manifest " + mpath + " does not hash to " + pinset
     except (ValueError, KeyError, TypeError) as exc:
         return "unreadable " + mpath + ": " + str(exc)
@@ -858,9 +877,15 @@ def finalise(request_sha: str, req: dict[str, Any], st_set: str, meta: str) -> N
         have = len(groups.get(g, []))
         if have == 0 or (n and have != n):
             fail(EXIT_MISSING, f"group {g} holds {have} files, needs {n if n else 'at least 1'}")
-    pinset = pinset_sha256(groups)
-    write_json(os.path.join(st_set, "manifest.json"), {"pinset_sha256": pinset, "groups": groups})
     jars_meta = read_json(os.path.join(meta, "jars.json"))
+    # The jar order is content: the same files in another order load other
+    # classes first, so they are another set.
+    order = jars_meta["order"]
+    pinset = pinset_sha256(groups, order)
+    write_json(
+        os.path.join(st_set, "manifest.json"),
+        {"pinset_sha256": pinset, "groups": groups, "jar_order": order},
+    )
     python = {}
     for part in ("spark", "duckdb"):
         p = os.path.join(meta, "python-" + part + ".txt")
@@ -876,7 +901,6 @@ def finalise(request_sha: str, req: dict[str, Any], st_set: str, meta: str) -> N
         "pypi_index": req.get("pypi_index", ""),
         "duckdb_extension_repository": req.get("duckdb_extension_repository", ""),
         "python": python,
-        "jar_order": jars_meta["order"],
         "coordinates": jars_meta["coordinates"],
         "overlaps": jars_meta["overlaps"],
         "duplicate_classes": jars_meta["duplicate_classes"],
@@ -974,10 +998,11 @@ def manifest_for(request_sha: str) -> dict[str, Any]:
     record = read_json(ptr)
     pinset = record.get("pinset_sha256", "")
     man = read_json(os.path.join(set_dir(pinset), "manifest.json"))
-    if man.get("pinset_sha256") != pinset or pinset_sha256(man["groups"]) != pinset:
+    if man.get("pinset_sha256") != pinset or manifest_pinset(man, pinset) != pinset:
         fail(EXIT_HASH, "set " + pinset + " does not hash to its pointer")
     out = dict(record)
     out["groups"] = man["groups"]
+    out["jar_order"] = man["jar_order"]
     return out
 
 
@@ -1165,7 +1190,7 @@ def cmd_fetch(a: argparse.Namespace) -> None:
     man = read_json(a.manifest)
     groups = man.get("groups") or {}
     pinset = man.get("pinset_sha256", "")
-    if pinset_sha256(groups) != pinset:
+    if manifest_pinset(man, a.manifest) != pinset:
         fail(EXIT_HASH, "manifest " + a.manifest + " does not hash to its pinset " + pinset)
     url = (a.url or os.environ.get("LB_DEPS_URL", "")).rstrip("/")
     if not url.endswith("/sets/" + pinset):
