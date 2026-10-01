@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
@@ -22,13 +22,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Cluster-scoped resources shared by every lakebench deployment (Stackable
-# SecretClass, the scratch StorageClass, etc.) must not be deleted while
-# another lakebench namespace still uses them. Deleting them out from under
-# a running parallel deploy has crashed other users' Hive Metastore pods
-# and killed other users' Spark PVC provisioning. See findings in the
-# deploy/destroy adversarial review.
-LAKEBENCH_NAMESPACE_LABEL = "app.kubernetes.io/managed-by=lakebench"
+# Cluster-scoped resources shared by every lakebench deployment must not be
+# deleted while another lakebench namespace may still use them. Deleting them
+# out from under a running parallel deploy has crashed other users' Hive
+# Metastore pods. The only such resources destroy still deletes are the two
+# legacy fixed-name SecretClasses (_legacy_secretclass_cleanup); the scratch
+# StorageClass is never deleted.
+_LEGACY_SECRETCLASSES = ("lakebench-s3-credentials-class", "lakebench-s3-ca-cert-class")
+
+# The PostgreSQL StatefulSet's claims: <claim template "data">-<statefulset>-
+# <ordinal> (templates/postgres/statefulset.yaml.j2). The claim template
+# carries no labels, and cannot gain one without making a v1.7 deploy over a
+# v1.6 StatefulSet fail (volumeClaimTemplates are immutable), so destroy
+# finds the claims by name (LB-187).
+_POSTGRES_PVC_RE = re.compile(r"^data-lakebench-postgres-\d+$")
 
 
 # LB-157: a namespace delete returns as soon as the API server accepts it; the
@@ -902,32 +909,88 @@ def _buckets_destroy_empties(
     return set(bplan.buckets), ""
 
 
-def _is_last_lakebench_namespace(namespace_names: list[str], current: str) -> bool:
-    """Return True iff `current` is the only lakebench-labeled namespace left.
+def _other_lakebench_namespaces(all_ns: list[Any], namespace: str) -> list[str]:
+    """Names of the lakebench namespaces in ``all_ns`` other than ``namespace``.
 
-    Extracted as a pure function so refcount behavior can be unit-tested
-    without a live cluster.
+    A namespace counts when it carries the ``lakebench.deployment/name``
+    annotation (PR-1 and later), or the ``app.kubernetes.io/managed-by`` or
+    ``app.kubernetes.io/name`` label set to ``lakebench`` (pre-PR-1
+    deployments predate the annotation). Every phase counts, Terminating
+    included: a namespace still being torn down can still have pods that
+    mount a legacy SecretClass, so counting it errs toward keeping the
+    shared object. The one refcount for ``_legacy_secretclass_cleanup``
+    (DEP-7).
     """
-    others = [n for n in namespace_names if n != current]
-    return not others
+    out: list[str] = []
+    for n in all_ns:
+        meta = getattr(n, "metadata", None)
+        name = getattr(meta, "name", None)
+        if meta is None or not name or name == namespace:
+            continue
+        anns = meta.annotations or {}
+        labels = meta.labels or {}
+        if (
+            anns.get("lakebench.deployment/name")
+            or labels.get("app.kubernetes.io/managed-by") == "lakebench"
+            or labels.get("app.kubernetes.io/name") == "lakebench"
+        ):
+            out.append(name)
+    return out
 
 
-def _other_lakebench_namespaces_exist(core_v1, current_namespace: str) -> bool:
-    """Return True if any lakebench-labeled namespace exists BESIDES the one
-    being destroyed. Fail-safe: on any listing error, return True (assume
-    others exist) so we don't delete a shared resource on flaky read.
+def _legacy_secretclass_cleanup(core_v1: Any, custom_api: Any, namespace: str) -> list[str]:
+    """Delete the legacy fixed-name SecretClasses when no other deployment remains.
+
+    ADR-F6: ``lakebench-s3-credentials-class`` and
+    ``lakebench-s3-ca-cert-class`` belong to pre-PR-2 deployments. They exist
+    only if a deployment was migrated with ``admin migrate-deployment``,
+    which copies them and does not delete them. They are cluster-scoped and
+    shared, so they go only when no other lakebench namespace is left
+    (``_other_lakebench_namespaces``). A namespace list that fails deletes
+    nothing. The cleanup is optional: every error is logged and swallowed.
+
+    Returns the names deleted.
     """
+    from kubernetes.client.rest import ApiException
+
     try:
-        ns_list = core_v1.list_namespace(label_selector=LAKEBENCH_NAMESPACE_LABEL)
-        names = [ns.metadata.name for ns in ns_list.items]
-    except Exception as e:
+        all_ns = core_v1.list_namespace().items
+    except Exception as e:  # noqa: BLE001
         logger.warning(
-            "Could not list lakebench namespaces (%s); assuming others exist "
-            "to avoid deleting a shared cluster-scoped resource.",
+            "Legacy SecretClass cleanup skipped: could not list namespaces (%s); "
+            "they are kept in case another deployment still uses them",
             e,
         )
-        return True
-    return not _is_last_lakebench_namespace(names, current_namespace)
+        return []
+    others = _other_lakebench_namespaces(all_ns, namespace)
+    if others:
+        logger.debug(
+            "Legacy SecretClasses kept: %d other lakebench namespace(s) remain (%s)",
+            len(others),
+            ", ".join(sorted(others)[:5]),
+        )
+        return []
+    deleted: list[str] = []
+    for legacy_name in _LEGACY_SECRETCLASSES:
+        try:
+            custom_api.delete_cluster_custom_object(
+                group="secrets.stackable.tech",
+                version="v1alpha1",
+                plural="secretclasses",
+                name=legacy_name,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                logger.debug("Legacy SecretClass %s not present", legacy_name)
+            else:
+                logger.warning("Legacy SecretClass %s not deleted: %s", legacy_name, e.reason)
+            continue
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Legacy SecretClass %s not deleted: %s", legacy_name, e)
+            continue
+        deleted.append(legacy_name)
+        logger.info("Removed legacy SecretClass %s (last lakebench deployment)", legacy_name)
+    return deleted
 
 
 def _buckets_hold_data(engine) -> bool | None:
@@ -2880,13 +2943,19 @@ def destroy_all(
             core_v1.delete_namespaced_service("lakebench-postgres", namespace)
         except ApiException as e:
             logger.debug("Postgres service delete skipped: %s", e.reason)
-        # Delete PVCs
-        pvcs = core_v1.list_namespaced_persistent_volume_claim(
-            namespace,
-            label_selector="app.kubernetes.io/component=postgres",
-        )
+        # The StatefulSet's claims, by name (LB-187: the claim template has
+        # no labels, so the old component-label selector matched none of
+        # ours and only ever could match another app's claim).
+        pvcs = core_v1.list_namespaced_persistent_volume_claim(namespace)
         for pvc in pvcs.items:
-            core_v1.delete_namespaced_persistent_volume_claim(pvc.metadata.name, namespace)
+            pvc_name = pvc.metadata.name
+            if not _POSTGRES_PVC_RE.match(pvc_name or ""):
+                continue
+            try:
+                core_v1.delete_namespaced_persistent_volume_claim(pvc_name, namespace)
+            except ApiException as e:
+                if e.status != 404:
+                    raise
         results.append(
             DeploymentResult(
                 component="postgres",
@@ -2992,64 +3061,9 @@ def destroy_all(
                 )
             except ApiException as e:
                 logger.debug("SecretClass %s delete skipped: %s", sc_name, e.reason)
-        # ADR-F6: legacy fixed-name SecretClasses (`lakebench-s3-credentials-class`,
-        # `lakebench-s3-ca-cert-class`) belong to pre-PR-2 deployments. They
-        # only exist in cluster state if this or another deployment was
-        # migrated from pre-PR-2 via `admin migrate-deployment` (which
-        # copies but does not delete). It is safe to clean them up when
-        # this destroy is the last remaining deployment that could
-        # depend on them -- i.e. no other lakebench-annotated namespace
-        # remains cluster-wide, and no annotationless legacy namespace
-        # is still around either. If either is present we leave the
-        # legacy names in place; the operator can reclaim them once the
-        # final deployment migrates and destroys.
-        try:
-            all_ns = core_v1.list_namespace().items
-
-            # ADR-F6b: a legacy pre-PR-1 deployment predates the
-            # annotation. Detect it via the managed-by LABEL that both
-            # PR-1 (annotated) and pre-PR-1 (annotationless) namespaces
-            # carry. Also skip cleanup on any namespace still in
-            # ``Active`` phase to avoid ripping the legacy SC out from
-            # under a mid-run Terminating tenant.
-            def _is_other_lakebench(n) -> bool:
-                if n.metadata.name == namespace:
-                    return False
-                anns = n.metadata.annotations or {}
-                labels = n.metadata.labels or {}
-                if anns.get("lakebench.deployment/name"):
-                    return True
-                if labels.get("app.kubernetes.io/managed-by") == "lakebench":
-                    return True
-                if labels.get("app.kubernetes.io/name") == "lakebench":
-                    return True
-                return False
-
-            other_lakebench = [n for n in all_ns if _is_other_lakebench(n)]
-            if not other_lakebench:
-                for legacy_name in (
-                    "lakebench-s3-credentials-class",
-                    "lakebench-s3-ca-cert-class",
-                ):
-                    try:
-                        custom_api.delete_cluster_custom_object(
-                            group="secrets.stackable.tech",
-                            version="v1alpha1",
-                            plural="secretclasses",
-                            name=legacy_name,
-                        )
-                        logger.info(
-                            "Removed legacy SecretClass %s (last migrated deployment)",
-                            legacy_name,
-                        )
-                    except ApiException as e:
-                        logger.debug(
-                            "Legacy SecretClass %s delete skipped: %s",
-                            legacy_name,
-                            e.reason,
-                        )
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Legacy SecretClass cluster-wide check skipped: %s", e)
+        # ADR-F6: the legacy fixed-name SecretClasses, only when no other
+        # lakebench namespace remains.
+        _legacy_secretclass_cleanup(core_v1, custom_api, namespace)
         results.append(
             DeploymentResult(
                 component="rbac",

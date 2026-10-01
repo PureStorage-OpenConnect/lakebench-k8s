@@ -192,9 +192,9 @@ The destroy engine follows a specific sequence to ensure clean removal:
    Server, or DuckDB).
 9. **Catalog** -- Removes the HiveCluster or Polaris deployment (or a Unity
    Catalog deployment, if the config selected `unity`; no recipe does).
-10. **PostgreSQL** -- Removes the StatefulSet and Service. Its data PVC is
-    removed with the namespace; with `create_namespace: false` it survives
-    destroy.
+10. **PostgreSQL** -- Removes the StatefulSet, the Service and the data PVC
+    (`data-lakebench-postgres-<n>`, found by name), also when
+    `create_namespace: false` keeps the namespace.
 11. **RBAC and Secrets** -- Removes the Spark ServiceAccount, Role,
     RoleBinding, and Secrets.
 12. **Namespace** -- Removes the namespace from the Spark Operator watch list,
