@@ -675,6 +675,40 @@ def _repetitions(metrics: Any) -> dict[str, Any]:
     }
 
 
+def _corpus_v2(
+    corpus: dict[str, Any],
+    problems: list[str],
+    inputs: Mapping[str, Any],
+    dg: Mapping[str, Any],
+    fleet: Any = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Add corpus id v2 (EVD-6) from the persisted run-end observation and,
+    for a series repetition, the inherited block (metrics/corpus_identity).
+    ``corpus.id`` (v1) is untouched. A record with neither input (every
+    v1.6 record) is returned unchanged."""
+    from lakebench.metrics.corpus_identity import corpus_v2_fields
+
+    obs = inputs.get("corpus_observation")
+    inherited = inputs.get("inherited_corpus")
+    v2 = corpus_v2_fields(
+        dict(inputs.get("corpus") or {}),
+        obs=obs if isinstance(obs, Mapping) else None,
+        inherited=inherited if isinstance(inherited, Mapping) else None,
+        model_version=(inputs.get("workload") or {}).get("generator_model_version"),
+        fleet_digest=dg.get("digest"),
+        fleet=fleet if isinstance(fleet, Mapping) else None,
+    )
+    if v2 is None:
+        return corpus, problems
+    if v2.replace is not None:
+        # Series case (b): repetition 1's block, verbatim (its problems
+        # included); this repetition's observation found no markers.
+        block = v2.replace
+        return block, list(block.pop("problems", None) or [])
+    corpus.update(v2.fields)
+    return corpus, [*problems, *v2.problems]
+
+
 def build_experiment(metrics: Any) -> dict[str, Any] | None:
     """The experiment block for *metrics* (a PipelineMetrics), or None when
     its snapshot has no experiment inputs (a record from before them)."""
@@ -768,6 +802,9 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     dg = _datagen(metrics, inputs)
     corpus, corpus_problems = _observed_corpus(dict(inputs.get("corpus") or {}), dg)
     corpus["datagen"] = dg
+    corpus, corpus_problems = _corpus_v2(
+        corpus, corpus_problems, inputs, dg, getattr(metrics, "datagen_fleet", None)
+    )
     if corpus_problems:
         corpus["problems"] = corpus_problems
     return {

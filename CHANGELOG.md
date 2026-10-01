@@ -87,6 +87,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Thrift deployments on Spark 4.1 with Iceberg 1.11 change runtime jar on
   their next deploy; other combinations are unchanged.
 
+### Added
+- **Corpus id v2 (EVD-6).** A run whose corpus observation was recorded
+  (the generator's per-node markers and `series.json` under the datagen
+  prefix, read once before the record is saved) gains in
+  `experiment.corpus`: `id_v2` (null when it cannot be computed, with the
+  reason in `id_v2_unavailable`), `id_version`, `args_sha256`, `declared`
+  (the config's corpus settings, for display), and, when markers exist,
+  `lineage`, `lineage_observed` and `lineage_notes`; `warnings` when the
+  config disagrees with the corpus it read. The id hashes the arguments the
+  generator resolved, the model version and the image lineage (the digest
+  in `series.json`, mapped through `src/lakebench/config/datagen_lineage.yaml`
+  and resolved when the run is observed), so a config edited after
+  generation does not change it. Markers that disagree, miss a node or
+  cycle, or come from different builds are corpus problems, which
+  `compare` reads as not comparable. `corpus.id` (v1) is unchanged, and no
+  stored id or identity digest moves.
+
 ## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and
