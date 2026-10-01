@@ -24,6 +24,8 @@ from lakebench.k8s.target import ClusterTarget, ContextConflictError, cli_args
 from tests.conftest import point_kubeconfig_at, write_kubeconfig
 
 # Loopback, nothing listening: an unmocked call is refused at once.
+pytestmark = pytest.mark.tool_pin
+
 SERVER_A = "https://127.0.0.1:1"
 SERVER_B = "https://127.0.0.1:2"
 

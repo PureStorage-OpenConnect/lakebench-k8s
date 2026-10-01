@@ -51,6 +51,9 @@ LINT_WHITELIST = {SRC_ROOT / "k8s" / "_pinned.py"}
 # ---------------------------------------------------------------------------
 
 
+pytestmark = pytest.mark.tool_pin
+
+
 def _make_cfg(context: str = "") -> SimpleNamespace:
     """Duck-typed stand-in for LakebenchConfig.platform.kubernetes.context."""
     return SimpleNamespace(platform=SimpleNamespace(kubernetes=SimpleNamespace(context=context)))

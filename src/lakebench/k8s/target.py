@@ -273,8 +273,14 @@ def cli_args(tool: str, explicit: Any = None) -> list[str]:
         return active.cli_args(tool)
     if name:
         return context_flag(tool, name)
-    pinned = pin_command(None)
+    pinned = _pin_on_first_tool_call()
     return pinned.cli_args(tool) if pinned is not None else []
+
+
+def _pin_on_first_tool_call() -> ClusterTarget | None:
+    """Pin the kubeconfig's current context for a tool call made before any
+    API client (:func:`pin_command` with no config)."""
+    return pin_command(None)
 
 
 def pin_command(cfg: Any = None) -> ClusterTarget | None:

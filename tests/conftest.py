@@ -91,6 +91,21 @@ def _reset_cluster_target():
     kclient.Configuration._default = saved
 
 
+@pytest.fixture(autouse=True)
+def _no_implicit_tool_pin(request, monkeypatch):
+    """``cli_args()`` pins the kubeconfig's current context on a tool call
+    made before any API client (SAF-7). Here that would be the hermetic
+    ``test`` context, which CI may or may not see depending on import order,
+    so tests that build a tool argv with no configured context get the
+    no-kubeconfig answer (no flag). Tests of the pin itself are marked
+    ``tool_pin`` and see the real behaviour."""
+    if request.node.get_closest_marker("tool_pin"):
+        return
+    from lakebench.k8s import target
+
+    monkeypatch.setattr(target, "_pin_on_first_tool_call", lambda: None)
+
+
 def point_kubeconfig_at(monkeypatch, path) -> None:
     """Make the kubernetes client's default kubeconfig location ``path``.
 

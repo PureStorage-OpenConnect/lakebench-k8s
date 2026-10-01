@@ -477,7 +477,7 @@ def test_destroy_removes_only_a_legacy_release_in_its_own_namespace():
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        if cmd[0] == "helm" and "list" in cmd:
+        if cmd[:2] == ["helm", "list"]:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=HELM_RELEASE_NAME)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
@@ -485,10 +485,7 @@ def test_destroy_removes_only_a_legacy_release_in_its_own_namespace():
     with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
         deployer.destroy()
     uninstalls = [c for c in calls if "uninstall" in c]
-    # The hermetic test kubeconfig's current context ("test") is pinned (SAF-7).
-    assert uninstalls == [
-        ["helm", "--kube-context", "test", "uninstall", HELM_RELEASE_NAME, "--namespace", "dep-a"]
-    ]
+    assert uninstalls == [["helm", "uninstall", HELM_RELEASE_NAME, "--namespace", "dep-a"]]
 
 
 def test_destroy_in_the_shared_namespace_never_uninstalls():
@@ -502,14 +499,6 @@ def test_destroy_in_the_shared_namespace_never_uninstalls():
     with patch("lakebench.deploy.observability.subprocess.run") as run:
         deployer.destroy()
     assert run.call_count == 0
-
-
-def _tool_verb(cmd: list[str]) -> list[str]:
-    """``[tool, verb]`` of an argv, past the pinned context flag (SAF-7)."""
-    rest = cmd[1:]
-    if rest[:1] in (["--kube-context"], ["--context"]):
-        rest = rest[2:]
-    return [cmd[0], *rest[:1]]
 
 
 @pytest.fixture
@@ -551,7 +540,7 @@ def test_deploy_reuses_an_existing_release_without_modifying_it(_lock):
     with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
         result = deployer.deploy()
     assert result.status == DeploymentStatus.SUCCESS
-    assert all(_tool_verb(c) == ["helm", "list"] for c in calls), calls
+    assert all(c[:2] == ["helm", "list"] for c in calls), calls
     assert "shared cluster component" in result.message
 
 
@@ -562,7 +551,7 @@ def test_deploy_installs_into_the_shared_namespace_only_when_absent(_lock):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        if _tool_verb(cmd) == ["helm", "list"]:
+        if cmd[:2] == ["helm", "list"]:
             return _helm_list_result([])
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
@@ -573,10 +562,10 @@ def test_deploy_installs_into_the_shared_namespace_only_when_absent(_lock):
         patch.object(ObservabilityDeployer, "_is_openshift", return_value=False),
     ):
         deployer.deploy()
-    installs = [c for c in calls if _tool_verb(c) == ["helm", "install"]]
+    installs = [c for c in calls if c[:2] == ["helm", "install"]]
     assert len(installs) == 1
     assert installs[0][installs[0].index("--namespace") + 1] == OBSERVABILITY_NAMESPACE
-    assert not [c for c in calls if _tool_verb(c) == ["helm", "upgrade"]]
+    assert not [c for c in calls if c[:2] == ["helm", "upgrade"]]
     assert _lock.called
 
 
@@ -594,7 +583,7 @@ def test_deploy_does_not_install_when_the_lookup_fails(_lock):
     with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
         result = deployer.deploy()
     assert result.status == DeploymentStatus.FAILED
-    assert not [c for c in calls if _tool_verb(c)[1] in ("install", "upgrade")]
+    assert not [c for c in calls if c[1] in ("install", "upgrade")]
 
 
 def test_helm_values_do_not_pin_scraping_to_one_namespace():
@@ -665,7 +654,7 @@ def test_deploy_refuses_to_reuse_a_release_that_is_not_deployed(_lock):
         result = deployer.deploy()
     assert result.status == DeploymentStatus.FAILED
     assert "status 'pending-install'" in result.message
-    assert all(_tool_verb(c) == ["helm", "list"] for c in calls), calls
+    assert all(c[:2] == ["helm", "list"] for c in calls), calls
 
 
 def test_destroy_reports_failure_when_it_cannot_list_releases():
@@ -705,7 +694,7 @@ def test_install_waits_for_prometheus_after_the_lease_and_fails_if_not_ready(_lo
     _lock.wait.side_effect = lambda ns, **_kw: order.append(f"wait {ns}") or "not Ready after 600s"
 
     def fake_run(cmd, **kw):
-        if _tool_verb(cmd) == ["helm", "list"]:
+        if cmd[:2] == ["helm", "list"]:
             return _helm_list_result([])
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
