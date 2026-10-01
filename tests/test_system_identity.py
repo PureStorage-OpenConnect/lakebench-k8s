@@ -61,13 +61,14 @@ def ca_file(tmp_path: Path) -> Path:
 @pytest.fixture
 def cluster(ca_file, monkeypatch):
     """A factory for fake K8sClients; also patches VersionApi."""
-    state: dict[str, Any] = {"version": "v1.32.13"}
+    state: dict[str, Any] = {"version": "v1.32.13", "timeouts": []}
 
     class VersionApi:
         def __init__(self, api_client):
             self.api_client = api_client
 
-        def get_code(self):
+        def get_code(self, **kw):
+            state["timeouts"].append(kw.get("_request_timeout"))
             return NS(git_version=state["version"])
 
     monkeypatch.setattr("kubernetes.client.VersionApi", VersionApi)
@@ -86,7 +87,8 @@ def cluster(ca_file, monkeypatch):
         class Core:
             api_client = NS(configuration=configuration)
 
-            def list_node(self):
+            def list_node(self, **kw):
+                state["timeouts"].append(kw.get("_request_timeout"))
                 if node_error:
                     raise node_error
                 return NS(items=items)
@@ -94,6 +96,7 @@ def cluster(ca_file, monkeypatch):
         class Custom:
             def get_cluster_custom_object(self, **kw):
                 assert kw["plural"] == "clusterversions"
+                state["timeouts"].append(kw.get("_request_timeout"))
                 if cv_error:
                     raise cv_error
                 version, st = openshift
@@ -408,3 +411,45 @@ def test_versionless_observation_never_matches(cluster) -> None:
     c = {**a, "version": "v1"}
     assert si.common_fingerprints(a, b)[0] != si.common_fingerprints(a, b)[1]
     assert si.common_fingerprints(a, c)[0] != si.common_fingerprints(a, c)[1]
+
+
+def test_every_cluster_read_has_a_timeout(cluster) -> None:
+    """An API server that stops answering must not hang the run."""
+    _observe(cluster())
+    assert cluster.state["timeouts"] == [si._REQUEST_TIMEOUT] * 3
+
+
+def test_sibling_clusters_are_not_one_system(cluster, tmp_path) -> None:
+    """Two clusters on one VM template, OpenShift release and storage share
+    every shape part; with one side's CA not observed they hash equal over
+    the common parts, but they are not known to be one system (review)."""
+    a = _observe(cluster())
+    b = _observe(cluster(ca=None, verify_ssl=False))
+    fa, fb, keys = si.common_fingerprints(a, b)
+    assert fa == fb and "api_server_ca" not in keys
+    assert si.same_system(a, b) is False
+    assert si.same_system(a, _observe(cluster())) is True
+    other_ca = tmp_path / "other.crt"
+    other_ca.write_bytes(b"other")
+    assert si.same_system(a, _observe(cluster(ca=other_ca))) is False
+
+
+def test_node_without_capacity_is_a_gap(cluster) -> None:
+    joining = _node(name="new")
+    joining.status.capacity = {}
+    out = _observe(cluster(nodes=[*_default_nodes(), joining]))
+    assert out["parts"]["nodes"] == {
+        "not_observed": "node new: ValueError: capacity not reported yet"
+    }
+
+
+def test_detect_backend_answers_are_pinned() -> None:
+    """storage_backend hashes detect_backend's answer. If this fails because
+    detect_backend learned a new backend, bump SYSTEM_IDENTITY_VERSION with
+    it, or stored v2 observations of an unchanged system stop matching."""
+    from lakebench.s3.conformance import detect_backend
+
+    assert si.SYSTEM_IDENTITY_VERSION == 2
+    assert detect_backend("http://10.0.1.50:80") == "unknown"
+    assert detect_backend("https://minio.example:9000") == "unknown"
+    assert detect_backend("https://s3.us-east-1.amazonaws.com") == "aws"

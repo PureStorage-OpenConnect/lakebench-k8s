@@ -26,7 +26,10 @@ cannot be read (RBAC, an unreachable endpoint, an unparseable node) is
 ``{"not_observed": reason}``, is left out of the hash, and sets ``partial``.
 ``type`` enters the hash. ``common_fingerprints(a, b)`` hashes two
 observations over the parts both observed, which is how two partial
-observations are compared (ER-10b).
+observations are compared, and ``same_system(a, b)`` is the one test ER-10b
+uses for "one system": equal over the common parts, and ``api_server_ca``
+among them, since it is the only part that names one cluster rather than
+its shape.
 
 Known limits, by design or not yet measured:
 
@@ -35,13 +38,25 @@ Known limits, by design or not yet measured:
   an ``oc login --certificate-authority`` one, or workstation against
   in-cluster) can hash differently; a client that skips TLS verification has
   no CA, so the part is not observed.
-* A node added, removed or replaced, or a capacity change that crosses a
-  GiB rounding boundary, changes the fingerprint: the fleet changed, which
-  is the safe direction (a system differential, never a false repeat).
+* A node added or removed, or a capacity change that crosses a GiB rounding
+  boundary, changes the fingerprint (the safe direction). A node replaced by
+  one of the same class, or a VM moved to a host with a newer CPU, does not:
+  the instance-type label on vSphere encodes CPU count and memory only, and
+  the host CPU is visible only through the NFD cpu-model labels. Such a
+  hardware change reads as the same system.
+* A node that has not yet reported its capacity (still registering) makes
+  the node part a gap rather than a zero-sized class.
 * One storage system reached by IP and by DNS name reads as two systems.
-* With no cluster part observed (a local run, or every read refused), only
-  the endpoint, the Server header and the scratch setting remain, which are
-  mostly config. ER-10b must not call such a pair a repeat.
+* Without ``api_server_ca`` on both sides (a local run, a client that skips
+  TLS verification, a refused read), the remaining parts describe a
+  cluster's shape and version, not which cluster: two sibling clusters on
+  one VM template and one storage system hash equal. ``same_system`` is
+  False for such a pair.
+* ``storage_backend`` hashes ``detect_backend``'s answer; a change to that
+  heuristic changes the part for an unchanged system, so it needs a bump of
+  ``SYSTEM_IDENTITY_VERSION`` (pinned by a test).
+* Each cluster read has a request timeout (``_REQUEST_TIMEOUT``); the S3 HEAD
+  is bounded by the S3 client's own retries and timeouts.
 
 Nothing here writes to the cluster or to S3, and ``observe_system`` never
 raises.
@@ -92,6 +107,10 @@ _NFD_CPU_MODEL = (
 
 _GIB = 1024**3
 
+#: (connect, read) seconds for each Kubernetes read: an API server that
+#: stops answering must not hang the run (the client default waits forever).
+_REQUEST_TIMEOUT = (5, 15)
+
 
 def not_observed(reason: str) -> dict[str, str]:
     return {"not_observed": reason}
@@ -137,6 +156,15 @@ def common_fingerprints(a: Mapping[str, Any], b: Mapping[str, Any]) -> tuple[str
     )
 
 
+def same_system(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """True when *a* and *b* are evidence of one system: equal over the
+    parts both observed, and those include ``api_server_ca``. Without the
+    CA on both sides the common parts describe a cluster's shape, which two
+    clusters can share, so the answer is False (not known to be one)."""
+    fa, fb, keys = common_fingerprints(a, b)
+    return "api_server_ca" in keys and fa == fb
+
+
 def _version_of(obs: Mapping[str, Any]) -> int:
     """The observation's identity version; -1 when missing or malformed, so
     it never matches a current observation."""
@@ -180,7 +208,9 @@ def _kubernetes(k8s: Any) -> Any:
     from kubernetes import client
 
     try:
-        version = client.VersionApi(k8s._core_v1.api_client).get_code()
+        version = client.VersionApi(k8s._core_v1.api_client).get_code(
+            _request_timeout=_REQUEST_TIMEOUT
+        )
     except Exception as exc:  # noqa: BLE001 -- recorded as not observed
         return not_observed(f"kubernetes version: {_reason(exc)}")
     return getattr(version, "git_version", None)
@@ -189,7 +219,11 @@ def _kubernetes(k8s: Any) -> Any:
 def _openshift(k8s: Any) -> Any:
     try:
         cv = k8s._custom.get_cluster_custom_object(
-            group="config.openshift.io", version="v1", plural="clusterversions", name="version"
+            group="config.openshift.io",
+            version="v1",
+            plural="clusterversions",
+            name="version",
+            _request_timeout=_REQUEST_TIMEOUT,
         )
     except Exception as exc:  # noqa: BLE001
         if getattr(exc, "status", None) == 404:
@@ -221,6 +255,8 @@ def _hardware_class(node: Any) -> dict[str, Any]:
     labels = (node.metadata.labels or {}) if node.metadata else {}
     status = node.status
     capacity = (status.capacity or {}) if status else {}
+    if not capacity.get("cpu") or not capacity.get("memory"):
+        raise ValueError("capacity not reported yet")
     info = getattr(status, "node_info", None) if status else None
     model = next((labels[k] for k in _INSTANCE_TYPE_LABELS if labels.get(k)), None)
     if model is None and any(labels.get(k) for k in _NFD_CPU_MODEL):
@@ -228,15 +264,15 @@ def _hardware_class(node: Any) -> dict[str, Any]:
     return {
         "role": "control-plane" if any(k in labels for k in _CONTROL_PLANE_LABELS) else "worker",
         "architecture": getattr(info, "architecture", None),
-        "cpu": _cpu_cores(str(capacity.get("cpu", "0"))),
-        "memory_gib": _memory_gib(str(capacity.get("memory", "0"))),
+        "cpu": _cpu_cores(str(capacity["cpu"])),
+        "memory_gib": _memory_gib(str(capacity["memory"])),
         "model": model,
     }
 
 
 def _nodes(k8s: Any) -> Any:
     try:
-        nodes = k8s._core_v1.list_node()
+        nodes = k8s._core_v1.list_node(_request_timeout=_REQUEST_TIMEOUT)
     except Exception as exc:  # noqa: BLE001
         return not_observed(f"node list: {_reason(exc)}")
     counts: dict[str, dict[str, Any]] = {}
