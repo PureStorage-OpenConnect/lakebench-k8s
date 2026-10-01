@@ -1,7 +1,8 @@
 """Shipped code and docs gain no new bug-id or internal-goal citations (OSS-3).
 
 ``LB-NNN`` bug ids, ``AML-GOALS``, ``GOALS P<n>``, ``MISSION-v1.<n>``, the
-v1.7 requirement and work-item ids (``QR-13``, ``PRC-5``, ``SD-8a``) and
+v1.7 requirement and work-item ids (``QR-13``, ``PRC-5``, ``AML-3``,
+``SD-8a``), the older ``OD-<n>`` and ``SP-<n>`` decision ids and
 ``gotcha <n>`` point at local files a reader of the published package cannot
 open. This is the
 ratchet half of OSS-3: per-file counts are pinned in
@@ -28,8 +29,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COUNTS = ROOT / "tests" / "fixtures" / "citation_counts.json"
 
-#: The v1.7 requirement families (SPEC) and work-item prefixes (DESIGN index).
-_PLAN_IDS = "QR|PC|SD|CC|CD|ER|AM|DEP|QA|OSS|PRC|SAF|CFG|DAT|REL|V16"
+#: The v1.7 requirement families (SPEC) and work-item prefixes (DESIGN index),
+#: every family the v1.7 plan files use three or more times, plus the older
+#: OD- and SP- decision ids that shipped code cites.
+_PLAN_IDS = (
+    "QR|PC|SD|CC|CD|ER|AM|DEP|QA|OSS|PRC|SAF|CFG|DAT|REL|V16|AML|ML|EVD|CLI|RPT|C36|OD|RR|SP"
+)
 CITATION = re.compile(
     r"\bLB-[0-9]{3}\b|AML-GOALS|\bGOALS P[0-9]|MISSION-v1\.[0-9]"
     rf"|\b(?:{_PLAN_IDS})-[0-9]+[a-z]?\b"
@@ -169,9 +174,19 @@ def test_pattern_matches_the_citation_forms():
     )
     assert hits == ["LB-044", "AML-GOALS", "GOALS P8", "MISSION-v1.6"]
     hits = CITATION.findall(
-        "QR-13, PRC-5 and SD-8a; (gotcha 34) and Gotcha 6; not CC-BY-4.0, XQR-1, AM-x"
+        "QR-13, PRC-5 and SD-8a; AML-3, EVD-12, OD-6; (gotcha 34) and Gotcha 6; "
+        "not CC-BY-4.0, XQR-1, AM-x, C360-s1"
     )
-    assert hits == ["QR-13", "PRC-5", "SD-8a", "gotcha 34", "Gotcha 6"]
+    assert hits == [
+        "QR-13",
+        "PRC-5",
+        "SD-8a",
+        "AML-3",
+        "EVD-12",
+        "OD-6",
+        "gotcha 34",
+        "Gotcha 6",
+    ]
 
 
 def test_planted_repo_ignores_an_inherited_git_dir(tmp_path, monkeypatch):
