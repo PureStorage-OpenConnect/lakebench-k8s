@@ -287,12 +287,10 @@ class RunInterrupt:
             for entry in todo:
                 if self.skip:
                     break
-                left_s = deadline - time.monotonic()
-                if left_s <= 1.0:
+                if _timeout(deadline) is None:
                     _move(record, entry.key, "left", "not reached: the cleanup deadline passed")
                     continue
-                timeout = (CLEANUP_CONNECT_TIMEOUT_S, min(CLEANUP_READ_TIMEOUT_S, left_s))
-                outcome, reason = self._stop_one(entry, api_client, timeout)
+                outcome, reason = self._stop_one(entry, api_client, deadline)
                 _move(record, entry.key, outcome, reason)
                 if outcome == "stopped":
                     _print(console, f"  stopped {entry.key}")
@@ -313,9 +311,7 @@ class RunInterrupt:
                 f"-n {self.namespace}",
             )
 
-    def _stop_one(
-        self, entry: Owned, api_client: Any, timeout: tuple[float, float]
-    ) -> tuple[str, str]:
+    def _stop_one(self, entry: Owned, api_client: Any, deadline: float) -> tuple[str, str]:
         """``("stopped" | "left" | "absent", reason)``; "absent": nothing was there."""
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
@@ -323,7 +319,7 @@ class RunInterrupt:
         uid = entry.uid
         try:
             if uid is None:
-                found = self._uid_of_ours(entry, api_client, timeout)
+                found = self._uid_of_ours(entry, api_client, _timeout(deadline) or (1.0, 1.0))
                 if found is None:
                     return "left", entry.note
                 if found == "absent":
@@ -331,6 +327,9 @@ class RunInterrupt:
                 if found == "not proven":
                     return "left", _NOT_PROVEN
                 uid = found
+            timeout = _timeout(deadline)
+            if timeout is None:
+                return "left", "not reached: the cleanup deadline passed"
             body = k8s_client.V1DeleteOptions(
                 preconditions=k8s_client.V1Preconditions(uid=uid),
                 propagation_policy="Background",
@@ -419,6 +418,16 @@ class RunInterrupt:
         if not ours or not isinstance(uid, str) or not uid:
             return "not proven"
         return uid
+
+
+def _timeout(deadline: float) -> tuple[float, float] | None:
+    """(connect, read) for one cleanup call, both within the deadline; None
+    when less than a second of it is left."""
+    left_s = deadline - time.monotonic()
+    if left_s <= 1.0:
+        return None
+    connect = min(CLEANUP_CONNECT_TIMEOUT_S, left_s / 2)
+    return connect, min(CLEANUP_READ_TIMEOUT_S, left_s - connect)
 
 
 def _cleanup_api_client() -> Any:

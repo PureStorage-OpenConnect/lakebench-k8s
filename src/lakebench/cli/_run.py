@@ -2259,6 +2259,8 @@ def run(
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
                     if datagen_result.status == DeploymentStatus.SUCCESS:
                         _interrupt.datagen_created()
+                    else:
+                        _interrupt.not_created("Job", "lakebench-datagen")
                     if datagen_result.status != DeploymentStatus.SUCCESS:
                         # Fatal: continuing would rebuild this cycle from the
                         # previous cycle's bronze, and incremental silver would
@@ -3143,11 +3145,16 @@ def run(
         # signal cannot leave the record without its interrupt block; then
         # this run's unfinished objects are deleted, by uid. Not re-raised:
         # the finally writes the record and exits 130.
-        from lakebench.modules.pipeline_engines.spark.job import FAILURE_STATES, SUCCESS_STATES
+        from lakebench.modules.pipeline_engines.spark.job import SUCCESS_STATES
 
         # The monitor may have seen the stage end before the interrupt landed
-        # (it reads the driver log after the terminal state).
-        _inflight_failed = _inflight is not None and _inflight_state in FAILURE_STATES
+        # (it reads the driver log after the terminal state). Only FAILING
+        # and FAILED: SUBMISSION_FAILED is retried by the operator, and the
+        # monitor keeps waiting through it.
+        _inflight_failed = _inflight is not None and _inflight_state in (
+            JobState.FAILING,
+            JobState.FAILED,
+        )
         if _inflight is not None and _inflight_state in SUCCESS_STATES:
             _interrupt.finished("SparkApplication", f"lakebench-{_inflight[0]}")
         _interrupted = _interrupt.seal(
@@ -3217,9 +3224,11 @@ def run(
                 console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
         if _interrupted is None and _interrupt.late_signal():
             # Interrupted while the results were gathered: sealed the same way.
+            # A run that had already failed keeps its own exit code.
             _interrupted = _interrupt.seal(at_stage="results", prior_failure=not pipeline_success)
+            if pipeline_success:
+                _pipeline_exit_code = EXIT_INTERRUPTED
             pipeline_success = False
-            _pipeline_exit_code = EXIT_INTERRUPTED
 
         # Always save metrics, even on failure
         run_metrics = collector.end_run(success=pipeline_success)
@@ -3312,6 +3321,17 @@ def run(
                         )
                     )
 
+            if _interrupted is None and _interrupt.late_signal():
+                # A signal since the check above (Prometheus, the scorecard):
+                # the record still says so. After the save, it is too late.
+                _interrupted = _interrupt.seal(
+                    at_stage="results", prior_failure=not pipeline_success
+                )
+                if pipeline_success:
+                    _pipeline_exit_code = EXIT_INTERRUPTED
+                pipeline_success = False
+                run_metrics.success = False
+                run_metrics.interrupted = _interrupted
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")

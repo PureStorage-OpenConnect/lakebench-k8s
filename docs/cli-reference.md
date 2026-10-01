@@ -319,7 +319,9 @@ something had already failed before the interrupt, never PASSED), and its
 left and skipped. After an interrupt the run does not measure bucket sizes
 or read Prometheus. A signal that arrives while the results are being
 gathered at the end of a run does not stop the record being written; the
-record is sealed the same way, at stage `results`.
+record is sealed the same way, at stage `results` (a run that had already
+failed keeps its own exit code). One that arrives after the record is
+saved changes nothing.
 
 Press Ctrl-C a second time to cut the cleanup short: what it had not reached
 is recorded as skipped (a quick double press can skip all of it). A third

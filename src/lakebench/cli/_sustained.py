@@ -2776,6 +2776,9 @@ def _run_sustained(
     _interrupt.install()
     _stage = "operator-check"
     _interrupted: dict | None = None
+    # Exit 130 at the end: an interrupt, or a late signal in a run that had
+    # not failed (a failed run keeps its own exit).
+    _exit_interrupted = False
 
     try:
         # Check Spark operator
@@ -3877,6 +3880,7 @@ def _run_sustained(
         _interrupted = _interrupt.seal(at_stage=_stage, prior_failure=not pipeline_success, exc=e)
         pipeline_success = False
         streams_stopped = True
+        _exit_interrupted = True
         console.print()
         print_warning(f"Interrupted by {_interrupted['signal']} during {_stage}")
         _interrupt.stop_owned(_interrupted, console)
@@ -3897,6 +3901,7 @@ def _run_sustained(
         if _interrupted is None and _interrupt.late_signal():
             # Interrupted while the run was being wound up: sealed the same way.
             _interrupted = _interrupt.seal(at_stage="results", prior_failure=not pipeline_success)
+            _exit_interrupted = pipeline_success
             pipeline_success = False
 
         run_metrics = collector.end_run(success=pipeline_success)
@@ -3957,6 +3962,16 @@ def _run_sustained(
             except Exception as e:
                 console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
+            if _interrupted is None and _interrupt.late_signal():
+                # A signal since the check above (Prometheus, the scores):
+                # the record still says so. After the save, it is too late.
+                _interrupted = _interrupt.seal(
+                    at_stage="results", prior_failure=not pipeline_success
+                )
+                _exit_interrupted = pipeline_success
+                pipeline_success = False
+                run_metrics.success = False
+                run_metrics.interrupted = _interrupted
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
@@ -3972,5 +3987,5 @@ def _run_sustained(
             ),
         )
         _interrupt.restore()
-        if _interrupted is not None:
+        if _exit_interrupted:
             raise typer.Exit(EXIT_INTERRUPTED)

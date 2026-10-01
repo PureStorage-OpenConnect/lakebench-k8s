@@ -320,6 +320,8 @@ def test_interrupt_in_the_benchmark_of_a_good_run_reads_interrupted(
     [
         ("COMPLETED", "INTERRUPTED", "interrupted"),
         ("FAILED", "FAILED", "FAILED (interrupted before its result was read)"),
+        # The operator retries a failed submission; the stage has not failed.
+        ("SUBMISSION_FAILED", "INTERRUPTED", "interrupted"),
     ],
 )
 def test_interrupt_after_the_stage_ended(
@@ -341,6 +343,56 @@ def test_interrupt_after_the_stage_ended(
     if ended == "COMPLETED":
         assert "lakebench-silver-build" in rec.apps
         assert record["interrupted"]["stopped"] == []
+    else:
+        assert "lakebench-silver-build" not in rec.apps
+
+
+def test_interrupt_while_a_failed_stage_is_parsed_reads_failed(
+    tmp_path, monkeypatch, sentinel_sigterm
+):
+    """silver-build failed; Ctrl-C lands while its driver log is parsed,
+    before its job is recorded: the run still reads FAILED."""
+    from lakebench.metrics.collector import MetricsCollector
+    from tests.harness.run_harness import send_interrupt
+
+    real = MetricsCollector.parse_driver_logs
+
+    def parse(self, logs, stage, *a, **k):
+        if stage == "silver-build":
+            send_interrupt("SIGINT")
+        return real(self, logs, stage, *a, **k)
+
+    monkeypatch.setattr(MetricsCollector, "parse_driver_logs", parse)
+    trace, rec, record = _run("batch_c360_silver_fails", tmp_path, monkeypatch)
+    assert trace["exit_code"] == 130
+    assert record["interrupted"]["prior_failure"] is True
+    assert record["verdict"]["status"] == "FAILED"
+
+
+def test_failed_datagen_deploy_registers_no_job(tmp_path, monkeypatch, sentinel_sigterm):
+    """deploy() reported failure: whatever Job holds the name is not this
+    run's, and an interrupt does not touch it."""
+    from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+    from tests.harness import run_harness
+
+    def failed_deploy(self, *args, **kwargs):
+        self._rec.add("Datagen", "deploy")
+        return DeploymentResult(
+            component="datagen", status=DeploymentStatus.FAILED, message="apply failed"
+        )
+
+    monkeypatch.setattr(run_harness.FakeDatagenDeployer, "deploy", failed_deploy)
+    trace, rec, record = _run(
+        "batch_c360",
+        tmp_path,
+        monkeypatch,
+        argv=["--generate", "--yes"],
+        interrupt=("datagen", "SIGINT"),
+    )
+    assert trace["exit_code"] == 130
+    assert record["interrupted"]["stopped"] == []
+    assert record["interrupted"]["left"] == []
+    assert not _deletes(rec, "Job")
 
 
 def test_interrupt_in_the_score_stage_stops_the_score_app(tmp_path, monkeypatch, sentinel_sigterm):
@@ -470,7 +522,8 @@ def test_continuous_signal_while_streams_stop_in_the_finally_keeps_the_record(
     """A run that failed after the window (an error, not an interrupt) is
     stopping its streams by name in the finally when SIGTERM arrives: the
     streams are all stopped, the record is still written, sealed at
-    "results" and FAILED, and the exit is 130."""
+    "results" and FAILED, and the run's own error still ends it (a failed
+    run keeps its exit)."""
     import lakebench.cli._sustained as sustained
     import lakebench.metrics.continuous_window as window
     from tests.harness.run_harness import send_interrupt
@@ -486,9 +539,9 @@ def test_continuous_signal_while_streams_stop_in_the_finally_keeps_the_record(
         return real_stop(k8s, ns, submitted)
 
     monkeypatch.setattr(sustained, "_stop_streams", stop)
-    trace, rec, record = _run("continuous_c360", tmp_path, monkeypatch)
-    assert trace["exit_code"] == 130
-    assert rec.live_streams == set()
+    with pytest.raises(RuntimeError, match="window error"):
+        _run("continuous_c360", tmp_path, monkeypatch)
+    record = saved_record(tmp_path)
     assert record["interrupted"]["at_stage"] == "results"
     assert record["interrupted"]["signal"] == "SIGTERM"
     assert record["interrupted"]["prior_failure"] is True
