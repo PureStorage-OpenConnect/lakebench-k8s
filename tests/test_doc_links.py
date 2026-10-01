@@ -45,6 +45,9 @@ PUBLISHED_README_PATHS = (
     "docs/troubleshooting.md",
 )
 PUBLISHED_README_ANCHORS = (("docs/compatibility-matrix.md", "support-states"),)
+#: `tree/main/<dir>` links: the 1.6.0 README links `examples`, and the
+#: pyproject Documentation URL is `tree/main/docs`.
+PUBLISHED_README_DIRS = ("docs", "examples")
 
 
 def _repo(tmp_path: Path, files: dict[str, str]) -> Path:
@@ -102,10 +105,14 @@ def test_slug_follows_github():
         "x-y",
     }
     assert cdr.slug("Snake_case and **bold** [link](u)") == "snake_case-and-bold-link"
+    # Code spans keep their underscores; only matched emphasis pairs drop.
+    assert cdr.slug("The `_JOB_PROFILES` table") == "the-_job_profiles-table"
+    assert cdr.slug("`__init__.py` and _em_ and foo_ bar") == "__init__py-and-em-and-foo_-bar"
 
 
 def published_path_problems(root: Path) -> list[str]:
     problems = [f"{p}: missing" for p in PUBLISHED_README_PATHS if not (root / p).is_file()]
+    problems += [f"{d}/: missing" for d in PUBLISHED_README_DIRS if not (root / d).is_dir()]
     for page, anchor in PUBLISHED_README_ANCHORS:
         if (root / page).is_file() and anchor not in cdr.anchors((root / page).read_text()):
             problems.append(f"{page}#{anchor}: no such anchor")
@@ -124,6 +131,7 @@ def test_published_path_check_fails_without_the_page(tmp_path):
     repo = _repo(tmp_path, files)
     assert published_path_problems(repo) == [
         "docs/aml-scoring.md: missing",
+        "examples/: missing",
         "docs/compatibility-matrix.md#support-states: no such anchor",
     ]
 
