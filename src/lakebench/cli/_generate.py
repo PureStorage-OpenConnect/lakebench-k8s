@@ -18,6 +18,7 @@ from lakebench.config import (
 )
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError, get_k8s_client
+from lakebench.k8s.target import ContextConflictError
 
 from ._helpers import (
     _journal_safe,
@@ -128,6 +129,8 @@ def generate(
             namespace=cfg.get_namespace(),
         )
         cluster_cap = k8s_for_cap.get_cluster_capacity()
+    except ContextConflictError:
+        raise
     except Exception as e:
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None

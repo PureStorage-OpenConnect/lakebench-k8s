@@ -86,10 +86,14 @@ class TrinoExecutor:
         return pod
 
     def _kubectl_prefix(self) -> list[str]:
-        """The ``kubectl`` argv prefix with the configured context pinned."""
-        if self.kube_context:
-            return ["kubectl", "--context", self.kube_context]
-        return ["kubectl"]
+        """The ``kubectl`` argv prefix with the configured context pinned.
+
+        With no configured context, the process's active cluster target
+        supplies it (SAF-7, ``k8s/target.py``).
+        """
+        from lakebench.k8s.target import cli_args
+
+        return ["kubectl", *cli_args("kubectl", self.kube_context)]
 
     def _exec_cmd(self, pod: str, *trino_args: str) -> list[str]:
         return [

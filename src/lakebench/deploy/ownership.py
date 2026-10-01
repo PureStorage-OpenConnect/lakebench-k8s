@@ -167,6 +167,18 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
     except ImportError:  # pragma: no cover -- kubernetes lib is a hard dep
         return None
 
+    if not context:
+        # No configured context: fingerprint the cluster this process's API
+        # clients are pinned to (SAF-7), not whatever the kubeconfig's
+        # current context has become since.
+        from lakebench.k8s.target import active_target
+
+        pinned = active_target()
+        if pinned is not None:
+            if pinned.in_cluster:
+                return _try_incluster_fingerprint()
+            context = pinned.context
+
     try:
         contexts, active = _kube_config.list_kube_config_contexts()
     except Exception as e:  # noqa: BLE001 -- kubeconfig may be missing
@@ -1165,6 +1177,11 @@ def check_data_ownership(
                     "buckets are handled by name without an identity record."
                 ),
             )
+        if not context_name:
+            from lakebench.k8s.target import active_target
+
+            pinned = active_target()
+            context_name = pinned.label if pinned is not None else ""
         ctx = context_name or "(current context)"
         return DataOwnershipDecision(
             allowed=False,

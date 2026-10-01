@@ -13,6 +13,8 @@ from typing import Any
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
+from lakebench.k8s.target import ClusterTarget, ContextConflictError
+
 logger = logging.getLogger(__name__)
 
 # Status codes worth retrying (transient server errors + rate limiting)
@@ -148,22 +150,35 @@ class K8sClient:
     high-level operations for Lakebench.
     """
 
-    def __init__(self, context: str = "", namespace: str = ""):
-        """Initialize Kubernetes client."""
-        self.context_name = context
+    def __init__(
+        self,
+        context: str | None = "",
+        namespace: str = "",
+        *,
+        target: ClusterTarget | None = None,
+    ):
+        """Initialize Kubernetes client.
+
+        The client is pinned to one :class:`ClusterTarget` (SAF-7): ``target``
+        when given, else the one ``context`` resolves to. An empty context
+        resolves to the process's active target, or to the kubeconfig's
+        current context by name. A different context from the one already
+        active raises :class:`ContextConflictError`.
+        """
         self._namespace = namespace
 
         try:
-            if context:
-                config.load_kube_config(context=context)
-            else:
-                # Try in-cluster config first, fall back to kubeconfig
-                try:
-                    config.load_incluster_config()
-                except config.ConfigException:
-                    config.load_kube_config()
+            resolved = (
+                target if target is not None else ClusterTarget.resolve(context=context or "")
+            )
+            self.target = resolved.activate()
+        except ContextConflictError:
+            raise
         except Exception as e:
             raise K8sConnectionError(f"Failed to load Kubernetes config: {e}")  # noqa: B904
+        # The resolved context name, so kubectl subprocesses this client
+        # runs use the same context as its API clients.
+        self.context_name = self.target.context or ""
 
         self._core_v1 = client.CoreV1Api()
         self._apps_v1 = client.AppsV1Api()
@@ -177,34 +192,42 @@ class K8sClient:
         if self._namespace:
             return self._namespace
 
-        # Try to get from kubeconfig
-        try:
-            contexts, active = config.list_kube_config_contexts()
-            if active and "namespace" in active.get("context", {}):
-                return active["context"]["namespace"]
-        except Exception as e:
-            logger.debug("Could not read namespace from kubeconfig: %s", e)
+        # The pinned context's namespace from the kubeconfig.
+        ctx = self._pinned_context_entry()
+        if ctx and "namespace" in ctx.get("context", {}):
+            return ctx["context"]["namespace"]
 
         return "default"
 
+    def _pinned_context_entry(self) -> dict[str, Any] | None:
+        """The kubeconfig entry of this client's pinned context, or None."""
+        if not self.context_name:
+            return None
+        try:
+            contexts, _current = config.list_kube_config_contexts()
+        except Exception as e:
+            logger.debug("Could not list kubeconfig contexts: %s", e)
+            return None
+        for entry in contexts or []:
+            if entry.get("name") == self.context_name:
+                return entry
+        return None
+
     def get_current_context(self) -> K8sContext | None:
-        """Get information about the current context.
+        """Get information about this client's pinned context.
 
         Returns:
             K8sContext with context details, or None if unavailable
         """
-        try:
-            contexts, active = config.list_kube_config_contexts()
-            if active:
-                ctx = active.get("context", {})
-                return K8sContext(
-                    name=active.get("name", ""),
-                    cluster=ctx.get("cluster", ""),
-                    user=ctx.get("user", ""),
-                    namespace=ctx.get("namespace"),
-                )
-        except Exception as e:
-            logger.debug("Could not list kubeconfig contexts: %s", e)
+        entry = self._pinned_context_entry()
+        if entry:
+            ctx = entry.get("context", {})
+            return K8sContext(
+                name=entry.get("name", ""),
+                cluster=ctx.get("cluster", ""),
+                user=ctx.get("user", ""),
+                namespace=ctx.get("namespace"),
+            )
         return None
 
     def test_connectivity(self) -> tuple[bool, str]:
@@ -1023,14 +1046,27 @@ class K8sClient:
             return 1, "", str(e)
 
 
-def get_k8s_client(context: str = "", namespace: str = "") -> K8sClient:
-    """Create a Kubernetes client.
+def get_k8s_client(
+    *,
+    context: str | None = None,
+    target: ClusterTarget | None = None,
+    namespace: str = "",
+) -> K8sClient:
+    """Create a Kubernetes client pinned to one cluster context (SAF-7).
+
+    Callers pass ``context=cfg.platform.kubernetes.context`` (empty means
+    the kubeconfig's current context, resolved once per process) or a
+    ``target``. Passing neither is a programming error, and the context
+    pinning lint fails on such a call.
 
     Args:
-        context: Kubernetes context (empty = current)
+        context: Kubernetes context from the config ("" = resolve current)
+        target: An already resolved target
         namespace: Default namespace (empty = from context)
 
     Returns:
         K8sClient instance
     """
-    return K8sClient(context=context, namespace=namespace)
+    if context is None and target is None:
+        raise TypeError("get_k8s_client() needs context= or target=")
+    return K8sClient(context=context or "", namespace=namespace, target=target)

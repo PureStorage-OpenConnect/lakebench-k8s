@@ -20,8 +20,9 @@ The helpers accept, uniformly:
 * a raw ``str`` context name (or ``""`` for "use current context"),
 * ``None`` for "no config, use current context".
 
-Empty and ``None`` both mean "do not append the flag" -- kubectl and helm
-already fall back to the current context in that case.
+Empty and ``None`` both mean "no configured context": the flag then names
+the context of the process's active ``ClusterTarget`` (``k8s/target.py``),
+and is left off only when no target is active.
 """
 
 from __future__ import annotations
@@ -55,14 +56,16 @@ def _resolve_context(cfg_or_context: Any) -> str | None:
 
 
 def _pinned_argv(tool: str, cfg_or_context: Any, args: list[str]) -> list[str]:
-    """Assemble the argv for ``tool`` with ``--context``/``--kube-context`` pinned."""
-    context = _resolve_context(cfg_or_context)
-    if not context:
-        return [tool, *args]
-    if tool == "helm":
-        return [tool, "--kube-context", context, *args]
-    # kubectl and oc share the same flag spelling.
-    return [tool, "--context", context, *args]
+    """Assemble the argv for ``tool`` with ``--context``/``--kube-context`` pinned.
+
+    With no configured context the flag comes from the process's active
+    :class:`~lakebench.k8s.target.ClusterTarget` (SAF-7), so a subprocess
+    and the API clients use the same context even when the kubeconfig's
+    current context changes mid-run.
+    """
+    from lakebench.k8s.target import cli_args
+
+    return [tool, *cli_args(tool, _resolve_context(cfg_or_context)), *args]
 
 
 def pinned_kubectl(

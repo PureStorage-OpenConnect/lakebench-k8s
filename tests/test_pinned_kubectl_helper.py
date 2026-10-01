@@ -3,8 +3,10 @@
 Two things are checked here:
 
 1. The helper functions themselves append the correct
-   ``--context``/``--kube-context`` flag when a config is set and pass
-   the argv through unchanged when it is not.
+   ``--context``/``--kube-context`` flag when a config is set and, with
+   no cluster target active in the process, pass the argv through
+   unchanged when it is not (with a target active they use its context;
+   ``tests/test_k8s_target.py``).
 2. A repo-wide lint (AST-based) refuses any bare ``subprocess.run``,
    ``subprocess.Popen``, ``subprocess.check_call``, ``subprocess.check_output``
    or ``subprocess.call`` whose first positional argument is a list
