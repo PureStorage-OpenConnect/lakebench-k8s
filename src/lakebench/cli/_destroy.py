@@ -387,6 +387,20 @@ def destroy(
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
+    mismatch = next((r for r in results if (r.details or {}).get("incarnation_mismatch")), None)
+    if mismatch is not None:
+        # Nothing was deleted: a refusal (exit 3), not a partial teardown.
+        from lakebench.exit_codes import SafetyRefusal
+
+        _journal_safe(j.end_command, success=False, message=mismatch.message)
+        _journal_safe(j.close_session)
+        raise SafetyRefusal(
+            mismatch.message,
+            why="the namespace was redeployed after this command checked it",
+            next="check which deployment the namespace now holds before destroying it",
+            path="destroy.incarnation_mismatch",
+        )
+
     # Summary
     destroy_elapsed = int(time.time() - destroy_start)
     console.print()

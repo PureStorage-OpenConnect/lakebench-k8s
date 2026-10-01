@@ -534,7 +534,8 @@ re-created the name, destroy stops and leaves the new deployment alone.
 
 Exit codes: `0` everything removed; `1` a step failed (see the summary);
 `3` the user declined the confirmation prompt, or a nameless config could
-not prove the deployment is its own (no side effects either way); `4`
+not prove the deployment is its own, or found the namespace redeployed
+since that check (no side effects either way); `4`
 everything else succeeded but the namespace was still terminating at
 `--namespace-timeout` (usually a PVC or pod finalizer; check with
 `kubectl get ns <namespace>` before re-deploying under the same name).

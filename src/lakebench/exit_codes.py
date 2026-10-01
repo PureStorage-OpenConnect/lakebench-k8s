@@ -263,8 +263,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "destroy.incarnation_mismatch",
         _C.REFUSED,
-        "`destroy` was told to expect a different deployment incarnation",
-        "CC-4",
+        "`destroy` found the namespace is not the deployment incarnation it checked or "
+        "was told to expect",
     ),
     ExitPath(
         "destroy.redeployed",
@@ -302,6 +302,11 @@ PATHS: tuple[ExitPath, ...] = (
         "nameless.v17_state_elsewhere",
         _C.REFUSED,
         "the namespace carries v1.7 state that lives with another config",
+    ),
+    ExitPath(
+        "deploy.state_copied",
+        _C.REFUSED,
+        "`deploy` found a state written for another directory or host (a copied directory)",
     ),
     ExitPath(
         "nameless.namespace_missing",

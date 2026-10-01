@@ -434,7 +434,59 @@ def _scenario_deploy_state_unrecordable(monkeypatch, tmp_path):
     return _runner().invoke(app, ["deploy", str(cfg), "--yes"])
 
 
+def _scenario_deploy_state_copied(monkeypatch, tmp_path):
+    import lakebench.cli._deploy as deploy_mod
+    from tests import test_saf2_deploy_state as t
+
+    core = t.FakeCore()
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
+
+    class Engine:
+        def __init__(self, cfg, dry_run=False, **kw):
+            self.results = []
+
+        def deploy_all(self, **kw):  # pragma: no cover -- must not be reached
+            raise AssertionError("deploy_all from a copied directory")
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+    cfg = t._named(tmp_path)
+    t._v17_state(cfg, [("n1", "confirmed")], config_dir="/elsewhere")
+    return _runner().invoke(app, ["deploy", str(cfg), "--yes"])
+
+
+def _scenario_destroy_incarnation_mismatch(monkeypatch, tmp_path):
+    from lakebench.deploy import DeploymentResult, DeploymentStatus
+
+    class Engine:
+        def __init__(self, cfg, **kw):
+            pass
+
+        def destroy_all(self, **kw):
+            assert kw["expected_incarnation"] == "u1#n1"
+            return [
+                DeploymentResult(
+                    component="ownership-check",
+                    status=DeploymentStatus.FAILED,
+                    message="Destroy NOT started: namespace lb-x is not the deployment "
+                    "this command checked. Nothing was changed.",
+                    details={"incarnation_mismatch": True},
+                )
+            ]
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+
+    def setup(t, core, cfg):
+        t._v16_namespace(core, nonce="n1")
+        t._v17_state(cfg, [("n1", "confirmed")])
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
 SCENARIOS = {
+    "deploy.state_copied": _scenario_deploy_state_copied,
+    "destroy.incarnation_mismatch": _scenario_destroy_incarnation_mismatch,
     "deploy.state_unrecordable": _scenario_deploy_state_unrecordable,
     "nameless.ambiguous": _scenario_nameless_ambiguous,
     "nameless.nonce_mismatch": _scenario_nameless_nonce_mismatch,

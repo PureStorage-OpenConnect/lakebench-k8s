@@ -16,8 +16,10 @@ from __future__ import annotations
 import getpass
 import hashlib
 import json
+import os
 import re
 import socket
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -54,7 +56,7 @@ class NameResolution:
 
 def legacy_state_path(config_path: str | Path) -> Path:
     """Where v1.6 kept the auto-generated name for configs in this directory."""
-    return Path(config_path).absolute().parent / LEGACY_STATE
+    return _config_file(config_path).parent / LEGACY_STATE
 
 
 def read_legacy_name(config_path: str | Path) -> str | None:
@@ -190,10 +192,18 @@ class DeployState:
     moved_to: str | None = None
     recorded_at: str = ""
     schema: str = STATE_SCHEMA
+    #: ``st_dev:st_ino`` of the config's directory when the state was
+    #: written there: ``cp -r`` and rsync change it, a rename does not.
+    config_dir_id: str | None = None
 
     @property
     def deploying(self) -> bool:
-        """The newest deploy has not confirmed its nonce on the namespace."""
+        """The newest deploy has not confirmed its nonce on the namespace.
+
+        Also stays True after a deploy that crashed before stamping, or whose
+        best-effort confirm failed, until the next deploy reconciles; it
+        says "not confirmed", not "a deploy is running".
+        """
         return bool(self.nonces) and self.nonces[0].status == "pending"
 
     def kept_nonces(self) -> list[str]:
@@ -213,6 +223,7 @@ class DeployState:
             "moved_from": self.moved_from,
             "moved_to": self.moved_to,
             "recorded_at": self.recorded_at,
+            "config_dir_id": self.config_dir_id,
         }
 
     @classmethod
@@ -237,6 +248,7 @@ class DeployState:
             moved_from=data.get("moved_from"),
             moved_to=data.get("moved_to"),
             recorded_at=str(data.get("recorded_at", "")),
+            config_dir_id=data.get("config_dir_id"),
         )
 
 
@@ -244,13 +256,50 @@ class StateError(Exception):
     """A state file exists but cannot be read or written."""
 
 
+def _config_file(config_path: str | Path) -> Path:
+    """The config's path with symlinks and ``..`` resolved: one directory has
+    one spelling in the state, however the command was typed."""
+    return Path(config_path).resolve()
+
+
+def _dir_id(directory: str | Path) -> str | None:
+    try:
+        st = os.stat(directory)
+    except OSError:
+        return None
+    return f"{st.st_dev}:{st.st_ino}"
+
+
 def state_dir(config_path: str | Path) -> Path:
-    return Path(config_path).absolute().parent / ".lakebench"
+    return _config_file(config_path).parent / ".lakebench"
 
 
 def state_path(config_path: str | Path, name: str) -> Path:
-    """``<config dir>/.lakebench/<name>.json``."""
+    """``<config dir>/.lakebench/<name>.json``.
+
+    Raises :class:`StateError` for a name that is not a plain file name, or
+    is ``state`` (the v1.6 file).
+    """
+    if not name or name.startswith(".") or "/" in name or "\\" in name or name == "state":
+        raise StateError(f"deployment name {name!r} cannot name a state file")
     return state_dir(config_path) / f"{name}.json"
+
+
+def not_here(state: DeployState, config_path: str | Path) -> str | None:
+    """Why ``state`` does not belong to ``config_path`` on this host, or None.
+
+    The state must name this host, this directory (resolved) and, when it
+    recorded one, this directory's inode: a ``cp -r`` copy of a directory
+    carries the original's state but is a different directory.
+    """
+    here = _config_file(config_path).parent
+    if state.host != _host():
+        return f"state written on host {state.host}, not {_host()}"
+    if Path(state.config_dir).resolve() != here:
+        return f"state written for {state.config_dir}, not {here}"
+    if state.config_dir_id is not None and state.config_dir_id != _dir_id(here):
+        return f"state written for another directory at {here} (a copy of {state.config_dir})"
+    return None
 
 
 def _config_name(config_path: str | Path) -> str:
@@ -293,7 +342,6 @@ def read_state(config_path: str | Path, name: str | None = None) -> DeployState 
 
 def write_state(path: Path, state: DeployState) -> None:
     """Write ``state`` atomically (temporary file plus ``os.replace``)."""
-    import os
     import tempfile
 
     state.recorded_at = _now()
@@ -312,21 +360,47 @@ def write_state(path: Path, state: DeployState) -> None:
         except OSError:
             pass
         raise
+    # The rename itself survives a host crash only once the directory is
+    # synced; the namespace may already carry the nonce by then.
+    dfd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+#: How long a deploy waits for another deploy from the same directory to
+#: finish its state update before it gives up.
+STATE_LOCK_TIMEOUT_S = 120.0
 
 
 @contextmanager
-def state_lock(config_path: str | Path, name: str) -> Iterator[None]:
+def state_lock(
+    config_path: str | Path, name: str, *, timeout: float = STATE_LOCK_TIMEOUT_S
+) -> Iterator[None]:
     """Hold ``<config dir>/.lakebench/<name>.lock`` (``fcntl.flock``).
 
     Host-local, like the state file: two deploys from one directory cannot
-    interleave their read-modify-write of the state.
+    interleave their read-modify-write of the state. Raises
+    :class:`StateError` when the lock is not free within ``timeout``.
     """
     import fcntl
 
-    d = state_dir(config_path)
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / f"{name}.lock", "a") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    path = state_path(config_path, name).with_suffix(".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StateError(
+                        f"{path} is held by another lakebench process from this "
+                        f"directory for over {timeout:.0f}s"
+                    ) from None
+                time.sleep(0.2)
         try:
             yield
         finally:
@@ -363,7 +437,7 @@ def read_namespace_identity(core_v1: Any, namespace: str) -> NamespaceIdentity |
     )
 
     try:
-        ns = core_v1.read_namespace(namespace)
+        ns = core_v1.read_namespace(namespace, _request_timeout=(10, 60))
     except ApiException as e:
         if e.status == 404:
             return None
@@ -380,14 +454,30 @@ def read_namespace_identity(core_v1: Any, namespace: str) -> NamespaceIdentity |
 
 
 def new_state(config_path: str | Path, name: str, namespace: str) -> DeployState:
-    p = Path(config_path).absolute()
+    p = _config_file(config_path)
     return DeployState(
         name=name,
         config_path=str(p),
         config_dir=str(p.parent),
         host=_host(),
         namespace=namespace,
+        config_dir_id=_dir_id(p.parent),
     )
+
+
+def retarget(state: DeployState, namespace: str) -> bool:
+    """Start a fresh nonce list when the config now targets another namespace.
+
+    The kept nonces belong to the old namespace; carrying them over would let
+    ``current_incarnation`` and check 2 answer for a namespace this config
+    no longer deploys. Returns True when the state was reset.
+    """
+    if state.namespace == namespace:
+        return False
+    state.namespace = namespace
+    state.namespace_uid = None
+    state.nonces = []
+    return True
 
 
 def reconcile(state: DeployState, ident: NamespaceIdentity | None) -> NonceEntry | None:
@@ -451,29 +541,39 @@ class RelocateRefused(Exception):
     """``relocate_state`` refused the move; nothing was written."""
 
 
-def relocate_state(config_path: str | Path, new_dir: str | Path) -> Path:
+def relocate_state(
+    config_path: str | Path, new_dir: str | Path, *, name: str | None = None
+) -> Path:
     """Move a deployment's config and state to ``new_dir``.
 
-    1. Refuse if the source state has ``moved_to`` set or was written on
-       another host.
+    1. Refuse if the source state has ``moved_to`` set, or does not belong
+       to the source directory on this host (:func:`not_here`): relocating a
+       ``cp -r`` copy would give two directories the same deployment.
     2. Copy the config byte for byte, and the v1.6 ``state.json`` when there
        is one.
-    3. Write ``<new_dir>/.lakebench/<name>.json`` with ``config_dir`` and
-       ``config_path`` rewritten, the nonces unchanged and ``moved_from``.
+    3. Write ``<new_dir>/.lakebench/<name>.json`` with ``config_dir``,
+       ``config_path`` and the directory identity rewritten, the nonces
+       unchanged and ``moved_from``.
     4. Rewrite the source state with ``moved_to``, so the old directory is
-       refused from then on.
+       refused from then on. If that write fails, step 3's files are removed.
+
+    ``name`` is the deployment name of a nameless config (its ``--name``);
+    by default the name the config resolves to. A directory with no v1.7
+    state (v1.6) has nothing recorded to move: the config and ``state.json``
+    are copied, and both directories stay able to tear the deployment down
+    with ``--name`` through the namespace's own stamps (check 3).
 
     Returns the new config path.
     """
     import shutil
 
-    src = Path(config_path).absolute()
-    dst_dir = Path(new_dir).absolute()
+    src = _config_file(config_path)
+    dst_dir = Path(new_dir).resolve()
     if not src.is_file():
         raise RelocateRefused(f"{src} is not a file")
     if dst_dir == src.parent:
         raise RelocateRefused(f"{dst_dir} is the config's own directory")
-    name = _config_name(src)
+    name = name or _config_name(src)
     src_state_path = state_path(src, name)
     with state_lock(src, name):
         state = read_state_file(src_state_path)
@@ -482,31 +582,48 @@ def relocate_state(config_path: str | Path, new_dir: str | Path) -> Path:
                 raise RelocateRefused(
                     f"{src_state_path} already moved to {state.moved_to}; run from there"
                 )
-            if state.host != _host():
+            why = not_here(state, src)
+            if why is not None:
                 raise RelocateRefused(
-                    f"{src_state_path} was written on host {state.host}, not {_host()}; "
-                    "a move across hosts is a new deployment directory"
+                    f"{src_state_path}: {why}; only the directory that deployed can move it"
                 )
         dst = dst_dir / src.name
         dst_state_path = state_path(dst, name)
         if dst.exists() or dst_state_path.exists():
             raise RelocateRefused(f"{dst} or {dst_state_path} already exists")
         dst_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
-        legacy = legacy_state_path(src)
-        if legacy.is_file():
+        written: list[Path] = []
+        try:
+            shutil.copyfile(src, dst)
+            written.append(dst)
+            legacy = legacy_state_path(src)
             legacy_dst = legacy_state_path(dst)
-            legacy_dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(legacy, legacy_dst)
-        if state is not None:
-            moved = DeployState.from_json(state.to_json())
-            moved.config_path = str(dst)
-            moved.config_dir = str(dst_dir)
-            moved.moved_from = {"config_dir": state.config_dir, "host": state.host, "at": _now()}
-            moved.moved_to = None
-            write_state(dst_state_path, moved)
-            state.moved_to = str(dst_dir)
-            write_state(src_state_path, state)
+            if legacy.is_file() and not legacy_dst.exists():
+                legacy_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(legacy, legacy_dst)
+                written.append(legacy_dst)
+            if state is not None:
+                moved = DeployState.from_json(state.to_json())
+                moved.config_path = str(dst)
+                moved.config_dir = str(dst_dir)
+                moved.config_dir_id = _dir_id(dst_dir)
+                moved.moved_from = {
+                    "config_dir": state.config_dir,
+                    "host": state.host,
+                    "at": _now(),
+                }
+                moved.moved_to = None
+                write_state(dst_state_path, moved)
+                written.append(dst_state_path)
+                state.moved_to = str(dst_dir)
+                write_state(src_state_path, state)
+        except BaseException:
+            for p in reversed(written):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            raise
     return dst
 
 
@@ -520,10 +637,11 @@ def main(argv: list[str] | None = None) -> int:
     rel = sub.add_parser("relocate", help="move a config and its deploy state")
     rel.add_argument("config")
     rel.add_argument("new_dir")
+    rel.add_argument("--name", default=None, help="deployment name of a nameless config")
     args = parser.parse_args(argv)
     try:
-        dst = relocate_state(args.config, args.new_dir)
-    except (RelocateRefused, StateError) as e:
+        dst = relocate_state(args.config, args.new_dir, name=args.name)
+    except (RelocateRefused, StateError, OSError) as e:
         print(f"relocate refused: {e}", file=sys.stderr)
         return 3
     print(dst)
@@ -559,7 +677,7 @@ def nameless_configs_in(directory: str | Path) -> list[Path]:
         except Exception:  # noqa: BLE001 -- unreadable or not YAML: not a config
             continue
         if isinstance(raw, dict) and not raw.get("name") and any(k in raw for k in CONFIG_KEYS):
-            found.append(p.absolute())
+            found.append(p.resolve())
     return found
 
 
@@ -605,7 +723,7 @@ def check_nameless_target(
     resolution: NameResolution | None = getattr(cfg, "_name_resolution", None)
     if resolution is None or not resolution.nameless:
         return None
-    cpath = Path(config_path).absolute()
+    cpath = _config_file(config_path)
     name = resolution.name
     namespace = cfg.get_namespace()
     nxt = _init_from(cpath)
@@ -642,11 +760,16 @@ def check_nameless_target(
         )
 
     # 2. A v1.7 state for this name.
-    spath = state_path(cpath, name)
     try:
+        spath = state_path(cpath, name)
         state = read_state_file(spath)
     except StateError as e:
-        raise SafetyRefusal(str(e), next=nxt, path="nameless.nonce_mismatch") from e
+        raise SafetyRefusal(
+            str(e),
+            why="the state that would prove this deployment cannot be read",
+            next=f"check the file, or {nxt}",
+            path="nameless.nonce_mismatch",
+        ) from e
     if state is not None:
         if state.moved_to:
             raise SafetyRefusal(
@@ -654,13 +777,22 @@ def check_nameless_target(
                 where=str(spath),
                 path="nameless.moved",
             )
-        if Path(state.config_dir) != cpath.parent or state.host != _host():
+        why_not = not_here(state, cpath)
+        if why_not is not None:
             raise SafetyRefusal(
-                f"state written for {state.config_dir} on {state.host}; this looks like "
-                "a copied directory",
+                f"{why_not}; this looks like a copied directory",
                 where=str(spath),
                 next=nxt,
                 path="nameless.copied_dir",
+            )
+        if state.namespace != namespace:
+            raise SafetyRefusal(
+                f"this directory recorded namespace {state.namespace}, and the config "
+                f"now targets {namespace}",
+                why="the recorded nonces belong to the other namespace",
+                where=str(spath),
+                next=nxt,
+                path="nameless.nonce_mismatch",
             )
         if not ident.nonce or ident.nonce not in state.kept_nonces():
             raise SafetyRefusal(

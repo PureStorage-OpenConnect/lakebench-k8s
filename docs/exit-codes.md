@@ -16,7 +16,7 @@ path yet says so.
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception` |
 | 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage` |
-| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `nameless.namespace_missing` |
+| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `destroy.incarnation_mismatch`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | no command yet |
@@ -37,6 +37,8 @@ the CLI down every path listed here and checks the code.
 | `version.ok` | 0 | `lakebench version` prints the version |
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `click.usage` | 2 | an unknown flag, a missing argument or a bad value |
+| `deploy.state_copied` | 3 | `deploy` found a state written for another directory or host (a copied directory) |
+| `destroy.incarnation_mismatch` | 3 | `destroy` found the namespace is not the deployment incarnation it checked or was told to expect |
 | `nameless.ambiguous` | 3 | a nameless config shares its directory with another nameless config and no --name |
 | `nameless.copied_dir` | 3 | a nameless config's state was written for another directory or host |
 | `nameless.moved` | 3 | a nameless config's state moved to another directory |

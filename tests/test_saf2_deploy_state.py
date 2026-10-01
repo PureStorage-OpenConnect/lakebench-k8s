@@ -46,7 +46,7 @@ class FakeCore:
     def add(self, name: str, uid: str = "u1", **annotations: str) -> None:
         self.namespaces[name] = {"uid": uid, "annotations": dict(annotations)}
 
-    def read_namespace(self, name: str):
+    def read_namespace(self, name: str, **kwargs: Any):
         self.reads += 1
         if self.fail_reads:
             raise ApiException(status=500, reason="boom")
@@ -587,12 +587,16 @@ def test_readonly_commands_create_no_files(tmp_path, fake_cluster, monkeypatch):
     _v16_namespace(fake_cluster)
     before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     runner = CliRunner()
-    runner.invoke(app, ["status", str(cfg)])
-    runner.invoke(app, ["status", str(cfg), "--name", NAME])
+    codes = [runner.invoke(app, ["status", str(cfg)]).exit_code]
+    codes.append(runner.invoke(app, ["status", str(cfg), "--name", NAME]).exit_code)
     with patch("lakebench.k8s._pinned.subprocess.run"):
-        runner.invoke(app, ["logs", "hive", str(cfg), "--name", NAME])
+        codes.append(runner.invoke(app, ["logs", "hive", str(cfg), "--name", NAME]).exit_code)
     after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     assert after == before
+    # Without --name a v1.6 directory is refused (3); with it the guard
+    # passes and status goes on to its own read of the (unreachable) test
+    # server, while logs, its kubectl mocked, completes.
+    assert codes[0] == 3 and codes[1] not in (0, 3) and codes[2] == 0, codes
 
 
 def _named(d: Path) -> Path:
@@ -693,3 +697,245 @@ def test_deploy_cli_dry_run_writes_nothing(tmp_path, monkeypatch):
         p.relative_to(tmp_path) for p in tmp_path.rglob("*") if "lakebench-journal" not in str(p)
     )
     assert after == before
+
+
+# -- review fixes (CC-2 Full review, 10-01) ------------------------------------
+
+
+def test_relocating_a_copied_directory_is_refused(tmp_path):
+    """`cp -r A B` then relocating B would give A and the new directory the
+    same deployment (the copy's state still names A)."""
+    import shutil
+
+    a = tmp_path / "A"
+    a.mkdir()
+    cfg_a = _named(a)
+    _v17_state(cfg_a, [("nA", "confirmed")])
+    b = tmp_path / "B"
+    shutil.copytree(a, b)
+    with pytest.raises(ds.RelocateRefused, match="only the directory that deployed"):
+        ds.relocate_state(b / cfg_a.name, tmp_path / "C")
+    assert not (tmp_path / "C").exists()
+    st = ds.read_state_file(ds.state_path(cfg_a, NAME))
+    assert st is not None and st.moved_to is None
+
+
+def test_a_directory_recreated_at_the_same_path_is_not_the_original(tmp_path):
+    """Same path, different directory (inode): the state is a copy."""
+    import shutil
+
+    a = tmp_path / "A"
+    a.mkdir()
+    cfg_a = _named(a)
+    _v17_state(cfg_a, [("nA", "confirmed")])
+    st = ds.read_state_file(ds.state_path(cfg_a, NAME))
+    assert st is not None and ds.not_here(st, cfg_a) is None
+    shutil.copytree(a, tmp_path / "copy")
+    shutil.rmtree(a)
+    (tmp_path / "copy").rename(a)
+    st = ds.read_state_file(ds.state_path(cfg_a, NAME))
+    assert st is not None and "a copy of" in (ds.not_here(st, cfg_a) or "")
+
+
+def test_deploy_refuses_a_copied_state(tmp_path, monkeypatch):
+    from lakebench.cli import _deploy
+
+    cfg_path = _named(tmp_path)
+    _v17_state(cfg_path, [("n1", "confirmed")], config_dir="/elsewhere")
+    core = FakeCore()
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    cfg = load_config(cfg_path, purpose=LoadPurpose.MUTATE)
+    _refused(
+        "deploy.state_copied",
+        _deploy._record_deploy_nonce,
+        cfg,
+        cfg_path,
+        dry_run=False,
+        nonce=None,
+    )
+    st = ds.read_state_file(ds.state_path(cfg_path, NAME))
+    assert st is not None and st.kept_nonces() == ["n1"]
+
+
+def test_deploy_to_a_new_namespace_starts_a_fresh_nonce_list(tmp_path, monkeypatch):
+    """Nonces recorded for the old namespace never answer for the new one."""
+    from lakebench.cli import _deploy
+
+    cfg_path = tmp_path / "named.yaml"
+    cfg_path.write_text(
+        f"name: {NAME}\nrecipe: hive-iceberg-spark-trino\n"
+        "platform:\n  kubernetes:\n    namespace: ns-b\n"
+    )
+    _v17_state(cfg_path, [("nA", "confirmed")])  # recorded for namespace lb-x
+    core = FakeCore()
+    core.add(NAME, uid="uA", **{ANNOTATION_DEPLOY_NONCE: "nA"})
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    cfg = load_config(cfg_path, purpose=LoadPurpose.MUTATE)
+    _deploy._record_deploy_nonce(cfg, cfg_path, dry_run=False, nonce="nB")
+    st = ds.read_state_file(ds.state_path(cfg_path, NAME))
+    assert st is not None and st.namespace == "ns-b"
+    assert st.kept_nonces() == ["nB"]
+    assert ds.current_incarnation(st, core) is None  # ns-b not stamped yet
+
+
+def test_check2_refuses_a_state_recorded_for_another_namespace(tmp_path, monkeypatch):
+    cfg_path = _nameless(tmp_path)
+    core = FakeCore()
+    _v16_namespace(core, nonce="n1")
+    _v17_state(cfg_path, [("n1", "confirmed")], namespace="lb-old")
+    cfg = _load(cfg_path, NAME)
+    with pytest.raises(SafetyRefusal) as ei:
+        ds.check_nameless_target(cfg, lambda: core, config_path=cfg_path)
+    assert ei.value.path == "nameless.nonce_mismatch"
+    assert "lb-old" in str(ei.value)
+
+
+def test_check2_accepts_the_same_directory_through_a_symlink(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    cfg_path = _nameless(real)
+    core = FakeCore()
+    _v16_namespace(core, nonce="n1")
+    _v17_state(cfg_path, [("n1", "confirmed")])
+    (tmp_path / "link").symlink_to(real)
+    via_link = tmp_path / "link" / cfg_path.name
+    for spelling in (via_link, real / ".." / "real" / cfg_path.name):
+        cfg = _load(spelling, NAME)
+        assert ds.check_nameless_target(cfg, lambda: core, config_path=spelling) == "u1#n1"
+
+
+class _StampingEngine:
+    """deploy_all creates the namespace and stamps it as the real engine does."""
+
+    core: FakeCore
+    raise_with: BaseException | None = None
+
+    def __init__(self, cfg, dry_run=False, **kw):
+        self.cfg = cfg
+        self.results: list = []
+        self.deploy_nonce = kw.get("deploy_nonce")
+
+    def deploy_all(self, **kw):
+        self.core.add(NAME, uid="u9")
+        write_deploy_nonce(self.core, NAME, nonce=self.deploy_nonce)
+        if self.raise_with is not None:
+            raise self.raise_with
+        return []
+
+
+@pytest.mark.parametrize("raise_with", [None, RuntimeError("helm failed"), KeyboardInterrupt()])
+def test_deploy_stamps_the_recorded_nonce_and_confirms_it(tmp_path, monkeypatch, raise_with):
+    """Through the CLI: the namespace carries exactly the nonce the state
+    recorded, with the v1.7 marker, and the entry is confirmed even when
+    deploy_all fails or is interrupted after stamping."""
+    from lakebench.cli import app
+
+    cfg_path = _named(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    core = FakeCore()
+    _StampingEngine.core = core
+    _StampingEngine.raise_with = raise_with
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", _StampingEngine)
+    monkeypatch.setattr("lakebench.cli._deploy._preflight_check", lambda cfg: None)
+    monkeypatch.setattr("lakebench.cli._deploy.check_datagen_scale", lambda cfg: None)
+    CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes"])
+    st = ds.read_state_file(ds.state_path(cfg_path, NAME))
+    assert st is not None and len(st.nonces) == 1
+    anns = core.namespaces[NAME]["annotations"]
+    assert anns[ANNOTATION_DEPLOY_NONCE] == st.nonces[0].nonce
+    assert anns[ANNOTATION_STATE_SCHEMA] == ds.STATE_SCHEMA
+    assert st.nonces[0].status == "confirmed"
+
+
+def test_deploy_impl_honours_a_caller_nonce(tmp_path, monkeypatch):
+    from lakebench.cli import _deploy
+
+    cfg_path = _named(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    core = FakeCore()
+    _StampingEngine.core = core
+    _StampingEngine.raise_with = None
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", _StampingEngine)
+    monkeypatch.setattr(_deploy, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(_deploy, "check_datagen_scale", lambda cfg: None)
+    try:
+        _deploy._deploy_impl(cfg_path, yes=True, nonce="caller-nonce")
+    except (SystemExit, Exception):  # noqa: BLE001 -- the outcome is the stamp
+        pass
+    assert core.namespaces[NAME]["annotations"][ANNOTATION_DEPLOY_NONCE] == "caller-nonce"
+
+
+def test_unusable_state_directory_stops_deploy_with_exit_4(tmp_path, monkeypatch):
+    """A plain file where .lakebench/ should be: the lock itself fails."""
+    from lakebench.cli import app
+
+    cfg_path = _named(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".lakebench").write_text("not a directory")
+    core = FakeCore()
+    _StampingEngine.core = core
+    _StampingEngine.raise_with = None
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", _StampingEngine)
+    monkeypatch.setattr("lakebench.cli._deploy._preflight_check", lambda cfg: None)
+    monkeypatch.setattr("lakebench.cli._deploy.check_datagen_scale", lambda cfg: None)
+    res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes"])
+    assert res.exit_code == 4, res.output
+    assert core.patches == [] and NAME not in core.namespaces
+
+
+def test_state_lock_times_out_instead_of_hanging(tmp_path):
+    import fcntl
+
+    cfg_path = _named(tmp_path)
+    with ds.state_lock(cfg_path, NAME):
+        lock = ds.state_path(cfg_path, NAME).with_suffix(".lock")
+        with open(lock, "a") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(ds.StateError, match="held by another"):
+            with ds.state_lock(cfg_path, NAME, timeout=0.3):
+                pass
+
+
+@pytest.mark.parametrize("bad", ["../evil", "a/b", ".hidden", "state", ""])
+def test_state_path_refuses_names_that_are_not_plain_file_names(tmp_path, bad):
+    with pytest.raises(ds.StateError):
+        ds.state_path(tmp_path / "a.yaml", bad)
+
+
+def test_relocate_removes_its_copies_when_the_source_cannot_be_marked(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    cfg_path = _named(tmp_path / "src")
+    _v17_state(cfg_path, [("n1", "confirmed")])
+    real_write = ds.write_state
+    src_state = ds.state_path(cfg_path, NAME)
+
+    def failing_write(path, state):
+        if path == src_state:
+            raise OSError("disk full")
+        real_write(path, state)
+
+    monkeypatch.setattr(ds, "write_state", failing_write)
+    with pytest.raises(OSError):
+        ds.relocate_state(cfg_path, tmp_path / "dst")
+    dst = tmp_path / "dst"
+    assert not (dst / cfg_path.name).exists()
+    assert not ds.state_path(dst / cfg_path.name, NAME).exists()
+    st = ds.read_state_file(src_state)
+    assert st is not None and st.moved_to is None
+
+
+def test_relocate_moves_a_nameless_state_keyed_by_name(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    cfg_path = _nameless(src)
+    _v17_state(cfg_path, [("n1", "confirmed")])
+    dst = ds.relocate_state(cfg_path, tmp_path / "dst", name=NAME)
+    moved = ds.read_state_file(ds.state_path(dst, NAME))
+    assert moved is not None and moved.kept_nonces() == ["n1"]
+    assert moved.config_dir == str((tmp_path / "dst").resolve())
+    old = ds.read_state_file(ds.state_path(cfg_path, NAME))
+    assert old is not None and old.moved_to

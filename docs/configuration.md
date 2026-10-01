@@ -51,9 +51,17 @@ about to stamp on the namespace in `.lakebench/<name>.json` beside the
 config, before the namespace gets it, under a lock file
 `.lakebench/<name>.lock`. The file keeps the last five nonces; the one the
 namespace carries is never dropped, and the next deploy confirms it. A
-`deploy --dry-run` writes nothing. The directory must be on a local disk, or
-deployed from one host only: the lock is host-local. If the state cannot be
-written, deploy stops before changing the cluster (exit 4).
+`deploy --dry-run` writes no state, lock or `.lakebench/` directory (the
+command journal is written as for any command). The directory must be on a
+local disk, or deployed from one host only: the lock is host-local, and a
+deploy waits at most 120 s for another deploy from the same directory. If
+the state cannot be written or read, deploy stops before changing the
+cluster (exit 4). A state written for another directory or host (a copied
+directory, including a `cp -r` copy at the same path) stops deploy with
+exit 3 (`deploy.state_copied`). When the config's
+`platform.kubernetes.namespace` changes, the next deploy starts a fresh
+nonce list for the new namespace. Deployment names that are not plain file
+names, and the name `state`, cannot be recorded (exit 4).
 
 `destroy`, `stop`, `status` and `logs` with a nameless config act only on a
 deployment the directory can prove is its own, and refuse otherwise
@@ -61,10 +69,11 @@ deployment the directory can prove is its own, and refuse otherwise
 
 1. It is the only nameless config in its directory, or `--name NAME` is
    given.
-2. If `.lakebench/<name>.json` exists, it was written for this directory on
-   this host, has not been moved, and the namespace carries one of its
-   nonces. A copied directory, or a namespace redeployed from elsewhere, is
-   refused.
+2. If `.lakebench/<name>.json` exists, it was written for this directory
+   (the same directory, not a copy at the same path) on this host, for the
+   config's namespace, has not been moved, and the namespace carries one of
+   its nonces. A copied directory, or a namespace redeployed from elsewhere,
+   is refused.
 3. Otherwise (a v1.6 directory, at most `.lakebench/state.json`): `--name`
    is required and must equal the name in `state.json` when there is one;
    the namespace must carry `lakebench.deployment/name: NAME`, must not
@@ -73,15 +82,21 @@ deployment the directory can prove is its own, and refuse otherwise
    tag) must name all three of the config's buckets.
 
 Destroy then acts only on the namespace incarnation the check proved; a
-redeploy in between stops it before any delete. `status` and `logs` on a
-namespace that does not exist report that and stop. Named configs skip
-these checks and rely on the ownership stamps alone.
+redeploy in between stops it before any delete (exit 3,
+`destroy.incarnation_mismatch`). For `status` and `logs` a namespace that
+does not exist passes the check, and the command reports what it finds as
+for any missing deployment. Named configs skip these checks and rely on the
+ownership stamps alone.
 
 To move a deployment's config to another directory without breaking check
-2, use `python -m lakebench.config.deploy_state relocate CONFIG NEWDIR`. It
-copies the config (and a v1.6 `state.json`), writes the state for the new
-directory and marks the old one as moved, so only the new directory is
-accepted from then on. A move to another host is refused.
+2, use `python -m lakebench.config.deploy_state relocate CONFIG NEWDIR`
+(add `--name NAME` for a nameless config). It copies the config (and a v1.6
+`state.json`), writes the state for the new directory and marks the old one
+as moved, so only the new directory is accepted from then on. Only the
+directory that wrote the state can move it: a copy, or a move to another
+host, is refused. A v1.6 directory has no v1.7 state to move, so after
+relocate both directories can still tear the deployment down with
+`--name` through the namespace's own stamps (check 3).
 
 ### Removed keys
 
