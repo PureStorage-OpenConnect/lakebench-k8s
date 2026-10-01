@@ -2459,8 +2459,12 @@ def frame_fingerprint(df, cols):
     to a NULL neighbour). Every nested value is paired with its own NULL
     flag, every array and map carries its size, and a map becomes its
     entries in sorted order (Spark refuses to hash a map, and a map has no
-    defined entry order). Values that compare equal hash equal: ``-0.0``
-    and ``0.0`` match, and so do all NaNs.
+    defined entry order). ``-0.0`` and ``0.0`` hash the same, and so do all
+    NaNs; a collated string hashes by its bytes, so ``'A'`` and ``'a'``
+    differ under ``UTF8_LCASE``. A struct with two fields of one name (only
+    an in-memory frame can have one) raises at analysis. The nested form
+    costs higher-order functions per row: measure it before fingerprinting
+    a full large table on a hot path.
 
     Callers name the columns; AML time travel and reproduction pass every
     column of the snapshot schema, including ``_stream_id``, ``_batch_id``

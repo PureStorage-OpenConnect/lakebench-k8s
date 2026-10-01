@@ -203,11 +203,11 @@ def test_sixty_three_columns(spark_session):
         ("a array<string>", (["a", None],), (["a"],)),
         ("a array<string>", (["a", None],), ([None, "a"],)),
         ("a array<string>", ([],), ([None],)),
-        ("a array<string>", ([],), (None,)),
+        ("s struct<t:array<string>>", (([],),), ((None,),)),
         ("s struct<a:string,b:string>", (("X", None),), ((None, "X"),)),
-        ("s struct<a:string,b:string>", ((None, None),), (None,)),
+        ("a array<struct<a:string,b:string>>", ([(None, None)],), ([None],)),
         ("m map<string,string>", ({"a": "b"},), ({"a": None, "b": None},)),
-        ("m map<string,string>", ({},), (None,)),
+        ("s struct<m:map<string,string>>", (({},),), ((None,),)),
         ("s struct<t:array<string>>", ((["a", None],),), ((["a"],),)),
         ("a array<struct<x:string,y:string>>", ([("X", None)],), ([(None, "X")],)),
         ("a array<array<string>>", ([["a"], []],), ([[], ["a"]],)),
@@ -218,11 +218,11 @@ def test_sixty_three_columns(spark_session):
         "array-trailing-null",
         "array-null-moved",
         "empty-vs-null-element",
-        "empty-vs-null-array",
+        "nested-empty-vs-null-array",
         "struct-null-moved",
-        "struct-all-null-vs-null",
+        "nested-all-null-struct-vs-null",
         "map-null-values",
-        "empty-vs-null-map",
+        "nested-empty-vs-null-map",
         "nested-array-null",
         "array-of-struct-null-moved",
         "nested-array-boundary",
@@ -240,12 +240,23 @@ def test_nested_values_differ(spark_session, schema, left, right):
 
 def test_nested_values_equal_when_equal(spark_session):
     """The canonical form is a function of the value: the same nested
-    values built in another order hash the same."""
-    schema = "m map<string,array<string>>, s struct<a:array<bigint>,b:string>"
-    rows = [({"x": ["1", None], "y": []}, ([1, None], None)), ({}, (None, "b"))]
-    a = spark_session.createDataFrame(rows, schema)
-    b = spark_session.createDataFrame(list(reversed(rows)), schema).repartition(2)
-    assert _fp(a, ["m", "s"]) == _fp(b, ["m", "s"])
+    values, with nested map entries inserted in the other order and rows in
+    another order, hash the same."""
+    from pyspark.sql import functions as F
+
+    def frame(entries, rows_reversed):
+        m = F.create_map(*[F.lit(x) for kv in entries for x in kv])
+        df = spark_session.createDataFrame([(1,), (2,)], "k int").select(
+            "k", F.struct(m.alias("m"), F.array(m).alias("ms")).alias("s")
+        )
+        return df.orderBy(F.col("k").desc()) if rows_reversed else df
+
+    pairs = [("x", "1"), ("y", "2"), ("z", "3")]
+    a = frame(pairs, False)
+    b = frame(list(reversed(pairs)), True).repartition(2)
+    assert _fp(a, ["k", "s"]) == _fp(b, ["k", "s"])
+    c = frame([("x", "1"), ("y", "2"), ("z", "4")], False)
+    assert _fp(a, ["k", "s"]) != _fp(c, ["k", "s"])
 
 
 def test_signed_zero_and_nan_hash_as_their_values(spark_session):
