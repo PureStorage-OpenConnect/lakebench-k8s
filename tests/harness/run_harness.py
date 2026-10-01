@@ -74,7 +74,7 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "run_char"
 
 #: Deployment name and namespace every scenario config uses.
 NAME = "runchar"
-#: The documented placeholder S3 host (CLAUDE.md section 8).
+#: The placeholder S3 host the docs and examples use.
 PLACEHOLDER_HOST = "10.0.1.50"
 
 _TRINO_POD = "lakebench-trino-coordinator-0"
