@@ -111,7 +111,7 @@ def test_stream_delta_main_calls_ensure_column_for_stream_and_batch_id(monkeypat
     monkeypatch.setattr(ss, "table_exists", lambda *a, **k: True)
     monkeypatch.setattr(ss, "emit_stream_scale_admission", lambda *a, **k: None)
     monkeypatch.setattr(ss, "set_utc_session", lambda *a, **k: None)
-    _stream_main_stub.install(monkeypatch, ss)
+    spark = _stream_main_stub.install(monkeypatch, ss)
 
     monkeypatch.setenv("CHECKPOINT_LOCATION", str(tmp_path / "ckpt-noop-i6"))
     monkeypatch.setenv("LB_ICEBERG_CATALOG", "ice")
@@ -123,6 +123,7 @@ def test_stream_delta_main_calls_ensure_column_for_stream_and_batch_id(monkeypat
 
     ss.main()
 
+    assert "refuse_fresh_checkpoint_over_data" in spark.skipped_calls, spark.skipped_calls
     silver_tbl = "ice.silver.customer_interactions_enriched"
     assert (silver_tbl, "_stream_id", "STRING") in calls, (
         f"silver_stream_delta.main() did not call ensure_column for _stream_id STRING; "

@@ -105,13 +105,14 @@ def spark(spark_session, iceberg_catalog, tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def profiles(spark):
+def profiles(spark, load_script_module):
     """(batch rows, stream rows) of silver.entity_profiles by entity_id,
     for one bronze corpus built once by each path."""
     import silver_stream_financial as ss
 
-    # Build a shared bronze corpus: 8 transactions from three originators
-    # to two beneficiaries; amounts spread enough that stddev is non-zero.
+    # Build a shared bronze corpus: 10 transactions among five entities;
+    # amounts spread enough that stddev is non-zero. A, Z, B and Y both send
+    # and receive (T9, T10); C only sends.
     base = datetime(2024, 6, 1)
     corpus = [
         _row("T1", "A", "Z", base + timedelta(days=0), "100.00"),
@@ -122,6 +123,8 @@ def profiles(spark):
         _row("T6", "B", "Z", base + timedelta(days=5), "300.00"),
         _row("T7", "C", "Z", base + timedelta(days=6), "125.00"),
         _row("T8", "C", "Y", base + timedelta(days=7), "175.00"),
+        _row("T9", "Z", "A", base + timedelta(days=8), "60.00"),
+        _row("T10", "Y", "B", base + timedelta(days=9), "90.00"),
     ]
     bronze = spark.createDataFrame(corpus, _PACS_SCHEMA)
 
@@ -139,9 +142,11 @@ def profiles(spark):
     batch_profiles = sbf.build_entity_profiles(batch_txns, data_clock=date(2024, 7, 1))
     batch_profiles.writeTo("lh.silver_batch.entity_profiles").overwrite(_lit(True))
 
-    # --- Stream path: feed the same corpus as one micro-batch through
+    # --- Stream path: feed the same corpus as two micro-batches through
     # _merge_batch (proxy for the streaming trigger; the MERGE code path
-    # is identical). streaming_query_id is monkey-patched: Spark only
+    # is identical). The first batch takes the MERGE's INSERT branch for
+    # every entity; the second takes the UPDATE branch, where the Welford
+    # parallel merge runs, for every entity the first batch saw. streaming_query_id is monkey-patched: Spark only
     # binds the query id inside a real foreachBatch and a direct call
     # would otherwise raise from streaming_query_id().
     #
@@ -167,14 +172,15 @@ def profiles(spark):
     ss._KYC_LOADED = True
     ss._kyc = lambda _s: None
     ss.append_new_dimensions = lambda *_a, **_kw: (0, 0)
-    ss._merge_batch(bronze, 0)
+    ss._merge_batch(spark.createDataFrame(corpus[:5], _PACS_SCHEMA), 0)
+    ss._merge_batch(spark.createDataFrame(corpus[5:], _PACS_SCHEMA), 1)
 
     # --- Compare per-entity rows.
     batch_rows = {
         r["entity_id"]: r for r in spark.table("lh.silver_batch.entity_profiles").collect()
     }
     stream_rows = {r["entity_id"]: r for r in spark.table(f"lh.{ss.SILVER_PROFILES}").collect()}
-    # Three originators and two beneficiaries: five entities on each side.
+    # Five entities on each side.
     assert len(batch_rows) == 5, sorted(batch_rows)
     return batch_rows, stream_rows
 
@@ -186,21 +192,34 @@ def test_batch_and_stream_profile_the_same_entities(profiles):
     )
 
 
+def test_batch_and_stream_profile_sums_match(profiles):
+    """total_sent_usd and total_received_usd, Decimal(38,2), compared
+    exactly as amounts, with NULL read as 0.00 (see the next test)."""
+    batch_rows, stream_rows = profiles
+    zero = Decimal("0.00")
+    for eid, b in batch_rows.items():
+        s = stream_rows[eid]
+        for c in ("total_sent_usd", "total_received_usd"):
+            b_v = zero if b[c] is None else b[c]
+            s_v = zero if s[c] is None else s[c]
+            assert b_v == s_v, f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
+
+
 @pytest.mark.known_bug(
     "QR-6",
     match=r"total_(sent|received)_usd: batch=None, stream=0\.00",
     reason=(
-        "product bug the corrected test found: an entity seen on one side only gets NULL "
-        "in batch and 0.00 in stream; LB id requested from the main lane"
+        "product difference the corrected test found: an entity that never sent (or never "
+        "received) gets NULL in batch and 0.00 in stream; LB id requested from the main lane"
     ),
 )
-def test_batch_and_stream_profile_sums_match(profiles):
-    """total_sent_usd and total_received_usd, Decimal(38,2), compared exactly."""
+def test_batch_and_stream_profile_sums_agree_on_null(profiles):
+    """A side the entity never used is NULL in both paths, or 0.00 in both."""
     batch_rows, stream_rows = profiles
     for eid, b in batch_rows.items():
         s = stream_rows[eid]
         for c in ("total_sent_usd", "total_received_usd"):
-            assert b[c] == s[c], f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
+            assert (b[c] is None) == (s[c] is None), f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
 
 
 def test_batch_and_stream_produce_equivalent_profiles(profiles):
@@ -226,6 +245,14 @@ def test_batch_and_stream_produce_equivalent_profiles(profiles):
             assert b[c] == s[c] or (b[c] is None and s[c] is None), (
                 f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
             )
+        # W4 reads passthrough_ratio and W8 avg_gap_days; both are derived.
+        for c in ("passthrough_ratio", "avg_gap_days"):
+            if b[c] is None:
+                assert s[c] is None, f"{eid}.{c}: batch NULL vs stream {s[c]}"
+            else:
+                assert s[c] is not None and math.isclose(
+                    float(b[c]), float(s[c]), rel_tol=1e-9, abs_tol=1e-9
+                ), f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
         # Welford accumulators: within a small relative tolerance because
         # incremental merges accrue rounding error compared with a single
         # pass. Corpus is small so absolute tolerance suffices too.

@@ -37,6 +37,10 @@ def test_stream_main_executes_ddl_profiles(monkeypatch):
 
     ss.main()
 
+    # main() still reaches the replaced checkpoint refusal and progress gate.
+    assert spark.skipped_calls == ["refuse_fresh_checkpoint_over_data", "assert_progress"], (
+        spark.skipped_calls
+    )
     assert ss.DDL_PROFILES in spark.executed_sql, (
         "silver_stream_financial.main() did not execute DDL_PROFILES; "
         "silver.entity_profiles will be missing on continuous-only deployments"

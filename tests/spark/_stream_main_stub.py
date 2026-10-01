@@ -75,12 +75,15 @@ class _Conf:
 
 
 class StubSession:
-    """The stub ``SparkSession``; ``executed_sql`` lists every statement."""
+    """The stub ``SparkSession``. ``executed_sql`` lists every statement;
+    ``skipped_calls`` names each replaced step main() called, in order, so a
+    test can still check that main() reaches it."""
 
     def __init__(self) -> None:
         self.conf = _Conf()
         self.readStream = _ReadStream()
         self.executed_sql: list[str] = []
+        self.skipped_calls: list[str] = []
 
     def sql(self, statement: str, *_a: Any, **_k: Any) -> None:
         self.executed_sql.append(statement)
@@ -109,11 +112,18 @@ class _Builder:
 def install(monkeypatch: Any, script: Any) -> StubSession:
     """Make ``script.main()`` build a ``StubSession`` and skip the JVM-only
     startup steps and the zero-row progress gate. Returns the session."""
+    spark = StubSession()
+
+    def _skipped(step: str) -> Any:
+        def call(*_a: Any, **_k: Any) -> None:
+            spark.skipped_calls.append(step)
+
+        return call
+
     for step in JVM_STEPS:
         # raising=True: a renamed or removed step fails here, not silently.
-        monkeypatch.setattr(script, step, lambda *_a, **_k: None)
+        monkeypatch.setattr(script, step, _skipped(step))
     # The stub stream writes no rows, which the LB-044 gate would refuse.
-    monkeypatch.setattr(script, "assert_progress", lambda *_a, **_k: None)
-    spark = StubSession()
+    monkeypatch.setattr(script, "assert_progress", _skipped("assert_progress"))
     monkeypatch.setattr(script.SparkSession, "builder", _Builder(spark))
     return spark

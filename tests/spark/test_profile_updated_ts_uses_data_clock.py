@@ -9,7 +9,7 @@ resolved data clock keeps rebuilds byte-identical for a fixed bronze.
 
 The first two tests are text checks; the signature and runtime tests
 import the script, which needs pyspark, so the file is in the Spark tier
-(CI's unit legs have no pyspark and would skip them).
+(CI's unit legs have no pyspark and skip the whole module).
 """
 
 from __future__ import annotations
@@ -17,6 +17,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
+# CI's unit legs collect tests/spark without pyspark: skip, do not error in
+# the spark_session fixture.
+pytest.importorskip("pyspark")
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 
@@ -59,9 +63,6 @@ def test_main_passes_data_clock_to_build_entity_profiles():
 
 def test_build_entity_profiles_signature_takes_data_clock():
     """Runtime: the function's signature includes a data_clock parameter."""
-    import pytest
-
-    pytest.importorskip("pyspark")
     import inspect
 
     import silver_build_financial as sbf
