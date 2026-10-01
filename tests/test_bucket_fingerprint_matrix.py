@@ -223,7 +223,13 @@ class TestDeploy:
 # ---------------------------------------------------------------------------
 
 
-def _destroy(rec: K8sRecorder, *, fp: str | None = FP, annotations: dict | None = None) -> list:
+def _destroy(
+    rec: K8sRecorder,
+    *,
+    fp: str | None = FP,
+    annotations: dict | None = None,
+    delete_buckets: bool = True,
+) -> list:
     from lakebench.deploy.destroy import destroy_all
     from lakebench.deploy.ownership import IdentityReport
     from lakebench.k8s.client import K8sClient
@@ -249,7 +255,7 @@ def _destroy(rec: K8sRecorder, *, fp: str | None = FP, annotations: dict | None 
         patch("lakebench.deploy.ownership.api_server_fingerprint", return_value=fp),
         patch("lakebench.deploy.destroy._sleep", lambda s: None),
     ):
-        return destroy_all(engine, clean_buckets=True)
+        return destroy_all(engine, clean_buckets=True, delete_buckets=delete_buckets)
 
 
 def _bucket_result(results: list):
@@ -362,3 +368,154 @@ def test_continuous_reset_applies_the_matrix(tags, problem):
         assert (got is not None) is problem, got
         if problem:
             assert B in got
+
+
+# ---------------------------------------------------------------------------
+# Review round: the marker on kept buckets, row 3 in destroy, no fingerprint
+# ---------------------------------------------------------------------------
+
+MINE = json.dumps({"deployment": NS, "cluster": FP}).encode()
+CREATED = {"lakebench.deployment/created-buckets": B}
+
+
+class TestDestroyKeepsTheClaim:
+    def test_keep_buckets_keeps_the_marker(self):
+        """A bucket destroy keeps stays this deployment's: the marker stays."""
+        with recording() as rec:
+            rec.s3_tagging = False
+            rec.add_bucket(B, {"data/part-0": b"x", OWNER_MARKER_KEY: MINE})
+            results = _destroy(rec, annotations=CREATED, delete_buckets=False)
+            assert _bucket_result(results).status.value == "success"
+            assert rec.buckets_store[B] == {OWNER_MARKER_KEY: MINE}
+
+    def test_marker_bucket_not_created_is_emptied_and_kept_with_its_marker(self):
+        with recording() as rec:
+            rec.s3_tagging = False
+            rec.add_bucket(B, {"data/part-0": b"x", OWNER_MARKER_KEY: MINE})
+            _destroy(rec)
+            assert rec.buckets_store[B] == {OWNER_MARKER_KEY: MINE}
+
+    def test_a_kept_recorded_legacy_bucket_is_stamped(self):
+        """Row 3 with --keep-buckets: stamped before the record goes with the
+        namespace, so the next deploy reads row 1, not row 4."""
+        with recording() as rec:
+            rec.add_bucket(
+                B, ["data/part-0"], tags={TAG_DEPLOYMENT_NAME: NS, "lakebench.created": "true"}
+            )
+            _destroy(rec, annotations=CREATED, delete_buckets=False)
+            assert rec.tags_store[B][TAG_CLUSTER] == FP
+            assert rec.tags_store[B]["lakebench.created"] == "true"
+            assert rec.buckets_store[B] == {}
+
+    def test_a_kept_recorded_tagless_bucket_gets_its_marker(self):
+        with recording() as rec:
+            rec.s3_tagging = False
+            rec.add_bucket(B, ["u01-bronze-data/part-0"])
+            _destroy(rec, annotations=CREATED, delete_buckets=False)
+            marker = json.loads(rec.buckets_store[B][OWNER_MARKER_KEY])
+            assert (marker["deployment"], marker["cluster"]) == (NS, FP)
+
+    def test_no_fingerprint_keeps_an_unstamped_recorded_bucket(self):
+        """Row 3 needs this cluster's fingerprint too: no bucket is emptied."""
+        with recording() as rec:
+            rec.add_bucket(
+                B, ["data/part-0"], tags={TAG_DEPLOYMENT_NAME: NS, "lakebench.created": "true"}
+            )
+            results = _destroy(rec, fp=None, annotations=CREATED)
+            assert rec.buckets_store[B] == {"data/part-0": b"x"}
+            assert _bucket_result(results).status.value == "failed"
+
+
+class TestNo16AdoptionProof:
+    def test_deploy_does_not_claim_a_16_adopted_tagless_bucket(self):
+        """1.6 recorded another cluster's empty bucket as adopted; 1.7 must not
+        turn that record into a marker claim."""
+        with recording(NS) as rec:
+            rec.s3_tagging = False
+            rec.add_namespace(
+                NS,
+                annotations={
+                    "lakebench.deployment/name": NS,
+                    "lakebench.deployment/adopted-empty-buckets": B,
+                },
+            )
+            rec.add_bucket(B, ["their/part-0"])
+            result = _deploy(rec)
+            assert result.status.value == "success", result.message
+            assert OWNER_MARKER_KEY not in rec.buckets_store[B]
+
+    def test_marker_write_mode_is_recorded(self):
+        from lakebench.deploy.ownership import ANNOTATION_MARKER_WRITE
+
+        with recording(NS) as rec:
+            rec.s3_tagging = False
+            _deploy(rec)
+            anns = rec.store[("namespaces", None, NS)].metadata.annotations
+            assert anns[ANNOTATION_MARKER_WRITE] == "conditional"
+
+    def test_preprovisioned_claim_lost_is_not_recorded(self):
+        from lakebench.deploy.engine import DeploymentEngine
+        from lakebench.deploy.ownership import ANNOTATION_ADOPTED_EMPTY_BUCKETS
+        from lakebench.k8s.client import K8sClient
+        from tests.conftest import make_config
+
+        cfg = make_config(name=NS)
+        cfg.platform.storage.s3.create_buckets = False
+        with recording(NS) as rec:
+            rec.for_config(cfg)
+            rec.s3_tagging = False
+            rec.add_namespace(NS, annotations={"lakebench.deployment/name": NS})
+            for b in ("u01-bronze", "u01-silver", "u01-gold"):
+                rec.add_bucket(b)
+            other = json.dumps({"deployment": NS, "cluster": OTHER_FP}).encode()
+
+            def racing_claim(bucket, key):
+                # Another cluster's marker replaces ours on bronze before our
+                # read-back (the race the marker decides).
+                if bucket == B and key == OWNER_MARKER_KEY:
+                    rec.buckets_store[B][OWNER_MARKER_KEY] = other
+
+            rec.after_put = racing_claim
+            engine = DeploymentEngine(cfg, k8s_client=K8sClient(namespace=NS))
+            with patch("lakebench.deploy.ownership.api_server_fingerprint", return_value=FP):
+                engine._deploy_buckets(force_legacy=True)
+            anns = rec.store[("namespaces", None, NS)].metadata.annotations
+            adopted = set(anns.get(ANNOTATION_ADOPTED_EMPTY_BUCKETS, "").split(","))
+            assert B not in adopted
+            assert {"u01-silver", "u01-gold"} <= adopted
+
+
+def test_has_user_objects_survives_a_backend_ignoring_start_after():
+    from lakebench.s3.client import has_user_objects
+
+    class IgnoresStartAfter:
+        def __init__(self, keys):
+            self.keys = sorted(keys)
+
+        def list_objects_v2(self, Bucket, Prefix="", MaxKeys=1000, **_kw):  # noqa: N803
+            ks = [k for k in self.keys if k.startswith(Prefix)][:MaxKeys]
+            return {"Contents": [{"Key": k} for k in ks], "KeyCount": len(ks)}
+
+        def get_paginator(self, _op):
+            outer = self
+
+            class P:
+                def paginate(self, Bucket, Prefix="", **_kw):  # noqa: N803
+                    yield outer.list_objects_v2(Bucket, Prefix)
+
+            return P()
+
+    assert has_user_objects(IgnoresStartAfter([OWNER_MARKER_KEY, "zz/data"]), B) is True
+    assert has_user_objects(IgnoresStartAfter([OWNER_MARKER_KEY]), B) is False
+
+
+def test_stale_bronze_note_outlives_generate_for_a_later_run(tmp_path, monkeypatch):
+    from lakebench.cli._helpers import load_stale_bronze, record_stale_bronze
+    from tests.conftest import make_config
+
+    monkeypatch.setattr("lakebench._constants.DEFAULT_OUTPUT_DIR", str(tmp_path))
+    cfg = make_config(name=NS)
+    record_stale_bronze(cfg, {"allowed": True, "objects_before": 3, "bucket": B, "prefix": "p"})
+    assert load_stale_bronze(cfg)["objects_before"] == 3
+    record_stale_bronze(cfg, None)  # a later clean generate
+    assert load_stale_bronze(cfg) is None

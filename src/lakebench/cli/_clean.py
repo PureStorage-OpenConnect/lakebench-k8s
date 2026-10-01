@@ -370,7 +370,6 @@ def clean(
             # buckets it created or adopted while empty.
             from lakebench.deploy.ownership import (
                 api_server_fingerprint,
-                read_adopted_empty_buckets,
                 read_created_buckets,
             )
 
@@ -379,9 +378,8 @@ def clean(
                 from kubernetes import client as _k8s_record
 
                 _core = _k8s_record.CoreV1Api()
-                ns_record = read_created_buckets(_core, cfg.get_namespace()) | (
-                    read_adopted_empty_buckets(_core, cfg.get_namespace())
-                )
+                # SAF-10: the created record only (not 1.6's adopted-empty one).
+                ns_record = read_created_buckets(_core, cfg.get_namespace())
             except Exception:  # noqa: BLE001 -- unreadable: nothing is proven by it
                 ns_record = set()
 

@@ -1389,14 +1389,23 @@ class DeploymentEngine:
                     continue
                 if not s3.has_user_objects(name):
                     empty.append(name)
-            record_adopted_empty_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), empty)
             stamp = cluster_stamp(fp)
+            if stamp is None:
+                logger.warning(
+                    "cannot compute this cluster's fingerprint; pre-provisioned buckets "
+                    "are not claimed"
+                )
+                return
+            # Claim first (the owner marker decides a race), record only what
+            # this deployment won.
+            ours: list[str] = []
             for name in empty:
-                if stamp is None:
-                    break
                 refused = self._stamp_owner_marker(s3.raw_client, name, self.config.name, stamp)
                 if refused:
                     logger.warning("pre-provisioned bucket not claimed: %s", refused)
+                    continue
+                ours.append(name)
+            record_adopted_empty_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), ours)
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not record pre-provisioned empty buckets: %s", e)
 
@@ -1417,6 +1426,16 @@ class DeploymentEngine:
             deployment, cluster, namespace, uid if isinstance(uid, str) else ""
         )
         result = write_owner_marker(boto, bucket, identity)
+        try:
+            from kubernetes import client as _kclient
+
+            from lakebench.deploy.ownership import ANNOTATION_MARKER_WRITE
+
+            _kclient.CoreV1Api().patch_namespace(
+                namespace, {"metadata": {"annotations": {ANNOTATION_MARKER_WRITE: result.mode}}}
+            )
+        except Exception as e:  # noqa: BLE001 -- the record is informational
+            logger.warning("could not record the marker write mode on %s: %s", namespace, e)
         if result.ours:
             return ""
         found = result.marker or {}
@@ -1523,7 +1542,6 @@ class DeploymentEngine:
             build_identity_from_config,
             cluster_stamp,
             list_lakebench_deployment_names,
-            read_adopted_empty_buckets,
             read_bucket_ownership_tag,
             record_created_buckets,
             verify_bucket_ownership,
@@ -1608,14 +1626,10 @@ class DeploymentEngine:
                     _created_cache.append(set())
             return _created_cache[0]
 
-        try:
-            adopted_record = read_adopted_empty_buckets(
-                _kclient.CoreV1Api(), self.config.get_namespace()
-            )
-        except Exception:  # noqa: BLE001 -- unreadable: nothing is proven by it
-            adopted_record = set()
         for name in bucket_names:
-            record = _recorded_created() | set(created) | adopted_record
+            # SAF-10: only the created record proves this cluster made a
+            # bucket (a 1.6 adopted-empty record does not).
+            record = _recorded_created() | set(created)
             v = verify_bucket_ownership(
                 boto,
                 name,
@@ -1750,7 +1764,7 @@ class DeploymentEngine:
                         identity.name,
                     )
                     unsupported_warned = True
-                stamp = was_created or name in _recorded_created() or name in adopted_record
+                stamp = was_created or name in _recorded_created()
                 if was_created:
                     logger.info(
                         "bucket %s: created under name-prefix ownership; "

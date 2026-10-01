@@ -59,7 +59,13 @@ def has_user_objects(boto_client: Any, bucket: str, prefix: str = "") -> bool:
     if prefix.startswith(LAKEBENCH_KEY_PREFIX):
         return False  # everything under this prefix is Lakebench's own
     resp = boto_client.list_objects_v2(**args, StartAfter=_AFTER_LAKEBENCH_KEYS)
-    return bool(resp.get("Contents"))
+    contents = resp.get("Contents") or []
+    if not contents:
+        return False
+    if not is_lakebench_key(contents[0]["Key"]):
+        return True
+    # The backend ignored StartAfter: a full listing decides (never a guess).
+    return bool(list_user_keys(boto_client, bucket, prefix, limit=1))
 
 
 def list_user_keys(boto_client: Any, bucket: str, prefix: str = "", limit: int = 50) -> list[str]:
@@ -477,7 +483,8 @@ class S3Client:
         stream checkpoints, and emptying a whole bucket is ``empty_bucket``.
         Also refuses a prefix under ``.lakebench/`` (Lakebench's own keys).
         ``abort_multipart`` also aborts incomplete multipart uploads under the
-        prefix (FlashBlade keeps them as ghosts otherwise, GOTCHAS 2).
+        prefix (FlashBlade keeps them as ghosts otherwise, GOTCHAS 2); they
+        are not counted in the return value.
         """
         if not prefix.strip("/"):
             raise ValueError("delete_prefix needs a non-empty prefix")
@@ -517,8 +524,6 @@ class S3Client:
                         except ClientError as e:
                             if e.response.get("Error", {}).get("Code") != "NoSuchUpload":
                                 raise
-                            continue
-                        deleted += 1
         except ClientError as e:
             raise S3BucketError(  # noqa: B904
                 f"Failed to delete {bucket_name}/{prefix}: {e}"

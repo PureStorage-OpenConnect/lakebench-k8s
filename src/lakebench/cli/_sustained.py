@@ -175,15 +175,13 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
     b = s3_cfg.buckets
     from lakebench.deploy.ownership import (
         api_server_fingerprint,
-        read_adopted_empty_buckets,
         read_created_buckets,
     )
 
     my_cluster = api_server_fingerprint(cfg.platform.kubernetes.context or "")
     try:
-        ns_record = read_created_buckets(core_v1, cfg.get_namespace()) | (
-            read_adopted_empty_buckets(core_v1, cfg.get_namespace())
-        )
+        # SAF-10: the created record only (not 1.6's adopted-empty one).
+        ns_record = read_created_buckets(core_v1, cfg.get_namespace())
     except Exception:  # noqa: BLE001 -- unreadable: nothing is proven by it
         ns_record = set()
     for bucket in (b.bronze, b.silver, b.gold):

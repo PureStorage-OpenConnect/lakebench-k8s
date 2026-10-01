@@ -185,15 +185,44 @@ class TestDeployerCycleZero:
             d._clear_bronze_prefix_if_fresh(0, PREFIX)
             assert list(rec.buckets_store[BRONZE]) == [OWNER_MARKER_KEY]
 
-    def test_adopted_empty_record_counts_as_owned(self):
-        """SAF-10 row 3 through the adopted-empty record: deploy adopted it empty."""
+    def test_a_16_adopted_empty_record_does_not_count_as_owned(self):
+        """SAF-10: only the created record (or an owner marker) proves this
+        cluster's claim; 1.6's adopted-empty record does not."""
+        from lakebench.deploy.datagen import StaleBronzeRefused
+
         with recording() as rec:
             cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"], created_record=False)
             rec.s3_tagging = False
             ns = rec.store[("namespaces", None, NS)]
             ns.metadata.annotations["lakebench.deployment/adopted-empty-buckets"] = BRONZE
+            with pytest.raises(StaleBronzeRefused):
+                self._deployer(cfg)._clear_bronze_prefix_if_fresh(0, PREFIX)
+            assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"]
+
+    def test_marker_claim_counts_as_owned(self):
+        import json
+
+        with recording() as rec:
+            cfg = _seed(rec, owned=False, created_record=False)
+            rec.s3_tagging = False
+            rec.buckets_store[BRONZE] = {
+                f"{PREFIX}/part-0": b"x",
+                OWNER_MARKER_KEY: json.dumps({"deployment": NS, "cluster": FP}).encode(),
+            }
             self._deployer(cfg)._clear_bronze_prefix_if_fresh(0, PREFIX)
-            assert rec.buckets_store[BRONZE] == {}
+            assert list(rec.buckets_store[BRONZE]) == [OWNER_MARKER_KEY]
+
+    def test_unproven_legacy_bucket_is_not_owned(self):
+        """Row 4: our name tag, no cluster stamp, not in the record."""
+        from lakebench.deploy.datagen import StaleBronzeRefused
+
+        with recording() as rec:
+            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"], created_record=False)
+            rec.tags_store[BRONZE] = {TAG_DEPLOYMENT_NAME: NS}
+            with pytest.raises(StaleBronzeRefused):
+                self._deployer(cfg)._clear_bronze_prefix_if_fresh(0, PREFIX)
+            got = _gate(cfg, regenerate=True)
+            assert not got.proceed and "reclaim-bucket" in got.message
 
 
 def test_continuous_unowned_refuses():

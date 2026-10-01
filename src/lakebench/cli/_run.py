@@ -1614,11 +1614,12 @@ def run(
             "--regenerate",
             help=(
                 "With --generate: clear the datagen prefix in the bronze "
-                "bucket before generating, when this deployment created the "
+                "bucket before generating, when this deployment owns the "
                 "bucket. Without this flag, a non-empty bronze prefix is "
                 "refused (exit 3) so existing datagen output is never "
                 "overwritten silently. Never clears a bucket this deployment "
-                "did not create. Refused without --generate or --generate-only."
+                "does not own. A multi-cycle run clears an owned prefix before "
+                "cycle 0 without it. Refused without --generate or --generate-only."
             ),
         ),
     ] = False,
@@ -2324,11 +2325,19 @@ def run(
 
         # SAF-9: a multi-cycle run's cycle 0 is a fresh write; the same gate
         # as generate, before the first cycle's datagen (unless the
-        # single-cycle --generate path above already ran it).
+        # single-cycle --generate path above already ran it). Cycle 0 of an
+        # owned bucket is cleared as 1.6 did (LB-185), so the gate runs with
+        # regenerate on: only a bucket this deployment may not empty refuses.
         if total_cycles > 1 and not (include_datagen and not skip_generate):
-            _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
+            _gate = enforce_bronze_gate(cfg, True, allow_stale_bronze)
             if collector.current_run is not None:
                 collector.current_run.datagen_stale_bronze = _gate.record()
+        elif not (include_datagen and not skip_generate) and collector.current_run is not None:
+            # No datagen in this run: a stale-bronze note left by the
+            # generate that made this bronze still describes it.
+            from lakebench.cli._helpers import load_stale_bronze
+
+            collector.current_run.datagen_stale_bronze = load_stale_bronze(cfg)
 
         for cycle_idx in range(total_cycles):
             # Track per-cycle metrics (v1.1.0)

@@ -221,8 +221,12 @@ kubectl logs -n <namespace> -l job-name=lakebench-datagen --tail=50
 its first cycle) refuses to write into a bronze datagen prefix that already
 holds data: it exits 3 (refused) and names the prefix, so an existing corpus is never
 overwritten by accident. What it does next depends on whether this
-deployment owns the bronze bucket (it created it, or adopted it while empty
-with `--force-legacy`, and the bucket carries this cluster's stamp):
+deployment owns the bronze bucket: it carries this deployment's and this
+cluster's stamp (a tag, or on FlashBlade the `.lakebench/owner.json` marker),
+or this namespace's created-buckets record lists it (a bucket 1.6 created,
+stamped on the next deploy). A multi-cycle run clears an owned prefix before
+cycle 0 without `--regenerate`, as 1.6 did; the continuous run refuses any
+bucket it does not own before it starts (exit 1).
 
 | Bucket | Prefix | Flag | Result |
 |---|---|---|---|
@@ -248,7 +252,11 @@ clears the datagen prefix of an owned bucket, so a smaller generate never
 inherits a larger earlier generate's `part-*` files, and refuses a non-empty
 prefix in any other bucket unless `--allow-stale-bronze` was passed. Before
 1.7 it skipped such a bucket silently and silver over-counted the stale
-files.
+files. A `run` without datagen after a `generate --allow-stale-bronze`
+records the same `datagen.stale_bronze` (the generate leaves the note under
+`lakebench-output/datagen/`). Every generate that proceeds clears the
+silver-state `bronze_data_clock`, since bronze is being replaced; the next
+bronze-verify writes it again.
 
 ## Configuration Options
 

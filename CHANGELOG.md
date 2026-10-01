@@ -788,13 +788,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `metrics.json` and the report warns "bronze held N objects before
   generate; rows may be over-counted". The deployer no longer skips such a
   bucket silently before cycle 0. A user with a pre-provisioned bronze
-  bucket who relied on `--regenerate` passes `--allow-stale-bronze` or
-  clears the prefix.
+  bucket who relied on `--regenerate` clears the prefix, or claims the bucket
+  once with `lakebench admin reclaim-bucket` and then uses `--regenerate`
+  (`--allow-stale-bronze` would over-count). A multi-cycle run still clears
+  an owned prefix before cycle 0, and a `run` after `generate
+  --allow-stale-bronze` still records the note.
 - **`destroy` clears the kept silver-state's data clock when it empties
   bronze (LB-231).** With `create_namespace: false`, `lakebench-silver-state`
   survives destroy for its rebuild counters; its `bronze_data_clock` now
-  goes when destroy empties the bronze bucket, so a later deploy's silver
-  stages no longer read the old data's clock.
+  goes when destroy empties the bronze bucket, and when a generate replaces
+  bronze, so silver stages no longer read the old data's clock.
 - **Bucket ownership names the cluster (SAF-10).** Deploy stamps each bucket
   it owns with `lakebench.cluster=<API-server fingerprint>` and refuses when it
   cannot compute the fingerprint. Deploy refuses, and destroy, `clean` and
@@ -809,6 +812,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (FlashBlade), deploy adopts a pre-existing empty bucket, or a
   pre-provisioned one with `create_buckets: false`, only with
   `--force-legacy`; without it the bucket is used but destroy leaves its data.
+  A bucket 1.6 recorded as adopted while empty is no longer emptied on that
+  record (1.6 wrote it for another cluster's bucket too); claim it with
+  `admin reclaim-bucket`. Destroy stamps a recorded 1.6 bucket before it
+  empties it, and keeps the stamp on every bucket it keeps (`--keep-buckets`
+  included), so the bucket stays this deployment's.
   There the stamp is an owner marker object, `.lakebench/owner.json`, written
   with a conditional PUT where the backend enforces it. `.lakebench/` keys
   are never counted as data, and `clean` and `--regenerate` keep them. The

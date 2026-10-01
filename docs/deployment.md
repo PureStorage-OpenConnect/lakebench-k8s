@@ -293,8 +293,9 @@ Pre-provisioned buckets (`create_buckets: false`), buckets deploy adopted, and
 `--keep-buckets` runs are emptied but kept. On a backend without bucket
 tagging (FlashBlade) the bucket name is the only other ownership evidence, so
 a pre-existing bucket is emptied only when deploy found it empty and recorded
-that (`lakebench.deployment/adopted-empty-buckets`, which from 1.7 deploy does
-only with `--force-legacy`); one that already held objects is left in place
+that, which from 1.7 deploy does only with `--force-legacy` and with an
+owner marker (`.lakebench/owner.json`); a bucket 1.6 recorded in
+`lakebench.deployment/adopted-empty-buckets` without a marker is kept. One that already held objects is left in place
 and reported unless you pass `--force-legacy`. A bucket stamped by another
 cluster (`lakebench.cluster`), or one that carries this deployment's name but
 no cluster stamp and is not in this namespace's record, is always kept. If a recorded bucket cannot be

@@ -90,6 +90,9 @@ ANNOTATION_DEPLOY_NONCE = "lakebench.deployment/deploy-nonce"
 # directory's state. A v1.6 directory with no state is refused a
 # nameless teardown of a namespace carrying it: the deployment moved on.
 ANNOTATION_STATE_SCHEMA = "lakebench.deployment/state-schema"
+# SAF-10: how this deployment's owner markers were written ("conditional" or
+# "unconditional"), so a backend that ignores IfNoneMatch is on record (R12).
+ANNOTATION_MARKER_WRITE = "lakebench.deployment/marker-write"
 
 # Namespace name max length (matches K8s + doubles as the bucket-tag length
 # guard: AWS caps tag values at 256, so 63 chars is well within bounds).
@@ -791,13 +794,12 @@ def tagless_contents_are_ours(core_v1: Any, namespace: str, bucket: str) -> bool
 
     The name alone is not proof (deploy adopts a pre-existing bucket that
     merely prefix-matches). True only when the namespace records that
-    lakebench created the bucket or adopted it while it was empty. Callers
-    still apply the longest-prefix name check. Read errors propagate; the
-    caller refuses on them.
+    lakebench created the bucket (SAF-10: the adopted-empty record a 1.6
+    deploy wrote is not proof; a 1.7 adoption carries an owner marker
+    instead). Callers still apply the longest-prefix name check. Read errors
+    propagate; the caller refuses on them.
     """
-    return bucket in read_created_buckets(core_v1, namespace) or bucket in (
-        read_adopted_empty_buckets(core_v1, namespace)
-    )
+    return bucket in read_created_buckets(core_v1, namespace)
 
 
 def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:
@@ -990,6 +992,73 @@ def owner_marker_identity(
     }
 
 
+def bucket_may_be_emptied(
+    boto_client: Any,
+    bucket: str,
+    deployment: str,
+    *,
+    cluster_fp: str | None,
+    created_record: Iterable[str],
+    other_deployments: Iterable[str] | None,
+) -> bool:
+    """The one rule for "may this deployment delete data in ``bucket``" (SAF-9, SAF-10).
+
+    True for MATCH (this deployment's and this cluster's stamp: tag, or
+    owner marker), and for LEGACY_PROVEN (no cluster stamp, in the created
+    record) on a tagged backend; on a tagless one LEGACY_PROVEN also needs
+    the longest-prefix name claim, which needs the other deployments' names
+    (``None``: they could not be listed, so False), as destroy requires.
+    Everything else is False. Read errors raise.
+    """
+    v = verify_bucket_ownership(
+        boto_client,
+        bucket,
+        deployment,
+        expected_cluster=cluster_fp,
+        created_record=created_record,
+    )
+    if v.verdict is IdentityVerdict.MATCH:
+        return True
+    if v.verdict is IdentityVerdict.LEGACY_PROVEN:
+        if v.tagged:
+            return True
+        return other_deployments is not None and bucket_name_matches_deployment(
+            bucket, deployment, other_deployments
+        )
+    return False
+
+
+def deployment_may_empty(cfg: Any, bucket: str, s3: Any) -> bool:
+    """``bucket_may_be_emptied`` for a config, on its own cluster context. Fail-safe.
+
+    The kube client is loaded for the config's context first, so the
+    namespace record, the other deployments and the fingerprint all come
+    from the same cluster. Any error is False.
+    """
+    try:
+        from kubernetes import client as k8s_client
+
+        from lakebench.k8s import get_k8s_client
+
+        if getattr(s3, "_init_error", None):
+            return False
+        context = cfg.platform.kubernetes.context or ""
+        namespace = cfg.get_namespace()
+        get_k8s_client(context=context, namespace=namespace)
+        core_v1 = k8s_client.CoreV1Api()
+        return bucket_may_be_emptied(
+            s3.raw_client,
+            bucket,
+            cfg.name,
+            cluster_fp=api_server_fingerprint(context),
+            created_record=read_created_buckets(core_v1, namespace),
+            other_deployments=list_lakebench_deployment_names(core_v1, exclude=namespace),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.info("could not prove this deployment may empty %s (%s); it may not", bucket, e)
+        return False
+
+
 def write_deploy_nonce(core_v1: Any, namespace: str, nonce: str | None = None) -> str:
     """Stamp a deploy nonce on the namespace and return it.
 
@@ -1114,6 +1183,21 @@ def _cluster_verdict(
             found_api_server=found_cluster,
             tagged=tagged,
         )
+    if bucket in record and cluster_stamp(expected_cluster) is None:
+        # Row 3 would stamp this cluster; with no fingerprint nothing may be
+        # claimed or emptied on the record's word (design: "no bucket is
+        # emptied or deleted").
+        return IdentityReport(
+            verdict=IdentityVerdict.UNVERIFIED_CLUSTER,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=expected_deployment,
+            tagged=tagged,
+            hint=(
+                f"bucket {bucket!r}: cannot compute this cluster's fingerprint; "
+                "buckets kept. `lakebench admin reclaim-bucket` (owner) can release them"
+            ),
+        )
     if bucket in record:
         return IdentityReport(
             verdict=IdentityVerdict.LEGACY_PROVEN,
@@ -1152,8 +1236,11 @@ def verify_bucket_ownership(
     """Read a bucket's ownership stamp and return its SAF-10 verdict.
 
     ``expected_cluster`` is this run's ``api_server_fingerprint`` (None when
-    it cannot be computed); ``created_record`` is this namespace's created
-    and adopted-empty buckets. The matrix (DESIGN ch01 section 4):
+    it cannot be computed); ``created_record`` is this namespace's
+    created-buckets record. Only that record proves this cluster made a
+    bucket (SPEC SAF-10): the adopted-empty record is what 1.6 wrote when it
+    adopted another cluster's empty bucket, so it proves nothing. The
+    matrix (DESIGN ch01 section 4):
 
     - row 1, name and cluster ours: MATCH;
     - rows 2 and 5, name ours, cluster not: FOREIGN_CLUSTER;
@@ -1164,8 +1251,8 @@ def verify_bucket_ownership(
     - row 6, name not ours: MISMATCH;
     - row 7, no stamp and not in the record: ABSENT on a tagged backend,
       UNSUPPORTED on a tagless one;
-    - row 8, a cluster stamp but no fingerprint for this run:
-      UNVERIFIED_CLUSTER.
+    - row 8, a cluster stamp (or row 3's record) but no fingerprint for this
+      run: UNVERIFIED_CLUSTER.
 
     On a backend without tagging the stamp is the owner marker
     (``.lakebench/owner.json``) and ``tagged`` is False on the report. A

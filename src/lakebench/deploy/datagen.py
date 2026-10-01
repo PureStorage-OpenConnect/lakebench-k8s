@@ -53,6 +53,40 @@ def bronze_datagen_prefix(config: LakebenchConfig) -> str:
     return "customer/interactions"
 
 
+def clear_bronze_data_clock(namespace: str) -> None:
+    """Set ``lakebench-silver-state``'s ``bronze_data_clock`` to "" (LB-231).
+
+    The clock is bronze-verify's max(event_ts) of the bronze data; once that
+    data is gone or replaced (destroy emptied bronze, ``clean bronze``, a
+    fresh generate) it is stale, and silver's LB_DATA_CLOCK ladder must fall
+    through instead. Conditional on the resourceVersion read. A missing
+    ConfigMap or namespace raises a 404 ApiException for the caller to
+    ignore; the rebuild-epoch counters are never touched.
+    """
+    from kubernetes import client as k8s_client
+
+    from lakebench.deploy.engine import DeploymentEngine
+
+    core_v1 = k8s_client.CoreV1Api()
+    cm = core_v1.read_namespaced_config_map(DeploymentEngine.SILVER_STATE_CONFIGMAP, namespace)
+    key = DeploymentEngine._SILVER_STATE_CLOCK_KEY  # noqa: SLF001
+    if not (cm.data or {}).get(key):
+        return
+    core_v1.patch_namespaced_config_map(
+        DeploymentEngine.SILVER_STATE_CONFIGMAP,
+        namespace,
+        {"data": {key: ""}, "metadata": {"resourceVersion": cm.metadata.resource_version}},
+    )
+
+
+def _clear_clock_best_effort(cfg: Any) -> None:
+    try:
+        clear_bronze_data_clock(cfg.get_namespace())
+    except Exception as e:  # noqa: BLE001
+        if getattr(e, "status", None) != 404:
+            logger.warning("could not clear the bronze data clock (LB-231): %s", e)
+
+
 class StaleBronzeRefused(RuntimeError):
     """Datagen would write over objects in a bronze bucket this deployment may not empty.
 
@@ -80,43 +114,14 @@ def _s3_client_for(cfg: Any) -> Any:
 def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None) -> bool:
     """Whether this deployment may delete data in ``bucket`` (SAF-9, SAF-10).
 
-    The rule destroy uses to empty a bucket: the SAF-10 verdict is MATCH (the
-    bucket carries this deployment's and this cluster's stamp) or
-    LEGACY_PROVEN (no cluster stamp, but this namespace's created or
-    adopted-empty record lists it). Fail-safe: any error, an unreachable
-    cluster or S3, or another verdict, is False.
+    ``lakebench.deploy.ownership.deployment_may_empty``: the rule destroy
+    uses to empty a bucket. Kept here as the gate's seam.
     """
-    try:
-        from kubernetes import client as k8s_client
+    from lakebench.deploy.ownership import deployment_may_empty as _rule
 
-        from lakebench.deploy.ownership import (
-            IdentityVerdict,
-            api_server_fingerprint,
-            read_adopted_empty_buckets,
-            read_created_buckets,
-            verify_bucket_ownership,
-        )
-
-        if s3 is None:
-            s3 = _s3_client_for(cfg)
-        if getattr(s3, "_init_error", None):
-            return False
-        core_v1 = k8s_client.CoreV1Api()
-        namespace = cfg.get_namespace()
-        record = read_created_buckets(core_v1, namespace) | read_adopted_empty_buckets(
-            core_v1, namespace
-        )
-        v = verify_bucket_ownership(
-            s3.raw_client,
-            bucket,
-            cfg.name,
-            expected_cluster=api_server_fingerprint(cfg.platform.kubernetes.context or ""),
-            created_record=record,
-        )
-        return v.verdict in (IdentityVerdict.MATCH, IdentityVerdict.LEGACY_PROVEN)
-    except Exception as e:  # noqa: BLE001
-        logger.info("could not prove this deployment may empty %s (%s); it may not", bucket, e)
-        return False
+    if s3 is None:
+        s3 = _s3_client_for(cfg)
+    return _rule(cfg, bucket, s3)
 
 
 @dataclass
@@ -172,7 +177,8 @@ def bronze_prefix_gate(
     ``--regenerate`` deletes only the datagen prefix, aborting its incomplete
     multipart uploads (GOTCHAS 2); an empty prefix is refused, never widened
     to the bucket. A read failure refuses. The caller exits with the
-    result's ``exit_code``.
+    result's ``exit_code``. Every "proceed" means bronze is about to be replaced, so the
+    silver-state data clock is cleared (LB-231).
     """
     bucket = cfg.platform.storage.s3.buckets.bronze
     prefix = bronze_datagen_prefix(cfg).strip("/")
@@ -193,12 +199,14 @@ def bronze_prefix_gate(
         )
     try:
         if not s3.bucket_exists(bucket):
+            _clear_clock_best_effort(cfg)
             return BronzeGateResult(True, bucket, prefix, owned=False)
         nonempty = s3.has_user_objects(bucket, prefix + "/" if prefix else "")
     except Exception as e:  # noqa: BLE001
         return refuse(f"could not list {shown}: {e}", owned=False, code=ExitCode.PREREQUISITE)
     owned = deployment_may_empty(cfg, bucket, s3)
     if not nonempty:
+        _clear_clock_best_effort(cfg)
         return BronzeGateResult(True, bucket, prefix, owned)
     try:
         info = s3.get_bucket_size(bucket, prefix=prefix + "/" if prefix else "")
@@ -231,23 +239,28 @@ def bronze_prefix_gate(
             return refuse(
                 f"--regenerate: could not clear {shown}: {e}", owned, n, code=ExitCode.FAILED
             )
+        _clear_clock_best_effort(cfg)
         return BronzeGateResult(True, bucket, prefix, owned, n, cleared=cleared)
     if regenerate:
         return refuse(
-            f"{held} and this deployment did not create {bucket}: Lakebench does not "
-            "empty a bucket this deployment did not create. Clear the prefix yourself, "
-            "or pass --allow-stale-bronze to generate over it.",
+            f"{held} and this deployment cannot prove it owns {bucket}: Lakebench does "
+            "not empty a bucket this deployment did not create. Clear the prefix "
+            "yourself, or claim the bucket with `lakebench admin reclaim-bucket` (owner) "
+            "and use --regenerate; --allow-stale-bronze generates over it.",
             owned,
             n,
         )
     if not allow_stale_bronze:
         return refuse(
-            f"{held} and this deployment did not create {bucket}. Pass "
-            "--allow-stale-bronze to generate over them (the scale-ratio check flags "
-            "an over-count), or clear the prefix yourself.",
+            f"{held} and this deployment cannot prove it owns {bucket} (it did not "
+            "create it, or no cluster stamp or record proves it). Clear the prefix "
+            "yourself, or claim the bucket with `lakebench admin reclaim-bucket` "
+            "(owner) and use --regenerate; --allow-stale-bronze generates over the "
+            "objects, and rows may then be over-counted.",
             owned,
             n,
         )
+    _clear_clock_best_effort(cfg)
     return BronzeGateResult(True, bucket, prefix, owned, n, stale_allowed=True)
 
 

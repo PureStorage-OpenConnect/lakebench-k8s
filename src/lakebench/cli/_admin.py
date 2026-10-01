@@ -1181,6 +1181,16 @@ def reclaim_bucket(
                     )
 
                     marker = owner_marker_identity(cfg.name, my_cluster, cfg.get_namespace())
+                    displaced = read_owner_marker(s3.raw_client, bucket)
+                    if displaced and (displaced.get("deployment"), displaced.get("cluster")) != (
+                        cfg.name,
+                        my_cluster,
+                    ):
+                        print_info(
+                            f"bucket {bucket!r}: replacing the owner marker of deployment "
+                            f"{displaced.get('deployment')!r} on cluster "
+                            f"{displaced.get('cluster')!r}"
+                        )
                     s3.raw_client.put_object(
                         Bucket=bucket,
                         Key=OWNER_MARKER_KEY,

@@ -259,6 +259,7 @@ def enforce_bronze_gate(cfg, regenerate: bool, allow_stale_bronze: bool = False)
     if not result.proceed:
         print_error(result.message)
         raise typer.Exit(result.exit_code)
+    record_stale_bronze(cfg, result.record())
     shown = f"s3://{result.bucket}/{result.prefix}"
     if result.cleared:
         print_success(f"--regenerate: removed {result.cleared} object(s) under {shown}")
@@ -270,6 +271,42 @@ def enforce_bronze_gate(cfg, regenerate: bool, allow_stale_bronze: bool = False)
             "flags it."
         )
     return result
+
+
+def _stale_bronze_path(cfg) -> Path:
+    from lakebench._constants import DEFAULT_OUTPUT_DIR
+
+    return Path(DEFAULT_OUTPUT_DIR) / "datagen" / f"{cfg.get_namespace()}-stale-bronze.json"
+
+
+def record_stale_bronze(cfg, record: dict | None) -> None:
+    """Keep the gate's ``datagen.stale_bronze`` for a later ``run`` (SAF-9).
+
+    ``generate`` writes no metrics, so a ``run`` after it reads the record
+    from here; a generate that wrote over nothing removes it.
+    """
+    import json
+
+    path = _stale_bronze_path(cfg)
+    try:
+        if record is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, sort_keys=True))
+    except OSError as e:
+        print_warning(f"could not record the stale-bronze note at {path}: {e}")
+
+
+def load_stale_bronze(cfg) -> dict | None:
+    """The ``datagen.stale_bronze`` record the last generate left, if any."""
+    import json
+
+    try:
+        data = json.loads(_stale_bronze_path(cfg).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def write_run_report(metrics_storage, run_id: str) -> Path | None:
