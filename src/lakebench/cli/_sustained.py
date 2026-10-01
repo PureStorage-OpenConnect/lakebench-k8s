@@ -2291,9 +2291,11 @@ class NamespaceGone(Exception):
         self.at_elapsed = at_elapsed
 
 
-#: Consecutive failed namespace reads (other than 404) before the run stops:
-#: one 503 must not end a good run.
+#: Consecutive failed namespace reads (other than 404) before the run stops,
+#: and the least time they must span: one 503, or a burst of quick failures
+#: in one loop pass, must not end a good run.
 NAMESPACE_READ_STRIKES = 3
+NAMESPACE_STRIKE_SPAN_S = 60.0
 
 
 class NamespaceWatch:
@@ -2303,14 +2305,16 @@ class NamespaceWatch:
     reads it again and raises :class:`NamespaceGone` on a 404, a namespace
     being deleted (deletion timestamp or phase Terminating), a different uid
     (destroyed and deployed again), or after ``NAMESPACE_READ_STRIKES``
-    consecutive failed reads. A single failed read is not a reason. Reads
-    go through a client that does not retry, so one costs at most 15 s.
+    consecutive failed reads spanning ``NAMESPACE_STRIKE_SPAN_S``. A single
+    failed read is not a reason. Reads go through a client that does not
+    retry, so one costs at most 15 s.
     """
 
     def __init__(self, namespace: str) -> None:
         self.namespace = namespace
         self.uid: str | None = None
         self.failures = 0
+        self._first_failure: float | None = None
         self._api_client: Any = None
 
     def _read(self):
@@ -2332,12 +2336,22 @@ class NamespaceWatch:
             self._api_client = None
 
     def start(self) -> None:
-        try:
-            ns = self._read()
-            uid = getattr(getattr(ns, "metadata", None), "uid", None)
-            self.uid = uid if isinstance(uid, str) and uid else None
-        except Exception as e:  # noqa: BLE001 -- the checks still see a 404
-            logger.warning("Could not read namespace %s at the window start: %s", self.namespace, e)
+        """Record the namespace's uid; tried three times, and if it still
+        cannot be read, the first later read that answers sets it."""
+        for attempt in range(NAMESPACE_READ_STRIKES):
+            try:
+                ns = self._read()
+            except Exception as e:  # noqa: BLE001 -- the checks still see a 404
+                logger.warning(
+                    "Could not read namespace %s at the window start (%d of %d): %s",
+                    self.namespace,
+                    attempt + 1,
+                    NAMESPACE_READ_STRIKES,
+                    e,
+                )
+                continue
+            self._baseline(ns)
+            return
 
     def gone(self) -> str | None:
         """Why the namespace is gone, or None while it is there (or unread)."""
@@ -2352,17 +2366,27 @@ class NamespaceWatch:
         except Exception as e:  # noqa: BLE001 -- transport errors
             return self._strike(str(e))
         self.failures = 0
+        self._first_failure = None
         meta = getattr(ns, "metadata", None)
         phase = getattr(getattr(ns, "status", None), "phase", None)
         if getattr(meta, "deletion_timestamp", None) is not None or phase == "Terminating":
             return f"namespace {self.namespace} is being deleted"
         uid = getattr(meta, "uid", None)
-        if self.uid is not None and isinstance(uid, str) and uid and uid != self.uid:
+        if self.uid is None:
+            self._baseline(ns)
+        elif isinstance(uid, str) and uid and uid != self.uid:
             return f"namespace {self.namespace} was deleted and created again"
         return None
 
+    def _baseline(self, ns: Any) -> None:
+        uid = getattr(getattr(ns, "metadata", None), "uid", None)
+        self.uid = uid if isinstance(uid, str) and uid else None
+
     def _strike(self, error: str) -> str | None:
         self.failures += 1
+        now = time.monotonic()
+        if self._first_failure is None:
+            self._first_failure = now
         logger.warning(
             "Could not read namespace %s (%d of %d): %s",
             self.namespace,
@@ -2370,7 +2394,10 @@ class NamespaceWatch:
             NAMESPACE_READ_STRIKES,
             error,
         )
-        if self.failures >= NAMESPACE_READ_STRIKES:
+        if (
+            self.failures >= NAMESPACE_READ_STRIKES
+            and now - self._first_failure >= NAMESPACE_STRIKE_SPAN_S
+        ):
             return f"namespace {self.namespace} unreadable ({error})"
         return None
 
@@ -3725,13 +3752,12 @@ def _run_sustained(
                     f"Letting the pipeline take in the rest of the corpus for the result "
                     f"check (up to {_need:.0f}s, not scored)..."
                 )
-                _settle_start = time.time()
                 settle = wait_for_settle(
                     monitor,
                     [n for _, n in submitted],
                     _datagen_output_rows,
                     _need,
-                    probe=lambda: _ns_watch.check(run_duration + time.time() - _settle_start),
+                    probe=lambda: _ns_watch.check(time.time() - start),
                 )
                 if settle["settled"]:
                     print_success(f"Corpus settled in gold after {settle['seconds']:.0f}s")
@@ -3745,7 +3771,7 @@ def _run_sustained(
         # Stop streaming jobs. By name: so first make sure the namespace is
         # still this run's (a redeployment's streams have the same names).
         _stage = "stop-streams"
-        _ns_watch.check(run_duration)
+        _ns_watch.check(time.time() - start)
         _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
         for _job_type, job_name in submitted:

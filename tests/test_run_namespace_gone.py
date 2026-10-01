@@ -124,66 +124,101 @@ def _ns(uid="u1", phase="Active", deleting=False):
     )
 
 
-def _watch(*answers):
-    from lakebench.cli._sustained import NamespaceWatch
+@pytest.fixture
+def watch(monkeypatch):
+    """A NamespaceWatch over a scripted CoreV1Api, on a clock the test moves."""
+    import lakebench.cli._sustained as sustained
 
-    api = MagicMock()
-    api.read_namespace.side_effect = list(answers)
-    patcher = patch("kubernetes.client.CoreV1Api", return_value=api)
-    patcher.start()
-    w = NamespaceWatch("ns1")
-    return w, api, patcher
+    clock = SimpleNamespace(t=0.0)
+    monkeypatch.setattr(sustained, "time", SimpleNamespace(monotonic=lambda: clock.t))
+
+    def make(*answers):
+        api = MagicMock()
+        api.read_namespace.side_effect = list(answers)
+        patcher = patch("kubernetes.client.CoreV1Api", return_value=api)
+        patcher.start()
+        made.append(patcher)
+        return sustained.NamespaceWatch("ns1"), api
+
+    made: list = []
+    yield make, clock
+    for p in made:
+        p.stop()
 
 
-def test_watch_rules():
+def _e503():
     from kubernetes.client.rest import ApiException
 
+    return ApiException(status=503, reason="Unavailable")
+
+
+def test_watch_deleting_and_timeouts(watch):
     from lakebench.cli._sustained import NamespaceGone
 
-    e503 = ApiException(status=503, reason="Unavailable")
-    w, api, p = _watch(_ns(), _ns(), _ns(deleting=True))
-    try:
-        w.start()
-        assert w.uid == "u1"
-        w.check(1.0)
-        with pytest.raises(NamespaceGone, match="is being deleted") as info:
-            w.check(2.0)
-        assert info.value.at_elapsed == 2.0
-        assert api.read_namespace.call_args.kwargs["_request_timeout"] == (5, 10)
-    finally:
-        p.stop()
-    w, api, p = _watch(_ns(), e503, e503, _ns(), e503, e503, e503)
-    try:
-        w.start()
-        w.check(1.0)
+    make, _ = watch
+    w, api = make(_ns(), _ns(), _ns(deleting=True))
+    w.start()
+    assert w.uid == "u1"
+    w.check(1.0)
+    with pytest.raises(NamespaceGone, match="is being deleted") as info:
         w.check(2.0)
-        w.check(3.0)  # answered: the strikes reset
-        w.check(4.0)
-        w.check(5.0)
-        with pytest.raises(NamespaceGone, match="unreadable"):
-            w.check(6.0)
-    finally:
-        p.stop()
-    w, api, p = _watch(_ns("u1"), _ns("u2"))
-    try:
-        w.start()
-        with pytest.raises(NamespaceGone, match="created again"):
-            w.check(1.0)
-    finally:
-        p.stop()
+    assert info.value.at_elapsed == 2.0
+    assert api.read_namespace.call_args.kwargs["_request_timeout"] == (5, 10)
 
 
-def test_watch_without_a_start_uid_still_sees_a_404():
+def test_strikes_need_three_reads_over_a_minute(watch):
+    from lakebench.cli._sustained import NamespaceGone
+
+    make, clock = watch
+    w, _ = make(_ns(), *[_e503() for _ in range(3)], _ns(), *[_e503() for _ in range(4)])
+    w.start()
+    for t in (10.0, 20.0, 30.0):  # three quick failures in one pass: not yet
+        clock.t = t
+        w.check(t)
+    clock.t = 40.0
+    w.check(40.0)  # answered: the strikes reset
+    for t in (100.0, 130.0):
+        clock.t = t
+        w.check(t)
+    clock.t = 160.0  # third failure 60 s after the first
+    with pytest.raises(NamespaceGone, match="unreadable"):
+        w.check(160.0)
+
+
+def test_redeployed_namespace_is_seen(watch):
+    from lakebench.cli._sustained import NamespaceGone
+
+    make, _ = watch
+    w, _ = make(_ns("u1"), _ns("u2"))
+    w.start()
+    with pytest.raises(NamespaceGone, match="created again"):
+        w.check(1.0)
+
+
+def test_start_retries_then_the_first_answer_sets_the_uid(watch):
+    """Unread at the window start (three tries): the first read that answers
+    becomes the baseline, so a later redeploy is still seen."""
     from kubernetes.client.rest import ApiException
 
     from lakebench.cli._sustained import NamespaceGone
 
-    w, api, p = _watch(RuntimeError("down"), _ns("u9"), ApiException(status=404, reason="NF"))
-    try:
-        w.start()
-        assert w.uid is None
-        w.check(1.0)  # no start uid: a uid is not compared
-        with pytest.raises(NamespaceGone, match="was deleted"):
-            w.check(2.0)
-    finally:
-        p.stop()
+    make, _ = watch
+    w, _ = make(
+        RuntimeError("down"),
+        RuntimeError("down"),
+        RuntimeError("down"),
+        _ns("u9"),
+        _ns("u9"),
+        _ns("u10"),
+    )
+    w.start()
+    assert w.uid is None
+    w.check(1.0)
+    assert w.uid == "u9"
+    w.check(2.0)
+    with pytest.raises(NamespaceGone, match="created again"):
+        w.check(3.0)
+    w2, _ = make(_ns("u1"), ApiException(status=404, reason="NF"))
+    w2.start()
+    with pytest.raises(NamespaceGone, match="was deleted"):
+        w2.check(4.0)
