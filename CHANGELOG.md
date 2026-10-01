@@ -290,10 +290,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`deploy --timeout` now bounds every wait (DEP-6).** It used to be
   checked only between steps, so a step waiting on Spark Thrift (300 s),
   DuckDB (900 s), Polaris (600 s plus 600 s) or an operator rollout could
-  run past it. Every wait is now clamped to the time left, and a wait the
-  deadline cuts short fails the step with "deploy timeout (N s) reached
-  after M s while waiting for <component>: <resource> (<last state>)".
-  Helm and API calls already running finish first.
+  run past it. Every wait is now clamped to the time left, including the
+  wait for the cluster lease, and a wait the deadline cuts short fails the
+  step with "deploy timeout (N s) reached after M s while waiting for
+  <component>: <resource> (<last state>)". No shared change (a helm
+  upgrade of the Spark Operator watch list, a Stackable or observability
+  install) starts after the deadline; one that has started is completed,
+  with its rollout and verify, before the step fails, so the shared
+  operator is never left mid-restart. Helm calls already running finish
+  first, and a polling wait can overrun by one poll interval (10 s at
+  most).
 - The deploy failure panel no longer claims that successful steps are
   skipped on retry: re-running deploy re-applies every step and keeps the
   existing resources.

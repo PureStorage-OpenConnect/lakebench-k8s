@@ -85,7 +85,7 @@ def _wait_for_prometheus(
                 ],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=max(1.0, min(30.0, deadline - time.time())),
             )
             if r.returncode == 0 and "True" in (r.stdout or "").split():
                 return ""
@@ -98,7 +98,7 @@ def _wait_for_prometheus(
                 f"Prometheus in namespace '{namespace}' was not Ready after {timeout_s}s "
                 f"({last}); platform metrics would be empty"
             )
-        time.sleep(10)
+        time.sleep(max(0.0, min(10.0, deadline - time.time())))
 
 
 class ObservabilityLookupError(RuntimeError):
@@ -293,9 +293,14 @@ class ObservabilityDeployer:
             # The existence check and the install happen under the cluster
             # lease, so two deploys cannot both see "absent" and both install.
             try:
-                with cluster_lock(_kclient.CoreV1Api(), timeout=600):
+                # The wait for the lease counts against the deploy deadline,
+                # and the shared install does not start once it has passed.
+                deploy_deadline.check("the cluster lease for the observability stack")
+                with cluster_lock(_kclient.CoreV1Api(), timeout=deploy_deadline.clamp(600)):
+                    deploy_deadline.check("helm install of the shared observability stack")
                     result = self._deploy_locked(namespace, start)
             except ClusterLockError as e:
+                deploy_deadline.check("the cluster lease for the observability stack", str(e))
                 return DeploymentResult(
                     component="observability",
                     status=DeploymentStatus.FAILED,
