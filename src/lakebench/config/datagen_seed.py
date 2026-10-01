@@ -599,6 +599,56 @@ def seed_ref(schema: str, seed: int, heldout: HeldOut | None = None) -> str:
     return seed_hash(h.salt, seed)
 
 
+def record_seed(schema: str, seed, corpus_role: str | None = None, heldout: HeldOut | None = None):
+    """How run output records a corpus seed (LB-229; SPEC release success 5):
+    metrics.json, the datagen fleet record, reports and the scorer's
+    provenance all call this, so no output carries a future look's seed.
+
+    The plaintext seed, except a financial seed that is held out (its salted
+    hash is registered for evaluation or robustness, or the corpus declares
+    one of those roles) and not yet spent, which is recorded as
+    ``{"seed_ref": <salted hash under the hash file's salt>, "role": <role>}``.
+    Seed 43, the other public development seeds and every spent seed stay in
+    plaintext, as invariant 5 needs. Equal seeds give equal records, so
+    comparisons on the recorded form still work. When the held-out record
+    cannot be read the seed is withheld (``seed_ref`` None, role
+    ``unknown``): the safe side. A recorded form passes through unchanged,
+    so the rule can be applied twice. Never raises, never prints a seed.
+    """
+    if isinstance(seed, Mapping) and "seed_ref" in seed:
+        return dict(seed)
+    if seed is None or isinstance(seed, bool):
+        return seed
+    try:
+        value = int(seed)
+    except (TypeError, ValueError, OverflowError):
+        return seed
+    if schema != "financial":
+        return value
+    try:
+        h = heldout if heldout is not None else _heldout()
+        role = heldout_role(value, h)
+        spent = is_spent(value, h)
+    except Exception:  # noqa: BLE001 -- unreadable or contradictory: withhold
+        return {"seed_ref": None, "role": "unknown", "withheld": "held-out record unreadable"}
+    if not spent:
+        try:
+            spent = value in spent_seeds() or value in recorded_seeds()
+        except Exception:  # noqa: BLE001 -- unknown spend status: not plaintext on that ground
+            spent = False
+    if spent:
+        return value
+    if role is None and corpus_role in PROTECTED_ROLES:
+        try:
+            public = value == calibration_seed()
+        except Exception:  # noqa: BLE001
+            public = False
+        role = None if public else corpus_role
+    if role is None:
+        return value
+    return {"seed_ref": seed_hash(h.salt, value), "role": role}
+
+
 # Seed recovery. The generator derives each instance seed as
 # splitmix64(seed ^ splitmix64(0xF100 + tid * TID_SEED_STRIDE + j))
 # (datagen_rs::typology::schedule_ex). splitmix64 is a bijection on 64-bit

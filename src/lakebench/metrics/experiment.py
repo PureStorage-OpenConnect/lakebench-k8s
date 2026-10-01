@@ -225,7 +225,11 @@ def experiment_inputs(
     corpus = {
         "schema": schema,
         "generator_image": images.datagen,
-        "seed": seed,
+        # A held-out seed is recorded by its salted hash, never in plaintext
+        # (LB-229); the v1 id then hashes that form, so the id does not give
+        # the seed away either. Every other seed is unchanged, and so is
+        # every id computed before.
+        "seed": _record_seed(schema, seed, dg.corpus_role),
         "corpus_role": dg.corpus_role,
         "robustness_perturbation": dg.robustness_perturbation,
         "scale": dg.get_effective_scale(),
@@ -552,8 +556,17 @@ def _results(metrics: Any, mode: str) -> dict[str, Any]:
     }
 
 
+def _record_seed(schema: str | None, seed: Any, corpus_role: str | None = None) -> Any:
+    """``datagen_seed.record_seed``: the one rule for how run output names a
+    seed (a held-out seed by its salted hash; LB-229)."""
+    from lakebench.config.datagen_seed import record_seed
+
+    return record_seed(schema or "", seed, corpus_role)
+
+
 def _datagen(metrics: Any, inputs: Mapping[str, Any]) -> dict[str, Any]:
     fleet = metrics.datagen_fleet or {}
+    corpus_in = inputs.get("corpus") or {}
     image = fleet.get("image")
     ids = [i for i in (fleet.get("image_ids") or []) if i]
     digest = None
@@ -574,12 +587,18 @@ def _datagen(metrics: Any, inputs: Mapping[str, Any]) -> dict[str, Any]:
         # Corpus parameters the datagen pods ran with (their container args),
         # when the fleet record carries them.
         "observed": bool(fleet) and any(fleet.get(k) is not None for k in ("seed", "scale")),
-        "seed": fleet.get("seed"),
+        "seed": _record_seed(
+            corpus_in.get("schema"), fleet.get("seed"), corpus_in.get("corpus_role")
+        ),
         "scale": fleet.get("scale"),
         "data_quality": fleet.get("data_quality"),
         "mixed_params": list(fleet.get("mixed_params") or []),
     }
     return out
+
+
+def _seed_key(seed: Any) -> str:
+    return json.dumps(seed, sort_keys=True, default=str)
 
 
 def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[dict, list[str]]:
@@ -596,7 +615,14 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
         )
     if dg.get("pod_image") and "," in str(dg["pod_image"]):
         problems.append(f"datagen pods ran different images ({dg['pod_image']})")
-    for key in ("seed", "scale"):
+    seed_seen, seed_declared = dg.get("seed"), corpus.get("seed")
+    if seed_seen is not None:
+        # Compared in the recorded form (datagen_seed.record_seed), so a
+        # held-out seed is never printed in a problem.
+        if seed_declared is not None and _seed_key(seed_declared) != _seed_key(seed_seen):
+            problems.append(f"config seed {seed_declared!r} but the datagen pods ran {seed_seen!r}")
+        out["seed"] = int(seed_seen) if isinstance(seed_seen, int) else seed_seen
+    for key in ("scale",):
         seen = dg.get(key)
         if seen is None:
             continue
@@ -604,7 +630,7 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
         # The pods get --scale as "%.6f" (deploy/datagen.py).
         if declared is not None and abs(float(declared) - float(seen)) > 1e-6:
             problems.append(f"config {key} {declared!r} but the datagen pods ran {seen!r}")
-        out[key] = int(seen) if key == "seed" else float(seen)
+        out[key] = float(seen)
     if dg.get("pod_image") and "," not in str(dg["pod_image"]):
         if corpus.get("generator_image") and dg["pod_image"] != corpus["generator_image"]:
             problems.append(

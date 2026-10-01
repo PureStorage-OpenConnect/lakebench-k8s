@@ -84,6 +84,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   stored id or identity digest moves.
 
 ### Changed
+- **Run output never records a held-out seed in plaintext (LB-229).** In
+  `metrics.json` (`experiment.corpus.seed`, `experiment.corpus.datagen.seed`
+  and `datagen_fleet.seed`) an unspent evaluation or robustness seed is
+  recorded as `{"seed_ref": <salted hash>, "role": <role>}`, and the v1
+  corpus id hashes that form. Seed 43, the other public development seeds
+  and every spent seed stay in plaintext. The rule is
+  `config/datagen_seed.record_seed`, for reports and the AML scorer too.
 - **Held-out AML seeds are checked as salted hashes.** The evaluation and
   robustness seeds are matched against `spark/data/aml/heldout_hashes.json`
   (which may only be appended to) and a compiled copy of the current

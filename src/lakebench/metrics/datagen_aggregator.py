@@ -236,7 +236,8 @@ class FleetSummary:
         return {
             "image": self.image,
             "image_ids": list(self.image_ids),
-            "seed": self.seed,
+            # A held-out seed is recorded by its salted hash (LB-229).
+            "seed": _record_seed(self.schema, self.seed),
             "scale": self.scale,
             "schema": self.schema,
             "pods_expected": self.pods_expected,
@@ -263,6 +264,12 @@ class FleetSummary:
             "mixed_params": list(self.mixed_params),
             "per_pod": [_pod_to_dict(p) for p in self.per_pod],
         }
+
+
+def _record_seed(schema: str | None, seed: Any) -> Any:
+    from lakebench.config.datagen_seed import record_seed
+
+    return record_seed(schema or "", seed)
 
 
 def _pod_to_dict(p: PodMetrics) -> dict[str, Any]:
