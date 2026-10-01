@@ -194,7 +194,14 @@ head's run finishes. The lint job runs `ruff check src/ tests/ scripts/`,
 `ruff format --check src/ tests/ scripts/` and `mypy src/lakebench/` on
 Python 3.11, and `scripts/check_action_runtimes.py --verify`, which reads
 each action's `action.yml` at its pinned SHA and fails if
-`.github/action-runtimes.json` no longer matches it. The test job runs
+`.github/action-runtimes.json` no longer matches it. It also runs
+`scripts/check_doc_readers.py`, which fails on any tracked `.md` file, file
+under `docs/` or `scripts/`, or top-level script that is neither linked from
+`README.md` or `docs/README.md` nor read by code, tests or CI (a mention in a
+comment or docstring does not count); link a new page from `docs/README.md`.
+`tests/test_doc_links.py` checks that every relative link, `#anchor` and
+backticked `src/`, `tests/`, `scripts/` or `datagen_rs/` path in the docs
+resolves. The test job runs
 `pytest tests/ -rs` (excluding `tests/test_e2e.py` and
 `tests/test_integration.py`) on Python 3.10 and 3.13, the oldest and newest
 supported versions. It runs to the end rather than stopping at the first

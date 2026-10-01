@@ -190,6 +190,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `compare` reads as not comparable. `corpus.id` (v1) is unchanged, and no
   stored id or identity digest moves.
 
+### Removed
+- `lbrun.py`, the run-from-a-checkout wrapper. Use
+  `PYTHONPATH=src python -m lakebench` instead.
+
 ## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and
