@@ -56,10 +56,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   there. The checksum file comes from the same release, so it does not
   prove who built the binary. The script refuses an `INSTALL_DIR` it cannot
   write before downloading, installs the binary with mode 755, runs
-  `version` on the binary it installed rather than the first `lakebench` on
-  `PATH`, and refuses Linux arm64 (never published) with the list of
-  available binaries. Releases before 1.7.0 have no `SHA256SUMS` and are
-  refused; download those by hand.
+  `version` on the downloaded binary before it replaces anything (not on
+  the first `lakebench` on `PATH`), so a binary that does not run on the
+  machine leaves the installed one in place, and refuses Linux arm64 (never published) with the list of
+  available binaries. Releases before 1.7.0 have no `SHA256SUMS`, so
+  `VERSION=1.6.0` (or `latest` while 1.6 is the newest release) installs
+  unverified with a warning on stderr. A release at 1.7.0 or later without
+  `SHA256SUMS` is refused, and so is a checksum mismatch on any release.
 - The package ships a `py.typed` marker, so type checkers read its
   annotations.
 ### Fixed

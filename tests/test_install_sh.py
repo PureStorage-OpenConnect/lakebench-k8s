@@ -39,6 +39,8 @@ class Release:
 
     assets: dict[str, bytes] = field(default_factory=dict)
     truncate: set[str] = field(default_factory=set)
+    status: dict[str, int] = field(default_factory=dict)  # asset -> HTTP error, 0 = drop
+    tag: str = TAG
     requests: list[str] = field(default_factory=list)
 
 
@@ -46,8 +48,14 @@ def _handler(release: Release) -> type[http.server.BaseHTTPRequestHandler]:
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
             release.requests.append(self.path)
-            prefix = f"/dl/{TAG}/"
+            prefix = f"/dl/{release.tag}/"
             name = self.path[len(prefix) :] if self.path.startswith(prefix) else ""
+            if name in release.status:
+                if release.status[name] == 0:  # drop the connection, no response
+                    self.close_connection = True
+                    return
+                self.send_error(release.status[name])
+                return
             body = release.assets.get(name)
             if body is None:
                 self.send_error(404)
@@ -240,15 +248,69 @@ def test_bad_checksum_exits_nonzero(release, make_env):
     assert list(env.tmpdir.iterdir()) == []
 
 
-def test_missing_sha256sums_is_refused(release, make_env):
+@pytest.mark.parametrize("version", ["v1.7.0", "1.7.1", "v1.10.0", "2.0.0", "v7", "vnext"])
+def test_missing_sha256sums_on_a_1_7_or_later_release_is_refused(release, make_env, version):
+    # 1.7.0 is the first release that publishes SHA256SUMS; a tag that does
+    # not parse as <major>.<minor> counts as new.
     rel, _ = release
-    rel.assets["lakebench-linux-amd64"] = FAKE_BINARY  # a pre-1.7 release: no SHA256SUMS
+    rel.tag = "v" + version.removeprefix("v")
+    rel.assets["lakebench-linux-amd64"] = FAKE_BINARY  # no SHA256SUMS
     env = make_env()
+    env.vars["VERSION"] = version
 
     result = _run(env)
 
     assert result.returncode != 0
-    assert "SHA256SUMS" in result.stderr
+    assert "has no SHA256SUMS; refusing" in result.stderr
+    assert "UNVERIFIED" not in result.stderr
+    assert list(env.install_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("version", ["1.6.0", "v1.6.2", "v1.0.2", "0.9.1"])
+def test_pre_1_7_release_without_sha256sums_installs_with_a_warning(release, make_env, version):
+    rel, _ = release
+    rel.tag = "v" + version.removeprefix("v")
+    rel.assets["lakebench-linux-amd64"] = FAKE_BINARY  # these releases publish no SHA256SUMS
+    env = make_env()
+    env.vars["VERSION"] = version
+
+    result = _run(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "UNVERIFIED" in result.stderr
+    assert (env.install_dir / "lakebench").read_bytes() == FAKE_BINARY
+    assert "lakebench fake 9.9.9" in result.stdout
+
+
+def test_pre_1_7_release_with_sha256sums_is_still_checked(release, make_env):
+    rel, _ = release
+    rel.tag = "v1.6.0"
+    _publish(rel, **{"lakebench-linux-amd64": FAKE_BINARY})
+    rel.assets["lakebench-linux-amd64"] = FAKE_BINARY + b"# tampered\n"
+    env = make_env()
+    env.vars["VERSION"] = "1.6.0"
+
+    result = _run(env)
+
+    assert result.returncode != 0
+    assert "checksum mismatch" in result.stderr
+    assert list(env.install_dir.iterdir()) == []
+
+
+def test_pre_1_7_release_with_a_failing_sha256sums_fetch_is_refused(release, make_env):
+    # Only a 404 means "no SHA256SUMS"; a server error is not a reason to skip the check.
+    rel, _ = release
+    rel.tag = "v1.6.0"
+    rel.assets["lakebench-linux-amd64"] = FAKE_BINARY
+    rel.status["SHA256SUMS"] = 500
+    env = make_env()
+    env.vars["VERSION"] = "1.6.0"
+
+    result = _run(env)
+
+    assert result.returncode != 0
+    assert "HTTP 500" in result.stderr
+    assert "UNVERIFIED" not in result.stderr
     assert list(env.install_dir.iterdir()) == []
 
 
@@ -363,3 +425,38 @@ def test_unwritable_install_dir_refused_before_download(release, make_env):
     assert result.returncode != 0
     assert "cannot write to" in result.stderr
     assert rel.requests == []
+
+
+def test_pre_1_7_release_with_an_unreachable_sha256sums_is_refused(release, make_env):
+    rel, _ = release
+    rel.tag = "v1.6.0"
+    rel.assets["lakebench-linux-amd64"] = FAKE_BINARY
+    rel.status["SHA256SUMS"] = 0
+    env = make_env()
+    env.vars["VERSION"] = "1.6.0"
+
+    result = _run(env)
+
+    assert result.returncode != 0
+    assert "HTTP 000" in result.stderr
+    assert "UNVERIFIED" not in result.stderr
+    assert list(env.install_dir.iterdir()) == []
+
+
+def test_binary_that_does_not_run_replaces_nothing(release, make_env):
+    # A pre-1.6 binary built for the wrong architecture or a newer glibc
+    # fails to run; the lakebench already installed must survive.
+    rel, _ = release
+    rel.tag = "v1.5.0"
+    broken = b"#!/bin/sh\necho 'cannot execute binary file' >&2\nexit 126\n"
+    rel.assets["lakebench-linux-amd64"] = broken
+    env = make_env()
+    env.vars["VERSION"] = "1.5.0"
+    (env.install_dir / "lakebench").write_bytes(FAKE_BINARY)
+
+    result = _run(env)
+
+    assert result.returncode != 0
+    assert "does not run here" in result.stderr
+    assert sorted(p.name for p in env.install_dir.iterdir()) == ["lakebench"]
+    assert (env.install_dir / "lakebench").read_bytes() == FAKE_BINARY

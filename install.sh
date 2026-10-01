@@ -13,7 +13,8 @@
 # so a failed, truncated or corrupted download never leaves a lakebench
 # there. SHA256SUMS comes from the same release as the binary: it detects a
 # bad download, not a tampered release. Releases before 1.7.0 publish no
-# SHA256SUMS and cannot be installed with this script.
+# SHA256SUMS: for those the binary is installed unverified, with a warning on
+# stderr. A release at 1.7.0 or later without SHA256SUMS is refused.
 #
 # Everything runs inside main(), called on the last line: if the pipe from
 # curl is cut short, bash is left with an unfinished function and runs
@@ -39,9 +40,23 @@ die() {
   exit 1
 }
 
+# True when the tag names a release before 1.7.0, the first to publish
+# SHA256SUMS. A tag that does not parse as <major>.<minor> counts as new, so
+# it is never installed unverified.
+predates_sha256sums() {
+  local v="${1#v}" major minor rest
+  major="${v%%.*}"
+  rest="${v#*.}"
+  [ "$rest" != "$v" ] || return 1
+  minor="${rest%%.*}"
+  case "$major" in "" | *[!0-9]*) return 1 ;; esac
+  case "$minor" in "" | *[!0-9]*) return 1 ;; esac
+  [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 7 ]; }
+}
+
 main() {
   local install_dir="${INSTALL_DIR:-/usr/local/bin}"
-  local raw_os arch os binary tag base hasher expected actual
+  local raw_os arch os binary tag base hasher expected actual sums_status
 
   raw_os=$(uname -s | tr '[:upper:]' '[:lower:]')
   arch=$(uname -m)
@@ -101,24 +116,33 @@ main() {
     echo "Available binaries: https://github.com/${REPO}/releases/tag/${tag}" >&2
     exit 1
   fi
-  if ! curl -fsSL "${base}/SHA256SUMS" -o "${LB_TMP}/SHA256SUMS"; then
-    die "could not download SHA256SUMS for release ${tag}; releases before 1.7.0" \
-      "publish none. Download ${binary} from https://github.com/${REPO}/releases/tag/${tag}" \
+  # Only a 404 counts as "this release has no SHA256SUMS"; any other failure
+  # (network, server error) stops the install whatever the version.
+  sums_status=$(curl -sSL -o "${LB_TMP}/SHA256SUMS" -w '%{http_code}' "${base}/SHA256SUMS") \
+    || sums_status="000"
+  if [ "$sums_status" = "404" ] && predates_sha256sums "$tag"; then
+    echo "Warning: release ${tag} predates SHA256SUMS (first published in 1.7.0)," \
+      "so this download is UNVERIFIED: it was not checked against any checksum." >&2
+  elif [ "$sums_status" = "404" ]; then
+    die "release ${tag} has no SHA256SUMS; refusing to install an unverified binary." \
+      "Download ${binary} from https://github.com/${REPO}/releases/tag/${tag}" \
       "and check it yourself, or install from PyPI: pipx install lakebench-k8s"
-  fi
-
-  # A line is "<sha256>  <name>", or "<sha256> *<name>" in binary mode.
-  expected=$(awk -v f="$binary" \
-    '{ n = $2; sub(/^\*/, "", n); if (n == f) { print tolower($1); exit } }' \
-    "${LB_TMP}/SHA256SUMS")
-  case "$expected" in
-    "" | *[!0-9a-f]*) die "SHA256SUMS for ${tag} has no valid entry for ${binary}" ;;
-  esac
-  [ "${#expected}" -eq 64 ] || die "SHA256SUMS for ${tag} has no valid entry for ${binary}"
-  actual=$($hasher "${LB_TMP}/${binary}" | awk '{ print $1 }')
-  if [ "$actual" != "$expected" ]; then
-    die "checksum mismatch for ${binary} (expected ${expected}, got ${actual});" \
-      "nothing was installed"
+  elif [ "$sums_status" != "200" ]; then
+    die "could not download SHA256SUMS for release ${tag} (HTTP ${sums_status})"
+  else
+    # A line is "<sha256>  <name>", or "<sha256> *<name>" in binary mode.
+    expected=$(awk -v f="$binary" \
+      '{ n = $2; sub(/^\*/, "", n); if (n == f) { print tolower($1); exit } }' \
+      "${LB_TMP}/SHA256SUMS")
+    case "$expected" in
+      "" | *[!0-9a-f]*) die "SHA256SUMS for ${tag} has no valid entry for ${binary}" ;;
+    esac
+    [ "${#expected}" -eq 64 ] || die "SHA256SUMS for ${tag} has no valid entry for ${binary}"
+    actual=$($hasher "${LB_TMP}/${binary}" | awk '{ print $1 }')
+    if [ "$actual" != "$expected" ]; then
+      die "checksum mismatch for ${binary} (expected ${expected}, got ${actual});" \
+        "nothing was installed"
+    fi
   fi
 
   # Stage inside INSTALL_DIR, then rename over the old binary, so the
@@ -127,12 +151,17 @@ main() {
   cp "${LB_TMP}/${binary}" "$LB_STAGED"
   # 755 whatever the umask, so a binary installed under sudo runs for everyone.
   chmod 755 "$LB_STAGED"
+  # Run the staged binary itself, not whichever lakebench is first on PATH,
+  # before it replaces anything: one that does not run on this machine (a
+  # pre-1.6 binary built for the wrong architecture or a newer glibc) is
+  # removed on exit and any lakebench already there is kept.
+  if ! "$LB_STAGED" version; then
+    die "the downloaded ${binary} (${tag}) does not run here (wrong architecture, a newer glibc," \
+      "or a noexec TMPDIR or INSTALL_DIR); nothing was installed"
+  fi
   mv -f "$LB_STAGED" "${install_dir}/lakebench"
   LB_STAGED=""
   echo "Installed lakebench ${tag} to ${install_dir}/lakebench"
-
-  # Verify the binary just installed, not whichever lakebench is first on PATH.
-  "${install_dir}/lakebench" version
 }
 
 main
