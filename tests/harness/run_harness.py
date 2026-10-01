@@ -759,7 +759,10 @@ class FakeMonitor:
         last line stamped at or before the fake cluster clock, so the window
         and the settle wait see the log grow as they did live."""
         _checked(self._rec, self._real._get_driver_logs, *args, **kwargs)
-        job_name = args[0] if args else kwargs["job_name"]
+        bound = inspect.signature(self._real._get_driver_logs).bind(None, *args, **kwargs)
+        bound.apply_defaults()
+        job_name = bound.arguments["job_name"]
+        tail = bound.arguments["tail_lines"]
         self._rec.add("SparkJobMonitor", "_get_driver_logs", job_name)
         if job_name not in self._rec.live_streams:
             raise self._rec.refuse(f"driver logs of a stream not running: {job_name}")
@@ -769,9 +772,13 @@ class FakeMonitor:
             raise self._rec.refuse(f"no fixture driver log for {job_name}: {log_path}")
         clock = self._rec.clock
         text = log_path.read_text()
-        if clock is None:
-            return text
-        return log_until(text, clock.cluster_now())
+        if clock is not None:
+            text = log_until(text, clock.cluster_now())
+        if tail is not None:
+            # The real read's tail (100 lines by default): a caller that
+            # drops tail_lines=None loses the window's first lines here too.
+            text = "\n".join(text.splitlines()[-tail:]) + "\n"
+        return text
 
     def application_end(self, *args, **kwargs):
         from lakebench.modules.pipeline_engines.spark.monitor import TIMING_DRIVER
@@ -1441,9 +1448,15 @@ def _install_continuous(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     budget_init = budget_cls.__init__
 
     def clocked_init(self, *args, **kwargs):
+        import time as real_time
+
+        before = real_time.monotonic()
         budget_init(self, *args, **kwargs)
+        # Keep whatever deadline the real __init__ set, moved onto the fake
+        # clock: a later change to its formula still shows in the trace.
+        offset = self.deadline - before
         self._clock = clock.monotonic
-        self.deadline = self._clock() + self.seconds
+        self.deadline = self._clock() + offset
 
     monkeypatch.setattr(budget_cls, "__init__", clocked_init)
     monkeypatch.setattr(
