@@ -16,14 +16,19 @@ lakebench run my-config.yaml
 
 ## Minimum Viable Config (v1.3)
 
-The smallest working config is 5 lines:
+The smallest working config:
 
 ```yaml
 name: my-lakehouse
-endpoint: http://your-s3-endpoint:80
-access_key: YOUR_KEY
-secret_key: YOUR_SECRET
-scale: 10
+platform:
+  storage:
+    s3:
+      endpoint: http://your-s3-endpoint:80
+      access_key: YOUR_KEY
+      secret_key: YOUR_SECRET
+workload:
+  datagen:
+    scale: 10
 ```
 
 Recipe defaults to `hive-iceberg-spark-trino`.
@@ -63,10 +68,12 @@ is refused by the commands that change data (the list above, except
 it and print an "Upgrade notes" block on stderr, so an old config can still
 be inspected, stopped, torn down and converted.
 
-### Flat Fields
+### Flat Fields (deprecated)
 
-v1.3 supports flat top-level fields that map to nested locations. These
-are easier to write and read than the full nested structure:
+v1.3 added flat top-level fields that map to nested locations. They still
+load in v1.7, and each one adds a deprecation note naming the nested key to
+write instead (for example "flat 'scale' is deprecated; write
+workload.datagen.scale"). Write the nested key in new configs:
 
 | Field | Maps to | Default |
 |-------|---------|---------|
@@ -83,7 +90,30 @@ are easier to write and read than the full nested structure:
 | `spark_image` | `images.spark` | from recipe |
 
 If both flat and nested are present for the same setting, flat takes
-precedence and a warning is printed.
+precedence and the note says so.
+
+### Error messages
+
+An unknown key names the key it is closest to, first among the keys of its
+own section and then among every key in the schema, so a key written in the
+wrong section is pointed at the right one:
+
+```text
+  - platform.compute.spark.silver_executor: unknown key; did you mean `silver_executors`?
+  - platform.storage.scale: unknown key; did you mean `workload.datagen.scale`?
+```
+
+An unknown recipe names the nearest recipe, or lists them all. Counts are
+bounded (for example `trino.worker.replicas` 1 to 256, `datagen.generators`
+0 to 1024, ports 1 to 65535). A setting that belongs to the other workload,
+such as `customer360.unique_customers` or `dirty_data_ratio` under `schema:
+financial`, or `tm_operations` or `w1_max_vertices` under `schema:
+customer360`, loads with a note that the workload does not read it. Under
+`financial` the note does not ask you to delete it: the corpus id still
+hashes the `customer360` fields and `dirty_data_ratio`, so removing one
+changes the id of an otherwise identical corpus. `datagen.timestamp_*` gets
+no note: the financial generator ignores it, but it sets the silver data
+clock for every workload.
 
 ### Environment Variable Substitution
 
@@ -91,10 +121,15 @@ Use `${VAR}` or `${VAR:-default}` in any YAML value:
 
 ```yaml
 name: my-lakehouse
-endpoint: ${S3_ENDPOINT}
-access_key: ${S3_ACCESS_KEY}
-secret_key: ${S3_SECRET_KEY}
-scale: ${LAKEBENCH_SCALE:-10}
+platform:
+  storage:
+    s3:
+      endpoint: ${S3_ENDPOINT}
+      access_key: ${S3_ACCESS_KEY}
+      secret_key: ${S3_SECRET_KEY}
+workload:
+  datagen:
+    scale: ${LAKEBENCH_SCALE:-10}
 ```
 
 Unresolved variables without defaults produce a clear error.
@@ -824,7 +859,9 @@ A production-scale config for 1 TB benchmarking on a 64-core cluster:
 name: lakebench-1tb
 recipe: hive-iceberg-spark-trino
 
-scale: 100
+workload:
+  datagen:
+    scale: 100
 
 platform:
   storage:
@@ -906,7 +943,10 @@ For corporate CAs, your infrastructure team can provide the PEM file.
 by the system CA bundle. No `ca_cert` is needed -- just use the HTTPS endpoint:
 
 ```yaml
-endpoint: https://s3.us-east-1.amazonaws.com
+platform:
+  storage:
+    s3:
+      endpoint: https://s3.us-east-1.amazonaws.com
 ```
 
 ## Supported Component Combinations

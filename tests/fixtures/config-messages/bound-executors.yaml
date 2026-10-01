@@ -1,0 +1,5 @@
+name: t
+platform:
+  compute:
+    spark:
+      silver_executors: -4

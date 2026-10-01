@@ -1,0 +1,1 @@
+workload.w1_max_vertices is a financial setting; nothing in a customer360 run reads it.

@@ -138,10 +138,11 @@ def test_both_locations_that_disagree_are_refused(tmp_path):
 
 
 def test_flat_scale_lands_in_the_top_level_block(tmp_path):
-    cfg = _quiet(
-        load_config,
-        _write(tmp_path, {"name": "t", "scale": 7, "workload": {"schema": "customer360"}}),
-    )
+    # Flat keys are deprecated in v1.7 (CFG-4 notes): still promoted, with a note.
+    with pytest.warns(DeprecationWarning, match="flat 'scale' is deprecated"):
+        cfg = load_config(
+            _write(tmp_path, {"name": "t", "scale": 7, "workload": {"schema": "customer360"}})
+        )
     assert cfg.workload.datagen.scale == 7
 
 

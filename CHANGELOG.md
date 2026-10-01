@@ -26,8 +26,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `config upgrade` and `admin` still load such a config and list the
   dropped keys in one "Upgrade notes" block on stderr. An old
   `datagen.file_size` is treated the same way.
+- **Flat top-level config keys are deprecated.** `endpoint:`, `scale:` and
+  the other flat spellings still load, each with a note naming the nested
+  key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Changed
+- Config errors name the nearest key: an unknown key gets "did you mean"
+  from its own section, then from the whole schema (for a key written in
+  the wrong section), and an unknown recipe names the nearest recipe.
+- Counts are bounded at load: `trino.worker.replicas` 1 to 256,
+  `datagen.generators` 0 to 1024, catalog ports 1 to 65535, and the core,
+  thread and override counts at least 1.
+- A setting of the other workload (`customer360.*` or `dirty_data_ratio`
+  under `schema: financial`; `tm_operations` or
+  `w1_max_vertices` under `schema: customer360`) loads with a note that the
+  workload does not read it.
 - Read-only commands create no files: `validate` no longer opens a journal,
   and `report` and `results` no longer create `lakebench-output/runs/`.
 

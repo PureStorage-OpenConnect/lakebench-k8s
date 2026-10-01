@@ -1,0 +1,1 @@
+workload.customer360.unique_customers is a customer360 setting; the financial generator does not read it.

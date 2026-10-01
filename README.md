@@ -72,15 +72,20 @@ first. The Spark Operator is shared cluster infrastructure: a cluster admin
 installs it once with `lakebench admin install-spark-operator` (see
 [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)).
 
-Minimum config -- 5 lines:
+Minimum config:
 
 ```yaml
 # lakebench.yaml
 name: my-lakehouse                 # names the namespace and the buckets
-endpoint: http://s3.example.com:80
-access_key: YOUR_KEY
-secret_key: YOUR_SECRET
-scale: 10                          # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
+platform:
+  storage:
+    s3:
+      endpoint: http://s3.example.com:80
+      access_key: YOUR_KEY
+      secret_key: YOUR_SECRET
+workload:
+  datagen:
+    scale: 10                      # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
 ```
 
 The name is required by every command that changes data (`deploy`,
@@ -88,23 +93,34 @@ The name is required by every command that changes data (`deploy`,
 name to add. Buckets default to `<name>-bronze`, `<name>-silver`
 and `<name>-gold`, so they are unique on stores where bucket names are
 global (FlashBlade, AWS S3). Recipe defaults to `hive-iceberg-spark-trino`.
-Override anything with flat fields or nested YAML:
+Override anything in the nested YAML:
 
 ```yaml
 # lakebench.yaml (with overrides)
 name: flashblade-polaris
 recipe: polaris-iceberg-spark-trino
-endpoint: http://10.0.1.50:80
-access_key: ${S3_ACCESS_KEY}       # env var substitution
-secret_key: ${S3_SECRET_KEY}
-scale: 50
-mode: batch
-spark_image: apache/spark:4.1.1-python3
+images:
+  spark: apache/spark:4.1.1-python3
+platform:
+  storage:
+    s3:
+      endpoint: http://10.0.1.50:80
+      access_key: ${S3_ACCESS_KEY}   # env var substitution
+      secret_key: ${S3_SECRET_KEY}
 architecture:
   catalog:
     polaris:
       client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
+  pipeline:
+    mode: batch
+workload:
+  datagen:
+    scale: 50
 ```
+
+The flat top-level spellings (`endpoint:`, `scale:` and the others in
+[Configuration](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md#flat-fields-deprecated))
+still load, with a deprecation note naming the nested key.
 
 Eleven recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
 for the full list. Support is judged per workload x recipe x mode:

@@ -19,6 +19,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 
 from ._load_context import CHANGES_DATA, emit_note, purpose_from_context
 
@@ -472,15 +473,15 @@ class StorageConfig(ConfigModel):
 class SparkDriverConfig(ConfigModel):
     """Spark driver resource configuration."""
 
-    cores: int = 4
+    cores: int = Field(default=4, ge=1, le=64)
     memory: str = "8g"
 
 
 class SparkExecutorConfig(ConfigModel):
     """Spark executor resource configuration."""
 
-    instances: int = 8
-    cores: int = 4
+    instances: int = Field(default=8, ge=1)
+    cores: int = Field(default=4, ge=1, le=64)
     memory: str = "48g"
     memory_overhead: str = "12g"
 
@@ -505,28 +506,34 @@ class SparkComputeConfig(ConfigModel):
     # Per-executor sizing (cores, memory, PVC) remains fixed from proven profiles.
     bronze_executors: int | None = Field(
         default=None,
+        ge=1,
         description="Override bronze-verify executor count. None = auto from scale.",
     )
     silver_executors: int | None = Field(
         default=None,
+        ge=1,
         description="Override silver-build executor count. None = auto from scale.",
     )
     gold_executors: int | None = Field(
         default=None,
+        ge=1,
         description="Override gold-finalize executor count. None = auto from scale.",
     )
 
     # Streaming job executor count overrides (None = auto from scale).
     bronze_ingest_executors: int | None = Field(
         default=None,
+        ge=1,
         description="Override bronze-ingest executor count. None = auto from scale.",
     )
     silver_stream_executors: int | None = Field(
         default=None,
+        ge=1,
         description="Override silver-stream executor count. None = auto from scale.",
     )
     gold_refresh_executors: int | None = Field(
         default=None,
+        ge=1,
         description="Override gold-refresh executor count. None = auto from scale.",
     )
 
@@ -539,6 +546,8 @@ class SparkComputeConfig(ConfigModel):
     )
     driver_cores: int | None = Field(
         default=None,
+        ge=1,
+        le=64,
         description="Override driver cores. None = profile default (typically 4).",
     )
 
@@ -573,8 +582,8 @@ class PlatformConfig(ConfigModel):
 class HiveThriftConfig(ConfigModel):
     """Hive Metastore thrift server configuration."""
 
-    min_threads: int = 10
-    max_threads: int = 50
+    min_threads: int = Field(default=10, ge=1, le=10000)
+    max_threads: int = Field(default=50, ge=1, le=10000)
     client_timeout: str = "300s"
 
 
@@ -628,7 +637,7 @@ class PolarisConfig(ConfigModel):
     """
 
     version: str = "1.6.0"
-    port: int = 8181
+    port: int = Field(default=8181, ge=1, le=65535)
     client_secret: str = ""
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
@@ -642,7 +651,7 @@ class UnityConfig(ConfigModel):
 
     version: str = "0.4.0"
     spark_connector_version: str = "0.4.0"
-    port: int = 8080
+    port: int = Field(default=8080, ge=1, le=65535)
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
 
@@ -738,7 +747,9 @@ class TrinoCoordinatorConfig(ConfigModel):
 class TrinoWorkerConfig(ConfigModel):
     """Trino worker configuration."""
 
-    replicas: int = 2
+    # le: the largest tier in config/scale.py asks for scale // 50 workers,
+    # 200 at the top scale of 10000.
+    replicas: int = Field(default=2, ge=1, le=256)
     cpu: str = "4"
     memory: str = "16Gi"
     spill_enabled: bool = True
@@ -805,7 +816,7 @@ class TrinoConfig(ConfigModel):
 class SparkThriftConfig(ConfigModel):
     """Spark Thrift Server configuration."""
 
-    cores: int = 2
+    cores: int = Field(default=2, ge=1, le=64)
     memory: str = "4g"
     catalog_name: str = "lakehouse"
 
@@ -813,7 +824,7 @@ class SparkThriftConfig(ConfigModel):
 class DuckDBConfig(ConfigModel):
     """DuckDB query engine configuration."""
 
-    cores: int = 2
+    cores: int = Field(default=2, ge=1, le=64)
     memory: str = "4g"
     catalog_name: str = "lakehouse"
     # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
@@ -1249,7 +1260,8 @@ class DatagenConfig(ConfigModel):
     dirty_data_ratio: float = 0.08
     cpu: str = "2"
     memory: str = "4Gi"
-    generators: int = 0  # generator threads per pod (0 = auto: follow the pod CPU)
+    # Generator threads per pod; 0 = auto (follow the pod CPU).
+    generators: int = Field(default=0, ge=0, le=1024)
     timestamp_start: str | None = Field(
         default=None,
         description="Start date for generated timestamps (ISO format, e.g. '2024-01-01'). Default: datagen built-in (2024-01-01).",
@@ -1330,10 +1342,12 @@ class Customer360Config(ConfigModel):
 
     unique_customers: int | None = Field(
         default=None,
+        ge=1,
         description="Override: unique customer count. If None, derived from scale.",
     )
     date_range_days: int | None = Field(
         default=None,
+        ge=1,
         description="Override: date range in days. If None, defaults to 365.",
     )
 
@@ -1355,7 +1369,9 @@ class TmOperationsConfig(ConfigModel):
             "run reports it as not run; only violated workflow invariants fail a run"
         ),
     )
-    seed: int = Field(default=20260924, description="Seed for every simulated decision")
+    seed: int = Field(
+        default=20260924, ge=0, le=2**63 - 1, description="Seed for every simulated decision"
+    )
     analyst_accuracy: float = Field(default=0.90, ge=0.5, le=1.0)
     investigator_accuracy: float = Field(default=0.95, ge=0.5, le=1.0)
     qa_sample_rate: float = Field(
@@ -1477,6 +1493,52 @@ class WorkloadConfig(ConfigModel):
                 "Customer 360 benchmark. Use 'customer360' or 'financial'."
             )
         return v
+
+    @model_validator(mode="after")
+    def _note_wrong_workload_keys(self) -> WorkloadConfig:
+        """Note settings that belong to the other workload (CFG-4).
+
+        A note, not a refusal, so no identity or hash moves. The note does not
+        say "delete it": the financial corpus id still hashes the customer360
+        and datagen fields (metrics/experiment.py), so deleting one moves the
+        id of an otherwise identical corpus. Only values that
+        differ from the default count, so a saved config that carries every
+        field (save_config) stays quiet.
+        """
+        schema = self.schema_type
+        wrong: list[str] = []
+        if schema == WorkloadSchema.FINANCIAL:
+            c360_defaults = Customer360Config()
+            for name in Customer360Config.model_fields:
+                if getattr(self.customer360, name) != getattr(c360_defaults, name):
+                    wrong.append(f"customer360.{name}")
+            # datagen.timestamp_* are not listed: the financial generator
+            # ignores them, but they set silver's data clock (job.py
+            # _resolve_silver_data_clock) for every workload.
+            if (
+                self.datagen.dirty_data_ratio
+                != DatagenConfig.model_fields["dirty_data_ratio"].default
+            ):
+                wrong.append("datagen.dirty_data_ratio")
+            other = "customer360"
+            reader = "the financial generator does not read it"
+        else:
+            # retention_workload and retention_months are not listed: the
+            # pre-benchmark maintenance honours them for every workload
+            # (cli/_sustained.py resolve_maintenance_retention).
+            if self.tm_operations != TmOperationsConfig():
+                wrong.append("tm_operations")
+            if self.w1_max_vertices != type(self).model_fields["w1_max_vertices"].default:
+                wrong.append("w1_max_vertices")
+            other = "financial"
+            reader = "nothing in a customer360 run reads it"
+        for key in wrong:
+            emit_note(
+                f"workload.{key} is a {other} setting; {reader}.",
+                kind="wrong-workload",
+                category=None,  # a UserWarning would print the note twice
+            )
+        return self
 
     @model_validator(mode="after")
     def _seed_allowed(self) -> WorkloadConfig:
@@ -2357,8 +2419,20 @@ class LakebenchConfig(ConfigModel):
 
             defaults = RECIPES.get(recipe_name)
             if not defaults:
-                valid = ", ".join(sorted(RECIPES.keys()))
-                raise ValueError(f"Unknown recipe: {recipe_name}. Valid recipes: {valid}")
+                from lakebench.config._hints import nearest
+
+                near = nearest(str(recipe_name), RECIPES)
+                if near:
+                    detail = f"did you mean '{near}'?"
+                else:
+                    detail = "valid recipes: " + ", ".join(sorted(RECIPES))
+                # The text goes in through the context, so braces in a
+                # user's recipe name are not read as template fields.
+                raise PydanticCustomError(
+                    "unknown_recipe",
+                    "{text}",
+                    {"text": f"unknown recipe '{recipe_name}'; {detail}"},
+                )
             _deep_setdefault(data, defaults)
         return data
 

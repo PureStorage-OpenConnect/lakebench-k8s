@@ -314,7 +314,7 @@ class TestRecipeSystem:
 
     def test_recipe_unknown_raises(self):
         """Unknown recipe name raises ValueError."""
-        with pytest.raises(Exception, match="Unknown recipe"):
+        with pytest.raises(Exception, match="(?i)unknown recipe"):
             _make_config(recipe="nonexistent-recipe")
 
     def test_recipe_default_alias(self):
@@ -373,7 +373,7 @@ class TestRecipeSystem:
         """Unity + Delta excluded from v1.2 (UCSingleCatalog STS limitation)."""
         for suffix in ("trino", "thrift", "none"):
             with pytest.raises(
-                ValueError, match="Unsupported component combination|Unknown recipe"
+                ValueError, match="(?i)Unsupported component combination|unknown recipe"
             ):
                 _make_config(recipe=f"unity-delta-spark-{suffix}")
 
