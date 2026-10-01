@@ -208,7 +208,9 @@ resolves. `tests/test_citations.py` fails when a shipped file (under `src/`,
 `docs/`, `scripts/`, `datagen_rs/` or `examples/`, or the README) gains a
 bug id, an internal plan, requirement or work-item id, or a gotcha number,
 none of which a reader of the package can look up; state the reason in
-words instead. The test job runs
+words instead. A change to `tests/fixtures/citation_counts.json` that raises
+a count is a review blocker, except in the commit that lands the ratchet on
+a merge-train tree (`python tests/test_citations.py` retakes it there). The test job runs
 `pytest tests/ -rs` (excluding `tests/test_e2e.py` and
 `tests/test_integration.py`) on Python 3.10 and 3.13, the oldest and newest
 supported versions. It runs to the end rather than stopping at the first
