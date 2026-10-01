@@ -149,6 +149,14 @@ watch list still names namespaces that no longer exist, run
 `lakebench admin repair-operator` (use `--dry-run` first) and then deploy
 again.
 
+**Destroy says "operator pods [...] still watch it".** Destroy removed the
+namespace from the Spark Operator watch list and restarted the operator, but
+a pod with the old `--namespaces=` list was still running after 120 s
+(usually one still terminating). Deleting the namespace then would crash-loop
+the operator for every deployment, so destroy kept it and exited 1. Check
+`kubectl get pods -n spark-operator`; once the old pods are gone, re-run
+`lakebench destroy`.
+
 **Ctrl-C does not stop the command at once.** If the command holds the
 cluster lease, it prints "interrupt received while holding the cluster
 lease" and finishes the shared change first (its hold budget is 750 s,

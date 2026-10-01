@@ -51,7 +51,8 @@ Rule: any mutation goes through a cluster-wide lease (see below), reads live sta
 A ConfigMap `lakebench-cluster-lock` in namespace `lakebench-system`, acquired via optimistic-concurrency create-or-replace, released in a `finally` block, reclaimable by `lakebench admin release-lock` when a holder crashes.
 
 Contents:
-- `holder`: `<hostname>@<user>@<git-sha>`
+- `holder`: `<hostname>@<user>@<git-sha>#<pid>-<8 hex>`; the suffix names the process for `admin status` and is new on every acquire
+- `write-nonce`: random per write; release deletes only the lease its own write created
 - `acquired-at`: ISO 8601
 - `ttl-seconds`: 3600 default
 - resourceVersion-based CAS for atomic acquire against an expired lease
@@ -68,7 +69,7 @@ While a process holds the lease:
 
 The hold budget bounds every child process today; the remaining waits inside the lease (retry sleeps, rollout polls) move onto it in a later change.
 
-A `kill -9` or a lost host is not covered: the TTL reclaims the lease, and `lakebench admin repair-operator` repairs a half-applied upgrade.
+A `kill -9` or a lost host is not covered: the TTL reclaims the lease, and `lakebench admin repair-operator` repairs a half-applied upgrade. An interrupt that lands inside the acquire, after the lease was written, releases it: the holder id is unique to the acquire, so only that write matches.
 
 ## Deployment identity
 
@@ -94,6 +95,8 @@ Legacy pre-v1.5 namespaces (annotation-less but containing lakebench-labelled re
 `spark.jobNamespaces` is Category 4. Every mutation is a read-modify-write on shared Helm state; without serialisation, two deploys can each read the list before the other writes, and the second silently drops the first's namespace.
 
 The strict path lease-gates the mutation and raises `WatchListMutationError` on failure. Destroy calls this path. On failure, destroy explicitly BLOCKS the namespace delete: deleting a namespace the operator still watches crash-loops the operator globally (`failed to wait for spark-application-controller caches to sync`), taking down SparkApplication reconciliation for every namespace on the cluster. Refusing to delete is the only safe response. The user is directed to `lakebench admin repair-operator` to reconcile.
+
+A successful removal is not enough on its own: after the helm upgrade and the operator restart, a terminating operator pod can still carry the old `--namespaces=` list. Still inside the lease, so no deploy can re-add the namespace, destroy lists every pod in the operator namespace and waits, polling every 3 s for up to 120 s (less if the hold budget has less left), until no pod that is still running lists the namespace. A finished pod (an evicted controller, `Failed`) and an empty `--namespaces=` (watch everything) do not count. If a pod still lists it, destroy keeps the namespace and exits 1: "Namespace X NOT deleted: operator pods [p] still watch it; re-run destroy after they roll". If the pods cannot be listed, the namespace is kept too.
 
 The add path (`_add_namespace_to_watch`) is lease-gated too, with three outcomes on lease acquire: `locked` (proceed under the lease), `unlocked` (genuine no-cluster case, e.g. workstation without kubeconfig -- safe to proceed with no other writer possible), or `refuse` (`ClusterLockHeld` or RBAC denial -- return False rather than proceed unlocked into the race).
 
@@ -136,4 +139,4 @@ Six live UAT scenarios run once per release against a real cluster (maintainer-r
 
 `lakebench admin migrate-deployment <namespace>` stamps the annotations and copies the legacy fixed-name SecretClasses (`lakebench-s3-credentials-class`, `lakebench-s3-ca-cert-class`) to the new `-<namespace>` form. Idempotent. Mandatory before `destroy` on any pre-v1.5 namespace -- destroy refuses without the annotations.
 
-Destroy cleans up the legacy fixed-name SecretClasses only when this is the last `managed-by: lakebench` namespace cluster-wide (keyed on the label so pre-v1.5 annotationless deployments still boot). Until every deployment on a cluster has migrated, the legacy names remain reserved.
+Destroy cleans up the legacy fixed-name SecretClasses only when no other lakebench namespace is left cluster-wide: one with the `lakebench.deployment/name` annotation, or the `app.kubernetes.io/managed-by` or `app.kubernetes.io/name` label set to `lakebench` (so pre-v1.5 annotationless deployments still count), in any phase. The count and the deletes run under the cluster lease, where `migrate-deployment` also works; when neither legacy SecretClass exists the lease is not taken, and when the lease stays held for 600 s or the namespace list fails the cleanup is skipped and the legacy names are kept. Until every deployment on a cluster has migrated, the legacy names remain reserved.

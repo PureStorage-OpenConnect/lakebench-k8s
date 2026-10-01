@@ -57,6 +57,21 @@ _TABLE_STEP_CAP = 1800
 # Delays before each in-lease namespace delete attempt (seconds).
 _IN_LEASE_DELETE_BACKOFF = (0.0, 2.0, 5.0)
 
+# SAF-4 (DESIGN ch01 3.3): inside the lease, before the namespace delete,
+# destroy waits up to this long (clamped to the lease's hold budget) for every
+# Spark Operator pod still listing the namespace in --namespaces= to go. The
+# restart before it already waited for the rollout, so this covers pods that
+# are still terminating.
+_OPERATOR_POD_WAIT_S = 120.0
+_OPERATOR_POD_POLL_S = 3.0
+# A pod in these phases runs no container, so it watches nothing (an evicted
+# controller pod stays in Failed with its old args).
+_FINISHED_POD_PHASES = frozenset({"Succeeded", "Failed"})
+
+# SAF-4 (3.2): how long the optional legacy SecretClass cleanup waits for the
+# cluster lease before it skips.
+_LEGACY_CLEANUP_LOCK_TIMEOUT_S = 600.0
+
 # Indirection so tests can drive the wait with a fake clock.
 _monotonic = time.monotonic
 _sleep = time.sleep
@@ -129,6 +144,96 @@ class _NamespaceReplaced(Exception):
 
 class _NamespaceUnverifiable(Exception):
     """The namespace UID could not be read, so its incarnation is unknown."""
+
+
+class _OperatorStillWatching(Exception):
+    """Spark Operator pods still list the namespace in ``--namespaces=`` (SAF-4)."""
+
+    def __init__(self, pods: list[str]) -> None:
+        super().__init__(", ".join(pods))
+        self.pods = pods
+
+
+def _namespaces_flag_values(argv: list[str]) -> list[str]:
+    """Every value of ``--namespaces`` in ``argv`` (``--namespaces=a,b`` or ``--namespaces a,b``)."""
+    out: list[str] = []
+    for i, a in enumerate(argv):
+        if a.startswith("--namespaces="):
+            out.append(a.split("=", 1)[1])
+        elif a == "--namespaces" and i + 1 < len(argv):
+            out.append(argv[i + 1])
+    return out
+
+
+def _operator_pods_listing(core_v1: Any, operator_ns: str, namespace: str) -> list[str]:
+    """Names of the operator pods whose ``--namespaces=`` still lists ``namespace``.
+
+    Lists every pod in the operator namespace, so controller and webhook
+    pods are covered whatever the chart labels them, and so are pods that
+    are terminating. A pod that has finished (Succeeded, Failed) is skipped.
+    An empty ``--namespaces=`` (watch everything) does not list the
+    namespace. A missing operator namespace has no pods. Any other read
+    error raises ``_NamespaceUnverifiable``.
+    """
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.deploy.cluster_lock import LEASE_REQUEST_TIMEOUT
+
+    try:
+        pods = core_v1.list_namespaced_pod(
+            operator_ns, _request_timeout=LEASE_REQUEST_TIMEOUT
+        ).items
+    except ApiException as e:
+        if e.status == 404:
+            return []
+        raise _NamespaceUnverifiable(
+            f"could not list the Spark Operator pods in {operator_ns}: {e.reason}"
+        ) from e
+    except Exception as e:  # noqa: BLE001
+        raise _NamespaceUnverifiable(
+            f"could not list the Spark Operator pods in {operator_ns}: {e}"
+        ) from e
+    found: list[str] = []
+    for pod in pods or []:
+        phase = getattr(getattr(pod, "status", None), "phase", None)
+        if phase in _FINISHED_POD_PHASES:
+            continue
+        containers = getattr(getattr(pod, "spec", None), "containers", None) or []
+        for c in containers:
+            argv = [str(x) for x in (*(c.command or []), *(c.args or []))]
+            if any(
+                namespace in (n.strip() for n in value.split(","))
+                for value in _namespaces_flag_values(argv)
+            ):
+                found.append(pod.metadata.name)
+                break
+    return sorted(found)
+
+
+def _await_operator_unwatch(core_v1: Any, operator_ns: str, namespace: str) -> list[str]:
+    """Poll ``_operator_pods_listing`` until no pod lists ``namespace``.
+
+    Every ``_OPERATOR_POD_POLL_S`` for up to ``lease_clamp(_OPERATOR_POD_WAIT_S)``
+    (the hold budget left caps it). Returns the pods still listing it at the
+    end, ``[]`` once none does. Runs inside the lease.
+    """
+    from lakebench.deploy.cluster_lock import lease_clamp
+
+    deadline = _monotonic() + lease_clamp(_OPERATOR_POD_WAIT_S)
+    while True:
+        pods = _operator_pods_listing(core_v1, operator_ns, namespace)
+        if not pods:
+            return []
+        left = deadline - _monotonic()
+        if left <= 0:
+            return pods
+        logger.info(
+            "waiting for Spark Operator pods %s to stop watching %s (%.0f s left)",
+            ", ".join(pods),
+            namespace,
+            left,
+        )
+        _sleep(min(_OPERATOR_POD_POLL_S, left))
 
 
 def _read_incarnation(engine, namespace: str) -> str:
@@ -938,6 +1043,33 @@ def _other_lakebench_namespaces(all_ns: list[Any], namespace: str) -> list[str]:
     return out
 
 
+def _legacy_secretclasses_present(custom_api: Any) -> bool:
+    """Whether either legacy SecretClass may exist (read only, outside the lease).
+
+    False only when both reads answer 404 (no object, or no SecretClass
+    CRD). Nothing creates the legacy names any more (``admin
+    migrate-deployment`` copies them to the per-namespace names), so a
+    False here cannot go stale before the leased cleanup would have run.
+    """
+    from kubernetes.client.rest import ApiException
+
+    for legacy_name in _LEGACY_SECRETCLASSES:
+        try:
+            custom_api.get_cluster_custom_object(
+                group="secrets.stackable.tech",
+                version="v1alpha1",
+                plural="secretclasses",
+                name=legacy_name,
+            )
+            return True
+        except ApiException as e:
+            if e.status != 404:
+                return True
+        except Exception:  # noqa: BLE001 -- unknown: let the leased check decide
+            return True
+    return False
+
+
 def _legacy_secretclass_cleanup(core_v1: Any, custom_api: Any, namespace: str) -> list[str]:
     """Delete the legacy fixed-name SecretClasses when no other deployment remains.
 
@@ -946,15 +1078,45 @@ def _legacy_secretclass_cleanup(core_v1: Any, custom_api: Any, namespace: str) -
     only if a deployment was migrated with ``admin migrate-deployment``,
     which copies them and does not delete them. They are cluster-scoped and
     shared, so they go only when no other lakebench namespace is left
-    (``_other_lakebench_namespaces``). A namespace list that fails deletes
-    nothing. The cleanup is optional: every error is logged and swallowed.
+    (``_other_lakebench_namespaces``), and the count and the deletes run
+    inside the cluster lease (SAF-4), where ``migrate-deployment`` also
+    works. When neither exists the lease is not taken. A lease that stays
+    held for ``_LEGACY_CLEANUP_LOCK_TIMEOUT_S``, or a namespace list that
+    fails, deletes nothing. The cleanup is optional: every error is logged
+    and swallowed.
 
     Returns the names deleted.
     """
+    from lakebench.deploy.cluster_lock import ClusterLockError, ClusterLockHeld, cluster_lock
+
+    if not _legacy_secretclasses_present(custom_api):
+        return []
+    try:
+        with cluster_lock(core_v1, timeout=_LEGACY_CLEANUP_LOCK_TIMEOUT_S):
+            return _legacy_secretclass_cleanup_locked(core_v1, custom_api, namespace)
+    except ClusterLockHeld as e:
+        logger.warning(
+            "Legacy SecretClass cleanup skipped: the cluster lease is held by %s; "
+            "the legacy SecretClasses are kept (optional cleanup)",
+            e.holder,
+        )
+    except ClusterLockError as e:
+        logger.warning(
+            "Legacy SecretClass cleanup skipped: could not take the cluster lease (%s); "
+            "the legacy SecretClasses are kept (optional cleanup)",
+            e,
+        )
+    return []
+
+
+def _legacy_secretclass_cleanup_locked(core_v1: Any, custom_api: Any, namespace: str) -> list[str]:
+    """The refcount and the deletes of ``_legacy_secretclass_cleanup``; the lease is held."""
     from kubernetes.client.rest import ApiException
 
+    from lakebench.deploy.cluster_lock import LEASE_REQUEST_TIMEOUT
+
     try:
-        all_ns = core_v1.list_namespace().items
+        all_ns = core_v1.list_namespace(_request_timeout=LEASE_REQUEST_TIMEOUT).items
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "Legacy SecretClass cleanup skipped: could not list namespaces (%s); "
@@ -978,6 +1140,7 @@ def _legacy_secretclass_cleanup(core_v1: Any, custom_api: Any, namespace: str) -
                 version="v1alpha1",
                 plural="secretclasses",
                 name=legacy_name,
+                _request_timeout=LEASE_REQUEST_TIMEOUT,
             )
         except ApiException as e:
             if e.status == 404:
@@ -1378,6 +1541,19 @@ def destroy_all(
                 # deleted namespace. Errors fall back to the delete below.
                 if not namespace_uid_at_start:
                     return
+                # SAF-4: never delete a namespace a live operator pod still
+                # lists; it would crash-loop on the missing namespace. The
+                # lease is held, so no deploy can re-add it meanwhile.
+                try:
+                    watching = _await_operator_unwatch(
+                        k8s_client.CoreV1Api(), spark_op_cfg.namespace, namespace
+                    )
+                except _NamespaceUnverifiable as e:
+                    in_lease["error"] = e
+                    return
+                if watching:
+                    in_lease["error"] = _OperatorStillWatching(watching)
+                    return
                 errored = False
                 for attempt, delay in enumerate(_IN_LEASE_DELETE_BACKOFF, start=1):
                     if delay:
@@ -1464,11 +1640,25 @@ def destroy_all(
                     # re-add the entry first (operator crash loop). Keep the
                     # namespace: it is un-watched but intact, and a re-run of
                     # destroy deletes it.
-                    msg = (
-                        f"Namespace {namespace!r} NOT deleted: the delete failed while the "
-                        f"watch-list lease was held ({in_lease['error']}). It is no longer "
-                        "watched by the Spark Operator; re-run destroy to delete it."
-                    )
+                    err = in_lease["error"]
+                    if isinstance(err, _OperatorStillWatching):
+                        msg = (
+                            f"Namespace {namespace!r} NOT deleted: operator pods "
+                            f"[{', '.join(err.pods)}] still watch it; re-run destroy "
+                            "after they roll"
+                        )
+                    elif isinstance(err, _NamespaceUnverifiable):
+                        msg = (
+                            f"Namespace {namespace!r} NOT deleted: {err}, so no running "
+                            "Spark Operator pod is proven to have stopped watching it. "
+                            "It is off the watch list; re-run destroy to delete it."
+                        )
+                    else:
+                        msg = (
+                            f"Namespace {namespace!r} NOT deleted: the delete failed while "
+                            f"the watch-list lease was held ({err}). It is no longer "
+                            "watched by the Spark Operator; re-run destroy to delete it."
+                        )
                     logger.error(msg)
                     results.append(
                         DeploymentResult(
