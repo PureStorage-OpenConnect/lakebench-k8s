@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from lakebench.deploy import deadline as deploy_deadline
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus, image_tag
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ class SparkThriftDeployer:
                     if doc:
                         self.k8s.apply_manifest(doc, namespace=namespace)
 
-            self._wait_for_ready(namespace, timeout_seconds=300)
+            self._wait_for_ready(namespace, timeout_seconds=deploy_deadline.clamp(300))
 
             spark_version = image_tag(self.config.images.spark)
             return DeploymentResult(
@@ -87,12 +88,13 @@ class SparkThriftDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _wait_for_ready(self, namespace: str, timeout_seconds: int = 300) -> None:
+    def _wait_for_ready(self, namespace: str, timeout_seconds: float = 300) -> None:
         """Wait for the Spark Thrift Server Deployment to have ready replicas."""
         from kubernetes import client as k8s_client
 
         apps_api = k8s_client.AppsV1Api()
         deadline = time.time() + timeout_seconds
+        last = "not created"
 
         while time.time() < deadline:
             try:
@@ -104,9 +106,11 @@ class SparkThriftDeployer:
                 desired = dep.spec.replicas or 1
                 if ready >= desired:
                     return
+                last = f"{ready}/{desired} ready"
             except k8s_client.rest.ApiException as e:
                 if e.status != 404:
                     raise
             time.sleep(10)
 
+        deploy_deadline.check("deployment lakebench-spark-thrift", last)
         raise RuntimeError(f"Spark Thrift Server did not become ready within {timeout_seconds}s")
