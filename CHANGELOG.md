@@ -66,6 +66,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `detail.compaction_failures`. The maintenance policy id and the effective
   maintenance `id` are unchanged.
 
+### Added
+- **Corpus id v2 (EVD-6).** The `experiment.corpus` block of a run whose
+  corpus observation was recorded gains `id_v2`, `id_version`,
+  `args_sha256`, `lineage`, `lineage_observed` and `declared`, or
+  `id_v2_unavailable` with the reason. The id hashes the generator's own
+  per-node markers (the arguments it resolved) and the image lineage from
+  `src/lakebench/config/datagen_lineage.yaml`, so a config edited after
+  generation no longer changes it. Markers that disagree, are missing a
+  node, or come from different builds are corpus problems, which `compare`
+  reads as not comparable. `corpus.id` (v1) is unchanged, and no stored id
+  or identity digest moves.
+
 ## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and

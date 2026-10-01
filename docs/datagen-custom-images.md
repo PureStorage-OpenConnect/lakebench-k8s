@@ -80,6 +80,24 @@ a rebuild that keeps `MODEL_VERSION` unchanged and produces byte-identical
 output at a fixed seed still belongs to the same freeze even under a
 different image tag.
 
+**Corpus identity of a custom image.** From v1.7 a run records a second
+corpus id, `corpus.id_v2`, taken from what the generator itself wrote
+rather than from the config: each datagen node leaves a completion marker
+under `<bronze prefix>/_corpus/` carrying a hash of the arguments it
+resolved, and the run hashes those markers together with the image's
+lineage. Two consequences for a custom image:
+
+- An image built from `datagen_rs/` older than the v1.7 generator writes no
+  markers. Its runs record `corpus.id_v2: null` with the reason in
+  `corpus.id_v2_unavailable`, and compare them by the v1 corpus id only.
+- Lineage is the image digest the run read from `_corpus/series.json`,
+  mapped through `src/lakebench/config/datagen_lineage.yaml`. A digest not
+  listed there is its own lineage, so a rebuilt image, even an
+  output-identical one, gives a different corpus id until a row with
+  byte-compare evidence maps it to the image it re-pins. Without an
+  observed digest the lineage reads `declared:<image tag>`, which never
+  equals an observed one.
+
 ## Anatomy of `datagen_rs/`
 
 The generator is a Rust crate. The files you are most likely to change:
