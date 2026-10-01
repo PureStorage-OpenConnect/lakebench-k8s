@@ -171,6 +171,7 @@ def test_platform_files_must_exist(tmp_path):
 
 
 def test_pending_platform_files_only_shrink():
+    assert set(cdr.PENDING_PLATFORM_FILES) <= {"RELEASING.md"}, "the pending list may only shrink"
     for rel in cdr.PENDING_PLATFORM_FILES:
         assert not (ROOT / rel).exists(), f"{rel} exists; remove it from PENDING_PLATFORM_FILES"
 
