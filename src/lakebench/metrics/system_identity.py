@@ -52,11 +52,17 @@ Known limits, by design or not yet measured:
   cluster's shape and version, not which cluster: two sibling clusters on
   one VM template and one storage system hash equal. ``same_system`` is
   False for such a pair.
+* ``same_system`` trusts the CA to name one cluster. Clusters whose API
+  certificates chain to one shared organisation CA, reached with that CA as
+  the client bundle, share the part, so siblings of one shape read as one
+  system (the same limit as ``api_server_fingerprint``'s F-3). Not checked
+  on the reference cluster, which presents its own installer CA.
 * ``storage_backend`` hashes ``detect_backend``'s answer; a change to that
   heuristic changes the part for an unchanged system, so it needs a bump of
   ``SYSTEM_IDENTITY_VERSION`` (pinned by a test).
-* Each cluster read has a request timeout (``_REQUEST_TIMEOUT``); the S3 HEAD
-  is bounded by the S3 client's own retries and timeouts.
+* Each cluster read has a request timeout (``_REQUEST_TIMEOUT``, at most
+  20 s each); the S3 HEAD is bounded by the S3 client's own settings (3
+  attempts of 10 s connect and 30 s read, about 120 s at worst).
 
 Nothing here writes to the cluster or to S3, and ``observe_system`` never
 raises.

@@ -249,7 +249,7 @@ def test_bucket_named_like_a_stage_is_refused_not_rewritten() -> None:
     experiment.stages.executed: refuse rather than edit the stages run."""
     rec = sr.load_record("5105a0")
     rec["config_snapshot"]["s3"]["buckets"]["silver"] = "silver"
-    with pytest.raises(scrub.ScrubError, match="silver"):
+    with pytest.raises(scrub.ScrubError, match="bucket name 'silver' is a single word"):
         scrub.scrub_record(rec)
 
 
@@ -260,14 +260,29 @@ def test_legacy_bucket_named_like_a_stage_is_refused() -> None:
     rec = sr.load_record("978622")
     assert experiment_of(rec) is None
     rec["config_snapshot"]["s3"]["buckets"]["silver"] = "silver"
+    with pytest.raises(scrub.ScrubError, match="is a single word"):
+        scrub.scrub_record(rec)
+    rec["config_snapshot"]["s3"]["buckets"]["silver"] = "dep-x-silver"
+    rec["pipeline_benchmark"]["stage_matrix"]["dep-x-silver"] = {}
     with pytest.raises(scrub.ScrubError, match="also a key in the record"):
+        scrub.scrub_record(rec)
+
+
+@pytest.mark.parametrize("value_at", ["table_format", "catalog", "pipeline_mode"])
+def test_legacy_bucket_equal_to_an_identity_value_is_refused(value_at: str) -> None:
+    """Fix-pass review: in a legacy record a bucket named like a recipe word
+    rewrote table_format, catalog and pipeline_mode with no refusal."""
+    rec = sr.load_record("978622")
+    rec["config_snapshot"]["s3"]["buckets"]["gold"] = "dep-x-gold"
+    rec["config_snapshot"][value_at] = "dep-x-gold"
+    with pytest.raises(scrub.ScrubError, match="also a value outside the bucket settings"):
         scrub.scrub_record(rec)
 
 
 def test_stage_name_is_evidence() -> None:
     rec = sr.load_record("978622")
     rec["config_snapshot"]["s3"]["buckets"]["bronze"] = "dep-x-bronze"
-    rec["pipeline_benchmark"]["stages"][0]["stage_name"] = "dep-x-bronze"
+    rec["pipeline_benchmark"]["stages"][0]["stage_name"] = "verify s3a://dep-x-bronze"
     with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*stage_name"):
         scrub.scrub_record(rec)
 
@@ -351,17 +366,18 @@ def test_real_protected_seeds_refused_unstubbed() -> None:
         rec["jobs"][0]["error_message"] = f"generated with seed {seed}"
         try:
             scrub.scrub_record(rec)
-            refused, leaked = False, False
+            refused, leaked, why = False, False, ""
         except scrub.ScrubError as exc:
-            refused, leaked = True, str(seed) in str(exc)
-        assert refused, "a real held-out seed was not refused"
+            refused, leaked, why = True, str(seed) in str(exc), str(exc).split(":")[0]
+        refused = refused and "seed" in why
+        assert refused, "a real held-out seed was not refused as a seed"
         assert not leaked, "the refusal names the seed value"
 
 
 def test_bucket_name_in_a_job_name_is_refused() -> None:
     rec = sr.load_record("5105a0")
     rec["config_snapshot"]["s3"]["buckets"]["bronze"] = "dep-x-bronze"
-    rec["jobs"][0]["job_name"] = "dep-x-bronze"
+    rec["jobs"][0]["job_name"] = "verify s3a://dep-x-bronze"
     with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*jobs\[0\]\.job_name"):
         scrub.scrub_record(rec)
 
@@ -642,3 +658,40 @@ def test_key_rename_inside_verdict_refused_but_not_lookalike_keys() -> None:
     rec["experimental"] = {"10.99.0.1": 1}
     out, changed = scrub.scrub_record(rec)
     assert out["experimental"] == {"10.0.1.50": 1}
+
+
+def test_seed_in_a_dict_key_is_not_printed_in_the_path(monkeypatch) -> None:
+    """Fix-pass review: a path built from a key holding the seed printed it."""
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "robustness"})
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["extra"] = {"987654": {"seed": 987654}, "run-987654": {"n": "x"}}
+    with pytest.raises(scrub.ScrubError, match="robustness seed") as exc:
+        scrub.scrub_record(rec)
+    assert "987654" not in str(exc.value)
+    assert not any("987654" in p for p in scrub.check_clean(rec))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "javax.jdo.option.ConnectionPassword=hive",
+        "trustStorePassword=Abcdefgh!secretTail",
+        "s3SecretKey=abc",
+        "rootPassword: x9",
+    ],
+)
+def test_prefixed_credential_names_in_text(text: str) -> None:
+    out = scrub.scrub_text(f"conf {text} done")
+    assert out.endswith(" done") and "${LAKEBENCH_" in out
+    value = text.split("=")[-1].split(": ")[-1]
+    assert value not in out
+
+
+def test_non_credential_pairs_in_text_left_alone() -> None:
+    text = (
+        "password_policy=strict-mode access_key_id=${LAKEBENCH_S3_ACCESS_KEY} "
+        "fs.s3a.aws.credentials.provider=org.apache.Simple v1.10.0.0.1"
+    )
+    assert scrub.scrub_text(text) == text

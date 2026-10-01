@@ -21,8 +21,10 @@ logs and other text go through ``scrub_text``. What it rewrites:
   case), under any key inside a credential-named mapping, or the ``value`` of
   a ``{name: <credential-named>, value: ...}`` entry (a Kubernetes env list)
   becomes a ``${LAKEBENCH_...}`` placeholder, and so does the value of a
-  credential assignment inside a string (``fs.s3a.secret.key=...``,
-  ``secretKey: ...``, ``aws_secret_access_key = ...``). Dict keys are scrubbed for
+  ``key=value`` or ``key: value`` pair inside a string whose key is
+  credential-named by the same rule (``fs.s3a.secret.key=...``,
+  ``trustStorePassword=...``, ``secretKey: ...``). Prose such as
+  ``password: authentication failed`` is rewritten too, which fails safe. Dict keys are scrubbed for
   addresses, hosts and buckets as values are; a key rename that would merge
   two keys, or that falls inside ``experiment`` or ``verdict``, is refused.
   An endpoint host without a dot (``minio``) is rewritten only in the
@@ -38,8 +40,10 @@ It refuses, rather than rewrites:
   A count that happens to equal one refuses too, which fails closed. Spent seeds are retired, and the calibration seed is the public
   development seed 43. The seed is identity, so it cannot be scrubbed; the
   message names the path and role, never the value;
-* a bucket name that is also a dict key somewhere in the record (a bucket
-  named ``silver`` would rename ``stage_matrix.silver``);
+* a bucket name that is a single word, a dict key somewhere in the record,
+  or a value outside the bucket settings (a bucket named ``silver``,
+  ``iceberg`` or ``batch`` would rewrite ``stage_matrix.silver``,
+  ``table_format`` or ``pipeline_mode``);
 * a rewrite inside the ``experiment`` or ``verdict`` blocks other than at an
   endpoint or bucket key (a credential-named key there is refused too, since
   ``max_token`` would read as one), or of a ``job_type``, ``job_name``,
@@ -77,7 +81,7 @@ from pathlib import Path
 from typing import Any
 
 #: Bump when a rule changes; recorded in tests/fixtures/records/MANIFEST.json.
-SCRUBBER_VERSION = 4
+SCRUBBER_VERSION = 5
 
 #: The documented placeholder host for the lab S3 address.
 PLACEHOLDER_HOST = "10.0.1.50"
@@ -111,11 +115,14 @@ _URL = re.compile(
 #: separator, group 2 the value. Covers .gitleaks.toml's
 #: s3-secret-key-assignment rule and the dotted Spark and Hadoop forms it
 #: misses (``fs.s3a.secret.key=``).
-_CREDENTIAL_ASSIGN = re.compile(
-    r"(?i)((?<![A-Za-z0-9])(?:aws[._-]?)?(?:secret[._-]?(?:access[._-]?)?key"
-    r"|access[._-]?key(?:[._-]?id)?|password|passwd|session[._-]?token)[\"']?\s*[:=]\s*[\"']?)"
-    r"([A-Za-z0-9+/=_.-]{8,})"
-)
+#: The key and separator of a ``key=value`` or ``key: value`` pair inside a
+#: string, and the value after it. The key is classified by the same rule as
+#: a JSON key (``_is_cred_key``), so camel, dotted and prefixed names
+#: (``trustStorePassword``, ``fs.s3a.secret.key``, ``s3SecretKey``) are
+#: credentials and ``password_policy`` is not. The key pattern does not
+#: consume the value, so ``config: secretKey: X`` still finds ``secretKey``.
+_ASSIGN_KEY = re.compile(r"""([A-Za-z0-9_.-]+)["']?\s*[:=]\s*["']?""")
+_ASSIGN_VALUE = re.compile(r"""[^\s"',;&}\]]+""")
 
 #: Value patterns that are credentials wherever they appear (the formats
 #: .gitleaks.toml adds, including its k8s-inline-env rule, plus the AWS key
@@ -148,6 +155,25 @@ def norm_key(key: str | None) -> str:
 
 def _is_cred_key(key: str | None) -> bool:
     return bool(_CREDENTIAL_KEY.search(norm_key(key)))
+
+
+def _text_credentials(text: str) -> list[tuple[int, int, str]]:
+    """(start, end, key) of each credential value assigned inside *text*
+    that is not already a placeholder."""
+    found = []
+    for m in _ASSIGN_KEY.finditer(text):
+        if not _is_cred_key(m.group(1)):
+            continue
+        v = _ASSIGN_VALUE.match(text, m.end())
+        if v and not v.group(0).startswith("$"):
+            found.append((v.start(), v.end(), m.group(1)))
+    return found
+
+
+def _replace_text_credentials(text: str) -> str:
+    for start, end, key in reversed(_text_credentials(text)):
+        text = text[:start] + _credential_placeholder(key) + text[end:]
+    return text
 
 
 def _is_endpoint_key(key: str | None) -> bool:
@@ -292,6 +318,7 @@ class _Sensitive:
     def __init__(self, record: Any) -> None:
         self.buckets: dict[str, str] = {}
         hosts: set[str] = set()
+        other_values: set[str] = set()
         for path, key, value, _cred in _walk(record):
             if not isinstance(value, str) or not value:
                 continue
@@ -300,16 +327,33 @@ class _Sensitive:
                 self._add_bucket(value, key)
             elif _is_bucket_key(key):
                 self._add_bucket(value, None)
+            else:
+                other_values.add(value)
             if _is_endpoint_key(key):
                 host = _host_of(value)
                 if host and host not in ALLOWED_HOSTS:
                     hosts.add(host)
+        # A bucket name that the record also uses as a word (a key such as
+        # stage_matrix.silver, or a value such as table_format "iceberg" or
+        # pipeline_mode "batch") cannot be rewritten as a token without
+        # rewriting identity fields, and a legacy record has no experiment
+        # block for the identity guard to compare. Refuse instead.
         keys = {k for _p, k in _keys(record)}
         for name in self.buckets:
+            if name.isalpha():
+                raise ScrubError(
+                    f"bucket name {name!r} is a single word; rewriting it as a token "
+                    "would rewrite other fields"
+                )
             if name in keys:
                 raise ScrubError(
                     f"bucket name {name!r} is also a key in the record; rewriting it "
                     "would rename structure"
+                )
+            if name in other_values:
+                raise ScrubError(
+                    f"bucket name {name!r} is also a value outside the bucket settings; "
+                    "rewriting it would rewrite that field"
                 )
         taken = {v for v in self.buckets.values() if v}
         n = 0
@@ -361,14 +405,7 @@ class _Sensitive:
             return f"{m.group('scheme')}{host}"  # user-info dropped
 
         out = _URL.sub(url, value)
-        out = _CREDENTIAL_ASSIGN.sub(
-            lambda m: (
-                m.group(0)
-                if m.group(2).startswith("$")
-                else m.group(1) + _credential_placeholder(m.group(1).rstrip("\"': ="))
-            ),
-            out,
-        )
+        out = _replace_text_credentials(out)
         if endpoint and not _URL.match(value.strip()):
             host = _host_of(value)
             if host and host not in ALLOWED_HOSTS:
@@ -415,8 +452,15 @@ def _seed_problems(record: Any) -> list[str]:
     # Only the live held-out roles refuse. Spent seeds are retired, and the
     # calibration seed is the public development seed 43.
     protected = datagen_seed.protected_seeds()
+
+    def redact(path: str) -> str:
+        # A path is built from dict keys, which can hold a seed themselves.
+        return _DIGITS.sub(lambda m: "<seed>" if int(m.group(0)) in protected else m.group(0), path)
+
     hits = [
-        f"{path} holds the {protected[n]} seed" for path, n in _numbers(record) if n in protected
+        f"{redact(path)} holds the {protected[n]} seed"
+        for path, n in _numbers(record)
+        if n in protected
     ]
     return sorted(set(hits))
 
@@ -432,9 +476,8 @@ def _text_problems(where: str, value: str) -> list[str]:
     for pattern in _CREDENTIAL_VALUES:
         if pattern.search(value):
             out.append(f"{where}: credential format")
-    for m in _CREDENTIAL_ASSIGN.finditer(value):
-        if not m.group(2).startswith("$"):
-            out.append(f"{where}: credential assigned in text")
+    if _text_credentials(value):
+        out.append(f"{where}: credential assigned in text")
     return out
 
 
