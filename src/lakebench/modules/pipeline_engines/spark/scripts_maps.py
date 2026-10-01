@@ -57,6 +57,11 @@ class ScriptsManifestError(ScriptsMapError):
     read, or two roles ship the same key."""
 
 
+class ScriptsApplyError(ScriptsMapError):
+    """The maps could not be applied or verified, or replacing them is
+    refused (another deployment's map, or one a live job mounts)."""
+
+
 class ScriptsBudgetError(ScriptsMapError):
     """A role's ConfigMap is over :data:`MAP_BUDGET_BYTES`."""
 

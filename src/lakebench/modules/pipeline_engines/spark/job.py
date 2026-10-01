@@ -3016,6 +3016,8 @@ class SparkJobManager:
 
         The maps are rendered by ``scripts_maps.build_script_configmaps`` and
         mounted together at /opt/spark/scripts through one projected volume.
+        Replacing a map is refused when another deployment owns it, or when
+        its content would change while a live SparkApplication mounts it.
         Each map is read back; its data must hash to the
         ``lakebench.io/scripts-sha256`` annotation written, and the annotation
         must be the one written. Then the v1.6 single map
@@ -3023,13 +3025,13 @@ class SparkJobManager:
         and no live SparkApplication still mounts it.
 
         Raises:
-            ScriptsMapError: a listed file is missing or unreadable, or a map
-                is over budget. The message is one line; the CLI prints it.
+            ScriptsMapError: one line naming the file or map: a listed file is
+                missing or unreadable, a map is over budget, a replace is
+                refused, or an apply or read-back failed. The CLI prints it
+                and exits 1 before any job is submitted.
 
         Returns:
-            True when every map applied and read back unchanged. False on an
-            apply failure or a read-back mismatch (logged as one line); the
-            caller exits before any job is submitted.
+            True (every failure raises).
         """
         # Lazy import: scripts_maps imports JobType from this module.
         from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
@@ -3038,19 +3040,17 @@ class SparkJobManager:
 
         refusal = self._scripts_apply_refusal(maps)
         if refusal:
-            logger.error("Spark scripts not deployed: %s", refusal)
-            return False
+            raise sm.ScriptsApplyError(refusal)
 
         written: dict[str, str] = {}
         for cm in maps:
             name = cm["metadata"]["name"]
             try:
-                if not self.k8s.apply_manifest(cm):
-                    logger.error("Failed to apply scripts ConfigMap %s", name)
-                    return False
+                applied = self.k8s.apply_manifest(cm)
             except Exception as e:  # noqa: BLE001
-                logger.error("Failed to apply scripts ConfigMap %s: %s", name, _one_line(e))
-                return False
+                raise sm.ScriptsApplyError(f"could not apply {name}: {_one_line(e)}") from None
+            if not applied:
+                raise sm.ScriptsApplyError(f"could not apply {name}")
             written[name] = cm["metadata"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION]
             logger.info("Applied scripts ConfigMap %s (%d files)", name, len(cm["data"]))
 
@@ -3058,20 +3058,14 @@ class SparkJobManager:
             try:
                 got = self.k8s.get_configmap(name, self.namespace)
             except Exception as e:  # noqa: BLE001
-                logger.error("Could not read back scripts ConfigMap %s: %s", name, _one_line(e))
-                return False
+                raise sm.ScriptsApplyError(f"could not read back {name}: {_one_line(e)}") from None
             ann = (got or {}).get("annotations", {}).get(sm.SCRIPTS_SHA256_ANNOTATION)
             data_hash = sm.data_sha256((got or {}).get("data", {})) if got else None
             if ann != want or data_hash != want:
-                logger.error(
-                    "Scripts ConfigMap %s reads back changed (annotation %s, data %s, "
-                    "written %s); another writer replaced it. Not submitting jobs.",
-                    name,
-                    ann,
-                    data_hash,
-                    want,
+                raise sm.ScriptsApplyError(
+                    f"{name} reads back changed (annotation {ann}, data {data_hash}, written "
+                    f"{want}); another writer replaced it"
                 )
-                return False
 
         self._delete_legacy_scripts_map(sm.LEGACY_MAP_NAME)
 
@@ -3104,7 +3098,10 @@ class SparkJobManager:
 
         for cm in maps:
             name = cm["metadata"]["name"]
-            current = self.k8s.get_configmap(name, self.namespace)
+            try:
+                current = self.k8s.get_configmap(name, self.namespace)
+            except Exception as e:  # noqa: BLE001
+                return f"could not read {name}: {_one_line(e)}"
             if current is None:
                 continue
             owner = current.get("labels", {}).get("app.kubernetes.io/instance")
@@ -3172,10 +3169,11 @@ class SparkJobManager:
         for app in apps.get("items", []):
             spec = app.get("spec") or {}
             state = ((app.get("status") or {}).get("applicationState") or {}).get("state", "")
-            restart = (spec.get("restartPolicy") or {}).get("type", "")
-            # FAILED is final only under restartPolicy Never; otherwise the
-            # operator may still rerun it (PENDING_RERUN) with the same mounts.
-            if state == "COMPLETED" or (state == "FAILED" and restart == "Never"):
+            # COMPLETED and FAILED are final: the operator decides reruns in
+            # the SUCCEEDING and FAILING states, before these
+            # (internal/controller/sparkapplication/controller.go, v2.5.1).
+            # Anything else, including no status yet, counts as live.
+            if state in ("COMPLETED", "FAILED"):
                 continue
             for side in ("driver", "executor"):
                 tpl = ((spec.get(side) or {}).get("template") or {}).get("spec") or {}

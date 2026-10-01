@@ -2688,21 +2688,19 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(1) from None
 
-        # Deploy scripts ConfigMap (includes streaming scripts) -- must succeed
-        print_info("Deploying Spark scripts...")
-        from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
+        # Packaging and size errors in the scripts maps surface here, before
+        # the reset below drops any state; the maps are applied after it.
+        from lakebench.modules.pipeline_engines.spark.scripts_maps import (
+            ScriptsMapError,
+            build_script_configmaps,
+        )
 
         try:
-            scripts_ok = job_manager.deploy_scripts_configmap()
+            build_script_configmaps(cfg, cfg.get_namespace())
         except ScriptsMapError as e:
             print_error(f"Spark scripts not deployed: {e}")
             _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
             raise typer.Exit(1) from None
-        if not scripts_ok:
-            print_error("Failed to deploy Spark scripts ConfigMap -- pipeline cannot proceed")
-            _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
-            raise typer.Exit(1)
-        print_success("Spark scripts deployed")
 
         # Start datagen before the stages below: the AML preflight needs parquet
         # data to infer a schema from, and datagen then runs concurrently with
@@ -2740,6 +2738,21 @@ def _run_sustained(
                 raise typer.Exit(1)
         _stop_leftover_streams(job_manager, cfg.get_namespace())
         _reset_continuous_state(cfg, clear_raw=not skip_generate)
+        # Deploy the scripts ConfigMaps (includes streaming scripts) -- must
+        # succeed. After the leftover streams are stopped: a changed map is not
+        # replaced while a live SparkApplication mounts it (DEP-1).
+        print_info("Deploying Spark scripts...")
+        try:
+            scripts_ok = job_manager.deploy_scripts_configmap()
+        except ScriptsMapError as e:
+            print_error(f"Spark scripts not deployed: {e}")
+            _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
+            raise typer.Exit(1) from None
+        if not scripts_ok:
+            print_error("Failed to deploy Spark scripts ConfigMap -- pipeline cannot proceed")
+            _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
+            raise typer.Exit(1)
+        print_success("Spark scripts deployed")
         if skip_generate:
             console.print()
             print_info("Skipping datagen deploy (--skip-generate)")

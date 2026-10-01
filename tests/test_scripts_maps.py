@@ -404,10 +404,15 @@ def test_deploy_applies_every_role_reads_back_and_drops_legacy():
 
 
 def test_deploy_fails_on_read_back_mismatch():
-    bad = {"labels": {}, "annotations": {sm.SCRIPTS_SHA256_ANNOTATION: "0" * 64}, "data": {}}
+    bad = {
+        "labels": {"app.kubernetes.io/instance": "sd8"},
+        "annotations": {sm.SCRIPTS_SHA256_ANNOTATION: "0" * 64},
+        "data": {},
+    }
     k8s = FakeK8s(overrides={"lakebench-scripts-aml-gate": bad})
     mgr = SparkJobManager(_cfg(), k8s)
-    assert mgr.deploy_scripts_configmap() is False
+    with pytest.raises(sm.ScriptsApplyError, match=r"reads back changed"):
+        mgr.deploy_scripts_configmap()
     assert k8s.deleted == [], "the legacy map stays until the new maps read back"
     assert mgr.scripts_provenance is None
 
@@ -422,12 +427,16 @@ def test_deploy_fails_when_data_does_not_match_its_annotation():
                 got = {**got, "data": {**got["data"], "synthetic_corridors.json": "{}"}}
             return got
 
-    assert SparkJobManager(_cfg(), Tamper()).deploy_scripts_configmap() is False
+    with pytest.raises(
+        sm.ScriptsApplyError, match=r"lakebench-scripts-aml-data reads back changed"
+    ):
+        SparkJobManager(_cfg(), Tamper()).deploy_scripts_configmap()
 
 
 def test_deploy_fails_when_a_map_is_missing_on_read_back():
     k8s = FakeK8s(overrides={"lakebench-scripts-common": None})
-    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    with pytest.raises(sm.ScriptsApplyError, match=r"lakebench-scripts-common reads back changed"):
+        SparkJobManager(_cfg(), k8s).deploy_scripts_configmap()
 
 
 def test_foreign_legacy_map_is_kept():
@@ -481,7 +490,7 @@ def test_live_apps_mounting_reads_templates(monkeypatch):
             app("b-done", "COMPLETED", cm(LEGACY)),
             app("c-other-map", "RUNNING", cm(common)),
             app("d-submitted", "", cm(LEGACY)),
-            app("e-failed-will-rerun", "FAILED", cm(LEGACY)),
+            app("e-failed-onfailure", "FAILED", cm(LEGACY)),
             app("f-failed-final", "FAILED", cm(LEGACY), restart="Never"),
             app("g-projected", "RUNNING", projected("lakebench-scripts-c360", common)),
         ]
@@ -491,11 +500,7 @@ def test_live_apps_mounting_reads_templates(monkeypatch):
     monkeypatch.undo()  # drop the autouse stub for this test
     mgr = SparkJobManager(_cfg(), FakeK8s())
     with patch("kubernetes.client.CustomObjectsApi", return_value=api):
-        assert mgr._live_apps_mounting(LEGACY) == [
-            "a-running",
-            "d-submitted",
-            "e-failed-will-rerun",
-        ]
+        assert mgr._live_apps_mounting(LEGACY) == ["a-running", "d-submitted"]
         assert mgr._live_apps_mounting(common) == ["c-other-map", "g-projected"]
 
 
@@ -516,7 +521,8 @@ def _prior_apply(k8s: FakeK8s, owner: str = "sd8", tweak: str | None = None) -> 
 def test_role_map_of_another_deployment_is_never_replaced():
     k8s = FakeK8s()
     _prior_apply(k8s, owner="other")
-    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    with pytest.raises(sm.ScriptsApplyError, match=r"belongs to deployment 'other'"):
+        SparkJobManager(_cfg(), k8s).deploy_scripts_configmap()
     assert k8s.applied == []
 
 
@@ -530,7 +536,11 @@ def test_changed_map_not_replaced_under_a_live_app(monkeypatch):
         return ["lakebench-gold-refresh"] if name == "lakebench-scripts-aml-rules" else []
 
     monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", live)
-    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    with pytest.raises(
+        sm.ScriptsApplyError,
+        match=r"lakebench-scripts-aml-rules would change under running SparkApplication.s. lakebench-gold-refresh",
+    ):
+        SparkJobManager(_cfg(), k8s).deploy_scripts_configmap()
     assert k8s.applied == []
     assert seen == ["lakebench-scripts-aml-rules"], "unchanged maps need no live check"
 
@@ -550,7 +560,8 @@ def test_changed_map_refused_when_apps_cannot_be_listed(monkeypatch):
         raise RuntimeError("503")
 
     monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", boom)
-    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    with pytest.raises(sm.ScriptsApplyError, match=r"could not list SparkApplications"):
+        SparkJobManager(_cfg(), k8s).deploy_scripts_configmap()
     assert k8s.applied == []
 
 
@@ -576,7 +587,8 @@ def test_submit_refuses_when_scripts_changed_after_apply():
 
 def test_partial_apply_stops_before_the_rest():
     k8s = FakeK8s(fail_apply_of="lakebench-scripts-aml-rules")
-    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    with pytest.raises(sm.ScriptsApplyError, match=r"could not apply lakebench-scripts-aml-rules"):
+        SparkJobManager(_cfg(), k8s).deploy_scripts_configmap()
     assert [cm["metadata"]["name"] for cm in k8s.applied] == [
         "lakebench-scripts-common",
         "lakebench-scripts-c360",
@@ -725,3 +737,15 @@ def test_destroy_scripts_step_list_failure(create_namespace, status):
     step = [r for r in results if r.component == "spark-scripts"]
     assert step and step[-1].status.name == status
     assert "\n" not in step[-1].message and "403 forbidden" in step[-1].message
+
+
+def test_continuous_run_applies_maps_after_stopping_leftover_streams():
+    """Leftover streams from a crashed run would otherwise block a changed
+    map forever (restartPolicy Always never finishes); packaging errors still
+    surface before the reset drops state."""
+    src = (PKG / "cli/_sustained.py").read_text(encoding="utf-8")
+    preflight = src.index("build_script_configmaps(cfg, cfg.get_namespace())")
+    stop = src.index("_stop_leftover_streams(job_manager, cfg.get_namespace())")
+    reset = src.index("_reset_continuous_state(cfg, clear_raw=not skip_generate)")
+    apply = src.index("job_manager.deploy_scripts_configmap()")
+    assert preflight < stop < reset < apply
