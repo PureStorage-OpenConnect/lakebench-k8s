@@ -121,6 +121,19 @@ def test_operator_install_true_refused_names_admin_install(tmp_path, extra, name
     assert names in str(e.value)
 
 
+@pytest.mark.parametrize("value", ["true", "yes", 1, "on"])
+def test_operator_install_coerced_true_refused(tmp_path, value):
+    # Pydantic reads these as True; the refusal runs after that coercion,
+    # so none of them reaches deploy's install branch.
+    for extra in (
+        {"platform": {"compute": {"spark": {"operator": {"install": value}}}}},
+        {"architecture": {"catalog": {"hive": {"operator": {"install": value}}}}},
+    ):
+        path = _write(tmp_path, extra)
+        with pytest.raises(ConfigValidationError, match="install: true' is refused"):
+            load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
+
+
 @pytest.mark.parametrize("extra", [_SPARK_OP, _HIVE_OP])
 def test_operator_install_true_loads_false_for_teardown(tmp_path, extra):
     path = _write(tmp_path, extra)
@@ -193,9 +206,32 @@ def test_run_refuses_explicit_streams(tmp_path):
         )
         with pytest.raises(ConfigValidationError, match="benchmark.streams 2"):
             load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
-    load_config(_write(tmp_path, {}), purpose=LoadPurpose.RUN, print_notes=False)
+    # A benchmark block without streams keeps the default 4 unset: allowed.
+    unset = _write(tmp_path, {"architecture": {"benchmark": {"iterations": 3}}})
+    cfg = load_config(unset, purpose=LoadPurpose.RUN, print_notes=False)
+    assert cfg.architecture.benchmark.streams == 4
     one = _write(tmp_path, {"architecture": {"benchmark": {"streams": 1}}})
     load_config(one, purpose=LoadPurpose.RUN, print_notes=False)
+
+
+def test_saved_config_loads_for_run(tmp_path):
+    # save_config writes every field; the default streams count would then
+    # read as set and run would refuse its own saved config.
+    from lakebench.config.loader import save_config
+
+    cfg = load_config(_write(tmp_path, {}), purpose=LoadPurpose.MUTATE, print_notes=False)
+    out = tmp_path / "saved.yaml"
+    save_config(cfg, out)
+    assert "streams" not in yaml.safe_load(out.read_text())["architecture"]["benchmark"]
+    load_config(out, purpose=LoadPurpose.RUN, print_notes=False)
+    # An explicit value is kept.
+    set_cfg = load_config(
+        _write(tmp_path, {"architecture": {"benchmark": {"streams": 8}}}),
+        purpose=LoadPurpose.MUTATE,
+        print_notes=False,
+    )
+    save_config(set_cfg, out)
+    assert yaml.safe_load(out.read_text())["architecture"]["benchmark"]["streams"] == 8
 
 
 @pytest.mark.parametrize("mode", ["standard", "extended", "power"])
@@ -270,3 +306,5 @@ def test_validation_error_never_echoes_a_seed(tmp_path, bad):
     assert str(_SEED) not in _all_error_text(ce.value)
     for err in ce.value.errors:
         assert "input" not in err
+    # The pydantic error (which keeps its input) is not chained on.
+    assert ce.value.__cause__ is None and ce.value.__suppress_context__

@@ -366,6 +366,27 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
         for k in added:
             os.environ.pop(k, None)
     mode = normalise_mode(cfg.architecture.pipeline.mode.value)
+    if mode == "sustained":
+        # The continuous concurrent budget caps unpinned executor counts by
+        # cluster size, and the fingerprint records the count before that
+        # cap: two clusters would run different counts under one fingerprint.
+        # A pinned count beats the budget.
+        spark = cfg.platform.compute.spark
+        unpinned = [
+            key
+            for key in (
+                "bronze_ingest_executors",
+                "silver_stream_executors",
+                "gold_refresh_executors",
+            )
+            if getattr(spark, key) is None
+        ]
+        if unpinned:
+            raise PerfGateError(
+                f"pinned config {path}: a continuous pinned config must set "
+                f"platform.compute.spark.{', '.join(unpinned)} (the concurrent budget "
+                "would otherwise size them by cluster)"
+            )
     # Through JSON, as a run's snapshot reaches the gate from metrics.json,
     # so both sides hash the same representation.
     snapshot = json.loads(json.dumps(build_config_snapshot(cfg), default=str))
@@ -801,15 +822,19 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
             diff = fingerprint_diff(pinned.fingerprint, run_fp)
             reasons.append("config fingerprint differs from the pinned config: " + "; ".join(diff))
 
-    # A run that records the sha256 of the config file it used must have used
-    # the pinned file byte for byte. Runs that predate the field cannot be
-    # checked this way; the fingerprint is the only guard for them.
+    # The run must have used the pinned file byte for byte: the fingerprint
+    # covers the fields that size work, the file covers every other setting.
+    # Version 2 runs record the file's sha256 when they start, so a version 2
+    # snapshot without it is refused (fail closed); older runs are refused by
+    # their version above.
     recorded = run.snapshot.get("config_sha256")
     if recorded and recorded != pinned.file_sha256:
         reasons.append(
             f"run used a different config file (sha256 {str(recorded)[:12]}, "
             f"pinned {pinned.file_sha256[:12]})"
         )
+    elif not recorded and version_problem is None:
+        reasons.append("run snapshot records no config_sha256, so its config file is unknown")
 
     scores = run.scores
     if run.mode == "batch":

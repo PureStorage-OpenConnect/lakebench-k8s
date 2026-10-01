@@ -135,8 +135,8 @@ A run is refused, never compared, when:
   whose result fingerprints differ from the baseline's, is refused like a
   batch run;
 - its datagen fleet reported `data_quality` other than `complete`;
-- its snapshot records a `config_sha256` that is not the pinned file's. Runs
-  do not record this field yet; see "Known gaps";
+- its snapshot records a `config_sha256` that is not the pinned file's, or
+  (a v1.7 run) records none;
 - it is a batch run whose time to value was taken differently from the
   baseline's (from stage timestamps in one, from the scorecard in the other),
   or whose stages carry no timestamps while its datagen stage is stale or
@@ -324,12 +324,13 @@ run as `uat/perf/run-<id>/metrics.json` alongside `uat/results-<version>.md`.
 ## Known gaps
 
 The fingerprint can only compare what `build_config_snapshot` records. Some
-knobs that move numbers are not in it: datagen CPU and the datagen timestamp
-range. Table format versions reach it through the jar coordinates in
-`owned_conf`. Pinning the rest in the file covers runs of the file itself,
-but a run of an edited copy with the same snapshot is not caught until runs
-record the sha256 of the config file they used (`config_sha256` in the
-snapshot), which the gate already checks when present. The datagen sidecar does not record the image
+knobs that move numbers are not in it, such as datagen CPU and the datagen
+timestamp range; the config-file sha256 covers them for runs of a pinned
+file. Code-default changes outside the Spark manifest's conf and sizing are
+not fingerprinted: the Spark pods' environment, the restart policy, and the
+continuous bronze-verify preflight and AML scoring jobs, which are not
+stages the gate times. A change there is compared, not refused, like any
+other code change. The datagen sidecar does not record the image
 that wrote it, so a run that reuses a recent sidecar from a different image is
 not caught either.
 

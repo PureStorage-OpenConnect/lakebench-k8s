@@ -38,7 +38,8 @@ class ConfigModel(BaseModel):
     # hide_input_in_errors: a validation error must not echo the input it
     # failed on. A model-level error carries the whole block it validated,
     # which can hold a datagen seed or a credential, and the CLI prints the
-    # error text.
+    # error text. Pydantic takes the setting from the model validation
+    # starts at (LakebenchConfig for every config load), which inherits it.
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     # Keys that were once valid and now do nothing. Maps key -> what to do
@@ -543,7 +544,7 @@ class StorageConfig(ConfigModel):
     scratch: ScratchStorageConfig = Field(default_factory=ScratchStorageConfig)
 
 
-def _refuse_operator_install(data: object, info: ValidationInfo, key: str, fix: str) -> object:
+def _refuse_operator_install(model: ConfigModel, info: ValidationInfo, key: str, fix: str) -> None:
     """``operator.install: true`` is refused by the commands that change data.
 
     Shared operators are cluster infrastructure: a deployment verifies them
@@ -551,25 +552,24 @@ def _refuse_operator_install(data: object, info: ValidationInfo, key: str, fix: 
     with *fix*; teardown and read commands load it as ``false`` with a note,
     so an old config can still be destroyed and inspected. ``false`` loads
     as before. A model built without a purpose (not through ``load_config``)
-    keeps the value.
+    keeps the value. Checked after coercion, so ``"true"``, ``1`` and a
+    ``${VAR}`` that resolves to ``yes`` count as true.
     """
-    if not isinstance(data, dict) or data.get("install") is not True:
-        return data
+    if not getattr(model, "install", False):
+        return
     purpose = purpose_from_context(info.context)
     if purpose is None:
-        return data
+        return
     if purpose in CHANGES_DATA:
         raise ValueError(
             f"'{key}: true' is refused: {fix} Delete the key or set it to false "
             "(destroy, status and the read-only commands still load it)"
         )
-    data = dict(data)
-    data["install"] = False
+    object.__setattr__(model, "install", False)
     emit_note(
         f"'{key}: true' is ignored: {fix} Commands that change data refuse it.",
         kind="removed",
     )
-    return data
 
 
 _SPARK_OPERATOR_INSTALL_FIX = (
@@ -589,12 +589,12 @@ class SparkOperatorConfig(ConfigModel):
     namespace: str = "spark-operator"
     version: str = "2.5.1"  # webhook volume injection gap (gotcha 3) unchanged from 2.4.0; template workaround stays
 
-    @model_validator(mode="before")
-    @classmethod
-    def _refuse_install(cls, data: object, info: ValidationInfo) -> object:
-        return _refuse_operator_install(
-            data, info, "platform.compute.spark.operator.install", _SPARK_OPERATOR_INSTALL_FIX
+    @model_validator(mode="after")
+    def _refuse_install(self, info: ValidationInfo) -> SparkOperatorConfig:
+        _refuse_operator_install(
+            self, info, "platform.compute.spark.operator.install", _SPARK_OPERATOR_INSTALL_FIX
         )
+        return self
 
 
 class SparkComputeConfig(ConfigModel):
@@ -726,15 +726,15 @@ class StackableOperatorConfig(ConfigModel):
     namespace: str = "stackable"
     version: str = "25.7.0"
 
-    @model_validator(mode="before")
-    @classmethod
-    def _refuse_install(cls, data: object, info: ValidationInfo) -> object:
-        return _refuse_operator_install(
-            data,
+    @model_validator(mode="after")
+    def _refuse_install(self, info: ValidationInfo) -> StackableOperatorConfig:
+        _refuse_operator_install(
+            self,
             info,
             "architecture.catalog.hive.operator.install",
             _STACKABLE_OPERATOR_INSTALL_FIX,
         )
+        return self
 
 
 class HiveConfig(ConfigModel):
@@ -1615,7 +1615,7 @@ class WorkloadConfig(ConfigModel):
     # Financial transaction-monitoring operations layer (GOALS P10).
     tm_operations: TmOperationsConfig = Field(default_factory=TmOperationsConfig)
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True, hide_input_in_errors=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     @field_validator("schema_type", mode="after")
     @classmethod

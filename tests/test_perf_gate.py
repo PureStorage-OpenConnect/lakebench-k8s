@@ -46,7 +46,8 @@ def _snapshot(config: Path) -> dict:
     try:
         cfg = load_config(config)
         resolve_auto_sizing(cfg, None)
-        return build_config_snapshot(cfg)
+        # A run records the sha256 of the file it loaded.
+        return build_config_snapshot(cfg, config_path=config)
     finally:
         for k in env:
             os.environ.pop(k, None)

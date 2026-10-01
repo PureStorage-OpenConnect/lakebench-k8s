@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar
 
 from lakebench._clock import utc_now
@@ -2140,7 +2142,11 @@ CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
 
 
 def build_config_snapshot(
-    cfg: Any, *, run_mode: str | None = None, system: str = "cluster"
+    cfg: Any,
+    *,
+    run_mode: str | None = None,
+    system: str = "cluster",
+    config_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build a config snapshot for metrics recording.
 
@@ -2149,6 +2155,9 @@ def build_config_snapshot(
 
     Args:
         cfg: A :class:`~lakebench.config.LakebenchConfig` instance.
+        config_path: The config file the run loaded. Its bytes' sha256 is
+            recorded as ``config_sha256``, which the perf gate compares with
+            the pinned file's.
 
     Returns:
         Dict suitable for JSON serialization.
@@ -2279,8 +2288,13 @@ def build_config_snapshot(
         # fields above (metrics/fingerprint_inputs.py). Stamped here, at run
         # start, so the gate reads them and never rebuilds them.
         "fingerprint_version": FINGERPRINT_VERSION,
-        "fingerprint_inputs": fingerprint_inputs(cfg, _continuous),
+        "fingerprint_inputs": fingerprint_inputs(cfg, _continuous, local=system == "local"),
     }
+    if config_path is not None:
+        try:
+            snapshot["config_sha256"] = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+        except OSError:
+            snapshot["config_sha256"] = None
 
     return snapshot
 

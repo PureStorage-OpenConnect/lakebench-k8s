@@ -371,9 +371,10 @@ architecture:
       benchmark_warmup: 300           # Clamped to gold_refresh_interval at runtime
 
   benchmark:
-    mode: power                       # power | throughput | composite | standard | extended
-    streams: 4
-    cache: hot                        # hot | cold
+    mode: power                       # power | standard | extended; throughput and composite
+                                      # are `lakebench benchmark --mode` only (run refuses them)
+    # streams: 4                      # `lakebench benchmark` throughput streams; run refuses > 1
+    cache: hot                        # hot; cold is `lakebench benchmark --cold` only
     iterations: 3                     # timed runs per query; QpH uses the median
 
   tables:
@@ -620,7 +621,7 @@ leave these at defaults and control volume via `datagen.scale`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.benchmark.mode` | enum | `power` | Benchmark mode: `power`, `standard`, `extended`, `throughput`, or `composite`. `lakebench run` measures one power pass (`standard` and `extended` are power) and refuses `throughput` and `composite`; `lakebench benchmark --mode` runs them. |
+| `architecture.benchmark.mode` | enum | `power` | Benchmark mode: `power`, `standard`, `extended`, `throughput`, or `composite`. `lakebench run` measures one power pass (`standard` and `extended` are power) and refuses `throughput` and `composite`, with or without `--skip-benchmark`; `lakebench benchmark --mode` runs them. |
 | `architecture.benchmark.streams` | int | `4` | Concurrent query streams for `lakebench benchmark` throughput mode. Range: 1--64. `lakebench run` uses one stream and refuses an explicit value above 1. |
 | `architecture.benchmark.cache` | enum | `hot` | Cache mode: `hot` (warm cache) or `cold` (cleared before each query). `lakebench run` measures a hot cache and refuses `cold`; use `lakebench benchmark --cold`. |
 | `architecture.benchmark.iterations` | int | `3` | Timed runs of each query per benchmark round. QpH is scored from the per-query median and every sample plus the spread is recorded in `metrics.json`. `1` is a quick run with no measured spread; the maintenance value is then not reported. Range: 1--100. |
@@ -860,8 +861,9 @@ platform:
       storage_class: px-csi-db
 ```
 
-No executor tuning needed -- auto-sizing handles it. At scale 100 the
-resolved resources are approximately:
+No executor tuning needed: the job profiles scale executor counts with the
+data, and the auto-sizer sizes datagen and Trino. At scale 100 the resolved
+resources are approximately:
 
 | Component | Instances | Per-Instance Resources |
 |---|---|---|

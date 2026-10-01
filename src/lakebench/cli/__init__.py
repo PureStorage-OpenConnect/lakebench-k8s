@@ -1050,7 +1050,8 @@ def validate(
     checks_warned += w
 
     # 8. Scale. Executor counts and per-executor sizing come from the job
-    # profiles at manifest build, so there is no executor setting to grade.
+    # profiles at manifest build, so there is no executor setting to grade;
+    # the tier's executor advice is not repeated (it named removed settings).
     _section_start("Scale")
     try:
         from lakebench.config.scale import compute_guidance as _cg
@@ -1060,9 +1061,8 @@ def validate(
         guidance = _cg(scale)
 
         _check_ok(f"Scale {scale}: {dims.customers:,} customers, {dims.approx_rows:,} rows")
-
-        if guidance.warning:
-            _check_warn(guidance.warning)
+        if guidance.tier_name == "extreme":
+            _check_warn(f"Scale {scale} is the extreme tier: it needs a large cluster")
 
     except Exception as e:
         _check_warn(f"Could not read the scale: {e}")

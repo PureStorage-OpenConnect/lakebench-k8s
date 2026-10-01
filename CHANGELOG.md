@@ -44,7 +44,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with the fix (`<job>_executors` for counts, `driver_memory` and
   `driver_cores` for the driver), and `destroy`, `status` and the read-only
   commands drop them with a note. The autosizer no longer reports executor
-  "caps" on them, and `validate` no longer grades executor counts and memory.
+  "caps" on them, so a run whose only cuts were those no longer carries the
+  "auto-sizing cuts" limit in its experiment identity; `validate` no longer
+  grades executor counts and memory.
 - **`operator.install: true` is refused.** The Spark Operator
   (`platform.compute.spark.operator.install`) and the Stackable operators
   (`architecture.catalog.hive.operator.install`) are shared cluster
@@ -66,8 +68,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   starts and the gate reads them. Baselines record `fingerprint_version` and
   the run's dependency pinset. Runs and baselines from before version 2 are
   refused by name until re-recorded, a run on another dependency set than
-  its baseline is refused, and `record` refuses a run without a pinset. The
-  three pinned configs drop the removed keys and `streams: 4`.
+  its baseline is refused, and `record` refuses a run without a pinset. A
+  run now records the sha256 of its config file (`config_sha256`) and the
+  gate refuses a run of any other file. A continuous pinned config must pin
+  its three streaming executor counts. The user's `spark.conf` entries
+  enter the fingerprint as a hash, never in plain text. The three pinned
+  configs drop the removed keys and `streams: 4`.
 - **Flat top-level config keys are deprecated.** `endpoint:`, `scale:` and
   the other flat spellings still load, each with a note naming the nested
   key to write. Both spellings set: the flat value still wins, with a note.

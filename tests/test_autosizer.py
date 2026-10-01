@@ -663,6 +663,26 @@ class TestAutoSizingClusterAware:
             f"batch datagen ({batch_datagen})"
         )
 
+    def test_medium_scale_not_scaled_up(self):
+        """Scale=10 on a big cluster: datagen stays at tier guidance."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={"workload": {"datagen": {"scale": 10}}},
+        )
+
+        cap = ClusterCapacity(
+            total_cpu_millicores=320000,
+            total_memory_bytes=8 * 432 * 1024**3,
+            node_count=8,
+            largest_node_cpu_millicores=40000,
+            largest_node_memory_bytes=432 * 1024**3,
+        )
+
+        resolve_auto_sizing(config, cap)
+
+        # Tier guidance for scale=10 (balanced): 4 pods -- no scaling up
+        assert config.architecture.workload.datagen.parallelism == 4
+
     def test_streaming_mode_no_overprovisioning(self):
         """In STREAMING mode, datagen stays inside its share of the phase budget."""
 

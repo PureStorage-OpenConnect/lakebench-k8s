@@ -115,6 +115,11 @@ def _qph_stop_warning(metrics) -> str:
     )
 
 
+# Continuous jobs whose executor count the concurrent budget can cap at
+# submit (recorded in experiment.limits).
+_STREAMING_JOBS = frozenset({"bronze-ingest", "silver-stream", "gold-refresh"})
+
+
 def _executor_rows(config: dict[str, Any]) -> list[tuple[str, Any]]:
     """One row per job in the snapshot's job profiles: what its manifest asked for,
     before any cluster-dependent cap (the continuous concurrent budget)."""
@@ -128,10 +133,11 @@ def _executor_rows(config: dict[str, Any]) -> list[tuple[str, Any]]:
             continue
         rows.append(
             (
-                f"Executors requested, {_html_escape(str(job))}",
+                f"Executors, {_html_escape(str(job))} (job profile)",
                 _html_escape(
                     f"{p.get('executor_instances')} x {p.get('executor_cores')} cores, "
                     f"{p.get('executor_memory')} + {p.get('executor_memory_overhead')} overhead"
+                    + (" before the concurrent budget" if str(job) in _STREAMING_JOBS else "")
                 ),
             )
         )

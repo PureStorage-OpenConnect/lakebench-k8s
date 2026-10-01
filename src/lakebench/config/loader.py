@@ -400,10 +400,11 @@ def _load_and_validate(
             msg = err["msg"]
             error_messages.append(f"  - {loc}: {msg}")
 
-        raise ConfigValidationError(  # noqa: B904
+        # from None: the chained ValidationError still holds the input.
+        raise ConfigValidationError(
             "Configuration validation failed:\n" + "\n".join(error_messages),
             errors=errors,
-        )
+        ) from None
     return cfg, resolution
 
 
@@ -542,6 +543,12 @@ def save_config(config: LakebenchConfig, path: str | Path) -> None:
     """
     path = Path(path)
     data = config.model_dump(mode="json", exclude_defaults=False)
+    # benchmark.streams is the throughput stream count for `lakebench
+    # benchmark`; `lakebench run` refuses an explicit value above 1, so the
+    # default is written only when the config set it.
+    bench = (data.get("architecture") or {}).get("benchmark") or {}
+    if "streams" not in config.architecture.benchmark.model_fields_set:
+        bench.pop("streams", None)
     # Write the canonical locations, so the saved file reloads without
     # deprecation warnings: 'workload' is a top-level key and the continuous
     # settings block is 'pipeline.continuous' (the model stores them at
@@ -629,7 +636,7 @@ def generate_example_config_yaml() -> str:
 #
 # Key behavior: commenting out an optional section does NOT disable it --
 # Pydantic fills in defaults. To truly disable something, set its 'enabled'
-# or 'install' field to false explicitly.
+# field to false explicitly.
 #
 # Full reference: docs/configuration.md
 # Recipe guide:   docs/recipes.md
