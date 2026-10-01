@@ -436,3 +436,28 @@ def test_compare_child_stdout_fd_without_a_real_stderr(monkeypatch):
     fd = _compare._stderr_fd()
     assert fd == 2
     assert subprocess.run(["true"], stdout=fd, check=False).returncode == 0
+
+
+def test_compare_child_stdout_discarded_when_stderr_is_closed(monkeypatch):
+    """With ``2>&-`` fd 2 may belong to a file this process opened since."""
+    import subprocess
+
+    from lakebench.cli import _compare
+
+    monkeypatch.setattr("sys.stderr", None)
+    assert _compare._stderr_fd() == subprocess.DEVNULL
+
+
+def test_compare_child_stdout_discarded_when_fd2_is_closed(monkeypatch):
+    """An in-memory stderr over a closed fd 2 must not hand subprocess a bad fd."""
+    import io
+    import subprocess
+
+    from lakebench.cli import _compare
+
+    def closed(fd):
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr("sys.stderr", io.StringIO())
+    monkeypatch.setattr(_compare.os, "fstat", closed)
+    assert _compare._stderr_fd() == subprocess.DEVNULL

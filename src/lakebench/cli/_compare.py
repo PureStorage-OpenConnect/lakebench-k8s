@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -302,15 +304,25 @@ def _is_neutral(metric: str) -> bool:
 
 
 def _stderr_fd() -> int:
-    """A file descriptor for stderr that subprocess can use.
+    """A descriptor for child output in machine mode: stderr, or DEVNULL.
 
     An in-memory sys.stderr (pytest capture, CliRunner, an embedding) has no
-    fileno; fd 2 is still the process's stderr.
+    fileno; fd 2 is still the process's stderr when it is open. With stderr
+    closed (``2>&-``) Python sets sys.stderr to None and fd 2 may since have
+    been reused by a file this process opened, so child output is discarded
+    rather than written into that file or onto stdout.
     """
+    if sys.stderr is None:
+        return subprocess.DEVNULL
     try:
         return sys.stderr.fileno()
     except (AttributeError, OSError, ValueError):
-        return 2
+        pass
+    try:
+        os.fstat(2)
+    except OSError:
+        return subprocess.DEVNULL
+    return 2
 
 
 def _recipe_summary(cfg) -> str:
@@ -337,7 +349,6 @@ def _run_single(
     ``child_stdout`` redirects the child commands' stdout (to stderr when the
     caller's stdout carries machine output).
     """
-    import subprocess
     import sys
 
     # Local mode refuses to run without an existing stack, so deploy first.

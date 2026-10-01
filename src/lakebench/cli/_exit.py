@@ -70,20 +70,30 @@ __all__ = [
 DEBUG_ENV = "LAKEBENCH_DEBUG"
 
 
-def _passthrough_classes() -> tuple[type[BaseException], ...]:
-    """Typer's Exit and Click's ClickException, found through public names.
+_CLICK_ROOTS = frozenset({"typer", "click"})
 
-    Their home moves between Typer releases: Typer 0.12 to 0.2x re-export
-    ``click``'s classes, 0.27.0 vendors Click as ``typer._click``, and 0.27.2
-    defines ``Exit`` and ``Abort`` in ``typer.exceptions`` while
-    ``ClickException`` stays in ``typer._click.exceptions``. ``typer.Exit``,
-    ``typer.Abort`` and ``typer.BadParameter`` exist in all of them.
+
+def _click_family(exc: BaseException) -> bool:
+    """True when *exc* is a Typer or Click class, vendored or stock.
+
+    Typer moves these classes between releases: 0.12 to 0.2x re-export
+    ``click``'s, 0.27.0 vendors Click as ``typer._click``, and 0.27.2 defines
+    ``Exit`` and ``Abort`` in ``typer.exceptions``. Checked on 0.20.0, 0.27.0
+    and 0.27.2. Matching on the defining package instead of a class name
+    keeps working when a release renames or moves a class, and covers stock
+    ``click`` raised by a dependency.
     """
-    click_exc = next(
-        (c for c in typer.BadParameter.__mro__ if c.__name__ == "ClickException"),
-        typer.BadParameter,
+    return any(c.__module__.split(".")[0] in _CLICK_ROOTS for c in type(exc).__mro__)
+
+
+def _is_abort(exc: BaseException) -> bool:
+    """Typer's or Click's ``Abort``: a declined confirm or no terminal."""
+    if isinstance(exc, typer.Abort):
+        return True
+    return any(
+        c.__name__ == "Abort" and c.__module__.split(".")[0] in _CLICK_ROOTS
+        for c in type(exc).__mro__
     )
-    return (typer.Exit, click_exc)
 
 
 def _debug() -> bool:
@@ -100,21 +110,21 @@ def error_for(exc: BaseException) -> LakebenchError | None:
 
     Pure apart from the lazy imports: it prints nothing and exits nothing.
     """
-    if isinstance(exc, (*_passthrough_classes(), SystemExit, GeneratorExit)):
-        return None
-    if isinstance(exc, BrokenPipeError) or (isinstance(exc, OSError) and exc.errno == errno.EPIPE):
-        return None  # the reader went away; Typer exits 1 quietly
-    if isinstance(exc, LakebenchError):
-        return exc
-    if isinstance(exc, KeyboardInterrupt):
-        return LakebenchError("Interrupted.", path="sigint", code=ExitCode.INTERRUPTED)
-    if isinstance(exc, typer.Abort):
+    if _is_abort(exc):
         return LakebenchError(
             "Not confirmed: the prompt was declined or there was no terminal to answer it.",
             next="Answer the prompt, or pass --yes where the command offers it.",
             path="confirm.non_tty",
             code=ExitCode.NOT_CONFIRMED,
         )
+    if isinstance(exc, (SystemExit, GeneratorExit)) or _click_family(exc):
+        return None  # typer.Exit and Click's usage errors: Click prints and exits
+    if isinstance(exc, BrokenPipeError) or (isinstance(exc, OSError) and exc.errno == errno.EPIPE):
+        return None  # the reader went away; Typer exits 1 quietly
+    if isinstance(exc, LakebenchError):
+        return exc
+    if isinstance(exc, KeyboardInterrupt):
+        return LakebenchError("Interrupted.", path="sigint", code=ExitCode.INTERRUPTED)
     if not isinstance(exc, Exception):
         return None
 
@@ -196,7 +206,7 @@ def _report(exc: BaseException, err: LakebenchError) -> None:
     try:
         if err.path == "unhandled_exception" and _debug():
             traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
-        if isinstance(exc, (KeyboardInterrupt, typer.Abort)):
+        if isinstance(exc, KeyboardInterrupt) or _is_abort(exc):
             # A prompt cut off by EOF or Ctrl-C leaves the cursor after it.
             sys.stderr.write("\n")
         from lakebench.cli._helpers import emit_error

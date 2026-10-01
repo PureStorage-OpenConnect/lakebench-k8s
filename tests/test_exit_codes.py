@@ -474,3 +474,33 @@ def test_gen_script_check_mode():
         check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def _foreign_class(module: str, name: str, base: type[BaseException]) -> type[BaseException]:
+    return type(name, (base,), {"__module__": module})
+
+
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [
+        ("click.exceptions", "UsageError"),  # stock click from a dependency
+        ("click.exceptions", "Exit"),
+        ("typer._click.exceptions", "NoSuchOption"),
+        ("typer._click.exceptions", "RenamedClickException"),  # a later rename
+    ],
+)
+def test_click_family_passes_through_by_package(module, name):
+    """Click prints its own usage error and exits 2; the handler must not wrap it."""
+    exc = _foreign_class(module, name, RuntimeError)("x")
+    assert cli_exit.error_for(exc) is None
+
+
+@pytest.mark.parametrize("module", ["click.exceptions", "typer._click.exceptions"])
+def test_any_click_abort_is_not_confirmed(module):
+    exc = _foreign_class(module, "Abort", RuntimeError)()
+    assert cli_exit.exit_code_for(exc) == ExitCode.NOT_CONFIRMED
+
+
+def test_non_click_runtime_error_is_failed():
+    exc = _foreign_class("somelib.errors", "UsageError", RuntimeError)("x")
+    assert cli_exit.exit_code_for(exc) == ExitCode.FAILED
