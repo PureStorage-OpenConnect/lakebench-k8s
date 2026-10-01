@@ -2,7 +2,9 @@
 
 The hook refuses a push whose ref reaches a pre-rewrite commit that carried
 leaked keys, and scans the pushed range with gitleaks using the config from
-``refs/remotes/origin/integrate/v1.5.0``, never the pushing branch's copy.
+``refs/remotes/origin/integrate/v1.5.0``, never the pushing branch's copy,
+and the baseline from the same ref; merge commits' changes are scanned and an
+inline allow comment hides nothing.
 Each test runs the tracked hook against a throwaway repository. Tests of the
 hook's own logic put a stub ``gitleaks`` that finds nothing on PATH; the two
 tests marked "requires gitleaks" run the real binary; they skip without it unless
@@ -230,3 +232,39 @@ def test_real_gitleaks_passes_a_clean_branch(repo):
     tip = _commit(repo, "notes.txt", "nothing secret here\n", "clean work")
     res = _run(repo, [_new_branch(tip)], os.environ["PATH"])
     assert res.returncode == 0, res.stderr
+
+
+def test_real_gitleaks_refuses_an_inline_allow(repo):
+    _require_gitleaks()
+    tip = _commit(repo, "conf.txt", f"k: {_planted_key()}  # gitleaks:allow\n", "allow it")
+    res = _run(repo, [_new_branch(tip)], os.environ["PATH"])
+    assert res.returncode == 1, res.stderr
+
+
+def test_real_gitleaks_ignores_the_pushing_trees_baseline(repo):
+    """A branch cannot allowlist its own finding in its .gitleaksignore."""
+    _require_gitleaks()
+    leak = _commit(repo, "conf.txt", f"k: {_planted_key()}\n", "leak")
+    tip = _commit(
+        repo,
+        ".gitleaksignore",
+        f"# mine\n{leak}:conf.txt:pure-flashblade-s3-access-key:1\n",
+        "hide it",
+    )
+    res = _run(repo, [_new_branch(tip)], os.environ["PATH"])
+    assert res.returncode == 1, res.stderr
+
+
+def test_real_gitleaks_refuses_a_key_added_in_a_merge(repo):
+    _require_gitleaks()
+    _git(repo, "checkout", "-q", "-b", "side")
+    _commit(repo, "a.txt", "side\n", "side")
+    _git(repo, "checkout", "-q", "main")
+    _commit(repo, "a.txt", "main\n", "main")
+    subprocess.run(
+        ["git", "-C", str(repo), "merge", "-q", "side"], capture_output=True, env=_clean_env()
+    )
+    tip = _commit(repo, "a.txt", f"k: {_planted_key()}\n", "merge")
+    assert _git(repo, "rev-list", "--parents", "-n", "1", tip).count(" ") == 2
+    res = _run(repo, [_new_branch(tip)], os.environ["PATH"])
+    assert res.returncode == 1, res.stderr

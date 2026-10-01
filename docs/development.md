@@ -167,9 +167,11 @@ The hooks do not run the tests; run `pytest tests/ -x` yourself.
 ### Pre-push hook
 
 `scripts/hooks/pre-push` refuses a push whose branch reaches a commit from
-before the 2026-09-30 history rewrite, and scans the pushed commits with
-gitleaks using the `.gitleaks.toml` from `origin/integrate/v1.5.0` rather
-than the branch's own copy. Install it by copying it, not through
+before the 2026-09-30 history rewrite, and scans the pushed commits and
+their messages with gitleaks using the `.gitleaks.toml` and `.gitleaksignore`
+from `origin/integrate/v1.5.0` rather than the branch's own copies. It also
+scans what merge commits change and ignores inline `gitleaks:allow`
+comments. Install it by copying it, not through
 pre-commit (the pre-commit framework would read the pushing branch's config,
 which an old branch may lack):
 
