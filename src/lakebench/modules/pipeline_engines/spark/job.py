@@ -3448,7 +3448,7 @@ class SparkJobManager:
             for p in problems:
                 logger.error("Held-out seed in a ConfigMap, not applying: %s", p)
             return False
-        logger.info(
+        logger.warning(
             "Held-out absence check (report mode) found %d key(s): %s",
             len(problems),
             "; ".join(problems),

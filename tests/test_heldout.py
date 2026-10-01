@@ -567,6 +567,7 @@ def two_configs():
 @pytest.mark.xfail(
     json.loads(PROD.read_text())["absence_check"] == "report",
     reason="the pre-registration keeps its plaintext seeds until the owner's OA5 commit",
+    raises=AssertionError,
     strict=True,
 )
 def test_tip_maps_clean(two_configs):
@@ -832,3 +833,65 @@ def test_ledger_message_names_an_unspent_heldout_seed_by_role(held, monkeypatch,
     monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(led))
     msg = g.seed_ever_recorded(EV)
     assert "evaluation" in msg and _no_seed_in(msg)
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (CD-3+4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [EV - 2**64, EV + 2**64, -1, 2**63])
+def test_spent_outside_i64_refused(bad):
+    # seed - 2**64 hashes to no role, so without a range check it would pass
+    # the spent rule while publishing the seed in a reversible form.
+    old, new = _doc(), _doc()
+    new["spent"].append(bad)
+    problems = ds.heldout_history_problems(old, new, _looks())
+    assert any("outside 0..2^63-1" in p for p in problems), problems
+    assert all(_no_seed_in(p) for p in problems)
+
+
+def test_spent_from_message_names_no_value():
+    for raw in ([EV, "x"], [str(RB)], str(EV)):
+        with pytest.raises(ValueError) as e:
+            ds.spent_from({"spent_seeds": raw})
+        assert _no_seed_in(str(e.value)), "spent_from echoed a value"
+
+
+def test_absence_finds_embedded_and_grouped_seeds(held):
+    shapes = [
+        f"20261001{EV}1",  # inside a longer digit run
+        f"0xff{EV}",  # decimal digits after a hex prefix
+        f"{EV:,}",  # comma-grouped
+        f"{EV:,}".replace(",", " "),  # space-grouped
+        f"id={EV}{EV}",
+    ]
+    texts = {f"m/{i}": t for i, t in enumerate(shapes)}
+    problems = ds.absence_problems(texts, held, exclude=[])
+    assert {p.split(":")[0] for p in problems} == set(texts), problems
+    assert all(_no_seed_in(p) for p in problems)
+    # Near misses stay clean.
+    clean = {"m/a": f"{EV + 1:,}", "m/b": f"1{EV + 1}2"}
+    assert ds.absence_problems(clean, held, exclude=[]) == []
+
+
+def _rust_seed_reads_as(role: str) -> bool | None:
+    """True when the seed robustness.rs compiles in for ``role`` hashes to that
+    role; None when the constant is gone (CD-5 moves the Rust check to the
+    hash file). Returns a bool so a failure prints no value."""
+    src = (ROOT / "datagen_rs/src/robustness.rs").read_text()
+    m = re.search(rf"pub const {role.upper()}_SEED: i64 = ([0-9_]+);", src)
+    if m is None:
+        assert f"{role.upper()}_SEED" not in src, f"{role.upper()}_SEED in an unreadable form"
+        return None
+    return ds.heldout_role(int(m.group(1).replace("_", ""))) == role
+
+
+@pytest.mark.parametrize("role", ds.PROTECTED_ROLES)
+def test_rust_compiled_seed_hashes_to_its_role(role):
+    # Until CD-5, robustness.rs compiles the two seeds in; they must be the
+    # registered ones, checked by hash so no value is read into a message.
+    ok = _rust_seed_reads_as(role)
+    if ok is None:
+        pytest.skip("robustness.rs no longer compiles the seed in (CD-5)")
+    assert ok is True, f"robustness.rs {role.upper()}_SEED is not the registered {role} seed"
