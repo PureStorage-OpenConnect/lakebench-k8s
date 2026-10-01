@@ -270,3 +270,14 @@ def test_the_checker_is_not_its_own_reader(tmp_path):
     }
     repo = _repo(tmp_path, files)
     assert "docs/x.md" in cdr.unread_files(repo)
+
+
+def test_a_script_imported_by_its_stem_is_read(tmp_path):
+    files = {
+        **_BASE,
+        "scripts/tool_a.py": "x = 1\n",
+        "scripts/tool_b.py": "x = 1\n",
+        "tests/test_t.py": "import sys\nimport tool_a  # noqa\nfrom os import path\n",
+    }
+    repo = _repo(tmp_path, files)
+    assert cdr.unread_files(repo) == ["scripts/tool_b.py"]

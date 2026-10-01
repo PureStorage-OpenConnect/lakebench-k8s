@@ -17,7 +17,8 @@ when it is
   ``Makefile``, ``pyproject.toml`` (string values, not under an
   ``exclude``, ``extend-exclude``, ``force-exclude`` or ``omit`` key) or
   ``.pre-commit-config.yaml``, alone or after ``./``, ``../``, ``$VAR/`` or
-  ``${{ expr }}/``; or it
+  ``${{ expr }}/``; a ``scripts/*.py`` file whose stem is imported as a
+  module (a test that puts ``scripts/`` on ``sys.path``); or it
   matches a ``PATTERN_READERS`` entry whose literal is still in the reader;
 - a **platform file** GitHub or the release reads (it only has to exist, and
   must, unless it is in ``PENDING_PLATFORM_FILES``);
@@ -369,6 +370,28 @@ def python_strings(files: Sequence[str], root: Path = ROOT) -> list[str]:
     return out
 
 
+def python_imports(files: Sequence[str], root: Path = ROOT) -> set[str]:
+    """Top-level module names imported by tracked Python under src/, tests/
+    and scripts/ (a test that puts scripts/ on sys.path imports a script by
+    its stem)."""
+    out: set[str] = set()
+    for rel in files:
+        if not rel.endswith(".py") or not rel.startswith(("src/", "tests/", "scripts/")):
+            continue
+        if rel in _NOT_READERS:
+            continue
+        try:
+            tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                out.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                out.add(node.module.split(".")[0])
+    return out
+
+
 def _strip_comment(line: str) -> str:
     if line.lstrip().startswith("#"):
         return ""
@@ -451,6 +474,7 @@ def unread_files(root: Path = ROOT) -> list[str]:
     joined = "\n".join(strings)
     string_set = set(strings)
     config = config_text(files, root)
+    imported = python_imports(files, root)
     basenames: dict[str, int] = {}
     for f in files:
         b = posixpath.basename(f)
@@ -467,6 +491,9 @@ def unread_files(root: Path = ROOT) -> list[str]:
             continue
         base = posixpath.basename(path)
         if basenames.get(base) == 1 and base in string_set:
+            continue
+        stem = base[: -len(".py")] if base.endswith(".py") else None
+        if path.startswith("scripts/") and stem and basenames.get(base) == 1 and stem in imported:
             continue
         if _mentions(config, path):
             continue
