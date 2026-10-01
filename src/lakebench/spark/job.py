@@ -6,7 +6,6 @@ Backward-compat re-export. Implementation moved to
 
 from lakebench.modules.pipeline_engines.spark.job import (  # noqa: F401
     _FORMAT_VERSION_COMPAT,
-    _ICEBERG_RUNTIME_SUFFIX,
     _JOB_PROFILES,
     _MAVEN_MIRROR_REPOS,
     _MAX_EXECUTORS_SAFE,
