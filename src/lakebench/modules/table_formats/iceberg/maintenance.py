@@ -235,7 +235,7 @@ _COMPACTION_PARTITION_COLUMN = {"customer_interactions_enriched": "interaction_d
 
 # Partitions per Trino optimize statement. Trino's Iceberg connector refuses
 # a write that opens more than max_partitions_per_writer (default 100)
-# writers: "Exceeded limit of 100 open writers for partitions: 101" (LB-210,
+# writers: "Exceeded limit of 100 open writers for partitions: 101" (seen in
 # run-20260929-204941-1d17f4). What trips it is the number of partitions one
 # optimize rewrites, not the number the table holds: batch C360 s1 silver
 # (366 interaction_date partitions, a few large files each) compacted in one
@@ -310,7 +310,7 @@ def build_compaction_plan(
     NULL`` when a NULL partition exists. Trino writer settings are not changed, so worker memory stays
     where a single successful optimize already runs (raising
     max_partitions_per_writer instead grows writer memory with the
-    partition count; LB-041). Every other case, including ``partitions``
+    partition count). Every other case, including ``partitions``
     None (not read, or the read failed), is :func:`build_compaction_sql`.
     """
     column = compaction_partition_column(table)

@@ -1,4 +1,4 @@
-"""Did-you-mean hints for config errors (CFG-4).
+"""Did-you-mean hints for config errors.
 
 An unknown key is matched first against the keys its own section accepts,
 then against the last part of every key path in the schema, so a key written

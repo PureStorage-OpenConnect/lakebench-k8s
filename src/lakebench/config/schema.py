@@ -1572,7 +1572,7 @@ class WorkloadConfig(ConfigModel):
 
     @model_validator(mode="after")
     def _note_wrong_workload_keys(self) -> WorkloadConfig:
-        """Note settings that belong to the other workload (CFG-4).
+        """Note settings that belong to the other workload.
 
         A note, not a refusal, so no identity or hash moves. The note does not
         say "delete it": the financial corpus id still hashes the customer360

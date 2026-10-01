@@ -86,7 +86,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one
-  recorded continuous Customer 360 run did (LB-210, n=1). A silver table with more than 90 partitions is now
+  recorded continuous Customer 360 run did (n=1). A silver table with more than 90 partitions is now
   compacted in chunks of at most 90, after a read of its partition values.
   This also applies to batch runs, whose single statement happened to
   succeed (batch silver holds a few large files per partition): the

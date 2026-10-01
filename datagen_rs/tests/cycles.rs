@@ -1014,7 +1014,7 @@ fn financial_output_is_pinned_to_the_frozen_generator() {
 }
 
 // ---------------------------------------------------------------------------
-// CD-26 (DAT-2): three more pins, captured at integrate 77a65d2 source (equal
+// Three more pins, captured at integrate 77a65d2 source (equal
 // to the v1.6 release generator, which passes the two pins above). With the
 // two above they cover the paths the look-image changes touch: the
 // perturbation branch, and cycle slicing with cycle-suffixed keys on both

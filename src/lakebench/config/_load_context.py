@@ -46,7 +46,7 @@ class LoadPurpose(str, Enum):
 #: missing name are refused.
 CHANGES_DATA = frozenset({LoadPurpose.MUTATE, LoadPurpose.RUN})
 
-#: Purposes that skip the derived-name length check (LB-153), so a
+#: Purposes that skip the derived-name length check, so a
 #: deployment whose name is too long to finish deploying can be inspected
 #: and torn down.
 SKIPS_NAME_LENGTH = frozenset({LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.INSPECT})
@@ -54,7 +54,7 @@ SKIPS_NAME_LENGTH = frozenset({LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpo
 #: Purposes that act on or report a deployment by the config's name. They
 #: refuse a nameless config whose name would come from the v1.6
 #: ``.lakebench/state.json``, because v1.6 gave every nameless config in the
-#: directory that name (SPEC SAF-2). INSPECT loads it: it only reads the
+#: directory that name. INSPECT loads it: it only reads the
 #: file.
 TARGETS_DEPLOYMENT = frozenset({LoadPurpose.TEARDOWN, LoadPurpose.READ})
 

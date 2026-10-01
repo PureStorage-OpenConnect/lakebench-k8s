@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Byte-compare datagen images on five fixed cases (DAT-2, CD-26 and CD-8).
+"""Byte-compare datagen images on five fixed cases.
 
 ``capture --image <ref> --case <case>`` runs one case on a datagen image
 against a local MinIO in a scratch directory, hashes every object it wrote,

@@ -1488,7 +1488,7 @@ def _compaction_partitions(
     None (one unchunked statement) when the table is not on the partition
     map, the engine is not Trino, the budget is already spent, or the read
     fails; a failed read is added to *notes* for the effective maintenance
-    reasons (LB-210).
+    reasons.
     """
     from lakebench.deploy.iceberg import query_sql
     from lakebench.modules.table_formats.iceberg.maintenance import (
