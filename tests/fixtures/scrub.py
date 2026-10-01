@@ -678,12 +678,15 @@ def _numbers(obj: Any, path: str = "") -> Iterator[tuple[str, int]]:
     elif isinstance(obj, int):
         yield path, obj
     elif isinstance(obj, float) and obj.is_integer():
-        n = int(obj)
-        # Above 2**53 a float stands for a run of integers one ulp wide;
-        # check them all, so a seed stored as a float is still found.
-        spread = int(math.ulp(obj)) if abs(obj) >= 2**53 else 0
-        for d in range(-spread, spread + 1):
-            yield path, n + d
+        # A seed is 0..2**63-1, so a larger float holds none. Between 2**53
+        # and 2**63 a float stands for every integer within half an ulp of
+        # it (at most 1,027 of them); check them all, so a seed stored as a
+        # float is still found.
+        if abs(obj) < 2**63:
+            n = int(obj)
+            spread = int(math.ulp(obj)) // 2 + 1 if abs(obj) >= 2**53 else 0
+            for d in range(-spread, spread + 1):
+                yield path, n + d
     elif isinstance(obj, str):
         for m in _DIGITS.finditer(obj):
             yield path, int(m.group(0))

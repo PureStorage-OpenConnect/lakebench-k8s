@@ -681,7 +681,10 @@ def seeds_equal(a, b, heldout: HeldOut | None = None) -> bool | None:
     equal plaintext, equal ``seed_ref``, or a plaintext seed whose salted
     hash is the other side's ``seed_ref`` (one record written before the
     seed was spent, one after). None when it cannot be told: either side
-    withheld, or the hash file unreadable for a mixed pair."""
+    withheld or not an exact integer, or the hash file unreadable for a
+    mixed pair. A seed_ref written under an earlier salt reads unequal to
+    its plaintext seed; the hash file is append-only, so its salt does not
+    change."""
 
     def ref(x):
         return x.get("seed_ref") if isinstance(x, Mapping) else None
@@ -694,16 +697,33 @@ def seeds_equal(a, b, heldout: HeldOut | None = None) -> bool | None:
     if ra is not None and rb is not None:
         return ra == rb
     if ra is None and rb is None:
-        try:
-            return int(a) == int(b)
-        except (TypeError, ValueError, OverflowError):
-            return a == b
+        ia, ib = _exact_int(a), _exact_int(b)
+        if ia is None or ib is None:
+            return None
+        return ia == ib
     plain, hashed = (b, ra) if ra is not None else (a, rb)
+    value = _exact_int(plain)
+    if value is None:
+        return None
     try:
         h = heldout if heldout is not None else _heldout()
-        return seed_hash(h.salt, int(plain)) == hashed
+        return seed_hash(h.salt, value) == hashed
     except Exception:  # noqa: BLE001
         return None
+
+
+def _exact_int(value) -> int | None:
+    """An integer seed exactly: an int, a decimal string, or an integral
+    float below 2**53; never a bool."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]+", value.strip()):
+        return int(value)
+    if isinstance(value, float) and value.is_integer() and abs(value) < 2**53:
+        return int(value)
+    return None
 
 
 # Seed recovery. The generator derives each instance seed as

@@ -183,3 +183,26 @@ class TestReviewCases:
         with pytest.raises(scrub.ScrubError) as exc:
             scrub.scrub_record(rec)
         assert "seed" in str(exc.value) and _absent(seed, str(exc.value))
+
+
+class TestFinalPassCases:
+    @pytest.mark.parametrize("value", [1e300, -1e300, float(2**63), 1.7976931348623157e308])
+    def test_huge_floats_scan_quickly(self, held, value):
+        import time
+
+        from tests.fixtures import scrub
+
+        start = time.monotonic()
+        assert scrub._seed_problems({"x": value}) == []
+        assert time.monotonic() - start < 1.0
+
+    def test_float_window_is_bounded(self, held):
+        from tests.fixtures import scrub
+
+        hits = list(scrub._numbers({"x": float(2**62)}))
+        assert 1 < len(hits) <= 1027
+
+    @pytest.mark.parametrize("a, b", [(43.9, 43), (True, 1), ("43", 43.5), (float(2**60), 2**60)])
+    def test_seeds_equal_needs_exact_integers(self, held, a, b):
+        assert ds.seeds_equal(a, b) is None
+        assert ds.seeds_equal("43", 43) is True
