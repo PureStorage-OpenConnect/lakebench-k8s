@@ -51,6 +51,57 @@ MANIFEST_GROUPS: dict[str, tuple[str, ...]] = {
     GROUP_DUCKDB: ("duckdb-wheels", "duckdb-ext"),
 }
 
+# lb_deps.py's exit codes, for SD-4a's readiness messages; the resolver
+# copies them and a parity test pins the copy. Its error line carries
+# "egress:" when a repository or index could not be reached.
+LB_DEPS_EXIT: dict[str, int] = {
+    "missing": 3,
+    "hash": 4,
+    "ux_d2": 5,
+    "space": 6,
+    "internal": 7,
+    "request": 8,
+}
+
+# Manifest group -> its directory under the set, which is also its URL
+# path below ``<base_url>`` (pip ``--find-links <base_url>/duckdb/wheels/``).
+MANIFEST_DIRS: dict[str, str] = {
+    "jars": "jars",
+    "py-reference": "py-reference",
+    "duckdb-wheels": "duckdb/wheels",
+    "duckdb-ext": "duckdb-ext",
+}
+
+# Jars in a set whose artifactId the stock Spark image also ships in
+# /opt/spark/jars at another version, as (artifactId, set version, image
+# version). Spark Thrift copies the set onto the system classpath, so a new
+# overlap can shadow the image's classes; deploy fails on one not listed
+# here (ch01 s2.3 step 7). Seeded from the SD-1 listing (2026-10-01): only
+# Delta 4.1.0 on apache/spark:4.1.1 overlaps at another version; today's
+# Thrift already loads these files. dlt40's antlr4-runtime 4.13.1 is the
+# image's own version and needs no entry.
+KNOWN_OVERLAPS: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        ("jsr305", "3.0.2", "3.0.0"),
+        ("log4j-api", "2.25.3", "2.24.3"),
+        ("log4j-core", "2.25.3", "2.24.3"),
+        ("log4j-slf4j2-impl", "2.25.3", "2.24.3"),
+        ("slf4j-api", "2.0.13", "2.0.17"),
+    }
+)
+
+
+def unknown_overlaps(overlaps: Iterable[Mapping[str, str]]) -> list[dict[str, str]]:
+    """The manifest's overlaps at another version that KNOWN_OVERLAPS does
+    not list. Keyed by both versions, so a bump of either side is new."""
+    return [
+        dict(o)
+        for o in overlaps
+        if o["version"] != o["image_version"]
+        and (o["artifact"], o["version"], o["image_version"]) not in KNOWN_OVERLAPS
+    ]
+
+
 # The resolver shipped to the lb-deps pod (SD-3). Its sha256 enters the
 # request, so a Lakebench upgrade that changes the resolver re-resolves.
 TOOLS_PATH = Path(__file__).resolve().parent.parent / "deploy" / "deps_tools" / "lb_deps.py"
@@ -197,6 +248,9 @@ class DepsRequest:
     duckdb_extension_repository: str = ""
 
     def canonical_json(self) -> str:
+        """The bytes of ``request.json`` in the ``lb-deps-tools`` ConfigMap.
+        lb_deps.py hashes the file and refuses it unless the sha256 equals
+        the pod's ``LB_DEPS_REQUEST_SHA256``, so write exactly this."""
         # Unselected groups leave their fields empty; dropping empties keeps
         # a C360 request's hash free of AML and DuckDB fields.
         data: dict[str, Any] = {k: v for k, v in asdict(self).items() if v not in ("", ())}
