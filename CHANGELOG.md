@@ -66,6 +66,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `detail.compaction_failures`. The maintenance policy id and the effective
   maintenance `id` are unchanged.
 ### Changed
+- **`destroy` removes what it used to leave in a surviving namespace.** With
+  `create_namespace: false`, destroy left the PostgreSQL ServiceAccount and,
+  with observability on, the Pushgateway Deployment, Service and PVC, the
+  Prometheus ConfigMap and five PodMonitors. A new last step deletes them by
+  name from the Category-1 registry (`deploy/category1.py`), which lists every
+  object deploy and run create in the namespace and the step that deletes
+  it. The `lakebench-silver-state` ConfigMap is kept on purpose (its rebuild
+  counters must not reset while table data can outlive destroy).
 - **`destroy` keeps a namespace an operator pod still watches.** After it
   removes the namespace from the Spark Operator watch list and the operator
   restarts, destroy waits inside the cluster lease (up to 120 s) for every
