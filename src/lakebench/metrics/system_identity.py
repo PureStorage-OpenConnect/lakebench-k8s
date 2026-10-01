@@ -1,27 +1,48 @@
 """The system a run ran on, as a fingerprint (SPEC v1.7 EVD-7, OD-2; SP-1).
 
-``observe_system`` samples what the system is, never how loaded it is:
+``observe_system`` samples what the system is, never how loaded it is. Each
+part is one flat entry, so a gap is always a whole part:
 
-* ``api_server_ca``: the cluster CA hash (``deploy/ownership.api_server_fingerprint``);
-* ``platform``: Kubernetes version and, on OpenShift, the ClusterVersion;
+* ``api_server_ca``: sha256 (12 hex) of the CA bundle the Kubernetes client
+  verifies the API server with (the same bytes
+  ``deploy/ownership.api_server_fingerprint`` hashes);
+* ``kubernetes``: the API server's ``git_version``;
+* ``openshift``: ``{version, state}`` of the newest ClusterVersion history
+  entry, or None on vanilla Kubernetes (a 404 is an observation, not a gap);
 * ``nodes``: the node inventory by hardware class (role, CPU architecture,
   CPU capacity, memory capacity rounded to GiB, and the instance-type or
-  NFD CPU-model label when present). Allocatable, conditions, cordons and
-  node names never enter: they move with load and maintenance, not with
-  the hardware;
-* ``storage``: the S3 endpoint host, the ``Server`` header the endpoint
-  answers with, and the backend lakebench recognises from the endpoint;
+  NFD CPU-model label when present), with a count per class. Allocatable,
+  conditions, cordons and node names never enter: they move with load and
+  maintenance, not with the hardware;
+* ``storage_endpoint``: the S3 endpoint's lowercased ``host:port``;
+* ``storage_server``: the ``Server`` header the endpoint answers a HEAD on
+  the deployment's bronze bucket with (None when it sends none);
 * ``scratch``: whether scratch PVCs are on and their StorageClass name.
 
-The result is ``{type, fingerprint, partial, parts}``. A part that cannot be
-read (RBAC, an unreachable endpoint) is ``{"not_observed": reason}``, is left
-out of the hash, and sets ``partial``. ``fingerprint_of(parts, keys)`` hashes
-a chosen subset, so two partial observations can be compared on the parts
-both observed. Values the system decides for a run (the endpoint written
-into Spark conf, autosized resources) are recorded elsewhere and are not
-architecture.
+The result is ``{type, version, fingerprint, partial, parts}``. A part that
+cannot be read (RBAC, an unreachable endpoint, an unparseable node) is
+``{"not_observed": reason}``, is left out of the hash, and sets ``partial``.
+``type`` enters the hash. ``common_fingerprints(a, b)`` hashes two
+observations over the parts both observed, which is how two partial
+observations are compared (ER-10b).
 
-Nothing here writes to the cluster or to S3.
+Known limits, by design or not yet measured:
+
+* The CA hash is of the bundle the client holds. Two kubeconfigs for one
+  cluster that embed different CA bundles (an installer kubeconfig against
+  an ``oc login --certificate-authority`` one, or workstation against
+  in-cluster) can hash differently; a client that skips TLS verification has
+  no CA, so the part is not observed.
+* A node added, removed or replaced, or a capacity change that crosses a
+  GiB rounding boundary, changes the fingerprint: the fleet changed, which
+  is the safe direction (a system differential, never a false repeat).
+* One storage system reached by IP and by DNS name reads as two systems.
+* With no cluster part observed (a local run, or every read refused), only
+  the endpoint, the Server header and the scratch setting remain, which are
+  mostly config. ER-10b must not call such a pair a repeat.
+
+Nothing here writes to the cluster or to S3, and ``observe_system`` never
+raises.
 """
 
 from __future__ import annotations
@@ -39,8 +60,18 @@ logger = logging.getLogger(__name__)
 #: of different versions never compare equal by accident.
 SYSTEM_IDENTITY_VERSION = 1
 
-#: The parts, in the order they are documented above.
-PARTS = ("api_server_ca", "platform", "nodes", "storage", "scratch")
+PARTS = (
+    "api_server_ca",
+    "kubernetes",
+    "openshift",
+    "nodes",
+    "storage_endpoint",
+    "storage_server",
+    "scratch",
+)
+
+#: The parts read from the cluster itself rather than from the config.
+CLUSTER_PARTS = ("api_server_ca", "kubernetes", "openshift", "nodes")
 
 _CONTROL_PLANE_LABELS = (
     "node-role.kubernetes.io/control-plane",
@@ -67,35 +98,34 @@ def is_observed(part: Any) -> bool:
     return not (isinstance(part, Mapping) and "not_observed" in part)
 
 
-def _observed_only(value: Any) -> Any:
-    """*value* with every not-observed entry removed, at any depth, so the
-    reason text never enters a hash."""
-    if isinstance(value, Mapping):
-        return {k: _observed_only(v) for k, v in value.items() if is_observed(v)}
-    if isinstance(value, list):
-        return [_observed_only(v) for v in value if is_observed(v)]
-    return value
+def observed_parts(parts: Mapping[str, Any]) -> set[str]:
+    return {k for k in PARTS if k in parts and is_observed(parts[k])}
 
 
-def _has_gap(value: Any) -> bool:
-    if not is_observed(value):
-        return True
-    if isinstance(value, Mapping):
-        return any(_has_gap(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_has_gap(v) for v in value)
-    return False
-
-
-def fingerprint_of(parts: Mapping[str, Any], keys: Iterable[str] | None = None) -> str:
-    """sha256 over the observed parts named by *keys* (all when None), as
-    sorted JSON, first 16 hex digits. Not-observed entries are left out at
-    any depth."""
+def fingerprint_of(
+    parts: Mapping[str, Any], keys: Iterable[str] | None = None, system_type: str = "cluster"
+) -> str:
+    """sha256 over the observed parts named by *keys* (all when None) and
+    the system type, as sorted JSON, first 16 hex digits."""
     chosen = PARTS if keys is None else tuple(keys)
-    body = {k: _observed_only(parts[k]) for k in chosen if k in parts and is_observed(parts[k])}
-    body["version"] = SYSTEM_IDENTITY_VERSION
+    body: dict[str, Any] = {k: parts[k] for k in chosen if k in parts and is_observed(parts[k])}
+    body["_type"] = system_type
+    body["_version"] = SYSTEM_IDENTITY_VERSION
     blob = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def common_fingerprints(a: Mapping[str, Any], b: Mapping[str, Any]) -> tuple[str, str, list[str]]:
+    """Fingerprints of two observations over the parts both observed, and
+    those part names. Equal fingerprints with an empty or config-only list
+    are not evidence of one system (see the module docstring)."""
+    pa, pb = a.get("parts") or {}, b.get("parts") or {}
+    keys = sorted(observed_parts(pa) & observed_parts(pb))
+    return (
+        fingerprint_of(pa, keys, str(a.get("type") or "cluster")),
+        fingerprint_of(pb, keys, str(b.get("type") or "cluster")),
+        keys,
+    )
 
 
 def _reason(exc: BaseException) -> str:
@@ -112,35 +142,50 @@ def _reason(exc: BaseException) -> str:
 
 
 def _api_server_ca(k8s: Any) -> Any:
-    from lakebench.deploy.ownership import api_server_fingerprint
+    """The CA the client itself verifies with (its ``ssl_ca_cert``), so the
+    hash follows the context the client is pinned to, not whatever the
+    kubeconfig's current-context is when this runs."""
+    configuration = getattr(getattr(k8s._core_v1, "api_client", None), "configuration", None)
+    path = getattr(configuration, "ssl_ca_cert", None)
+    if path:
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            return not_observed(f"CA bundle: {_reason(exc)}")
+        if data:
+            return hashlib.sha256(data).hexdigest()[:12]
+    if getattr(configuration, "verify_ssl", True) is False:
+        return not_observed("client skips TLS verification")
+    return not_observed("client holds no CA bundle")
 
-    ca = api_server_fingerprint(getattr(k8s, "context_name", "") or None)
-    return {"sha256_12": ca} if ca else not_observed("no CA material in the kubeconfig")
 
-
-def _platform(k8s: Any) -> Any:
+def _kubernetes(k8s: Any) -> Any:
     from kubernetes import client
 
-    core = k8s._core_v1
     try:
-        version = client.VersionApi(core.api_client).get_code()
+        version = client.VersionApi(k8s._core_v1.api_client).get_code()
     except Exception as exc:  # noqa: BLE001 -- recorded as not observed
         return not_observed(f"kubernetes version: {_reason(exc)}")
-    out: dict[str, Any] = {
-        "kubernetes": getattr(version, "git_version", None),
-        "openshift": None,
-    }
+    return getattr(version, "git_version", None)
+
+
+def _openshift(k8s: Any) -> Any:
     try:
         cv = k8s._custom.get_cluster_custom_object(
             group="config.openshift.io", version="v1", plural="clusterversions", name="version"
         )
     except Exception as exc:  # noqa: BLE001
         if getattr(exc, "status", None) == 404:
-            return out  # not OpenShift: an observed fact, not a gap
+            return None  # not OpenShift: an observed fact, not a gap
         return not_observed(f"openshift clusterversion: {_reason(exc)}")
     history = ((cv or {}).get("status") or {}).get("history") or []
-    out["openshift"] = (history[0] or {}).get("version") if history else None
-    return out
+    if not history:
+        return {"version": None, "state": None}
+    # history[0] is the newest entry; during an upgrade it is the target with
+    # state Partial, so the state is part of what identifies the cluster.
+    newest = history[0] or {}
+    return {"version": newest.get("version"), "state": newest.get("state")}
 
 
 def _memory_gib(quantity: str) -> int:
@@ -180,7 +225,13 @@ def _nodes(k8s: Any) -> Any:
         return not_observed(f"node list: {_reason(exc)}")
     counts: dict[str, dict[str, Any]] = {}
     for node in nodes.items or []:
-        hw = _hardware_class(node)
+        try:
+            hw = _hardware_class(node)
+        except Exception as exc:  # noqa: BLE001
+            # A partial inventory would read as a smaller fleet: the whole
+            # part is a gap instead.
+            name = getattr(getattr(node, "metadata", None), "name", "?")
+            return not_observed(f"node {name}: {_reason(exc)}")
         key = json.dumps(hw, sort_keys=True, default=str)
         counts.setdefault(key, {**hw, "count": 0})["count"] += 1
     if not counts:
@@ -188,21 +239,26 @@ def _nodes(k8s: Any) -> Any:
     return [counts[k] for k in sorted(counts)]
 
 
-def _storage(cfg: Any, s3_client: Any) -> Any:
-    from lakebench.s3.conformance import detect_backend
-
-    s3 = cfg.platform.storage.s3
-    endpoint = str(s3.endpoint or "")
-    host = urlparse(endpoint).hostname if "://" in endpoint else endpoint.partition(":")[0]
+def _storage_endpoint(cfg: Any) -> Any:
+    endpoint = str(cfg.platform.storage.s3.endpoint or "").strip()
+    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
+    host = (parsed.hostname or "").lower()
     if not host:
         return not_observed("no S3 endpoint configured")
-    out: dict[str, Any] = {"endpoint_host": host, "backend": detect_backend(endpoint)}
-    if s3_client is None:
-        out["server"] = not_observed("no S3 client")
-        return out
     try:
-        raw = s3_client.raw_client
-        resp = raw.head_bucket(Bucket=s3.buckets.bronze)
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return f"{host}:{port}"
+
+
+def _storage_server(cfg: Any, s3_client: Any) -> Any:
+    if s3_client is None:
+        return not_observed("no S3 client")
+    try:
+        resp = s3_client.raw_client.head_bucket(Bucket=cfg.platform.storage.s3.buckets.bronze)
         headers = (resp.get("ResponseMetadata") or {}).get("HTTPHeaders") or {}
     except Exception as exc:  # noqa: BLE001
         # A refused HEAD still carries the server's headers.
@@ -210,11 +266,9 @@ def _storage(cfg: Any, s3_client: Any) -> Any:
             "HTTPHeaders"
         ) or {}
         if not headers:
-            out["server"] = not_observed(f"head bucket: {_reason(exc)}")
-            return out
-    server = {k.lower(): v for k, v in headers.items()}.get("server")
-    out["server"] = server if server else not_observed("endpoint sent no Server header")
-    return out
+            return not_observed(f"head bucket: {_reason(exc)}")
+    # An absent header was observed: the endpoint answered without one.
+    return {k.lower(): v for k, v in headers.items()}.get("server") or None
 
 
 def _scratch(cfg: Any) -> dict[str, Any]:
@@ -233,38 +287,42 @@ def _scratch(cfg: Any) -> dict[str, Any]:
 def observe_system(
     k8s: Any, cfg: Any, *, s3_client: Any = None, local: bool = False
 ) -> dict[str, Any]:
-    """``{type, fingerprint, partial, parts}`` for the system *cfg* runs on.
+    """``{type, version, fingerprint, partial, parts}`` for the system *cfg*
+    runs on.
 
     *k8s* is a ``K8sClient`` (None or *local* for a ``--local`` run, whose
     cluster parts are then not observed); *s3_client* an ``S3Client`` used
     for one HEAD on the bronze bucket (None leaves the Server header not
-    observed). Never raises for an unreadable part.
+    observed). Never raises.
     """
+    system_type = "local" if local else "cluster"
+    readers: list[tuple[str, Any]] = [
+        ("api_server_ca", _api_server_ca),
+        ("kubernetes", _kubernetes),
+        ("openshift", _openshift),
+        ("nodes", _nodes),
+    ]
     parts: dict[str, Any] = {}
-    if local or k8s is None:
-        reason = "local run" if local else "no Kubernetes client"
-        for name in ("api_server_ca", "platform", "nodes"):
-            parts[name] = not_observed(reason)
-    else:
-        for name, read in (
-            ("api_server_ca", _api_server_ca),
-            ("platform", _platform),
-            ("nodes", _nodes),
-        ):
-            try:
-                parts[name] = read(k8s)
-            except Exception as exc:  # noqa: BLE001 -- a reader bug is a gap, not a crash
-                logger.debug("system identity part %s: %s", name, exc)
-                parts[name] = not_observed(_reason(exc))
-    try:
-        parts["storage"] = _storage(cfg, s3_client)
-    except Exception as exc:  # noqa: BLE001
-        parts["storage"] = not_observed(_reason(exc))
-    parts["scratch"] = _scratch(cfg)
+    for name, read in readers:
+        if local or k8s is None:
+            parts[name] = not_observed("local run" if local else "no Kubernetes client")
+            continue
+        parts[name] = _safely(name, lambda read=read: read(k8s))
+    parts["storage_endpoint"] = _safely("storage_endpoint", lambda: _storage_endpoint(cfg))
+    parts["storage_server"] = _safely("storage_server", lambda: _storage_server(cfg, s3_client))
+    parts["scratch"] = _safely("scratch", lambda: _scratch(cfg))
     return {
-        "type": "local" if local else "cluster",
+        "type": system_type,
         "version": SYSTEM_IDENTITY_VERSION,
-        "fingerprint": fingerprint_of(parts),
-        "partial": _has_gap(parts),
+        "fingerprint": fingerprint_of(parts, system_type=system_type),
+        "partial": len(observed_parts(parts)) < len(PARTS),
         "parts": parts,
     }
+
+
+def _safely(name: str, read: Any) -> Any:
+    try:
+        return read()
+    except Exception as exc:  # noqa: BLE001 -- a reader bug is a gap, not a crash
+        logger.debug("system identity part %s: %s", name, exc)
+        return not_observed(_reason(exc))
