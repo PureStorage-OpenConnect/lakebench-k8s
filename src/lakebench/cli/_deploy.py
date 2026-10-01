@@ -252,7 +252,7 @@ def deploy(
         typer.Option(
             "--timeout",
             "-t",
-            help="Global deployment timeout in seconds (0 = no timeout); bounds every wait in every step",
+            help="Global deployment timeout in seconds (0 = no timeout); bounds the waits in every step",
         ),
     ] = 3600,
     local: Annotated[

@@ -135,6 +135,8 @@ class HiveDeployer:
         version = op_cfg.version
 
         for i, op in enumerate(self._INSTALL_ORDER):
+            # Not after the deploy deadline: each install is a shared change.
+            deploy_deadline.check(f"helm install of Stackable {op}")
             chart = f"oci://oci.stackable.tech/sdp-charts/{op}"
             cmd = [
                 "install",

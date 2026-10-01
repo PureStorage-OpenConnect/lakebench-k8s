@@ -487,7 +487,10 @@ class SecurityVerifier:
                 return False
 
             if attempt < self._SCC_ADD_MAX_ATTEMPTS:
-                time.sleep(self._SCC_ADD_BACKOFF_SECONDS * attempt)
+                from lakebench.deploy import deadline as deploy_deadline
+
+                deploy_deadline.check(f"SCC {scc_name} grant to {namespace}/{sa_name}")
+                time.sleep(deploy_deadline.clamp(self._SCC_ADD_BACKOFF_SECONDS * attempt))
 
         logger.warning(
             "SCC %s add for serviceaccount %s/%s failed to land after %d attempts "
