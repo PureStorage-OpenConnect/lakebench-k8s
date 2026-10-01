@@ -396,6 +396,10 @@ def _is_shallow(root: Path) -> bool | None:
     return out == "true"
 
 
+#: The history scanner, shared with the secrets-history CI job.
+_HISTORY_SCAN = Path(__file__).resolve().parent / "gitleaks_history.py"
+
+
 def check_gitleaks_history() -> Result:
     """Every commit reachable from HEAD, merges included, beyond the
     .gitleaksignore baseline."""
@@ -415,26 +419,24 @@ def check_gitleaks_history() -> Result:
         )
     if not (ROOT / ".gitleaksignore").is_file():
         return Result("gitleaks-history", FAIL, ".gitleaksignore (the history baseline) is missing")
+    # The scanner CI's secrets-history job runs: every commit with
+    # --remerge-diff (a merge commit's own change), commit and tag messages,
+    # no inline allow, and a failure when gitleaks scanned nothing. The
+    # baseline is this release worktree's own.
     return command_check(
         "gitleaks-history",
         [
-            exe,
-            "git",
-            ".",
+            sys.executable,
+            str(_HISTORY_SCAN),
+            "--repo",
+            str(ROOT),
             "--config",
-            ".gitleaks.toml",
-            "--redact",
-            "--no-banner",
-            "--exit-code",
-            "1",
-            # An inline gitleaks:allow comment must not hide a finding.
-            "--ignore-gitleaks-allow",
-            # Plain `git log -p` shows no diff for a merge commit; this scans
-            # what the merge itself changed.
-            "--log-opts=--remerge-diff HEAD",
+            str(ROOT / ".gitleaks.toml"),
+            "--ignore",
+            str(ROOT / ".gitleaksignore"),
+            "--gitleaks",
+            exe,
         ],
-        # Read at call time. gitleaks reads .gitleaksignore from the scanned
-        # tree (and from its cwd), so this is the release worktree's baseline.
         cwd=ROOT,
     )
 
@@ -443,8 +445,10 @@ def check_pre_push_hook() -> Result:
     """The pre-push hook installed in this clone is the tracked one."""
     tracked = ROOT / "scripts" / "hooks" / "pre-push"
     try:
-        common = subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        # The hooks directory git runs: core.hooksPath when set, otherwise the
+        # common directory's hooks/ (shared by every worktree).
+        hooks = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"],
             cwd=ROOT,
             capture_output=True,
             text=True,
@@ -452,7 +456,7 @@ def check_pre_push_hook() -> Result:
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return Result("pre-push-hook", FAIL, "not a git checkout")
-    installed = Path(common) / "hooks" / "pre-push"
+    installed = Path(hooks) / "pre-push"
     if not tracked.is_file():
         return Result("pre-push-hook", FAIL, "scripts/hooks/pre-push is missing")
     if not installed.is_file():

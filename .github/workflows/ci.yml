@@ -183,9 +183,23 @@ jobs:
           mkdir -p "$work"
           ignore="$work/gitleaksignore"
           cfg="$work/gitleaks.toml"
+          # The config always comes from a trusted ref when one has it, so no
+          # branch (a pull request to main included) can allowlist its own key
+          # through .gitleaks.toml.
+          cfg_ref=""
+          for ref in origin/main origin/integrate/v1.5.0; do
+            if git cat-file -e "$ref:.gitleaks.toml" 2>/dev/null; then
+              cfg_ref="$ref"
+              break
+            fi
+          done
           trusted=""
           if [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" = "main" ]; then
             echo "::warning::pull request to main: its own baseline is used; the owner reviews it"
+            if git cat-file -e origin/main 2>/dev/null; then
+              echo "baseline and config changes against origin/main:"
+              git diff origin/main HEAD -- .gitleaksignore .gitleaks.toml || true
+            fi
           else
             for ref in origin/main origin/integrate/v1.5.0; do
               if git cat-file -e "$ref:.gitleaksignore" 2>/dev/null; then
@@ -197,20 +211,22 @@ jobs:
           fi
           if [ -n "$trusted" ]; then
             git show "$trusted:.gitleaksignore" >"$ignore"
-            git show "$trusted:.gitleaks.toml" >"$cfg"
-            echo "baseline and config from $trusted"
+            echo "baseline from $trusted"
           else
             cp .gitleaksignore "$ignore" 2>/dev/null || : >"$ignore"
+          fi
+          if [ -n "$cfg_ref" ]; then
+            git show "$cfg_ref:.gitleaks.toml" >"$cfg"
+            echo "config from $cfg_ref"
+          else
             cp .gitleaks.toml "$cfg"
           fi
-          repo=$(git rev-parse --path-format=absolute --git-dir)
-          own="$PWD/.gitleaks.toml"
-          cd "$work"
-          for config in "$cfg" "$own"; do
+          # Commits (merge commits' own changes included), commit messages and
+          # tag messages; fails if gitleaks scanned nothing.
+          scan="$PWD/scripts/gitleaks_history.py"
+          for config in "$cfg" "$PWD/.gitleaks.toml"; do
             echo "scanning with $config"
-            gitleaks git "$repo" --config "$config" --gitleaks-ignore-path "$ignore" \
-              --redact --no-banner --exit-code 1 --ignore-gitleaks-allow \
-              --log-opts="--remerge-diff HEAD"
+            python "$scan" --repo . --config "$config" --ignore "$ignore"
           done
 
       - name: Pre-push hook and baseline tests
@@ -218,7 +234,7 @@ jobs:
           LB_REQUIRE_GITLEAKS: "1"
         run: |
           pip install -e ".[dev]"
-          pytest tests/test_pre_push_hook.py tests/test_gitleaks_baseline.py -rs --tb=short
+          pytest tests/test_pre_push_hook.py tests/test_gitleaks_baseline.py tests/test_gitleaks_history.py -rs --tb=short
           pytest tests/test_release_gate.py -k gitleaks_history -rs --tb=short
 
   rust:
@@ -290,7 +306,8 @@ jobs:
   # train/* (the merge trains, so a red result stops the train before
   # integrate moves) and tags (so also in the release's ci call, where
   # github.event_name is the caller's `push`), and on every pull request to
-  # integrate/**. A selection that finds no test exits 5, so the job cannot
+  # integrate/** or main (a skipped job would satisfy a required check on the
+  # integrate-to-main pull request). A selection that finds no test exits 5, so the job cannot
   # pass having run nothing.
   aml-slow:
     name: AML statistics (slow)
@@ -300,6 +317,7 @@ jobs:
       || startsWith(github.ref, 'refs/heads/train/')
       || startsWith(github.ref, 'refs/tags/')
       || (github.event_name == 'pull_request' && startsWith(github.base_ref, 'integrate/'))
+      || (github.event_name == 'pull_request' && github.base_ref == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

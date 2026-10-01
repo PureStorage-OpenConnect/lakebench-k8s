@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -167,9 +168,17 @@ def test_ci_history_scan_uses_the_trusted_baseline(tmp_path):
     runner = tmp_path / "runner"
     runner.mkdir()
 
+    # The step runs the tree's scripts/gitleaks_history.py with `python`.
+    (repo / "scripts").mkdir()
+    shutil.copy(ROOT / "scripts" / "gitleaks_history.py", repo / "scripts")
+    pybin = tmp_path / "bin"
+    pybin.mkdir()
+    (pybin / "python").symlink_to(sys.executable)
+
     def ci(**env: str) -> subprocess.CompletedProcess:
         full = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         full.update({"EVENT": "push", "BASE_REF": "", "RUNNER_TEMP": str(runner)}, **env)
+        full["PATH"] = f"{pybin}{os.pathsep}{full.get('PATH', '')}"
         return subprocess.run(
             ["bash", "-c", _ci_scan_script()], cwd=repo, capture_output=True, text=True, env=full
         )
@@ -212,6 +221,15 @@ def test_ci_history_scan_uses_the_trusted_baseline(tmp_path):
     commit(".gitleaks.toml", toml, "allowlist it")
     res = ci()
     assert res.returncode == 1 and "leaks found" in res.stdout + res.stderr, res.stderr
+    # A pull request to main brings its own baseline, never its own config.
+    res = ci(EVENT="pull_request", BASE_REF="main")
+    assert res.returncode == 1 and "config from origin/main" in res.stdout, res.stdout
+
+    # A key in a commit message only.
+    _git(repo, "reset", "-q", "--hard", main)
+    _git(repo, "commit", "-q", "--allow-empty", "-m", f"note {_planted_key('Z')}")
+    res = ci()
+    assert res.returncode == 1 and "leaks found" in res.stdout + res.stderr, res.stdout
 
     # With no baseline on main, origin/integrate/v1.5.0 is the trusted ref.
     _git(repo, "reset", "-q", "--hard", main)

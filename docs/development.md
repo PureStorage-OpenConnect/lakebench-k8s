@@ -189,8 +189,9 @@ one.
 
 `.github/workflows/ci.yml` runs on every branch push and on pull requests to
 `main` and `integrate/**`. A newer push to the same `lane/*` branch or pull
-request cancels the older run; on every other branch and on tags each pushed
-head's run finishes. The lint job runs `ruff check src/ tests/ scripts/`,
+request cancels the older run; on every other branch each pushed head's run
+finishes. A tag push does not trigger this workflow; the release workflow
+calls it instead. The lint job runs `ruff check src/ tests/ scripts/`,
 `ruff format --check src/ tests/ scripts/` and `mypy src/lakebench/` on
 Python 3.11, and `scripts/check_action_runtimes.py --verify`, which reads
 each action's `action.yml` at its pinned SHA and fails if
@@ -213,23 +214,31 @@ with `pyspark==4.0.1` on Java 17 and checks its own floors with
 the tests marked `slow` (the heavy fidelity-gate fits, the scale invariance
 check and the Spark fidelity gate over silver) on Python 3.11 with the pinned
 `[aml]` libraries, on every push to `main`, `integrate/**`, `train/*` and
-tags and on every pull request to `integrate/**`; it is not run on other
-branch pushes. It also reruns the D8 power simulation in a second
+tags (through the release workflow's call) and on every pull request to
+`integrate/**` or `main`; it is not run on other branch pushes. Until the
+fast path deselects them, the unit legs run the `slow` tests as well. It also reruns the D8 power simulation in a second
 environment with the numpy and scipy versions the pre-registration recorded
 its output hash with, since that guard skips on the `[aml]` pins.
 The Rust job runs `cargo fmt
 --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test
 --release --locked` in `datagen_rs/`. A gitleaks job scans the working tree
-for credentials, and a second one scans every commit reachable from the
-pushed or merged head, including what merge commits change, and ignores
-inline `gitleaks:allow` comments. Findings listed in `.gitleaksignore` (the history
+for credentials, and a second one (`scripts/gitleaks_history.py`, which the
+release gate also runs) scans every commit reachable from the pushed or
+merged head, including what merge commits change, plus every commit and tag
+message, and ignores inline `gitleaks:allow` comments. It fails if gitleaks
+scanned no commit, which is how gitleaks reports a `git log` it could not
+run. Findings listed in `.gitleaksignore` (the history
 baseline: two fingerprints of the old default Polaris secret that PyPI
-1.0.0 to 1.4.0 published) are not reported. The scan takes the baseline and
-the config from `origin/main` (or `origin/integrate/v1.5.0` while `main` has
-no baseline), not from the branch, so a branch cannot allowlist its own
-finding; it also scans with the branch's own config, so a new rule applies
-at once. `tests/test_gitleaks_baseline.py` pins the list. The package build
-runs only after all of these pass.
+1.0.0 to 1.4.0 published) are not reported. The scan takes the config
+from `origin/main` (or `origin/integrate/v1.5.0`) and the baseline from
+`origin/main` (or `origin/integrate/v1.5.0` while `main` has no baseline),
+not from the branch, so a branch cannot allowlist its own finding; a pull
+request to `main` uses its own baseline, which the owner reviews, and CI
+prints its baseline and config diff against `main`. The scan also runs with
+the branch's own config, so a new rule applies at once.
+`tests/test_gitleaks_baseline.py` pins the list. The package build runs
+only after the lint, test, Spark, Rust and both secret-scan jobs pass; it
+does not wait for the slow AML job, which most branches skip.
 
 Every job runs on a fixed runner image (`ubuntu-24.04`, never
 `ubuntu-latest`), and every action is pinned by commit SHA with its tag as

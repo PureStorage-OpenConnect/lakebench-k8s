@@ -31,8 +31,9 @@ from lakebench.aml import d8_shards  # noqa: E402
 from lakebench.aml import fidelity_gate as fg  # noqa: E402
 from lakebench.aml import scale_invariance as si  # noqa: E402
 
-# CPU-bound (10 to 20 minutes on several cores): CI runs it in the "AML
-# statistics (slow)" job (.github/workflows/ci.yml), not on every lane push.
+# CPU-bound (10 to 20 minutes on several cores): CI runs it on the pinned
+# libraries in the "AML statistics (slow)" job (.github/workflows/ci.yml); the
+# unit legs also run it until the fast path (QA-6) deselects the mark there.
 pytestmark = pytest.mark.slow
 
 ROOT = Path(__file__).resolve().parents[1]
