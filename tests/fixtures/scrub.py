@@ -21,7 +21,10 @@ logs and other text go through ``scrub_text``. What it rewrites:
   case), under any key inside a credential-named mapping, or the ``value`` of
   a ``{name: <credential-named>, value: ...}`` entry (a Kubernetes env list)
   becomes a ``${LAKEBENCH_...}`` placeholder. Dict keys are scrubbed for
-  addresses, hosts and buckets as values are.
+  addresses, hosts and buckets as values are; a key rename that would merge
+  two keys, or that falls inside ``experiment`` or ``verdict``, is refused.
+  An endpoint host without a dot (``minio``) is rewritten only in the
+  endpoint value itself, never as a word elsewhere.
 
 It refuses, rather than rewrites:
 
@@ -82,7 +85,7 @@ _CREDENTIAL_KEY = re.compile(
 _ENDPOINT_KEY = re.compile(r"(?:^|_)endpoint(?:_url|_override)?(?:_s3)?$")
 _BUCKET_KEY = re.compile(r"(?:^|_)bucket(?:_name)?$")
 _SEED_KEY = re.compile(r"(?:^|_)seeds?$")
-_SEED_ARG = re.compile(r"--seed[= ]+(\d+)")
+_SEED_ARG = re.compile(r"(?i)(?<![a-z0-9_])(?:--)?seed[=: ]\s*(\d+)")
 
 #: Leaf keys whose values are evidence: a rewrite there is refused unless the
 #: key is also an endpoint, bucket or credential key.
@@ -101,6 +104,8 @@ _CREDENTIAL_VALUES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 )
+
+_CGNAT = ipaddress.IPv4Network("100.64.0.0/10")
 
 _TOKEN_BEFORE = r"(?<![A-Za-z0-9_.-])"
 _TOKEN_AFTER = r"(?![A-Za-z0-9_-])"
@@ -173,16 +178,34 @@ def _rewrite(
     obj: Any,
     leaf: Callable[[str | None, str, bool], str],
     rekey: Callable[[str], str],
+    renames: list[str],
+    path: str = "",
     key: str | None = None,
     cred: bool = False,
 ) -> Any:
+    """Copy of *obj* with leaves through *leaf* and dict keys through
+    *rekey*. Each renamed key's full path is appended to *renames*; a
+    rename that would merge two keys, or that falls in a guarded path,
+    raises ScrubError (it would drop or relabel evidence)."""
     if isinstance(obj, Mapping):
         out: dict[str, Any] = {}
         for k, ek, v in _children(obj):
-            out[rekey(k)] = _rewrite(v, leaf, rekey, ek, cred or _is_cred_key(ek))
+            new = rekey(k)
+            if new != k:
+                where = f"{path}.{k}"
+                if new in obj or new in out:
+                    raise ScrubError(f"scrubbing key {where} would merge it into {new!r}")
+                if where.startswith((".experiment", ".verdict")):
+                    raise ScrubError(f"scrubbing would rename evidence key {where}")
+                renames.append(where)
+            out[new] = _rewrite(
+                v, leaf, rekey, renames, f"{path}.{k}", ek, cred or _is_cred_key(ek)
+            )
         return out
     if isinstance(obj, list):
-        return [_rewrite(v, leaf, rekey, key, cred) for v in obj]
+        return [
+            _rewrite(v, leaf, rekey, renames, f"{path}[{i}]", key, cred) for i, v in enumerate(obj)
+        ]
     if isinstance(obj, str):
         return leaf(key, obj, cred)
     return obj
@@ -198,7 +221,9 @@ def _private_ip(text: str) -> bool:
         ip = ipaddress.IPv4Address(text)
     except ValueError:
         return False  # 999.1.2.3 is not an address
-    return text not in ALLOWED_HOSTS and (ip.is_private or ip.is_reserved or ip.is_link_local)
+    return text not in ALLOWED_HOSTS and (
+        ip.is_private or ip.is_reserved or ip.is_link_local or ip in _CGNAT
+    )
 
 
 def _host_of(value: str) -> str | None:
@@ -212,11 +237,11 @@ def _host_of(value: str) -> str | None:
     return v.partition("/")[0].rpartition("@")[2].partition(":")[0].lower() or None
 
 
-def _token_re(names: list[str]) -> re.Pattern[str] | None:
+def _token_re(names: list[str], flags: int = 0) -> re.Pattern[str] | None:
     if not names:
         return None
     alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
-    return re.compile(f"{_TOKEN_BEFORE}(?:{alt}){_TOKEN_AFTER}")
+    return re.compile(f"{_TOKEN_BEFORE}(?:{alt}){_TOKEN_AFTER}", flags)
 
 
 def _credential_placeholder(key: str | None) -> str:
@@ -244,7 +269,10 @@ class _Sensitive:
                 self._add_bucket(value, None)
             if _is_endpoint_key(key):
                 host = _host_of(value)
-                if host and host not in ALLOWED_HOSTS:
+                # A dotless name (minio, prometheus) is a service name that
+                # also appears as ordinary words: rewritten only where it is
+                # the endpoint value itself, never as a token elsewhere.
+                if host and host not in ALLOWED_HOSTS and "." in host:
                     hosts.add(host)
         taken = {v for v in self.buckets.values() if v}
         n = 0
@@ -256,7 +284,7 @@ class _Sensitive:
                 self.buckets[name] = f"scrubbed-bucket-{n}"
         self.hosts = sorted(hosts)
         self._bucket_re = _token_re(list(self.buckets))
-        self._host_re = _token_re(self.hosts)
+        self._host_re = _token_re(self.hosts, re.IGNORECASE)
 
     def _add_bucket(self, name: str, layer: str | None) -> None:
         if name.startswith("scrubbed-") or name in self.buckets:
@@ -307,9 +335,26 @@ def _seed_values(path: str, key: str | None, value: Any) -> Iterator[tuple[str, 
             yield path, int(m.group(1))
 
 
+def _argv_seeds(obj: Any, path: str = "") -> Iterator[tuple[str, int]]:
+    """``["--seed", "N"]`` (or ``"seed", N``) inside any list."""
+    if isinstance(obj, Mapping):
+        for k, v in obj.items():
+            yield from _argv_seeds(v, f"{path}.{k}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            nxt = obj[i + 1] if i + 1 < len(obj) else None
+            if isinstance(v, str) and v.lstrip("-").lower() == "seed" and nxt is not None:
+                if isinstance(nxt, int) and not isinstance(nxt, bool):
+                    yield f"{path}[{i + 1}]", nxt
+                elif isinstance(nxt, str) and nxt.strip().isdigit():
+                    yield f"{path}[{i + 1}]", int(nxt.strip())
+            yield from _argv_seeds(v, f"{path}[{i}]")
+
+
 def _seed_problems(record: Any) -> list[str]:
     """Paths holding a seed the AML protocol protects. Never the value."""
     seeds = [s for p, k, v, _c in _walk(record) for s in _seed_values(p, k, v)]
+    seeds += list(_argv_seeds(record))
     if not seeds:
         return []
     from lakebench.config import datagen_seed
@@ -445,13 +490,19 @@ def scrub_record(record: Any) -> tuple[dict[str, Any], list[str]]:
             return _credential_placeholder(key)
         return sensitive.text(value, endpoint=_is_endpoint_key(key))
 
-    scrubbed = _rewrite(record, leaf, sensitive.text)
-    before = {p: (k, v) for p, k, v, _c in _walk(record)}
-    after = {p: v for p, _k, v, _c in _walk(scrubbed)}
-    changed = sorted(p for p, (_k, v) in before.items() if after.get(p, v) != v)
-    renamed = sorted({p for p, k in _keys(record)} - {p for p, k in _keys(scrubbed)})
+    renames: list[str] = []
+    scrubbed = _rewrite(record, leaf, sensitive.text, renames)
+    # _rewrite keeps structure and order, so the two walks pair leaf by leaf
+    # even under a renamed key; paths are reported as in the source.
+    changed_leaves = [
+        (p, k)
+        for (p, k, v, _c), (_p2, _k2, v2, _c2) in zip(_walk(record), _walk(scrubbed), strict=True)
+        if v != v2
+    ]
+    changed = sorted(p for p, _k in changed_leaves)
+    renamed = sorted(renames)
 
-    guarded = [p for p in changed if _guarded(p, before[p][0])]
+    guarded = [p for p, k in changed_leaves if _guarded(p, k)]
     if guarded:
         raise ScrubError(
             "scrubbing would rewrite evidence (not an endpoint, bucket or credential): "

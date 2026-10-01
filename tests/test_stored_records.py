@@ -391,3 +391,67 @@ def test_pinned_pair_before(pair: str) -> None:
     conditions = [c.split(" differs (")[0] for c in got["condition_differences"]]
     assert conditions == want["condition_differences"]
     assert len(got["refusals"]["results"]) == want["result_refusals"]
+
+
+def test_key_rename_that_merges_keys_refused() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["by_host"] = {"10.99.0.1": 5, "10.99.0.2": 7}
+    with pytest.raises(scrub.ScrubError, match="would merge"):
+        scrub.scrub_record(rec)
+
+
+def test_key_rename_reported_by_full_path() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["by_host"] = {"10.99.0.1": {"job_name": "x"}}
+    out, changed = scrub.scrub_record(rec)
+    assert out["config_snapshot"]["by_host"] == {"10.0.1.50": {"job_name": "x"}}
+    assert ".config_snapshot.by_host.10.99.0.1" in changed
+
+
+def test_key_rename_inside_experiment_refused() -> None:
+    rec = sr.load_record("5105a0")
+    rec["experiment"]["limits"]["by_host"] = {"10.99.0.1": 1}
+    with pytest.raises(scrub.ScrubError, match="rename evidence key"):
+        scrub.scrub_record(rec)
+
+
+def test_dotless_endpoint_host_is_not_a_global_token() -> None:
+    """An endpoint http://minio:9000 must not rewrite every word minio, or
+    a key named minio, elsewhere in the record."""
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["endpoint"] = "http://minio:9000"
+    rec["config_snapshot"]["note"] = "backend minio"
+    rec["config_snapshot"]["minio"] = {"image": "x"}
+    out, _ = scrub.scrub_record(rec)
+    assert out["config_snapshot"]["s3"]["endpoint"] == "http://10.0.1.50:9000"
+    assert out["config_snapshot"]["note"] == "backend minio"
+    assert "minio" in out["config_snapshot"]
+
+
+def test_endpoint_host_matched_case_insensitively() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["endpoint"] = "http://s3.lab.example:80"
+    rec["jobs"][0]["error_message"] = "S3.LAB.EXAMPLE refused"
+    out, _ = scrub.scrub_record(rec)
+    assert out["jobs"][0]["error_message"] == "10.0.1.50 refused"
+
+
+@pytest.mark.parametrize("shape", ["argv_list", "argv_ints", "seed_equals"])
+def test_protected_seed_in_argv_shapes_refused(monkeypatch, shape: str) -> None:
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "evaluation"})
+    rec = sr.load_record("5105a0")
+    extra = rec["config_snapshot"].setdefault("extra", {})
+    if shape == "argv_list":
+        extra["args"] = ["generate", "--seed", "987654"]
+    elif shape == "argv_ints":
+        extra["spark_arguments"] = ["--scale", 1, "--seed", 987654]
+    else:
+        extra["cmd"] = "gen seed=987654"
+    with pytest.raises(scrub.ScrubError, match="evaluation seed") as exc:
+        scrub.scrub_record(rec)
+    assert "987654" not in str(exc.value)
+    if shape == "seed_equals":
+        with pytest.raises(scrub.ScrubError, match="evaluation seed"):
+            scrub.scrub_text("gen seed=987654")

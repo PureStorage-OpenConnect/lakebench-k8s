@@ -103,27 +103,33 @@ def observed_parts(parts: Mapping[str, Any]) -> set[str]:
 
 
 def fingerprint_of(
-    parts: Mapping[str, Any], keys: Iterable[str] | None = None, system_type: str = "cluster"
+    parts: Mapping[str, Any],
+    keys: Iterable[str] | None = None,
+    system_type: str = "cluster",
+    version: int = SYSTEM_IDENTITY_VERSION,
 ) -> str:
-    """sha256 over the observed parts named by *keys* (all when None) and
-    the system type, as sorted JSON, first 16 hex digits."""
+    """sha256 over the observed parts named by *keys* (all when None), the
+    system type and the identity version, as sorted JSON, first 16 hex
+    digits."""
     chosen = PARTS if keys is None else tuple(keys)
     body: dict[str, Any] = {k: parts[k] for k in chosen if k in parts and is_observed(parts[k])}
     body["_type"] = system_type
-    body["_version"] = SYSTEM_IDENTITY_VERSION
+    body["_version"] = version
     blob = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
 def common_fingerprints(a: Mapping[str, Any], b: Mapping[str, Any]) -> tuple[str, str, list[str]]:
     """Fingerprints of two observations over the parts both observed, and
-    those part names. Equal fingerprints with an empty or config-only list
-    are not evidence of one system (see the module docstring)."""
+    those part names. Each side hashes with its own type and version, so
+    observations of different versions never compare equal. Equal
+    fingerprints over no part of ``CLUSTER_PARTS`` are not evidence of one
+    system; the caller (ER-10b) must not read such a pair as a repeat."""
     pa, pb = a.get("parts") or {}, b.get("parts") or {}
     keys = sorted(observed_parts(pa) & observed_parts(pb))
     return (
-        fingerprint_of(pa, keys, str(a.get("type") or "cluster")),
-        fingerprint_of(pb, keys, str(b.get("type") or "cluster")),
+        fingerprint_of(pa, keys, str(a.get("type") or "cluster"), int(a.get("version") or 0)),
+        fingerprint_of(pb, keys, str(b.get("type") or "cluster"), int(b.get("version") or 0)),
         keys,
     )
 

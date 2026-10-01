@@ -381,3 +381,11 @@ def test_observation_round_trips_through_json(cluster) -> None:
     stored = json.loads(json.dumps(out))
     assert stored == out
     assert si.fingerprint_of(stored["parts"]) == out["fingerprint"]
+
+
+def test_common_fingerprints_keep_each_version(cluster) -> None:
+    a = _observe(cluster())
+    b = json.loads(json.dumps(a))
+    b["version"] = a["version"] + 1
+    fa, fb, _ = si.common_fingerprints(a, b)
+    assert fa != fb
