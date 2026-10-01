@@ -113,7 +113,6 @@ exclude = [
     "conftest.py",
     "test-config*.yaml",
     "lakebench.spec",
-    "lbrun.py",
     "Makefile",
     "install.sh",
     "docs/internal/",

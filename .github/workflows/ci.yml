@@ -57,6 +57,12 @@ jobs:
       - name: mypy
         run: mypy src/lakebench/
 
+      # Every tracked doc, script and top-level .md is linked from the docs
+      # index or read by code, tests or CI (tests/test_doc_readers.py runs
+      # the same check with its planted cases).
+      - name: Docs have readers
+        run: python scripts/check_doc_readers.py
+
       # Every action in .github/workflows is pinned by SHA and listed in
       # .github/action-runtimes.json with its runs.using value. This reads
       # each action.yml at its pinned SHA and fails if the map has drifted.
