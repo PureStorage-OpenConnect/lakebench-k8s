@@ -1,0 +1,365 @@
+{
+  "scrubber_version": 1,
+  "records": {
+    "20260926-211343-978622": {
+      "source": "dev-artifacts/evidence-runs/run-20260926-211343-978622/metrics.json",
+      "source_sha256": "0dbe3ab5caf963a393c266d302aa7e1e9d3cf628f6248b97a89ae08b0151e9e1",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260926-215221-65567b": {
+      "source": "dev-artifacts/evidence-runs/run-20260926-215221-65567b/metrics.json",
+      "source_sha256": "bbdcdcf66ea748ade05106d5177985b76c35bae3e4623ae6a71c36e1ad3c23d9",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260926-215533-9f9a9b": {
+      "source": "dev-artifacts/evidence-runs/run-20260926-215533-9f9a9b/metrics.json",
+      "source_sha256": "f7ba7b904653ac46902aecac833b8e9e3dfc4a51f4405e1944f944bd05770e5d",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260926-231711-6dd3bc": {
+      "source": "dev-artifacts/evidence-runs/run-20260926-231711-6dd3bc/metrics.json",
+      "source_sha256": "d11f39cf1af703a9956d0114597993c259c73af7488fbcd998cec944692d094b",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260927-011043-e338c5": {
+      "source": "dev-artifacts/evidence-runs/run-20260927-011043-e338c5/metrics.json",
+      "source_sha256": "cda96f66e0ae804158f14e548190c88754890d817d1b6903d0dbb3a8e7fb61a4",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260927-011123-497f02": {
+      "source": "dev-artifacts/evidence-runs/run-20260927-011123-497f02/metrics.json",
+      "source_sha256": "c4d3306a2890d8766399c75a35703dd5d02bc8d9576ca74bfb35630b158910ca",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260927-011355-7ad7ad": {
+      "source": "dev-artifacts/evidence-runs/run-20260927-011355-7ad7ad/metrics.json",
+      "source_sha256": "111b3516b7f5663b097d9a6c79595a50d018f0280fe8cb481e48bdbc212eb93d",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260927-073533-9de9c9": {
+      "source": "dev-artifacts/evidence-runs/run-20260927-073533-9de9c9/metrics.json",
+      "source_sha256": "6b646d3af4d79d6b422bc027ac06526272e2b2f2320fa28e7e75b1d09db4e314",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260927-073818-7934eb": {
+      "source": "dev-artifacts/evidence-runs/run-20260927-073818-7934eb/metrics.json",
+      "source_sha256": "7c2fd4829d2c834e93b7f1a200507110939b22bb84622c14f0581cc4a83e316a",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260927-082708-233b69": {
+      "source": "dev-artifacts/evidence-runs/run-20260927-082708-233b69/metrics.json",
+      "source_sha256": "1197aac97484cabc985ff76dbea11ebe97d0c2d70997e396eb5cdc6fb33f6c56",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260927-095006-71b4a3": {
+      "source": "dev-artifacts/evidence-runs/run-20260927-095006-71b4a3/metrics.json",
+      "source_sha256": "d2c5a63582aecafa0364a8246fc18614faefb6c54c77d24da0154e8ca145d463",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260928-102711-8387da": {
+      "source": "dev-artifacts/evidence-runs/run-20260928-102711-8387da/metrics.json",
+      "source_sha256": "eab193df6b96026ca98f258a5bfed621cc656285b563f7794c4caa37dd10e015",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260928-103055-de1772": {
+      "source": "dev-artifacts/evidence-runs/run-20260928-103055-de1772/metrics.json",
+      "source_sha256": "82b7517c17f8193612e8cfcc4fa3d7c2b5f623611974cfc9f36cab5e0d0f5b33",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260928-130953-f8a2cf": {
+      "source": "dev-artifacts/evidence-runs/run-20260928-130953-f8a2cf/metrics.json",
+      "source_sha256": "c977550cb92d7ff56c8386fe8d37fef79e394d93e01b4c89c449d81bccf99e5a",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260928-140552-a112be": {
+      "source": "dev-artifacts/evidence-runs/run-20260928-140552-a112be/metrics.json",
+      "source_sha256": "a7b6f49e488eef7226cfa4869904b1afc075db9bf5653d36d1d8d35d285098ab",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260928-224226-a46421": {
+      "source": "dev-artifacts/evidence-runs/run-20260928-224226-a46421/metrics.json",
+      "source_sha256": "94727b30b7589bb206982397b673899e412cc3b671c0cef1da1046cae35a010a",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260928-224247-1320bd": {
+      "source": "dev-artifacts/evidence-runs/run-20260928-224247-1320bd/metrics.json",
+      "source_sha256": "f5b00821057ce107ab5b38fcffadc11343439b3fbc408b9bb5e4133e52b7e860",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260929-000406-85b404": {
+      "source": "dev-artifacts/evidence-runs/run-20260929-000406-85b404/metrics.json",
+      "source_sha256": "893187a7316670a1cb8310c9017201eaa9c4b914316a0dbbb228f25ce65b9eec",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".datagen_fleet.per_pod[0].bucket",
+        ".datagen_fleet.per_pod[1].bucket",
+        ".datagen_fleet.per_pod[2].bucket",
+        ".datagen_fleet.per_pod[3].bucket",
+        ".datagen_fleet.per_pod[4].bucket",
+        ".datagen_fleet.per_pod[5].bucket",
+        ".datagen_fleet.per_pod[6].bucket",
+        ".datagen_fleet.per_pod[7].bucket",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260929-204941-1d17f4": {
+      "source": "dev-artifacts/evidence-runs/run-20260929-204941-1d17f4/metrics.json",
+      "source_sha256": "1248658f677cc7f12cb6b61eedfc06b91e6c3c8a94477edee535c7568cb20218",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260929-204947-be2b70": {
+      "source": "dev-artifacts/evidence-runs/run-20260929-204947-be2b70/metrics.json",
+      "source_sha256": "521ff941d011439aee2dba8f774cec0577939a78930b6555317ec2071f4cc5a7",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260929-205000-ebb26f": {
+      "source": "dev-artifacts/evidence-runs/run-20260929-205000-ebb26f/metrics.json",
+      "source_sha256": "62a7d1273fc145bf5b7c3df4b3a6ec2142914db7538feabd37dc5c1cad89b7db",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260929-212900-5105a0": {
+      "source": "dev-artifacts/evidence-runs/run-20260929-212900-5105a0/metrics.json",
+      "source_sha256": "96b792d025ae517a6a263bbfdf1c4236119524fd8c4b7eaea79dffc8ec567540",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260929-214442-825153": {
+      "source": "integrate lakebench-output/runs/run-20260929-214442-825153/metrics.json",
+      "source_sha256": "7118f81cc419637d4849656296b052846e72531cfae360396d682cfcfee87c48",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    },
+    "20260929-221146-9d5345": {
+      "source": "integrate lakebench-output/runs/run-20260929-221146-9d5345/metrics.json",
+      "source_sha256": "57c1b7473f160c4a34f5745733445b7afdf0ddba44896cd556afa2af505e3f86",
+      "rewritten": [
+        ".config_snapshot.s3.buckets.bronze",
+        ".config_snapshot.s3.buckets.gold",
+        ".config_snapshot.s3.buckets.silver",
+        ".config_snapshot.s3.endpoint",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.bronze",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.gold",
+        ".pipeline_benchmark.config_snapshot.s3.buckets.silver",
+        ".pipeline_benchmark.config_snapshot.s3.endpoint"
+      ]
+    }
+  }
+}

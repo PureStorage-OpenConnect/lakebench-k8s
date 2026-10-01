@@ -1,0 +1,3592 @@
+{
+  "run_id": "20260928-224247-1320bd",
+  "deployment_name": "g2-aml-batch-s1",
+  "start_time": "2026-09-29T04:42:47.320004+00:00",
+  "end_time": "2026-09-29T05:23:12.516654+00:00",
+  "total_elapsed_seconds": 2425.19665,
+  "success": true,
+  "verdict": {
+    "status": "PASSED",
+    "reasons": [],
+    "gates": {
+      "pipeline": "PASS",
+      "benchmark": "PASS"
+    },
+    "qualifiers": {
+      "pipeline_mode": "batch",
+      "n_batch_jobs": 3,
+      "n_benchmark_queries": 12
+    }
+  },
+  "bronze_size_gb": 8.485348297283053,
+  "silver_size_gb": 9.090571803040802,
+  "gold_size_gb": 0.6637593666091561,
+  "jobs": [
+    {
+      "job_name": "lakebench-bronze-verify",
+      "job_type": "bronze-verify",
+      "start_time": "2026-09-29T04:42:49.810966+00:00",
+      "end_time": "2026-09-29T04:44:09.286223+00:00",
+      "elapsed_seconds": 79.423761,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 8.47,
+      "output_size_gb": 8.485348297283053,
+      "input_rows": 26671878,
+      "output_rows": 26671878,
+      "executor_count": 4,
+      "executor_cores": 2,
+      "executor_memory_gb": 8.0,
+      "cpu_seconds_requested": 635.390088,
+      "memory_gb_requested": 80.0,
+      "throughput_gb_per_second": 0.21829896907216498,
+      "throughput_rows_per_second": 687419.5360824743,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {},
+      "extra_metrics": {}
+    },
+    {
+      "job_name": "lakebench-silver-build",
+      "job_type": "silver-build",
+      "start_time": "2026-09-29T04:44:15.381492+00:00",
+      "end_time": "2026-09-29T04:47:14.286223+00:00",
+      "elapsed_seconds": 178.840254,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 8.47,
+      "output_size_gb": 8.109093504957855,
+      "input_rows": 26671878,
+      "output_rows": 26671878,
+      "executor_count": 8,
+      "executor_cores": 4,
+      "executor_memory_gb": 48.0,
+      "cpu_seconds_requested": 5722.888128,
+      "memory_gb_requested": 480.0,
+      "throughput_gb_per_second": 0.06071684587813621,
+      "throughput_rows_per_second": 191196.25806451612,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {
+        "silver_transactions_rows": 26671878,
+        "silver_entities_rows": 113711,
+        "silver_accounts_rows": 113711,
+        "silver_statements_rows": 53343756,
+        "silver_edges_rows": 4873267,
+        "silver_profiles_rows": 113711
+      },
+      "extra_metrics": {
+        "data_clock_source": "datagen_timestamp_end"
+      }
+    },
+    {
+      "job_name": "lakebench-gold-finalize",
+      "job_type": "gold-finalize",
+      "start_time": "2026-09-29T04:47:21.480075+00:00",
+      "end_time": "2026-09-29T04:57:15.286223+00:00",
+      "elapsed_seconds": 593.741594,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 3.301,
+      "output_size_gb": 0.3363238414749503,
+      "input_rows": 26671878,
+      "output_rows": 728291,
+      "executor_count": 4,
+      "executor_cores": 4,
+      "executor_memory_gb": 32.0,
+      "cpu_seconds_requested": 9499.865504,
+      "memory_gb_requested": 160.0,
+      "throughput_gb_per_second": 0.00593598273691782,
+      "throughput_rows_per_second": 47962.37727027513,
+      "alerts_by_rule": {
+        "W5_sanctions_match": 195,
+        "W6_pep_counterparty": 2041,
+        "W2_structuring": 3071,
+        "W3_round_tripping": 1668,
+        "W17_layering_chain": 46394,
+        "W4_risk_propagation": 98479,
+        "W7_cross_border_high_risk": 518761,
+        "W8_dormant_reactivation": 57682
+      },
+      "rule_errors": {},
+      "rules_skipped": {
+        "W1_connected_components": "giant-component"
+      },
+      "tm_invariants": {
+        "1": {
+          "monitored_population": {
+            "status": "pass",
+            "detail": "55438 customers of the reporting FI, 20023102 monitored payments"
+          },
+          "reconciliation": {
+            "status": "pass",
+            "detail": "monitored 20023102 + excluded 6648776 = 26671878 vs source 26671878"
+          },
+          "every_alert_dispositioned": {
+            "status": "pass",
+            "detail": "alerts 728291, disposition rows for them 728291"
+          },
+          "one_row_per_alert_identity": {
+            "status": "pass",
+            "detail": "728291 disposition rows, 728291 distinct alert identities"
+          },
+          "no_null_disposition": {
+            "status": "pass",
+            "detail": "0 disposition rows with no disposition"
+          },
+          "noncustomer_alerts_declared": {
+            "status": "pass",
+            "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72704 non-customer alerts in all)"
+          },
+          "escalated_le_alerts": {
+            "status": "pass",
+            "detail": "escalated 60606 <= customer alerts 655587"
+          },
+          "cases_le_escalated": {
+            "status": "pass",
+            "detail": "alert-driven cases 60606 <= escalated 60606"
+          },
+          "sars_le_cases": {
+            "status": "pass",
+            "detail": "SARs 7899 <= cases 67452"
+          },
+          "one_open_case_per_customer": {
+            "status": "pass",
+            "detail": "most open cases on one customer: 1"
+          },
+          "funnel_monotone": {
+            "status": "pass",
+            "detail": "payments 26671878 >= monitored 20023102 >= alerts 655587 >= escalated 60606 >= cases 60606 >= sars 7457"
+          },
+          "continuing_review_fires": {
+            "status": "pass",
+            "detail": "0 SARs past their 90-day review date with no review (7258 due, 0 deferred behind a case waiting to file)"
+          },
+          "review_not_folded_into_determined": {
+            "status": "pass",
+            "detail": "0 reviews credited to a case already determined before the review was due"
+          }
+        }
+      },
+      "tm_ops": {
+        "alert_aging_open": {
+          "0-30": 11735,
+          "31-60": 541,
+          "61-90": 11,
+          "90+": 0
+        },
+        "alert_sla_breaches": 5706,
+        "alerts_by_disposition": {
+          "attached": 84485,
+          "closed_nfa": 501724,
+          "escalated": 60606,
+          "out_of_scope": 72704,
+          "pending_l1": 8772
+        },
+        "alerts_by_priority": {
+          "critical": 210955,
+          "high": 256500,
+          "low": 26137,
+          "medium": 161995
+        },
+        "alerts_noncustomer_undeclared": 0,
+        "alerts_out_of_scope": 72704,
+        "alerts_over_capacity": 0,
+        "alerts_total": 728291,
+        "alerts_withdrawn_carried": 0,
+        "as_of_date": "2026-01-01",
+        "cases_by_status": {
+          "closed": 65526,
+          "open": 1854,
+          "pending_filing": 72
+        },
+        "cases_by_type": {
+          "alert_escalation": 60606,
+          "continuing_activity": 6846
+        },
+        "continuing_reviews_deferred": 0,
+        "continuing_reviews_due": 7258,
+        "continuing_reviews_folded": 385,
+        "continuing_reviews_opened": 6846,
+        "continuing_reviews_superseded": 27,
+        "continuing_sars_over_120_days": 16,
+        "cycle": 1,
+        "elapsed_seconds": 43.1,
+        "filed_late": 232,
+        "filed_over_30_days_pct": 0.05177870616533738,
+        "filing_days_median": 15,
+        "filing_days_p95": 31,
+        "funnel": {
+          "alerts": 655587,
+          "cases": 60606,
+          "escalated": 60606,
+          "monitored": 20023102,
+          "payments": 26671878,
+          "sars": 7457
+        },
+        "invariants": {
+          "cases_le_escalated": {
+            "detail": "alert-driven cases 60606 <= escalated 60606",
+            "status": "pass"
+          },
+          "continuing_review_fires": {
+            "detail": "0 SARs past their 90-day review date with no review (7258 due, 0 deferred behind a case waiting to file)",
+            "status": "pass"
+          },
+          "escalated_le_alerts": {
+            "detail": "escalated 60606 <= customer alerts 655587",
+            "status": "pass"
+          },
+          "every_alert_dispositioned": {
+            "detail": "alerts 728291, disposition rows for them 728291",
+            "status": "pass"
+          },
+          "funnel_monotone": {
+            "detail": "payments 26671878 >= monitored 20023102 >= alerts 655587 >= escalated 60606 >= cases 60606 >= sars 7457",
+            "status": "pass"
+          },
+          "monitored_population": {
+            "detail": "55438 customers of the reporting FI, 20023102 monitored payments",
+            "status": "pass"
+          },
+          "no_null_disposition": {
+            "detail": "0 disposition rows with no disposition",
+            "status": "pass"
+          },
+          "noncustomer_alerts_declared": {
+            "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72704 non-customer alerts in all)",
+            "status": "pass"
+          },
+          "one_open_case_per_customer": {
+            "detail": "most open cases on one customer: 1",
+            "status": "pass"
+          },
+          "one_row_per_alert_identity": {
+            "detail": "728291 disposition rows, 728291 distinct alert identities",
+            "status": "pass"
+          },
+          "reconciliation": {
+            "detail": "monitored 20023102 + excluded 6648776 = 26671878 vs source 26671878",
+            "status": "pass"
+          },
+          "review_not_folded_into_determined": {
+            "detail": "0 reviews credited to a case already determined before the review was due",
+            "status": "pass"
+          },
+          "sars_le_cases": {
+            "detail": "SARs 7899 <= cases 67452",
+            "status": "pass"
+          }
+        },
+        "l1_decided": 562330,
+        "l1_escalation_rate": 0.10777657247523696,
+        "open_cases": 1926,
+        "open_cases_over_60_days": 24,
+        "qa_disagreement_rate": 0.142191556709464,
+        "qa_sample": 28117,
+        "reconciliation": {
+          "completeness.bronze": 26671878,
+          "completeness.customers": 55438,
+          "completeness.excluded": 6648776,
+          "completeness.monitored": 20023102,
+          "completeness.silver": 26671878,
+          "completeness.source": 26671878,
+          "dq.dq_missing_agent_bic": 0,
+          "dq.dq_nonpositive_amount": 0,
+          "dq.dq_self_transfer": 0,
+          "dq.dq_unconvertible_currency": 0,
+          "exclusion.dq_unconvertible_currency": 0,
+          "exclusion.no_customer_party": 6648776,
+          "funnel.alerts": 655587,
+          "funnel.alerts_noncustomer_undeclared": 0,
+          "funnel.alerts_out_of_scope": 72704,
+          "funnel.cases": 60606,
+          "funnel.continuing_review_cases": 6846,
+          "funnel.continuing_sars": 442,
+          "funnel.escalated": 60606,
+          "funnel.sars": 7457
+        },
+        "sars_by_limit": {
+          "120_day_continuing": {
+            "filed": 442,
+            "late": 16
+          },
+          "30_day": {
+            "filed": 7081,
+            "late": 199
+          },
+          "60_day_no_suspect": {
+            "filed": 376,
+            "late": 17
+          }
+        },
+        "sars_filed": 7899,
+        "sars_no_suspect": 376,
+        "scenarios": {
+          "W17_layering_chain": {
+            "alerts": 23345,
+            "escalated": 2549,
+            "productive_rate": 0.12743446905903183,
+            "sar_conversion": 0.05071749839366031
+          },
+          "W2_structuring": {
+            "alerts": 3071,
+            "escalated": 194,
+            "productive_rate": 0.09917355371900827,
+            "sar_conversion": 0.045262129599479
+          },
+          "W3_round_tripping": {
+            "alerts": 1198,
+            "escalated": 540,
+            "productive_rate": 0.6327212020033389,
+            "sar_conversion": 0.5901502504173622
+          },
+          "W4_risk_propagation": {
+            "alerts": 49294,
+            "escalated": 5727,
+            "productive_rate": 0.12817025743802637,
+            "sar_conversion": 0.04195236742808455
+          },
+          "W5_sanctions_match": {
+            "alerts": 195,
+            "escalated": 60,
+            "productive_rate": 0.3487179487179487,
+            "sar_conversion": 0.2717948717948718
+          },
+          "W6_pep_counterparty": {
+            "alerts": 2041,
+            "escalated": 237,
+            "productive_rate": 0.13643104300543746,
+            "sar_conversion": 0.06614404703576678
+          },
+          "W7_cross_border_high_risk": {
+            "alerts": 518761,
+            "escalated": 45166,
+            "productive_rate": 0.09991102269504097,
+            "sar_conversion": 0.020477638064542246
+          },
+          "W8_dormant_reactivation": {
+            "alerts": 57682,
+            "escalated": 6133,
+            "productive_rate": 0.10835918739373543,
+            "sar_conversion": 0.018064560868208453
+          }
+        },
+        "simulation": {
+          "alert_sla_days": 60,
+          "analyst_accuracy": 0.9,
+          "continuous_interval_seconds": 1800,
+          "counterparty_scenarios": [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain"
+          ],
+          "enabled": true,
+          "investigator_accuracy": 0.95,
+          "late_filing_rate": 0.03,
+          "lookback_months": 12,
+          "max_alerts_per_customer": 50000,
+          "no_suspect_rate": 0.05,
+          "note": "dispositions simulated from datagen ground truth",
+          "qa_sample_rate": 0.05,
+          "seed": 20260924
+        }
+      },
+      "tm_status": {
+        "1": {
+          "status": "ran",
+          "reason": "ok"
+        }
+      },
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {},
+      "extra_metrics": {}
+    }
+  ],
+  "queries": [],
+  "streaming": [],
+  "config_snapshot": {
+    "name": "g2-aml-batch-s1",
+    "scale": 1.0,
+    "approx_bronze_gb": 8.4,
+    "processing_pattern": "medallion",
+    "s3": {
+      "endpoint": "http://10.0.1.50:80",
+      "buckets": {
+        "bronze": "scrubbed-bronze",
+        "silver": "scrubbed-silver",
+        "gold": "scrubbed-gold"
+      }
+    },
+    "scratch": {
+      "enabled": true,
+      "storage_class": "px-csi-scratch",
+      "size": "100Gi"
+    },
+    "spark": {
+      "driver": {
+        "cores": 2,
+        "memory": "2g"
+      },
+      "executor": {
+        "instances": 2,
+        "cores": 2,
+        "memory": "4g",
+        "memory_overhead": "1g"
+      },
+      "executor_overrides": {
+        "bronze": null,
+        "silver": null,
+        "gold": null,
+        "bronze_ingest": null,
+        "silver_stream": null,
+        "gold_refresh": null
+      }
+    },
+    "catalog": "hive",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "trino",
+    "workload_schema": "financial",
+    "sustained": {
+      "bronze_trigger_interval": "30 seconds",
+      "silver_trigger_interval": "60 seconds",
+      "gold_refresh_interval": "5 minutes",
+      "run_duration": 1800,
+      "max_files_per_trigger": 1,
+      "bronze_target_file_size_mb": 512,
+      "silver_target_file_size_mb": 512,
+      "gold_target_file_size_mb": 128,
+      "benchmark_interval": 300,
+      "benchmark_warmup": 300
+    },
+    "datagen": {
+      "scale": 1.0,
+      "mode": "batch",
+      "parallelism": 2,
+      "file_size": "64mb"
+    },
+    "images": {
+      "datagen": "docker.io/sillidata/lb-datagen:9382420",
+      "spark": "apache/spark:4.0.2-python3",
+      "trino": "trinodb/trino:483"
+    },
+    "trino": {
+      "coordinator": {
+        "cpu": "1",
+        "memory": "4Gi"
+      },
+      "worker": {
+        "replicas": 1,
+        "cpu": "2",
+        "memory": "8Gi"
+      }
+    },
+    "benchmark": {
+      "mode": "power",
+      "streams": 4,
+      "cache": "hot",
+      "iterations": 3
+    },
+    "maintenance": {
+      "pre_benchmark_maintenance": true,
+      "retention_interval": null,
+      "retention_threshold": "30m",
+      "compaction_enabled": true,
+      "compaction_interval": null
+    },
+    "experiment_inputs": {
+      "workload": {
+        "name": "financial",
+        "version": "aml-1",
+        "generator_model_version": "datagen-v2-rs-0.3",
+        "parameters_id": "7f987bedd2c609d4",
+        "parameters": {
+          "tm_operations": {
+            "enabled": true,
+            "seed": 20260924,
+            "analyst_accuracy": 0.9,
+            "investigator_accuracy": 0.95,
+            "qa_sample_rate": 0.05,
+            "alert_sla_days": 60,
+            "case_lookback_months": 12,
+            "late_filing_rate": 0.03,
+            "no_suspect_rate": 0.05,
+            "max_alerts_per_customer": 50000,
+            "continuous_interval_seconds": 1800,
+            "counterparty_scenarios": [
+              "W1_connected_components",
+              "W3_round_tripping",
+              "W4_risk_propagation",
+              "W17_layering_chain"
+            ]
+          },
+          "w1_max_vertices": 8000000,
+          "retention_workload": true,
+          "retention_months": 60
+        }
+      },
+      "corpus": {
+        "schema": "financial",
+        "generator_image": "docker.io/sillidata/lb-datagen:9382420",
+        "seed": 777001,
+        "corpus_role": null,
+        "robustness_perturbation": false,
+        "scale": 1.0,
+        "timestamp_start": "2024-01-01",
+        "timestamp_end": "2025-01-01",
+        "dirty_data_ratio": 0.08,
+        "id": "45b32f6d85cc3b3d"
+      },
+      "architecture": {
+        "recipe": "hive-iceberg-spark-trino",
+        "catalog": {
+          "type": "hive",
+          "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+        },
+        "table_format": {
+          "type": "iceberg",
+          "version": "1.11.0"
+        },
+        "pipeline_engine": {
+          "type": "spark",
+          "image": "apache/spark:4.0.2-python3"
+        },
+        "query_engine": {
+          "type": "trino",
+          "version": "trinodb/trino:483"
+        },
+        "query_access_path": "catalog"
+      },
+      "maintenance_config": {
+        "pre_benchmark_maintenance": true,
+        "compaction_enabled": true,
+        "settings": {
+          "retention_threshold": "2013d",
+          "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+        }
+      },
+      "mode": "batch",
+      "run_mode": "batch",
+      "support": {
+        "workload": "financial",
+        "mode": "batch",
+        "recipe": "hive-iceberg-spark-trino",
+        "state": "unverified",
+        "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+      },
+      "config_limits": {
+        "max_files_per_trigger": 1,
+        "benchmark_iterations": 3,
+        "w1_max_vertices": 8000000,
+        "tm_max_alerts_per_customer": 50000
+      }
+    }
+  },
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.6.0.dev0",
+    "git_sha": "40d5fc70540f032446abe758c3f24cf5a2d43c63",
+    "git_dirty": true
+  },
+  "autosize_cuts": [],
+  "maintenance_outcomes": [
+    {
+      "kind": "expire",
+      "retention": "2013d",
+      "operations": [
+        {
+          "operation": "expire_snapshots",
+          "retention": "2013d",
+          "total": 18,
+          "succeeded": 18,
+          "failed": 0,
+          "timed_out": 0,
+          "not_attempted": 0
+        },
+        {
+          "operation": "remove_orphan_files",
+          "retention": "48312h",
+          "total": 18,
+          "succeeded": 18,
+          "failed": 0,
+          "timed_out": 0,
+          "not_attempted": 0
+        }
+      ],
+      "engine": "trino",
+      "total": 36,
+      "succeeded": 36,
+      "failed": 0,
+      "timed_out": 0,
+      "not_attempted": 0
+    },
+    {
+      "kind": "compaction",
+      "engine": "trino",
+      "total": 16,
+      "succeeded": 16,
+      "failed": 0,
+      "timed_out": 0,
+      "not_attempted": 0
+    },
+    {
+      "kind": "compaction",
+      "files_before": 65,
+      "files_after": 61
+    }
+  ],
+  "experiment": {
+    "schema": "exp1",
+    "system": "cluster",
+    "support": {
+      "workload": "financial",
+      "mode": "batch",
+      "recipe": "hive-iceberg-spark-trino",
+      "state": "unverified",
+      "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+    },
+    "repetitions": {
+      "runs": 1,
+      "benchmark_samples_per_query": 3,
+      "benchmark_rounds": null
+    },
+    "workload": {
+      "name": "financial",
+      "version": "aml-1",
+      "generator_model_version": "datagen-v2-rs-0.3",
+      "parameters_id": "7f987bedd2c609d4",
+      "parameters": {
+        "tm_operations": {
+          "enabled": true,
+          "seed": 20260924,
+          "analyst_accuracy": 0.9,
+          "investigator_accuracy": 0.95,
+          "qa_sample_rate": 0.05,
+          "alert_sla_days": 60,
+          "case_lookback_months": 12,
+          "late_filing_rate": 0.03,
+          "no_suspect_rate": 0.05,
+          "max_alerts_per_customer": 50000,
+          "continuous_interval_seconds": 1800,
+          "counterparty_scenarios": [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain"
+          ]
+        },
+        "w1_max_vertices": 8000000,
+        "retention_workload": true,
+        "retention_months": 60
+      }
+    },
+    "corpus": {
+      "schema": "financial",
+      "generator_image": "docker.io/sillidata/lb-datagen:9382420",
+      "seed": 777001,
+      "corpus_role": null,
+      "robustness_perturbation": false,
+      "scale": 1.0,
+      "timestamp_start": "2024-01-01",
+      "timestamp_end": "2025-01-01",
+      "dirty_data_ratio": 0.08,
+      "id": "45b32f6d85cc3b3d",
+      "observed": true,
+      "datagen": {
+        "configured_image": "docker.io/sillidata/lb-datagen:9382420",
+        "pod_image": "docker.io/sillidata/lb-datagen:9382420",
+        "digest": "sha256:148ba6ad7350ad4a947d1bbdb542bce26a9be20cdd0be76a821a4783f60c014b",
+        "observed": true,
+        "seed": 777001,
+        "scale": 1.0,
+        "data_quality": "complete",
+        "mixed_params": []
+      }
+    },
+    "architecture": {
+      "recipe": "hive-iceberg-spark-trino",
+      "catalog": {
+        "type": "hive",
+        "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+      },
+      "table_format": {
+        "type": "iceberg",
+        "version": "1.11.0"
+      },
+      "pipeline_engine": {
+        "type": "spark",
+        "image": "apache/spark:4.0.2-python3"
+      },
+      "query_engine": {
+        "type": "trino",
+        "version": "trinodb/trino:483"
+      },
+      "query_access_path": "catalog"
+    },
+    "maintenance_settings": {
+      "retention_threshold": "2013d",
+      "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+    },
+    "mode": "batch",
+    "maintenance_policy_id": "m2-2026-09-26",
+    "effective_maintenance": {
+      "id": "m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran",
+      "detail_id": "m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on",
+      "operations": {
+        "expire_snapshots": "ran",
+        "remove_orphan_files": "ran",
+        "compaction": "ran"
+      },
+      "expire": "ran",
+      "compaction": "ran",
+      "detail": {
+        "expire_snapshots": "on",
+        "remove_orphan_files": "on",
+        "compaction": "on",
+        "applied_retention": [
+          "2013d"
+        ],
+        "operations": {
+          "expire_snapshots": {
+            "kind": "expire",
+            "applied_retention": [
+              "2013d"
+            ],
+            "total": 18,
+            "succeeded": 18
+          },
+          "remove_orphan_files": {
+            "kind": "expire",
+            "applied_retention": [
+              "48312h"
+            ],
+            "total": 18,
+            "succeeded": 18
+          }
+        }
+      },
+      "basis": "recorded outcomes",
+      "reasons": [],
+      "known_limitations": []
+    },
+    "stages": {
+      "executed": [
+        "datagen",
+        "bronze",
+        "silver",
+        "gold",
+        "query"
+      ],
+      "skipped": []
+    },
+    "rules": {
+      "executed": [
+        "W17_layering_chain",
+        "W2_structuring",
+        "W3_round_tripping",
+        "W4_risk_propagation",
+        "W5_sanctions_match",
+        "W6_pep_counterparty",
+        "W7_cross_border_high_risk",
+        "W8_dormant_reactivation"
+      ],
+      "skipped": {
+        "W1_connected_components": "giant-component"
+      },
+      "errored": {}
+    },
+    "limits": {
+      "benchmark_iterations": 3,
+      "w1_max_vertices": 8000000,
+      "tm_max_alerts_per_customer": 50000,
+      "executors": [
+        {
+          "job_type": "bronze-verify",
+          "scale_derived": 4,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        },
+        {
+          "job_type": "silver-build",
+          "scale_derived": 8,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 8
+        },
+        {
+          "job_type": "gold-finalize",
+          "scale_derived": 4,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        }
+      ],
+      "autosize_cuts": [],
+      "maintenance_stopped": false,
+      "bound": [],
+      "bound_kinds": [],
+      "benchmark_mode": "power"
+    },
+    "results": {
+      "query_set_id": "qs12-4bd2d9416abb",
+      "fingerprints": {
+        "FQ1_txn_full_scan": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 5,
+          "exact": "ae25ed383bf414ec",
+          "approx": {
+            "4": 13317.87
+          },
+          "approx_w": {
+            "4": 22377.56701129064
+          },
+          "quanta": {
+            "4": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "9fd686cd1a33421f"
+        },
+        "FQ2_top_corridors_window": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "de9d89e45ec3690f",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "107a484633719eed"
+        },
+        "FQ6_structuring_scan": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 6,
+          "exact": "c1c0d7927cd200be",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "2ccdecb01e28d59f"
+        },
+        "FQ3_entity_edge_risk": {
+          "spec": "rf2",
+          "rows": 200,
+          "cols": 5,
+          "exact": "8d3845629c24b391",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "28f44470df5baaa1"
+        },
+        "FQ7_cross_border_concentration": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "e9883348e9dd6b31",
+          "approx": {
+            "4": 30.798
+          },
+          "approx_w": {
+            "4": 46.07542599940371
+          },
+          "quanta": {
+            "4": 0.001
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "4f37c61bf83df0c9"
+        },
+        "FQ4_running_balance_window": {
+          "spec": "rf2",
+          "rows": 936353,
+          "cols": 6,
+          "exact": "ed628b61a1a01166",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "d9f87e6c24db7193"
+        },
+        "FQ5_alert_triage": {
+          "spec": "rf2",
+          "rows": 17,
+          "cols": 6,
+          "exact": "71e1be4a74a7ea72",
+          "approx": {
+            "5": 12.523
+          },
+          "approx_w": {
+            "5": 18.67474578613131
+          },
+          "quanta": {
+            "5": 0.001
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "84117932f136dd8e"
+        },
+        "FQ8_alert_to_entity_join": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "a3729ef990f99f51",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "volatile": [
+            0
+          ],
+          "engine": "trino",
+          "adapted_sql_sha": "b3144e32312bc677"
+        },
+        "IQ1_customer_360": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 18,
+          "exact": "af0d7d91918adba4",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "c3948ae76734acf1"
+        },
+        "IQ2_case_activity_12m": {
+          "spec": "rf2",
+          "rows": 12,
+          "cols": 6,
+          "exact": "8122025d64cb3590",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "7e495a0c38a32265"
+        },
+        "IQ3_counterparty_two_hop": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 8,
+          "exact": "518e349ba8d7e3e1",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "c605a0f96dd0a026"
+        },
+        "IQ4_open_cases_over_60_days": {
+          "spec": "rf2",
+          "rows": 24,
+          "cols": 10,
+          "exact": "c969e7c2feea822f",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "79e62d84a079e864"
+        }
+      }
+    },
+    "lakebench": {
+      "lakebench_version": "1.6.0.dev0",
+      "git_sha": "40d5fc70540f032446abe758c3f24cf5a2d43c63",
+      "git_dirty": true
+    }
+  },
+  "benchmark": {
+    "benchmark_type": "trino_query",
+    "engine": "trino",
+    "query_set_id": "qs12-4bd2d9416abb",
+    "mode": "power",
+    "cache": "hot",
+    "scale": 1.0,
+    "qph": 421.3,
+    "total_seconds": 102.53,
+    "iterations": 3,
+    "streams": 1,
+    "queries": [
+      {
+        "name": "FQ1_txn_full_scan",
+        "display_name": "Silver transactions full aggregation",
+        "class": "scan",
+        "elapsed_seconds": 14.406,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 5,
+          "exact": "ae25ed383bf414ec",
+          "approx": {
+            "4": 13317.87
+          },
+          "approx_w": {
+            "4": 22377.56701129064
+          },
+          "quanta": {
+            "4": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "9fd686cd1a33421f"
+        },
+        "samples": [
+          14.197,
+          14.77,
+          14.406
+        ],
+        "min_seconds": 14.197,
+        "max_seconds": 14.77,
+        "relative_range": 0.0398
+      },
+      {
+        "name": "FQ2_top_corridors_window",
+        "display_name": "Top payment corridors by volume (last 30 days)",
+        "class": "filter_prune",
+        "elapsed_seconds": 5.492,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "de9d89e45ec3690f",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "107a484633719eed"
+        },
+        "samples": [
+          5.999,
+          5.492,
+          5.398
+        ],
+        "min_seconds": 5.398,
+        "max_seconds": 5.999,
+        "relative_range": 0.1094
+      },
+      {
+        "name": "FQ6_structuring_scan",
+        "display_name": "Structuring-band transaction detection (W2 shape)",
+        "class": "filter_prune",
+        "elapsed_seconds": 6.969,
+        "rows_returned": 500,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 6,
+          "exact": "c1c0d7927cd200be",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "2ccdecb01e28d59f"
+        },
+        "samples": [
+          7.209,
+          6.969,
+          6.541
+        ],
+        "min_seconds": 6.541,
+        "max_seconds": 7.209,
+        "relative_range": 0.0959
+      },
+      {
+        "name": "FQ3_entity_edge_risk",
+        "display_name": "Entity out-degree + volume via edges",
+        "class": "aggregation",
+        "elapsed_seconds": 8.482,
+        "rows_returned": 200,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 200,
+          "cols": 5,
+          "exact": "8d3845629c24b391",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "28f44470df5baaa1"
+        },
+        "samples": [
+          8.482,
+          8.183,
+          8.704
+        ],
+        "min_seconds": 8.183,
+        "max_seconds": 8.704,
+        "relative_range": 0.0614
+      },
+      {
+        "name": "FQ7_cross_border_concentration",
+        "display_name": "Cross-border corridor concentration",
+        "class": "aggregation",
+        "elapsed_seconds": 11.0,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "e9883348e9dd6b31",
+          "approx": {
+            "4": 30.798
+          },
+          "approx_w": {
+            "4": 46.07542599940371
+          },
+          "quanta": {
+            "4": 0.001
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "4f37c61bf83df0c9"
+        },
+        "samples": [
+          11.0,
+          10.708,
+          11.482
+        ],
+        "min_seconds": 10.708,
+        "max_seconds": 11.482,
+        "relative_range": 0.0704
+      },
+      {
+        "name": "FQ4_running_balance_window",
+        "display_name": "Running balance for high-activity accounts",
+        "class": "analytics",
+        "elapsed_seconds": 28.954,
+        "rows_returned": 936353,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 936353,
+          "cols": 6,
+          "exact": "ed628b61a1a01166",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "d9f87e6c24db7193"
+        },
+        "samples": [
+          29.805,
+          28.954,
+          28.898
+        ],
+        "min_seconds": 28.898,
+        "max_seconds": 29.805,
+        "relative_range": 0.0313
+      },
+      {
+        "name": "FQ5_alert_triage",
+        "display_name": "Alert triage by priority + rule",
+        "class": "operational",
+        "elapsed_seconds": 4.257,
+        "rows_returned": 17,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 17,
+          "cols": 6,
+          "exact": "71e1be4a74a7ea72",
+          "approx": {
+            "5": 12.523
+          },
+          "approx_w": {
+            "5": 18.67474578613131
+          },
+          "quanta": {
+            "5": 0.001
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "84117932f136dd8e"
+        },
+        "samples": [
+          4.257,
+          4.001,
+          4.397
+        ],
+        "min_seconds": 4.001,
+        "max_seconds": 4.397,
+        "relative_range": 0.093
+      },
+      {
+        "name": "FQ8_alert_to_entity_join",
+        "display_name": "Case investigation: alert -> entity -> recent txns",
+        "class": "operational",
+        "elapsed_seconds": 4.417,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "a3729ef990f99f51",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "volatile": [
+            0
+          ],
+          "engine": "trino",
+          "adapted_sql_sha": "b3144e32312bc677"
+        },
+        "samples": [
+          4.417,
+          4.389,
+          4.491
+        ],
+        "min_seconds": 4.389,
+        "max_seconds": 4.491,
+        "relative_range": 0.0231
+      },
+      {
+        "name": "IQ1_customer_360",
+        "display_name": "Investigator: customer 360 for the top open case",
+        "class": "investigator",
+        "elapsed_seconds": 4.793,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 18,
+          "exact": "af0d7d91918adba4",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "c3948ae76734acf1"
+        },
+        "samples": [
+          4.827,
+          4.793,
+          4.793
+        ],
+        "min_seconds": 4.793,
+        "max_seconds": 4.827,
+        "relative_range": 0.0071
+      },
+      {
+        "name": "IQ2_case_activity_12m",
+        "display_name": "Investigator: 12-month activity review for the newest case",
+        "class": "investigator",
+        "elapsed_seconds": 4.515,
+        "rows_returned": 12,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 12,
+          "cols": 6,
+          "exact": "8122025d64cb3590",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "7e495a0c38a32265"
+        },
+        "samples": [
+          4.401,
+          4.515,
+          4.675
+        ],
+        "min_seconds": 4.401,
+        "max_seconds": 4.675,
+        "relative_range": 0.0607
+      },
+      {
+        "name": "IQ3_counterparty_two_hop",
+        "display_name": "Investigator: counterparties and two-hop network of the oldest open case",
+        "class": "investigator",
+        "elapsed_seconds": 5.169,
+        "rows_returned": 500,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 8,
+          "exact": "518e349ba8d7e3e1",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "c605a0f96dd0a026"
+        },
+        "samples": [
+          5.105,
+          5.169,
+          5.213
+        ],
+        "min_seconds": 5.105,
+        "max_seconds": 5.213,
+        "relative_range": 0.0209
+      },
+      {
+        "name": "IQ4_open_cases_over_60_days",
+        "display_name": "Investigator: open cases older than 60 days",
+        "class": "investigator",
+        "elapsed_seconds": 4.079,
+        "rows_returned": 24,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 24,
+          "cols": 10,
+          "exact": "c969e7c2feea822f",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "79e62d84a079e864"
+        },
+        "samples": [
+          4.115,
+          4.079,
+          4.013
+        ],
+        "min_seconds": 4.013,
+        "max_seconds": 4.115,
+        "relative_range": 0.025
+      }
+    ],
+    "spread": {
+      "samples_per_query": 3,
+      "qph_low": 408.8,
+      "qph_high": 429.3,
+      "relative_range": 0.0493
+    }
+  },
+  "pipeline_benchmark": {
+    "run_id": "20260928-224247-1320bd",
+    "deployment_name": "g2-aml-batch-s1",
+    "pipeline_mode": "batch",
+    "scale_factor": 1.0,
+    "start_time": "2026-09-29T04:42:47.320004+00:00",
+    "end_time": "2026-09-29T05:23:12.516654+00:00",
+    "success": true,
+    "scorecard": {
+      "time_to_value_seconds": 865.48,
+      "total_elapsed_seconds": 972.61,
+      "total_data_processed_gb": 20.905,
+      "pipeline_throughput_gb_per_second": 0.0242,
+      "total_core_hours": 4.41,
+      "compute_efficiency_gb_per_core_hour": 4.7456,
+      "composite_qph": 421.3,
+      "scale_ratio": 1.008,
+      "benchmark_samples_per_query": 3,
+      "qph_spread": {
+        "low": 408.8,
+        "high": 429.3,
+        "relative_range": 0.0493
+      },
+      "maintenance_elapsed_seconds": 249.77,
+      "maintenance_pct_of_pipeline": 25.68,
+      "pre_compaction_file_count": 65,
+      "post_compaction_file_count": 61,
+      "compaction_ratio": 1.07,
+      "pre_compaction_qph": 305.9,
+      "post_compaction_qph": 421.3,
+      "maintenance_value_pct": 12.1,
+      "maintenance_paired_queries": 8,
+      "maintenance_settle_seconds": 150.6,
+      "maintenance_settled": true,
+      "maintenance_settle_capped": false,
+      "maintenance_settle_verified": true
+    },
+    "scores": {
+      "time_to_value_seconds": 865.48,
+      "total_elapsed_seconds": 972.61,
+      "total_data_processed_gb": 20.905,
+      "pipeline_throughput_gb_per_second": 0.0242,
+      "total_core_hours": 4.41,
+      "compute_efficiency_gb_per_core_hour": 4.7456,
+      "composite_qph": 421.3,
+      "scale_ratio": 1.008,
+      "benchmark_samples_per_query": 3,
+      "qph_spread": {
+        "low": 408.8,
+        "high": 429.3,
+        "relative_range": 0.0493
+      },
+      "maintenance_elapsed_seconds": 249.77,
+      "maintenance_pct_of_pipeline": 25.68,
+      "pre_compaction_file_count": 65,
+      "post_compaction_file_count": 61,
+      "compaction_ratio": 1.07,
+      "pre_compaction_qph": 305.9,
+      "post_compaction_qph": 421.3,
+      "maintenance_value_pct": 12.1,
+      "maintenance_paired_queries": 8,
+      "maintenance_settle_seconds": 150.6,
+      "maintenance_settled": true,
+      "maintenance_settle_capped": false,
+      "maintenance_settle_verified": true
+    },
+    "stages": [
+      {
+        "stage_name": "datagen",
+        "stage_type": "datagen",
+        "engine": "datagen",
+        "elapsed_seconds": 18.073,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0.0,
+        "input_size_gb": 0.0,
+        "output_size_gb": 9.110964215,
+        "input_rows": 0,
+        "output_rows": 26671878,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 2,
+        "executor_cores": 8,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "bronze",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-29T04:42:49.810966+00:00",
+        "end_time": "2026-09-29T04:44:09.286223+00:00",
+        "elapsed_seconds": 79.423761,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 8.47,
+        "output_size_gb": 8.485348297283053,
+        "input_rows": 26671878,
+        "output_rows": 26671878,
+        "throughput_gb_per_second": 0.21829896907216498,
+        "throughput_rows_per_second": 687419.5360824743,
+        "executor_count": 4,
+        "executor_cores": 2,
+        "executor_memory_gb": 8.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-29T04:44:15.381492+00:00",
+        "end_time": "2026-09-29T04:47:14.286223+00:00",
+        "elapsed_seconds": 178.840254,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 8.47,
+        "output_size_gb": 8.109093504957855,
+        "input_rows": 26671878,
+        "output_rows": 26671878,
+        "throughput_gb_per_second": 0.06071684587813621,
+        "throughput_rows_per_second": 191196.25806451612,
+        "executor_count": 8,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "gold",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-29T04:47:21.480075+00:00",
+        "end_time": "2026-09-29T04:57:15.286223+00:00",
+        "elapsed_seconds": 593.741594,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 3.301,
+        "output_size_gb": 0.3363238414749503,
+        "input_rows": 26671878,
+        "output_rows": 728291,
+        "throughput_gb_per_second": 0.00593598273691782,
+        "throughput_rows_per_second": 47962.37727027513,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "query",
+        "stage_type": "query",
+        "engine": "trino",
+        "elapsed_seconds": 102.53359734476544,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0.0,
+        "input_size_gb": 0.6637593666091561,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 12,
+        "queries_per_hour": 421.3253130555987
+      }
+    ],
+    "stage_matrix": {
+      "datagen": {
+        "engine": "datagen",
+        "elapsed_seconds": 18.07,
+        "input_size_gb": 0.0,
+        "output_size_gb": 9.111,
+        "input_rows": 0,
+        "output_rows": 26671878,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 2,
+        "executor_cores": 8,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "bronze": {
+        "engine": "spark",
+        "elapsed_seconds": 79.42,
+        "input_size_gb": 8.47,
+        "output_size_gb": 8.485,
+        "input_rows": 26671878,
+        "output_rows": 26671878,
+        "throughput_gb_per_second": 0.2183,
+        "throughput_rows_per_second": 687419.5,
+        "executor_count": 4,
+        "executor_cores": 2,
+        "executor_memory_gb": 8.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "silver": {
+        "engine": "spark",
+        "elapsed_seconds": 178.84,
+        "input_size_gb": 8.47,
+        "output_size_gb": 8.109,
+        "input_rows": 26671878,
+        "output_rows": 26671878,
+        "throughput_gb_per_second": 0.0607,
+        "throughput_rows_per_second": 191196.3,
+        "executor_count": 8,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "gold": {
+        "engine": "spark",
+        "elapsed_seconds": 593.74,
+        "input_size_gb": 3.301,
+        "output_size_gb": 0.336,
+        "input_rows": 26671878,
+        "output_rows": 728291,
+        "throughput_gb_per_second": 0.0059,
+        "throughput_rows_per_second": 47962.4,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "query": {
+        "engine": "trino",
+        "elapsed_seconds": 102.53,
+        "input_size_gb": 0.664,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 421.3,
+        "success": true
+      }
+    },
+    "bucket_sizes": {
+      "bronze_gb": 8.47,
+      "silver_gb": 8.109,
+      "gold_gb": 0.336
+    },
+    "config_snapshot": {
+      "name": "g2-aml-batch-s1",
+      "scale": 1.0,
+      "approx_bronze_gb": 8.4,
+      "processing_pattern": "medallion",
+      "s3": {
+        "endpoint": "http://10.0.1.50:80",
+        "buckets": {
+          "bronze": "scrubbed-bronze",
+          "silver": "scrubbed-silver",
+          "gold": "scrubbed-gold"
+        }
+      },
+      "scratch": {
+        "enabled": true,
+        "storage_class": "px-csi-scratch",
+        "size": "100Gi"
+      },
+      "spark": {
+        "driver": {
+          "cores": 2,
+          "memory": "2g"
+        },
+        "executor": {
+          "instances": 2,
+          "cores": 2,
+          "memory": "4g",
+          "memory_overhead": "1g"
+        },
+        "executor_overrides": {
+          "bronze": null,
+          "silver": null,
+          "gold": null,
+          "bronze_ingest": null,
+          "silver_stream": null,
+          "gold_refresh": null
+        }
+      },
+      "catalog": "hive",
+      "table_format": "iceberg",
+      "pipeline_engine": "spark",
+      "query_engine": "trino",
+      "workload_schema": "financial",
+      "sustained": {
+        "bronze_trigger_interval": "30 seconds",
+        "silver_trigger_interval": "60 seconds",
+        "gold_refresh_interval": "5 minutes",
+        "run_duration": 1800,
+        "max_files_per_trigger": 1,
+        "bronze_target_file_size_mb": 512,
+        "silver_target_file_size_mb": 512,
+        "gold_target_file_size_mb": 128,
+        "benchmark_interval": 300,
+        "benchmark_warmup": 300
+      },
+      "datagen": {
+        "scale": 1.0,
+        "mode": "batch",
+        "parallelism": 2,
+        "file_size": "64mb"
+      },
+      "images": {
+        "datagen": "docker.io/sillidata/lb-datagen:9382420",
+        "spark": "apache/spark:4.0.2-python3",
+        "trino": "trinodb/trino:483"
+      },
+      "trino": {
+        "coordinator": {
+          "cpu": "1",
+          "memory": "4Gi"
+        },
+        "worker": {
+          "replicas": 1,
+          "cpu": "2",
+          "memory": "8Gi"
+        }
+      },
+      "benchmark": {
+        "mode": "power",
+        "streams": 4,
+        "cache": "hot",
+        "iterations": 3
+      },
+      "maintenance": {
+        "pre_benchmark_maintenance": true,
+        "retention_interval": null,
+        "retention_threshold": "30m",
+        "compaction_enabled": true,
+        "compaction_interval": null
+      },
+      "experiment_inputs": {
+        "workload": {
+          "name": "financial",
+          "version": "aml-1",
+          "generator_model_version": "datagen-v2-rs-0.3",
+          "parameters_id": "7f987bedd2c609d4",
+          "parameters": {
+            "tm_operations": {
+              "enabled": true,
+              "seed": 20260924,
+              "analyst_accuracy": 0.9,
+              "investigator_accuracy": 0.95,
+              "qa_sample_rate": 0.05,
+              "alert_sla_days": 60,
+              "case_lookback_months": 12,
+              "late_filing_rate": 0.03,
+              "no_suspect_rate": 0.05,
+              "max_alerts_per_customer": 50000,
+              "continuous_interval_seconds": 1800,
+              "counterparty_scenarios": [
+                "W1_connected_components",
+                "W3_round_tripping",
+                "W4_risk_propagation",
+                "W17_layering_chain"
+              ]
+            },
+            "w1_max_vertices": 8000000,
+            "retention_workload": true,
+            "retention_months": 60
+          }
+        },
+        "corpus": {
+          "schema": "financial",
+          "generator_image": "docker.io/sillidata/lb-datagen:9382420",
+          "seed": 777001,
+          "corpus_role": null,
+          "robustness_perturbation": false,
+          "scale": 1.0,
+          "timestamp_start": "2024-01-01",
+          "timestamp_end": "2025-01-01",
+          "dirty_data_ratio": 0.08,
+          "id": "45b32f6d85cc3b3d"
+        },
+        "architecture": {
+          "recipe": "hive-iceberg-spark-trino",
+          "catalog": {
+            "type": "hive",
+            "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+          },
+          "table_format": {
+            "type": "iceberg",
+            "version": "1.11.0"
+          },
+          "pipeline_engine": {
+            "type": "spark",
+            "image": "apache/spark:4.0.2-python3"
+          },
+          "query_engine": {
+            "type": "trino",
+            "version": "trinodb/trino:483"
+          },
+          "query_access_path": "catalog"
+        },
+        "maintenance_config": {
+          "pre_benchmark_maintenance": true,
+          "compaction_enabled": true,
+          "settings": {
+            "retention_threshold": "2013d",
+            "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+          }
+        },
+        "mode": "batch",
+        "run_mode": "batch",
+        "support": {
+          "workload": "financial",
+          "mode": "batch",
+          "recipe": "hive-iceberg-spark-trino",
+          "state": "unverified",
+          "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+        },
+        "config_limits": {
+          "max_files_per_trigger": 1,
+          "benchmark_iterations": 3,
+          "w1_max_vertices": 8000000,
+          "tm_max_alerts_per_customer": 50000
+        }
+      }
+    },
+    "scale_ratio": 1.008,
+    "query_benchmark": {
+      "benchmark_type": "trino_query",
+      "engine": "trino",
+      "query_set_id": "qs12-4bd2d9416abb",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 421.3,
+      "total_seconds": 102.53,
+      "iterations": 3,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 14.406,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 1,
+            "cols": 5,
+            "exact": "ae25ed383bf414ec",
+            "approx": {
+              "4": 13317.87
+            },
+            "approx_w": {
+              "4": 22377.56701129064
+            },
+            "quanta": {
+              "4": 0.01
+            },
+            "engine": "trino",
+            "adapted_sql_sha": "9fd686cd1a33421f"
+          },
+          "samples": [
+            14.197,
+            14.77,
+            14.406
+          ],
+          "min_seconds": 14.197,
+          "max_seconds": 14.77,
+          "relative_range": 0.0398
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 5.492,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "de9d89e45ec3690f",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "107a484633719eed"
+          },
+          "samples": [
+            5.999,
+            5.492,
+            5.398
+          ],
+          "min_seconds": 5.398,
+          "max_seconds": 5.999,
+          "relative_range": 0.1094
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 6.969,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 500,
+            "cols": 6,
+            "exact": "c1c0d7927cd200be",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "2ccdecb01e28d59f"
+          },
+          "samples": [
+            7.209,
+            6.969,
+            6.541
+          ],
+          "min_seconds": 6.541,
+          "max_seconds": 7.209,
+          "relative_range": 0.0959
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 8.482,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 200,
+            "cols": 5,
+            "exact": "8d3845629c24b391",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "28f44470df5baaa1"
+          },
+          "samples": [
+            8.482,
+            8.183,
+            8.704
+          ],
+          "min_seconds": 8.183,
+          "max_seconds": 8.704,
+          "relative_range": 0.0614
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 11.0,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "e9883348e9dd6b31",
+            "approx": {
+              "4": 30.798
+            },
+            "approx_w": {
+              "4": 46.07542599940371
+            },
+            "quanta": {
+              "4": 0.001
+            },
+            "engine": "trino",
+            "adapted_sql_sha": "4f37c61bf83df0c9"
+          },
+          "samples": [
+            11.0,
+            10.708,
+            11.482
+          ],
+          "min_seconds": 10.708,
+          "max_seconds": 11.482,
+          "relative_range": 0.0704
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 28.954,
+          "rows_returned": 936353,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 936353,
+            "cols": 6,
+            "exact": "ed628b61a1a01166",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "d9f87e6c24db7193"
+          },
+          "samples": [
+            29.805,
+            28.954,
+            28.898
+          ],
+          "min_seconds": 28.898,
+          "max_seconds": 29.805,
+          "relative_range": 0.0313
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 4.257,
+          "rows_returned": 17,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 17,
+            "cols": 6,
+            "exact": "71e1be4a74a7ea72",
+            "approx": {
+              "5": 12.523
+            },
+            "approx_w": {
+              "5": 18.67474578613131
+            },
+            "quanta": {
+              "5": 0.001
+            },
+            "engine": "trino",
+            "adapted_sql_sha": "84117932f136dd8e"
+          },
+          "samples": [
+            4.257,
+            4.001,
+            4.397
+          ],
+          "min_seconds": 4.001,
+          "max_seconds": 4.397,
+          "relative_range": 0.093
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 4.417,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "a3729ef990f99f51",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "volatile": [
+              0
+            ],
+            "engine": "trino",
+            "adapted_sql_sha": "b3144e32312bc677"
+          },
+          "samples": [
+            4.417,
+            4.389,
+            4.491
+          ],
+          "min_seconds": 4.389,
+          "max_seconds": 4.491,
+          "relative_range": 0.0231
+        },
+        {
+          "name": "IQ1_customer_360",
+          "display_name": "Investigator: customer 360 for the top open case",
+          "class": "investigator",
+          "elapsed_seconds": 4.793,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 1,
+            "cols": 18,
+            "exact": "af0d7d91918adba4",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "c3948ae76734acf1"
+          },
+          "samples": [
+            4.827,
+            4.793,
+            4.793
+          ],
+          "min_seconds": 4.793,
+          "max_seconds": 4.827,
+          "relative_range": 0.0071
+        },
+        {
+          "name": "IQ2_case_activity_12m",
+          "display_name": "Investigator: 12-month activity review for the newest case",
+          "class": "investigator",
+          "elapsed_seconds": 4.515,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 12,
+            "cols": 6,
+            "exact": "8122025d64cb3590",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "7e495a0c38a32265"
+          },
+          "samples": [
+            4.401,
+            4.515,
+            4.675
+          ],
+          "min_seconds": 4.401,
+          "max_seconds": 4.675,
+          "relative_range": 0.0607
+        },
+        {
+          "name": "IQ3_counterparty_two_hop",
+          "display_name": "Investigator: counterparties and two-hop network of the oldest open case",
+          "class": "investigator",
+          "elapsed_seconds": 5.169,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 500,
+            "cols": 8,
+            "exact": "518e349ba8d7e3e1",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "c605a0f96dd0a026"
+          },
+          "samples": [
+            5.105,
+            5.169,
+            5.213
+          ],
+          "min_seconds": 5.105,
+          "max_seconds": 5.213,
+          "relative_range": 0.0209
+        },
+        {
+          "name": "IQ4_open_cases_over_60_days",
+          "display_name": "Investigator: open cases older than 60 days",
+          "class": "investigator",
+          "elapsed_seconds": 4.079,
+          "rows_returned": 24,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 24,
+            "cols": 10,
+            "exact": "c969e7c2feea822f",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "79e62d84a079e864"
+          },
+          "samples": [
+            4.115,
+            4.079,
+            4.013
+          ],
+          "min_seconds": 4.013,
+          "max_seconds": 4.115,
+          "relative_range": 0.025
+        }
+      ],
+      "spread": {
+        "samples_per_query": 3,
+        "qph_low": 408.8,
+        "qph_high": 429.3,
+        "relative_range": 0.0493
+      }
+    },
+    "pre_compaction_benchmark": {
+      "benchmark_type": "trino_query",
+      "engine": "trino",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 305.9,
+      "category_qph": {
+        "aggregation": 331.8,
+        "analytics": 121.8,
+        "filter_prune": 513.2,
+        "operational": 643.4,
+        "scan": 203.7
+      },
+      "total_seconds": 94.15,
+      "iterations": 3,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 17.669,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            18.086,
+            17.309,
+            17.669
+          ],
+          "min_seconds": 17.309,
+          "max_seconds": 18.086,
+          "relative_range": 0.0439
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 6.239,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            6.306,
+            6.239,
+            6.183
+          ],
+          "min_seconds": 6.183,
+          "max_seconds": 6.306,
+          "relative_range": 0.0198
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 7.79,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            8.008,
+            7.493,
+            7.79
+          ],
+          "min_seconds": 7.493,
+          "max_seconds": 8.008,
+          "relative_range": 0.0662
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 10.279,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            10.279,
+            10.317,
+            9.711
+          ],
+          "min_seconds": 9.711,
+          "max_seconds": 10.317,
+          "relative_range": 0.0589
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 11.42,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            11.478,
+            11.42,
+            11.379
+          ],
+          "min_seconds": 11.379,
+          "max_seconds": 11.478,
+          "relative_range": 0.0086
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 29.567,
+          "rows_returned": 936353,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            31.921,
+            29.567,
+            29.054
+          ],
+          "min_seconds": 29.054,
+          "max_seconds": 31.921,
+          "relative_range": 0.097
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 5.271,
+          "rows_returned": 17,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            4.973,
+            5.271,
+            5.352
+          ],
+          "min_seconds": 4.973,
+          "max_seconds": 5.352,
+          "relative_range": 0.0718
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 5.919,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            5.755,
+            5.919,
+            6.192
+          ],
+          "min_seconds": 5.755,
+          "max_seconds": 6.192,
+          "relative_range": 0.0739
+        }
+      ],
+      "spread": {
+        "samples_per_query": 3,
+        "qph_low": 294.9,
+        "qph_high": 313.5,
+        "relative_range": 0.0616
+      }
+    },
+    "maintenance_settle": {
+      "probe_query": "FQ1_txn_full_scan",
+      "settled": true,
+      "settle_seconds": 150.6,
+      "capped": false,
+      "max_seconds": 2700.0,
+      "tolerance_pct": 10.0,
+      "reference_seconds": 17.669,
+      "probes": [
+        {
+          "offset_seconds": 15.2,
+          "seconds": 17.85
+        },
+        {
+          "offset_seconds": 75.2,
+          "seconds": 15.898
+        },
+        {
+          "offset_seconds": 135.2,
+          "seconds": 15.409
+        }
+      ],
+      "reason": "",
+      "verified": true,
+      "reference_samples": [
+        18.086,
+        17.309,
+        17.669
+      ],
+      "reference_spread_pct": 4.1,
+      "effective_tolerance_pct": 10.0,
+      "trigger": "52 maintenance and compaction statements ran"
+    },
+    "score_descriptions": {
+      "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+      "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+      "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+      "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+      "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+      "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+      "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
+      "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
+      "maintenance_elapsed_seconds": "Total seconds spent on expire_snapshots + remove_orphan_files + compaction",
+      "maintenance_pct_of_pipeline": "Maintenance time as percentage of total pipeline time",
+      "pre_compaction_file_count": "Iceberg data files before rewrite_data_files / OPTIMIZE",
+      "post_compaction_file_count": "Iceberg data files after rewrite_data_files / OPTIMIZE",
+      "compaction_ratio": "pre/post file count ratio (higher = more compaction benefit)",
+      "pre_compaction_qph": "QpH measured before maintenance (on uncompacted data)",
+      "post_compaction_qph": "QpH measured after maintenance (on compacted data) -- the primary QpH score",
+      "maintenance_value_pct": "QpH change from maintenance over the queries that succeeded in both runs: (post - pre) / pre * 100; null when not measurable or within the within-round spread",
+      "benchmark_samples_per_query": "Timed samples per query in the scored benchmark round (QpH uses the per-query median; 1 means no measured spread)",
+      "qph_spread": "QpH of the slowest and fastest round the per-query samples allow, and their relative range",
+      "maintenance_paired_queries": "Queries that succeeded before and after maintenance (the base of maintenance_value_pct)",
+      "maintenance_settle_seconds": "Seconds from maintenance end until a storage-bound probe query was stable, before the post-maintenance round; not counted in time_to_value",
+      "maintenance_settled": "True when the probe settled within the cap; false means the post round ran on unsettled storage and maintenance_value_pct is null",
+      "maintenance_settle_capped": "True when the settle wait reached benchmark.maintenance_settle.max_seconds",
+      "maintenance_settle_verified": "False when there was no pre-maintenance probe time (scale >= 50): the probes agreed with each other, which a slow plateau also does"
+    },
+    "advanced_metrics": null
+  },
+  "platform_metrics": {
+    "start_time": "2026-09-29T04:42:47.320004+00:00",
+    "end_time": "2026-09-29T05:23:12.516654+00:00",
+    "duration_seconds": 2425.19665,
+    "collection_window_seconds": 2425.19665,
+    "pods": [
+      {
+        "pod_name": "lakebench-bronze-verify-driver",
+        "component": "spark-driver",
+        "cpu_avg_cores": 2.445,
+        "cpu_max_cores": 3.749,
+        "memory_avg_bytes": 1746768554,
+        "memory_max_bytes": 4075102208
+      },
+      {
+        "pod_name": "lakebench-gold-finalize-driver",
+        "component": "spark-driver",
+        "cpu_avg_cores": 1.3,
+        "cpu_max_cores": 3.616,
+        "memory_avg_bytes": 7396265881,
+        "memory_max_bytes": 14071275520
+      },
+      {
+        "pod_name": "lakebench-hive-metastore-default-0",
+        "component": "hive",
+        "cpu_avg_cores": 0.048,
+        "cpu_max_cores": 0.474,
+        "memory_avg_bytes": 1978889304,
+        "memory_max_bytes": 2060599296
+      },
+      {
+        "pod_name": "lakebench-postgres-0",
+        "component": "postgres",
+        "cpu_avg_cores": 0.056,
+        "cpu_max_cores": 0.08,
+        "memory_avg_bytes": 375205989,
+        "memory_max_bytes": 385146880
+      },
+      {
+        "pod_name": "lakebench-pushgateway-6759dc56c9-kzw9k",
+        "component": "unknown",
+        "cpu_avg_cores": 0.002,
+        "cpu_max_cores": 0.005,
+        "memory_avg_bytes": 99240163,
+        "memory_max_bytes": 119365632
+      },
+      {
+        "pod_name": "lakebench-score-financial-driver",
+        "component": "spark-driver",
+        "cpu_avg_cores": 2.164,
+        "cpu_max_cores": 3.567,
+        "memory_avg_bytes": 3641809578,
+        "memory_max_bytes": 7529861120
+      },
+      {
+        "pod_name": "lakebench-silver-build-driver",
+        "component": "spark-driver",
+        "cpu_avg_cores": 1.844,
+        "cpu_max_cores": 4.086,
+        "memory_avg_bytes": 4040918882,
+        "memory_max_bytes": 5993594880
+      },
+      {
+        "pod_name": "lakebench-trino-coordinator-79b4dc6b97-wkvkx",
+        "component": "trino-coordinator",
+        "cpu_avg_cores": 1.323,
+        "cpu_max_cores": 3.823,
+        "memory_avg_bytes": 4728731420,
+        "memory_max_bytes": 7031136256
+      },
+      {
+        "pod_name": "lakebench-trino-worker-0",
+        "component": "trino-worker",
+        "cpu_avg_cores": 1.754,
+        "cpu_max_cores": 6.093,
+        "memory_avg_bytes": 11410310788,
+        "memory_max_bytes": 21602500608
+      },
+      {
+        "pod_name": "lb-bronze-verify-financial-85fb14a0eb798b6d-exec-1",
+        "component": "spark-executor",
+        "cpu_avg_cores": 1.212,
+        "cpu_max_cores": 3.585,
+        "memory_avg_bytes": 2564014080,
+        "memory_max_bytes": 11196604416
+      },
+      {
+        "pod_name": "lb-bronze-verify-financial-85fb14a0eb798b6d-exec-2",
+        "component": "spark-executor",
+        "cpu_avg_cores": 1.94,
+        "cpu_max_cores": 4.186,
+        "memory_avg_bytes": 2408468480,
+        "memory_max_bytes": 9541271552
+      },
+      {
+        "pod_name": "lb-bronze-verify-financial-85fb14a0eb798b6d-exec-3",
+        "component": "spark-executor",
+        "cpu_avg_cores": 1.514,
+        "cpu_max_cores": 3.006,
+        "memory_avg_bytes": 3125991424,
+        "memory_max_bytes": 11570495488
+      },
+      {
+        "pod_name": "lb-bronze-verify-financial-85fb14a0eb798b6d-exec-4",
+        "component": "spark-executor",
+        "cpu_avg_cores": 1.746,
+        "cpu_max_cores": 3.571,
+        "memory_avg_bytes": 4733668556,
+        "memory_max_bytes": 10220060672
+      },
+      {
+        "pod_name": "lb-gold-finalize-financial-ef59cca0eb7db06e-exec-1",
+        "component": "spark-executor",
+        "cpu_avg_cores": 10.199,
+        "cpu_max_cores": 14.745,
+        "memory_avg_bytes": 98126868070,
+        "memory_max_bytes": 125552001024
+      },
+      {
+        "pod_name": "lb-gold-finalize-financial-ef59cca0eb7db06e-exec-2",
+        "component": "spark-executor",
+        "cpu_avg_cores": 10.905,
+        "cpu_max_cores": 14.374,
+        "memory_avg_bytes": 98514828390,
+        "memory_max_bytes": 125567246336
+      },
+      {
+        "pod_name": "lb-gold-finalize-financial-ef59cca0eb7db06e-exec-3",
+        "component": "spark-executor",
+        "cpu_avg_cores": 10.856,
+        "cpu_max_cores": 15.184,
+        "memory_avg_bytes": 99800439808,
+        "memory_max_bytes": 132133158912
+      },
+      {
+        "pod_name": "lb-gold-finalize-financial-ef59cca0eb7db06e-exec-4",
+        "component": "spark-executor",
+        "cpu_avg_cores": 10.9,
+        "cpu_max_cores": 13.927,
+        "memory_avg_bytes": 102623917260,
+        "memory_max_bytes": 137324118016
+      },
+      {
+        "pod_name": "lb-score-financial-c9d712a0eb86f477-exec-1",
+        "component": "spark-executor",
+        "cpu_avg_cores": 8.367,
+        "cpu_max_cores": 13.679,
+        "memory_avg_bytes": 14875227477,
+        "memory_max_bytes": 35876413440
+      },
+      {
+        "pod_name": "lb-score-financial-c9d712a0eb86f477-exec-2",
+        "component": "spark-executor",
+        "cpu_avg_cores": 5.272,
+        "cpu_max_cores": 10.634,
+        "memory_avg_bytes": 17436897735,
+        "memory_max_bytes": 48352354304
+      },
+      {
+        "pod_name": "lb-silver-build-financial-94ed0ca0eb7adae8-exec-1",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.281,
+        "cpu_max_cores": 12.719,
+        "memory_avg_bytes": 58046596332,
+        "memory_max_bytes": 151442694144
+      },
+      {
+        "pod_name": "lb-silver-build-financial-94ed0ca0eb7adae8-exec-2",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.267,
+        "cpu_max_cores": 13.441,
+        "memory_avg_bytes": 59104432128,
+        "memory_max_bytes": 121498656768
+      },
+      {
+        "pod_name": "lb-silver-build-financial-94ed0ca0eb7adae8-exec-3",
+        "component": "spark-executor",
+        "cpu_avg_cores": 8.219,
+        "cpu_max_cores": 13.031,
+        "memory_avg_bytes": 69637695960,
+        "memory_max_bytes": 149635194880
+      },
+      {
+        "pod_name": "lb-silver-build-financial-94ed0ca0eb7adae8-exec-4",
+        "component": "spark-executor",
+        "cpu_avg_cores": 8.271,
+        "cpu_max_cores": 13.185,
+        "memory_avg_bytes": 64326849772,
+        "memory_max_bytes": 148743856128
+      },
+      {
+        "pod_name": "lb-silver-build-financial-94ed0ca0eb7adae8-exec-5",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.199,
+        "cpu_max_cores": 12.287,
+        "memory_avg_bytes": 65359065403,
+        "memory_max_bytes": 147431333888
+      },
+      {
+        "pod_name": "lb-silver-build-financial-94ed0ca0eb7adae8-exec-6",
+        "component": "spark-executor",
+        "cpu_avg_cores": 8.505,
+        "cpu_max_cores": 12.417,
+        "memory_avg_bytes": 66444957853,
+        "memory_max_bytes": 153093144576
+      },
+      {
+        "pod_name": "lb-silver-build-financial-94ed0ca0eb7adae8-exec-7",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.445,
+        "cpu_max_cores": 12.198,
+        "memory_avg_bytes": 61351668814,
+        "memory_max_bytes": 151732887552
+      },
+      {
+        "pod_name": "lb-silver-build-financial-94ed0ca0eb7adae8-exec-8",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.922,
+        "cpu_max_cores": 13.323,
+        "memory_avg_bytes": 68308847274,
+        "memory_max_bytes": 154570661888
+      }
+    ],
+    "s3_requests_total": 0,
+    "s3_errors_total": 0,
+    "s3_avg_latency_ms": 0.0,
+    "engine": {
+      "trino_completed_queries": 187,
+      "trino_failed_queries": 0
+    },
+    "collection_error": null
+  },
+  "datagen_fleet": {
+    "image": "docker.io/sillidata/lb-datagen:9382420",
+    "image_ids": [
+      "docker.io/sillidata/lb-datagen@sha256:148ba6ad7350ad4a947d1bbdb542bce26a9be20cdd0be76a821a4783f60c014b"
+    ],
+    "seed": 777001,
+    "scale": 1.0,
+    "schema": "financial",
+    "pods_expected": 2,
+    "pods_reported": 2,
+    "pods_missing": 0,
+    "data_quality": "complete",
+    "total_bytes_written": 9110964215,
+    "total_files_written": 141,
+    "total_rows_written": 26671878,
+    "aggregate_mbps": 504.108,
+    "wall_elapsed_max_s": 18.073,
+    "wall_elapsed_min_s": 16.588,
+    "cores_total": 16.0,
+    "cpu_seconds_total": 277.289,
+    "cpu_hr_per_tb": 8.454,
+    "phase_pct": {
+      "build_batch": 28.52,
+      "encode_parquet": 71.48,
+      "s3_put": 71.48
+    },
+    "phase_p50_s": {
+      "build_batch": 33.416,
+      "encode_parquet": 83.738,
+      "s3_put": 83.738
+    },
+    "phase_p95_s": {
+      "build_batch": 34.845,
+      "encode_parquet": 83.78,
+      "s3_put": 83.779
+    },
+    "worst_pod_elapsed_s": 18.073,
+    "best_pod_elapsed_s": 16.588,
+    "customer_id_max": null,
+    "mixed_params": [],
+    "per_pod": [
+      {
+        "node_id": 0,
+        "node_count": 2,
+        "schema": "financial",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "pacs008",
+        "file_size_mb": 64,
+        "rows_per_file": 194452,
+        "total_files": 137,
+        "files_written": 73,
+        "bytes_written": 4597389617,
+        "rows_written": 13432303,
+        "elapsed_s": 18.073441,
+        "setup_s": 0.0,
+        "gen_s": 17.013637,
+        "build_batch_s": 34.845455,
+        "encode_parquet_s": 83.779534,
+        "s3_put_s": 83.779451,
+        "throughput_mbps": 254.372678,
+        "cpu_seconds": 144.587529,
+        "cpu_hr_per_tb": 8.736088,
+        "cpu_request_millicores": 8000,
+        "world_s": 0.065585,
+        "typology_s": 0.041,
+        "reference_s": 0.95317,
+        "scale": 1.0,
+        "corpus_months": 60,
+        "population": 111111,
+        "total_txns": 26666640,
+        "typology_instances": 7204,
+        "target_tb": null,
+        "customer_id_max": null,
+        "dirty_ratio": null,
+        "pod_name": "lakebench-datagen-0-8lsjj"
+      },
+      {
+        "node_id": 1,
+        "node_count": 2,
+        "schema": "financial",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "pacs008",
+        "file_size_mb": 64,
+        "rows_per_file": 194452,
+        "total_files": 137,
+        "files_written": 68,
+        "bytes_written": 4513574598,
+        "rows_written": 13239575,
+        "elapsed_s": 16.587633,
+        "setup_s": 0.0,
+        "gen_s": 16.512622,
+        "build_batch_s": 31.987006,
+        "encode_parquet_s": 83.695969,
+        "s3_put_s": 83.695965,
+        "throughput_mbps": 272.104799,
+        "cpu_seconds": 132.701066,
+        "cpu_hr_per_tb": 8.166788,
+        "cpu_request_millicores": 8000,
+        "world_s": 0.034618,
+        "typology_s": 0.04033,
+        "reference_s": 0.0,
+        "scale": 1.0,
+        "corpus_months": 60,
+        "population": 111111,
+        "total_txns": 26666640,
+        "typology_instances": 7204,
+        "target_tb": null,
+        "customer_id_max": null,
+        "dirty_ratio": null,
+        "pod_name": "lakebench-datagen-1-6tmbj"
+      }
+    ],
+    "namespace": "g2-aml-batch-s1",
+    "written_at": "2026-09-29T04:42:22.256661+00:00"
+  },
+  "financial_scoring": {
+    "typology_counts": {
+      "scored": 8,
+      "partial": 0,
+      "no_rule": 8,
+      "rule_skipped": 1,
+      "rule_error": 0
+    },
+    "rules": [
+      {
+        "rule_id": "W17_layering_chain",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "stack",
+        "alert_count": 46394
+      },
+      {
+        "rule_id": "W1_connected_components",
+        "status": "skipped",
+        "reason": "giant-component",
+        "target_typology": "gather_scatter",
+        "alert_count": null
+      },
+      {
+        "rule_id": "W2_structuring",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "micro_structuring",
+        "alert_count": 3071
+      },
+      {
+        "rule_id": "W3_round_tripping",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "cycle",
+        "alert_count": 1668
+      },
+      {
+        "rule_id": "W4_risk_propagation",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "rapid_layering",
+        "alert_count": 98479
+      },
+      {
+        "rule_id": "W5_sanctions_match",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "sanctions_match",
+        "alert_count": 195
+      },
+      {
+        "rule_id": "W6_pep_counterparty",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "pep_match",
+        "alert_count": 2041
+      },
+      {
+        "rule_id": "W7_cross_border_high_risk",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "corridor_high_risk",
+        "alert_count": 518761
+      },
+      {
+        "rule_id": "W8_dormant_reactivation",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "dormant_reactivation",
+        "alert_count": 57682
+      }
+    ],
+    "total_alerts": 728291,
+    "fp_alerts": 718271,
+    "fp_rate": 0.9862417632512279,
+    "fp_rate_by_rule": {
+      "W3_round_tripping": 0.7350119904076738,
+      "W17_layering_chain": 0.9898693796611631,
+      "W8_dormant_reactivation": 0.9976595818452897,
+      "W6_pep_counterparty": 0.9441450269475747,
+      "W7_cross_border_high_risk": 0.9972530702963407,
+      "W5_sanctions_match": 0.7076923076923076,
+      "W2_structuring": 0.9928362097036796,
+      "W4_risk_propagation": 0.9934199169366058
+    },
+    "txn_precision_by_rule": {
+      "W3_round_tripping": 0.2754323103287116,
+      "W17_layering_chain": 0.012729755716893578,
+      "W8_dormant_reactivation": 0.0023404181547103083,
+      "W6_pep_counterparty": 0.05585497305242528,
+      "W7_cross_border_high_risk": 0.0027469297036592957,
+      "W5_sanctions_match": 0.30845771144278605,
+      "W2_structuring": 0.007324595219737857,
+      "W4_risk_propagation": 0.00042861702612739957
+    },
+    "chance_by_rule": {
+      "W17_layering_chain": 0.00562429696287964,
+      "W8_dormant_reactivation": 0.05961754780652419,
+      "W7_cross_border_high_risk": 0.030371203599550055,
+      "W4_risk_propagation": 0.06411698537682789
+    },
+    "random_control_floor": 0.15185601799775028,
+    "run_id": "20260928-224247-1320bd-c1",
+    "subject_customer_check": {
+      "status": "ok",
+      "subjects": 7312,
+      "unmapped": 0,
+      "not_customer": 0,
+      "failing_typologies": [],
+      "unresolved_typologies": [],
+      "by_typology": {
+        "fan_in": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "cycle": {
+          "subjects": 444,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "fan_out": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "gather_scatter": {
+          "subjects": 222,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "random": {
+          "subjects": 1778,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "scatter_gather": {
+          "subjects": 178,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "stack": {
+          "subjects": 444,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "synthetic_identity": {
+          "subjects": 593,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "corridor_high_risk": {
+          "subjects": 603,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "dormant_reactivation": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "cross_border_cycle": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "micro_structuring": {
+          "subjects": 222,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "rapid_layering": {
+          "subjects": 889,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "tbml_repeated_invoice": {
+          "subjects": 296,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "bipartite": {
+          "subjects": 111,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "pep_match": {
+          "subjects": 68,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "sanctions_match": {
+          "subjects": 40,
+          "unmapped": 0,
+          "not_customer": 0
+        }
+      }
+    },
+    "typologies": [
+      {
+        "typology_type": "bipartite",
+        "workload_category": "W1_synthetic_id",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.7207207207207207,
+        "instance_count": 111,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "corridor_high_risk",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W7_cross_border_high_risk",
+        "recall": 0.802653399668325,
+        "incidental_recall": 0.8640132669983416,
+        "instance_count": 603,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "cross_border_cycle",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 1.0,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "cycle",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W3_round_tripping",
+        "recall": 0.9954954954954955,
+        "incidental_recall": 1.0,
+        "instance_count": 444,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "dormant_reactivation",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W8_dormant_reactivation",
+        "recall": 0.3595505617977528,
+        "incidental_recall": 0.547752808988764,
+        "instance_count": 356,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "fan_in",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.4606741573033708,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "fan_out",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.45224719101123595,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "gather_scatter",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W1_connected_components",
+        "recall": null,
+        "incidental_recall": 0.6936936936936937,
+        "instance_count": 222,
+        "detection_status": "rule_skipped",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "micro_structuring",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W2_structuring",
+        "recall": 0.0990990990990991,
+        "incidental_recall": 0.6666666666666666,
+        "instance_count": 222,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "pep_match",
+        "workload_category": "W6_pep",
+        "designated_rules": "W6_pep_counterparty",
+        "recall": 0.8529411764705882,
+        "incidental_recall": 0.8970588235294118,
+        "instance_count": 68,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "random",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.15185601799775028,
+        "instance_count": 1778,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "rapid_layering",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W4_risk_propagation",
+        "recall": 0.6839145106861643,
+        "incidental_recall": 0.7311586051743532,
+        "instance_count": 889,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "sanctions_match",
+        "workload_category": "W5_sanctions",
+        "designated_rules": "W5_sanctions_match",
+        "recall": 0.8,
+        "incidental_recall": 0.95,
+        "instance_count": 40,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "scatter_gather",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.7584269662921348,
+        "instance_count": 178,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "stack",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W17_layering_chain",
+        "recall": 0.9977477477477478,
+        "incidental_recall": 1.0,
+        "instance_count": 444,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "synthetic_identity",
+        "workload_category": "W1_synthetic_id",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.3591905564924115,
+        "instance_count": 593,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "tbml_repeated_invoice",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.36824324324324326,
+        "instance_count": 296,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      }
+    ],
+    "computed_by": "lb-score-financial"
+  },
+  "tm_operations": {
+    "status": "pass",
+    "reason": "",
+    "problems": [],
+    "cycles_ran": [
+      1
+    ],
+    "cycles_not_run": [],
+    "invariants": {
+      "1": {
+        "monitored_population": {
+          "status": "pass",
+          "detail": "55438 customers of the reporting FI, 20023102 monitored payments"
+        },
+        "reconciliation": {
+          "status": "pass",
+          "detail": "monitored 20023102 + excluded 6648776 = 26671878 vs source 26671878"
+        },
+        "every_alert_dispositioned": {
+          "status": "pass",
+          "detail": "alerts 728291, disposition rows for them 728291"
+        },
+        "one_row_per_alert_identity": {
+          "status": "pass",
+          "detail": "728291 disposition rows, 728291 distinct alert identities"
+        },
+        "no_null_disposition": {
+          "status": "pass",
+          "detail": "0 disposition rows with no disposition"
+        },
+        "noncustomer_alerts_declared": {
+          "status": "pass",
+          "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72704 non-customer alerts in all)"
+        },
+        "escalated_le_alerts": {
+          "status": "pass",
+          "detail": "escalated 60606 <= customer alerts 655587"
+        },
+        "cases_le_escalated": {
+          "status": "pass",
+          "detail": "alert-driven cases 60606 <= escalated 60606"
+        },
+        "sars_le_cases": {
+          "status": "pass",
+          "detail": "SARs 7899 <= cases 67452"
+        },
+        "one_open_case_per_customer": {
+          "status": "pass",
+          "detail": "most open cases on one customer: 1"
+        },
+        "funnel_monotone": {
+          "status": "pass",
+          "detail": "payments 26671878 >= monitored 20023102 >= alerts 655587 >= escalated 60606 >= cases 60606 >= sars 7457"
+        },
+        "continuing_review_fires": {
+          "status": "pass",
+          "detail": "0 SARs past their 90-day review date with no review (7258 due, 0 deferred behind a case waiting to file)"
+        },
+        "review_not_folded_into_determined": {
+          "status": "pass",
+          "detail": "0 reviews credited to a case already determined before the review was due"
+        }
+      }
+    },
+    "ops": {
+      "alert_aging_open": {
+        "0-30": 11735,
+        "31-60": 541,
+        "61-90": 11,
+        "90+": 0
+      },
+      "alert_sla_breaches": 5706,
+      "alerts_by_disposition": {
+        "attached": 84485,
+        "closed_nfa": 501724,
+        "escalated": 60606,
+        "out_of_scope": 72704,
+        "pending_l1": 8772
+      },
+      "alerts_by_priority": {
+        "critical": 210955,
+        "high": 256500,
+        "low": 26137,
+        "medium": 161995
+      },
+      "alerts_noncustomer_undeclared": 0,
+      "alerts_out_of_scope": 72704,
+      "alerts_over_capacity": 0,
+      "alerts_total": 728291,
+      "alerts_withdrawn_carried": 0,
+      "as_of_date": "2026-01-01",
+      "cases_by_status": {
+        "closed": 65526,
+        "open": 1854,
+        "pending_filing": 72
+      },
+      "cases_by_type": {
+        "alert_escalation": 60606,
+        "continuing_activity": 6846
+      },
+      "continuing_reviews_deferred": 0,
+      "continuing_reviews_due": 7258,
+      "continuing_reviews_folded": 385,
+      "continuing_reviews_opened": 6846,
+      "continuing_reviews_superseded": 27,
+      "continuing_sars_over_120_days": 16,
+      "cycle": 1,
+      "elapsed_seconds": 43.1,
+      "filed_late": 232,
+      "filed_over_30_days_pct": 0.05177870616533738,
+      "filing_days_median": 15,
+      "filing_days_p95": 31,
+      "funnel": {
+        "alerts": 655587,
+        "cases": 60606,
+        "escalated": 60606,
+        "monitored": 20023102,
+        "payments": 26671878,
+        "sars": 7457
+      },
+      "invariants": {
+        "cases_le_escalated": {
+          "detail": "alert-driven cases 60606 <= escalated 60606",
+          "status": "pass"
+        },
+        "continuing_review_fires": {
+          "detail": "0 SARs past their 90-day review date with no review (7258 due, 0 deferred behind a case waiting to file)",
+          "status": "pass"
+        },
+        "escalated_le_alerts": {
+          "detail": "escalated 60606 <= customer alerts 655587",
+          "status": "pass"
+        },
+        "every_alert_dispositioned": {
+          "detail": "alerts 728291, disposition rows for them 728291",
+          "status": "pass"
+        },
+        "funnel_monotone": {
+          "detail": "payments 26671878 >= monitored 20023102 >= alerts 655587 >= escalated 60606 >= cases 60606 >= sars 7457",
+          "status": "pass"
+        },
+        "monitored_population": {
+          "detail": "55438 customers of the reporting FI, 20023102 monitored payments",
+          "status": "pass"
+        },
+        "no_null_disposition": {
+          "detail": "0 disposition rows with no disposition",
+          "status": "pass"
+        },
+        "noncustomer_alerts_declared": {
+          "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72704 non-customer alerts in all)",
+          "status": "pass"
+        },
+        "one_open_case_per_customer": {
+          "detail": "most open cases on one customer: 1",
+          "status": "pass"
+        },
+        "one_row_per_alert_identity": {
+          "detail": "728291 disposition rows, 728291 distinct alert identities",
+          "status": "pass"
+        },
+        "reconciliation": {
+          "detail": "monitored 20023102 + excluded 6648776 = 26671878 vs source 26671878",
+          "status": "pass"
+        },
+        "review_not_folded_into_determined": {
+          "detail": "0 reviews credited to a case already determined before the review was due",
+          "status": "pass"
+        },
+        "sars_le_cases": {
+          "detail": "SARs 7899 <= cases 67452",
+          "status": "pass"
+        }
+      },
+      "l1_decided": 562330,
+      "l1_escalation_rate": 0.10777657247523696,
+      "open_cases": 1926,
+      "open_cases_over_60_days": 24,
+      "qa_disagreement_rate": 0.142191556709464,
+      "qa_sample": 28117,
+      "reconciliation": {
+        "completeness.bronze": 26671878,
+        "completeness.customers": 55438,
+        "completeness.excluded": 6648776,
+        "completeness.monitored": 20023102,
+        "completeness.silver": 26671878,
+        "completeness.source": 26671878,
+        "dq.dq_missing_agent_bic": 0,
+        "dq.dq_nonpositive_amount": 0,
+        "dq.dq_self_transfer": 0,
+        "dq.dq_unconvertible_currency": 0,
+        "exclusion.dq_unconvertible_currency": 0,
+        "exclusion.no_customer_party": 6648776,
+        "funnel.alerts": 655587,
+        "funnel.alerts_noncustomer_undeclared": 0,
+        "funnel.alerts_out_of_scope": 72704,
+        "funnel.cases": 60606,
+        "funnel.continuing_review_cases": 6846,
+        "funnel.continuing_sars": 442,
+        "funnel.escalated": 60606,
+        "funnel.sars": 7457
+      },
+      "sars_by_limit": {
+        "120_day_continuing": {
+          "filed": 442,
+          "late": 16
+        },
+        "30_day": {
+          "filed": 7081,
+          "late": 199
+        },
+        "60_day_no_suspect": {
+          "filed": 376,
+          "late": 17
+        }
+      },
+      "sars_filed": 7899,
+      "sars_no_suspect": 376,
+      "scenarios": {
+        "W17_layering_chain": {
+          "alerts": 23345,
+          "escalated": 2549,
+          "productive_rate": 0.12743446905903183,
+          "sar_conversion": 0.05071749839366031
+        },
+        "W2_structuring": {
+          "alerts": 3071,
+          "escalated": 194,
+          "productive_rate": 0.09917355371900827,
+          "sar_conversion": 0.045262129599479
+        },
+        "W3_round_tripping": {
+          "alerts": 1198,
+          "escalated": 540,
+          "productive_rate": 0.6327212020033389,
+          "sar_conversion": 0.5901502504173622
+        },
+        "W4_risk_propagation": {
+          "alerts": 49294,
+          "escalated": 5727,
+          "productive_rate": 0.12817025743802637,
+          "sar_conversion": 0.04195236742808455
+        },
+        "W5_sanctions_match": {
+          "alerts": 195,
+          "escalated": 60,
+          "productive_rate": 0.3487179487179487,
+          "sar_conversion": 0.2717948717948718
+        },
+        "W6_pep_counterparty": {
+          "alerts": 2041,
+          "escalated": 237,
+          "productive_rate": 0.13643104300543746,
+          "sar_conversion": 0.06614404703576678
+        },
+        "W7_cross_border_high_risk": {
+          "alerts": 518761,
+          "escalated": 45166,
+          "productive_rate": 0.09991102269504097,
+          "sar_conversion": 0.020477638064542246
+        },
+        "W8_dormant_reactivation": {
+          "alerts": 57682,
+          "escalated": 6133,
+          "productive_rate": 0.10835918739373543,
+          "sar_conversion": 0.018064560868208453
+        }
+      },
+      "simulation": {
+        "alert_sla_days": 60,
+        "analyst_accuracy": 0.9,
+        "continuous_interval_seconds": 1800,
+        "counterparty_scenarios": [
+          "W1_connected_components",
+          "W3_round_tripping",
+          "W4_risk_propagation",
+          "W17_layering_chain"
+        ],
+        "enabled": true,
+        "investigator_accuracy": 0.95,
+        "late_filing_rate": 0.03,
+        "lookback_months": 12,
+        "max_alerts_per_customer": 50000,
+        "no_suspect_rate": 0.05,
+        "note": "dispositions simulated from datagen ground truth",
+        "qa_sample_rate": 0.05,
+        "seed": 20260924
+      }
+    },
+    "mode": "batch"
+  }
+}

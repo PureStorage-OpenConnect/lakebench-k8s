@@ -1,0 +1,3476 @@
+{
+  "run_id": "20260928-103055-de1772",
+  "deployment_name": "lb-silver-live-v17-aml-b",
+  "start_time": "2026-09-28T16:30:55.556039+00:00",
+  "end_time": "2026-09-28T17:20:44.396483+00:00",
+  "total_elapsed_seconds": 2988.840444,
+  "success": true,
+  "verdict": {
+    "status": "PASSED",
+    "reasons": [],
+    "gates": {
+      "pipeline": "PASS",
+      "benchmark": "PASS"
+    },
+    "qualifiers": {
+      "pipeline_mode": "batch",
+      "n_batch_jobs": 3,
+      "n_benchmark_queries": 12
+    }
+  },
+  "bronze_size_gb": 8.490828483365476,
+  "silver_size_gb": 8.113033045083284,
+  "gold_size_gb": 0.6611561430618167,
+  "jobs": [
+    {
+      "job_name": "lakebench-bronze-verify",
+      "job_type": "bronze-verify",
+      "start_time": "2026-09-28T16:31:28.270652+00:00",
+      "end_time": "2026-09-28T16:32:56.737387+00:00",
+      "elapsed_seconds": 88.412955,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 8.475,
+      "output_size_gb": 8.490828483365476,
+      "input_rows": 26671846,
+      "output_rows": 26671846,
+      "executor_count": 4,
+      "executor_cores": 2,
+      "executor_memory_gb": 8.0,
+      "cpu_seconds_requested": 707.30364,
+      "memory_gb_requested": 80.0,
+      "throughput_gb_per_second": 0.21955958549222795,
+      "throughput_rows_per_second": 690980.4663212436,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {},
+      "extra_metrics": {}
+    },
+    {
+      "job_name": "lakebench-silver-build",
+      "job_type": "silver-build",
+      "start_time": "2026-09-28T16:32:58.777007+00:00",
+      "end_time": "2026-09-28T16:36:17.737387+00:00",
+      "elapsed_seconds": 198.880369,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 8.475,
+      "output_size_gb": 8.10508855432272,
+      "input_rows": 26671846,
+      "output_rows": 26671846,
+      "executor_count": 8,
+      "executor_cores": 4,
+      "executor_memory_gb": 48.0,
+      "cpu_seconds_requested": 6364.171808,
+      "memory_gb_requested": 480.0,
+      "throughput_gb_per_second": 0.05985169491525424,
+      "throughput_rows_per_second": 188360.4943502825,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {
+        "silver_transactions_rows": 26671846,
+        "silver_entities_rows": 113713,
+        "silver_accounts_rows": 113713,
+        "silver_statements_rows": 53343692,
+        "silver_edges_rows": 4874794,
+        "silver_profiles_rows": 113713
+      },
+      "extra_metrics": {
+        "data_clock_source": "datagen_timestamp_end"
+      }
+    },
+    {
+      "job_name": "lakebench-gold-finalize",
+      "job_type": "gold-finalize",
+      "start_time": "2026-09-28T16:36:19.997510+00:00",
+      "end_time": "2026-09-28T16:46:25.737387+00:00",
+      "elapsed_seconds": 605.679219,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 3.298,
+      "output_size_gb": 0.333282059058547,
+      "input_rows": 26671846,
+      "output_rows": 719433,
+      "executor_count": 4,
+      "executor_cores": 4,
+      "executor_memory_gb": 32.0,
+      "cpu_seconds_requested": 9690.867504,
+      "memory_gb_requested": 160.0,
+      "throughput_gb_per_second": 0.005925260510240747,
+      "throughput_rows_per_second": 47919.23463887891,
+      "alerts_by_rule": {
+        "W5_sanctions_match": 126,
+        "W6_pep_counterparty": 2011,
+        "W2_structuring": 2353,
+        "W3_round_tripping": 1620,
+        "W17_layering_chain": 46228,
+        "W4_risk_propagation": 98765,
+        "W7_cross_border_high_risk": 509768,
+        "W8_dormant_reactivation": 58562
+      },
+      "rule_errors": {},
+      "rules_skipped": {
+        "W1_connected_components": "giant-component"
+      },
+      "tm_invariants": {
+        "1": {
+          "monitored_population": {
+            "status": "pass",
+            "detail": "55733 customers of the reporting FI, 20030443 monitored payments"
+          },
+          "reconciliation": {
+            "status": "pass",
+            "detail": "monitored 20030443 + excluded 6641403 = 26671846 vs source 26671846"
+          },
+          "every_alert_dispositioned": {
+            "status": "pass",
+            "detail": "alerts 719433, disposition rows for them 719433"
+          },
+          "one_row_per_alert_identity": {
+            "status": "pass",
+            "detail": "719433 disposition rows, 719433 distinct alert identities"
+          },
+          "no_null_disposition": {
+            "status": "pass",
+            "detail": "0 disposition rows with no disposition"
+          },
+          "noncustomer_alerts_declared": {
+            "status": "pass",
+            "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72405 non-customer alerts in all)"
+          },
+          "escalated_le_alerts": {
+            "status": "pass",
+            "detail": "escalated 60050 <= customer alerts 647028"
+          },
+          "cases_le_escalated": {
+            "status": "pass",
+            "detail": "alert-driven cases 60050 <= escalated 60050"
+          },
+          "sars_le_cases": {
+            "status": "pass",
+            "detail": "SARs 7662 <= cases 66777"
+          },
+          "one_open_case_per_customer": {
+            "status": "pass",
+            "detail": "most open cases on one customer: 1"
+          },
+          "funnel_monotone": {
+            "status": "pass",
+            "detail": "payments 26671846 >= monitored 20030443 >= alerts 647028 >= escalated 60050 >= cases 60050 >= sars 7220"
+          },
+          "continuing_review_fires": {
+            "status": "pass",
+            "detail": "0 SARs past their 90-day review date with no review (7039 due, 0 deferred behind a case waiting to file)"
+          },
+          "review_not_folded_into_determined": {
+            "status": "pass",
+            "detail": "0 reviews credited to a case already determined before the review was due"
+          }
+        }
+      },
+      "tm_ops": {
+        "alert_aging_open": {
+          "0-30": 11555,
+          "31-60": 603,
+          "61-90": 7,
+          "90+": 0
+        },
+        "alert_sla_breaches": 5693,
+        "alerts_by_disposition": {
+          "attached": 79152,
+          "closed_nfa": 498961,
+          "escalated": 60050,
+          "out_of_scope": 72405,
+          "pending_l1": 8865
+        },
+        "alerts_by_priority": {
+          "critical": 202709,
+          "high": 255569,
+          "low": 26367,
+          "medium": 162383
+        },
+        "alerts_noncustomer_undeclared": 0,
+        "alerts_out_of_scope": 72405,
+        "alerts_over_capacity": 0,
+        "alerts_total": 719433,
+        "alerts_withdrawn_carried": 0,
+        "as_of_date": "2026-01-01",
+        "cases_by_status": {
+          "closed": 64932,
+          "open": 1758,
+          "pending_filing": 87
+        },
+        "cases_by_type": {
+          "alert_escalation": 60050,
+          "continuing_activity": 6727
+        },
+        "continuing_reviews_deferred": 0,
+        "continuing_reviews_due": 7039,
+        "continuing_reviews_folded": 285,
+        "continuing_reviews_opened": 6727,
+        "continuing_reviews_superseded": 27,
+        "continuing_sars_over_120_days": 9,
+        "cycle": 1,
+        "elapsed_seconds": 43.4,
+        "filed_late": 219,
+        "filed_over_30_days_pct": 0.049986948577394934,
+        "filing_days_median": 15,
+        "filing_days_p95": 30,
+        "funnel": {
+          "alerts": 647028,
+          "cases": 60050,
+          "escalated": 60050,
+          "monitored": 20030443,
+          "payments": 26671846,
+          "sars": 7220
+        },
+        "invariants": {
+          "cases_le_escalated": {
+            "detail": "alert-driven cases 60050 <= escalated 60050",
+            "status": "pass"
+          },
+          "continuing_review_fires": {
+            "detail": "0 SARs past their 90-day review date with no review (7039 due, 0 deferred behind a case waiting to file)",
+            "status": "pass"
+          },
+          "escalated_le_alerts": {
+            "detail": "escalated 60050 <= customer alerts 647028",
+            "status": "pass"
+          },
+          "every_alert_dispositioned": {
+            "detail": "alerts 719433, disposition rows for them 719433",
+            "status": "pass"
+          },
+          "funnel_monotone": {
+            "detail": "payments 26671846 >= monitored 20030443 >= alerts 647028 >= escalated 60050 >= cases 60050 >= sars 7220",
+            "status": "pass"
+          },
+          "monitored_population": {
+            "detail": "55733 customers of the reporting FI, 20030443 monitored payments",
+            "status": "pass"
+          },
+          "no_null_disposition": {
+            "detail": "0 disposition rows with no disposition",
+            "status": "pass"
+          },
+          "noncustomer_alerts_declared": {
+            "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72405 non-customer alerts in all)",
+            "status": "pass"
+          },
+          "one_open_case_per_customer": {
+            "detail": "most open cases on one customer: 1",
+            "status": "pass"
+          },
+          "one_row_per_alert_identity": {
+            "detail": "719433 disposition rows, 719433 distinct alert identities",
+            "status": "pass"
+          },
+          "reconciliation": {
+            "detail": "monitored 20030443 + excluded 6641403 = 26671846 vs source 26671846",
+            "status": "pass"
+          },
+          "review_not_folded_into_determined": {
+            "detail": "0 reviews credited to a case already determined before the review was due",
+            "status": "pass"
+          },
+          "sars_le_cases": {
+            "detail": "SARs 7662 <= cases 66777",
+            "status": "pass"
+          }
+        },
+        "l1_decided": 559011,
+        "l1_escalation_rate": 0.1074218575305316,
+        "open_cases": 1845,
+        "open_cases_over_60_days": 21,
+        "qa_disagreement_rate": 0.1410752993852386,
+        "qa_sample": 28141,
+        "reconciliation": {
+          "completeness.bronze": 26671846,
+          "completeness.customers": 55733,
+          "completeness.excluded": 6641403,
+          "completeness.monitored": 20030443,
+          "completeness.silver": 26671846,
+          "completeness.source": 26671846,
+          "dq.dq_missing_agent_bic": 0,
+          "dq.dq_nonpositive_amount": 0,
+          "dq.dq_self_transfer": 0,
+          "dq.dq_unconvertible_currency": 0,
+          "exclusion.dq_unconvertible_currency": 0,
+          "exclusion.no_customer_party": 6641403,
+          "funnel.alerts": 647028,
+          "funnel.alerts_noncustomer_undeclared": 0,
+          "funnel.alerts_out_of_scope": 72405,
+          "funnel.cases": 60050,
+          "funnel.continuing_review_cases": 6727,
+          "funnel.continuing_sars": 442,
+          "funnel.escalated": 60050,
+          "funnel.sars": 7220
+        },
+        "sars_by_limit": {
+          "120_day_continuing": {
+            "filed": 442,
+            "late": 9
+          },
+          "30_day": {
+            "filed": 6858,
+            "late": 197
+          },
+          "60_day_no_suspect": {
+            "filed": 362,
+            "late": 13
+          }
+        },
+        "sars_filed": 7662,
+        "sars_no_suspect": 362,
+        "scenarios": {
+          "W17_layering_chain": {
+            "alerts": 23361,
+            "escalated": 2655,
+            "productive_rate": 0.1287670053383847,
+            "sar_conversion": 0.047857540345019475
+          },
+          "W2_structuring": {
+            "alerts": 2353,
+            "escalated": 163,
+            "productive_rate": 0.09792924935289042,
+            "sar_conversion": 0.03612409689757756
+          },
+          "W3_round_tripping": {
+            "alerts": 1199,
+            "escalated": 527,
+            "productive_rate": 0.6390977443609023,
+            "sar_conversion": 0.5963302752293578
+          },
+          "W4_risk_propagation": {
+            "alerts": 49648,
+            "escalated": 5647,
+            "productive_rate": 0.1270997437600835,
+            "sar_conversion": 0.040545439896873994
+          },
+          "W5_sanctions_match": {
+            "alerts": 126,
+            "escalated": 46,
+            "productive_rate": 0.4426229508196721,
+            "sar_conversion": 0.3333333333333333
+          },
+          "W6_pep_counterparty": {
+            "alerts": 2011,
+            "escalated": 234,
+            "productive_rate": 0.13330004992511232,
+            "sar_conversion": 0.057682744903033316
+          },
+          "W7_cross_border_high_risk": {
+            "alerts": 509768,
+            "escalated": 44440,
+            "productive_rate": 0.09932575741103497,
+            "sar_conversion": 0.019530453068847004
+          },
+          "W8_dormant_reactivation": {
+            "alerts": 58562,
+            "escalated": 6338,
+            "productive_rate": 0.10991267732026369,
+            "sar_conversion": 0.0181346265496397
+          }
+        },
+        "simulation": {
+          "alert_sla_days": 60,
+          "analyst_accuracy": 0.9,
+          "continuous_interval_seconds": 1800,
+          "counterparty_scenarios": [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain"
+          ],
+          "enabled": true,
+          "investigator_accuracy": 0.95,
+          "late_filing_rate": 0.03,
+          "lookback_months": 12,
+          "max_alerts_per_customer": 50000,
+          "no_suspect_rate": 0.05,
+          "note": "dispositions simulated from datagen ground truth",
+          "qa_sample_rate": 0.05,
+          "seed": 20260924
+        }
+      },
+      "tm_status": {
+        "1": {
+          "status": "ran",
+          "reason": "ok"
+        }
+      },
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {},
+      "extra_metrics": {}
+    }
+  ],
+  "queries": [],
+  "streaming": [],
+  "config_snapshot": {
+    "name": "lb-silver-live-v17-aml-b",
+    "scale": 1.0,
+    "approx_bronze_gb": 8.4,
+    "processing_pattern": "medallion",
+    "s3": {
+      "endpoint": "http://10.0.1.50:80",
+      "buckets": {
+        "bronze": "scrubbed-bronze",
+        "silver": "scrubbed-silver",
+        "gold": "scrubbed-gold"
+      }
+    },
+    "scratch": {
+      "enabled": true,
+      "storage_class": "px-csi-scratch",
+      "size": "200Gi"
+    },
+    "spark": {
+      "driver": {
+        "cores": 2,
+        "memory": "2g"
+      },
+      "executor": {
+        "instances": 2,
+        "cores": 2,
+        "memory": "4g",
+        "memory_overhead": "1g"
+      },
+      "executor_overrides": {
+        "bronze": null,
+        "silver": null,
+        "gold": null,
+        "bronze_ingest": null,
+        "silver_stream": null,
+        "gold_refresh": null
+      }
+    },
+    "catalog": "polaris",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "spark-thrift",
+    "workload_schema": "financial",
+    "sustained": {
+      "bronze_trigger_interval": "30 seconds",
+      "silver_trigger_interval": "60 seconds",
+      "gold_refresh_interval": "5 minutes",
+      "run_duration": 1800,
+      "max_files_per_trigger": 1,
+      "bronze_target_file_size_mb": 512,
+      "silver_target_file_size_mb": 512,
+      "gold_target_file_size_mb": 128,
+      "benchmark_interval": 300,
+      "benchmark_warmup": 300
+    },
+    "datagen": {
+      "scale": 1.0,
+      "mode": "auto",
+      "parallelism": 2,
+      "file_size": "64mb"
+    },
+    "images": {
+      "datagen": "docker.io/sillidata/lb-datagen:b6f2905",
+      "spark": "apache/spark:4.0.2-python3",
+      "trino": "trinodb/trino:483"
+    },
+    "trino": {
+      "coordinator": {
+        "cpu": "1",
+        "memory": "4Gi"
+      },
+      "worker": {
+        "replicas": 1,
+        "cpu": "2",
+        "memory": "8Gi"
+      }
+    },
+    "benchmark": {
+      "mode": "power",
+      "streams": 4,
+      "cache": "hot",
+      "iterations": 3
+    },
+    "maintenance": {
+      "pre_benchmark_maintenance": true,
+      "retention_interval": null,
+      "retention_threshold": "30m",
+      "compaction_enabled": true,
+      "compaction_interval": null
+    },
+    "experiment_inputs": {
+      "workload": {
+        "name": "financial",
+        "version": "aml-1",
+        "generator_model_version": "datagen-v2-rs-0.3",
+        "parameters_id": "7f987bedd2c609d4",
+        "parameters": {
+          "tm_operations": {
+            "enabled": true,
+            "seed": 20260924,
+            "analyst_accuracy": 0.9,
+            "investigator_accuracy": 0.95,
+            "qa_sample_rate": 0.05,
+            "alert_sla_days": 60,
+            "case_lookback_months": 12,
+            "late_filing_rate": 0.03,
+            "no_suspect_rate": 0.05,
+            "max_alerts_per_customer": 50000,
+            "continuous_interval_seconds": 1800,
+            "counterparty_scenarios": [
+              "W1_connected_components",
+              "W3_round_tripping",
+              "W4_risk_propagation",
+              "W17_layering_chain"
+            ]
+          },
+          "w1_max_vertices": 8000000,
+          "retention_workload": true,
+          "retention_months": 60
+        }
+      },
+      "corpus": {
+        "schema": "financial",
+        "generator_image": "docker.io/sillidata/lb-datagen:b6f2905",
+        "seed": 43,
+        "corpus_role": null,
+        "robustness_perturbation": false,
+        "scale": 1.0,
+        "timestamp_start": "2024-01-01",
+        "timestamp_end": "2025-01-01",
+        "dirty_data_ratio": 0.08,
+        "id": "0f8cde1474494e6b"
+      },
+      "architecture": {
+        "recipe": "polaris-iceberg-spark-thrift",
+        "catalog": {
+          "type": "polaris",
+          "version": "apache/polaris:1.6.0"
+        },
+        "table_format": {
+          "type": "iceberg",
+          "version": "1.11.0"
+        },
+        "pipeline_engine": {
+          "type": "spark",
+          "image": "apache/spark:4.0.2-python3"
+        },
+        "query_engine": {
+          "type": "spark-thrift",
+          "version": "apache/spark:4.0.2-python3"
+        },
+        "query_access_path": "catalog"
+      },
+      "maintenance_config": {
+        "pre_benchmark_maintenance": true,
+        "compaction_enabled": true,
+        "settings": {
+          "retention_threshold": "2013d",
+          "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+        }
+      },
+      "mode": "batch",
+      "run_mode": "batch",
+      "support": {
+        "workload": "financial",
+        "mode": "batch",
+        "recipe": "polaris-iceberg-spark-thrift",
+        "state": "unverified",
+        "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+      },
+      "config_limits": {
+        "max_files_per_trigger": 1,
+        "benchmark_iterations": 3,
+        "w1_max_vertices": 8000000,
+        "tm_max_alerts_per_customer": 50000
+      }
+    }
+  },
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.6.0.dev0",
+    "git_sha": "e31514d2963578abd3dd928330dbaa2469cf04ad",
+    "git_dirty": false
+  },
+  "autosize_cuts": [],
+  "maintenance_outcomes": [
+    {
+      "kind": "expire",
+      "retention": "2013d",
+      "operations": [
+        {
+          "operation": "expire_snapshots",
+          "retention": "2013d",
+          "total": 18,
+          "succeeded": 18,
+          "failed": 0,
+          "timed_out": 0,
+          "not_attempted": 0
+        },
+        {
+          "operation": "remove_orphan_files",
+          "retention": "48312h",
+          "total": 18,
+          "succeeded": 18,
+          "failed": 0,
+          "timed_out": 0,
+          "not_attempted": 0
+        }
+      ],
+      "engine": "spark-thrift",
+      "total": 36,
+      "succeeded": 36,
+      "failed": 0,
+      "timed_out": 0,
+      "not_attempted": 0
+    },
+    {
+      "kind": "compaction",
+      "engine": "spark-thrift",
+      "total": 16,
+      "succeeded": 16,
+      "failed": 0,
+      "timed_out": 0,
+      "not_attempted": 0
+    },
+    {
+      "kind": "compaction",
+      "files_before": 65,
+      "files_after": 65,
+      "note": "no-op: data files 65 -> 65"
+    }
+  ],
+  "experiment": {
+    "schema": "exp1",
+    "system": "cluster",
+    "support": {
+      "workload": "financial",
+      "mode": "batch",
+      "recipe": "polaris-iceberg-spark-thrift",
+      "state": "unverified",
+      "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+    },
+    "repetitions": {
+      "runs": 1,
+      "benchmark_samples_per_query": 3,
+      "benchmark_rounds": null
+    },
+    "workload": {
+      "name": "financial",
+      "version": "aml-1",
+      "generator_model_version": "datagen-v2-rs-0.3",
+      "parameters_id": "7f987bedd2c609d4",
+      "parameters": {
+        "tm_operations": {
+          "enabled": true,
+          "seed": 20260924,
+          "analyst_accuracy": 0.9,
+          "investigator_accuracy": 0.95,
+          "qa_sample_rate": 0.05,
+          "alert_sla_days": 60,
+          "case_lookback_months": 12,
+          "late_filing_rate": 0.03,
+          "no_suspect_rate": 0.05,
+          "max_alerts_per_customer": 50000,
+          "continuous_interval_seconds": 1800,
+          "counterparty_scenarios": [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain"
+          ]
+        },
+        "w1_max_vertices": 8000000,
+        "retention_workload": true,
+        "retention_months": 60
+      }
+    },
+    "corpus": {
+      "schema": "financial",
+      "generator_image": "docker.io/sillidata/lb-datagen:b6f2905",
+      "seed": 43,
+      "corpus_role": null,
+      "robustness_perturbation": false,
+      "scale": 1.0,
+      "timestamp_start": "2024-01-01",
+      "timestamp_end": "2025-01-01",
+      "dirty_data_ratio": 0.08,
+      "id": "0f8cde1474494e6b",
+      "observed": false,
+      "observed_note": "declared by the config, not observed from the datagen pods",
+      "datagen": {
+        "configured_image": "docker.io/sillidata/lb-datagen:b6f2905",
+        "pod_image": null,
+        "digest": null,
+        "digest_reason": "no datagen fleet record for this run (data generated elsewhere or earlier)",
+        "observed": false,
+        "seed": null,
+        "scale": null,
+        "data_quality": null,
+        "mixed_params": []
+      }
+    },
+    "architecture": {
+      "recipe": "polaris-iceberg-spark-thrift",
+      "catalog": {
+        "type": "polaris",
+        "version": "apache/polaris:1.6.0"
+      },
+      "table_format": {
+        "type": "iceberg",
+        "version": "1.11.0"
+      },
+      "pipeline_engine": {
+        "type": "spark",
+        "image": "apache/spark:4.0.2-python3"
+      },
+      "query_engine": {
+        "type": "spark-thrift",
+        "version": "apache/spark:4.0.2-python3"
+      },
+      "query_access_path": "catalog"
+    },
+    "maintenance_settings": {
+      "retention_threshold": "2013d",
+      "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+    },
+    "mode": "batch",
+    "maintenance_policy_id": "m2-2026-09-26",
+    "effective_maintenance": {
+      "id": "m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran",
+      "detail_id": "m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on",
+      "operations": {
+        "expire_snapshots": "ran",
+        "remove_orphan_files": "ran",
+        "compaction": "ran"
+      },
+      "expire": "ran",
+      "compaction": "ran",
+      "detail": {
+        "expire_snapshots": "on",
+        "remove_orphan_files": "on",
+        "compaction": "on",
+        "applied_retention": [
+          "2013d"
+        ],
+        "operations": {
+          "expire_snapshots": {
+            "kind": "expire",
+            "applied_retention": [
+              "2013d"
+            ],
+            "total": 18,
+            "succeeded": 18
+          },
+          "remove_orphan_files": {
+            "kind": "expire",
+            "applied_retention": [
+              "48312h"
+            ],
+            "total": 18,
+            "succeeded": 18
+          }
+        }
+      },
+      "basis": "recorded outcomes",
+      "reasons": [
+        "compaction: no-op: data files 65 -> 65"
+      ],
+      "known_limitations": []
+    },
+    "stages": {
+      "executed": [
+        "datagen",
+        "bronze",
+        "silver",
+        "gold",
+        "query"
+      ],
+      "skipped": []
+    },
+    "rules": {
+      "executed": [
+        "W17_layering_chain",
+        "W2_structuring",
+        "W3_round_tripping",
+        "W4_risk_propagation",
+        "W5_sanctions_match",
+        "W6_pep_counterparty",
+        "W7_cross_border_high_risk",
+        "W8_dormant_reactivation"
+      ],
+      "skipped": {
+        "W1_connected_components": "giant-component"
+      },
+      "errored": {}
+    },
+    "limits": {
+      "benchmark_iterations": 3,
+      "w1_max_vertices": 8000000,
+      "tm_max_alerts_per_customer": 50000,
+      "executors": [
+        {
+          "job_type": "bronze-verify",
+          "scale_derived": 4,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        },
+        {
+          "job_type": "silver-build",
+          "scale_derived": 8,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 8
+        },
+        {
+          "job_type": "gold-finalize",
+          "scale_derived": 4,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        }
+      ],
+      "autosize_cuts": [],
+      "maintenance_stopped": false,
+      "bound": [],
+      "bound_kinds": [],
+      "benchmark_mode": "power"
+    },
+    "results": {
+      "query_set_id": "qs12-4bd2d9416abb",
+      "fingerprints": {
+        "FQ1_txn_full_scan": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 5,
+          "exact": "0b462a228865c5c3",
+          "approx": {
+            "4": 13393.93
+          },
+          "approx_w": {
+            "4": 13983.790328358267
+          },
+          "quanta": {
+            "4": 0.01
+          },
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "9fd686cd1a33421f"
+        },
+        "FQ2_top_corridors_window": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "d6527bef35623e64",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "107a484633719eed"
+        },
+        "FQ6_structuring_scan": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 6,
+          "exact": "498e59b5855f6bdc",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "2ccdecb01e28d59f"
+        },
+        "FQ3_entity_edge_risk": {
+          "spec": "rf2",
+          "rows": 200,
+          "cols": 5,
+          "exact": "5413772725eaa7d6",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "28f44470df5baaa1"
+        },
+        "FQ7_cross_border_concentration": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "9a18cac6897ba35f",
+          "approx": {
+            "4": 34.055
+          },
+          "approx_w": {
+            "4": 50.8938767218174
+          },
+          "quanta": {
+            "4": 0.001
+          },
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "4f37c61bf83df0c9"
+        },
+        "FQ4_running_balance_window": {
+          "spec": "rf2",
+          "rows": 878356,
+          "cols": 6,
+          "exact": "733b4f902a8ba2d2",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "d9f87e6c24db7193"
+        },
+        "FQ5_alert_triage": {
+          "spec": "rf2",
+          "rows": 17,
+          "cols": 6,
+          "exact": "a044bbfba0f18c59",
+          "approx": {
+            "5": 12.515
+          },
+          "approx_w": {
+            "5": 18.103286621133574
+          },
+          "quanta": {
+            "5": 0.001
+          },
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "84117932f136dd8e"
+        },
+        "FQ8_alert_to_entity_join": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "a60f1e877c4f7491",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "volatile": [
+            0
+          ],
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "b3144e32312bc677"
+        },
+        "IQ1_customer_360": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 18,
+          "exact": "4f88c8ef1c0f6546",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "aca51deb34223f62"
+        },
+        "IQ2_case_activity_12m": {
+          "spec": "rf2",
+          "rows": 12,
+          "cols": 6,
+          "exact": "7a10ee3da64c6b3a",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "78a4d8c2f80a3c68"
+        },
+        "IQ3_counterparty_two_hop": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 8,
+          "exact": "78adc07539691ef7",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "39669d82bc39b64c"
+        },
+        "IQ4_open_cases_over_60_days": {
+          "spec": "rf2",
+          "rows": 21,
+          "cols": 10,
+          "exact": "9d38be7d3a3755d1",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "c420aadbf6dfcf52"
+        }
+      }
+    },
+    "lakebench": {
+      "lakebench_version": "1.6.0.dev0",
+      "git_sha": "e31514d2963578abd3dd928330dbaa2469cf04ad",
+      "git_dirty": false
+    }
+  },
+  "benchmark": {
+    "benchmark_type": "spark_thrift_query",
+    "engine": "spark-thrift",
+    "query_set_id": "qs12-4bd2d9416abb",
+    "mode": "power",
+    "cache": "hot",
+    "scale": 1.0,
+    "qph": 245.5,
+    "total_seconds": 175.98,
+    "iterations": 3,
+    "streams": 1,
+    "queries": [
+      {
+        "name": "FQ1_txn_full_scan",
+        "display_name": "Silver transactions full aggregation",
+        "class": "scan",
+        "elapsed_seconds": 33.699,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 5,
+          "exact": "0b462a228865c5c3",
+          "approx": {
+            "4": 13393.93
+          },
+          "approx_w": {
+            "4": 13983.790328358267
+          },
+          "quanta": {
+            "4": 0.01
+          },
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "9fd686cd1a33421f"
+        },
+        "samples": [
+          34.377,
+          33.663,
+          33.699
+        ],
+        "min_seconds": 33.663,
+        "max_seconds": 34.377,
+        "relative_range": 0.0212
+      },
+      {
+        "name": "FQ2_top_corridors_window",
+        "display_name": "Top payment corridors by volume (last 30 days)",
+        "class": "filter_prune",
+        "elapsed_seconds": 6.605,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "d6527bef35623e64",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "107a484633719eed"
+        },
+        "samples": [
+          6.913,
+          6.435,
+          6.605
+        ],
+        "min_seconds": 6.435,
+        "max_seconds": 6.913,
+        "relative_range": 0.0723
+      },
+      {
+        "name": "FQ6_structuring_scan",
+        "display_name": "Structuring-band transaction detection (W2 shape)",
+        "class": "filter_prune",
+        "elapsed_seconds": 7.752,
+        "rows_returned": 500,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 6,
+          "exact": "498e59b5855f6bdc",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "2ccdecb01e28d59f"
+        },
+        "samples": [
+          9.31,
+          7.752,
+          7.548
+        ],
+        "min_seconds": 7.548,
+        "max_seconds": 9.31,
+        "relative_range": 0.2274
+      },
+      {
+        "name": "FQ3_entity_edge_risk",
+        "display_name": "Entity out-degree + volume via edges",
+        "class": "aggregation",
+        "elapsed_seconds": 11.857,
+        "rows_returned": 200,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 200,
+          "cols": 5,
+          "exact": "5413772725eaa7d6",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "28f44470df5baaa1"
+        },
+        "samples": [
+          13.489,
+          11.768,
+          11.857
+        ],
+        "min_seconds": 11.768,
+        "max_seconds": 13.489,
+        "relative_range": 0.1451
+      },
+      {
+        "name": "FQ7_cross_border_concentration",
+        "display_name": "Cross-border corridor concentration",
+        "class": "aggregation",
+        "elapsed_seconds": 19.212,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "9a18cac6897ba35f",
+          "approx": {
+            "4": 34.055
+          },
+          "approx_w": {
+            "4": 50.8938767218174
+          },
+          "quanta": {
+            "4": 0.001
+          },
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "4f37c61bf83df0c9"
+        },
+        "samples": [
+          20.176,
+          19.139,
+          19.212
+        ],
+        "min_seconds": 19.139,
+        "max_seconds": 20.176,
+        "relative_range": 0.0539
+      },
+      {
+        "name": "FQ4_running_balance_window",
+        "display_name": "Running balance for high-activity accounts",
+        "class": "analytics",
+        "elapsed_seconds": 72.727,
+        "rows_returned": 878356,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 878356,
+          "cols": 6,
+          "exact": "733b4f902a8ba2d2",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "d9f87e6c24db7193"
+        },
+        "samples": [
+          72.727,
+          76.907,
+          70.654
+        ],
+        "min_seconds": 70.654,
+        "max_seconds": 76.907,
+        "relative_range": 0.086
+      },
+      {
+        "name": "FQ5_alert_triage",
+        "display_name": "Alert triage by priority + rule",
+        "class": "operational",
+        "elapsed_seconds": 3.037,
+        "rows_returned": 17,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 17,
+          "cols": 6,
+          "exact": "a044bbfba0f18c59",
+          "approx": {
+            "5": 12.515
+          },
+          "approx_w": {
+            "5": 18.103286621133574
+          },
+          "quanta": {
+            "5": 0.001
+          },
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "84117932f136dd8e"
+        },
+        "samples": [
+          4.5,
+          2.99,
+          3.037
+        ],
+        "min_seconds": 2.99,
+        "max_seconds": 4.5,
+        "relative_range": 0.4971
+      },
+      {
+        "name": "FQ8_alert_to_entity_join",
+        "display_name": "Case investigation: alert -> entity -> recent txns",
+        "class": "operational",
+        "elapsed_seconds": 3.498,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "a60f1e877c4f7491",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "volatile": [
+            0
+          ],
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "b3144e32312bc677"
+        },
+        "samples": [
+          3.622,
+          3.498,
+          3.455
+        ],
+        "min_seconds": 3.455,
+        "max_seconds": 3.622,
+        "relative_range": 0.0475
+      },
+      {
+        "name": "IQ1_customer_360",
+        "display_name": "Investigator: customer 360 for the top open case",
+        "class": "investigator",
+        "elapsed_seconds": 2.801,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 18,
+          "exact": "4f88c8ef1c0f6546",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "aca51deb34223f62"
+        },
+        "samples": [
+          3.04,
+          2.801,
+          2.634
+        ],
+        "min_seconds": 2.634,
+        "max_seconds": 3.04,
+        "relative_range": 0.145
+      },
+      {
+        "name": "IQ2_case_activity_12m",
+        "display_name": "Investigator: 12-month activity review for the newest case",
+        "class": "investigator",
+        "elapsed_seconds": 7.791,
+        "rows_returned": 12,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 12,
+          "cols": 6,
+          "exact": "7a10ee3da64c6b3a",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "78a4d8c2f80a3c68"
+        },
+        "samples": [
+          8.229,
+          7.791,
+          7.787
+        ],
+        "min_seconds": 7.787,
+        "max_seconds": 8.229,
+        "relative_range": 0.0568
+      },
+      {
+        "name": "IQ3_counterparty_two_hop",
+        "display_name": "Investigator: counterparties and two-hop network of the oldest open case",
+        "class": "investigator",
+        "elapsed_seconds": 4.609,
+        "rows_returned": 500,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 8,
+          "exact": "78adc07539691ef7",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "39669d82bc39b64c"
+        },
+        "samples": [
+          5.05,
+          4.609,
+          4.46
+        ],
+        "min_seconds": 4.46,
+        "max_seconds": 5.05,
+        "relative_range": 0.1281
+      },
+      {
+        "name": "IQ4_open_cases_over_60_days",
+        "display_name": "Investigator: open cases older than 60 days",
+        "class": "investigator",
+        "elapsed_seconds": 2.395,
+        "rows_returned": 21,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 21,
+          "cols": 10,
+          "exact": "9d38be7d3a3755d1",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "spark-thrift",
+          "adapted_sql_sha": "c420aadbf6dfcf52"
+        },
+        "samples": [
+          2.415,
+          2.395,
+          2.251
+        ],
+        "min_seconds": 2.251,
+        "max_seconds": 2.415,
+        "relative_range": 0.0685
+      }
+    ],
+    "spread": {
+      "samples_per_query": 3,
+      "qph_low": 229.8,
+      "qph_high": 250.0,
+      "relative_range": 0.0866
+    }
+  },
+  "pipeline_benchmark": {
+    "run_id": "20260928-103055-de1772",
+    "deployment_name": "lb-silver-live-v17-aml-b",
+    "pipeline_mode": "batch",
+    "scale_factor": 1.0,
+    "start_time": "2026-09-28T16:30:55.556039+00:00",
+    "end_time": "2026-09-28T17:20:44.396483+00:00",
+    "success": true,
+    "scorecard": {
+      "time_to_value_seconds": 897.47,
+      "total_elapsed_seconds": 1099.29,
+      "total_data_processed_gb": 20.909,
+      "pipeline_throughput_gb_per_second": 0.0233,
+      "total_core_hours": 4.66,
+      "compute_efficiency_gb_per_core_hour": 4.4906,
+      "composite_qph": 245.5,
+      "scale_ratio": 1.009,
+      "benchmark_samples_per_query": 3,
+      "qph_spread": {
+        "low": 229.8,
+        "high": 250.0,
+        "relative_range": 0.0866
+      },
+      "maintenance_elapsed_seconds": 184.19,
+      "maintenance_pct_of_pipeline": 16.75,
+      "pre_compaction_file_count": 65,
+      "post_compaction_file_count": 65,
+      "compaction_ratio": 1.0,
+      "pre_compaction_qph": 177.9,
+      "post_compaction_qph": 245.5,
+      "maintenance_value_pct": null,
+      "maintenance_paired_queries": 0,
+      "maintenance_value_reason": "compaction changed no files (65 -> 65)",
+      "maintenance_settle_seconds": 102.2,
+      "maintenance_settled": true,
+      "maintenance_settle_capped": false,
+      "maintenance_settle_verified": true
+    },
+    "scores": {
+      "time_to_value_seconds": 897.47,
+      "total_elapsed_seconds": 1099.29,
+      "total_data_processed_gb": 20.909,
+      "pipeline_throughput_gb_per_second": 0.0233,
+      "total_core_hours": 4.66,
+      "compute_efficiency_gb_per_core_hour": 4.4906,
+      "composite_qph": 245.5,
+      "scale_ratio": 1.009,
+      "benchmark_samples_per_query": 3,
+      "qph_spread": {
+        "low": 229.8,
+        "high": 250.0,
+        "relative_range": 0.0866
+      },
+      "maintenance_elapsed_seconds": 184.19,
+      "maintenance_pct_of_pipeline": 16.75,
+      "pre_compaction_file_count": 65,
+      "post_compaction_file_count": 65,
+      "compaction_ratio": 1.0,
+      "pre_compaction_qph": 177.9,
+      "post_compaction_qph": 245.5,
+      "maintenance_value_pct": null,
+      "maintenance_paired_queries": 0,
+      "maintenance_value_reason": "compaction changed no files (65 -> 65)",
+      "maintenance_settle_seconds": 102.2,
+      "maintenance_settled": true,
+      "maintenance_settle_capped": false,
+      "maintenance_settle_verified": true
+    },
+    "stages": [
+      {
+        "stage_name": "datagen",
+        "stage_type": "datagen",
+        "engine": "datagen",
+        "elapsed_seconds": 30.330492,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0.0,
+        "input_size_gb": 0.0,
+        "output_size_gb": 8.489969822578132,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "bronze",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-28T16:31:28.270652+00:00",
+        "end_time": "2026-09-28T16:32:56.737387+00:00",
+        "elapsed_seconds": 88.412955,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 8.475,
+        "output_size_gb": 8.490828483365476,
+        "input_rows": 26671846,
+        "output_rows": 26671846,
+        "throughput_gb_per_second": 0.21955958549222795,
+        "throughput_rows_per_second": 690980.4663212436,
+        "executor_count": 4,
+        "executor_cores": 2,
+        "executor_memory_gb": 8.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-28T16:32:58.777007+00:00",
+        "end_time": "2026-09-28T16:36:17.737387+00:00",
+        "elapsed_seconds": 198.880369,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 8.475,
+        "output_size_gb": 8.10508855432272,
+        "input_rows": 26671846,
+        "output_rows": 26671846,
+        "throughput_gb_per_second": 0.05985169491525424,
+        "throughput_rows_per_second": 188360.4943502825,
+        "executor_count": 8,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "gold",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-28T16:36:19.997510+00:00",
+        "end_time": "2026-09-28T16:46:25.737387+00:00",
+        "elapsed_seconds": 605.679219,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 3.298,
+        "output_size_gb": 0.333282059058547,
+        "input_rows": 26671846,
+        "output_rows": 719433,
+        "throughput_gb_per_second": 0.005925260510240747,
+        "throughput_rows_per_second": 47919.23463887891,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "query",
+        "stage_type": "query",
+        "engine": "trino",
+        "elapsed_seconds": 175.983453548979,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0.0,
+        "input_size_gb": 0.6611561430618167,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 12,
+        "queries_per_hour": 245.47762376976394
+      }
+    ],
+    "stage_matrix": {
+      "datagen": {
+        "engine": "datagen",
+        "elapsed_seconds": 30.33,
+        "input_size_gb": 0.0,
+        "output_size_gb": 8.49,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "bronze": {
+        "engine": "spark",
+        "elapsed_seconds": 88.41,
+        "input_size_gb": 8.475,
+        "output_size_gb": 8.491,
+        "input_rows": 26671846,
+        "output_rows": 26671846,
+        "throughput_gb_per_second": 0.2196,
+        "throughput_rows_per_second": 690980.5,
+        "executor_count": 4,
+        "executor_cores": 2,
+        "executor_memory_gb": 8.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "silver": {
+        "engine": "spark",
+        "elapsed_seconds": 198.88,
+        "input_size_gb": 8.475,
+        "output_size_gb": 8.105,
+        "input_rows": 26671846,
+        "output_rows": 26671846,
+        "throughput_gb_per_second": 0.0599,
+        "throughput_rows_per_second": 188360.5,
+        "executor_count": 8,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "gold": {
+        "engine": "spark",
+        "elapsed_seconds": 605.68,
+        "input_size_gb": 3.298,
+        "output_size_gb": 0.333,
+        "input_rows": 26671846,
+        "output_rows": 719433,
+        "throughput_gb_per_second": 0.0059,
+        "throughput_rows_per_second": 47919.2,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "query": {
+        "engine": "trino",
+        "elapsed_seconds": 175.98,
+        "input_size_gb": 0.661,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 245.5,
+        "success": true
+      }
+    },
+    "bucket_sizes": {
+      "bronze_gb": 8.475,
+      "silver_gb": 8.105,
+      "gold_gb": 0.333
+    },
+    "config_snapshot": {
+      "name": "lb-silver-live-v17-aml-b",
+      "scale": 1.0,
+      "approx_bronze_gb": 8.4,
+      "processing_pattern": "medallion",
+      "s3": {
+        "endpoint": "http://10.0.1.50:80",
+        "buckets": {
+          "bronze": "scrubbed-bronze",
+          "silver": "scrubbed-silver",
+          "gold": "scrubbed-gold"
+        }
+      },
+      "scratch": {
+        "enabled": true,
+        "storage_class": "px-csi-scratch",
+        "size": "200Gi"
+      },
+      "spark": {
+        "driver": {
+          "cores": 2,
+          "memory": "2g"
+        },
+        "executor": {
+          "instances": 2,
+          "cores": 2,
+          "memory": "4g",
+          "memory_overhead": "1g"
+        },
+        "executor_overrides": {
+          "bronze": null,
+          "silver": null,
+          "gold": null,
+          "bronze_ingest": null,
+          "silver_stream": null,
+          "gold_refresh": null
+        }
+      },
+      "catalog": "polaris",
+      "table_format": "iceberg",
+      "pipeline_engine": "spark",
+      "query_engine": "spark-thrift",
+      "workload_schema": "financial",
+      "sustained": {
+        "bronze_trigger_interval": "30 seconds",
+        "silver_trigger_interval": "60 seconds",
+        "gold_refresh_interval": "5 minutes",
+        "run_duration": 1800,
+        "max_files_per_trigger": 1,
+        "bronze_target_file_size_mb": 512,
+        "silver_target_file_size_mb": 512,
+        "gold_target_file_size_mb": 128,
+        "benchmark_interval": 300,
+        "benchmark_warmup": 300
+      },
+      "datagen": {
+        "scale": 1.0,
+        "mode": "auto",
+        "parallelism": 2,
+        "file_size": "64mb"
+      },
+      "images": {
+        "datagen": "docker.io/sillidata/lb-datagen:b6f2905",
+        "spark": "apache/spark:4.0.2-python3",
+        "trino": "trinodb/trino:483"
+      },
+      "trino": {
+        "coordinator": {
+          "cpu": "1",
+          "memory": "4Gi"
+        },
+        "worker": {
+          "replicas": 1,
+          "cpu": "2",
+          "memory": "8Gi"
+        }
+      },
+      "benchmark": {
+        "mode": "power",
+        "streams": 4,
+        "cache": "hot",
+        "iterations": 3
+      },
+      "maintenance": {
+        "pre_benchmark_maintenance": true,
+        "retention_interval": null,
+        "retention_threshold": "30m",
+        "compaction_enabled": true,
+        "compaction_interval": null
+      },
+      "experiment_inputs": {
+        "workload": {
+          "name": "financial",
+          "version": "aml-1",
+          "generator_model_version": "datagen-v2-rs-0.3",
+          "parameters_id": "7f987bedd2c609d4",
+          "parameters": {
+            "tm_operations": {
+              "enabled": true,
+              "seed": 20260924,
+              "analyst_accuracy": 0.9,
+              "investigator_accuracy": 0.95,
+              "qa_sample_rate": 0.05,
+              "alert_sla_days": 60,
+              "case_lookback_months": 12,
+              "late_filing_rate": 0.03,
+              "no_suspect_rate": 0.05,
+              "max_alerts_per_customer": 50000,
+              "continuous_interval_seconds": 1800,
+              "counterparty_scenarios": [
+                "W1_connected_components",
+                "W3_round_tripping",
+                "W4_risk_propagation",
+                "W17_layering_chain"
+              ]
+            },
+            "w1_max_vertices": 8000000,
+            "retention_workload": true,
+            "retention_months": 60
+          }
+        },
+        "corpus": {
+          "schema": "financial",
+          "generator_image": "docker.io/sillidata/lb-datagen:b6f2905",
+          "seed": 43,
+          "corpus_role": null,
+          "robustness_perturbation": false,
+          "scale": 1.0,
+          "timestamp_start": "2024-01-01",
+          "timestamp_end": "2025-01-01",
+          "dirty_data_ratio": 0.08,
+          "id": "0f8cde1474494e6b"
+        },
+        "architecture": {
+          "recipe": "polaris-iceberg-spark-thrift",
+          "catalog": {
+            "type": "polaris",
+            "version": "apache/polaris:1.6.0"
+          },
+          "table_format": {
+            "type": "iceberg",
+            "version": "1.11.0"
+          },
+          "pipeline_engine": {
+            "type": "spark",
+            "image": "apache/spark:4.0.2-python3"
+          },
+          "query_engine": {
+            "type": "spark-thrift",
+            "version": "apache/spark:4.0.2-python3"
+          },
+          "query_access_path": "catalog"
+        },
+        "maintenance_config": {
+          "pre_benchmark_maintenance": true,
+          "compaction_enabled": true,
+          "settings": {
+            "retention_threshold": "2013d",
+            "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+          }
+        },
+        "mode": "batch",
+        "run_mode": "batch",
+        "support": {
+          "workload": "financial",
+          "mode": "batch",
+          "recipe": "polaris-iceberg-spark-thrift",
+          "state": "unverified",
+          "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+        },
+        "config_limits": {
+          "max_files_per_trigger": 1,
+          "benchmark_iterations": 3,
+          "w1_max_vertices": 8000000,
+          "tm_max_alerts_per_customer": 50000
+        }
+      }
+    },
+    "scale_ratio": 1.009,
+    "query_benchmark": {
+      "benchmark_type": "spark_thrift_query",
+      "engine": "spark-thrift",
+      "query_set_id": "qs12-4bd2d9416abb",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 245.5,
+      "total_seconds": 175.98,
+      "iterations": 3,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 33.699,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 1,
+            "cols": 5,
+            "exact": "0b462a228865c5c3",
+            "approx": {
+              "4": 13393.93
+            },
+            "approx_w": {
+              "4": 13983.790328358267
+            },
+            "quanta": {
+              "4": 0.01
+            },
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "9fd686cd1a33421f"
+          },
+          "samples": [
+            34.377,
+            33.663,
+            33.699
+          ],
+          "min_seconds": 33.663,
+          "max_seconds": 34.377,
+          "relative_range": 0.0212
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 6.605,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "d6527bef35623e64",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "107a484633719eed"
+          },
+          "samples": [
+            6.913,
+            6.435,
+            6.605
+          ],
+          "min_seconds": 6.435,
+          "max_seconds": 6.913,
+          "relative_range": 0.0723
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 7.752,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 500,
+            "cols": 6,
+            "exact": "498e59b5855f6bdc",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "2ccdecb01e28d59f"
+          },
+          "samples": [
+            9.31,
+            7.752,
+            7.548
+          ],
+          "min_seconds": 7.548,
+          "max_seconds": 9.31,
+          "relative_range": 0.2274
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 11.857,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 200,
+            "cols": 5,
+            "exact": "5413772725eaa7d6",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "28f44470df5baaa1"
+          },
+          "samples": [
+            13.489,
+            11.768,
+            11.857
+          ],
+          "min_seconds": 11.768,
+          "max_seconds": 13.489,
+          "relative_range": 0.1451
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 19.212,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "9a18cac6897ba35f",
+            "approx": {
+              "4": 34.055
+            },
+            "approx_w": {
+              "4": 50.8938767218174
+            },
+            "quanta": {
+              "4": 0.001
+            },
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "4f37c61bf83df0c9"
+          },
+          "samples": [
+            20.176,
+            19.139,
+            19.212
+          ],
+          "min_seconds": 19.139,
+          "max_seconds": 20.176,
+          "relative_range": 0.0539
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 72.727,
+          "rows_returned": 878356,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 878356,
+            "cols": 6,
+            "exact": "733b4f902a8ba2d2",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "d9f87e6c24db7193"
+          },
+          "samples": [
+            72.727,
+            76.907,
+            70.654
+          ],
+          "min_seconds": 70.654,
+          "max_seconds": 76.907,
+          "relative_range": 0.086
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 3.037,
+          "rows_returned": 17,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 17,
+            "cols": 6,
+            "exact": "a044bbfba0f18c59",
+            "approx": {
+              "5": 12.515
+            },
+            "approx_w": {
+              "5": 18.103286621133574
+            },
+            "quanta": {
+              "5": 0.001
+            },
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "84117932f136dd8e"
+          },
+          "samples": [
+            4.5,
+            2.99,
+            3.037
+          ],
+          "min_seconds": 2.99,
+          "max_seconds": 4.5,
+          "relative_range": 0.4971
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 3.498,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "a60f1e877c4f7491",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "volatile": [
+              0
+            ],
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "b3144e32312bc677"
+          },
+          "samples": [
+            3.622,
+            3.498,
+            3.455
+          ],
+          "min_seconds": 3.455,
+          "max_seconds": 3.622,
+          "relative_range": 0.0475
+        },
+        {
+          "name": "IQ1_customer_360",
+          "display_name": "Investigator: customer 360 for the top open case",
+          "class": "investigator",
+          "elapsed_seconds": 2.801,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 1,
+            "cols": 18,
+            "exact": "4f88c8ef1c0f6546",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "aca51deb34223f62"
+          },
+          "samples": [
+            3.04,
+            2.801,
+            2.634
+          ],
+          "min_seconds": 2.634,
+          "max_seconds": 3.04,
+          "relative_range": 0.145
+        },
+        {
+          "name": "IQ2_case_activity_12m",
+          "display_name": "Investigator: 12-month activity review for the newest case",
+          "class": "investigator",
+          "elapsed_seconds": 7.791,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 12,
+            "cols": 6,
+            "exact": "7a10ee3da64c6b3a",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "78a4d8c2f80a3c68"
+          },
+          "samples": [
+            8.229,
+            7.791,
+            7.787
+          ],
+          "min_seconds": 7.787,
+          "max_seconds": 8.229,
+          "relative_range": 0.0568
+        },
+        {
+          "name": "IQ3_counterparty_two_hop",
+          "display_name": "Investigator: counterparties and two-hop network of the oldest open case",
+          "class": "investigator",
+          "elapsed_seconds": 4.609,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 500,
+            "cols": 8,
+            "exact": "78adc07539691ef7",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "39669d82bc39b64c"
+          },
+          "samples": [
+            5.05,
+            4.609,
+            4.46
+          ],
+          "min_seconds": 4.46,
+          "max_seconds": 5.05,
+          "relative_range": 0.1281
+        },
+        {
+          "name": "IQ4_open_cases_over_60_days",
+          "display_name": "Investigator: open cases older than 60 days",
+          "class": "investigator",
+          "elapsed_seconds": 2.395,
+          "rows_returned": 21,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 21,
+            "cols": 10,
+            "exact": "9d38be7d3a3755d1",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "spark-thrift",
+            "adapted_sql_sha": "c420aadbf6dfcf52"
+          },
+          "samples": [
+            2.415,
+            2.395,
+            2.251
+          ],
+          "min_seconds": 2.251,
+          "max_seconds": 2.415,
+          "relative_range": 0.0685
+        }
+      ],
+      "spread": {
+        "samples_per_query": 3,
+        "qph_low": 229.8,
+        "qph_high": 250.0,
+        "relative_range": 0.0866
+      }
+    },
+    "pre_compaction_benchmark": {
+      "benchmark_type": "spark_thrift_query",
+      "engine": "spark-thrift",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 177.9,
+      "category_qph": {
+        "aggregation": 227.6,
+        "analytics": 52.8,
+        "filter_prune": 504.0,
+        "operational": 580.7,
+        "scan": 101.7
+      },
+      "total_seconds": 161.93,
+      "iterations": 3,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 35.383,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            35.792,
+            34.253,
+            35.383
+          ],
+          "min_seconds": 34.253,
+          "max_seconds": 35.792,
+          "relative_range": 0.0435
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 6.506,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            7.454,
+            6.506,
+            6.341
+          ],
+          "min_seconds": 6.341,
+          "max_seconds": 7.454,
+          "relative_range": 0.171
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 7.781,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            10.116,
+            7.781,
+            7.559
+          ],
+          "min_seconds": 7.559,
+          "max_seconds": 10.116,
+          "relative_range": 0.3286
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 12.545,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            14.94,
+            12.545,
+            11.982
+          ],
+          "min_seconds": 11.982,
+          "max_seconds": 14.94,
+          "relative_range": 0.2358
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 19.094,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            20.823,
+            19.077,
+            19.094
+          ],
+          "min_seconds": 19.077,
+          "max_seconds": 20.823,
+          "relative_range": 0.0914
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 68.221,
+          "rows_returned": 878356,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            70.808,
+            68.221,
+            68.025
+          ],
+          "min_seconds": 68.025,
+          "max_seconds": 70.808,
+          "relative_range": 0.0408
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 7.065,
+          "rows_returned": 17,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            7.26,
+            6.106,
+            7.065
+          ],
+          "min_seconds": 6.106,
+          "max_seconds": 7.26,
+          "relative_range": 0.1634
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 5.334,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            5.803,
+            5.327,
+            5.334
+          ],
+          "min_seconds": 5.327,
+          "max_seconds": 5.803,
+          "relative_range": 0.0891
+        }
+      ],
+      "spread": {
+        "samples_per_query": 3,
+        "qph_low": 166.5,
+        "qph_high": 181.5,
+        "relative_range": 0.0885
+      }
+    },
+    "maintenance_settle": {
+      "probe_query": "FQ1_txn_full_scan",
+      "settled": true,
+      "settle_seconds": 102.2,
+      "capped": false,
+      "max_seconds": 2700.0,
+      "tolerance_pct": 10.0,
+      "reference_seconds": 35.383,
+      "probes": [
+        {
+          "offset_seconds": 7.8,
+          "seconds": 34.829
+        },
+        {
+          "offset_seconds": 67.8,
+          "seconds": 34.417
+        }
+      ],
+      "reason": "",
+      "verified": true,
+      "reference_samples": [
+        35.792,
+        34.253,
+        35.383
+      ],
+      "reference_spread_pct": 2.3,
+      "effective_tolerance_pct": 10.0,
+      "trigger": "52 maintenance and compaction statements ran"
+    },
+    "score_descriptions": {
+      "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+      "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+      "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+      "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+      "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+      "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+      "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
+      "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
+      "maintenance_elapsed_seconds": "Total seconds spent on expire_snapshots + remove_orphan_files + compaction",
+      "maintenance_pct_of_pipeline": "Maintenance time as percentage of total pipeline time",
+      "pre_compaction_file_count": "Iceberg data files before rewrite_data_files / OPTIMIZE",
+      "post_compaction_file_count": "Iceberg data files after rewrite_data_files / OPTIMIZE",
+      "compaction_ratio": "pre/post file count ratio (higher = more compaction benefit)",
+      "pre_compaction_qph": "QpH measured before maintenance (on uncompacted data)",
+      "post_compaction_qph": "QpH measured after maintenance (on compacted data) -- the primary QpH score",
+      "maintenance_value_pct": "QpH change from maintenance over the queries that succeeded in both runs: (post - pre) / pre * 100; null when not measurable or within the within-round spread",
+      "maintenance_value_reason": "Why maintenance_value_pct is null: not measurable, one sample per query, or within noise",
+      "benchmark_samples_per_query": "Timed samples per query in the scored benchmark round (QpH uses the per-query median; 1 means no measured spread)",
+      "qph_spread": "QpH of the slowest and fastest round the per-query samples allow, and their relative range",
+      "maintenance_paired_queries": "Queries that succeeded before and after maintenance (the base of maintenance_value_pct)",
+      "maintenance_settle_seconds": "Seconds from maintenance end until a storage-bound probe query was stable, before the post-maintenance round; not counted in time_to_value",
+      "maintenance_settled": "True when the probe settled within the cap; false means the post round ran on unsettled storage and maintenance_value_pct is null",
+      "maintenance_settle_capped": "True when the settle wait reached benchmark.maintenance_settle.max_seconds",
+      "maintenance_settle_verified": "False when there was no pre-maintenance probe time (scale >= 50): the probes agreed with each other, which a slow plateau also does"
+    },
+    "advanced_metrics": null
+  },
+  "platform_metrics": {
+    "start_time": "2026-09-28T16:30:55.556039+00:00",
+    "end_time": "2026-09-28T17:20:44.396483+00:00",
+    "duration_seconds": 2988.840444,
+    "collection_window_seconds": 2988.840444,
+    "pods": [
+      {
+        "pod_name": "lakebench-bronze-verify-driver",
+        "component": "spark-driver",
+        "cpu_avg_cores": 2.308,
+        "cpu_max_cores": 3.279,
+        "memory_avg_bytes": 1854044842,
+        "memory_max_bytes": 3541549056
+      },
+      {
+        "pod_name": "lakebench-gold-finalize-driver",
+        "component": "spark-driver",
+        "cpu_avg_cores": 1.357,
+        "cpu_max_cores": 3.956,
+        "memory_avg_bytes": 8095426110,
+        "memory_max_bytes": 14072946688
+      },
+      {
+        "pod_name": "lakebench-polaris-7f449ffd4d-mwz2r",
+        "component": "polaris",
+        "cpu_avg_cores": 0.049,
+        "cpu_max_cores": 0.34,
+        "memory_avg_bytes": 1134650122,
+        "memory_max_bytes": 1214382080
+      },
+      {
+        "pod_name": "lakebench-postgres-0",
+        "component": "postgres",
+        "cpu_avg_cores": 0.051,
+        "cpu_max_cores": 0.065,
+        "memory_avg_bytes": 177684766,
+        "memory_max_bytes": 189743104
+      },
+      {
+        "pod_name": "lakebench-score-financial-driver",
+        "component": "spark-driver",
+        "cpu_avg_cores": 2.195,
+        "cpu_max_cores": 3.83,
+        "memory_avg_bytes": 3097267768,
+        "memory_max_bytes": 5339029504
+      },
+      {
+        "pod_name": "lakebench-silver-build-driver",
+        "component": "spark-driver",
+        "cpu_avg_cores": 1.684,
+        "cpu_max_cores": 3.722,
+        "memory_avg_bytes": 3880223350,
+        "memory_max_bytes": 5500952576
+      },
+      {
+        "pod_name": "lakebench-spark-thrift-6d6f56957f-tmct8",
+        "component": "spark-thrift",
+        "cpu_avg_cores": 3.817,
+        "cpu_max_cores": 7.876,
+        "memory_avg_bytes": 14553975562,
+        "memory_max_bytes": 27392425984
+      },
+      {
+        "pod_name": "lb-bronze-verify-financial-874b28a0e8dc0e36-exec-1",
+        "component": "spark-executor",
+        "cpu_avg_cores": 1.636,
+        "cpu_max_cores": 3.104,
+        "memory_avg_bytes": 3489875968,
+        "memory_max_bytes": 10528550912
+      },
+      {
+        "pod_name": "lb-bronze-verify-financial-874b28a0e8dc0e36-exec-2",
+        "component": "spark-executor",
+        "cpu_avg_cores": 1.457,
+        "cpu_max_cores": 2.627,
+        "memory_avg_bytes": 3896771925,
+        "memory_max_bytes": 13013213184
+      },
+      {
+        "pod_name": "lb-bronze-verify-financial-874b28a0e8dc0e36-exec-3",
+        "component": "spark-executor",
+        "cpu_avg_cores": 2.131,
+        "cpu_max_cores": 3.88,
+        "memory_avg_bytes": 2527453184,
+        "memory_max_bytes": 6671237120
+      },
+      {
+        "pod_name": "lb-bronze-verify-financial-874b28a0e8dc0e36-exec-4",
+        "component": "spark-executor",
+        "cpu_avg_cores": 1.61,
+        "cpu_max_cores": 3.152,
+        "memory_avg_bytes": 3688136021,
+        "memory_max_bytes": 10674630656
+      },
+      {
+        "pod_name": "lb-gold-finalize-financial-a2a3d2a0e8e09002-exec-1",
+        "component": "spark-executor",
+        "cpu_avg_cores": 10.084,
+        "cpu_max_cores": 15.672,
+        "memory_avg_bytes": 98086204620,
+        "memory_max_bytes": 119778615296
+      },
+      {
+        "pod_name": "lb-gold-finalize-financial-a2a3d2a0e8e09002-exec-2",
+        "component": "spark-executor",
+        "cpu_avg_cores": 10.42,
+        "cpu_max_cores": 14.276,
+        "memory_avg_bytes": 95896599976,
+        "memory_max_bytes": 130623725568
+      },
+      {
+        "pod_name": "lb-gold-finalize-financial-a2a3d2a0e8e09002-exec-3",
+        "component": "spark-executor",
+        "cpu_avg_cores": 10.483,
+        "cpu_max_cores": 14.76,
+        "memory_avg_bytes": 103017889177,
+        "memory_max_bytes": 133979750400
+      },
+      {
+        "pod_name": "lb-gold-finalize-financial-a2a3d2a0e8e09002-exec-4",
+        "component": "spark-executor",
+        "cpu_avg_cores": 10.607,
+        "cpu_max_cores": 14.547,
+        "memory_avg_bytes": 97511047782,
+        "memory_max_bytes": 126216749056
+      },
+      {
+        "pod_name": "lb-score-financial-0f893ea0e8e9dfc3-exec-1",
+        "component": "spark-executor",
+        "cpu_avg_cores": 5.091,
+        "cpu_max_cores": 10.17,
+        "memory_avg_bytes": 15541654869,
+        "memory_max_bytes": 42157334528
+      },
+      {
+        "pod_name": "lb-score-financial-0f893ea0e8e9dfc3-exec-2",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.21,
+        "cpu_max_cores": 13.735,
+        "memory_avg_bytes": 22521753600,
+        "memory_max_bytes": 55988576256
+      },
+      {
+        "pod_name": "lb-silver-build-financial-c0c163a0e8dd8083-exec-1",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.298,
+        "cpu_max_cores": 12.161,
+        "memory_avg_bytes": 69543546880,
+        "memory_max_bytes": 149524004864
+      },
+      {
+        "pod_name": "lb-silver-build-financial-c0c163a0e8dd8083-exec-2",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.347,
+        "cpu_max_cores": 12.941,
+        "memory_avg_bytes": 66209486848,
+        "memory_max_bytes": 149907652608
+      },
+      {
+        "pod_name": "lb-silver-build-financial-c0c163a0e8dd8083-exec-3",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.402,
+        "cpu_max_cores": 12.048,
+        "memory_avg_bytes": 68938504192,
+        "memory_max_bytes": 148606787584
+      },
+      {
+        "pod_name": "lb-silver-build-financial-c0c163a0e8dd8083-exec-4",
+        "component": "spark-executor",
+        "cpu_avg_cores": 8.139,
+        "cpu_max_cores": 13.349,
+        "memory_avg_bytes": 76958640128,
+        "memory_max_bytes": 151979433984
+      },
+      {
+        "pod_name": "lb-silver-build-financial-c0c163a0e8dd8083-exec-5",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.143,
+        "cpu_max_cores": 12.318,
+        "memory_avg_bytes": 68332020053,
+        "memory_max_bytes": 151697735680
+      },
+      {
+        "pod_name": "lb-silver-build-financial-c0c163a0e8dd8083-exec-6",
+        "component": "spark-executor",
+        "cpu_avg_cores": 8.421,
+        "cpu_max_cores": 13.262,
+        "memory_avg_bytes": 68321652053,
+        "memory_max_bytes": 149727322112
+      },
+      {
+        "pod_name": "lb-silver-build-financial-c0c163a0e8dd8083-exec-7",
+        "component": "spark-executor",
+        "cpu_avg_cores": 8.445,
+        "cpu_max_cores": 13.659,
+        "memory_avg_bytes": 71211591680,
+        "memory_max_bytes": 149586182144
+      },
+      {
+        "pod_name": "lb-silver-build-financial-c0c163a0e8dd8083-exec-8",
+        "component": "spark-executor",
+        "cpu_avg_cores": 7.743,
+        "cpu_max_cores": 12.436,
+        "memory_avg_bytes": 68726462464,
+        "memory_max_bytes": 151499309056
+      },
+      {
+        "pod_name": "lakebench-datagen-0-kjkxq",
+        "component": "datagen",
+        "cpu_avg_cores": 0.0,
+        "cpu_max_cores": 0.0,
+        "memory_avg_bytes": 3462713344,
+        "memory_max_bytes": 6925426688
+      },
+      {
+        "pod_name": "lakebench-datagen-1-6wsr6",
+        "component": "datagen",
+        "cpu_avg_cores": 0.0,
+        "cpu_max_cores": 0.0,
+        "memory_avg_bytes": 3372605440,
+        "memory_max_bytes": 6745210880
+      }
+    ],
+    "s3_requests_total": 0,
+    "s3_errors_total": 0,
+    "s3_avg_latency_ms": 0.0,
+    "engine": null,
+    "collection_error": null
+  },
+  "financial_scoring": {
+    "typology_counts": {
+      "scored": 8,
+      "partial": 0,
+      "no_rule": 8,
+      "rule_skipped": 1,
+      "rule_error": 0
+    },
+    "rules": [
+      {
+        "rule_id": "W17_layering_chain",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "stack",
+        "alert_count": 46228
+      },
+      {
+        "rule_id": "W1_connected_components",
+        "status": "skipped",
+        "reason": "giant-component",
+        "target_typology": "gather_scatter",
+        "alert_count": null
+      },
+      {
+        "rule_id": "W2_structuring",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "micro_structuring",
+        "alert_count": 2353
+      },
+      {
+        "rule_id": "W3_round_tripping",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "cycle",
+        "alert_count": 1620
+      },
+      {
+        "rule_id": "W4_risk_propagation",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "rapid_layering",
+        "alert_count": 98765
+      },
+      {
+        "rule_id": "W5_sanctions_match",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "sanctions_match",
+        "alert_count": 126
+      },
+      {
+        "rule_id": "W6_pep_counterparty",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "pep_match",
+        "alert_count": 2011
+      },
+      {
+        "rule_id": "W7_cross_border_high_risk",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "corridor_high_risk",
+        "alert_count": 509768
+      },
+      {
+        "rule_id": "W8_dormant_reactivation",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "dormant_reactivation",
+        "alert_count": 58562
+      }
+    ],
+    "total_alerts": 719433,
+    "fp_alerts": 709589,
+    "fp_rate": 0.9863170024171813,
+    "fp_rate_by_rule": {
+      "W3_round_tripping": 0.7259259259259259,
+      "W17_layering_chain": 0.9897681059098382,
+      "W8_dormant_reactivation": 0.9974044602301834,
+      "W6_pep_counterparty": 0.9517652909000497,
+      "W7_cross_border_high_risk": 0.9971849939580358,
+      "W5_sanctions_match": 0.6111111111111112,
+      "W2_structuring": 0.996600084997875,
+      "W4_risk_propagation": 0.9934794714726877
+    },
+    "txn_precision_by_rule": {
+      "W3_round_tripping": 0.27942101950912523,
+      "W17_layering_chain": 0.012849732238985445,
+      "W8_dormant_reactivation": 0.0025955397698166046,
+      "W6_pep_counterparty": 0.04823470909995027,
+      "W7_cross_border_high_risk": 0.0028150060419641874,
+      "W5_sanctions_match": 0.28431372549019607,
+      "W2_structuring": 0.003486120077469335,
+      "W4_risk_propagation": 0.0004287743149740181
+    },
+    "chance_by_rule": {
+      "W17_layering_chain": 0.00281214848143982,
+      "W8_dormant_reactivation": 0.0686164229471316,
+      "W7_cross_border_high_risk": 0.0421822272215973,
+      "W4_risk_propagation": 0.07761529808773904
+    },
+    "random_control_floor": 0.1766029246344207,
+    "run_id": "20260928-103055-de1772-c1",
+    "subject_customer_check": {
+      "status": "ok",
+      "subjects": 7300,
+      "unmapped": 0,
+      "not_customer": 0,
+      "failing_typologies": [],
+      "unresolved_typologies": [],
+      "by_typology": {
+        "bipartite": {
+          "subjects": 111,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "cycle": {
+          "subjects": 444,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "fan_in": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "fan_out": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "gather_scatter": {
+          "subjects": 222,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "random": {
+          "subjects": 1778,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "scatter_gather": {
+          "subjects": 178,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "stack": {
+          "subjects": 444,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "synthetic_identity": {
+          "subjects": 593,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "corridor_high_risk": {
+          "subjects": 594,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "cross_border_cycle": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "dormant_reactivation": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "micro_structuring": {
+          "subjects": 222,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "rapid_layering": {
+          "subjects": 889,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "tbml_repeated_invoice": {
+          "subjects": 296,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "pep_match": {
+          "subjects": 65,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "sanctions_match": {
+          "subjects": 40,
+          "unmapped": 0,
+          "not_customer": 0
+        }
+      }
+    },
+    "typologies": [
+      {
+        "typology_type": "bipartite",
+        "workload_category": "W1_synthetic_id",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.7387387387387387,
+        "instance_count": 111,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "corridor_high_risk",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W7_cross_border_high_risk",
+        "recall": 0.8013468013468014,
+        "incidental_recall": 0.8484848484848485,
+        "instance_count": 594,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "cross_border_cycle",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 1.0,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "cycle",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W3_round_tripping",
+        "recall": 1.0,
+        "incidental_recall": 1.0,
+        "instance_count": 444,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "dormant_reactivation",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W8_dormant_reactivation",
+        "recall": 0.398876404494382,
+        "incidental_recall": 0.5646067415730337,
+        "instance_count": 356,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "fan_in",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.4157303370786517,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "fan_out",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.40168539325842695,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "gather_scatter",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W1_connected_components",
+        "recall": null,
+        "incidental_recall": 0.6171171171171171,
+        "instance_count": 222,
+        "detection_status": "rule_skipped",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "micro_structuring",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W2_structuring",
+        "recall": 0.036036036036036036,
+        "incidental_recall": 0.6576576576576577,
+        "instance_count": 222,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "pep_match",
+        "workload_category": "W6_pep",
+        "designated_rules": "W6_pep_counterparty",
+        "recall": 0.7076923076923077,
+        "incidental_recall": 0.8,
+        "instance_count": 65,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "random",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.1766029246344207,
+        "instance_count": 1778,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "rapid_layering",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W4_risk_propagation",
+        "recall": 0.6816647919010124,
+        "incidental_recall": 0.7300337457817773,
+        "instance_count": 889,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "sanctions_match",
+        "workload_category": "W5_sanctions",
+        "designated_rules": "W5_sanctions_match",
+        "recall": 0.725,
+        "incidental_recall": 0.8,
+        "instance_count": 40,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "scatter_gather",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.7303370786516854,
+        "instance_count": 178,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "stack",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W17_layering_chain",
+        "recall": 0.9977477477477478,
+        "incidental_recall": 0.9977477477477478,
+        "instance_count": 444,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "synthetic_identity",
+        "workload_category": "W1_synthetic_id",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.3642495784148398,
+        "instance_count": 593,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "tbml_repeated_invoice",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.38175675675675674,
+        "instance_count": 296,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      }
+    ],
+    "computed_by": "lb-score-financial"
+  },
+  "tm_operations": {
+    "status": "pass",
+    "reason": "",
+    "problems": [],
+    "cycles_ran": [
+      1
+    ],
+    "cycles_not_run": [],
+    "invariants": {
+      "1": {
+        "monitored_population": {
+          "status": "pass",
+          "detail": "55733 customers of the reporting FI, 20030443 monitored payments"
+        },
+        "reconciliation": {
+          "status": "pass",
+          "detail": "monitored 20030443 + excluded 6641403 = 26671846 vs source 26671846"
+        },
+        "every_alert_dispositioned": {
+          "status": "pass",
+          "detail": "alerts 719433, disposition rows for them 719433"
+        },
+        "one_row_per_alert_identity": {
+          "status": "pass",
+          "detail": "719433 disposition rows, 719433 distinct alert identities"
+        },
+        "no_null_disposition": {
+          "status": "pass",
+          "detail": "0 disposition rows with no disposition"
+        },
+        "noncustomer_alerts_declared": {
+          "status": "pass",
+          "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72405 non-customer alerts in all)"
+        },
+        "escalated_le_alerts": {
+          "status": "pass",
+          "detail": "escalated 60050 <= customer alerts 647028"
+        },
+        "cases_le_escalated": {
+          "status": "pass",
+          "detail": "alert-driven cases 60050 <= escalated 60050"
+        },
+        "sars_le_cases": {
+          "status": "pass",
+          "detail": "SARs 7662 <= cases 66777"
+        },
+        "one_open_case_per_customer": {
+          "status": "pass",
+          "detail": "most open cases on one customer: 1"
+        },
+        "funnel_monotone": {
+          "status": "pass",
+          "detail": "payments 26671846 >= monitored 20030443 >= alerts 647028 >= escalated 60050 >= cases 60050 >= sars 7220"
+        },
+        "continuing_review_fires": {
+          "status": "pass",
+          "detail": "0 SARs past their 90-day review date with no review (7039 due, 0 deferred behind a case waiting to file)"
+        },
+        "review_not_folded_into_determined": {
+          "status": "pass",
+          "detail": "0 reviews credited to a case already determined before the review was due"
+        }
+      }
+    },
+    "ops": {
+      "alert_aging_open": {
+        "0-30": 11555,
+        "31-60": 603,
+        "61-90": 7,
+        "90+": 0
+      },
+      "alert_sla_breaches": 5693,
+      "alerts_by_disposition": {
+        "attached": 79152,
+        "closed_nfa": 498961,
+        "escalated": 60050,
+        "out_of_scope": 72405,
+        "pending_l1": 8865
+      },
+      "alerts_by_priority": {
+        "critical": 202709,
+        "high": 255569,
+        "low": 26367,
+        "medium": 162383
+      },
+      "alerts_noncustomer_undeclared": 0,
+      "alerts_out_of_scope": 72405,
+      "alerts_over_capacity": 0,
+      "alerts_total": 719433,
+      "alerts_withdrawn_carried": 0,
+      "as_of_date": "2026-01-01",
+      "cases_by_status": {
+        "closed": 64932,
+        "open": 1758,
+        "pending_filing": 87
+      },
+      "cases_by_type": {
+        "alert_escalation": 60050,
+        "continuing_activity": 6727
+      },
+      "continuing_reviews_deferred": 0,
+      "continuing_reviews_due": 7039,
+      "continuing_reviews_folded": 285,
+      "continuing_reviews_opened": 6727,
+      "continuing_reviews_superseded": 27,
+      "continuing_sars_over_120_days": 9,
+      "cycle": 1,
+      "elapsed_seconds": 43.4,
+      "filed_late": 219,
+      "filed_over_30_days_pct": 0.049986948577394934,
+      "filing_days_median": 15,
+      "filing_days_p95": 30,
+      "funnel": {
+        "alerts": 647028,
+        "cases": 60050,
+        "escalated": 60050,
+        "monitored": 20030443,
+        "payments": 26671846,
+        "sars": 7220
+      },
+      "invariants": {
+        "cases_le_escalated": {
+          "detail": "alert-driven cases 60050 <= escalated 60050",
+          "status": "pass"
+        },
+        "continuing_review_fires": {
+          "detail": "0 SARs past their 90-day review date with no review (7039 due, 0 deferred behind a case waiting to file)",
+          "status": "pass"
+        },
+        "escalated_le_alerts": {
+          "detail": "escalated 60050 <= customer alerts 647028",
+          "status": "pass"
+        },
+        "every_alert_dispositioned": {
+          "detail": "alerts 719433, disposition rows for them 719433",
+          "status": "pass"
+        },
+        "funnel_monotone": {
+          "detail": "payments 26671846 >= monitored 20030443 >= alerts 647028 >= escalated 60050 >= cases 60050 >= sars 7220",
+          "status": "pass"
+        },
+        "monitored_population": {
+          "detail": "55733 customers of the reporting FI, 20030443 monitored payments",
+          "status": "pass"
+        },
+        "no_null_disposition": {
+          "detail": "0 disposition rows with no disposition",
+          "status": "pass"
+        },
+        "noncustomer_alerts_declared": {
+          "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72405 non-customer alerts in all)",
+          "status": "pass"
+        },
+        "one_open_case_per_customer": {
+          "detail": "most open cases on one customer: 1",
+          "status": "pass"
+        },
+        "one_row_per_alert_identity": {
+          "detail": "719433 disposition rows, 719433 distinct alert identities",
+          "status": "pass"
+        },
+        "reconciliation": {
+          "detail": "monitored 20030443 + excluded 6641403 = 26671846 vs source 26671846",
+          "status": "pass"
+        },
+        "review_not_folded_into_determined": {
+          "detail": "0 reviews credited to a case already determined before the review was due",
+          "status": "pass"
+        },
+        "sars_le_cases": {
+          "detail": "SARs 7662 <= cases 66777",
+          "status": "pass"
+        }
+      },
+      "l1_decided": 559011,
+      "l1_escalation_rate": 0.1074218575305316,
+      "open_cases": 1845,
+      "open_cases_over_60_days": 21,
+      "qa_disagreement_rate": 0.1410752993852386,
+      "qa_sample": 28141,
+      "reconciliation": {
+        "completeness.bronze": 26671846,
+        "completeness.customers": 55733,
+        "completeness.excluded": 6641403,
+        "completeness.monitored": 20030443,
+        "completeness.silver": 26671846,
+        "completeness.source": 26671846,
+        "dq.dq_missing_agent_bic": 0,
+        "dq.dq_nonpositive_amount": 0,
+        "dq.dq_self_transfer": 0,
+        "dq.dq_unconvertible_currency": 0,
+        "exclusion.dq_unconvertible_currency": 0,
+        "exclusion.no_customer_party": 6641403,
+        "funnel.alerts": 647028,
+        "funnel.alerts_noncustomer_undeclared": 0,
+        "funnel.alerts_out_of_scope": 72405,
+        "funnel.cases": 60050,
+        "funnel.continuing_review_cases": 6727,
+        "funnel.continuing_sars": 442,
+        "funnel.escalated": 60050,
+        "funnel.sars": 7220
+      },
+      "sars_by_limit": {
+        "120_day_continuing": {
+          "filed": 442,
+          "late": 9
+        },
+        "30_day": {
+          "filed": 6858,
+          "late": 197
+        },
+        "60_day_no_suspect": {
+          "filed": 362,
+          "late": 13
+        }
+      },
+      "sars_filed": 7662,
+      "sars_no_suspect": 362,
+      "scenarios": {
+        "W17_layering_chain": {
+          "alerts": 23361,
+          "escalated": 2655,
+          "productive_rate": 0.1287670053383847,
+          "sar_conversion": 0.047857540345019475
+        },
+        "W2_structuring": {
+          "alerts": 2353,
+          "escalated": 163,
+          "productive_rate": 0.09792924935289042,
+          "sar_conversion": 0.03612409689757756
+        },
+        "W3_round_tripping": {
+          "alerts": 1199,
+          "escalated": 527,
+          "productive_rate": 0.6390977443609023,
+          "sar_conversion": 0.5963302752293578
+        },
+        "W4_risk_propagation": {
+          "alerts": 49648,
+          "escalated": 5647,
+          "productive_rate": 0.1270997437600835,
+          "sar_conversion": 0.040545439896873994
+        },
+        "W5_sanctions_match": {
+          "alerts": 126,
+          "escalated": 46,
+          "productive_rate": 0.4426229508196721,
+          "sar_conversion": 0.3333333333333333
+        },
+        "W6_pep_counterparty": {
+          "alerts": 2011,
+          "escalated": 234,
+          "productive_rate": 0.13330004992511232,
+          "sar_conversion": 0.057682744903033316
+        },
+        "W7_cross_border_high_risk": {
+          "alerts": 509768,
+          "escalated": 44440,
+          "productive_rate": 0.09932575741103497,
+          "sar_conversion": 0.019530453068847004
+        },
+        "W8_dormant_reactivation": {
+          "alerts": 58562,
+          "escalated": 6338,
+          "productive_rate": 0.10991267732026369,
+          "sar_conversion": 0.0181346265496397
+        }
+      },
+      "simulation": {
+        "alert_sla_days": 60,
+        "analyst_accuracy": 0.9,
+        "continuous_interval_seconds": 1800,
+        "counterparty_scenarios": [
+          "W1_connected_components",
+          "W3_round_tripping",
+          "W4_risk_propagation",
+          "W17_layering_chain"
+        ],
+        "enabled": true,
+        "investigator_accuracy": 0.95,
+        "late_filing_rate": 0.03,
+        "lookback_months": 12,
+        "max_alerts_per_customer": 50000,
+        "no_suspect_rate": 0.05,
+        "note": "dispositions simulated from datagen ground truth",
+        "qa_sample_rate": 0.05,
+        "seed": 20260924
+      }
+    },
+    "mode": "batch"
+  }
+}
