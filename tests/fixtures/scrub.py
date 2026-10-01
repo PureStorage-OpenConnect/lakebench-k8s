@@ -84,7 +84,7 @@ from pathlib import Path
 from typing import Any
 
 #: Bump when a rule changes; recorded in tests/fixtures/records/MANIFEST.json.
-SCRUBBER_VERSION = 8
+SCRUBBER_VERSION = 9
 
 #: The documented placeholder host for the lab S3 address.
 PLACEHOLDER_HOST = "10.0.1.50"
@@ -133,17 +133,23 @@ _URL = re.compile(
 #: any credential-named key and separator, the next token must be a
 #: placeholder, a YAML key or nothing, or the text is refused.
 _ASSIGN_KEY = re.compile(
-    r"""(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)\\?["']?[ \t]*[:=][ \t]*(\\?["']|)"""
+    r"""(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)\\*["']?[ \t]*(?::=|=>|[:=])[ \t]*"""
 )
+#: ``--password X`` style arguments.
+_FLAG_KEY = re.compile(r"(?<![A-Za-z0-9_.-])--?([A-Za-z0-9_.-]+)[ \t]+(?=\S)")
+#: YAML tags and anchors before a value (``!!str``, ``&a``).
+_YAML_PROPS = re.compile(r"(?:(?:!!?[A-Za-z0-9_-]*|&[A-Za-z0-9_-]+)[ \t]+)*")
+_QUOTE = re.compile(r"""\\*["']""")
 _PLACEHOLDER = re.compile(r"\$\{[A-Za-z0-9_]+\}")
 _NL = r"\r?\n"
+#: Nothing left on the line but an optional ``# comment`` (or a shell
+#: continuation backslash): the value, if any, is on the next line.
+_LINE_END = re.compile(rf"[ \t]*(?:#(?:[ \t][^\r\n]*)?|\\)?[ \t]*(?={_NL}|$)")
 _NEXT_LINE = re.compile(rf"(?:[ \t]*{_NL})+([ \t]+)(\S[^\r\n]*)")
 _BLOCK_INDICATOR = re.compile(rf"[|>][0-9]?[-+]?[0-9]?[ \t]*(?:#[^\r\n]*)?(?={_NL})")
 _YAML_KEY = re.compile(r"""["']?[A-Za-z0-9_.-]+["']?:(?=[ \t]|\r?\n|$)""")
-#: ``--password X`` and ``Authorization: Basic X`` style arguments.
-_FLAG_KEY = re.compile(r"(?<![A-Za-z0-9_.-])--?([A-Za-z0-9_.-]+)[ \t]+(?=\S)")
-#: What may sit between a key's separator and its value in the backstop.
-_SEPARATOR_JUNK = re.compile(r"""(?:[\s"'\\|>+-]|#[^\r\n]*)*""")
+_WORD = re.compile(r"\S*")
+_ALNUM = re.compile(r"[A-Za-z0-9]")
 
 #: Value patterns that are credentials wherever they appear (the formats
 #: .gitleaks.toml adds, including its k8s-inline-env rule, plus the AWS key
@@ -197,13 +203,17 @@ def _is_cred_key(key: str | None) -> bool:
 
 def _quoted_end(text: str, i: int, quote: str) -> int:
     """End (exclusive, before the closing quote) of a quoted body that starts
-    at *i*. *quote* is ``"``, ``'`` or a JSON-escaped ``\\"``; a backslash
-    escape inside a plain quote is stepped over. Stops at a line end."""
+    at *i*. *quote* is ``"``, ``'`` or a backslash-escaped form; inside a
+    plain quote a backslash escape and YAML's doubled ``''`` are stepped
+    over. Stops at a line end."""
     n = len(text)
     while i < n and text[i] not in "\r\n":
-        if text.startswith(quote, i):
+        if len(quote) == 1 and text.startswith(quote * 2, i) and quote == "'":
+            i += 2
+        elif text.startswith(quote, i):
             return i
-        i += 2 if (text[i] == "\\" and len(quote) == 1) else 1
+        else:
+            i += 2 if (text[i] == "\\" and len(quote) == 1) else 1
     return min(i, n)
 
 
@@ -236,67 +246,83 @@ def _following_lines(text: str, pos: int, block: bool) -> tuple[int, int] | None
         end = more.end(2)
 
 
+def _value_span(text: str, pos: int) -> tuple[int, int] | None:
+    """The value after a credential key's separator at *pos*."""
+    pos = _YAML_PROPS.match(text, pos).end()  # type: ignore[union-attr]
+    quote = _QUOTE.match(text, pos)
+    if quote:
+        return quote.end(), _quoted_end(text, quote.end(), quote.group(0))
+    block = _BLOCK_INDICATOR.match(text, pos)
+    if block:
+        return _following_lines(text, block.end(), block=True)
+    eol = _LINE_END.match(text, pos)
+    if eol:
+        return _following_lines(text, eol.end(), block=False)
+    return pos, _unquoted_end(text, pos)
+
+
 def _text_credentials(text: str) -> list[tuple[int, int, str]]:
     """(start, end, key) of each credential value assigned inside *text*
     that is not already a placeholder; spans never overlap."""
     found: list[tuple[int, int, str]] = []
     taken = 0  # end of the last value: a key inside a value is not a key
-    for m in _ASSIGN_KEY.finditer(text):
-        if m.start() < taken or not _is_cred_key(m.group(1)):
+    keys = [(m, m.group(1)) for m in _ASSIGN_KEY.finditer(text)]
+    keys += [(m, m.group(1)) for m in _FLAG_KEY.finditer(text)]
+    for m, key in sorted(keys, key=lambda mk: mk[0].start()):
+        if m.start() < taken or not _is_cred_key(key):
             continue
-        start, quote = m.end(), m.group(2)
-        span: tuple[int, int] | None
-        if quote:
-            span = (start, _quoted_end(text, start, quote))
-        else:
-            block = _BLOCK_INDICATOR.match(text, start)
-            if block:
-                span = _following_lines(text, block.end(), block=True)
-            elif start >= len(text) or text[start] in "\r\n":
-                span = _following_lines(text, start, block=False)
-            else:
-                span = (start, _unquoted_end(text, start))
+        span = _value_span(text, m.end())
         if span is None:
             continue
         value = text[span[0] : span[1]]
         if value and not _PLACEHOLDER.fullmatch(value):
-            found.append((span[0], span[1], m.group(1)))
+            found.append((span[0], span[1], key))
             taken = span[1]
-    for m in _FLAG_KEY.finditer(text):
-        if m.start() < taken or not _is_cred_key(m.group(1)):
-            continue
-        end = _unquoted_end(text, m.end())
-        if not _PLACEHOLDER.fullmatch(text[m.end() : end]):
-            found.append((m.end(), end, m.group(1)))
-    return sorted(found)
+    return found
 
 
 def _replace_text_credentials(text: str) -> str:
     out, pos = [], 0
     for start, end, key in _text_credentials(text):
-        if start < pos:
-            continue
         out += [text[pos:start], _credential_placeholder(key)]
         pos = end
     out.append(text[pos:])
     return "".join(out)
 
 
+def _bare(token: str) -> bool:
+    """*token*, placeholders removed, holds no letter or digit."""
+    return not _ALNUM.search(_PLACEHOLDER.sub("", token))
+
+
 def _unreplaced_text_credentials(text: str) -> bool:
-    """The fail-closed backstop: a credential-named key with a separator
-    whose next token is not a placeholder, a YAML key or nothing."""
+    """The fail-closed backstop. After a credential-named key and separator,
+    the first token on the line, placeholders removed, must hold no letter
+    or digit. When the line holds nothing else (or only a comment, a
+    continuation, a block indicator), the first token of an indented next
+    line must be a placeholder or a YAML key. Anything else refuses."""
     if _text_credentials(text):
         return True
-    for m in _ASSIGN_KEY.finditer(text):
-        if not _is_cred_key(m.group(1)):
+    seen = 0
+    keys = [(m, m.group(1)) for m in _ASSIGN_KEY.finditer(text)]
+    keys += [(m, m.group(1)) for m in _FLAG_KEY.finditer(text)]
+    for m, key in sorted(keys, key=lambda mk: mk[0].start()):
+        if m.start() < seen or not _is_cred_key(key):
             continue
-        rest = _SEPARATOR_JUNK.match(text, m.end() - len(m.group(2)))
-        nxt = rest.end() if rest else m.end()
-        if nxt >= len(text) or _PLACEHOLDER.match(text, nxt) or _YAML_KEY.match(text, nxt):
+        pos = _YAML_PROPS.match(text, m.end()).end()  # type: ignore[union-attr]
+        token = _WORD.match(text, pos).group(0)  # type: ignore[union-attr]
+        seen = pos + len(token)
+        if _PLACEHOLDER.search(token):
+            if not _bare(token):
+                return True
             continue
-        if text[nxt] in ",;}])":
-            continue  # an empty value: password=, or {"password": ""}
-        return True
+        line_end = _LINE_END.match(text, pos)  # nothing but a comment or "\\"
+        if not line_end and not _bare(token):
+            return True
+        # The value, if any, is on the next indented line.
+        nxt = _NEXT_LINE.match(text, line_end.end() if line_end else seen)
+        if nxt and not _YAML_KEY.match(nxt.group(2)) and not _bare(nxt.group(2).split()[0]):
+            return True
     return False
 
 

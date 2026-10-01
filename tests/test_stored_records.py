@@ -832,3 +832,57 @@ def test_many_text_credentials_scrub_in_linear_time() -> None:
     out = scrub.scrub_text(text)
     assert time.monotonic() - t0 < 5.0
     assert out.count("${LAKEBENCH_CREDENTIAL}") == 50_000
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password => 'hunter2'",
+        "password := hunter2",
+        "password:= hunter2",
+        "password: !!str hunter2",
+        "password: &a hunter2",
+        "password: # c\n  hunter2",
+        "--secret-key \\\n    hunter2",
+        'password="${X}"hunter2',
+        "password: 'it''s-hunter2'",
+        '\\"password\\": \\"ab\\\\\\"cd-hunter2\\"',
+        '{\\\\\\"password\\\\\\": \\\\\\"hunter2\\\\\\"}',
+    ],
+)
+def test_fifth_pass_text_shapes_leave_no_secret(text: str) -> None:
+    """Final pass: a prefix replaced with the secret kept behind it, a quote
+    ended early, or a doubly escaped key. Scrubbed away or refused."""
+    try:
+        out = scrub.scrub_text(text)
+    except scrub.ScrubError:
+        return
+    assert "hunter2" not in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Missing credentials:\nRetrying in 5s",
+        "ERROR: invalid token:\nsee docs",
+        "secret: \n\nfoo",
+        "secret not found",
+        "token budget exceeded",
+        "password_policy=strict",
+        "Invalid password: authentication failed",
+        'cfg {"password": ""}',
+        "credentials:\n  user: x",
+    ],
+)
+def test_prose_is_not_refused(text: str) -> None:
+    scrub.scrub_text(text)
+
+
+def test_many_empty_quoted_keys_scrub_in_linear_time() -> None:
+    import contextlib
+    import time
+
+    t0 = time.monotonic()
+    with contextlib.suppress(scrub.ScrubError):
+        scrub.scrub_text("password: ''#" * 8000)
+    assert time.monotonic() - t0 < 2.0
