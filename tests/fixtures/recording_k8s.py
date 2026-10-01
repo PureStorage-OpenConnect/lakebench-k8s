@@ -1042,7 +1042,18 @@ class _FakePopen:
         return cls
 
     def __init__(self, recorder: K8sRecorder, args: Any, kwargs: dict[str, Any]) -> None:
-        result = recorder._run_command(args, kwargs, popen=True)
+        self._recorder = recorder
+        self._first = len(recorder.calls)
+        # A scripted TimeoutExpired means "did not finish in time": the
+        # process starts, and communicate(timeout=...) raises it once.
+        self._pending: BaseException | None = None
+        try:
+            result = recorder._run_command(args, kwargs, popen=True)
+        except subprocess.TimeoutExpired as e:
+            self._pending = e
+            result = subprocess.CompletedProcess(args, -15, "", "")
+        self._last = len(recorder.calls)
+        self.signals: list[int] = []
         self.args = args
         self.pid = 0
         self.returncode: int | None = result.returncode
@@ -1067,16 +1078,27 @@ class _FakePopen:
         return int(self.returncode or 0)
 
     def communicate(self, input: Any = None, timeout: float | None = None) -> tuple[Any, Any]:
+        """Records the timeout on this process's calls; raises a scripted timeout once."""
+        if timeout is not None:
+            with self._recorder._lock:
+                for i in range(self._first, self._last):
+                    c = self._recorder.calls[i]
+                    self._recorder.calls[i] = dataclasses.replace(
+                        c, kwargs={**c.kwargs, "timeout": timeout}
+                    )
+        if self._pending is not None:
+            pending, self._pending = self._pending, None
+            raise pending
         return self._out, self._err
 
     def terminate(self) -> None:
-        pass
+        self.signals.append(15)
 
     def kill(self) -> None:
-        pass
+        self.signals.append(9)
 
     def send_signal(self, sig: int) -> None:
-        pass
+        self.signals.append(int(sig))
 
     def __enter__(self) -> _FakePopen:
         return self
@@ -1333,6 +1355,7 @@ class K8sRecorder:
         self.tags_store: dict[str, dict[str, str]] = {}
         self.created_buckets: set[str] = set()
         self.pod_logs: dict[tuple[str, str], str] = {}
+        self.processes: list[Any] = []  # every fake Popen, with the signals it got
         self.exec_output = ""
         self.can_i = True
         self.s3_tagging = True  # False: the backend answers NotImplemented (FlashBlade)
@@ -2465,7 +2488,15 @@ class K8sRecorder:
         if output == "name":
             return 0, "\n".join(f"{kind}/{d['metadata']['name']}" for d in docs), "", True
         if output in ("", "wide"):
-            lines = ["NAME"] + [d["metadata"]["name"] for d in docs]
+            if not docs:
+                return 0, "", "No resources found\n", True
+            if ns == "*":  # -A: kubectl puts the namespace first
+                rows = [
+                    f"{d['metadata'].get('namespace', '')} {d['metadata']['name']}" for d in docs
+                ]
+                lines = ["NAMESPACE NAME", *rows]
+            else:
+                lines = ["NAME"] + [d["metadata"]["name"] for d in docs]
             return 0, "\n".join(lines) + "\n", "", True
         return 1, "", "", False
 
@@ -2493,7 +2524,9 @@ class K8sRecorder:
             return recorder._run_command(args, kw)
 
         def fake_popen(args: Any, *a: Any, **kw: Any) -> _FakePopen:
-            return _FakePopen(recorder, args, kw)
+            proc = _FakePopen(recorder, args, kw)
+            recorder.processes.append(proc)
+            return proc
 
         def fake_boto3_client(service_name: str, *a: Any, **kw: Any) -> Any:
             if service_name != "s3":

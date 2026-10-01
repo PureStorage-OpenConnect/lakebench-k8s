@@ -60,6 +60,16 @@ The lease is NOT a distributed lock in the CAP sense: a partitioned holder that 
 
 Every mutating `admin` command acquires the lease. The strict variant of the Spark Operator watch-list mutation (`remove_namespace_from_watch(strict=True)`) also acquires it, so destroy paths and admin operations serialise against each other.
 
+While a process holds the lease:
+
+- **Interrupts are deferred.** A Ctrl-C, SIGTERM or SIGHUP prints "interrupt received while holding the cluster lease; finishing the shared change (hold budget N s left), then stopping", lets the shared change finish, releases the lease, and only then stops the command. A second interrupt repeats the budget left. A third aborts at once: the lease is still released (interrupts during the release are only recorded), and a running `kubectl`, `helm` or `oc` child and its process group get SIGTERM and 20 s to stop before SIGKILL (25 s at most in all). This applies on the main thread, where every lakebench command takes the lease; an ignored signal (`nohup`) stays ignored.
+- **Children run in their own session with a timeout.** `kubectl`, `helm` and `oc` started under the lease do not receive a terminal's Ctrl-C directly. Each gets a timeout from the hold budget: 750 s for deploy, destroy and run, 1800 s for `admin` commands. A mutating `helm` call keeps 60 s of the budget back, is not started with less than 60 s left for it, and gets its own `--timeout` 30 s shorter than its subprocess timeout, so helm stops itself first. On a timeout the child gets the same SIGTERM-first stop; helm handles SIGTERM by cancelling the operation and marking the release failed, rather than the `pending-upgrade` a SIGKILL leaves. For helm the error then says to check `helm history` for the release, roll back a pending revision with `helm rollback`, and run `lakebench admin repair-operator`. Deploy and destroy fail closed (destroy keeps the namespace), and `admin` commands exit 1 with the error.
+- **API calls are bounded.** Every Kubernetes API call the lease makes, the namespace reads and delete destroy makes inside it, and the namespace reads of the watch-list add, carry a 10 s connect and 60 s read timeout. A lease write whose reply timed out but which landed is kept and released normally.
+
+The hold budget bounds every child process today; the remaining waits inside the lease (retry sleeps, rollout polls) move onto it in a later change.
+
+A `kill -9` or a lost host is not covered: the TTL reclaims the lease, and `lakebench admin repair-operator` repairs a half-applied upgrade.
+
 ## Deployment identity
 
 On `deploy`, `_deploy_namespace` writes these identity annotations to the namespace:

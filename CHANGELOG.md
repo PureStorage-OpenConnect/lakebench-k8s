@@ -20,6 +20,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   changed since its run applied them. The first 1.7 `run` deletes the 1.6 map
   unless a running SparkApplication still mounts it; `destroy` deletes all
   scripts maps, also when `create_namespace: false`.
+- **Interrupts wait for the cluster lease to be released.** A Ctrl-C,
+  SIGTERM or SIGHUP while a command holds the `lakebench-cluster-lock`
+  lease no longer stops it between a `helm upgrade` of the shared Spark
+  Operator and the operator restart. The command prints the hold budget
+  left (750 s, 1800 s for `admin` commands), finishes the shared change,
+  releases the lease, then stops; a third interrupt aborts at once and
+  still releases the lease. `kubectl`, `helm` and `oc` run under the lease
+  in their own session with a timeout from that budget, and are stopped
+  with SIGTERM rather than killed, so a terminal Ctrl-C or a timeout no
+  longer leaves the release `pending-upgrade`. A leased command that runs
+  out of time fails deploy or destroy closed (destroy keeps the namespace);
+  for helm the error names `helm rollback` and
+  `lakebench admin repair-operator`.
 
 ## [1.6.0] - 2026-09-30
 
