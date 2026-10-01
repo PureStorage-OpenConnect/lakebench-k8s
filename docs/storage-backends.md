@@ -88,7 +88,16 @@ empties and deletes) or `lakebench.deployment/adopted-empty-buckets`
 (pre-existing buckets that were empty when deploy adopted them, which destroy
 empties but never deletes). A bucket that matches the name but is in neither
 record, such as one that already held data when deploy adopted it, is left
-in place and reported; `--force-legacy` empties it and never deletes it. The
+in place and reported; `--force-legacy` empties it and never deletes it.
+
+From 1.7, deploy adopts a pre-existing, empty FlashBlade bucket (recording it
+in `adopted-empty-buckets`) only when you pass `--force-legacy`, and the same
+holds for pre-provisioned buckets with `create_buckets: false`. Nothing visible
+from one cluster tells an empty bucket apart from another cluster's bucket
+that has not been written yet, and 1.6 adopted such a bucket, which let the
+second cluster's destroy empty the first one's data later. Without the flag
+the bucket is used for reads and writes but destroy, `clean` and the
+continuous reset leave its data alone. Buckets deploy creates are unaffected. The
 example configs and `lakebench init` follow the naming convention, so a user
 who lets deploy create the buckets gets destroy safety on FlashBlade close to
 a tagged backend. A user who names buckets outside the convention on

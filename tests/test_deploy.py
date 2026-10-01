@@ -29,6 +29,15 @@ def _no_live_namespace_listing():
         yield core
 
 
+@pytest.fixture(autouse=True)
+def _cluster_fingerprint():
+    """SAF-10: deploy stamps buckets with this cluster's fingerprint and
+    refuses without one; give the tests a cluster (tests that need none
+    patch it themselves)."""
+    with patch("lakebench.deploy.ownership.api_server_fingerprint", return_value="fp-test"):
+        yield
+
+
 def _make_config(**overrides) -> LakebenchConfig:
     """Create a LakebenchConfig with sensible defaults for testing.
 
@@ -1381,7 +1390,7 @@ class TestBucketCreationRecord:
             patch("lakebench.s3.S3Client", return_value=client),
             patch(
                 "lakebench.deploy.ownership.verify_bucket_ownership",
-                side_effect=lambda _b, name, _id: IdentityReport(
+                side_effect=lambda _b, name, _id, **_k: IdentityReport(
                     verdict=(
                         IdentityVerdict.MISMATCH if name in mismatch else IdentityVerdict.MATCH
                     ),
@@ -1452,11 +1461,14 @@ class TestBucketCreationRecord:
 
 
 class TestTaglessAdoptionRecord:
-    """Backends without bucket tagging: deploy records a pre-existing bucket
-    it adopts while empty, so destroy may empty it later; one that already
-    holds objects is not recorded (its data may not be lakebench's)."""
+    """Backends without bucket tagging: with --force-legacy deploy records a
+    pre-existing bucket it adopts while empty, so destroy may empty it later;
+    one that already holds objects is not recorded (its data may not be
+    lakebench's). Without the flag nothing is adopted: an empty, unmarked
+    bucket may be another cluster's not yet written (SAF-10 row 7)."""
 
-    def test_empty_adopted_bucket_is_recorded_non_empty_is_not(self):
+    @pytest.mark.parametrize("force_legacy", [True, False])
+    def test_empty_adopted_bucket_is_recorded_non_empty_is_not(self, force_legacy):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
         config = _make_config(name="td")
@@ -1478,7 +1490,7 @@ class TestTaglessAdoptionRecord:
             patch("lakebench.s3.S3Client", return_value=client),
             patch(
                 "lakebench.deploy.ownership.verify_bucket_ownership",
-                side_effect=lambda _b, name, _id: IdentityReport(
+                side_effect=lambda _b, name, _id, **_k: IdentityReport(
                     verdict=IdentityVerdict.UNSUPPORTED,
                     resource_name=name,
                     expected_deployment="td",
@@ -1490,15 +1502,21 @@ class TestTaglessAdoptionRecord:
             patch("lakebench.k8s.get_k8s_client"),
             patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
         ):
-            result = engine._deploy_buckets()
+            result = engine._deploy_buckets(force_legacy=force_legacy)
         assert result.status == DeploymentStatus.SUCCESS, result.message
-        adopted.assert_called_once()
-        assert adopted.call_args.args[2] == ["td-bronze"]
+        if force_legacy:
+            adopted.assert_called_once()
+            assert adopted.call_args.args[2] == ["td-bronze"]
+        else:
+            adopted.assert_not_called()
 
 
-def test_preprovisioned_empty_tagless_buckets_are_recorded():
+@pytest.mark.parametrize("force_legacy", [True, False])
+def test_preprovisioned_empty_tagless_buckets_are_recorded(force_legacy):
     """Review: with create_buckets=false nothing was recorded, so clean and
-    the continuous reset refused pre-provisioned FlashBlade buckets forever."""
+    the continuous reset refused pre-provisioned FlashBlade buckets forever.
+    SAF-10 row 7: only with --force-legacy (the operator's word that no
+    other cluster uses the names)."""
     from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
     config = _make_config(name="td")
@@ -1515,7 +1533,7 @@ def test_preprovisioned_empty_tagless_buckets_are_recorded():
         patch("lakebench.s3.S3Client", return_value=client),
         patch(
             "lakebench.deploy.ownership.verify_bucket_ownership",
-            side_effect=lambda _b, name, _id: IdentityReport(
+            side_effect=lambda _b, name, _id, **_k: IdentityReport(
                 verdict=IdentityVerdict.UNSUPPORTED, resource_name=name, expected_deployment="td"
             ),
         ),
@@ -1523,6 +1541,9 @@ def test_preprovisioned_empty_tagless_buckets_are_recorded():
         patch("lakebench.k8s.get_k8s_client"),
         patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
     ):
-        result = engine._deploy_buckets()
+        result = engine._deploy_buckets(force_legacy=force_legacy)
     assert result.status == DeploymentStatus.SKIPPED
-    assert adopted.call_args.args[2] == ["td-bronze"]
+    if force_legacy:
+        assert adopted.call_args.args[2] == ["td-bronze"]
+    else:
+        adopted.assert_not_called()

@@ -777,6 +777,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rule, score or query reads these two columns, and `passthrough_ratio`
   was already equal.
 ### Changed
+- **Bucket ownership names the cluster (SAF-10).** Deploy stamps each bucket
+  it owns with `lakebench.cluster=<API-server fingerprint>` and refuses when it
+  cannot compute the fingerprint. Deploy refuses, and destroy, `clean` and
+  the continuous reset keep, a bucket another cluster stamped, so the same
+  deployment name on two clusters sharing an object store can no longer
+  empty each other's data. A 1.6 bucket without the stamp is stamped on the
+  next deploy when this namespace's record shows it created or adopted it;
+  one it does not record (adopted by 1.6) is used but no longer emptied or
+  deleted, and `lakebench admin reclaim-bucket` can claim it. With no
+  fingerprint, destroy keeps every stamped bucket: "Destroy NOT completed:
+  this cluster has no fingerprint". On a backend without tagging
+  (FlashBlade), deploy adopts a pre-existing empty bucket, or a
+  pre-provisioned one with `create_buckets: false`, only with
+  `--force-legacy`; without it the bucket is used but destroy leaves its data.
 - **`destroy` removes what it used to leave in a surviving namespace.** With
   `create_namespace: false`, destroy left the PostgreSQL ServiceAccount, the
   `lakebench-ca-certificate` Secret (with `s3.ca_cert`) and, with

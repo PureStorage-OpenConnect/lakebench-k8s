@@ -69,6 +69,14 @@ TAG_WORKLOAD_SCHEMA = "lakebench.workload"
 # only when it carries this marker (or is listed in the namespace annotation
 # below); buckets deploy adopted are emptied but kept.
 TAG_CREATED_BY_LAKEBENCH = "lakebench.created"
+# SAF-10 (DESIGN ch01 section 4): the cluster that claimed a bucket. Tagged
+# backends carry it as a tag, tagless ones (FlashBlade) in the owner marker
+# object. Without it, a deployment of the same name on another cluster that
+# shares the object store could adopt, and later empty, this one's bucket.
+TAG_CLUSTER = "lakebench.cluster"
+# Keys under this prefix are Lakebench's own bookkeeping, never user data.
+MARKER_PREFIX = ".lakebench/"
+OWNER_MARKER_KEY = ".lakebench/owner.json"
 ANNOTATION_CREATED_BUCKETS = "lakebench.deployment/created-buckets"
 # Buckets deploy adopted while they held no objects, on a backend without
 # bucket tagging. Everything in them was written by this deployment, so
@@ -103,7 +111,25 @@ class IdentityVerdict(str, Enum):
     #: ``NotImplemented`` on ``GetBucketTagging`` / ``PutBucketTagging``).
     #: Tag-based ownership is impossible; callers must fall back to a
     #: weaker check (name-prefix on buckets) or refuse. See LB-088.
+    #: Among the SAF-10 verdicts it means: tagless, no owner marker, and not
+    #: in this namespace's created or adopted-empty record (row 7 of the
+    #: matrix in ``verify_bucket_ownership``).
     UNSUPPORTED = "unsupported"
+    #: SAF-10 row 2 (and 5): the bucket is this deployment's by name but
+    #: was claimed from another cluster (or this cluster's API-server CA
+    #: changed). Refuse; never empty it.
+    FOREIGN_CLUSTER = "foreign_cluster"
+    #: SAF-10 row 3: no cluster stamp, but this namespace's created or
+    #: adopted-empty record proves this cluster made or adopted it. Stamp
+    #: the cluster, then treat it as MATCH.
+    LEGACY_PROVEN = "legacy_proven"
+    #: SAF-10 row 4: tagged with this deployment's name but no cluster stamp
+    #: and not in the record (a bucket an earlier lakebench adopted). Usable
+    #: for reads and writes, never stamped, never emptied or deleted.
+    LEGACY_UNPROVEN = "legacy_unproven"
+    #: SAF-10 row 8: the bucket carries a cluster stamp, but this run cannot
+    #: compute its own cluster fingerprint. Keep it.
+    UNVERIFIED_CLUSTER = "unverified_cluster"
 
 
 class BucketTaggingUnsupported(Exception):
@@ -130,6 +156,9 @@ class IdentityReport:
     found_api_server: str | None = None
     current_api_server: str | None = None
     hint: str | None = None
+    #: Buckets only: False when the backend has no bucket tagging (the
+    #: verdict then came from the owner marker or the namespace record).
+    tagged: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -577,8 +606,13 @@ def write_bucket_ownership_tag(
     deployment_name: str,
     workload_schema: str | None = None,
     created: bool = False,
+    cluster: str | None = None,
 ) -> None:
     """Write the ownership tag and verify the round trip.
+
+    ``cluster`` (SAF-10) is this cluster's stamp (``cluster_stamp``); when
+    given it is written as ``lakebench.cluster`` and verified too. A row-4
+    bucket (``LEGACY_UNPROVEN``) is never passed here.
 
     ``created`` adds the created-by-lakebench marker (LB-159). The whole tag
     set is rewritten, so a caller re-tagging a bucket lakebench created on an
@@ -617,6 +651,8 @@ def write_bucket_ownership_tag(
         tag_set.append({"Key": TAG_WORKLOAD_SCHEMA, "Value": workload_schema})
     if created:
         tag_set.append({"Key": TAG_CREATED_BY_LAKEBENCH, "Value": "true"})
+    if cluster:
+        tag_set.append({"Key": TAG_CLUSTER, "Value": cluster})
 
     from botocore.exceptions import ClientError
 
@@ -659,6 +695,11 @@ def write_bucket_ownership_tag(
         raise BucketOwnershipError(
             f"bucket {bucket!r}: tag round-trip mismatch. Wrote "
             f"{deployment_name!r}, read {got.get(TAG_DEPLOYMENT_NAME)!r}."
+        )
+    if cluster and got.get(TAG_CLUSTER) != cluster:
+        raise BucketOwnershipError(
+            f"bucket {bucket!r}: cluster tag round-trip mismatch. Wrote "
+            f"{cluster!r}, read {got.get(TAG_CLUSTER)!r}."
         )
 
 
@@ -818,31 +859,149 @@ def forget_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> 
             raise
 
 
+def cluster_stamp(fingerprint: str | None) -> str | None:
+    """The cluster stamp a bucket carries: ``api_server_fingerprint(...)[:32]``."""
+    return fingerprint[:32] if fingerprint else None
+
+
+def read_owner_marker(boto_client: Any, bucket: str) -> dict[str, Any] | None:
+    """The bucket's ``.lakebench/owner.json``, or None when it has none.
+
+    Raises on any other error, including a marker that is not a JSON
+    object (a corrupt claim is never read as "no claim").
+    """
+    import json
+
+    from botocore.exceptions import ClientError
+
+    try:
+        resp = boto_client.get_object(Bucket=bucket, Key=OWNER_MARKER_KEY)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return None
+        raise
+    body = resp["Body"].read()
+    marker = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+    if not isinstance(marker, dict):
+        raise BucketOwnershipError(f"bucket {bucket!r}: owner marker is not a JSON object")
+    return marker
+
+
+def _cluster_verdict(
+    bucket: str,
+    expected_deployment: str,
+    found_cluster: str | None,
+    expected_cluster: str | None,
+    record: set[str],
+    *,
+    tagged: bool,
+) -> IdentityReport:
+    """Rows 1 to 5 and 8 of the SAF-10 matrix, for a bucket whose name stamp is ours."""
+    if found_cluster:
+        mine = cluster_stamp(expected_cluster)
+        if mine is None:
+            return IdentityReport(
+                verdict=IdentityVerdict.UNVERIFIED_CLUSTER,
+                resource_name=bucket,
+                expected_deployment=expected_deployment,
+                found_deployment=expected_deployment,
+                found_api_server=found_cluster,
+                tagged=tagged,
+                hint=(
+                    f"bucket {bucket!r}: cannot compute this cluster's fingerprint; "
+                    "buckets kept. `lakebench admin reclaim-bucket` (owner) can release them"
+                ),
+            )
+        if found_cluster != mine:
+            return IdentityReport(
+                verdict=IdentityVerdict.FOREIGN_CLUSTER,
+                resource_name=bucket,
+                expected_deployment=expected_deployment,
+                found_deployment=expected_deployment,
+                found_api_server=found_cluster,
+                current_api_server=mine,
+                tagged=tagged,
+                hint=(
+                    f"bucket {bucket!r} belongs to deployment {expected_deployment!r} on "
+                    f"another cluster (fp {found_cluster}, this cluster {mine}). If this "
+                    "cluster's API-server CA changed, an owner can re-claim it with "
+                    "`lakebench admin reclaim-bucket`"
+                ),
+            )
+        return IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=expected_deployment,
+            found_api_server=found_cluster,
+            tagged=tagged,
+        )
+    if bucket in record:
+        return IdentityReport(
+            verdict=IdentityVerdict.LEGACY_PROVEN,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=expected_deployment,
+            tagged=tagged,
+            hint=(
+                f"bucket {bucket!r} has no cluster stamp; this namespace's record "
+                "proves this cluster created or adopted it"
+            ),
+        )
+    return IdentityReport(
+        verdict=IdentityVerdict.LEGACY_UNPROVEN,
+        resource_name=bucket,
+        expected_deployment=expected_deployment,
+        found_deployment=expected_deployment,
+        tagged=tagged,
+        hint=(
+            f"bucket {bucket!r} carries this deployment's name but no cluster stamp, "
+            "and this namespace does not record creating or adopting it (a bucket an "
+            "earlier lakebench adopted). It is used but never emptied or deleted; an "
+            "owner can claim it with `lakebench admin reclaim-bucket`"
+        ),
+    )
+
+
 def verify_bucket_ownership(
     boto_client: Any,
     bucket: str,
     expected_deployment: str,
+    *,
+    expected_cluster: str | None,
+    created_record: Iterable[str],
 ) -> IdentityReport:
-    """Read a bucket's ownership tag and return the verdict.
+    """Read a bucket's ownership stamp and return its SAF-10 verdict.
 
-    Returns ``IdentityVerdict.UNSUPPORTED`` when the backend does not
-    implement the tagging API (LB-088). Callers MUST handle this verdict
-    explicitly: it is not "no tag found" (that is ABSENT) and it is not
-    "cannot reach the bucket" (that is NOT_FOUND). It is "the answer to
-    'who owns this?' cannot be obtained from tags on this backend at all."
-    Deploy s3-buckets and destroy s3-buckets fall back to a weaker
-    name-prefix check.
+    ``expected_cluster`` is this run's ``api_server_fingerprint`` (None when
+    it cannot be computed); ``created_record`` is this namespace's created
+    and adopted-empty buckets. The matrix (DESIGN ch01 section 4):
+
+    - row 1, name and cluster ours: MATCH;
+    - rows 2 and 5, name ours, cluster not: FOREIGN_CLUSTER;
+    - row 3, name ours (or tagless with no marker), no cluster stamp, in the
+      record: LEGACY_PROVEN;
+    - row 4, tagged with our name, no cluster stamp, not in the record:
+      LEGACY_UNPROVEN;
+    - row 6, name not ours: MISMATCH;
+    - row 7, no stamp and not in the record: ABSENT on a tagged backend,
+      UNSUPPORTED on a tagless one;
+    - row 8, a cluster stamp but no fingerprint for this run:
+      UNVERIFIED_CLUSTER.
+
+    On a backend without tagging the stamp is the owner marker
+    (``.lakebench/owner.json``) and ``tagged`` is False on the report. A
+    missing bucket is NOT_FOUND. Read errors raise.
     """
     from botocore.exceptions import ClientError
 
+    record = set(created_record)
     try:
         tags = read_bucket_ownership_tag(boto_client, bucket)
     except BucketTaggingUnsupported as e:
-        return IdentityReport(
-            verdict=IdentityVerdict.UNSUPPORTED,
-            resource_name=bucket,
-            expected_deployment=expected_deployment,
-            hint=str(e),
+        return _verify_tagless(
+            boto_client, bucket, expected_deployment, expected_cluster, record, str(e)
         )
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
@@ -891,11 +1050,66 @@ def verify_bucket_ownership(
             ),
         )
 
-    return IdentityReport(
-        verdict=IdentityVerdict.MATCH,
-        resource_name=bucket,
-        expected_deployment=expected_deployment,
-        found_deployment=found,
+    return _cluster_verdict(
+        bucket, expected_deployment, tags.get(TAG_CLUSTER), expected_cluster, record, tagged=True
+    )
+
+
+def _verify_tagless(
+    boto_client: Any,
+    bucket: str,
+    expected_deployment: str,
+    expected_cluster: str | None,
+    record: set[str],
+    unsupported_hint: str,
+) -> IdentityReport:
+    """The SAF-10 verdict on a backend without tagging, from the owner marker."""
+    from botocore.exceptions import ClientError
+
+    try:
+        marker = read_owner_marker(boto_client, bucket)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "NoSuchBucket":
+            return IdentityReport(
+                verdict=IdentityVerdict.NOT_FOUND,
+                resource_name=bucket,
+                expected_deployment=expected_deployment,
+                tagged=False,
+            )
+        raise
+    if marker is None:
+        if bucket in record:
+            return _cluster_verdict(
+                bucket, expected_deployment, None, expected_cluster, record, tagged=False
+            )
+        return IdentityReport(
+            verdict=IdentityVerdict.UNSUPPORTED,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            tagged=False,
+            hint=unsupported_hint,
+        )
+    found = marker.get("deployment")
+    if found != expected_deployment:
+        return IdentityReport(
+            verdict=IdentityVerdict.MISMATCH,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=str(found),
+            tagged=False,
+            hint=(
+                f"bucket {bucket!r} is claimed by deployment {found!r} "
+                f"({OWNER_MARKER_KEY}), not {expected_deployment!r}. Refusing."
+            ),
+        )
+    return _cluster_verdict(
+        bucket,
+        expected_deployment,
+        str(marker.get("cluster") or "") or None,
+        expected_cluster,
+        record,
+        tagged=False,
     )
 
 

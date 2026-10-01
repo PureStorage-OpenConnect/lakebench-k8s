@@ -6,6 +6,7 @@ Called by DeploymentEngine.destroy_all() -- not used directly.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 import time
@@ -595,6 +596,8 @@ class _BucketPlan:
     created_record: set[str]
     record_unreadable: list[str]
     owned_by_tag: list[str]
+    owned_by_marker: list[str]
+    unverified_cluster: list[str]
     absent_buckets: list[str]
     legacy_forced: list[str]
     unsupported_by_prefix: list[str]
@@ -679,12 +682,17 @@ def _classify_buckets(
     # workload. `--force-legacy` is the explicit opt-in.
     from lakebench.deploy.ownership import (
         IdentityVerdict,
+        api_server_fingerprint,
         bucket_name_matches_deployment,
         list_lakebench_deployment_names,
         verify_bucket_ownership,
     )
 
     identity_name = engine.config.name
+    # SAF-10: the stamp a bucket must carry to be this deployment's on this
+    # cluster. None (no CA data) keeps every stamped bucket (row 8);
+    # --allow-unverified-cluster waives the namespace check, never this one.
+    my_cluster = api_server_fingerprint(engine.config.platform.kubernetes.context or "")
     # Cluster-scan other lakebench deployments so the
     # UNSUPPORTED fallback can enforce longest-prefix-wins.
     # ``None`` means "cannot know" and the UNSUPPORTED
@@ -747,9 +755,46 @@ def _classify_buckets(
     unsupported_unrecorded: list[str] = []
     unsupported_forced_unrecorded: list[str] = []
     owned_by_tag: list[str] = []
+    # Tagless buckets whose owner marker names this deployment and cluster.
+    owned_by_marker: list[str] = []
     absent_buckets: list[str] = []
+    # SAF-10 refusals: another cluster's claim, an unproven 1.6 claim, or no
+    # fingerprint for this run.
+    foreign_cluster: list[str] = []
+    legacy_unproven: list[str] = []
+    unverified_cluster: list[str] = []
+    record = created_record | adopted_empty_record
     for bucket in buckets:
-        v = verify_bucket_ownership(s3.raw_client, bucket, identity_name)
+        v = verify_bucket_ownership(
+            s3.raw_client,
+            bucket,
+            identity_name,
+            expected_cluster=my_cluster,
+            created_record=record,
+        )
+        if v.verdict is IdentityVerdict.LEGACY_PROVEN:
+            # Row 3: the record proves this cluster made or adopted it. A
+            # tagged one is ours as a MATCH is; a tagless one takes the
+            # record branch below, as before SAF-10.
+            v = dataclasses.replace(
+                v,
+                verdict=IdentityVerdict.MATCH if v.tagged else IdentityVerdict.UNSUPPORTED,
+            )
+        if v.verdict is IdentityVerdict.MATCH and not v.tagged:
+            owned_by_marker.append(bucket)
+            continue
+        if v.verdict is IdentityVerdict.FOREIGN_CLUSTER:
+            foreign_cluster.append(f"{bucket} ({v.hint})")
+            refused_names.append(bucket)
+            continue
+        if v.verdict is IdentityVerdict.LEGACY_UNPROVEN:
+            legacy_unproven.append(bucket)
+            refused_names.append(bucket)
+            continue
+        if v.verdict is IdentityVerdict.UNVERIFIED_CLUSTER:
+            unverified_cluster.append(bucket)
+            refused_names.append(bucket)
+            continue
         if v.verdict is IdentityVerdict.MATCH:
             owned_by_tag.append(bucket)
         elif v.verdict is IdentityVerdict.NOT_FOUND:
@@ -881,8 +926,29 @@ def _classify_buckets(
         or unsupported_refused
         or held_recorded
         or unsupported_unrecorded
+        or foreign_cluster
+        or legacy_unproven
+        or unverified_cluster
     ):
         parts = []
+        if unverified_cluster:
+            parts.append(
+                "Destroy NOT completed: this cluster has no fingerprint (kubeconfig "
+                "has no CA data); buckets kept: "
+                + ", ".join(unverified_cluster)
+                + " (`lakebench admin reclaim-bucket` (owner) can release them)"
+            )
+        if foreign_cluster:
+            parts.append("claimed from another cluster: " + "; ".join(foreign_cluster))
+        if legacy_unproven:
+            parts.append(
+                "carry this deployment's name but no cluster stamp, and this "
+                "namespace does not record creating or adopting them (claimed by an "
+                "earlier lakebench): "
+                + ", ".join(legacy_unproven)
+                + " (left in place; an owner can claim them with "
+                "`lakebench admin reclaim-bucket`)"
+            )
         if unsupported_unrecorded:
             parts.append(
                 "backend does not support bucket tagging and this "
@@ -954,6 +1020,8 @@ def _classify_buckets(
         created_record=created_record,
         record_unreadable=record_unreadable,
         owned_by_tag=owned_by_tag,
+        owned_by_marker=owned_by_marker,
+        unverified_cluster=unverified_cluster,
         absent_buckets=absent_buckets,
         legacy_forced=legacy_forced,
         unsupported_by_prefix=unsupported_by_prefix,
@@ -2804,6 +2872,8 @@ def destroy_all(
                 created_record = plan_b.created_record
                 record_unreadable = plan_b.record_unreadable
                 owned_by_tag = plan_b.owned_by_tag
+                owned_by_marker = plan_b.owned_by_marker
+                unverified_cluster = plan_b.unverified_cluster
                 absent_buckets = plan_b.absent_buckets
                 unsupported_by_prefix = plan_b.unsupported_by_prefix
                 unsupported_forced_unrecorded = plan_b.unsupported_forced_unrecorded
@@ -2869,7 +2939,10 @@ def destroy_all(
                     bucket_notes, delete_failed = _delete_owned_buckets(
                         s3,
                         buckets,
-                        deletable=(set(owned_by_tag) | set(unsupported_by_prefix)) & created_set,
+                        deletable=(
+                            set(owned_by_tag) | set(owned_by_marker) | set(unsupported_by_prefix)
+                        )
+                        & created_set,
                         enabled=delete_buckets,
                         create_buckets=bool(s3_cfg.create_buckets),
                         absent=set(absent_buckets),
@@ -3029,19 +3102,24 @@ def destroy_all(
                 bucket_status = (
                     DeploymentStatus.FAILED if delete_failed else DeploymentStatus.SUCCESS
                 )
+                # SAF-10 row 8 is a refusal with its own exit code
+                # (CC-9's REFUSAL_DETAIL key), when it is the only refusal.
+                bucket_details: dict = {}
+                if bucket_refused_only:
+                    bucket_details[REFUSAL_DETAIL] = (
+                        "destroy.unverified_cluster"
+                        if unverified_cluster and set(unverified_cluster) == refused_set
+                        else "deploy.identity_foreign"
+                    )
                 results.append(
                     DeploymentResult(
                         component="s3-buckets",
                         status=bucket_status,
-                        details=(
-                            {REFUSAL_DETAIL: "deploy.identity_foreign"}
-                            if bucket_refused_only
-                            else {}
-                        ),
                         message=(
                             f"Emptied {len(buckets)} S3 buckets "
                             f"({total_deleted} objects)" + summary_note
                         ),
+                        details=bucket_details,
                     )
                 )
                 report(

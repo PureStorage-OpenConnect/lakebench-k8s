@@ -1105,6 +1105,17 @@ def reclaim_bucket(
         raise typer.Exit(ExitCode.PREREQUISITE)
 
     workload_schema = getattr(cfg, "workload_schema", None)
+    # SAF-10: the claim names this cluster too, so the same deployment name on
+    # another cluster sharing the object store reads it as foreign.
+    from lakebench.deploy.ownership import api_server_fingerprint, cluster_stamp
+
+    my_cluster = cluster_stamp(api_server_fingerprint(cfg.platform.kubernetes.context or ""))
+    if my_cluster is None:
+        print_error(
+            "cannot compute this cluster's fingerprint (kubeconfig has no CA data); "
+            "ownership cannot be stamped"
+        )
+        raise typer.Exit(1)
     try:
         with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
             # ADR-F3: object-count check MUST run inside the lease.
@@ -1133,6 +1144,7 @@ def reclaim_bucket(
                     bucket=bucket,
                     deployment_name=cfg.name,
                     workload_schema=workload_schema,
+                    cluster=my_cluster,
                 )
             except BucketTaggingUnsupported:
                 # Backend does not support bucket tagging (e.g.

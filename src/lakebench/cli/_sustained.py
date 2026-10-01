@@ -5,6 +5,7 @@ Extracted from cli/__init__.py to reduce file size.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -172,10 +173,30 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
     ).raw_client
     others = None
     b = s3_cfg.buckets
+    from lakebench.deploy.ownership import (
+        api_server_fingerprint,
+        read_adopted_empty_buckets,
+        read_created_buckets,
+    )
+
+    my_cluster = api_server_fingerprint(cfg.platform.kubernetes.context or "")
+    try:
+        ns_record = read_created_buckets(core_v1, cfg.get_namespace()) | (
+            read_adopted_empty_buckets(core_v1, cfg.get_namespace())
+        )
+    except Exception:  # noqa: BLE001 -- unreadable: nothing is proven by it
+        ns_record = set()
     for bucket in (b.bronze, b.silver, b.gold):
-        v = verify_bucket_ownership(raw, bucket, cfg.name)
+        v = verify_bucket_ownership(
+            raw, bucket, cfg.name, expected_cluster=my_cluster, created_record=ns_record
+        )
         if v.verdict is IdentityVerdict.MATCH:
             continue
+        if v.verdict is IdentityVerdict.LEGACY_PROVEN:
+            if v.tagged:
+                continue  # SAF-10 row 3: the record proves this cluster made it
+            # Tagless: the record rule below decides, as before SAF-10.
+            v = dataclasses.replace(v, verdict=IdentityVerdict.UNSUPPORTED)
         if v.verdict is IdentityVerdict.UNSUPPORTED:
             if others is None:
                 others = list_lakebench_deployment_names(core_v1, exclude=cfg.get_namespace())

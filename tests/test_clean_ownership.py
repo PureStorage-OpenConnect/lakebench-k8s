@@ -107,7 +107,7 @@ def test_unsupported_refuses_when_siblings_unknown(
 ):
     s3 = _s3()
     s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     with pytest.raises(typer.Exit) as exc:
         _clean(_cfg(tmp_path))
     assert exc.value.exit_code == 1
@@ -127,7 +127,7 @@ def test_unsupported_refuses_when_other_deployment_has_prefix_claim(
     # here the bucket name does not match "my-clean" at all.
     s3 = _s3()
     s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     cfg = tmp_path / "c.yaml"
     cfg.write_text(
         CFG.replace("my-clean-bronze", "other-bronze")
@@ -151,7 +151,7 @@ def test_unsupported_cleans_on_prefix_match(
 ):
     s3 = _s3()
     s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     _clean(_cfg(tmp_path))
     assert s3.empty_bucket.call_count == 3
 
@@ -170,7 +170,7 @@ def test_unsupported_prefix_match_without_record_is_not_cleaned(
     on FlashBlade after destroy had stopped doing so."""
     s3 = _s3()
     s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     with pytest.raises(typer.Exit):
         _clean(_cfg(tmp_path))
     assert s3.empty_bucket.call_count == 0

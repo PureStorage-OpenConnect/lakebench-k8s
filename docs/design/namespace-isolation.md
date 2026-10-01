@@ -104,13 +104,29 @@ The add path (`_add_namespace_to_watch`) is lease-gated too, with three outcomes
 
 ## Bucket ownership
 
-Every `ensure_buckets` call unconditionally writes:
+Every `ensure_buckets` call writes, on each bucket this deployment owns:
 
 - `lakebench.deployment=<cfg.name>`
 - `lakebench.workload=<cfg.workload_schema>`
 - `lakebench.created=true`, only on a bucket this deployment created
+- `lakebench.cluster=<fingerprint>`, this cluster's API-server fingerprint (SAF-10)
 
-Then reads the tags back and verifies the round trip. A backend that accepts the write but drops it (the read-back returns no tags or a different name) is refused rather than trusted. A backend that does not implement tagging at all (`NotImplemented`, as on FlashBlade) takes the name-prefix and namespace-record fallback described under Category 1. Destroy and clean read the tag before mutating: a mismatch is a hard refusal (`--force` does not bypass), an absent tag on a legacy bucket requires `--force-legacy`, a missing bucket is a no-op.
+Then reads the tags back and verifies the round trip, the cluster tag included. Deploy refuses when it cannot compute the fingerprint (kubeconfig with no CA data).
+
+**The cluster stamp (SAF-10).** A deployment name alone is not unique across clusters that share an object store: a deployment of the same name on another cluster used to adopt this one's still-empty bucket and later empty it. Every verdict now also checks the cluster:
+
+| Row | Stamp found | Verdict | Deploy | Destroy, clean, continuous reset |
+|---|---|---|---|---|
+| 1 | name and cluster ours | MATCH | use | may empty; delete if created |
+| 2 | name ours, cluster not | FOREIGN_CLUSTER | refuse | keep, FAILED |
+| 3 | name ours (or no marker on a tagless backend), no cluster stamp, in this namespace's created or adopted-empty record | LEGACY_PROVEN | stamp the cluster, then as row 1 | as row 1 |
+| 4 | name ours, no cluster stamp, not in the record (a bucket an earlier lakebench adopted) | LEGACY_UNPROVEN | use for reads and writes, never stamp | keep; `admin reclaim-bucket` (owner) can claim it |
+| 5 | the stamp is this cluster's old fingerprint (CA rotated) | FOREIGN_CLUSTER, hint names the CA | refuse | keep |
+| 6 | name not ours | MISMATCH | refuse | keep |
+| 7 | no stamp, not in the record | ABSENT on a tagged backend (needs `--force-legacy`, as before); on a tagless one, used but adopted only with `--force-legacy` | | keep |
+| 8 | a cluster stamp, but this run has no fingerprint | UNVERIFIED_CLUSTER | (deploy already refused) | keep: "Destroy NOT completed: this cluster has no fingerprint" |
+
+`--allow-unverified-cluster` waives the namespace check only; with no fingerprint every stamped bucket is still kept. On a tagless backend the stamp is the owner marker object `.lakebench/owner.json` (`{deployment, cluster, ...}`); deploy writes it in a later change of this release, and until then a tagless bucket is proved by the namespace record as before. A backend that accepts the write but drops it (the read-back returns no tags or a different name) is refused rather than trusted. A backend that does not implement tagging at all (`NotImplemented`, as on FlashBlade) takes the name-prefix and namespace-record fallback described under Category 1. Destroy and clean read the tag before mutating: a mismatch is a hard refusal (`--force` does not bypass), an absent tag on a legacy bucket requires `--force-legacy`, a missing bucket is a no-op.
 
 `lakebench admin reclaim-bucket <name>` rewrites the tag under the cluster lease with an object-count check inside the lease scope; a bucket with objects requires `--force-nonempty` acknowledgement.
 

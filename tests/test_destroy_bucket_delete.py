@@ -281,7 +281,7 @@ class TestDestroyAllBuckets:
         # Default: deploy recorded all three as created (LB-159 marker).
         created_record = set(verdicts) if created is None else set(created)
 
-        def verify(_boto, bucket, _name):
+        def verify(_boto, bucket, _name, **_kw):
             return IdentityReport(
                 verdict=getattr(IdentityVerdict, verdicts[bucket]),
                 resource_name=bucket,

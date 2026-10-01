@@ -66,6 +66,8 @@ def _instant_waits(mp: pytest.MonkeyPatch) -> None:
     mp.setattr(SparkThriftDeployer, "_wait_for_ready", lambda *a, **k: None)
     mp.setattr(DuckDBDeployer, "_wait_for_ready", lambda *a, **k: None)
     mp.setattr("lakebench.deploy.observability._wait_for_prometheus", lambda *a, **k: "")
+    # SAF-10: deploy stamps buckets with this cluster's fingerprint.
+    mp.setattr("lakebench.deploy.ownership.api_server_fingerprint", lambda *a, **k: "fp-test")
     _instant_deps_server(mp)
 
 
