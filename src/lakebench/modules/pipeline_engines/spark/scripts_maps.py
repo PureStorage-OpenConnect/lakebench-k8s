@@ -143,6 +143,7 @@ SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
             "aml_level2_predictions.json",
             "aml_preregistration.json",
             "aml_registered_looks.json",
+            "heldout_hashes.json",
             "high_risk_jurisdictions.json",
             "synthetic_corridors.json",
         )

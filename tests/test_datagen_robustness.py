@@ -21,11 +21,27 @@ from pydantic import ValidationError
 
 from lakebench.config import datagen_seed as ds
 from tests.conftest import make_config
+from tests.fixtures import heldout_test_seeds as ts
 
 REPO = Path(__file__).resolve().parents[1]
 PREREG = json.loads((REPO / "src/lakebench/spark/data/aml/aml_preregistration.json").read_text())
 CORPORA = PREREG["corpora"]
+# The plaintext held-out keys are dropped so no assertion can print them.
+for _k in ("evaluation_seed", "robustness_seed"):
+    CORPORA.pop(_k, None)
 RUST = (REPO / "datagen_rs/src/robustness.rs").read_text()
+# Test-only held-out seeds, registered in tests/fixtures/heldout_test.json.
+ROBUST, EVAL = ts.TEST_ROBUSTNESS_SEED, ts.TEST_EVALUATION_SEED
+
+
+@pytest.fixture(autouse=True)
+def _fixture_heldout(monkeypatch):
+    ts.use_fixture(monkeypatch)
+
+
+def _no_plain(corpora: dict) -> dict:
+    """``corpora`` without the plaintext held-out keys, so no assertion prints them."""
+    return {k: v for k, v in corpora.items() if k not in ("evaluation_seed", "robustness_seed")}
 
 
 def _rust_const(name: str) -> float:
@@ -44,11 +60,6 @@ def _rust_const(name: str) -> float:
 )
 def test_rust_multipliers_are_the_preregistered_ones(const, key):
     assert _rust_const(const) == CORPORA["robustness_perturbation"][key]
-
-
-def test_rust_registered_seeds_match_the_preregistration():
-    assert int(_rust_const("ROBUSTNESS_SEED")) == CORPORA["robustness_seed"]
-    assert int(_rust_const("EVALUATION_SEED")) == CORPORA["evaluation_seed"]
 
 
 def test_prereg_block_has_exactly_the_three_multipliers():
@@ -72,7 +83,7 @@ def _cfg(schema="financial", **dg):
 
 @pytest.fixture
 def looks_open(monkeypatch):
-    opened = {**ds._corpora(), "registered_looks_open": True}
+    opened = {**_no_plain(ds._corpora()), "registered_looks_open": True}
     monkeypatch.setattr(ds, "_corpora", lambda: opened)
 
 
@@ -92,20 +103,21 @@ def test_non_financial_refused():
 
 def test_robustness_role_requires_the_perturbation(looks_open):
     with pytest.raises(ValidationError, match="needs datagen.robustness_perturbation"):
-        _cfg(corpus_role="robustness")
-    cfg = _cfg(corpus_role="robustness", robustness_perturbation=True)
-    assert ds.config_seed(cfg) == CORPORA["robustness_seed"]
+        _cfg(seed=ROBUST, corpus_role="robustness")
+    cfg = _cfg(seed=ROBUST, corpus_role="robustness", robustness_perturbation=True)
+    assert ds.config_seed(cfg) == ROBUST
     assert ds.config_perturbation(cfg) is True
 
 
 @pytest.mark.parametrize("role", ["calibration", "evaluation"])
 def test_other_roles_refuse_the_perturbation(role, looks_open):
+    seed = EVAL if role == "evaluation" else CORPORA["calibration_seed"]
     with pytest.raises(ValidationError, match="never perturbed"):
-        _cfg(corpus_role=role, robustness_perturbation=True)
+        _cfg(seed=seed, corpus_role=role, robustness_perturbation=True)
 
 
 def test_refused_even_if_validation_is_bypassed(looks_open):
-    cfg = _cfg(corpus_role="robustness", robustness_perturbation=True)
+    cfg = _cfg(seed=ROBUST, corpus_role="robustness", robustness_perturbation=True)
     cfg.architecture.workload.datagen.robustness_perturbation = False
     with pytest.raises(ValueError, match="needs datagen.robustness_perturbation"):
         ds.config_perturbation(cfg)
@@ -220,7 +232,6 @@ def test_reference_job_records_the_perturbation(monkeypatch):
 # Manifest stamp: the robustness look reads the perturbation from the corpus
 # ---------------------------------------------------------------------------
 
-ROBUST = CORPORA["robustness_seed"]
 MULT = {
     mkey: [str(CORPORA["robustness_perturbation"][pkey])]
     for pkey, mkey in ds.MANIFEST_MULTIPLIER_KEYS.items()
@@ -311,15 +322,26 @@ def scorer(monkeypatch, load_script):
 
 
 class _FakeAf:
-    def __init__(self, seed, groups):
-        self.seed, self.groups = seed, groups
-
-    def corpus_seed_check(self, _manifest, g):
-        return {"matched_share": 1.0 if g == self.seed else 0.0}
+    def __init__(self, groups):
+        self.groups = groups
 
     def manifest_stamp_groups(self, _manifest, keys):
         assert tuple(keys) == ds.MANIFEST_KEYS
         return self.groups
+
+
+class _Manifest:
+    """Manifest rows derived from ``seed`` the way the generator does."""
+
+    def __init__(self, seed, n=7):
+        self.rows = ts.manifest_rows(seed, n)
+
+    def select(self, *cols):
+        assert cols == ("typology_id", "seed")
+        return self
+
+    def toLocalIterator(self):  # noqa: N802 -- the pyspark name
+        return iter({"typology_id": t, "seed": s} for t, s in self.rows)
 
 
 def _groups(stamped):
@@ -329,15 +351,18 @@ def _groups(stamped):
 
 
 def test_scorer_refuses_a_robustness_look_on_an_unstamped_corpus(scorer, monkeypatch):
-    # What an old image (lb-datagen:14c4eee) produces for seed 90000042: the
+    # What an old image (lb-datagen:14c4eee) produces for the robustness seed: the
     # right instance seeds, no stamp. The config still declares the
     # perturbation, so only the corpus can tell.
     monkeypatch.setenv("LB_DATAGEN_SEED", str(ROBUST))
     monkeypatch.setenv("LB_DATAGEN_CORPUS_ROLE", "robustness")
     monkeypatch.setenv("LB_DATAGEN_ROBUSTNESS_PERTURBATION", "true")
     with pytest.raises(SystemExit, match="no robustness stamp"):
-        scorer._refuse_guarded_corpus(_FakeAf(ROBUST, _groups(False)), None, counts_only=False)
-    stamp = scorer._refuse_guarded_corpus(_FakeAf(ROBUST, _groups(True)), None, counts_only=False)
+        scorer._refuse_guarded_corpus(_FakeAf(_groups(False)), _Manifest(ROBUST), counts_only=False)
+    stamp, verdict = scorer._refuse_guarded_corpus(
+        _FakeAf(_groups(True)), _Manifest(ROBUST), counts_only=False
+    )
+    assert verdict.matches_claim is True
     assert stamp["n_stamped"] == stamp["n_instances"] == 7
 
 
@@ -346,8 +371,10 @@ def test_scorer_refuses_a_stamp_the_config_did_not_declare(scorer, monkeypatch):
     monkeypatch.delenv("LB_DATAGEN_CORPUS_ROLE", raising=False)
     monkeypatch.delenv("LB_DATAGEN_ROBUSTNESS_PERTURBATION", raising=False)
     with pytest.raises(SystemExit, match="declares"):
-        scorer._refuse_guarded_corpus(_FakeAf(7777, _groups(True)), None, counts_only=False)
-    assert scorer._refuse_guarded_corpus(_FakeAf(7777, _groups(False)), None, counts_only=False)
+        scorer._refuse_guarded_corpus(_FakeAf(_groups(True)), _Manifest(7777), counts_only=False)
+    assert scorer._refuse_guarded_corpus(
+        _FakeAf(_groups(False)), _Manifest(7777), counts_only=False
+    )
 
 
 def test_scorer_provenance_comes_from_the_manifest():

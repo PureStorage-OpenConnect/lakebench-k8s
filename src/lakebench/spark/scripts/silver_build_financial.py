@@ -115,9 +115,9 @@ MANIFEST_GLOB = env(
 # excuse missing masters; datagen-v2-rs-0.2 is the first KYC version.
 PRE_KYC_MODEL_VERSIONS = frozenset({"datagen-v2-rs-0.1"})
 
-# Columns silver.entities takes from the party master (GOALS P10 stages 0 and
-# 2). The KYC columns are NULL for non-customers: the reporting FI holds no
-# CDD file on another bank's customer.
+# Columns silver.entities takes from the party master. The KYC columns are
+# NULL for non-customers: the reporting FI holds no CDD file on another bank's
+# customer.
 KYC_ENTITY_COLUMNS = (
     ("is_customer", "boolean"),
     ("home_fi", "string"),
@@ -133,7 +133,7 @@ KYC_ACCOUNT_COLUMNS = (("home_fi", "string"), ("is_customer", "boolean"))
 # Reference USD rates by settlement currency, mirroring
 # datagen_rs::amounts::fx_to_usd (a drift test keeps the two in step). The
 # generator expresses each amount in its account's currency, so silver needs a
-# reference rate to put every row on one USD scale (LB-137).
+# reference rate to put every row on one USD scale.
 _FX_TO_USD = {
     "USD": 1.0,
     "GBP": 1.30,
@@ -196,7 +196,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_TRANSACTIONS} (
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 # `_batch_id` supports the silver_stream two-phase batchId idempotency
-# protocol (LB-109). Batch-mode writes leave it NULL; streaming writes
+# protocol. Batch-mode writes leave it NULL; streaming writes
 # tag each row with the Structured Streaming batchId so that on retry the
 # handler can DELETE WHERE _batch_id = X + reinsert without double-count.
 # Nullable so batch-mode `_replace_data(build_transactions(...))` works
@@ -288,7 +288,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_EDGES} (
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
-# C-PROFILES (LB-130): per-entity behavioural baseline. Kept in lock-step with
+# C-PROFILES: per-entity behavioural baseline. Kept in lock-step with
 # SILVER_ENTITY_PROFILES_DDL in deploy/financial_ddl.py.
 DDL_PROFILES = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_PROFILES} (
@@ -360,7 +360,7 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 def _entity_id_from(name_col, country_col, city_col=None, lei_col=None):
     """Deterministic BIGINT entity_id, LEI-first with name-hash fallback.
 
-    LB-101 (P1): bronze carries a role-independent LEI on both dbtr and
+    Bronze carries a role-independent LEI on both dbtr and
     cdtr sides (``dbtr.id.lei``, ``cdtr.id.lei``); the Rust datagen
     stamps ``lei_for(entity_id)`` for both roles, so the same real
     entity appears with the same LEI on either side of a wire. Keying
@@ -483,7 +483,7 @@ def build_transactions(bronze):
         col("cdtr.nm").alias("rptd_beneficiary_name"),
         col("cdtr.pstl_adr.strt_nm").alias("rptd_beneficiary_address"),
         col("msg_id").alias("source_message_ref"),
-        # LB-109: _batch_id populated by silver_stream, NULL for batch mode.
+        # _batch_id populated by silver_stream, NULL for batch mode.
         # Present in every DataFrame that writes silver.transactions so the
         # DataFrameWriterV2.overwrite() column set matches the target schema.
         lit(None).cast("bigint").alias("_batch_id"),
@@ -559,7 +559,7 @@ def build_kyc(party, account):
         for name, sql_type in KYC_ENTITY_COLUMNS
         if name != "home_fi"
     ]
-    # The party master carries no sanctions or PEP flag (AML-GOALS #50): that
+    # The party master carries no sanctions or PEP flag: that
     # is the answer the screening rules W5/W6 are scored against.
     prt = party.select(
         col("entity_id").alias("_dg_id"),
@@ -646,7 +646,7 @@ def build_entities(txns_df, bronze=None, kyc=None):
 def build_accounts(bronze, kyc=None):
     """Distinct IBAN -> holder_entity from the pacs.008 payload.
 
-    Fixes LB-104-shape non-determinism and the follow-up cross-side blending
+    Fixes holder-assignment non-determinism and the follow-up cross-side blending
     hazard (I3). An IBAN that appears both as a debtor account (with dbtr's
     entity as holder) and as a creditor account (with cdtr's entity as holder)
     previously had holder_entity_id chosen coin-flip by dropDuplicates, and
@@ -892,7 +892,7 @@ def build_edges(txns_df):
             col("last_seen_ts"),
             col("cumulative_amount_usd"),
             col("txn_count"),
-            # LB-109: NULL in batch mode; silver_stream overrides in its
+            # NULL in batch mode; silver_stream overrides in its
             # per-batch build_edges wrapper. Present so overwrite() writes
             # match the target schema.
             lit(None).cast("bigint").alias("_batch_id"),
@@ -904,7 +904,7 @@ def build_edges(txns_df):
 
 
 def build_entity_profiles(txns_df, data_clock):
-    """Per-entity behavioural baseline (C-PROFILES, LB-130).
+    """Per-entity behavioural baseline (C-PROFILES).
 
     ``data_clock`` (I1, silver-plan): the resolved data clock anchor
     (``datetime.date``) that stamps ``profile_updated_ts``. Passing a
@@ -1186,7 +1186,7 @@ def main() -> None:
     # produce different partition layouts (reproducibility failure).
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
-    # Multi-cycle mode contract (LB-121). The orchestrator sets
+    # Multi-cycle mode contract. The orchestrator sets
     # LB_SILVER_INCREMENTAL=true for cycles 2+ of a multi-cycle batch run.
     # Customer 360's silver_build honours that by APPENDING the cycle's
     # bronze read. AML must NOT: its bronze is CUMULATIVE across cycles
@@ -1241,7 +1241,7 @@ def main() -> None:
         spark.sql(ddl)
         log(f"Bootstrapped silver.{name}")
 
-    # LB-109 upgrade path: on a reused catalog whose tables predate these
+    # Upgrade path for _batch_id: on a reused catalog whose tables predate these
     # columns, CREATE TABLE IF NOT EXISTS above is a no-op and the writes
     # below (which carry them) would fail on a schema mismatch.
     for table in (SILVER_TRANSACTIONS, SILVER_EDGES):
@@ -1425,7 +1425,7 @@ def main() -> None:
     _replace_data(spark, edges, SILVER_EDGES)
     log("Wrote silver.counterparty_edges")
 
-    # C-PROFILES (LB-130): per-entity behavioural baseline for relative-anomaly
+    # C-PROFILES: per-entity behavioural baseline for relative-anomaly
     # detection (W4/W8 over-firing). Full rebuild from the transaction frame.
     # I1: ``data_clock`` fixes ``profile_updated_ts`` so rebuilds are
     # byte-identical for the same bronze.
@@ -1496,7 +1496,7 @@ def main() -> None:
         data_clock_source=_clock_source,
         **per_table,
     )
-    # A1: LB-044 gate; refuse exit-0 if the primary output table is empty.
+    # A1: progress gate; refuse exit-0 if the primary output table is empty.
     # Emitted after metrics so a failed run still leaves the block on stdout.
     assert_progress(silver_rows, "silver-build")
     spark.stop()

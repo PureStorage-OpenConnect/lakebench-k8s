@@ -27,7 +27,7 @@ from pyspark.sql.functions import current_timestamp
 from pyspark.sql.types import StructType
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-# LB-089: honor LB_FINANCIAL_BRONZE_PREFIX with the same semantics as
+# Honor LB_FINANCIAL_BRONZE_PREFIX with the same semantics as
 # bronze_verify_financial: the env var is the ROOT prefix datagen_rs was
 # invoked with (mirrored from path_template by job.py). Transactions
 # land under {root}/bronze/pacs008/. Pre-PR-F this file used the env
@@ -50,7 +50,7 @@ TRIGGER_S = int(env("LB_FINANCIAL_BRONZE_TRIGGER_S", "10"))
 
 def _log_new_progress(query, logged_batch: int) -> int:
     """Log each micro-batch once, in the line format the metrics collector
-    parses (LB-136: without these the continuous scorecard read zero rows
+    parses (without these the continuous scorecard read zero rows
     ingested for a healthy AML stream). Returns the last batch id logged."""
     for p in query.recentProgress:
         rows = int(p.get("numInputRows") or 0)
@@ -150,7 +150,7 @@ def main() -> None:
     # Re-raise any streaming exception so a jar-download stall / schema
     # mismatch / S3 auth failure surfaces as pod exit != 0. Without this,
     # the query dies but the pod exits 0 and sustained mode reports PASS
-    # with zero rows -- the exact LB-044 shape this file is meant to
+    # with zero rows -- the exit-0-with-no-data shape this file is meant to
     # avoid.
     exc = query.exception()
     if exc is not None:
