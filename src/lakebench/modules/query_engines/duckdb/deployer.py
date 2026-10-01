@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from lakebench.deploy import deadline as deploy_deadline
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus, image_tag
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ class DuckDBDeployer:
                     if doc:
                         self.k8s.apply_manifest(doc, namespace=namespace)
 
-            self._wait_for_ready(namespace, timeout_seconds=900)
+            self._wait_for_ready(namespace, timeout_seconds=deploy_deadline.clamp(900))
 
             duckdb_version = image_tag(self.config.images.duckdb)
             return DeploymentResult(
@@ -87,7 +88,7 @@ class DuckDBDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _wait_for_ready(self, namespace: str, timeout_seconds: int = 300) -> None:
+    def _wait_for_ready(self, namespace: str, timeout_seconds: float = 300) -> None:
         """Wait for the DuckDB Deployment to have ready replicas.
 
         Readiness alone cannot say *why* a pod is not ready. A slow pip
@@ -102,6 +103,7 @@ class DuckDBDeployer:
 
         apps_api = k8s_client.AppsV1Api()
         deadline = time.time() + timeout_seconds
+        last = "not created"
 
         while time.time() < deadline:
             try:
@@ -113,11 +115,13 @@ class DuckDBDeployer:
                 desired = dep.spec.replicas or 1
                 if ready >= desired:
                     return
+                last = f"{ready}/{desired} ready"
             except k8s_client.rest.ApiException as e:
                 if e.status != 404:
                     raise
             time.sleep(5)
 
+        deploy_deadline.check("deployment lakebench-duckdb", last)
         raise RuntimeError(
             f"DuckDB did not become ready within {timeout_seconds}s. "
             f"{self._describe_not_ready(namespace)}"

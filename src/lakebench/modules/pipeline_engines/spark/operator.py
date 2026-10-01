@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from lakebench.deploy import deadline as deploy_deadline
 from lakebench.k8s import pinned_helm, pinned_kubectl, pinned_oc
 from lakebench.k8s.lease_state import LeaseHoldExceeded
 from lakebench.modules.pipeline_engines.spark.operator_scratch import (
@@ -1442,7 +1443,11 @@ class SparkOperatorManager:
                     f"deployment/{deploy}",
                     "-n",
                     self.namespace,
-                    "--timeout=120s",
+                    "--timeout="
+                    + str(
+                        deploy_deadline.clamp_whole_seconds(120, f"rollout of deployment/{deploy}")
+                    )
+                    + "s",
                 ],
                 capture_output=True,
                 text=True,
@@ -1468,7 +1473,7 @@ class SparkOperatorManager:
         Returns:
             True if the deployment spec includes the namespace.
         """
-        deadline = time.time() + timeout
+        deadline = time.time() + deploy_deadline.clamp(timeout)
         while time.time() < deadline:
             try:
                 watched = self._get_active_namespaces()
@@ -1701,7 +1706,7 @@ class SparkOperatorManager:
         """The controller's /tmp volume; raises _DeploymentReadError."""
         return tmp_volume(self._controller_deployment())
 
-    def _wait_for_rollout(self, timeout_s: int = 180) -> bool:
+    def _wait_for_rollout(self, timeout_s: float = 180) -> bool:
         """Wait for both operator Deployments to finish rolling out."""
         for deploy in (self.CONTROLLER_DEPLOYMENT, "spark-operator-webhook"):
             result = self._run(
@@ -1712,7 +1717,13 @@ class SparkOperatorManager:
                     f"deployment/{deploy}",
                     "-n",
                     self.namespace,
-                    f"--timeout={timeout_s}s",
+                    "--timeout="
+                    + str(
+                        deploy_deadline.clamp_whole_seconds(
+                            timeout_s, f"rollout of deployment/{deploy}"
+                        )
+                    )
+                    + "s",
                 ],
                 capture_output=True,
                 text=True,
@@ -1794,7 +1805,7 @@ class SparkOperatorManager:
         if self._is_openshift():
             self._assign_openshift_scc()
             self._patch_openshift_deployments()
-        if not self._wait_for_rollout():
+        if not self._wait_for_rollout(timeout_s=deploy_deadline.clamp(180)):
             return False
         return self._verify_tmp_size(tmp_size)
 
@@ -1934,9 +1945,9 @@ class SparkOperatorManager:
 
             # readyReplicas alone can still count the old pod during an
             # upgrade; wait for the new ReplicaSets.
-            if exists and not self._wait_for_rollout():
+            if exists and not self._wait_for_rollout(timeout_s=deploy_deadline.clamp(180)):
                 return False
-            if not self._wait_for_ready(timeout=120):
+            if not self._wait_for_ready(timeout=deploy_deadline.clamp(120)):
                 return False
             return self._verify_tmp_size(tmp_size)
 
@@ -1944,7 +1955,7 @@ class SparkOperatorManager:
             logger.error(f"Failed to install Spark Operator: {e}")
             return False
 
-    def _wait_for_ready(self, timeout: int = 120) -> bool:
+    def _wait_for_ready(self, timeout: float = 120) -> bool:
         """Wait for Spark Operator to become ready.
 
         Args:
@@ -1954,14 +1965,17 @@ class SparkOperatorManager:
             True if operator becomes ready
         """
         start = time.time()
+        last = ""
 
         while time.time() - start < timeout:
             status = self.check_status()
             if status.ready:
                 logger.info("Spark Operator is ready")
                 return True
+            last = status.message
             time.sleep(5)
 
+        deploy_deadline.check("Spark Operator ready", last)
         logger.error(f"Spark Operator not ready after {timeout}s")
         return False
 
@@ -2023,7 +2037,7 @@ class SparkOperatorManager:
                 return self.check_status()
             return status
         logger.info("Spark Operator not ready, waiting for it to recover...")
-        if self._wait_for_ready(timeout=120):
+        if self._wait_for_ready(timeout=deploy_deadline.clamp(120)):
             status = self.check_status()
             if (
                 not _after_wait

@@ -326,7 +326,7 @@ class K8sClient:
                 blockers.append(cond.message or cond.reason or cond.type)
         return phase, blockers
 
-    def wait_for_namespace_deleted(self, name: str, timeout: int = 120) -> None:
+    def wait_for_namespace_deleted(self, name: str, timeout: float = 120) -> None:
         """Wait for a namespace to be fully deleted."""
         import time
 
