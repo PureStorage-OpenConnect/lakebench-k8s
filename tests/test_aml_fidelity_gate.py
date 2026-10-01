@@ -32,7 +32,8 @@ FEATURES_SRC = ROOT / "src/lakebench/spark/scripts/aml_features.py"
 
 # Tests that take 5 s or more on the pinned reference libraries (183 s for the
 # whole file, of which these are about 140 s, measured 2026-09-30). CI runs them
-# in the "AML statistics (slow)" job; the fast path deselects them.
+# in the "AML statistics (slow)" job, and the unit legs still run them too until
+# the fast path (QA-6) deselects the mark there.
 SLOW = pytest.mark.slow
 
 PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
