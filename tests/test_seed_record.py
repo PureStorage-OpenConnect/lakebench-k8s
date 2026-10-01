@@ -71,12 +71,9 @@ class TestRule:
             raise FileNotFoundError("heldout_hashes.json")
 
         monkeypatch.setattr(ds, "_heldout", broken)
-        rec = ds.record_seed("financial", 43)
-        assert rec == {
-            "seed_ref": None,
-            "role": "unknown",
-            "withheld": "held-out record unreadable",
-        }
+        assert ds.record_seed("financial", 777) == ds.WITHHELD
+        # The calibration seed is public from the pre-registration alone.
+        assert ds.record_seed("financial", 43) == 43
 
     @pytest.mark.parametrize("seed", [None, True, "not a seed"])
     def test_non_seeds_pass_through(self, held, seed):
@@ -121,3 +118,68 @@ class TestRecords:
         ]
         assert corpus["seed"] == 43 and corpus["datagen"]["seed"] == 43
         assert "problems" not in corpus
+
+
+class TestReviewCases:
+    def test_unknown_schema_is_checked_not_plaintext(self, held):
+        rec = ds.record_seed("", ts.TEST_EVALUATION_SEED)
+        assert rec["role"] == "evaluation"
+        d = _fleet(ts.TEST_EVALUATION_SEED, schema="").to_dict()
+        assert _absent(ts.TEST_EVALUATION_SEED, d)
+
+    def test_seeds_equal_across_the_spend(self, held):
+        seed = ts.TEST_EVALUATION_SEED
+        ref = ds.record_seed("financial", seed)
+        assert ds.seeds_equal(ref, seed) is True and ds.seeds_equal(seed, ref) is True
+        assert ds.seeds_equal(ref, ts.TEST_ROBUSTNESS_SEED) is False
+        assert ds.seeds_equal(43, 43) is True and ds.seeds_equal(43, 44) is False
+        assert ds.seeds_equal(ds.WITHHELD, 43) is None
+        assert ds.seeds_equal(ds.WITHHELD, ds.WITHHELD) is None
+
+    def test_record_written_before_the_spend_reads_one_seed_after(self, held, monkeypatch):
+        """Config seed stored as a ref (held out at run start), fleet seed
+        plaintext (written after the look spent it): one corpus, no problem."""
+        seed = ts.TEST_EVALUATION_SEED
+        monkeypatch.setattr(ds, "config_seed", lambda cfg: seed)
+        run = _metrics(_cfg("financial"), fleet=None)
+        inputs = run.config_snapshot["experiment_inputs"]
+        assert inputs["corpus"]["seed"]["role"] == "evaluation"
+        monkeypatch.setattr(ds, "recorded_seeds", lambda path=None: frozenset({seed}))
+        run.datagen_fleet = {"seed": seed, "schema": "financial"}
+        corpus = run.to_dict()["experiment"]["corpus"]
+        assert not any("seed" in p for p in corpus.get("problems", []))
+
+    def test_withheld_seed_is_a_problem_not_a_match(self, held, monkeypatch):
+        monkeypatch.setattr(ds, "config_seed", lambda cfg: 777)
+        fleet = {"seed": dict(ds.WITHHELD), "schema": "financial"}
+        problems = _metrics(_cfg("financial"), fleet=fleet).to_dict()["experiment"]["corpus"][
+            "problems"
+        ]
+        assert any("could not be checked" in p for p in problems)
+
+    def test_one_spent_rule_for_scrubber_and_records(self, held, monkeypatch):
+        from tests.fixtures import scrub
+
+        seed = ts.TEST_EVALUATION_SEED
+        assert scrub._protected_role(seed) == "evaluation"
+        monkeypatch.setattr(ds, "recorded_seeds", lambda path=None: frozenset({seed}))
+        assert scrub._protected_role(seed) is None
+        assert ds.record_seed("financial", seed) == seed
+
+    @pytest.mark.parametrize("shape", ["grouped", "underscored", "float"])
+    def test_scrubber_finds_grouped_and_float_seeds(self, held, shape):
+        from tests.fixtures import scrub
+        from tests.fixtures import stored_records as sr
+
+        seed = ts.TEST_EVALUATION_SEED
+        rec = sr.load_record("5105a0")
+        extra = rec["config_snapshot"].setdefault("extra", {})
+        if shape == "grouped":
+            extra["note"] = f"seed {seed:,}"
+        elif shape == "underscored":
+            extra["note"] = f"seed {seed:_}"
+        else:
+            extra["seed"] = float(seed)
+        with pytest.raises(scrub.ScrubError) as exc:
+            scrub.scrub_record(rec)
+        assert "seed" in str(exc.value) and _absent(seed, str(exc.value))

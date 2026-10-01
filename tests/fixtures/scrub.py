@@ -79,6 +79,7 @@ import copy
 import hashlib
 import ipaddress
 import json
+import math
 import re
 import sys
 import tempfile
@@ -102,6 +103,8 @@ _CREDENTIAL_KEY = re.compile(
 _ENDPOINT_KEY = re.compile(r"(?:^|_)(?:endpoints?(?:_url|_override)?(?:_s3)?|s3_url)$")
 _BUCKET_KEY = re.compile(r"(?:^|_)bucket(?:_name)?$")
 _DIGITS = re.compile(r"(?<!\d)\d+(?!\d)")
+#: A digit-grouped number ("8,763,195,430" or "8_763_195_430"), read whole.
+_GROUPED = re.compile(r"(?<!\d)\d{1,3}(?:[,_ ]\d{3})+(?!\d)")
 
 #: Leaf keys whose values are evidence: a rewrite there is refused unless the
 #: key is also an endpoint, bucket or credential key.
@@ -202,7 +205,7 @@ def _protected_role(n: int) -> str | None:
     from lakebench.config import datagen_seed
 
     role = datagen_seed.heldout_role(n)
-    if role is None or datagen_seed.is_spent(n):
+    if role is None or datagen_seed.is_public_seed(n):
         return None
     return role
 
@@ -210,10 +213,13 @@ def _protected_role(n: int) -> str | None:
 def _redact_seeds(text: str) -> str:
     """*text* with every digit run equal to a held-out seed replaced. When
     the held-out record cannot be read, every digit run is replaced."""
+
+    def redact(m: re.Match) -> str:
+        n = int(re.sub(r"[,_ ]", "", m.group(0)))
+        return "<seed>" if _protected_role(n) else m.group(0)
+
     try:
-        return _DIGITS.sub(
-            lambda m: "<seed>" if _protected_role(int(m.group(0))) else m.group(0), text
-        )
+        return _DIGITS.sub(redact, _GROUPED.sub(redact, text))
     except Exception:  # noqa: BLE001 -- fail closed: no number survives
         return _DIGITS.sub("<n>", text)
 
@@ -661,6 +667,8 @@ def _numbers(obj: Any, path: str = "") -> Iterator[tuple[str, int]]:
         for k, v in obj.items():
             for m in _DIGITS.finditer(str(k)):
                 yield f"{path} key", int(m.group(0))
+            for m in _GROUPED.finditer(str(k)):
+                yield f"{path} key", int(re.sub(r"[,_ ]", "", m.group(0)))
             yield from _numbers(v, f"{path}.{k}")
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
@@ -670,10 +678,17 @@ def _numbers(obj: Any, path: str = "") -> Iterator[tuple[str, int]]:
     elif isinstance(obj, int):
         yield path, obj
     elif isinstance(obj, float) and obj.is_integer():
-        yield path, int(obj)
+        n = int(obj)
+        # Above 2**53 a float stands for a run of integers one ulp wide;
+        # check them all, so a seed stored as a float is still found.
+        spread = int(math.ulp(obj)) if abs(obj) >= 2**53 else 0
+        for d in range(-spread, spread + 1):
+            yield path, n + d
     elif isinstance(obj, str):
         for m in _DIGITS.finditer(obj):
             yield path, int(m.group(0))
+        for m in _GROUPED.finditer(obj):
+            yield path, int(re.sub(r"[,_ ]", "", m.group(0)))
 
 
 def _seed_problems(record: Any) -> list[str]:

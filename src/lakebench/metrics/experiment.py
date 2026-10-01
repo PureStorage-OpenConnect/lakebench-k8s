@@ -597,10 +597,6 @@ def _datagen(metrics: Any, inputs: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _seed_key(seed: Any) -> str:
-    return json.dumps(seed, sort_keys=True, default=str)
-
-
 def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[dict, list[str]]:
     """The corpus as generated: the config's values replaced by what the
     datagen pods ran with where the fleet record says, and the problems that
@@ -617,9 +613,17 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
         problems.append(f"datagen pods ran different images ({dg['pod_image']})")
     seed_seen, seed_declared = dg.get("seed"), corpus.get("seed")
     if seed_seen is not None:
-        # Compared in the recorded form (datagen_seed.record_seed), so a
-        # held-out seed is never printed in a problem.
-        if seed_declared is not None and _seed_key(seed_declared) != _seed_key(seed_seen):
+        # Compared and printed in the recorded form (datagen_seed.record_seed
+        # and seeds_equal), so a held-out seed is never printed in a problem.
+        from lakebench.config.datagen_seed import seeds_equal
+
+        same = seeds_equal(seed_declared, seed_seen) if seed_declared is not None else True
+        if same is None:
+            problems.append(
+                "the corpus seed could not be checked against the datagen pods' seed "
+                "(the held-out seed record was unreadable)"
+            )
+        elif not same:
             problems.append(f"config seed {seed_declared!r} but the datagen pods ran {seed_seen!r}")
         out["seed"] = int(seed_seen) if isinstance(seed_seen, int) else seed_seen
     for key in ("scale",):

@@ -599,21 +599,60 @@ def seed_ref(schema: str, seed: int, heldout: HeldOut | None = None) -> str:
     return seed_hash(h.salt, seed)
 
 
+#: Schemas whose seeds are never held out. Any other schema name, an empty
+#: one included, goes through the held-out check (a fleet record that read
+#: no pod metrics line has no schema).
+_PUBLIC_SEED_SCHEMAS = frozenset({"customer360", "custom"})
+
+
+def is_public_seed(seed, heldout: HeldOut | None = None) -> bool:
+    """Whether ``seed`` may appear in plaintext in any output: the
+    calibration seed, a seed the pre-registration lists as spent, a seed
+    with a recorded look (started or complete), or one in the hash file's
+    spent list. The one spent rule for ``record_seed`` and the fixture
+    scrubber. Never raises: what cannot be read does not make a seed public."""
+    if seed is None or isinstance(seed, bool):
+        return False
+    try:
+        value = int(seed)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    for check in (
+        lambda: value == calibration_seed(),
+        lambda: value in spent_seeds(),
+        lambda: value in recorded_seeds(),
+        lambda: is_spent(value, heldout),
+    ):
+        try:
+            if check():
+                return True
+        except Exception:  # noqa: BLE001 -- unreadable: not public on that ground
+            continue
+    return False
+
+
+#: The recorded form of a seed that could not be checked (the held-out record
+#: was unreadable). ``seeds_equal`` never calls it equal to anything.
+WITHHELD = {"seed_ref": None, "role": "unknown", "withheld": "held-out record unreadable"}
+
+
 def record_seed(schema: str, seed, corpus_role: str | None = None, heldout: HeldOut | None = None):
     """How run output records a corpus seed (LB-229; SPEC release success 5):
     metrics.json, the datagen fleet record, reports and the scorer's
     provenance all call this, so no output carries a future look's seed.
 
-    The plaintext seed, except a financial seed that is held out (its salted
-    hash is registered for evaluation or robustness, or the corpus declares
-    one of those roles) and not yet spent, which is recorded as
-    ``{"seed_ref": <salted hash under the hash file's salt>, "role": <role>}``.
-    Seed 43, the other public development seeds and every spent seed stay in
-    plaintext, as invariant 5 needs. Equal seeds give equal records, so
-    comparisons on the recorded form still work. When the held-out record
-    cannot be read the seed is withheld (``seed_ref`` None, role
-    ``unknown``): the safe side. A recorded form passes through unchanged,
-    so the rule can be applied twice. Never raises, never prints a seed.
+    The plaintext seed when the schema is Customer 360 or custom, or the seed
+    is public (``is_public_seed``: seed 43, spent seeds, seeds with a recorded
+    look), as invariant 5 needs. Otherwise a seed that is held out (its
+    salted hash is registered for evaluation or robustness, or the corpus
+    declares one of those roles) is recorded as ``{"seed_ref": <salted hash
+    under the hash file's salt>, "role": <role>}``. When the held-out record
+    cannot be read the seed is withheld (``WITHHELD``). A recorded form
+    passes through unchanged. Never raises, never prints a seed.
+
+    The form is decided when a record is written and is stored; a record
+    written while a seed was held out keeps its ``seed_ref`` after the seed
+    is spent. Compare recorded forms with ``seeds_equal``, never with ``==``.
     """
     if isinstance(seed, Mapping) and "seed_ref" in seed:
         return dict(seed)
@@ -623,30 +662,48 @@ def record_seed(schema: str, seed, corpus_role: str | None = None, heldout: Held
         value = int(seed)
     except (TypeError, ValueError, OverflowError):
         return seed
-    if schema != "financial":
+    if schema in _PUBLIC_SEED_SCHEMAS or is_public_seed(value, heldout):
         return value
     try:
         h = heldout if heldout is not None else _heldout()
         role = heldout_role(value, h)
-        spent = is_spent(value, h)
     except Exception:  # noqa: BLE001 -- unreadable or contradictory: withhold
-        return {"seed_ref": None, "role": "unknown", "withheld": "held-out record unreadable"}
-    if not spent:
-        try:
-            spent = value in spent_seeds() or value in recorded_seeds()
-        except Exception:  # noqa: BLE001 -- unknown spend status: not plaintext on that ground
-            spent = False
-    if spent:
-        return value
+        return dict(WITHHELD)
     if role is None and corpus_role in PROTECTED_ROLES:
-        try:
-            public = value == calibration_seed()
-        except Exception:  # noqa: BLE001
-            public = False
-        role = None if public else corpus_role
+        role = corpus_role
     if role is None:
         return value
     return {"seed_ref": seed_hash(h.salt, value), "role": role}
+
+
+def seeds_equal(a, b, heldout: HeldOut | None = None) -> bool | None:
+    """Whether two recorded seeds (``record_seed`` forms) name one seed:
+    equal plaintext, equal ``seed_ref``, or a plaintext seed whose salted
+    hash is the other side's ``seed_ref`` (one record written before the
+    seed was spent, one after). None when it cannot be told: either side
+    withheld, or the hash file unreadable for a mixed pair."""
+
+    def ref(x):
+        return x.get("seed_ref") if isinstance(x, Mapping) else None
+
+    if a is None or b is None:
+        return None
+    ra, rb = ref(a), ref(b)
+    if isinstance(a, Mapping) and ra is None or isinstance(b, Mapping) and rb is None:
+        return None
+    if ra is not None and rb is not None:
+        return ra == rb
+    if ra is None and rb is None:
+        try:
+            return int(a) == int(b)
+        except (TypeError, ValueError, OverflowError):
+            return a == b
+    plain, hashed = (b, ra) if ra is not None else (a, rb)
+    try:
+        h = heldout if heldout is not None else _heldout()
+        return seed_hash(h.salt, int(plain)) == hashed
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # Seed recovery. The generator derives each instance seed as
