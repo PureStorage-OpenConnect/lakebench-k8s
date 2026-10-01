@@ -88,3 +88,12 @@ def test_source_shipped_python_is_in_spec():
     shipped = [s for s, _ in _spec_datas()]
     assert "src/lakebench/aml/reference_score.py" in shipped
     assert "src/lakebench/aml/fidelity_gate.py" in shipped
+
+
+def test_lb_deps_resolver_is_in_spec():
+    # select_request() hashes the resolver file; without it in the binary
+    # every deploy from the release binary raises FileNotFoundError.
+    from lakebench.deps.request import TOOLS_PATH
+
+    shipped = [s for s, _ in _spec_datas()]
+    assert str(TOOLS_PATH.relative_to(ROOT)) in shipped
