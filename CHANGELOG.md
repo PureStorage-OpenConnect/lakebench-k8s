@@ -82,9 +82,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   lists, a paged cluster-wide pod list, the API server version and
   ClusterVersion and sends one HEAD on the bronze bucket at run start, and
   a node list and the pod list when the record is saved; each sample
-  finishes within 120 s and 60 s, and a refused or unfinished read is
-  recorded as `not_observed`. A `--local` run records no system part and
-  no load.
+  returns within 120 s and 60 s, and a refused or unfinished read is
+  recorded as `not_observed`. A `--local` run records a local system
+  identity with no part observed, and no load.
 - **A stored experiment block is never rebuilt.** Loading and saving a
   record keeps its block as written; 1.6 rebuilt it with the current code,
   which moved the identity digest of seven stored records.

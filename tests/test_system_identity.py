@@ -529,6 +529,32 @@ def test_load_pod_overhead_counts() -> None:
     assert si.observe_load(k8s, "mine")["cotenant_requested"]["cpu"] == 1.25
 
 
+def test_endless_continue_token_is_bounded() -> None:
+    class Core:
+        def list_node(self, **kw):
+            return NS(items=_default_nodes())
+
+        def list_pod_for_all_namespaces(self, **kw):
+            return NS(items=[], metadata=NS(_continue="again"))  # never ends
+
+    out = si.observe_load(NS(_core_v1=Core()), "mine")
+    assert "did not end" in out["cotenant_requested"]["not_observed"]
+
+
+def test_mock_continue_token_ends_the_list() -> None:
+    """A test double's continue token (not a string) ends the list."""
+    from unittest import mock
+
+    class Core:
+        def list_node(self, **kw):
+            return NS(items=_default_nodes())
+
+        def list_pod_for_all_namespaces(self, **kw):
+            return mock.MagicMock()
+
+    assert si.observe_load(NS(_core_v1=Core()), "mine")["cotenant_requested"]["pods"] == 0
+
+
 def test_refused_pod_list_is_not_observed() -> None:
     k8s, _ = _load_cluster(pod_error=_ApiError(403))
     out = si.observe_load(k8s, "mine")
@@ -605,10 +631,35 @@ def test_one_unreadable_pod_is_counted_not_fatal() -> None:
 def test_sidecars_and_pod_level_requests() -> None:
     side = _pod("o", "w0", "1", "1Gi", init=[("2", "1Gi")])
     side.spec.init_containers[0].restart_policy = "Always"  # a native sidecar
-    pod_level = _pod("o", "w0", "1", "1Gi")
-    pod_level.spec.resources = NS(requests={"cpu": "4", "memory": "8Gi"})
+    pod_level = _pod("o", "w0", "1", "8Gi")
+    pod_level.spec.resources = NS(requests={"cpu": "4"})  # memory not set: containers' 8Gi
     k8s, _ = _load_cluster(pods=[side, pod_level])
-    assert si.observe_load(k8s, "mine")["cotenant_requested"]["cpu"] == 3.0 + 4.0
+    out = si.observe_load(k8s, "mine")["cotenant_requested"]
+    assert out["cpu"] == 3.0 + 4.0
+    assert out["memory_gib"] == 2.0 + 8.0
+
+
+def test_unsampled_start_marks_every_half() -> None:
+    from tests.test_experiment import _cfg as exp_cfg
+    from tests.test_experiment import _metrics
+
+    class Core:
+        def list_node(self, **kw):
+            raise RuntimeError("boom")
+
+    cfg = exp_cfg()
+    run = _metrics(cfg)
+    import lakebench.metrics.system_identity as mod
+
+    orig = mod.observe_system
+    mod.observe_system = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+    try:
+        si.sample_run_start(run, cfg, k8s=NS(_core_v1=Core(), _custom=None))
+    finally:
+        mod.observe_system = orig
+    observed = run.config_snapshot["experiment_inputs"]["observed"]
+    for half in ("allocatable", "cotenant_requested", "cotenant_pending"):
+        assert observed[half]["start"]["not_observed"].startswith("sampling failed")
 
 
 def test_pod_list_is_paged() -> None:

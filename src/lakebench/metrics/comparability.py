@@ -538,10 +538,11 @@ def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
     systems are assumed the same, with a note. With both,
     ``system_identity.same_system`` decides (equal over the parts both
     observed, the API server CA among them), and observations that differ
-    on a common part are different. ``unknown``, with the reason, is
-    everything in between: a fingerprint on one side only (a 1.6 record
-    against a 1.7 one), observations that agree on every common part but
-    not on the CA, or no common part (two local runs). The ladder reads
+    on a common part are different. A fingerprint on one side only is
+    different, as is a pair of cluster observations with no part in common
+    (nothing was compared). ``unknown``, with the reason, is the case in
+    between: cluster observations that agree on every common part but not
+    on the CA, or two local runs (which record no part). The ladder reads
     ``unknown`` as the same system with the note, and never as a repeat."""
     from lakebench.metrics.system_identity import common_fingerprints, same_system
 
@@ -553,7 +554,7 @@ def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
         return "same", "system identity not recorded; assumed the same"
     if ia is None or ib is None:
         missing = a.run_id if ia is None else b.run_id
-        return "unknown", f"system identity not established: not recorded on {missing}"
+        return "different", f"system identity recorded on one side only (not on {missing})"
     if same_system(ia, ib):
         return "same", None
     fa, fb, keys = common_fingerprints(ia, ib)
@@ -563,7 +564,9 @@ def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
             f"system fingerprint differs ({ia.get('fingerprint')} vs {ib.get('fingerprint')})",
         )
     if not keys:
-        return "unknown", "system identity not established: no part observed on both sides"
+        if sa == "local":
+            return "unknown", "system identity not established: local runs record no part"
+        return "different", "system identity not comparable: no part observed on both sides"
     return "unknown", (
         "system identity not established: the observations agree on "
         + (", ".join(keys) or "no part")
@@ -893,11 +896,17 @@ def pair_verdict(
         return verdict(NOT_LIKE_FOR_LIKE, "7", [str(d) for d in cond])
     # Step 7a: same composition, different dependency sets.
     if [d.key for d in arch] == ["dependency pinset"]:
-        return verdict(
-            NOT_LIKE_FOR_LIKE,
-            "7a",
-            ["same composition, different dependency sets (dependency pinset differs)"],
+        unrecorded = [
+            c.run_id or "?"
+            for c in (ca, cb)
+            if c.keys(ARCHITECTURE).get("dependency pinset") in (None, PINSET_NOT_RECORDED)
+        ]
+        reason = (
+            "same composition, different dependency sets (dependency pinset differs)"
+            if not unrecorded
+            else "same composition; the dependency set is not recorded on " + ", ".join(unrecorded)
         )
+        return verdict(NOT_LIKE_FOR_LIKE, "7a", [reason])
     # Step 8.
     if arch:
         attribution = "architecture differential"

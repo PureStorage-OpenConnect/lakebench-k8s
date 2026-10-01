@@ -440,17 +440,19 @@ class TestSystemRelation:
         rel, note = cmp.system_relation(self._c(), self._c())
         assert rel == "same" and "assumed the same" in note
 
-    def test_absent_on_one_side_is_unknown(self):
-        """A 1.6 record against a 1.7 one: not shown to be two systems."""
+    def test_absent_on_one_side_is_different(self):
+        """The design rule: identity absent on one side only counts as
+        different (a run whose start sample timed out included)."""
         rel, note = cmp.system_relation(self._c(SYSID), self._c())
-        assert rel == "unknown" and "not recorded on" in note
+        assert rel == "different" and "one side only" in note
 
     def test_no_common_part_is_unknown(self):
         a = copy.deepcopy(SYSID)
         a["parts"] = {"api_server_ca": {"not_observed": "x"}}
         b = copy.deepcopy(SYSID)
         b["parts"] = {"kubernetes": {"not_observed": "x"}}
-        assert cmp.system_relation(self._c(a), self._c(b))[0] == "unknown"
+        # Nothing was compared: different, never assumed the same.
+        assert cmp.system_relation(self._c(a), self._c(b))[0] == "different"
 
     def test_same_fingerprint_with_ca_is_same(self):
         assert cmp.system_relation(self._c(SYSID), self._c(copy.deepcopy(SYSID))) == ("same", None)
@@ -637,9 +639,14 @@ class TestLadder:
         assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "architecture differential")
         assert any("not established" in n for n in v.notes)
 
-    def test_v16_against_v17_record_is_not_a_system_differential(self):
-        v = _verdict(_rec(), _rec(new_id="b", experiment__system_identity=_sys()))
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system not established")
+    def test_identity_on_one_side_only_counts_as_different(self):
+        """A 1.6 record against a 1.7 one: a system differential, and with
+        an architecture difference CONFOUNDED (never credited to the
+        architecture)."""
+        b = _rec(new_id="b", experiment__system_identity=_sys())
+        assert _verdict(_rec(), b).attribution == "system differential"
+        b["experiment"]["architecture"]["recipe"] = "other"
+        assert _verdict(_rec(), b).verdict == cmp.CONFOUNDED
 
     def test_two_local_runs_are_never_one_system(self, monkeypatch):
         from lakebench.metrics import system_identity as si

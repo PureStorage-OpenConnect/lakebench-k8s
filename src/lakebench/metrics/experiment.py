@@ -1235,8 +1235,8 @@ def refusals(
     # Ladder step 0 (identity versions, required keys, a withheld seed).
     step0 = cmp.pair_verdict([record_a or {}], [record_b or {}], label_a, label_b)
     prov = list(step0.reasons) if step0.step == "0" else []
-    if not (prov and "identity v" in prov[0]):
-        # A version mismatch is already the step 0 line.
+    if _cmp.block_generation(ea) == _cmp.block_generation(eb):
+        # (A version mismatch is already the step 0 line.)
         prov += identity_differences(ea, eb, record_a, record_b)
     for label, exp in ((label_a, ea), (label_b, eb)):
         prov.extend(f"{label}: {p}" for p in corpus_problems(exp))

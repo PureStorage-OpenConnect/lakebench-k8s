@@ -458,40 +458,45 @@ def _quantities(requests: Any) -> tuple[float, float]:
 
 
 def _pod_request(pod: Any) -> tuple[float, float]:
-    """(cores, bytes) a pod requests as the scheduler counts it: pod-level
-    ``spec.resources`` when set; else the larger of (the containers plus
-    the sidecars, which are init containers with ``restartPolicy: Always``)
-    and each regular init container plus the sidecars started before it;
-    plus the pod overhead."""
+    """(cores, bytes) a pod requests as the scheduler counts it: the larger
+    of (the containers plus the sidecars, which are init containers with
+    ``restartPolicy: Always``) and each regular init container plus the
+    sidecars started before it; replaced, per resource, by a pod-level
+    ``spec.resources`` request; plus the pod overhead."""
     spec = pod.spec
 
     def req(c: Any) -> tuple[float, float]:
         return _quantities(getattr(getattr(c, "resources", None), "requests", None))
 
-    pod_level = getattr(getattr(spec, "resources", None), "requests", None)
-    if pod_level:
-        cpu, mem = _quantities(pod_level)
-    else:
-        main = [req(c) for c in spec.containers or []]
-        cpu, mem = sum(c for c, _ in main), sum(m for _, m in main)
-        side_cpu = side_mem = 0.0
-        init_cpu = init_mem = 0.0
-        for c in getattr(spec, "init_containers", None) or []:
-            ic, im = req(c)
-            if getattr(c, "restart_policy", None) == "Always":
-                side_cpu, side_mem = side_cpu + ic, side_mem + im
-            else:
-                init_cpu = max(init_cpu, ic + side_cpu)
-                init_mem = max(init_mem, im + side_mem)
-        cpu, mem = max(cpu + side_cpu, init_cpu), max(mem + side_mem, init_mem)
+    main = [req(c) for c in spec.containers or []]
+    cpu, mem = sum(c for c, _ in main), sum(m for _, m in main)
+    side_cpu = side_mem = 0.0
+    init_cpu = init_mem = 0.0
+    for c in getattr(spec, "init_containers", None) or []:
+        ic, im = req(c)
+        if getattr(c, "restart_policy", None) == "Always":
+            side_cpu, side_mem = side_cpu + ic, side_mem + im
+        else:
+            init_cpu = max(init_cpu, ic + side_cpu)
+            init_mem = max(init_mem, im + side_mem)
+    cpu, mem = max(cpu + side_cpu, init_cpu), max(mem + side_mem, init_mem)
+    pod_level = getattr(getattr(spec, "resources", None), "requests", None) or {}
+    p_cpu, p_mem = _quantities(pod_level)
+    cpu = p_cpu if pod_level.get("cpu") else cpu
+    mem = p_mem if pod_level.get("memory") else mem
     o_cpu, o_mem = _quantities(getattr(spec, "overhead", None))
     return cpu + o_cpu, mem + o_mem
+
+
+#: More pages than any cluster lakebench supports holds: a guard against a
+#: continue token that never ends.
+_MAX_POD_PAGES = 200
 
 
 def _list_pods(k8s: Any) -> list[Any]:
     out: list[Any] = []
     token = None
-    while True:
+    for _page in range(_MAX_POD_PAGES):
         kw: dict[str, Any] = {
             "field_selector": "status.phase!=Succeeded,status.phase!=Failed",
             "limit": _POD_PAGE,
@@ -502,8 +507,9 @@ def _list_pods(k8s: Any) -> list[Any]:
         page = k8s._core_v1.list_pod_for_all_namespaces(**kw)
         out.extend(page.items or [])
         token = getattr(getattr(page, "metadata", None), "_continue", None)
-        if not token:
+        if not isinstance(token, str) or not token:
             return out
+    raise RuntimeError(f"pod list did not end within {_MAX_POD_PAGES} pages")
 
 
 def _sum(pods: list[Any]) -> tuple[dict[str, Any], int]:
@@ -582,7 +588,10 @@ def observe_load(k8s: Any, namespace: str, *, local: bool = False) -> dict[str, 
     if unreadable:
         requested["unreadable_pods"] = unreadable
     out["cotenant_requested"] = requested
-    out["cotenant_pending"] = _sum(pending)[0]
+    waiting, unreadable = _sum(pending)
+    if unreadable:
+        waiting["unreadable_pods"] = unreadable
+    out["cotenant_pending"] = waiting
     return out
 
 
@@ -625,8 +634,10 @@ def _clients(cfg: Any, local: bool, *, s3_too: bool = True) -> tuple[Any, Any]:
 
 def _within(deadline: float, work: Any) -> tuple[bool, Any]:
     """Run *work* in a daemon thread for at most *deadline* seconds:
-    ``(finished, result)``. A read still running after the deadline is
-    abandoned (it only reads); its result is never used."""
+    ``(finished, result)``. Work still running after the deadline is
+    abandoned: it sends only reads to the cluster and S3 (building its
+    client loads the kubeconfig, as every client here does), and its result
+    is never used, so it cannot touch the record."""
     box: dict[str, Any] = {}
 
     def target() -> None:
@@ -679,11 +690,13 @@ def sample_run_start(run: Any, cfg: Any, *, local: bool = False, k8s: Any = None
 
         done, result = _within(START_DEADLINE_S, work)
         if not done:
-            why = f"not sampled within {START_DEADLINE_S:.0f} s" + (
-                f": {_reason(result)}" if isinstance(result, BaseException) else ""
+            why = (
+                f"sampling failed: {_reason(result)}"
+                if isinstance(result, BaseException)
+                else f"not sampled within {START_DEADLINE_S:.0f} s"
             )
             logger.warning("system identity: %s", why)
-            _record_load(inputs, "start", {"at": _now(), "allocatable": not_observed(why)})
+            _record_load(inputs, "start", _unsampled(why))
             return
         inputs["system_identity"], sample = result
         _record_load(inputs, "start", sample)
@@ -712,11 +725,24 @@ def sample_run_end(run: Any, cfg: Any, *, local: bool = False, k8s: Any = None) 
 
         done, result = _within(END_DEADLINE_S, work)
         if not done:
-            why = f"not sampled within {END_DEADLINE_S:.0f} s"
-            result = {"at": _now(), "allocatable": not_observed(why)}
+            why = (
+                f"sampling failed: {_reason(result)}"
+                if isinstance(result, BaseException)
+                else f"not sampled within {END_DEADLINE_S:.0f} s"
+            )
+            result = _unsampled(why)
         _record_load(inputs, "end", result)
     except Exception as exc:  # noqa: BLE001
         logger.warning("load not sampled at run end: %s", _reason(exc))
+
+
+def _unsampled(why: str) -> dict[str, Any]:
+    return {
+        "at": _now(),
+        "allocatable": not_observed(why),
+        "cotenant_requested": not_observed(why),
+        "cotenant_pending": not_observed(why),
+    }
 
 
 def _record_load(inputs: dict[str, Any], when: str, sample: Mapping[str, Any]) -> None:
