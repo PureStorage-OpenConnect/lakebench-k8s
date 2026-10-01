@@ -62,6 +62,9 @@ import pytest  # noqa: E402
 
 from lakebench.config import LakebenchConfig  # noqa: E402
 
+# SAF-4 / DEP-3 oracle (SD-9): `recording_k8s` is available to every test.
+from tests.fixtures.recording_k8s import recording_k8s  # noqa: E402, F401
+
 
 @pytest.fixture(autouse=True)
 def _journal_in_tmp(tmp_path, monkeypatch):
