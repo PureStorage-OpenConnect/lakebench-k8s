@@ -894,6 +894,10 @@ class TestThirdPassCases:
         body["generation"]["customer_id_max"] = "10000000"
         obs, _ = observe(two_nodes(corpus_args=args), body)
         assert corpus_of(obs=obs)["lineage"] == D
+        big = 2**60
+        body["generation"]["customer_id_max"] = big + 1
+        obs, _ = observe(two_nodes(corpus_args={"customer_id_max": big}), body)
+        assert "customer_id_max" in corpus_of(obs=obs)["lineage_notes"][0]
 
     @pytest.mark.parametrize(
         "markers, series_schema, needle",

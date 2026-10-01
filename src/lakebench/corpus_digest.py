@@ -378,13 +378,30 @@ def _num(value: Any) -> float | None:
 _FLOAT_KEYS = frozenset({"scale"})
 
 
+def _int(value: Any) -> int | None:
+    """An integer, or the integer an integral string or float spells."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        return int(value)
+    if isinstance(value, float) and value.is_integer() and abs(value) < 2**53:
+        return int(value)
+    return None
+
+
 def _same(name: str, a: Any, b: Any) -> bool:
-    """Equal as numbers (``"1.000000"`` equals ``1.0``), else as JSON."""
-    na, nb = _num(a), _num(b)
-    if na is not None and nb is not None:
-        if name in _FLOAT_KEYS:
-            return abs(na - nb) <= 1e-9 * max(1.0, abs(na))
-        return na == nb
+    """Equal as numbers, else as JSON. ``scale`` allows the pods' ``%.6f``
+    rounding (``"1.000000"`` equals ``1.0``); every other key compares
+    exactly, as integers when both sides spell one."""
+    if name in _FLOAT_KEYS:
+        na, nb = _num(a), _num(b)
+        if na is not None and nb is not None:
+            return abs(na - nb) <= 1e-6 * max(1.0, abs(na))
+    ia, ib = _int(a), _int(b)
+    if ia is not None and ib is not None:
+        return ia == ib
     return _key(a) == _key(b)
 
 
