@@ -886,3 +886,55 @@ def test_many_empty_quoted_keys_scrub_in_linear_time() -> None:
     with contextlib.suppress(scrub.ScrubError):
         scrub.scrub_text("password: ''#" * 8000)
     assert time.monotonic() - t0 < 2.0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password: [ hunter2 ]",
+        '"credentials": [ "hunter2" ]',
+        "password: - hunter2",
+        "password: ( hunter2 )",
+        "password: < hunter2 >",
+        "password: ? hunter2",
+        "password: *alias hunter2",
+        "password: !<tag:x> hunter2",
+        "token: { value: hunter2 }",
+        'password: "" hunter2',
+        "password: '' hunter2",
+        '--password "" hunter2',
+        "password:\xa0hunter2",
+        "password\xa0= hunter2",
+        "password: \u2028  hunter2",
+        "password:\x0bhunter2",
+        "password:\x0chunter2",
+        "password:\n\u3000hunter2",
+        "password:\r  hunter2",
+        "password: #c\n  hunter2",
+    ],
+)
+def test_last_pass_text_shapes_leave_no_secret(text: str) -> None:
+    try:
+        out = scrub.scrub_text(text)
+    except scrub.ScrubError:
+        return
+    assert "hunter2" not in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['  PASSWORD=""\n  echo hi', 'INFO password: ""\n    retrying with default'],
+)
+def test_empty_quoted_value_is_not_refused(text: str) -> None:
+    assert scrub.scrub_text(text) == text
+
+
+@pytest.mark.parametrize("text", ["h://" + ":" * 100_000, "password: #c " * 20_000])
+def test_pathological_lines_stay_linear(text: str) -> None:
+    import contextlib
+    import time
+
+    t0 = time.monotonic()
+    with contextlib.suppress(scrub.ScrubError):
+        scrub.scrub_text(text)
+    assert time.monotonic() - t0 < 3.0
