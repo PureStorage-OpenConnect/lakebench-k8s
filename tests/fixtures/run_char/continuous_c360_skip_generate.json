@@ -21,7 +21,8 @@
    "calls[238]": "S3 paginate list_objects_v2 runchar-bronze customer/interactions/: read_corpus_markers -> _read_into -> list_scope (corpus_digest.py:263-292, 137-146); get_paginator itself records nothing, paginate records (Bucket, Prefix) (run_harness.py:857-872). Bucket cfg.platform.storage.s3.buckets.bronze = runchar-bronze (default_bucket_names, as the get_bucket_size calls show). bronze_datagen_prefix (deploy/datagen.py:40-53): schema customer360, path_template default 'customer/interactions' (config/schema.py:929; base_config does not set it), unchanged; datagen_scope (corpus_digest.py:94-101) -> 'customer/interactions/'. The bucket starts with 'runchar-', so no refusal.",
    "after": "The page is empty, so no marker or series.json GET (corpus_digest.py:294-356); resolve_lineage reads the local lineage table only (metrics/corpus_identity.py:511-549); no further seam call before save_run.",
    "other_sections": "unchanged. experiment's top-level keys are fixed (metrics/experiment.py:811-828), so metrics_keys.experiment is the same; the observation adds only experiment.corpus fields (id_v2 None, id_v2_unavailable, declared, problems), which no trace section reads (build_trace, run_harness.py:1687-1746). compute_verdict reads no corpus or experiment field (metrics/verdict.py), so success, verdict and verdict_reasons are unchanged. No journal event. unscripted stays []."
-  }
+  },
+  "er10a": "v2_unavailable joins the experiment block keys: experiment_inputs writes identity_version 2 at run start, and the block is exp1 until it has corpus id v2 and a system identity, so build_experiment writes v2_unavailable (metrics/experiment.py build_experiment). Derived by the independent second agent of the ER-10 goldens from the code, harness not run."
  },
  "exit_code": 0,
  "unscripted": [],
@@ -1837,6 +1838,7 @@
    "stages",
    "support",
    "system",
+   "v2_unavailable",
    "workload"
   ]
  },

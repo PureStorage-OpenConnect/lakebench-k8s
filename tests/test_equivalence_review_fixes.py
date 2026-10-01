@@ -3,6 +3,7 @@ work (lane compare-equiv). Each test fails with its fix reverted."""
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 from types import SimpleNamespace
@@ -380,8 +381,9 @@ class TestStamps:
         assert e["architecture"]["query_engine"]["type"] == "duckdb"
         assert e["architecture"]["query_access_path"] == "direct_storage"
         assert "not_supported" in e["effective_maintenance"]["id"]
+        # The system is its own OD-2 group, not an execution condition.
         cluster = _run(_cfg(query_engine={"type": "duckdb"})).to_dict()
-        assert any(d.startswith("system") for d in ex.like_for_like(run.to_dict(), cluster))
+        assert not any(d.startswith("system") for d in ex.like_for_like(run.to_dict(), cluster))
 
     def test_streaming_budget_cap_and_tm_cap_are_bound(self):
         run = _run(
@@ -435,9 +437,18 @@ class TestBlockFollowsTheRecord:
         loaded = storage.load_run(run.run_id)
         assert loaded.to_dict()["experiment"]["results"]["not_checked"]
         loaded.benchmark = _run().benchmark  # what `lakebench benchmark` does
+        stored = copy.deepcopy(loaded.to_dict()["experiment"])
+        assert stored["results"]["not_checked"], "a stored block is never rebuilt"
+        ex.refresh_benchmark(loaded)  # and then this (cli/_query.py)
         storage.save_run(loaded)
         e = storage.load_run(run.run_id).to_dict()["experiment"]
         assert "not_checked" not in e["results"] and e["results"]["fingerprints"]
+        assert e["benchmark_source"].startswith("lakebench benchmark")
+        assert {
+            k: v
+            for k, v in e.items()
+            if k not in ("results", "limits", "repetitions", "benchmark_source")
+        } == {k: v for k, v in stored.items() if k not in ("results", "limits", "repetitions")}
 
     def test_run_ending_before_maintenance_is_not_run(self):
         run = _run()

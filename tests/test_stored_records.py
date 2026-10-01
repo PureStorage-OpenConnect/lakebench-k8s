@@ -538,11 +538,13 @@ def _refusal_kinds(prov: list[str]) -> tuple[list[str], list[str]]:
 
 
 @pytest.mark.parametrize("pair", sorted(PAIRS, key=lambda p: int(p[1:])))
-def test_pinned_pair_before(pair: str) -> None:
+def test_pinned_pair_compare(pair: str) -> None:
+    """``compare`` (until ER-11 rewrites it) gives the v1.6 Before answer,
+    changed only by the fields each pair's ``compare_after`` lists."""
     spec = PAIRS[pair]
     got = _build_comparison("A", sr.load_record(spec["a"]), "B", sr.load_record(spec["b"]))
     keys, kinds = _refusal_kinds(got["refusals"]["provenance"])
-    want = spec["before"]
+    want = {**spec["before"], **spec.get("compare_after", {})}
     assert got["verdict"] == want["verdict"]
     assert got["like_for_like"] is want["like_for_like"]
     assert keys == want["identity_differences"]

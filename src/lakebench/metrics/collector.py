@@ -454,22 +454,22 @@ class PipelineMetrics:
     continuous: dict[str, Any] | None = None
 
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
-    # experiment_block() rebuilds it from the record when the snapshot holds
-    # experiment_inputs; a record from before the block has none and never
-    # gets one.
+    # None on a fresh run until it is saved; experiment_block() builds it then.
     experiment: dict[str, Any] | None = None
 
     def experiment_block(self) -> dict[str, Any] | None:
-        """The experiment block, rebuilt from the record whenever its snapshot
-        carries the config half (``experiment_inputs``, frozen at run start):
-        the run half then always describes the record as it is now, including
-        after ``lakebench benchmark`` replaced its benchmark. A record from
-        before the block has no inputs and keeps what it was written with
-        (normally nothing)."""
+        """The experiment block: the stored one whenever the record has one,
+        whatever its schema, and otherwise built from the snapshot's
+        ``experiment_inputs`` (a fresh run, or a v1.6 record saved before the
+        block existed). A stored block is never rebuilt (ch03 section 0.1,
+        S1): rebuilding with newer code re-stamped v1.6 records and moved
+        their identity digests. ``lakebench benchmark`` refreshes only the
+        benchmark half of a stored block (``experiment.refresh_benchmark``)."""
+        if self.experiment is not None:
+            return self.experiment
         from lakebench.metrics.experiment import build_experiment
 
-        built = build_experiment(self)
-        return built if built is not None else self.experiment
+        return build_experiment(self)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""

@@ -52,7 +52,7 @@ It refuses, rather than rewrites:
 * a scrub that changes the identity dict (every key, ``generator digest``
   included), corpus id, result fingerprints, query set, stages run or bound
   kinds of the stored block, or the identity of the block
-  ``PipelineMetrics.experiment_block()`` rebuilds.
+  ``build_experiment`` makes from the record's ``experiment_inputs``.
 
 Not covered: IPv6 addresses; hostnames that are neither in a URL, an
 endpoint value of the same record, nor a subdomain of one of its endpoint
@@ -727,8 +727,15 @@ def check_clean(obj: Any) -> list[str]:
 
 def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
     """What the scrubber must not change, for the stored block and the block
-    ``experiment_block()`` rebuilds on load."""
-    from lakebench.metrics.experiment import experiment_of, identity, result_fingerprints
+    ``build_experiment`` makes from the record's ``experiment_inputs`` (what
+    a record without a stored block gets on load; a stored block is never
+    rebuilt, so this is the stricter of the two)."""
+    from lakebench.metrics.experiment import (
+        build_experiment,
+        experiment_of,
+        identity,
+        result_fingerprints,
+    )
     from lakebench.metrics.storage import MetricsStorage
 
     def view(exp: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -747,7 +754,7 @@ def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory() as tmp:
         rebuilt = MetricsStorage(tmp)._dict_to_metrics(copy.deepcopy(dict(record)))
-        rebuilt_block = rebuilt.experiment_block()
+        rebuilt_block = build_experiment(rebuilt) or rebuilt.experiment
     rebuilt_view = view(rebuilt_block)
     return {
         "stored": view(experiment_of(record)),
