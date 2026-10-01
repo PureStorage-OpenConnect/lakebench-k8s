@@ -30,7 +30,8 @@ pytest.importorskip("pyspark")
 
 pytestmark = [
     pytest.mark.requires_jars("iceberg"),
-    pytest.mark.usefixtures("load_script"),
+    # The module-scoped fixture below runs both scripts once for every test.
+    pytest.mark.usefixtures("load_script_module"),
     # One core, as before the shared harness: the profile sums are compared
     # with a tolerance, and merge order follows the partition count.
     pytest.mark.spark_static_conf({"spark.master": "local[1]"}),
@@ -103,13 +104,10 @@ def spark(spark_session, iceberg_catalog, tmp_path_factory):
     return spark_session
 
 
-@pytest.mark.known_bug(
-    "QR-6",
-    match="TABLE_OR_VIEW_NOT_FOUND",
-    reason="stale unqualified silver_stream table names in the test",
-)
-def test_batch_and_stream_produce_equivalent_profiles(spark):
-
+@pytest.fixture(scope="module")
+def profiles(spark):
+    """(batch rows, stream rows) of silver.entity_profiles by entity_id,
+    for one bronze corpus built once by each path."""
     import silver_stream_financial as ss
 
     # Build a shared bronze corpus: 8 transactions from three originators
@@ -146,15 +144,15 @@ def test_batch_and_stream_produce_equivalent_profiles(spark):
     # is identical). streaming_query_id is monkey-patched: Spark only
     # binds the query id inside a real foreachBatch and a direct call
     # would otherwise raise from streaming_query_id().
-    ss.CATALOG = "lh"
-    ss.SILVER_TXNS = "silver_stream.transactions"
-    ss.SILVER_EDGES = "silver_stream.counterparty_edges"
-    ss.SILVER_ENTITIES = "silver_stream.entities"
-    ss.SILVER_ACCOUNTS = "silver_stream.accounts"
-    ss.SILVER_PROFILES = "silver_stream.entity_profiles"
-    ss.SILVER_BATCH_VERSIONS = "silver_stream.silver_batch_versions"
+    #
+    # The stream writes the tables its DDL literals name, which interpolate
+    # the table names at import: the default silver.* names in catalog lh
+    # (_catalog_env). Reassigning ss.SILVER_* after import would point the
+    # MERGE at tables the DDLs never created. The batch side writes only
+    # lh.silver_batch.entity_profiles, so the two never share a table.
+    assert ss.CATALOG == _CATALOG
     ss.streaming_query_id = lambda _s: "qid-parity"
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver_stream")
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver")
     for ddl_attr in (
         "DDL_TXNS",
         "DDL_ENTITIES",
@@ -175,12 +173,40 @@ def test_batch_and_stream_produce_equivalent_profiles(spark):
     batch_rows = {
         r["entity_id"]: r for r in spark.table("lh.silver_batch.entity_profiles").collect()
     }
-    stream_rows = {
-        r["entity_id"]: r for r in spark.table("lh.silver_stream.entity_profiles").collect()
-    }
+    stream_rows = {r["entity_id"]: r for r in spark.table(f"lh.{ss.SILVER_PROFILES}").collect()}
+    # Three originators and two beneficiaries: five entities on each side.
+    assert len(batch_rows) == 5, sorted(batch_rows)
+    return batch_rows, stream_rows
+
+
+def test_batch_and_stream_profile_the_same_entities(profiles):
+    batch_rows, stream_rows = profiles
     assert set(batch_rows) == set(stream_rows), (
         f"entity coverage drift: batch={set(batch_rows)}, stream={set(stream_rows)}"
     )
+
+
+@pytest.mark.known_bug(
+    "QR-6",
+    match=r"total_(sent|received)_usd: batch=None, stream=0\.00",
+    reason=(
+        "product bug the corrected test found: an entity seen on one side only gets NULL "
+        "in batch and 0.00 in stream; LB id requested from the main lane"
+    ),
+)
+def test_batch_and_stream_profile_sums_match(profiles):
+    """total_sent_usd and total_received_usd, Decimal(38,2), compared exactly."""
+    batch_rows, stream_rows = profiles
+    for eid, b in batch_rows.items():
+        s = stream_rows[eid]
+        for c in ("total_sent_usd", "total_received_usd"):
+            assert b[c] == s[c], f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
+
+
+def test_batch_and_stream_produce_equivalent_profiles(profiles):
+    """Every other compared column: counts exact, LEAST/GREATEST timestamps
+    exact, Welford accumulators and means within a tight tolerance."""
+    batch_rows, stream_rows = profiles
     for eid, b in batch_rows.items():
         s = stream_rows[eid]
         # Additive + count columns must be exact.
@@ -192,11 +218,6 @@ def test_batch_and_stream_produce_equivalent_profiles(spark):
             "distinct_counterparties_in",
         ):
             assert b[c] == s[c], f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
-        for c in ("total_sent_usd", "total_received_usd"):
-            b_v = b[c]
-            s_v = s[c]
-            # Decimal(38,2) comparison is exact.
-            assert b_v == s_v, f"{eid}.{c}: batch={b_v}, stream={s_v}"
         # LEAST / GREATEST timestamps must be exact.
         for c in ("first_seen_ts", "last_seen_ts"):
             assert b[c] == s[c], f"{eid}.{c}: batch={b[c]}, stream={s[c]}"

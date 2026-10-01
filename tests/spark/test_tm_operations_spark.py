@@ -48,9 +48,9 @@ def _session(warehouse, jars):
 
 
 @pytest.mark.known_bug(
-    "QR-6",
+    "LB-236",
     match="W5_sanctions_match",
-    reason="W5_sanctions_match KeyError, not root-caused (QR-6 records the decision)",
+    reason="W5_sanctions_match KeyError, not root-caused (v17-aml-rules decides the rule)",
 )
 def test_tm_operations_end_to_end(tmp_path, spark_subprocess, spark_jars):
     """Fresh interpreter: a JVM with its own static Spark conf.
