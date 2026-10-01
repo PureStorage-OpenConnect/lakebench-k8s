@@ -710,7 +710,8 @@ def test_start_sample_is_bounded_by_its_deadline(monkeypatch) -> None:
     si.sample_run_start(run, cfg, k8s=NS(_core_v1=Core(), _custom=None))
     gate.set()
     inputs = run.config_snapshot["experiment_inputs"]
-    assert "system_identity" not in inputs
+    assert not si.observed_parts(inputs["system_identity"]["parts"])
+    assert inputs["system_identity"]["type"] == "cluster"
     assert "not sampled within" in inputs["observed"]["allocatable"]["start"]["not_observed"]
 
 

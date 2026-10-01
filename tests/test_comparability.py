@@ -446,7 +446,7 @@ class TestSystemRelation:
         rel, note = cmp.system_relation(self._c(SYSID), self._c())
         assert rel == "different" and "one side only" in note
 
-    def test_no_common_part_is_unknown(self):
+    def test_no_common_part_is_different(self):
         a = copy.deepcopy(SYSID)
         a["parts"] = {"api_server_ca": {"not_observed": "x"}}
         b = copy.deepcopy(SYSID)
@@ -852,7 +852,8 @@ class TestLadder:
         assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "5")
 
     def _v17(self, pinset, new_id=None):
-        rec = _rec(new_id=new_id)
+        """A 1.7 record (it sampled its system, as a 1.7 run does)."""
+        rec = _rec(new_id=new_id, experiment__system_identity=_sys())
         rec["experiment"]["lakebench"]["lakebench_version"] = "1.7.0"
         rec["provenance"]["deps"] = {"pinset_sha256": pinset}
         return rec
@@ -881,7 +882,7 @@ class TestLadder:
         present and a pinset-only difference is 7a, not a repeat."""
         recs = []
         for i, pin in enumerate(("a" * 64, "b" * 64)):
-            rec = _rec(new_id=f"r{i}")
+            rec = _rec(new_id=f"r{i}", experiment__system_identity=_sys())
             rec["experiment"]["v2_unavailable"] = ["corpus id v2"]
             rec["provenance"]["deps"] = {"pinset_sha256": pin}
             recs.append(rec)
@@ -913,6 +914,31 @@ class TestLadder:
 
     def test_to_dict_is_json(self):
         json.dumps(_verdict(_rec(), _rec(new_id="b")).to_dict())
+
+
+class TestUnsampledV17:
+    def test_two_unsampled_v17_runs_are_not_a_repeat(self):
+        """Two 1.7 runs that both failed to sample their system identity
+        are never assumed to share a system."""
+        a = _rec(experiment__v2_unavailable=["corpus id v2", "system identity"])
+        b = _rec(new_id="b", experiment__v2_unavailable=["corpus id v2", "system identity"])
+        v = _verdict(a, b)
+        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system differential")
+        b["experiment"]["architecture"]["recipe"] = "other"
+        assert _verdict(a, b).verdict == cmp.CONFOUNDED
+
+    def test_timed_out_start_records_a_stub_that_matches_nothing(self, monkeypatch):
+        from lakebench.metrics import system_identity as si
+
+        stub = si._unobserved_identity("cluster", "not sampled within 120 s")
+        a = _rec(experiment__system_identity=stub)
+        b = _rec(new_id="b", experiment__system_identity=copy.deepcopy(stub))
+        assert (
+            cmp.system_relation(cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b))[
+                0
+            ]
+            == "different"
+        )
 
 
 class TestWrappers:

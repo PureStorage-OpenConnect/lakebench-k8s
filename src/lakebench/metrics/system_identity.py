@@ -545,6 +545,7 @@ def observe_load(k8s: Any, namespace: str, *, local: bool = False) -> dict[str, 
             "at": at,
             "allocatable": not_observed(reason),
             "cotenant_requested": not_observed(reason),
+            "cotenant_pending": not_observed(reason),
         }
     from kubernetes.utils import parse_quantity
 
@@ -571,16 +572,18 @@ def observe_load(k8s: Any, namespace: str, *, local: bool = False) -> dict[str, 
     except Exception as exc:  # noqa: BLE001
         out["allocatable"] = not_observed(f"node list: {_reason(exc)}")
     if not workers:
-        out["cotenant_requested"] = not_observed(
+        why = (
             "no schedulable worker node observed"
             if is_observed(out["allocatable"])
             else "allocatable not observed"
         )
+        out["cotenant_requested"] = out["cotenant_pending"] = not_observed(why)
         return out
     try:
         others = [p for p in _list_pods(k8s) if getattr(p.metadata, "namespace", None) != namespace]
     except Exception as exc:  # noqa: BLE001
-        out["cotenant_requested"] = not_observed(f"cluster-wide pod list: {_reason(exc)}")
+        why = f"cluster-wide pod list: {_reason(exc)}"
+        out["cotenant_requested"] = out["cotenant_pending"] = not_observed(why)
         return out
     on_workers = [p for p in others if getattr(p.spec, "node_name", None) in workers]
     pending = [p for p in others if not getattr(p.spec, "node_name", None)]
@@ -654,19 +657,23 @@ def _within(deadline: float, work: Any) -> tuple[bool, Any]:
     return True, box.get("result")
 
 
+def _unobserved_identity(system_type: str, reason: str) -> dict[str, Any]:
+    parts = {name: not_observed(reason) for name in PARTS}
+    return {
+        "type": system_type,
+        "version": SYSTEM_IDENTITY_VERSION,
+        "fingerprint": fingerprint_of(parts, system_type=system_type),
+        "partial": True,
+        "parts": parts,
+    }
+
+
 def _local_identity(cfg: Any) -> dict[str, Any]:
     """A ``--local`` run's identity: no cluster part, and the storage and
     scratch parts are not the config's (the local stack runs its own object
     store), so nothing names the machine; two local runs are therefore
     never shown to share a system."""
-    parts = {name: not_observed("local run") for name in PARTS}
-    return {
-        "type": "local",
-        "version": SYSTEM_IDENTITY_VERSION,
-        "fingerprint": fingerprint_of(parts, system_type="local"),
-        "partial": True,
-        "parts": parts,
-    }
+    return _unobserved_identity("local", "local run")
 
 
 def sample_run_start(run: Any, cfg: Any, *, local: bool = False, k8s: Any = None) -> None:
@@ -696,6 +703,9 @@ def sample_run_start(run: Any, cfg: Any, *, local: bool = False, k8s: Any = None
                 else f"not sampled within {START_DEADLINE_S:.0f} s"
             )
             logger.warning("system identity: %s", why)
+            # A stub with every part not observed: it shares no part with
+            # any observation, so it never reads as the same system.
+            inputs["system_identity"] = _unobserved_identity("cluster", why)
             _record_load(inputs, "start", _unsampled(why))
             return
         inputs["system_identity"], sample = result

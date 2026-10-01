@@ -339,6 +339,10 @@ class Classified:
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: ``experiment.system_identity`` when one was observed.
     system_identity: Mapping[str, Any] | None = None
+    #: Written by 1.7 or later (``written_by_v17``): such a record without a
+    #: system identity failed to sample it, and is never assumed to share
+    #: a system.
+    v17: bool = False
     notes: list[str] = field(default_factory=list)
 
     def keys(self, group: str) -> dict[str, Any]:
@@ -400,6 +404,7 @@ def classify(exp: Mapping[str, Any], record: Mapping[str, Any] | None = None) ->
         architecture["query access path"] = arch.get("query_access_path")
     has_pinset, pinset, notes = dependency_pinset(exp, record)
     out.notes += notes
+    out.v17 = written_by_v17(exp, record)[0]
     if has_pinset:
         architecture["dependency pinset"] = pinset
 
@@ -551,6 +556,11 @@ def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
         return "different", f"system {sa!r} vs {sb!r}"
     ia, ib = a.system_identity, b.system_identity
     if ia is None and ib is None:
+        unsampled = [c.run_id or "?" for c in (a, b) if c.v17]
+        if unsampled:
+            # A 1.7 run without one failed to sample it: nothing says where
+            # it ran.
+            return "different", "system identity not sampled on " + ", ".join(unsampled)
         return "same", "system identity not recorded; assumed the same"
     if ia is None or ib is None:
         missing = a.run_id if ia is None else b.run_id
