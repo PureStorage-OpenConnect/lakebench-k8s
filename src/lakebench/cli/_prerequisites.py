@@ -268,12 +268,14 @@ def _co_resident_request(
         _parse_cpu_millicores,
         _parse_memory_gi,
     )
+    from lakebench.deps.manifest import POD_REQUEST_MEMORY_MI
 
     qe = cfg.architecture.query_engine
     engine = qe.type.value
+    # Includes the lb-deps pod's CPU reservation; its memory is added here.
     cpu_m = _co_resident_cpu_m(cfg)
-    mem_gi = 0.0
-    parts = ["catalog/Postgres"]
+    mem_gi = POD_REQUEST_MEMORY_MI / 1024
+    parts = ["catalog/Postgres", "lb-deps"]
     if engine == "trino":
         mem_gi += _parse_memory_gi(qe.trino.coordinator.memory)
         mem_gi += qe.trino.worker.replicas * _parse_memory_gi(qe.trino.worker.memory)

@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Each deployment gets a dependency server (DEP-2).** `deploy` runs a new
+  `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
+  and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
+  Spark image. Its init containers resolve the jars (plus the AML reference
+  wheels for the AML workload, and the DuckDB wheel and extensions for
+  DuckDB) once per request; the server re-hashes the set at every start and
+  serves it read-only. Deploy reads the served manifest, recomputes the set
+  hash from its file entries and jar order, checks it (every selected group
+  present, the one table-format runtime the jobs use, no unlisted jar
+  shadowing an image jar), and records it in the `lb-deps-manifest`
+  ConfigMap and the namespace annotation `lakebench.deployment/deps-set`.
+  The step removes the annotation first and writes it last, so a deploy
+  whose `deps` step fails leaves none. A cold resolve adds one to a few
+  minutes to the first deploy; an unchanged redeploy renders the same pod
+  template and does not restart the server.
+- New optional config block `platform.deps`: `maven_repository`,
+  `pypi_index` and `duckdb_extension_repository` point the resolve at
+  mirrors for clusters without public egress, and `storage_class` picks the
+  PVC's StorageClass. Mirror URLs with credentials, a query or another
+  scheme are refused at load.
+
 ### Breaking changes
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
@@ -137,6 +159,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   CRD). A check that cannot run (an API error, or no right to list
   cluster-wide) fails the preflight with "could not check";
   `--skip-preflight` bypasses it.
+- The capacity check before `run` and the auto-sizer count the dependency
+  server among the always-on pods, at its pod's reservation of 1 CPU and
+  2 GiB (the resolve init container's request stays reserved for the pod's
+  life). The reported co-resident request therefore rises by 1 core and
+  2 GB. Where the CPU budget is binding, the auto-sized datagen parallelism
+  and Spark executor instances can come out one step (2) lower, which
+  happens at scale 100 and above on clusters of a few hundred cores. The
+  concurrent budget of continuous-mode streams does not count the server
+  yet, so the AML continuous executor split is unchanged.
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.

@@ -1,0 +1,23 @@
+---
+# The dependency set's volume (DEP-2). Created once and never patched,
+# resized or replaced: deploy creates it only when it is absent.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ pvc_name }}
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: deps
+    app.kubernetes.io/managed-by: lakebench
+    lakebench.io/deployment: "{{ deployment_name }}"
+    lakebench.io/deps-role: data
+spec:
+  accessModes:
+    - ReadWriteOnce
+{% if storage_class %}
+  storageClassName: "{{ storage_class }}"
+{% endif %}
+  resources:
+    requests:
+      storage: {{ pvc_size }}

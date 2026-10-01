@@ -46,8 +46,9 @@ Lakebench deploys infrastructure in a fixed sequence defined in the deployment e
 3. **PostgreSQL** (StatefulSet + Service)
 4. Catalog service (Hive Metastore or Polaris), then Spark RBAC, then Unity Catalog when that is the catalog
 5. Spark Operator check and watch-list entry
-6. Query engine (Trino, Spark Thrift Server or DuckDB)
-7. Observability stack (if enabled)
+6. Dependency server (`lb-deps`)
+7. Query engine (Trino, Spark Thrift Server or DuckDB)
+8. Observability stack (if enabled)
 
 PostgreSQL is deployed after namespace, secret and bucket setup and the scratch StorageClass check, because every catalog service depends on a running PostgreSQL instance before they can start. The deployer waits for two readiness signals before proceeding: the StatefulSet reports all replicas ready, and a `pg_isready` probe against the `hive` database on pod `lakebench-postgres-0` succeeds.
 
