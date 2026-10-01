@@ -355,3 +355,63 @@ def test_readonly_load_writes_nothing_with_legacy_state(tmp_path):
     before = _listing(tmp_path)
     assert load_config(cfg_path, purpose=LoadPurpose.READ).name == "lb-20260101-000000"
     assert _listing(tmp_path) == before
+
+
+# -- v1.6 directories with several nameless configs (SAF-2 c, check 1) --------
+
+
+def _v16_dir(tmp_path: Path) -> Path:
+    (tmp_path / ".lakebench").mkdir()
+    shutil.copy(FIXTURES / "v16-state" / "state.json", tmp_path / ".lakebench" / "state.json")
+    return _write(tmp_path, NAMELESS, "a.yaml")
+
+
+def test_v16_state_teardown_refused_when_siblings_share_the_name(tmp_path):
+    # v1.6 gave a.yaml and b.yaml one name. destroy b.yaml must not reach the
+    # deployment a.yaml made (finding 1 of the CC-1 review).
+    a = _v16_dir(tmp_path)
+    b = _write(tmp_path, NAMELESS, "b.yaml")
+    for path, other in ((a, "b.yaml"), (b, "a.yaml")):
+        with pytest.raises(ConfigNameRequired) as e:
+            load_config(path, purpose=LoadPurpose.TEARDOWN)
+        msg = " ".join(str(e.value).split())
+        assert f"nameless {other}" in msg
+        assert "name: lb-20260915-101530" in msg
+        assert e.value.siblings == [tmp_path / other]
+    # READ still loads; CC-2's check_nameless_target guards the cluster reads.
+    assert load_config(a, purpose=LoadPurpose.READ).name == "lb-20260915-101530"
+    # Naming the one that deployed it makes it loadable as itself.
+    named = _write(tmp_path, {**NAMELESS, "name": "lb-20260915-101530"}, "a.yaml")
+    assert load_config(named, purpose=LoadPurpose.TEARDOWN).name == "lb-20260915-101530"
+
+
+def test_v16_state_teardown_ignores_files_that_are_not_nameless_configs(tmp_path):
+    a = _v16_dir(tmp_path)
+    _write(tmp_path, {**NAMELESS, "name": "other"}, "named.yaml")
+    _write(tmp_path, {"apiVersion": "v1", "kind": "ConfigMap"}, "manifest.yaml")
+    (tmp_path / "broken.yml").write_text("{not: [yaml")
+    (tmp_path / "notes.txt").write_text(yaml.safe_dump(NAMELESS))
+    (tmp_path / "alias.yaml").symlink_to(a)
+    (tmp_path / "sub").mkdir()
+    _write(tmp_path / "sub", NAMELESS, "c.yaml")
+    assert load_config(a, purpose=LoadPurpose.TEARDOWN).name == "lb-20260915-101530"
+    # The alias is the same file, not a second config.
+    assert load_config(tmp_path / "alias.yaml", purpose=LoadPurpose.TEARDOWN).name == (
+        "lb-20260915-101530"
+    )
+
+
+def test_v16_state_mutate_refusal_does_not_offer_a_shared_name(tmp_path):
+    # Offering "name: X" when another nameless config may have made X steers
+    # the user into redeploying over that deployment (finding 3).
+    a = _v16_dir(tmp_path)
+    with pytest.raises(ConfigNameRequired) as alone:
+        load_config(a, purpose=LoadPurpose.MUTATE)
+    assert "if this config made deployment 'lb-20260915-101530'" in str(alone.value)
+    _write(tmp_path, NAMELESS, "b.yaml")
+    with pytest.raises(ConfigNameRequired) as shared:
+        load_config(a, purpose=LoadPurpose.MUTATE)
+    msg = " ".join(str(shared.value).split())
+    assert "nameless b.yaml" in msg
+    assert "new unique name, for example 'name: lb-" in msg
+    assert "only to the one config that deployed" in msg

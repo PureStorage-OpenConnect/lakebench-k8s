@@ -22,10 +22,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
+
 #: The v1.6 state file, relative to the config's directory. Only ever read.
 LEGACY_STATE = Path(".lakebench") / "state.json"
 
 NameSource = Literal["config", "override", "legacy-state", "suggested"]
+
+#: A YAML mapping with any of these top-level keys is taken for a lakebench
+#: config when counting the nameless configs in a directory.
+CONFIG_MARKER_KEYS = frozenset(
+    {"platform", "architecture", "workload", "recipe", "endpoint", "scale"}
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +81,40 @@ def read_legacy_name(config_path: str | Path) -> str | None:
     if isinstance(name, str) and name:
         return name
     return None
+
+
+def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
+    """The other nameless lakebench configs in this config's directory.
+
+    v1.6 gave every nameless config in a directory the one name in
+    ``.lakebench/state.json``, so when there is more than one, that name
+    cannot be tied to any one of them (SAF-2 part c, check 1). Each
+    ``*.yaml`` and ``*.yml`` file beside the config is parsed with
+    ``yaml.safe_load`` on its raw text (no env substitution); a file that
+    does not parse is skipped, and the config itself is left out, however
+    it is linked. Only this directory is read, not its subdirectories.
+    Returns None when the directory cannot be listed, so a caller can fail
+    closed.
+    """
+    path = Path(config_path).absolute()
+    try:
+        own = path.resolve()
+        entries = sorted(path.parent.iterdir())
+    except OSError:
+        return None
+    others: list[Path] = []
+    for entry in entries:
+        if entry.suffix not in (".yaml", ".yml"):
+            continue
+        try:
+            if not entry.is_file() or entry.resolve() == own:
+                continue
+            raw = yaml.safe_load(entry.read_text())
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        if isinstance(raw, dict) and not raw.get("name") and CONFIG_MARKER_KEYS & raw.keys():
+            others.append(entry)
+    return others
 
 
 def _user_token() -> str:

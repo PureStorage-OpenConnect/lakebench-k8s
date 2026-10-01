@@ -17,7 +17,7 @@ from ._load_context import (
     LoadPurpose,
     collecting_notes,
 )
-from .deploy_state import NameResolution, resolve_name
+from .deploy_state import NameResolution, other_nameless_configs, resolve_name, suggested_name
 from .schema import LakebenchConfig
 
 # -- Env var substitution ----------------------------------------------------
@@ -164,26 +164,58 @@ class ConfigNameRequired(ConfigValidationError):
     The commands that change data refuse every nameless config. The teardown
     commands refuse one that has only a suggested name: v1.7 never deploys a
     nameless config, so a deployment under that name was made by some other
-    config file.
+    config file. They also refuse a v1.6 state name when other nameless
+    configs share the directory (``siblings``; None when it could not be
+    listed), because v1.6 gave all of them that one name.
     """
 
-    def __init__(self, resolution: NameResolution, *, teardown: bool = False):
+    def __init__(
+        self,
+        resolution: NameResolution,
+        *,
+        teardown: bool = False,
+        siblings: list[Path] | None = None,
+        suggestion: str | None = None,
+    ):
         self.resolution = resolution
+        self.siblings = siblings
         name = resolution.name
-        if teardown:
+        shared = siblings is None or bool(siblings)
+        if siblings is None:
+            others = "this directory could not be listed"
+        else:
+            others = "this directory also holds nameless " + ", ".join(p.name for p in siblings)
+        if teardown and resolution.source == "legacy-state":
+            msg = (
+                f"config has no name, and {others}; v1.6 gave every nameless config "
+                f"here the name '{name}' (read from {resolution.legacy_state_path}), so "
+                "it cannot tell which one made that deployment. Fix: add "
+                f"'name: {name}' to the one config that deployed it and run this again "
+                "with that config."
+            )
+        elif teardown:
             msg = (
                 "config has no name and this directory has no readable v1.6 "
                 f"{resolution.legacy_state_path}, so no deployment can be its own; "
                 f"'{name}' is only a suggestion. Fix: add the deployment's name to the "
                 "config (the namespace's lakebench.deployment/name annotation holds it)."
             )
+        elif resolution.source == "legacy-state" and shared:
+            msg = (
+                f"config has no name, so it cannot change data, and {others}; v1.6 "
+                f"gave every nameless config here the name '{name}' (read from "
+                f"{resolution.legacy_state_path}), so which one made that deployment "
+                "cannot be told from the files. Fix: give this config a new unique "
+                f"name, for example 'name: {suggestion or 'my-unique-name'}'; add "
+                f"'name: {name}' only to the one config that deployed '{name}'."
+            )
         elif resolution.source == "legacy-state":
             msg = (
                 "config has no name, so it cannot change data; without a name it "
-                f"resolves to '{name}' (read from {resolution.legacy_state_path}), which every "
-                "other nameless config in this directory also resolves to. Fix: if this "
-                f"config made deployment '{name}' and no other config here uses that "
-                f"name, add 'name: {name}' to it; otherwise add a new unique name."
+                f"resolves to '{name}' (read from {resolution.legacy_state_path}), the "
+                "name v1.6 gave the nameless configs in this directory. Fix: if this "
+                f"config made deployment '{name}', add 'name: {name}' to it; otherwise "
+                "add a new unique name."
             )
         else:
             msg = (
@@ -291,10 +323,16 @@ def load_config(
             errors=[{"loc": ("name",), "msg": str(e), "type": "name_override"}],
         ) from None
     if resolution.nameless:
+        siblings = other_nameless_configs(path) if resolution.source == "legacy-state" else []
         if purpose in CHANGES_DATA:
-            raise ConfigNameRequired(resolution)
+            raise ConfigNameRequired(resolution, siblings=siblings, suggestion=suggested_name(path))
         if purpose == LoadPurpose.TEARDOWN and resolution.source == "suggested":
             raise ConfigNameRequired(resolution, teardown=True)
+        if purpose == LoadPurpose.TEARDOWN and siblings != []:
+            # SAF-2 (c) check 1 for the v1.6 name: with several nameless
+            # configs here it belongs to whichever one deployed, and destroy,
+            # stop or admin from another would act on that deployment.
+            raise ConfigNameRequired(resolution, teardown=True, siblings=siblings)
         data["name"] = resolution.name
 
     # The model stores the workload block at architecture.workload; report

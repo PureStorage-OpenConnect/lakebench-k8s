@@ -36,9 +36,13 @@ time-based name (`lb-YYYYMMDD-HHMMSS`) written to `.lakebench/state.json`
 in the config's directory, which every nameless config in that directory
 shared. That file is now only read: `destroy`, `stop`, `status`, `logs`,
 `report`, `info` and `config show` load a nameless config under the name it records,
-so a deployment made by v1.6 can still be inspected and torn down. Without
-the file, `destroy`, `stop` and `admin` refuse a nameless config, because no
-deployment can be its own, and the read-only commands use a suggested name,
+so a deployment made by v1.6 can still be inspected and torn down. When the
+directory holds more than one nameless config, `destroy`, `stop` and `admin`
+refuse each of them, naming the others: v1.6 gave them all the one name, so
+it cannot say which one deployed it. Add `name:` with that name to the config
+that did. Without the file, `destroy`, `stop` and `admin` refuse a nameless
+config, because no deployment can be its own, and the read-only commands use
+a suggested name,
 `lb-<user>-<6 hex>`, which the error for the other commands also offers. No
 command writes `.lakebench/state.json` any more, and the read-only commands
 create no files.

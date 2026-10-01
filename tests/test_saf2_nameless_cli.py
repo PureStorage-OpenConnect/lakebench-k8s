@@ -109,3 +109,20 @@ def test_reproduce_refuses_before_its_pre_run_destroy(tmp_path, monkeypatch):
         with pytest.raises(ReproduceError):
             _run_pipeline(cfg_path, None, keep=False)
     assert calls == []
+
+
+def test_destroy_refuses_a_v16_name_two_nameless_configs_share(tmp_path, monkeypatch):
+    # v1.6 resolved a.yaml and b.yaml to the one name in state.json, so
+    # destroy b.yaml went for the namespace a.yaml deployed. It must stop
+    # before any cluster call.
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".lakebench").mkdir()
+    (tmp_path / ".lakebench" / "state.json").write_text('{"name": "lb-20260915-101530"}')
+    _write(tmp_path, NAMELESS, "a.yaml")
+    b = _write(tmp_path, NAMELESS, "b.yaml")
+    result = runner.invoke(app, ["destroy", str(b), "--force"])
+    assert result.exit_code != 0
+    out = " ".join(result.output.split())
+    assert "nameless a.yaml" in out
+    assert "name: lb-20260915-101530" in out
