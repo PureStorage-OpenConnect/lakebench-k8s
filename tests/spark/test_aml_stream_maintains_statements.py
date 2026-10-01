@@ -13,37 +13,23 @@ and dimension paths that need separate seed data) and asserts:
 * the first batch's opening bal_after uses the deterministic
   ``abs(xxhash64(iban)) % 200_000 + 10_000`` formula, matching batch mode.
 
-Runs in a subprocess so a fresh JVM picks up the Iceberg jar.
+Runs in a subprocess: a fresh JVM with its own static Spark conf.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_HERE = Path(__file__).resolve().parent
-_SCRIPTS = _HERE.parents[1] / "src/lakebench/spark/scripts"
 
-pytestmark = pytest.mark.usefixtures("load_script")
-from _d_full_helpers import iceberg_jar  # noqa: E402
-
-
-def test_stream_maintains_statements_in_a_fresh_jvm():
-    jar = iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+@pytest.mark.requires_jars("iceberg")
+def test_stream_maintains_statements_in_a_fresh_jvm(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # 5 micro-batches x 1 payment each = 5 payments = 10 statement entries
     # (one DBIT + one CRDT per payment). Both touched IBANs have 5 rows.
@@ -61,7 +47,7 @@ def test_stream_maintains_statements_in_a_fresh_jvm():
     assert out["current_balance_matches_last_bal_after_us02"] is True, out
 
 
-def _run(jar):
+def _run(jars):
     from _d_full_helpers import (
         BASE_TS,
         batch_rows,
@@ -74,7 +60,7 @@ def _run(jar):
     )
 
     with tempfile.TemporaryDirectory() as work:
-        spark = build_spark(work, jar)
+        spark = build_spark(work, jars)
         bootstrap_catalog(spark)
         for iban in ("GB01", "US02"):
             seed_account(spark, iban)
@@ -160,6 +146,6 @@ def _run(jar):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(_SCRIPTS), str(_HERE)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts and tests/spark on
+    # PYTHONPATH and passes the jar classpath.
     _run(sys.argv[1])

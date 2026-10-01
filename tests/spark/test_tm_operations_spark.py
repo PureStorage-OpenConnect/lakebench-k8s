@@ -10,42 +10,24 @@ snapshot pinned against a concurrent stream commit, the not-run and disabled
 paths, the Polaris PURGE fallback, and each read-back invariant failing when
 the written tables are inconsistent.
 
-Needs the Iceberg Spark runtime jar (LB_TEST_ICEBERG_JAR or
-LB_SPARK_TEST_JARS); skipped otherwise.
+Needs the Iceberg Spark runtime jar in LB_SPARK_TEST_JARS (see
+tests/spark/conftest.py).
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-def _find_jar() -> str | None:
-    cands = [os.environ.get("LB_TEST_ICEBERG_JAR", "")]
-    cands += os.environ.get("LB_SPARK_TEST_JARS", "").split(",")
-    for c in (c.strip() for c in cands):
-        if c and "iceberg-spark-runtime" in Path(c).name and Path(c).is_file():
-            return c
-    return None
-
-
-_JAR = _find_jar()
-pytestmark = [
-    pytest.mark.skipif(
-        _JAR is None, reason="no Iceberg runtime jar in LB_TEST_ICEBERG_JAR / LB_SPARK_TEST_JARS"
-    ),
-    pytest.mark.usefixtures("load_script"),
-]
-
-
-def _session(warehouse):
+def _session(warehouse, jars):
+    """*jars*: the comma-separated test jar classpath."""
     from pyspark.sql import SparkSession
 
     return (
@@ -53,7 +35,7 @@ def _session(warehouse):
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.jars", _JAR)
+        .config("spark.jars", jars)
         .config(
             "spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -65,22 +47,12 @@ def _session(warehouse):
     )
 
 
-def test_tm_operations_end_to_end(tmp_path):
-    """Fresh interpreter: spark.jars only applies to a JVM not yet started.
-    The scripts directory goes on PYTHONPATH so executor Python workers can
-    import tm_operations (the per-customer replay runs there)."""
-    import subprocess
-
-    env = dict(os.environ, PYSPARK_PYTHON=sys.executable)
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(_SCRIPTS), env.get("PYTHONPATH")) if p)
-    proc = subprocess.run(
-        [sys.executable, __file__, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=900,
-    )
-    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+def test_tm_operations_end_to_end(tmp_path, spark_subprocess, spark_jars):
+    """Fresh interpreter: a JVM with its own static Spark conf.
+    spark_subprocess puts the scripts directory on PYTHONPATH, so executor
+    Python workers can import tm_operations (the per-customer replay runs
+    there)."""
+    proc = spark_subprocess(__file__, tmp_path, spark_jars.classpath, timeout=900)
     assert "CHECK OK" in proc.stdout
 
 
@@ -813,15 +785,15 @@ def _check(spark):
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess (argv: <warehouse> <jars>), which puts the
+    # scripts on PYTHONPATH.
     # A path-based (hadoop) catalog places tables itself, like Polaris; the
     # Hive-only explicit bronze location does not apply.
     os.environ["LB_CATALOG_TYPE"] = "polaris"
     os.environ["LB_TEST_WAREHOUSE"] = sys.argv[1]
     # Keep the continuous reset's raw-path handling on local disk.
     os.environ["LB_BRONZE_URI"] = f"file://{sys.argv[1]}/raw/"
-    _spark = _session(sys.argv[1])
+    _spark = _session(sys.argv[1], sys.argv[2])
     try:
         _check(_spark)
     finally:

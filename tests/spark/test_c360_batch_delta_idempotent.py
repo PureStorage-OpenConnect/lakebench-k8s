@@ -11,55 +11,19 @@ cycles 0/1/2 each twice with delta_batch_txn_options and asserts:
 
 from __future__ import annotations
 
-import glob
-import os
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_JARS = os.environ.get("LB_SPARK_TEST_JARS", "")
-_NEEDED = ("delta-spark", "delta-storage")
-
-
-def _have_jars() -> bool:
-    if not _JARS or not Path(_JARS).is_dir():
-        return False
-    names = [p.name for p in Path(_JARS).glob("*.jar")]
-    return all(any(n.startswith(k) for n in names) for k in _NEEDED)
-
-
-pytestmark = [
-    pytest.mark.skipif(not _have_jars(), reason="LB_SPARK_TEST_JARS with Delta jars not set"),
-    pytest.mark.usefixtures("load_script"),
-]
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 @pytest.fixture(scope="module")
-def spark(tmp_path_factory):
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    wh = tmp_path_factory.mktemp("delta-wh")
-    jars = ",".join(sorted(glob.glob(os.path.join(_JARS, "*.jar"))))
-    s = (
-        SparkSession.builder.master("local[2]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.jars", jars)
-        .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config(
-            "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
-        )
-        .config("spark.sql.warehouse.dir", f"file://{wh}")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
+def spark(spark_session):
+    """The shared session: Delta extension, DeltaCatalog as spark_catalog."""
+    return spark_session
 
 
 def _rows(spark, n, start=0):
@@ -79,6 +43,7 @@ def _rows(spark, n, start=0):
     )
 
 
+@pytest.mark.requires_jars("delta")
 def test_repeated_cycle_appends_are_delta_no_ops(spark, tmp_path):
     """cycles 0/1/2 each submitted twice; final count matches single-run sequence."""
     from common import delta_batch_txn_options

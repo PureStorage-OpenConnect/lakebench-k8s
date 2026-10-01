@@ -12,12 +12,14 @@ fails on each such line under tests/, naming the file and line:
   sys.modules, directly or through monkeypatch;
 - ``spec_from_file_location`` under a plain script name.
 
-conftest.py files (where the loader lives), this module's own fixtures in
-tests/test_script_loader.py, and ``if __name__ == "__main__":`` blocks
-(which run only in a fresh child interpreter) are exempt. The scan is the
-fast, named message; the pytest_runtest_teardown hook in tests/conftest.py
-is the backstop for forms it cannot see (a non-literal sys.modules key, for
-one, is allowed here because tests stub pyspark modules in loops).
+conftest.py files (where the loader lives) and this module's own fixtures
+in tests/test_script_loader.py are exempt. A Spark child (a test file run
+as a script) gets the scripts directory from ``spark_subprocess``'s
+PYTHONPATH (tests/spark/conftest.py), so ``__main__`` blocks are not
+exempt either. The scan is the fast, named message; the
+pytest_runtest_teardown hook in tests/conftest.py is the backstop for forms
+it cannot see (a non-literal sys.modules key, for one, is allowed here
+because tests stub pyspark modules in loops).
 """
 
 from __future__ import annotations
@@ -43,16 +45,6 @@ def _dotted(node: ast.AST) -> str:
     return ".".join(reversed(parts))
 
 
-def _is_main_guard(node: ast.AST) -> bool:
-    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
-        return False
-    t = node.test
-    sides = [t.left, *t.comparators]
-    return any(isinstance(s, ast.Name) and s.id == "__name__" for s in sides) and any(
-        isinstance(s, ast.Constant) and s.value == "__main__" for s in sides
-    )
-
-
 def _script_key(node: ast.AST | None) -> bool:
     """A sys.modules key that is (or may be) a script name: a literal script
     name, or anything not a literal, since it cannot be checked."""
@@ -71,14 +63,8 @@ def _sets_sys_path(call: ast.Call) -> bool:
 
 def violations(source: str, rel: str) -> list[str]:
     tree = ast.parse(source)
-    exempt: set[int] = set()
-    for top in tree.body:
-        if _is_main_guard(top):
-            exempt.update(id(n) for n in ast.walk(top))
     out: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        if id(node) in exempt:
-            continue
         msg = None
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             target = _dotted(node.func.value)
@@ -174,10 +160,10 @@ def test_planted_violations_are_found():
         "    importlib.util.spec_from_file_location('common', 'x/common.py')\n"
         "    sys.modules.update(common=None)\n"
         "if __name__ == '__main__':\n"
-        "    sys.path.insert(0, 'child only')\n"
+        "    sys.path.insert(0, 'child too')\n"
     )
     lines = [v.split(":")[1] for v in violations(src, "t.py")]
-    assert lines == ["2", "3", "4", "5", "7", "8", "9", "10", "11", "12", "13"]
+    assert lines == ["2", "3", "4", "5", "7", "8", "9", "10", "11", "12", "13", "15"]
 
 
 def test_stub_modules_and_private_names_are_allowed():

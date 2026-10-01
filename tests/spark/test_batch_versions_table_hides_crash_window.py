@@ -8,50 +8,27 @@ row for that batch. Then a reader that semi-joins silver.transactions
 against silver_batch_versions on (_stream_id, _batch_id) sees zero rows
 for the crashed batch.
 
-Runs in a child process because Iceberg jars must be on the driver
-classpath at JVM launch, matching the pattern in
-``tests/spark/test_aml_stream_one_delete_per_restart.py``.
+Runs in a Spark child (``spark_subprocess``) with the Iceberg jar from
+``LB_SPARK_TEST_JARS`` on the driver classpath at JVM launch, matching the
+pattern in ``tests/spark/test_aml_stream_one_delete_per_restart.py``.
 """
 
 from __future__ import annotations
 
-import glob
 import json
-import os
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parents[1] / "src/lakebench/spark/scripts"
 
-
-def _iceberg_jar() -> str | None:
-    env = os.environ.get("LB_TEST_ICEBERG_JAR")
-    if env and Path(env).exists():
-        return env
-    hits = sorted(
-        glob.glob(str(Path.home() / ".lakebench/local/*/ivy/cache/org.apache.iceberg/*/jars/*.jar"))
-        + glob.glob(str(Path.home() / ".ivy2*/cache/org.apache.iceberg/*/jars/*.jar"))
-    )
-    return next((h for h in hits if "spark-runtime-4.0" in h), None)
-
-
-def test_crash_window_is_invisible_to_semi_join():
-    jar = _iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+@pytest.mark.requires_jars("iceberg")
+def test_crash_window_is_invisible_to_semi_join(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # Batch 0 sealed cleanly -- txns rows visible under the filter.
     assert out["sealed_visible_rows"] == 1, out
@@ -171,14 +148,14 @@ CREATE TABLE lh.silver.silver_batch_versions (
 """
 
 
-def _run(jar):
+def _run(jars):
     from pyspark.sql import SparkSession
 
     with tempfile.TemporaryDirectory() as work:
         spark = (
             SparkSession.builder.master("local[1]")
             .config("spark.ui.enabled", "false")
-            .config("spark.jars", jar)
+            .config("spark.jars", jars)
             .config("spark.sql.shuffle.partitions", "2")
             .config(
                 "spark.sql.extensions",
@@ -301,6 +278,6 @@ def _run(jar):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(SCRIPTS)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts on PYTHONPATH; argv[1]
+    # is the comma-separated jar classpath.
     _run(sys.argv[1])

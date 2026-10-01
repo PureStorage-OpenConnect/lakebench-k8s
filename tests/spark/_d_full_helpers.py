@@ -6,20 +6,17 @@ account_statements) plus silver.accounts / silver.entities for the
 current_balance MERGE. Instead of repeating the ~150 lines of DDL and
 Spark bootstrap in each file, this module centralises the shape.
 
-The tests each spawn a subprocess with an Iceberg jar on the classpath
-(see ``test_aml_stream_one_delete_per_restart.py`` for the pattern) and
-import this module to build the catalog. Nothing in this file runs Spark
+The tests each run a Spark child through the ``spark_subprocess`` fixture
+(tests/spark/conftest.py), which passes the test jars, and import this
+module there to build the catalog. Nothing in this file runs Spark
 at import time -- ``pyspark`` and the Iceberg jar are only touched from
-inside ``run_in_subprocess``.
+inside the child.
 """
 
 from __future__ import annotations
 
-import glob
-import os
 from datetime import datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 PACS_SCHEMA = (
     "txn_id string, uetr string, "
@@ -144,18 +141,6 @@ CREATE TABLE lh.silver.entities (
 """
 
 
-def iceberg_jar() -> str | None:
-    """LB_TEST_ICEBERG_JAR, or an iceberg-spark-runtime-4.0 jar on disk."""
-    env_jar = os.environ.get("LB_TEST_ICEBERG_JAR")
-    if env_jar and Path(env_jar).exists():
-        return env_jar
-    hits = sorted(
-        glob.glob(str(Path.home() / ".lakebench/local/*/ivy/cache/org.apache.iceberg/*/jars/*.jar"))
-        + glob.glob(str(Path.home() / ".ivy2*/cache/org.apache.iceberg/*/jars/*.jar"))
-    )
-    return next((h for h in hits if "spark-runtime-4.0" in h), None)
-
-
 def bronze_row(spark, txn_id, ts, dbtr_iban="GB01", cdtr_iban="US02", amt="100.00"):
     """One-row bronze DataFrame in pacs.008 shape."""
 
@@ -193,14 +178,14 @@ def bronze_batch(spark, rows):
     return out
 
 
-def build_spark(work_dir, jar):
+def build_spark(work_dir, jars):
     """Local[1] SparkSession with a Hadoop-catalog Iceberg pointing at work_dir."""
     from pyspark.sql import SparkSession
 
     return (
         SparkSession.builder.master("local[1]")
         .config("spark.ui.enabled", "false")
-        .config("spark.jars", jar)
+        .config("spark.jars", jars)
         .config("spark.sql.shuffle.partitions", "2")
         .config(
             "spark.sql.extensions",

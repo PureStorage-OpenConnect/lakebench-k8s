@@ -20,36 +20,25 @@ assertions below.
 
 from __future__ import annotations
 
-import glob
 import math
-import os
-import sys
 from datetime import datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
-
-# Point the stream / build modules at the test's Iceberg catalog before
-# import so their `{CATALOG}` f-string interpolation resolves to "lh".
-os.environ.setdefault("LB_ICEBERG_CATALOG", "lh")
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_JARS = os.environ.get("LB_SPARK_TEST_JARS", "")
-
-
-def _have_jars() -> bool:
-    if not _JARS or not Path(_JARS).is_dir():
-        return False
-    names = [p.name for p in Path(_JARS).glob("*.jar")]
-    return any(n.startswith("iceberg-spark-runtime") for n in names)
-
-
 pytestmark = [
-    pytest.mark.skipif(not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"),
+    pytest.mark.requires_jars("iceberg"),
     pytest.mark.usefixtures("load_script"),
+    # One core, as before the shared harness: the profile sums are compared
+    # with a tolerance, and merge order follows the partition count.
+    pytest.mark.spark_static_conf({"spark.master": "local[1]"}),
 ]
+
+# The Iceberg catalog the scripts are pointed at (LB_ICEBERG_CATALOG) and the
+# one registered on the shared session.
+_CATALOG = "lh"
 
 
 _PACS_SCHEMA = (
@@ -95,31 +84,23 @@ def _row(txn_id, orig, ben, ts, amount):
     )
 
 
-@pytest.fixture(scope="module")
-def spark(tmp_path_factory):
-    from pyspark.sql import SparkSession
+@pytest.fixture(scope="module", autouse=True)
+def _catalog_env():
+    """Point the stream / build modules at the test's Iceberg catalog
+    before a test imports them: their DDL literals interpolate
+    ``{CATALOG}`` at import, so patching module attributes after import is
+    too late."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LB_ICEBERG_CATALOG", _CATALOG)
+        yield
 
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    wh = tmp_path_factory.mktemp("aml-parity-wh")
-    jars = ",".join(sorted(glob.glob(os.path.join(_JARS, "*.jar"))))
-    s = (
-        SparkSession.builder.master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.jars", jars)
-        .config("spark.sql.shuffle.partitions", "2")
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config("spark.sql.catalog.lh", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.lh.type", "hadoop")
-        .config("spark.sql.catalog.lh.cache-enabled", "false")
-        .config("spark.sql.catalog.lh.warehouse", f"file://{wh}")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
+
+@pytest.fixture(scope="module")
+def spark(spark_session, iceberg_catalog, tmp_path_factory):
+    iceberg_catalog(
+        spark_session, _CATALOG, tmp_path_factory.mktemp("aml-parity-wh"), cache_enabled=False
     )
-    yield s
-    s.stop()
+    return spark_session
 
 
 def test_batch_and_stream_produce_equivalent_profiles(spark):

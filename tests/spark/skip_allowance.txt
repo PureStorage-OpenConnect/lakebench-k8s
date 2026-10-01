@@ -1,0 +1,4 @@
+# Skips a LB_REQUIRE_JARS=1 Spark run may have, one per line:
+#   <nodeid>  <reason>
+# A skip whose reason mentions jars fails the run even when listed here.
+# The target is an empty list (QA-2).

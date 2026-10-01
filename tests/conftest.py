@@ -243,10 +243,14 @@ def _clear_script_leaks() -> None:
 def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Any:
     """Fail a test that leaves the Spark scripts importable for later tests:
     the scripts directory on sys.path, or a script module in sys.modules
-    outside a load_script namespace. It runs after every fixture of the test
-    is torn down, monkeypatch undo and module-scoped namespaces included, so
-    the error lands on the test that leaked and not on the next one. The
-    state is then cleared, so the next test starts without it."""
+    outside a load_script namespace. It runs after the fixtures this test's
+    teardown finalizes (its function fixtures with monkeypatch undo, and on
+    the last test of a module or session the wider-scoped ones too), so a
+    leak made by the test is reported as that test's teardown error and not
+    the next test's. A leak made in a module or session fixture's own
+    teardown lands on the last test of that scope. If a fixture teardown
+    raises, the leak is cleared but only that error is reported. The state
+    is cleared either way, so the next test starts without it."""
     try:
         result = yield
     except BaseException:
