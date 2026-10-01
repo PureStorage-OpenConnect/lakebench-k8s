@@ -49,6 +49,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   workload does not read it.
 - Read-only commands create no files: `validate` no longer opens a journal,
   and `report` and `results` no longer create `lakebench-output/runs/`.
+- **`install.sh` detects a corrupted or incomplete download.** It downloads
+  the binary to a temporary directory, checks it against the `SHA256SUMS`
+  file that each release now publishes, and only then moves it into
+  `INSTALL_DIR`, so a failed, truncated or corrupted download leaves nothing
+  there. The checksum file comes from the same release, so it does not
+  prove who built the binary. The script refuses an `INSTALL_DIR` it cannot
+  write before downloading, installs the binary with mode 755, runs
+  `version` on the binary it installed rather than the first `lakebench` on
+  `PATH`, and refuses Linux arm64 (never published) with the list of
+  available binaries. Releases before 1.7.0 have no `SHA256SUMS` and are
+  refused; download those by hand.
+- The package ships a `py.typed` marker, so type checkers read its
+  annotations.
 ### Fixed
 
 - Trino compaction of the Customer 360 silver table no longer fails with

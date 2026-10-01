@@ -177,5 +177,12 @@ jobs:
       - name: Build wheel and sdist
         run: python -m build
 
+      # PEP 561 marker; without it type checkers ignore lakebench's annotations.
+      - name: Wheel carries py.typed
+        run: >-
+          python -c "import glob, zipfile;
+          names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist();
+          assert 'lakebench/py.typed' in names, 'py.typed missing from the wheel'"
+
       - name: Verify wheel installs
         run: pip install dist/*.whl && lakebench version

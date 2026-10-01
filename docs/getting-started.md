@@ -267,6 +267,23 @@ No Python required.
 curl -fsSL https://raw.githubusercontent.com/PureStorage-OpenConnect/lakebench-k8s/main/install.sh | bash
 ```
 
+The script checks the download against the release's `SHA256SUMS` file
+before it installs it into `INSTALL_DIR` (default `/usr/local/bin`; run it
+with `sudo bash` or set `INSTALL_DIR` to a directory you can write), and
+installs nothing if the download fails or the checksum does not match. That
+catches a corrupted or incomplete download; the checksum file comes from the
+same release, so it does not prove who built the binary. Releases before
+1.7.0 have no `SHA256SUMS`, so for those use the manual download below.
+There is no Linux arm64 binary; on that platform install from PyPI.
+
+Set `INSTALL_DIR` or `VERSION` on the `bash` side of the pipe, and pass them
+through `sudo` with `env`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PureStorage-OpenConnect/lakebench-k8s/main/install.sh | INSTALL_DIR="$HOME/.local/bin" bash
+curl -fsSL https://raw.githubusercontent.com/PureStorage-OpenConnect/lakebench-k8s/main/install.sh | sudo env VERSION=1.7.0 bash
+```
+
 Or download manually from
 [GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases):
 

@@ -1,0 +1,46 @@
+# Dependabot opens pull requests against the integration branch, never main.
+#
+# Dependabot reads this file from the default branch, so it takes effect once
+# it reaches main.
+#
+# github-actions bumps the SHA pins in .github/workflows/ (each pin keeps its
+# tag as a comment for this), grouped into one pull request a month. A new
+# SHA has no entry in .github/action-runtimes.json, so
+# scripts/check_action_runtimes.py fails that pull request until the entries
+# are added there, with their runtimes.
+#
+# pip reads pyproject.toml and ignores the AML reference packages. Their
+# versions are the pins in REFERENCE_PY_DEPS
+# (src/lakebench/modules/pipeline_engines/spark/job.py), which dependabot
+# cannot read; they fix the reference detector's numbers and change only by a
+# deliberate commit, so a pyproject.toml requirement on any of them is not
+# bumped either. There is no cargo entry: datagen_rs/Cargo.lock is an input
+# of the datagen image and changes only with a rebuild.
+#
+# target-branch names the integration branch; change it here when that
+# branch is renamed (tests/test_community_files.py pins the value).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: integrate/v1.5.0
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    target-branch: integrate/v1.5.0
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: numpy
+      - dependency-name: scipy
+      - dependency-name: pandas
+      - dependency-name: scikit-learn
+      - dependency-name: joblib
+      - dependency-name: threadpoolctl
