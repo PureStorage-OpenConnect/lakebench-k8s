@@ -252,7 +252,7 @@ def deploy(
         typer.Option(
             "--timeout",
             "-t",
-            help="Global deployment timeout in seconds (0 = no timeout)",
+            help="Global deployment timeout in seconds (0 = no timeout); bounds every wait in every step",
         ),
     ] = 3600,
     local: Annotated[
@@ -487,7 +487,7 @@ def deploy(
             guidance = (
                 f"Failed at: {failed_component.component}\n"
                 "Fix the issue above, then re-run 'lakebench deploy'.\n"
-                "Successful steps will be skipped on retry."
+                "Re-running deploy re-applies every step; existing resources are kept."
             )
         console.print(
             Panel(
