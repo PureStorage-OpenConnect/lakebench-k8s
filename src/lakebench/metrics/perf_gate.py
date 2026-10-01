@@ -268,7 +268,7 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
     offline autosizing ``lakebench run`` applies, so it is the snapshot a
     faithful run of this file records (before any cluster capping).
     """
-    from lakebench.config import load_config
+    from lakebench.config import LoadPurpose, load_config
     from lakebench.config.autosizer import resolve_auto_sizing
     from lakebench.metrics.collector import build_config_snapshot
 
@@ -281,7 +281,9 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
     try:
         # The fingerprint does not depend on the name, so a too-long
         # LAKEBENCH_PERF_NAME left in the environment must not fail the gate.
-        cfg = load_config(path, allow_long_names=True)
+        # RUN: a pinned config is run with `lakebench run`, so it must load as
+        # run loads it (removed keys refused), not as a teardown.
+        cfg = load_config(path, purpose=LoadPurpose.RUN, allow_long_names=True)
         resolve_auto_sizing(cfg, None)
     except Exception as e:  # noqa: BLE001 -- any load failure is a gate failure
         raise PerfGateError(f"pinned config {path} does not load: {e}") from None

@@ -284,7 +284,8 @@ class MetricsStorage:
             metrics_dir: Directory for storing metrics (parent of per-run dirs)
         """
         self.metrics_dir = Path(metrics_dir)
-        self.metrics_dir.mkdir(parents=True, exist_ok=True)
+        # Created on first write (run_dir), not here: report, results and
+        # compare only read, and a read-only command creates no files.
 
     # ------------------------------------------------------------------
     # Run directory helpers
@@ -358,8 +359,11 @@ class MetricsStorage:
         Returns:
             List of run summaries (most recent first)
         """
-        runs = []
+        runs: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
+
+        if not self.metrics_dir.is_dir():
+            return runs
 
         # New layout: per-run directories
         for run_dir in sorted(self.metrics_dir.iterdir(), reverse=True):
@@ -492,6 +496,8 @@ class MetricsStorage:
 
     def _iter_metrics_files(self):
         """Yield all metrics JSON file paths (new + legacy layouts)."""
+        if not self.metrics_dir.is_dir():
+            return
         # New layout: per-run directories
         for run_dir in sorted(self.metrics_dir.iterdir(), reverse=True):
             metrics_file = run_dir / "metrics.json"

@@ -34,10 +34,8 @@ def test_file_size_refuses_every_other_size(value: object) -> None:
 
 def test_cleanup_loaders_tolerate_an_old_file_size() -> None:
     """destroy and clean must still load a config written with an old size."""
-    with pytest.warns(UserWarning, match="fixed at 64mb"):
-        dg = DatagenConfig.model_validate(
-            {"file_size": "128mb"}, context={"allow_long_names": True}
-        )
+    with pytest.warns(DeprecationWarning, match="fixed at 64mb"):
+        dg = DatagenConfig.model_validate({"file_size": "128mb"}, context={"purpose": "teardown"})
     assert dg.file_size == "64mb"
 
 

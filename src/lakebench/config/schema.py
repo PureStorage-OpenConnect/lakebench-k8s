@@ -7,7 +7,6 @@ matching the specification in lakebench-spec.md Section 4.
 from __future__ import annotations
 
 import logging
-import warnings
 from enum import Enum
 from typing import Any, ClassVar, Literal
 
@@ -15,10 +14,13 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationInfo,
     field_validator,
     model_validator,
 )
+
+from ._load_context import CHANGES_DATA, emit_note, purpose_from_context
 
 logger = logging.getLogger(__name__)
 
@@ -34,25 +36,39 @@ class ConfigModel(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Keys that were once valid and now do nothing. They are dropped with a
-    # DeprecationWarning instead of rejected, so existing configs keep
-    # loading. Maps key -> what to do instead.
+    # Keys that were once valid and now do nothing. Maps key -> what to do
+    # instead. A load for a command that changes data (LoadPurpose MUTATE or
+    # RUN) refuses them with that text; the teardown and read commands drop
+    # them with a note, so an old config can still be destroyed, inspected
+    # and converted. A model built without a purpose drops them with a
+    # DeprecationWarning, as before v1.7.
     _removed_keys: ClassVar[dict[str, str]] = {}
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_removed_keys(cls, data: object) -> object:
+    def _drop_removed_keys(cls, data: object, info: ValidationInfo) -> object:
         if not isinstance(data, dict) or not cls._removed_keys:
             return data
         present = [k for k in cls._removed_keys if k in data]
         if not present:
             return data
+        if purpose_from_context(info.context) in CHANGES_DATA:
+            raise ValueError(
+                "; ".join(
+                    f"'{key}' was removed: {cls._removed_keys[key]} Delete it from the config "
+                    "(destroy, status and the read-only commands still load it)"
+                    for key in present
+                )
+            )
         data = dict(data)
         for key in present:
             data.pop(key)
-            msg = f"'{key}' ({cls.__name__}) is no longer used and is ignored. {cls._removed_keys[key]}"
-            logger.warning(msg)
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            emit_note(
+                f"'{key}' ({cls.__name__}) is no longer used and is ignored. "
+                f"{cls._removed_keys[key]} Commands that change data refuse the config "
+                "until it is deleted.",
+                kind="removed",
+            )
         return data
 
     # Fields that load but that nothing in lakebench reads (D19). Setting one
@@ -76,8 +92,7 @@ class ConfigModel(BaseModel):
                 f"'{name}' ({type(self).__name__}) has no effect: nothing in lakebench "
                 f"reads it. It will be removed in v1.7; delete it from the config. {note}"
             ).rstrip()
-            logger.warning(msg)
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            emit_note(msg, kind="dead")
         return self
 
 
@@ -1123,8 +1138,7 @@ class ProcessingConfig(ConfigModel):
                 "'pipeline.sustained' is deprecated and will be removed in a future "
                 "release; rename the block to 'pipeline.continuous'."
             )
-            logger.warning(msg)
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            emit_note(msg)
         return data
 
     @field_validator("mode", mode="before")
@@ -1136,8 +1150,7 @@ class ProcessingConfig(ConfigModel):
                 "pipeline mode 'sustained' is deprecated and will be removed in a future "
                 "release; use 'mode: continuous'."
             )
-            logger.warning(msg)
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            emit_note(msg)
             return PipelineMode.CONTINUOUS.value
         return v
 
@@ -1154,8 +1167,7 @@ class ProcessingConfig(ConfigModel):
                 "recorded in the run's config snapshot, and 'streaming' makes the "
                 "auto-sizer give Spark 60% and datagen 40% of the CPU budget."
             )
-            logger.warning(msg)
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            emit_note(msg)
         return self
 
     @model_validator(mode="after")
@@ -1256,18 +1268,17 @@ class DatagenConfig(ConfigModel):
     @field_validator("file_size", mode="before")
     @classmethod
     def _fixed_file_size(cls, v: object, info: ValidationInfo) -> object:
-        """Accept any spelling of 64mb; refuse every other size. Cleanup loaders
-        (destroy, clean, admin: the ``allow_long_names`` context of
-        ``load_config``) accept an old size with a warning, so a deployment made
-        from an older config can still be torn down."""
+        """Accept any spelling of 64mb; refuse every other size. The loads
+        that do not change data (LoadPurpose TEARDOWN, READ, COMPARE) accept
+        an old size with a note, as they do a removed key, so a deployment
+        made from an older config can still be inspected and torn down."""
         if isinstance(v, str) and v.strip().lower() == "64mb":
             return "64mb"
-        if info.context and info.context.get("allow_long_names"):
-            import warnings
-
-            warnings.warn(
+        purpose = purpose_from_context(info.context)
+        if purpose is not None and purpose not in CHANGES_DATA:
+            emit_note(
                 f"datagen.file_size {v!r} is ignored: the file size is fixed at 64mb.",
-                stacklevel=2,
+                kind="removed",
             )
             return "64mb"
         raise ValueError(
@@ -1288,13 +1299,9 @@ class DatagenConfig(ConfigModel):
     def resolve_scale_from_target_size(self) -> DatagenConfig:
         """If legacy target_size is set, derive scale from it."""
         if self.target_size is not None:
-            import warnings
-
-            warnings.warn(
+            emit_note(
                 "datagen.target_size is deprecated. Use datagen.scale instead. "
-                "Example: scale: 10 (for ~100 GB)",
-                DeprecationWarning,
-                stacklevel=2,
+                "Example: scale: 10 (for ~100 GB)"
             )
             bytes_val = parse_size_to_bytes(self.target_size)
             # 1 scale unit ~ 10 GB = 10 * 1024^3 bytes
@@ -1902,13 +1909,7 @@ class ArchitectureConfig(ConfigModel):
         if not isinstance(data, dict):
             return data
         if "processing" in data:
-            import warnings
-
-            warnings.warn(
-                "'processing' is deprecated, use 'pipeline' instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            emit_note("'processing' is deprecated, use 'pipeline' instead.")
             if "pipeline" in data:
                 raise ValueError(
                     "both 'architecture.processing' (deprecated) and 'architecture.pipeline' "
@@ -2079,13 +2080,10 @@ class ObservabilityConfig(ConfigModel):
         # in must not re-trigger the warning.
         for field in ("s3_metrics_enabled", "spark_metrics_enabled"):
             if getattr(self, field) is not None:
-                import warnings
-
-                warnings.warn(
+                emit_note(
                     f"observability.{field} is unwired -- setting it has no effect. "
                     "PodMonitor deployment is not gated on this flag today.",
-                    DeprecationWarning,
-                    stacklevel=2,
+                    kind="dead",
                 )
         return self
 
@@ -2276,8 +2274,7 @@ def resolve_workload_location(data: dict[str, Any]) -> dict[str, Any]:
             "'architecture.workload' is deprecated and will be removed in a future "
             "release; move the block to a top-level 'workload:' key."
         )
-        logger.warning(msg)
-        warnings.warn(msg, DeprecationWarning, stacklevel=3)
+        emit_note(msg)
         if has_top:
             conflicts: list[str] = []
             merged = _merge_workload_blocks(top, nested, "workload", conflicts)
@@ -2337,6 +2334,11 @@ class LakebenchConfig(ConfigModel):
 
     # Spark configuration overrides
     spark: SparkConfOverrides = Field(default_factory=SparkConfOverrides)
+
+    # Set by load_config: the notes the load collected and how the name was
+    # resolved (config/loader.py load_notes, name_resolution).
+    _load_notes: Any = PrivateAttr(default=None)
+    _name_resolution: Any = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod

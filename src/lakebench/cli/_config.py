@@ -35,7 +35,7 @@ def config_show(
     ] = Path("lakebench.yaml"),
 ) -> None:
     """Show fully resolved configuration with source annotations."""
-    from lakebench.config import load_config
+    from lakebench.config import LoadPurpose, load_config
     from lakebench.config.loader import load_yaml
 
     try:
@@ -44,7 +44,7 @@ def config_show(
         raw_keys = set(_flatten_keys(raw))
 
         # Load fully resolved config
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
 
         console.print(
             Panel(
@@ -188,7 +188,7 @@ def _validate_local(config_file: Path) -> None:
     following that advice would go looking for a cluster.
     """
     from lakebench.cli._local import LocalModeError, check_local_supported, scale_advisory
-    from lakebench.config import load_config
+    from lakebench.config import LoadPurpose, load_config
     from lakebench.runtime.container import ContainerRuntimeError, detect_container_cli
 
     console.print()
@@ -198,7 +198,8 @@ def _validate_local(config_file: Path) -> None:
     passed, failed = 0, 0
 
     try:
-        cfg = load_config(config_file)
+        # Loads as deploy does, so the check fails where deploy would.
+        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
         console.print("  [green]+[/green] Config syntax valid")
         passed += 1
     except Exception as e:
@@ -273,11 +274,11 @@ def config_storage(
     what the backend does. This command never blocks a deployment: it tells
     you whether the store will work and what to expect if it will not.
     """
-    from lakebench.config import load_config
+    from lakebench.config import LoadPurpose, load_config
     from lakebench.s3 import KNOWN_BACKENDS, CheckStatus, Severity, run_conformance
 
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except Exception as e:
         console.print(f"[red]Could not load config: {e}[/red]")
         raise typer.Exit(1) from e
@@ -366,12 +367,12 @@ def config_recommend(
 ) -> None:
     """Show sizing guidance for your cluster."""
     from lakebench.cli import recommend as _recommend
-    from lakebench.config import load_config
+    from lakebench.config import LoadPurpose, load_config
 
     # Extract pipeline mode from config to pass to recommend
     schema: str | None = None
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
         mode = cfg.architecture.pipeline.mode.value
         schema = cfg.architecture.workload.schema_type.value
     except Exception:
@@ -520,13 +521,24 @@ def config_upgrade(
     """Upgrade a v1.2 config to v2 flat format."""
     import yaml
 
-    from lakebench.config import load_config
+    from lakebench.config import LoadPurpose, load_config
+    from lakebench.config.loader import name_resolution
 
     try:
-        cfg = load_config(config_file)
+        # INSPECT, so an old config's removed keys are dropped rather than
+        # refused: converting old configs is what this command is for.
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except Exception as e:
         console.print(f"[red]Error loading config: {e}[/red]")
         raise typer.Exit(1) from None
+    resolution = name_resolution(cfg)
+    if resolution is None or resolution.nameless:
+        # The output is a config for deploy; it must not carry a name the
+        # input never chose.
+        console.print(
+            "[red]Error: the config has no name; add 'name:' to it before upgrading.[/red]"
+        )
+        raise typer.Exit(1)
 
     # Build v2 flat config
     v2: dict = {"name": cfg.name}

@@ -72,17 +72,20 @@ first. The Spark Operator is shared cluster infrastructure: a cluster admin
 installs it once with `lakebench admin install-spark-operator` (see
 [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)).
 
-Minimum config -- 4 lines:
+Minimum config -- 5 lines:
 
 ```yaml
 # lakebench.yaml
+name: my-lakehouse                 # names the namespace and the buckets
 endpoint: http://s3.example.com:80
 access_key: YOUR_KEY
 secret_key: YOUR_SECRET
 scale: 10                          # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
 ```
 
-Name is auto-generated. Buckets default to `<name>-bronze`, `<name>-silver`
+The name is required by every command that changes data (`deploy`,
+`generate`, `run` and the rest); a config without one is refused with the
+name to add. Buckets default to `<name>-bronze`, `<name>-silver`
 and `<name>-gold`, so they are unique on stores where bucket names are
 global (FlashBlade, AWS S3). Recipe defaults to `hive-iceberg-spark-trino`.
 Override anything with flat fields or nested YAML:

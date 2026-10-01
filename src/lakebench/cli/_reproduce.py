@@ -847,10 +847,18 @@ def _run_pipeline(
     from lakebench.cli._destroy import destroy as _destroy_cmd
     from lakebench.cli._generate import generate as _generate_cmd
     from lakebench.cli._run import run as _run_cmd
-    from lakebench.config import load_config
+    from lakebench.config import ConfigError, LoadPurpose, load_config
     from lakebench.metrics import MetricsStorage
 
     storage = MetricsStorage()
+
+    # Load first: deploy and run would refuse a nameless config or a removed
+    # key, and that refusal must come before the pre-run destroy below, which
+    # loads the config as a teardown and would accept it.
+    try:
+        cfg = load_config(config_file, purpose=LoadPurpose.RUN)
+    except ConfigError as e:
+        raise ReproduceError(str(e)) from None
 
     # F5: pre-destroy is idempotent-safe. destroy(--force) on a missing
     # namespace returns implicitly (exit 0). A non-zero exit means a
@@ -874,8 +882,7 @@ def _run_pipeline(
         logger.info("pre-run destroy exited cleanly (exit_code=%s); continuing", exit_code)
 
     # Watermark BEFORE deploy, so any run started by this reproduce falls
-    # strictly after it. Load config once to get the deployment_name.
-    cfg = load_config(config_file)
+    # strictly after it.
     deployment_name = cfg.name
     start_watermark = datetime.now(timezone.utc)
 
@@ -958,13 +965,18 @@ def _verify(
         raise typer.Exit(2) from None
     print_info(f"  config: {config_file}")
 
-    # Refuse before a multi-hour run that would be refused afterwards.
-    try:
-        from lakebench.config import load_config
+    # Refuse before a multi-hour run that would be refused afterwards, and
+    # before the pre-run destroy: a config that deploy and run would refuse
+    # (no name, a removed key) must not reach that destroy.
+    from lakebench.config import ConfigError, LoadPurpose, load_config
 
-        _iterations = load_config(config_file).architecture.benchmark.iterations
-    except Exception:  # noqa: BLE001 -- the run itself reports config errors
-        _iterations = None
+    try:
+        _iterations = load_config(
+            config_file, purpose=LoadPurpose.RUN
+        ).architecture.benchmark.iterations
+    except ConfigError as e:
+        print_error(str(e))
+        raise typer.Exit(2) from None
     _mismatch = _sample_mismatch(meta, _iterations)
     if _mismatch:
         print_error(_mismatch)

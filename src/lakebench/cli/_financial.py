@@ -25,6 +25,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,14 @@ def _assert_financial_schema(cfg) -> None:
 
 
 def _load_config(config_path: Path):
-    from lakebench.config import load_config
+    from lakebench.config import ConfigError, LoadPurpose, load_config
 
-    cfg = load_config(str(config_path))
+    try:
+        cfg = load_config(str(config_path), purpose=LoadPurpose.MUTATE)
+    except ConfigError as e:
+        # One line, not a traceback.
+        console.print(f"[red]ERROR[/red] {escape(str(e))}")
+        raise typer.Exit(1) from None
     _assert_financial_schema(cfg)
     return cfg
 

@@ -10,6 +10,15 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from ._load_context import (
+    CHANGES_DATA,
+    SKIPS_NAME_LENGTH,
+    TARGETS_DEPLOYMENT,
+    LoadNotes,
+    LoadPurpose,
+    collecting_notes,
+)
+from .deploy_state import NameResolution, other_nameless_configs, resolve_name, suggested_name
 from .schema import LakebenchConfig
 
 # -- Env var substitution ----------------------------------------------------
@@ -150,54 +159,79 @@ class ConfigValidationError(ConfigError):
         self.errors = errors or []
 
 
-# -- Auto-generated name with state persistence ------------------------------
+class ConfigNameRequired(ConfigValidationError):
+    """A nameless config was loaded by a command that may not use it (SAF-2).
 
-
-def _resolve_auto_name(config_dir: Path) -> str:
-    """Generate or retrieve a stable deployment name.
-
-    Checks ``.lakebench/state.json`` in *config_dir* for an existing name.
-    If found, reuses it (stability across runs). Otherwise generates
-    ``lb-YYYYMMDD-HHMMSS`` and persists it.
+    The commands that change data refuse every nameless config. The teardown
+    commands also refuse one that has only a suggested name (v1.7 never
+    deploys a nameless config, so a deployment under that name was made by
+    some other config file). The teardown commands and the read commands
+    that look at a deployment refuse one whose name comes from the v1.6
+    ``.lakebench/state.json``: v1.6 gave every nameless config in the
+    directory that name, so nothing ties it to this one (SPEC SAF-2: a v1.6
+    directory is refused without ``--name``). ``siblings`` lists the other
+    nameless configs found there, for the message (None when the directory
+    could not be listed).
     """
-    import json
-    import logging
-    from datetime import datetime
 
-    logger = logging.getLogger(__name__)
-
-    state_dir = config_dir / ".lakebench"
-    state_file = state_dir / "state.json"
-
-    # Try to load existing name from state file
-    if state_file.exists():
-        try:
-            with open(state_file) as f:
-                state = json.load(f)
-            name = state.get("name", "")
-            if name:
-                logger.debug("Reusing auto-generated name from %s: %s", state_file, name)
-                return name
-        except (json.JSONDecodeError, OSError):
-            pass  # Corrupt state file -- regenerate
-
-    # Generate new name
-    name = f"lb-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-
-    # Persist to state file
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        with open(state_file, "w") as f:
-            json.dump(
-                {"name": name, "created": datetime.now().isoformat()},
-                f,
-                indent=2,
+    def __init__(
+        self,
+        resolution: NameResolution,
+        *,
+        teardown: bool = False,
+        siblings: list[Path] | None = None,
+        suggestion: str | None = None,
+    ):
+        self.resolution = resolution
+        self.siblings = siblings
+        name = resolution.name
+        shared = siblings is None or bool(siblings)
+        if siblings is None:
+            others = "this directory could not be listed"
+        else:
+            others = "this directory also holds nameless " + ", ".join(p.name for p in siblings)
+        if teardown and resolution.source == "legacy-state":
+            also = f", and {others}" if shared else ""
+            msg = (
+                f"config has no name; '{name}' (read from {resolution.legacy_state_path}) "
+                f"is the name v1.6 gave every nameless config in this directory{also}, "
+                "so nothing ties that deployment to this config. Fix: add "
+                f"'name: {name}' to the config that deployed it and run this command "
+                "with that config."
             )
-        logger.debug("Persisted auto-generated name to %s: %s", state_file, name)
-    except OSError as e:
-        logger.warning("Could not persist auto-generated name: %s", e)
-
-    return name
+        elif teardown:
+            msg = (
+                "config has no name and this directory has no readable v1.6 "
+                f"{resolution.legacy_state_path}, so no deployment can be its own; "
+                f"'{name}' is only a suggestion. Fix: add the deployment's name to the "
+                "config (the namespace's lakebench.deployment/name annotation holds it)."
+            )
+        elif resolution.source == "legacy-state" and shared:
+            msg = (
+                f"config has no name, so it cannot change data, and {others}; v1.6 "
+                f"gave every nameless config here the name '{name}' (read from "
+                f"{resolution.legacy_state_path}), so which one made that deployment "
+                "cannot be told from the files. Fix: give this config a new unique "
+                f"name, for example 'name: {suggestion or 'my-unique-name'}'; add "
+                f"'name: {name}' only to the one config that deployed '{name}'."
+            )
+        elif resolution.source == "legacy-state":
+            msg = (
+                "config has no name, so it cannot change data; without a name it "
+                f"resolves to '{name}' (read from {resolution.legacy_state_path}), the "
+                "name v1.6 gave the nameless configs in this directory. Fix: if this "
+                f"config made deployment '{name}', add 'name: {name}' to it; otherwise "
+                "add a new unique name."
+            )
+        else:
+            msg = (
+                "config has no name, so it cannot change data. Fix: add a unique "
+                f"name to the config, for example 'name: {name}'."
+            )
+        super().__init__(
+            f"Configuration validation failed:\n  - name: {msg}",
+            errors=[{"loc": ("name",), "msg": msg, "type": "name_required"}],
+        )
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -230,37 +264,86 @@ def load_yaml(path: Path) -> dict[str, Any]:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
 
 
-def load_config(path: str | Path, *, allow_long_names: bool = False) -> LakebenchConfig:
+def load_config(
+    path: str | Path,
+    *,
+    purpose: LoadPurpose | None = None,
+    name_override: str | None = None,
+    allow_long_names: bool = False,
+    print_notes: bool = True,
+) -> LakebenchConfig:
     """Load and validate Lakebench configuration from file.
 
     Processing order:
     1. Read YAML with ``${VAR}`` env-var substitution
     2. Promote flat top-level fields (v2 config) to nested locations
-    3. Validate with Pydantic
+    3. Resolve the name (``deploy_state.resolve_name``; nothing is written)
+    4. Validate with Pydantic, with the purpose in the validation context
+
+    The loader never writes to disk.
 
     Args:
         path: Path to configuration YAML file
-        allow_long_names: Skip the derived-name length check (LB-153). Set by
-            the teardown and diagnostic commands (destroy, clean, status,
-            stop, logs, admin) and the perf gate, so a deployment whose
-            namespace is too long to finish deploying can still be
-            inspected and torn down. deploy, generate and run never set it.
+        purpose: What the calling command will do with the config (see
+            ``LoadPurpose``). MUTATE and RUN refuse a config with no name and
+            a config that carries a removed key; the others drop removed
+            keys with a note. A nameless config loads under its resolved
+            name, except that TEARDOWN refuses one whose name is only a
+            suggestion, and TEARDOWN and READ refuse one whose name comes
+            from the v1.6 state file. Defaults to MUTATE, or to TEARDOWN
+            when only ``allow_long_names`` is given.
+        name_override: The name for a config that sets none (``--name``).
+            It must equal the config's own name when the config has one.
+        allow_long_names: Skip the derived-name length check (LB-153).
+            TEARDOWN, READ and INSPECT always skip it. Given alone it means TEARDOWN,
+            as in v1.6; with an explicit purpose it only skips the length
+            check, which ``clean`` and the perf gate use so a deployment
+            whose namespace is too long to finish deploying can still be
+            cleaned while keeping the MUTATE refusals.
+        print_notes: Print the notes block on stderr (the default). A caller
+            that reports the notes itself (``load_notes``) passes False.
 
     Returns:
-        Validated LakebenchConfig object
+        Validated LakebenchConfig object. ``load_notes(cfg)`` and
+        ``name_resolution(cfg)`` read what the load collected.
 
     Raises:
         ConfigFileNotFoundError: If file doesn't exist
         ConfigParseError: If YAML parsing fails
+        ConfigNameRequired: A nameless config under MUTATE or RUN
         ConfigValidationError: If validation fails
     """
+    if purpose is None:
+        purpose = LoadPurpose.TEARDOWN if allow_long_names else LoadPurpose.MUTATE
+    purpose = LoadPurpose(purpose)
+    skip_name_length = allow_long_names or purpose in SKIPS_NAME_LENGTH
+
     path = Path(path)
     data = load_yaml(path)
     data = _apply_flat_fields(data)
 
-    # Auto-generate name if not provided (v1.3)
-    if not data.get("name"):
-        data["name"] = _resolve_auto_name(path.parent)
+    try:
+        resolution = resolve_name(path, data, name_override)
+    except ValueError as e:
+        raise ConfigValidationError(
+            f"Configuration validation failed:\n  - name: {e}",
+            errors=[{"loc": ("name",), "msg": str(e), "type": "name_override"}],
+        ) from None
+    if resolution.nameless:
+        siblings = other_nameless_configs(path) if resolution.source == "legacy-state" else []
+        if purpose in CHANGES_DATA:
+            raise ConfigNameRequired(resolution, siblings=siblings, suggestion=suggested_name(path))
+        if purpose == LoadPurpose.TEARDOWN and resolution.source == "suggested":
+            raise ConfigNameRequired(resolution, teardown=True)
+        if purpose in TARGETS_DEPLOYMENT and resolution.source == "legacy-state":
+            # SAF-2: a v1.6 directory with no recorded nonce is refused
+            # without --name. v1.6 gave every nameless config here this one
+            # name, so destroy, stop, admin or status from any of them would
+            # act on, or report, whichever deployment it names. Naming the
+            # config that deployed it (or CC-2's --name with the stamp
+            # check) is the way through.
+            raise ConfigNameRequired(resolution, teardown=True, siblings=siblings)
+        data["name"] = resolution.name
 
     # The model stores the workload block at architecture.workload; report
     # errors at the location the user wrote it.
@@ -269,8 +352,10 @@ def load_config(path: str | Path, *, allow_long_names: bool = False) -> Lakebenc
         isinstance(_arch, dict) and "workload" in _arch
     )
 
+    context = {"purpose": purpose, "allow_long_names": skip_name_length}
     try:
-        cfg = LakebenchConfig.model_validate(data, context={"allow_long_names": allow_long_names})
+        with collecting_notes() as notes:
+            cfg = LakebenchConfig.model_validate(data, context=context)
     except ValidationError as e:
         errors = e.errors()
         if _top_level_workload:
@@ -300,8 +385,42 @@ def load_config(path: str | Path, *, allow_long_names: bool = False) -> Lakebenc
             "Configuration validation failed:\n" + "\n".join(error_messages),
             errors=[dict(e) for e in errors],  # type: ignore[call-overload]
         )
+    cfg._load_notes = notes
+    cfg._name_resolution = resolution
+    if print_notes:
+        _print_load_notes(path, notes)
     _print_load_advisories(cfg)
     return cfg
+
+
+def load_notes(cfg: LakebenchConfig) -> LoadNotes:
+    """The notes the ``load_config`` call that built *cfg* collected."""
+    notes = cfg._load_notes
+    return notes if notes is not None else LoadNotes()
+
+
+def name_resolution(cfg: LakebenchConfig) -> NameResolution | None:
+    """How *cfg*'s name was resolved; None for a config not built by ``load_config``."""
+    return cfg._name_resolution
+
+
+_printed_notes: set[tuple[str, str]] = set()
+
+
+def _print_load_notes(path: Path, notes: LoadNotes) -> None:
+    """Print a load's notes once per process and config as one block on stderr."""
+    key = str(path.absolute())
+    fresh = [t for t in notes.texts() if (key, t) not in _printed_notes]
+    if not fresh:
+        return
+    _printed_notes.update((key, t) for t in fresh)
+    from rich.console import Console
+    from rich.markup import escape
+
+    console = Console(stderr=True)
+    console.print(f"[yellow]Upgrade notes[/yellow] for {escape(str(path))}:", soft_wrap=True)
+    for text in fresh:
+        console.print(f"  - {escape(text)}", highlight=False, soft_wrap=True)
 
 
 # Iceberg snapshot-expiry floor while continuous streams are live. Mirrors

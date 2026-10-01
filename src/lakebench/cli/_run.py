@@ -30,6 +30,7 @@ from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
+    LoadPurpose,
     load_config,
     parse_spark_memory,
 )
@@ -1697,7 +1698,7 @@ def run(
 
     # Load configuration
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.RUN)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904

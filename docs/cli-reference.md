@@ -142,6 +142,10 @@ lakebench config recipes [NAME]         # list recipes, what each one trades off
 lakebench config upgrade CONFIG_FILE    # upgrade a v1.2 config to v2 flat format (-o to write elsewhere)
 ```
 
+`config validate` and `validate` load the config as `deploy` does, so they
+fail on a config with no `name:` or with a removed key. `config upgrade`
+refuses a config with no `name:`.
+
 `config show` prints the config's support state and its peak requested
 resources. `config recipes` lists, for every recipe, its support state per
 workload and mode (Customer 360 and AML, batch and continuous: supported,
