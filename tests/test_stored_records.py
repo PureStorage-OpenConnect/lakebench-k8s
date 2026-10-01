@@ -455,3 +455,47 @@ def test_protected_seed_in_argv_shapes_refused(monkeypatch, shape: str) -> None:
     if shape == "seed_equals":
         with pytest.raises(scrub.ScrubError, match="evaluation seed"):
             scrub.scrub_text("gen seed=987654")
+
+
+def test_dotless_endpoint_host_rewritten_inside_urls() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["endpoint"] = "http://fb01:80"
+    rec["jobs"][0]["error_message"] = "GET http://FB01:80/a failed; fb01 busy"
+    out, _ = scrub.scrub_record(rec)
+    assert out["jobs"][0]["error_message"] == "GET http://10.0.1.50:80/a failed; fb01 busy"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['cfg {"seed": 987654}', "seed = 987654", "AML_SEED=987654", "datagen_seed: 987654"],
+)
+def test_protected_seed_in_dumped_text_refused(monkeypatch, text: str) -> None:
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "evaluation"})
+    rec = sr.load_record("5105a0")
+    rec["jobs"][0]["error_message"] = text
+    with pytest.raises(scrub.ScrubError, match="evaluation seed"):
+        scrub.scrub_record(rec)
+    rec["jobs"][0]["error_message"] = "ok"
+    rec["config_snapshot"]["args"] = ["--aml-seed", "987654"]
+    with pytest.raises(scrub.ScrubError, match="evaluation seed"):
+        scrub.scrub_record(rec)
+
+
+def test_cgnat_address_is_private() -> None:
+    rec = sr.load_record("5105a0")
+    rec["jobs"][0]["error_message"] = "via 100.64.3.4 and 100.128.0.1"
+    out, _ = scrub.scrub_record(rec)
+    assert out["jobs"][0]["error_message"] == "via 10.0.1.50 and 100.128.0.1"
+
+
+def test_key_rename_inside_verdict_refused_but_not_lookalike_keys() -> None:
+    rec = sr.load_record("5105a0")
+    rec["verdict"]["by_host"] = {"10.99.0.1": 1}
+    with pytest.raises(scrub.ScrubError, match="rename evidence key"):
+        scrub.scrub_record(rec)
+    rec = sr.load_record("5105a0")
+    rec["experimental"] = {"10.99.0.1": 1}
+    out, changed = scrub.scrub_record(rec)
+    assert out["experimental"] == {"10.0.1.50": 1}

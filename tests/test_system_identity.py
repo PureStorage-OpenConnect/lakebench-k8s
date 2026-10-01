@@ -389,3 +389,11 @@ def test_common_fingerprints_keep_each_version(cluster) -> None:
     b["version"] = a["version"] + 1
     fa, fb, _ = si.common_fingerprints(a, b)
     assert fa != fb
+
+
+def test_versionless_observation_never_matches(cluster) -> None:
+    a = _observe(cluster())
+    b = {k: v for k, v in a.items() if k != "version"}
+    c = {**a, "version": "v1"}
+    assert si.common_fingerprints(a, b)[0] != si.common_fingerprints(a, b)[1]
+    assert si.common_fingerprints(a, c)[0] != si.common_fingerprints(a, c)[1]

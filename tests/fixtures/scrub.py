@@ -70,7 +70,7 @@ from pathlib import Path
 from typing import Any
 
 #: Bump when a rule changes; recorded in tests/fixtures/records/MANIFEST.json.
-SCRUBBER_VERSION = 2
+SCRUBBER_VERSION = 3
 
 #: The documented placeholder host (CLAUDE.md section 8).
 PLACEHOLDER_HOST = "10.0.1.50"
@@ -85,7 +85,7 @@ _CREDENTIAL_KEY = re.compile(
 _ENDPOINT_KEY = re.compile(r"(?:^|_)endpoint(?:_url|_override)?(?:_s3)?$")
 _BUCKET_KEY = re.compile(r"(?:^|_)bucket(?:_name)?$")
 _SEED_KEY = re.compile(r"(?:^|_)seeds?$")
-_SEED_ARG = re.compile(r"(?i)(?<![a-z0-9_])(?:--)?seed[=: ]\s*(\d+)")
+_SEED_ARG = re.compile(r"""(?i)seed["']?\s*[=:]?\s*["']?(\d+)""")
 
 #: Leaf keys whose values are evidence: a rewrite there is refused unless the
 #: key is also an endpoint, bucket or credential key.
@@ -195,7 +195,7 @@ def _rewrite(
                 where = f"{path}.{k}"
                 if new in obj or new in out:
                     raise ScrubError(f"scrubbing key {where} would merge it into {new!r}")
-                if where.startswith((".experiment", ".verdict")):
+                if where.startswith((".experiment.", ".verdict.")):
                     raise ScrubError(f"scrubbing would rename evidence key {where}")
                 renames.append(where)
             out[new] = _rewrite(
@@ -269,10 +269,7 @@ class _Sensitive:
                 self._add_bucket(value, None)
             if _is_endpoint_key(key):
                 host = _host_of(value)
-                # A dotless name (minio, prometheus) is a service name that
-                # also appears as ordinary words: rewritten only where it is
-                # the endpoint value itself, never as a token elsewhere.
-                if host and host not in ALLOWED_HOSTS and "." in host:
+                if host and host not in ALLOWED_HOSTS:
                     hosts.add(host)
         taken = {v for v in self.buckets.values() if v}
         n = 0
@@ -282,9 +279,13 @@ class _Sensitive:
                 while f"scrubbed-bucket-{n}" in taken:
                     n += 1
                 self.buckets[name] = f"scrubbed-bucket-{n}"
+        #: Every endpoint host: rewritten as the host of any URL.
         self.hosts = sorted(hosts)
         self._bucket_re = _token_re(list(self.buckets))
-        self._host_re = _token_re(self.hosts, re.IGNORECASE)
+        # A dotless name (minio, prometheus) is a service name that also
+        # appears as an ordinary word: rewritten in URLs and endpoint values,
+        # never as a bare token elsewhere.
+        self._host_re = _token_re([h for h in self.hosts if "." in h], re.IGNORECASE)
 
     def _add_bucket(self, name: str, layer: str | None) -> None:
         if name.startswith("scrubbed-") or name in self.buckets:
@@ -343,7 +344,7 @@ def _argv_seeds(obj: Any, path: str = "") -> Iterator[tuple[str, int]]:
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
             nxt = obj[i + 1] if i + 1 < len(obj) else None
-            if isinstance(v, str) and v.lstrip("-").lower() == "seed" and nxt is not None:
+            if isinstance(v, str) and norm_key(v.lstrip("-")).endswith("seed") and nxt is not None:
                 if isinstance(nxt, int) and not isinstance(nxt, bool):
                     yield f"{path}[{i + 1}]", nxt
                 elif isinstance(nxt, str) and nxt.strip().isdigit():

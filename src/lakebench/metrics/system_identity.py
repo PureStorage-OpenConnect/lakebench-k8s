@@ -128,10 +128,17 @@ def common_fingerprints(a: Mapping[str, Any], b: Mapping[str, Any]) -> tuple[str
     pa, pb = a.get("parts") or {}, b.get("parts") or {}
     keys = sorted(observed_parts(pa) & observed_parts(pb))
     return (
-        fingerprint_of(pa, keys, str(a.get("type") or "cluster"), int(a.get("version") or 0)),
-        fingerprint_of(pb, keys, str(b.get("type") or "cluster"), int(b.get("version") or 0)),
+        fingerprint_of(pa, keys, str(a.get("type") or "cluster"), _version_of(a)),
+        fingerprint_of(pb, keys, str(b.get("type") or "cluster"), _version_of(b)),
         keys,
     )
+
+
+def _version_of(obs: Mapping[str, Any]) -> int:
+    """The observation's identity version; -1 when missing or malformed, so
+    it never matches a current observation."""
+    v = obs.get("version")
+    return v if isinstance(v, int) and not isinstance(v, bool) else -1
 
 
 def _reason(exc: BaseException) -> str:
