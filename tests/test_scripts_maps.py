@@ -457,28 +457,107 @@ def test_legacy_map_kept_when_apps_cannot_be_listed(monkeypatch):
 
 
 def test_live_apps_mounting_reads_templates(monkeypatch):
-    def app(name, state, cm):
-        tpl = {"spec": {"volumes": [{"name": "spark-scripts", "configMap": {"name": cm}}]}}
+    def app(name, state, vol, restart="OnFailure"):
+        tpl = {"spec": {"volumes": [vol]}}
         return {
             "metadata": {"name": name},
-            "spec": {"driver": {"template": tpl}},
+            "spec": {"driver": {"template": tpl}, "restartPolicy": {"type": restart}},
             "status": {"applicationState": {"state": state}},
         }
 
+    def cm(name):
+        return {"name": "spark-scripts", "configMap": {"name": name}}
+
+    def projected(*names):
+        return {
+            "name": "spark-scripts",
+            "projected": {"sources": [{"configMap": {"name": n}} for n in names]},
+        }
+
+    common = "lakebench-scripts-common"
     listing = {
         "items": [
-            app("a-running", "RUNNING", LEGACY),
-            app("b-done", "COMPLETED", LEGACY),
-            app("c-new", "RUNNING", "lakebench-scripts-common"),
-            app("d-submitted", "", LEGACY),
+            app("a-running", "RUNNING", cm(LEGACY)),
+            app("b-done", "COMPLETED", cm(LEGACY)),
+            app("c-other-map", "RUNNING", cm(common)),
+            app("d-submitted", "", cm(LEGACY)),
+            app("e-failed-will-rerun", "FAILED", cm(LEGACY)),
+            app("f-failed-final", "FAILED", cm(LEGACY), restart="Never"),
+            app("g-projected", "RUNNING", projected("lakebench-scripts-c360", common)),
         ]
     }
     api = MagicMock()
     api.list_namespaced_custom_object.return_value = listing
     monkeypatch.undo()  # drop the autouse stub for this test
+    mgr = SparkJobManager(_cfg(), FakeK8s())
     with patch("kubernetes.client.CustomObjectsApi", return_value=api):
-        got = SparkJobManager(_cfg(), FakeK8s())._live_apps_mounting(LEGACY)
-    assert got == ["a-running", "d-submitted"]
+        assert mgr._live_apps_mounting(LEGACY) == [
+            "a-running",
+            "d-submitted",
+            "e-failed-will-rerun",
+        ]
+        assert mgr._live_apps_mounting(common) == ["c-other-map", "g-projected"]
+
+
+def _prior_apply(k8s: FakeK8s, owner: str = "sd8", tweak: str | None = None) -> None:
+    """Put role maps in the fake as an earlier run left them."""
+    for cm in sm.build_script_configmaps(_cfg(), "ns"):
+        name = cm["metadata"]["name"]
+        ann = dict(cm["metadata"]["annotations"])
+        if name == tweak:
+            ann[sm.SCRIPTS_SHA256_ANNOTATION] = "e" * 64
+        k8s.store[name] = {
+            "labels": {"app.kubernetes.io/instance": owner},
+            "annotations": ann,
+            "data": dict(cm["data"]),
+        }
+
+
+def test_role_map_of_another_deployment_is_never_replaced():
+    k8s = FakeK8s()
+    _prior_apply(k8s, owner="other")
+    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    assert k8s.applied == []
+
+
+def test_changed_map_not_replaced_under_a_live_app(monkeypatch):
+    k8s = FakeK8s()
+    _prior_apply(k8s, tweak="lakebench-scripts-aml-rules")
+    seen: list[str] = []
+
+    def live(self, name):
+        seen.append(name)
+        return ["lakebench-gold-refresh"] if name == "lakebench-scripts-aml-rules" else []
+
+    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", live)
+    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    assert k8s.applied == []
+    assert seen == ["lakebench-scripts-aml-rules"], "unchanged maps need no live check"
+
+
+def test_unchanged_maps_reapply_while_apps_run(monkeypatch):
+    k8s = FakeK8s()
+    _prior_apply(k8s)
+    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", lambda self, n: ["x"])
+    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is True
+
+
+def test_changed_map_refused_when_apps_cannot_be_listed(monkeypatch):
+    k8s = FakeK8s()
+    _prior_apply(k8s, tweak="lakebench-scripts-common")
+
+    def boom(self, name):
+        raise RuntimeError("503")
+
+    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", boom)
+    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    assert k8s.applied == []
+
+
+def test_every_financial_submit_is_checked():
+    src = (PKG / "cli/_financial.py").read_text(encoding="utf-8")
+    calls = src.count("\n    _require_submitted(status)\n")
+    assert src.count("job_manager.submit_job(") == calls == 4
 
 
 def test_submit_refuses_when_scripts_changed_after_apply():
@@ -504,8 +583,8 @@ def test_partial_apply_stops_before_the_rest():
     ]
 
 
-def test_budget_error_reaches_the_cli_as_one_line(tmp_path, monkeypatch):
-    """`lakebench financial ...` exits naming the map, not a traceback."""
+def test_budget_error_reaches_the_cli_as_one_line(tmp_path, monkeypatch, capsys):
+    """`lakebench financial ...` exits 1 naming the map, not a traceback."""
     import typer
 
     from lakebench.cli import _financial
@@ -513,16 +592,36 @@ def test_budget_error_reaches_the_cli_as_one_line(tmp_path, monkeypatch):
     pkg = _copy_package(tmp_path)
     _pad_common_to(pkg, sm.MAP_BUDGET_BYTES + 1)
     monkeypatch.setattr(_resources, "_package_dir", lambda: pkg)
+    monkeypatch.setattr(_financial.console, "width", 400)
     k8s = FakeK8s()
     with (
         patch("lakebench.k8s.get_k8s_client", return_value=k8s),
         pytest.raises(typer.Exit) as ei,
     ):
         _financial._get_job_manager(_cfg("financial"))
-    msg = str(ei.value.exit_code)
-    assert msg.startswith("Spark scripts not deployed: scripts ConfigMap lakebench-scripts-common")
-    assert "\n" not in msg and "budget" in msg
+    assert ei.value.exit_code == 1
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("Spark scripts not deployed: scripts ConfigMap lakebench-scripts-common")
+    assert "\n" not in out and "budget" in out
     assert k8s.applied == []
+
+
+def test_financial_command_exits_when_not_submitted(capsys):
+    """A refused submit must not fall through to waiting on a previous
+    application of the same name (a false pass) or on nothing (a hang)."""
+    import typer
+
+    from lakebench.cli import _financial
+    from lakebench.modules.pipeline_engines.spark.job import JobState, JobStatus
+
+    status = JobStatus(name="lakebench-score-financial", state=JobState.FAILED, message="why")
+    with pytest.raises(typer.Exit) as ei:
+        _financial._require_submitted(status)
+    assert ei.value.exit_code == 1
+    assert "Not submitted: why" in capsys.readouterr().out
+    _financial._require_submitted(
+        JobStatus(name="x", state=JobState.SUBMITTED, message="ok")
+    )  # no exit
 
 
 def test_pyinstaller_spec_bundles_every_file_outside_spark():

@@ -1546,15 +1546,15 @@ class SparkJobManager:
             Initial JobStatus
         """
         job_name = f"lakebench-{job_type.value}"
-        # The scripts this run applied must still be the ones its pods mount:
-        # a second run from another tree against the same deployment would
-        # otherwise switch the scripts under this run's later stages (DEP-1).
+        # Delete existing job if present
+        self._delete_job(job_name)
+        # A later stage is not submitted on scripts other than the ones this
+        # run applied (DEP-1). Checked after the delete, so a caller that
+        # ignores the FAILED status cannot read a previous run's result.
         changed = self.scripts_changed_since_apply(job_type)
         if changed:
             logger.error("%s: %s", job_name, changed)
             return JobStatus(name=job_name, state=JobState.FAILED, message=changed)
-        # Delete existing job if present
-        self._delete_job(job_name)
 
         # Build SparkApplication manifest
         manifest = self._build_manifest(
@@ -3036,6 +3036,11 @@ class SparkJobManager:
 
         maps = sm.build_script_configmaps(self.config, self.namespace)
 
+        refusal = self._scripts_apply_refusal(maps)
+        if refusal:
+            logger.error("Spark scripts not deployed: %s", refusal)
+            return False
+
         written: dict[str, str] = {}
         for cm in maps:
             name = cm["metadata"]["name"]
@@ -3086,6 +3091,39 @@ class SparkJobManager:
         }
         return True
 
+    def _scripts_apply_refusal(self, maps: list[dict[str, Any]]) -> str | None:
+        """Why the role maps must not be replaced, or None.
+
+        A map that belongs to another deployment is never replaced. A map whose
+        content would change is not replaced while a SparkApplication that
+        mounts it is still live: kubelet would update its files under the
+        running pods, so they would run a mix of two trees' scripts. Fails
+        closed when the applications cannot be listed.
+        """
+        from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
+        for cm in maps:
+            name = cm["metadata"]["name"]
+            current = self.k8s.get_configmap(name, self.namespace)
+            if current is None:
+                continue
+            owner = current.get("labels", {}).get("app.kubernetes.io/instance")
+            if owner != self.config.name:
+                return f"ConfigMap {name} belongs to deployment {owner!r}, not {self.config.name!r}"
+            want = cm["metadata"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION]
+            if current.get("annotations", {}).get(sm.SCRIPTS_SHA256_ANNOTATION) == want:
+                continue
+            try:
+                live = self._live_apps_mounting(name)
+            except Exception as e:  # noqa: BLE001
+                return f"could not list SparkApplications to check {name} is unused: {_one_line(e)}"
+            if live:
+                return (
+                    f"{name} would change under running SparkApplication(s) "
+                    f"{', '.join(live)}; let them finish or delete them, then re-run"
+                )
+        return None
+
     def _delete_legacy_scripts_map(self, name: str) -> None:
         """Delete the v1.6 single scripts map if it is this deployment's and no
         live SparkApplication mounts it. Best effort: a kept map is removed by
@@ -3119,9 +3157,9 @@ class SparkJobManager:
             )
 
     def _live_apps_mounting(self, configmap: str) -> list[str]:
-        """SparkApplications in this namespace, not in a terminal state, whose
-        pod templates mount ``configmap``. Raises when they cannot be listed,
-        so the caller keeps the map."""
+        """SparkApplications in this namespace that are not finished and whose
+        pod templates mount ``configmap`` (directly or as a projected source).
+        Raises when they cannot be listed; callers then fail safe."""
         from kubernetes import client as k8s_client
 
         apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
@@ -3130,17 +3168,24 @@ class SparkJobManager:
             namespace=self.namespace,
             plural="sparkapplications",
         )
-        terminal = {"COMPLETED", "FAILED"}
         out: list[str] = []
         for app in apps.get("items", []):
-            state = ((app.get("status") or {}).get("applicationState") or {}).get("state", "")
-            if state in terminal:
-                continue
             spec = app.get("spec") or {}
+            state = ((app.get("status") or {}).get("applicationState") or {}).get("state", "")
+            restart = (spec.get("restartPolicy") or {}).get("type", "")
+            # FAILED is final only under restartPolicy Never; otherwise the
+            # operator may still rerun it (PENDING_RERUN) with the same mounts.
+            if state == "COMPLETED" or (state == "FAILED" and restart == "Never"):
+                continue
             for side in ("driver", "executor"):
-                vols = ((spec.get(side) or {}).get("template") or {}).get("spec", {})
-                for v in vols.get("volumes") or []:
-                    if (v.get("configMap") or {}).get("name") == configmap:
+                tpl = ((spec.get(side) or {}).get("template") or {}).get("spec") or {}
+                for v in tpl.get("volumes") or []:
+                    names = [(v.get("configMap") or {}).get("name")]
+                    names += [
+                        (src.get("configMap") or {}).get("name")
+                        for src in (v.get("projected") or {}).get("sources") or []
+                    ]
+                    if configmap in names:
                         out.append(app["metadata"]["name"])
         return sorted(set(out))
 
@@ -3160,7 +3205,8 @@ class SparkJobManager:
             except Exception as e:  # noqa: BLE001
                 return f"could not read scripts ConfigMap {name}: {_one_line(e)}"
             ann = (got or {}).get("annotations", {}).get(sm.SCRIPTS_SHA256_ANNOTATION)
-            if ann != recorded.get(role):
+            data_hash = sm.data_sha256(got["data"]) if got else None
+            if ann != recorded.get(role) or data_hash != recorded.get(role):
                 return (
                     f"scripts ConfigMap {name} changed since this run applied it "
                     "(another run or tree wrote it); not submitting"

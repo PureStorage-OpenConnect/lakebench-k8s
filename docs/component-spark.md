@@ -24,9 +24,11 @@ one flat directory, at `/opt/spark/scripts` in both driver and executor pods:
 The file list is `SCRIPT_MAPS` in `modules/pipeline_engines/spark/scripts_maps.py`.
 `run` (and `lakebench financial`) applies every map, reads each back and checks
 that its data still hashes to its `lakebench.io/scripts-sha256` annotation, and
-only then submits jobs. Before each later job it re-reads the annotations, so a
-second run from another tree that rewrites the maps stops this run instead of
-changing its scripts mid-pipeline. A listed file missing from the installed
+only then submits jobs. It refuses to change a map that another deployment
+owns, or one that a still-running SparkApplication mounts (Kubernetes would
+swap the files under the running pods), and it re-checks the maps before each
+later job, so no stage is submitted on scripts other than the ones its run
+applied. A listed file missing from the installed
 package, or a map over 838,860 bytes (80% of the 1 MiB ConfigMap limit, counting
 key and value bytes), stops the run with one line naming the file or map. The
 single `lakebench-spark-scripts` map used by 1.6 and earlier is deleted on the

@@ -74,10 +74,22 @@ def _get_job_manager(cfg):
     try:
         scripts_ok = job_manager.deploy_scripts_configmap()
     except ScriptsMapError as e:
-        raise typer.Exit(f"Spark scripts not deployed: {e}") from None
+        console.print(f"Spark scripts not deployed: {e}", style="red", markup=False)
+        raise typer.Exit(1) from None
     if not scripts_ok:
         raise typer.Exit("Failed to deploy Spark scripts ConfigMap")
     return job_manager
+
+
+def _require_submitted(status) -> None:
+    """Exit 1 when the job was not submitted. Waiting on it would find
+    nothing (a 30-minute 404 poll) or, if a previous application of the same
+    name survived, report that one's result as this run's."""
+    from lakebench.modules.pipeline_engines.spark.job import JobState
+
+    if status.state is JobState.FAILED:
+        console.print(f"Not submitted: {status.message}", style="red", markup=False)
+        raise typer.Exit(1)
 
 
 def _wait_for_sparkapp(namespace: str, name: str, timeout: int = 1800) -> str:
@@ -163,6 +175,7 @@ def replay(
     job_manager = _get_job_manager(cfg)
     status = job_manager.submit_job(JobType.REPLAY_FINANCIAL, arguments=args)
     console.print(f"  submitted: {status.message}")
+    _require_submitted(status)
 
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-replay-financial")
@@ -188,6 +201,7 @@ def reproduce(
         arguments=["--alert-id", alert_id],
     )
     console.print(f"  submitted: {status.message}")
+    _require_submitted(status)
 
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-reproduce-financial")
@@ -214,6 +228,7 @@ def score(
         arguments=["--manifest", manifest, "--output", output],
     )
     console.print(f"  submitted: {status.message}")
+    _require_submitted(status)
 
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial")
@@ -266,6 +281,7 @@ def reference_score(
         ],
     )
     console.print(f"  submitted: {status.message}")
+    _require_submitted(status)
 
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial-reference")

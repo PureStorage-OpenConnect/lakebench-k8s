@@ -15,7 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Each map is refused above 80% of 1 MiB, measured on the bytes applied. A
   script listed for shipping but missing from the installed package now stops
   `run` before any job is submitted, where 1.6 skipped it and the driver
-  failed later with an ImportError. A job is not submitted if its scripts maps
+  failed later with an ImportError. `run` will not change a scripts map that a
+  running SparkApplication mounts, and a job is not submitted if its maps
   changed since its run applied them. The first 1.7 `run` deletes the 1.6 map
   unless a running SparkApplication still mounts it; `destroy` deletes all
   scripts maps, also when `create_namespace: false`.
