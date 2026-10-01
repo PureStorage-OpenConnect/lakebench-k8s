@@ -14,9 +14,13 @@ when it is
   that is not a docstring under ``src/``, ``tests/`` or ``scripts/``; a
   string constant equals its basename and that basename is unique among
   tracked files; its path appears outside comments in a workflow, the
-  ``Makefile``, ``pyproject.toml`` or ``.pre-commit-config.yaml``; or it
+  ``Makefile``, ``pyproject.toml`` (string values, not under an
+  ``exclude``, ``extend-exclude``, ``force-exclude`` or ``omit`` key) or
+  ``.pre-commit-config.yaml``, alone or after ``./``, ``../``, ``$VAR/`` or
+  ``${{ expr }}/``; or it
   matches a ``PATTERN_READERS`` entry whose literal is still in the reader;
-- a **platform file** GitHub or the release reads (it only has to exist);
+- a **platform file** GitHub or the release reads (it only has to exist, and
+  must, unless it is in ``PENDING_PLATFORM_FILES``);
 - a **published stub**: a path a published PyPI README links, kept for one
   release as a page of at most five lines.
 
@@ -25,13 +29,16 @@ other string constant, an error message included, is one.
 
 Usage:
     python scripts/check_doc_readers.py                  # the reader check
-    python scripts/check_doc_readers.py --resolve-paths NOTES.md [--base DIR ...]
+    python scripts/check_doc_readers.py --resolve-paths NOTES.md [--base [PREFIX=]DIR ...]
 
 ``--resolve-paths`` checks that every backticked path and every relative
 link in a local file (agent instructions, a memory index, a brief) exists: a
 link relative to the file's directory, a backticked path absolute or
 relative to one of the ``--base`` directories (default: the repository
-root). ``--ignore REGEX`` (repeatable) skips matching tokens.
+root). A base given as ``PREFIX=DIR`` takes only the tokens that start with
+PREFIX, and those resolve under DIR alone, so a path that is gone from one
+tree cannot resolve in another. ``--ignore REGEX`` (repeatable) skips
+matching tokens.
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ import ast
 import bisect
 import fnmatch
 import html
+import os
 import posixpath
 import re
 import subprocess
@@ -48,6 +56,11 @@ import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:  # Python 3.10; tomli is in [dev] there
+    import tomli as tomllib  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = "PureStorage-OpenConnect/lakebench-k8s"
@@ -69,6 +82,9 @@ PLATFORM_FILES = (
     # pytest loads the rootdir conftest.py itself.
     "conftest.py",
 )
+#: Platform files that do not exist yet; every other non-glob PLATFORM_FILES
+#: entry must exist. The list may only shrink (the test fails once one exists).
+PENDING_PLATFORM_FILES = ("RELEASING.md",)
 
 #: Paths a published PyPI README links that v1.7 moved; each stays one
 #: release as a stub of at most STUB_MAX_LINES lines. The benchmark-spec move
@@ -106,9 +122,18 @@ _NOT_READERS = (
 # -- tracked files -------------------------------------------------------------
 
 
+def _git_env() -> dict[str, str]:
+    # Under a git hook GIT_DIR and GIT_INDEX_FILE name the hook's repository;
+    # inherited, `git -C <root>` would list that index instead of root's.
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def tracked_files(root: Path = ROOT) -> list[str]:
     out = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True
+        ["git", "-C", str(root), "ls-files", "-z"],
+        capture_output=True,
+        check=True,
+        env=_git_env(),
     ).stdout.decode()
     return sorted(p for p in out.split("\0") if p and (root / p).is_file())
 
@@ -188,9 +213,19 @@ def slug(heading: str) -> str:
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", heading)  # links -> text
     text = re.sub(r"<[^>]+>", "", text)  # inline HTML
     text = html.unescape(text)
-    text = text.replace("`", "").replace("*", "").replace("~", "")
-    text = re.sub(r"(?<!\w)_+|_+(?!\w)", "", text)  # _emphasis_, not snake_case
-    text = text.strip().lower()
+    # Code spans render verbatim; emphasis markers outside them do not render.
+    parts = re.split(r"(`+[^`]*?`+)", text)
+    out = []
+    for part in parts:
+        if part.startswith("`"):
+            out.append(part.strip("`"))
+            continue
+        part = part.replace("*", "").replace("~", "")
+        # Matched _emphasis_ / __strong__ pairs only; snake_case and a lone
+        # underscore stay, as GitHub keeps them.
+        part = re.sub(r"(?<![\w\\])(_{1,3})(?=\S)(.+?)(?<=\S)\1(?!\w)", r"\2", part)
+        out.append(part)
+    text = "".join(out).strip().lower()
     text = re.sub(r"[^\w\- ]", "", text)
     return text.replace(" ", "-")
 
@@ -340,10 +375,29 @@ def _strip_comment(line: str) -> str:
     return re.split(r"\s#", line, maxsplit=1)[0]
 
 
-def _drop_exclude_lists(text: str) -> str:
-    """pyproject.toml without its `exclude = [...]` arrays: leaving a file out
-    of a package is not reading it."""
-    return re.sub(r"(?ms)^\s*exclude\s*=\s*\[.*?^\s*\]", "", text)
+#: pyproject.toml keys whose values leave files out rather than read them.
+_EXCLUDE_KEYS = frozenset({"exclude", "extend-exclude", "force-exclude", "omit"})
+
+
+def _pyproject_strings(text: str) -> str:
+    """Every string value in pyproject.toml, one per line, except those under
+    an exclude-type key: leaving a file out of a package is not reading it."""
+    out: list[str] = []
+
+    def walk(value: object, key: str = "") -> None:
+        if key in _EXCLUDE_KEYS:
+            return
+        if isinstance(value, str):
+            out.append(value)
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                walk(v, k)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v, key)
+
+    walk(tomllib.loads(text))
+    return "\n".join(out)
 
 
 def config_text(files: Sequence[str], root: Path = ROOT) -> str:
@@ -354,14 +408,26 @@ def config_text(files: Sequence[str], root: Path = ROOT) -> str:
     for rel in readers:
         text = (root / rel).read_text(encoding="utf-8")
         if rel == "pyproject.toml":
-            text = _drop_exclude_lists(text)
+            lines += _pyproject_strings(text).splitlines()
+            continue
         lines += [_strip_comment(ln) for ln in text.splitlines()]
     return "\n".join(lines)
 
 
+#: What may sit before a path and still leave it a whole path: `./`, `../`,
+#: `$VAR/`, `${VAR}/`, `${{ expr }}/` or `$(cmd)/`.
+_PATH_PREFIX = re.compile(r"(?:(?<![\w.])\.{1,2}|\$\w+|\}|\))/\Z")
+
+
 def _mentions(haystack: str, path: str) -> bool:
     """*path* appears in *haystack* as a whole path, not inside a longer one."""
-    return re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w-]|\.\w)", haystack) is not None
+    for m in re.finditer(rf"{re.escape(path)}(?![\w-]|\.\w)", haystack):
+        before = haystack[max(0, m.start() - 64) : m.start()]
+        if not before or not re.search(r"[\w./-]\Z", before):
+            return True
+        if _PATH_PREFIX.search(before):
+            return True
+    return False
 
 
 def _matches_platform(path: str) -> bool:
@@ -565,10 +631,39 @@ def path_tokens(text: str) -> list[tuple[int, str, bool]]:
     return out
 
 
-def unresolved_paths(path: Path, bases: Sequence[Path], ignore: Sequence[str] = ()) -> list[str]:
+def platform_problems(root: Path = ROOT) -> list[str]:
+    """Every non-glob platform file exists, except the pending ones."""
+    out = []
+    for rel in PLATFORM_FILES:
+        if any(c in rel for c in "*?[") or rel in PENDING_PLATFORM_FILES:
+            continue
+        if not (root / rel).is_file():
+            out.append(f"{rel}: platform file missing")
+    return out
+
+
+def _split_bases(bases: Sequence[Path | str]) -> tuple[list[Path], list[tuple[str, Path]]]:
+    plain: list[Path] = []
+    mapped: list[tuple[str, Path]] = []
+    for b in bases:
+        text = str(b)
+        if "=" in text:
+            prefix, _, d = text.partition("=")
+            mapped.append((prefix, Path(d)))
+        else:
+            plain.append(Path(text))
+    return plain, mapped
+
+
+def unresolved_paths(
+    path: Path, bases: Sequence[Path | str], ignore: Sequence[str] = ()
+) -> list[str]:
     """Paths in a local file that do not exist. A link resolves against the
     file's own directory; a backticked path is absolute or relative to one of
-    *bases*."""
+    *bases*. A base written ``PREFIX=DIR`` takes only the tokens starting
+    with PREFIX, and those resolve under DIR alone, so a stale path cannot
+    resolve in another tree."""
+    plain, mapped = _split_bases(bases)
     out = []
     for n, tok, is_link in path_tokens(path.read_text(encoding="utf-8")):
         if any(re.search(pat, tok) for pat in ignore):
@@ -577,7 +672,8 @@ def unresolved_paths(path: Path, bases: Sequence[Path], ignore: Sequence[str] = 
         if p.is_absolute():
             ok = p.exists()
         else:
-            roots = [path.parent] if is_link else list(bases)
+            owner = [d for prefix, d in mapped if tok.startswith(prefix)]
+            roots = [path.parent] if is_link else (owner[:1] or plain)
             ok = any((b / tok).exists() for b in roots)
         if not ok:
             out.append(f"{path}:{n}: {tok}: no such path")
@@ -587,20 +683,29 @@ def unresolved_paths(path: Path, bases: Sequence[Path], ignore: Sequence[str] = 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--resolve-paths", metavar="FILE", type=Path, action="append")
-    parser.add_argument("--base", metavar="DIR", type=Path, action="append")
+    parser.add_argument(
+        "--base",
+        metavar="[PREFIX=]DIR",
+        action="append",
+        help="base for backticked paths; PREFIX=DIR takes only tokens starting with PREFIX",
+    )
     parser.add_argument("--ignore", metavar="REGEX", action="append", default=[])
     args = parser.parse_args(argv)
     if args.resolve_paths:
-        bases = args.base or [ROOT]
+        bases = args.base or [str(ROOT)]
         bad = [b for f in args.resolve_paths for b in unresolved_paths(f, bases, args.ignore)]
         for line in bad:
             print(line)
         return 1 if bad else 0
-    problems = [
-        f"{p}: not linked from the docs index and not read by code, tests or CI"
-        for p in unread_files(ROOT)
-        if p not in KNOWN_ORPHANS
-    ] + stub_problems(ROOT)
+    problems = (
+        [
+            f"{p}: not linked from the docs index and not read by code, tests or CI"
+            for p in unread_files(ROOT)
+            if p not in KNOWN_ORPHANS
+        ]
+        + stub_problems(ROOT)
+        + platform_problems(ROOT)
+    )
     for line in problems:
         print(line)
     return 1 if problems else 0
