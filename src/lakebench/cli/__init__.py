@@ -38,6 +38,7 @@ from lakebench.cli._helpers import (
 from lakebench.cli._helpers import (
     get_journal as get_journal,
 )
+from lakebench.cli._nameless import NAME_OPTION_HELP, guard_nameless
 from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
@@ -1216,6 +1217,10 @@ def status(
             help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
         ),
     ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
 ) -> None:
     """Show deployment status.
 
@@ -1228,11 +1233,14 @@ def status(
         config_file = resolve_config_path(config_file, file_option)
     if config_file:
         try:
-            cfg = load_config(config_file, purpose=LoadPurpose.READ)  # LB-153
+            cfg = load_config(config_file, purpose=LoadPurpose.READ, name_override=name)  # LB-153
             ns = ns or cfg.get_namespace()
         except ConfigError as e:
             print_error(f"Config error: {e}")
             raise typer.Exit(1)  # noqa: B904
+    if cfg is not None and config_file and not local:
+        # A nameless config reads only a deployment it can prove (SAF-2).
+        guard_nameless(cfg, config_file, allow_absent=True)
 
     if local:
         from lakebench.cli._local import print_local_status, status_local
@@ -1372,6 +1380,10 @@ def stop(
             help="Path to configuration YAML file (alternative to positional argument)",
         ),
     ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
 ) -> None:
     """Stop running continuous-mode jobs.
 
@@ -1381,11 +1393,15 @@ def stop(
 
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)  # LB-153; stops only
+        cfg = load_config(
+            config_file, purpose=LoadPurpose.TEARDOWN, name_override=name
+        )  # LB-153; stops only
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
 
+    # A nameless config stops only a deployment it can prove (SAF-2).
+    guard_nameless(cfg, config_file, allow_absent=False)
     namespace = cfg.get_namespace()
     k8s = get_k8s_client(
         context=cfg.platform.kubernetes.context,
@@ -2161,6 +2177,10 @@ def logs(
             help="Number of lines to show",
         ),
     ] = 100,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
 ) -> None:
     """Stream logs from a component.
 
@@ -2188,11 +2208,13 @@ def logs(
     config_file = resolve_config_path(config_file, file_option)
 
     try:
-        cfg = load_config(config_file, purpose=LoadPurpose.READ)  # LB-153
+        cfg = load_config(config_file, purpose=LoadPurpose.READ, name_override=name)  # LB-153
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
 
+    # A nameless config reads only a deployment it can prove (SAF-2).
+    guard_nameless(cfg, config_file, allow_absent=True)
     namespace = cfg.get_namespace()
     label_selector, container = COMPONENT_SELECTORS[component]
     # logs runs only kubectl; pin the context before the first call (SAF-7).

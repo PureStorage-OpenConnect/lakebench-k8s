@@ -30,6 +30,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import LakebenchError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
@@ -210,6 +211,111 @@ def _deploy_local_mode(
     )
 
 
+def _namespace_identity(cfg):
+    """One read of the namespace's UID and lakebench annotations (or None)."""
+    from kubernetes import client
+
+    from lakebench.config.deploy_state import read_namespace_identity
+    from lakebench.exit_codes import PrerequisiteError
+
+    try:
+        return read_namespace_identity(client.CoreV1Api(), cfg.get_namespace())
+    except Exception as e:  # noqa: BLE001
+        raise PrerequisiteError(
+            f"cannot read namespace {cfg.get_namespace()}: {e}",
+            why="deploy reconciles its recorded nonces with the namespace before any change",
+            path="deploy.state_unrecordable",
+        ) from e
+
+
+def _record_deploy_nonce(cfg, config_file: Path, *, dry_run: bool, nonce: str | None) -> str | None:
+    """Steps 1 to 4 of SAF-2 (b): lock, reconcile, choose, record.
+
+    Under the directory's state lock: read the state, read the namespace and
+    mark the entry it carries confirmed, prepend the new nonce as pending
+    (never evicting the carried entry), write the state atomically. Returns
+    the nonce. A dry run reads the namespace, prints which entry it carries
+    and writes nothing (no lock, no ``.lakebench/``). A state that cannot be
+    written stops the deploy with exit 4 before any cluster change.
+    """
+    import uuid
+
+    from lakebench.config import deploy_state as ds
+    from lakebench.exit_codes import PrerequisiteError, SafetyRefusal
+
+    name = cfg.name
+    path = ds.state_path(config_file, name)
+    if dry_run:
+        ident = _namespace_identity(cfg)
+        try:
+            state = ds.read_state_file(path)
+        except ds.StateError as e:
+            print_info(f"State: {e}")
+            return None
+        carries = state is not None and ident is not None and ident.nonce in state.kept_nonces()
+        print_info(
+            f"State: {path} "
+            + (
+                "(none yet)"
+                if state is None
+                else f"keeps {len(state.nonces)} nonce(s); namespace carries "
+                + ("one of them" if carries else "none of them")
+            )
+            + "; a dry run writes nothing"
+        )
+        return None
+    chosen = nonce or uuid.uuid4().hex
+    try:
+        with ds.state_lock(config_file, name):
+            state = ds.read_state_file(path)
+            if state is not None and state.moved_to:
+                raise SafetyRefusal(
+                    f"this deployment's state moved to {state.moved_to}; deploy from there",
+                    where=str(path),
+                    path="nameless.moved",
+                )
+            if state is None:
+                state = ds.new_state(config_file, name, cfg.get_namespace())
+            ident = _namespace_identity(cfg)
+            carried = ds.reconcile(state, ident)
+            ds.record_pending(state, chosen, carried)
+            from lakebench.k8s.target import active_target
+
+            pinned = active_target()
+            state.api_server = pinned.api_server if pinned is not None else state.api_server
+            ds.write_state(path, state)
+    except (OSError, ds.StateError) as e:
+        raise PrerequisiteError(
+            f"cannot record the deploy nonce in {path}: {e}",
+            why="deploy records the nonce before the namespace gets it (SAF-2)",
+            where=str(path),
+            next="make the config's directory writable, or deploy from a local disk",
+            path="deploy.state_unrecordable",
+        ) from e
+    return chosen
+
+
+def _confirm_deploy_nonce(cfg, config_file: Path, nonce: str) -> None:
+    """Step 7: once the namespace carries ``nonce``, mark it confirmed.
+
+    Runs whether the deploy succeeded or failed. Best effort: an entry left
+    pending is still accepted by the nameless checks and confirmed by the
+    next deploy's reconcile.
+    """
+    from lakebench.config import deploy_state as ds
+
+    try:
+        with ds.state_lock(config_file, cfg.name):
+            path = ds.state_path(config_file, cfg.name)
+            state = ds.read_state_file(path)
+            if state is None:
+                return
+            if ds.confirm(state, nonce, _namespace_identity(cfg)):
+                ds.write_state(path, state)
+    except Exception as e:  # noqa: BLE001 -- the entry stays pending
+        logger.debug("could not confirm deploy nonce %s: %s", nonce, e)
+
+
 def deploy(
     config_file: Annotated[
         Path | None,
@@ -299,9 +405,36 @@ def deploy(
     7. Query Engine (Trino / Spark Thrift / DuckDB)
     8. Observability (if enabled)
     """
-    from lakebench.deploy import DeploymentEngine, DeploymentStatus
+    _deploy_impl(
+        resolve_config_path(config_file, file_option),
+        dry_run=dry_run,
+        include_observability=include_observability,
+        yes=yes,
+        timeout=timeout,
+        local=local,
+        workdir=workdir,
+        force_legacy=force_legacy,
+    )
 
-    config_file = resolve_config_path(config_file, file_option)
+
+def _deploy_impl(
+    config_file: Path,
+    *,
+    dry_run: bool = False,
+    include_observability: bool = False,
+    yes: bool = False,
+    timeout: int = 3600,
+    local: bool = False,
+    workdir: Path | None = None,
+    force_legacy: bool = False,
+    nonce: str | None = None,
+) -> str | None:
+    """The body of ``deploy``, callable with a nonce the caller chose.
+
+    ``reproduce`` passes its own ``nonce`` (SAF-1). Returns the nonce this
+    deploy recorded and stamped, or None for a dry run or local mode.
+    """
+    from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
     # Load configuration
     try:
@@ -327,7 +460,7 @@ def deploy(
     # against a cluster that is not there.
     if local:
         _deploy_local_mode(cfg, config_file, workdir, dry_run, yes, timeout)
-        return
+        return None
 
     check_datagen_scale(cfg)
 
@@ -369,8 +502,14 @@ def deploy(
 
     # Deploy
     deploy_start = time.time()
+    recorded: str | None = None
     try:
         engine = DeploymentEngine(cfg, dry_run=dry_run)
+        # SAF-2: record the nonce in the directory's state before the
+        # namespace gets it, so a crash between the two cannot orphan the
+        # deployment. A dry run only reads.
+        recorded = _record_deploy_nonce(cfg, config_file, dry_run=dry_run, nonce=nonce)
+        engine.deploy_nonce = recorded
 
         # Progress callback -- columnar output with version info
         _step_start: dict[str, float] = {}
@@ -398,11 +537,15 @@ def deploy(
                 elapsed = time.time() - _step_start.pop(component, time.time())
                 console.print(_fmt_deploy_line("x", "red", elapsed))
 
-        results = engine.deploy_all(
-            progress_callback=on_progress,
-            timeout=timeout,
-            force_legacy=force_legacy,
-        )
+        try:
+            results = engine.deploy_all(
+                progress_callback=on_progress,
+                timeout=timeout,
+                force_legacy=force_legacy,
+            )
+        finally:
+            if recorded:
+                _confirm_deploy_nonce(cfg, config_file, recorded)
 
         # Record each component result in journal
         for r in results:
@@ -421,6 +564,9 @@ def deploy(
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
+    except LakebenchError as e:
+        _journal_safe(j.end_command, success=False, message=str(e))
+        raise
 
     # Summary
     console.print()
@@ -497,3 +643,4 @@ def deploy(
             )
         )
         raise typer.Exit(1)
+    return recorded

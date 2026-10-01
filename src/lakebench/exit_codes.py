@@ -273,26 +273,40 @@ PATHS: tuple[ExitPath, ...] = (
         "CC-9",
     ),
     ExitPath(
-        "nameless.nonce_mismatch",
+        "nameless.ambiguous",
         _C.REFUSED,
-        "a nameless config's nonce does not match the namespace",
-        "CC-2",
+        "a nameless config shares its directory with another nameless config and no --name",
     ),
     ExitPath(
-        "nameless.copied_dir", _C.REFUSED, "a nameless config's state directory was copied", "CC-2"
+        "nameless.nonce_mismatch",
+        _C.REFUSED,
+        "a nameless config's recorded nonces do not include the namespace's",
     ),
-    ExitPath("nameless.moved", _C.REFUSED, "a nameless config moved away from its state", "CC-2"),
+    ExitPath(
+        "nameless.copied_dir",
+        _C.REFUSED,
+        "a nameless config's state was written for another directory or host",
+    ),
+    ExitPath("nameless.moved", _C.REFUSED, "a nameless config's state moved to another directory"),
+    ExitPath(
+        "nameless.name_required",
+        _C.REFUSED,
+        "a nameless config in a v1.6 directory (no v1.7 state) was given no --name",
+    ),
     ExitPath(
         "nameless.stamp_mismatch",
         _C.REFUSED,
-        "a nameless config's stamp does not match the namespace",
-        "CC-2",
+        "a nameless v1.6 config's --name or buckets do not match the namespace's stamps",
     ),
     ExitPath(
         "nameless.v17_state_elsewhere",
         _C.REFUSED,
         "the namespace carries v1.7 state that lives with another config",
-        "CC-2",
+    ),
+    ExitPath(
+        "nameless.namespace_missing",
+        _C.REFUSED,
+        "a nameless config's teardown found no namespace to check against",
     ),
     ExitPath(
         "deploy.identity_foreign",
@@ -326,6 +340,16 @@ PATHS: tuple[ExitPath, ...] = (
         "SD-10",
     ),
     # 4
+    ExitPath(
+        "deploy.state_unrecordable",
+        _C.PREREQUISITE,
+        "`deploy` could not read the namespace or write the nonce to the directory's state",
+    ),
+    ExitPath(
+        "nameless.namespace_unreadable",
+        _C.PREREQUISITE,
+        "a nameless config's namespace could not be read for its check",
+    ),
     ExitPath("run.prereq_failed", _C.PREREQUISITE, "a `run` preflight check failed", "CC-9"),
     ExitPath(
         "capacity.shortfall",

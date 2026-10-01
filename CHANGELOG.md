@@ -22,7 +22,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   dropped keys in one "Upgrade notes" block on stderr. An old
   `datagen.file_size` is treated the same way.
 
+- **A nameless config tears down or reads only a deployment it can prove
+  is its own (SAF-2).** `destroy`, `stop`, `status` and `logs` with a
+  config that has no `name:` refuse (exit 3) unless it is the only nameless
+  config in its directory or `--name` is given, and the namespace carries a
+  nonce recorded in `.lakebench/<name>.json` for this directory on this
+  host. A v1.6 directory (only `.lakebench/state.json`) needs `--name`,
+  and the namespace's name and created-buckets stamps must match it. The
+  refusal points at `lakebench init --from`. Destroy then touches only the
+  namespace incarnation it checked.
+
 ### Changed
+- **Deploy records its nonce beside the config.** Every `deploy` writes
+  the nonce it stamps on the namespace to `.lakebench/<name>.json` first
+  (last five kept, under a host-local lock), and the namespace gets
+  `lakebench.deployment/state-schema: lb-state/1`. `deploy --dry-run`
+  writes nothing; a state that cannot be written stops the deploy with
+  exit 4 before any cluster change.
+  `python -m lakebench.config.deploy_state relocate CONFIG NEWDIR` moves a
+  config with its state.
 - **One cluster context per process (SAF-7).** A `lakebench` command
   resolves its cluster context once, at its first cluster call, from
   `platform.kubernetes.context` or, when that is empty, from the

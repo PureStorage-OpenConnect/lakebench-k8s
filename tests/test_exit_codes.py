@@ -323,7 +323,128 @@ def _scenario_sigint(monkeypatch, tmp_path):
     return _runner().invoke(app, ["status", str(tmp_path / "c.yaml")])
 
 
+def _nameless_destroy(monkeypatch, tmp_path, setup, argv_extra=()):
+    """`destroy --force` on a nameless config against a fake namespace (SAF-2)."""
+    import lakebench.cli._nameless as nameless
+    from tests import test_saf2_deploy_state as t
+
+    core = t.FakeCore()
+    monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
+    monkeypatch.setattr(nameless, "_bucket_owned_factory", lambda cfg: lambda b: False)
+    cfg = t._nameless(tmp_path)
+    setup(t, core, cfg)
+    return _runner().invoke(app, ["destroy", str(cfg), "--force", *argv_extra])
+
+
+def _scenario_nameless_ambiguous(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._nameless(tmp_path, "b.yaml")
+        t._legacy_state(tmp_path)
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup)
+
+
+def _scenario_nameless_nonce_mismatch(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._v16_namespace(core, nonce="foreign")
+        t._v17_state(cfg, [("mine", "confirmed")])
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_copied_dir(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._v16_namespace(core, nonce="n1")
+        t._v17_state(cfg, [("n1", "confirmed")], config_dir="/elsewhere")
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_moved(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._v16_namespace(core, nonce="n1")
+        t._v17_state(cfg, [("n1", "confirmed")], moved_to="/new/home")
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_name_required(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+        t._v16_namespace(core)
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup)
+
+
+def _scenario_nameless_stamp_mismatch(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+        core.add("lb-x", **{t.ANNOTATION_DEPLOYMENT_NAME: "lb-other"})
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_v17_state_elsewhere(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+        t._v16_namespace(core, **{t.ANNOTATION_STATE_SCHEMA: "lb-state/1"})
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_namespace_missing(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_namespace_unreadable(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+        core.fail_reads = True
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_deploy_state_unrecordable(monkeypatch, tmp_path):
+    import lakebench.cli._deploy as deploy_mod
+    from lakebench.config import deploy_state as ds
+    from tests import test_saf2_deploy_state as t
+
+    core = t.FakeCore()
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
+
+    class Engine:
+        def __init__(self, cfg, dry_run=False, **kw):
+            self.results = []
+
+        def deploy_all(self, **kw):  # pragma: no cover -- must not be reached
+            raise AssertionError("deploy_all after a failed state write")
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+
+    def no_write(path, state):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(ds, "write_state", no_write)
+    cfg = t._named(tmp_path)
+    return _runner().invoke(app, ["deploy", str(cfg), "--yes"])
+
+
 SCENARIOS = {
+    "deploy.state_unrecordable": _scenario_deploy_state_unrecordable,
+    "nameless.ambiguous": _scenario_nameless_ambiguous,
+    "nameless.nonce_mismatch": _scenario_nameless_nonce_mismatch,
+    "nameless.copied_dir": _scenario_nameless_copied_dir,
+    "nameless.moved": _scenario_nameless_moved,
+    "nameless.name_required": _scenario_nameless_name_required,
+    "nameless.stamp_mismatch": _scenario_nameless_stamp_mismatch,
+    "nameless.v17_state_elsewhere": _scenario_nameless_v17_state_elsewhere,
+    "nameless.namespace_missing": _scenario_nameless_namespace_missing,
+    "nameless.namespace_unreadable": _scenario_nameless_namespace_unreadable,
     "version.ok": _scenario_version_ok,
     "click.usage": _scenario_click_usage,
     "unhandled_exception": _scenario_unhandled_exception,

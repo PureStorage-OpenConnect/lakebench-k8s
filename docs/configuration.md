@@ -36,12 +36,52 @@ time-based name (`lb-YYYYMMDD-HHMMSS`) written to `.lakebench/state.json`
 in the config's directory, which every nameless config in that directory
 shared. That file is now only read: `destroy`, `stop`, `status`, `logs`,
 `report`, `info` and `config show` load a nameless config under the name it records,
-so a deployment made by v1.6 can still be inspected and torn down. Without
+so a deployment made by v1.6 can still be inspected and torn down (see
+"Deploy state and nameless teardown" below). Without
 the file, `destroy`, `stop` and `admin` refuse a nameless config, because no
 deployment can be its own, and the read-only commands use a suggested name,
 `lb-<user>-<6 hex>`, which the error for the other commands also offers. No
 command writes `.lakebench/state.json` any more, and the read-only commands
 create no files.
+
+### Deploy state and nameless teardown
+
+Every `deploy` (named configs included) records the per-deploy nonce it is
+about to stamp on the namespace in `.lakebench/<name>.json` beside the
+config, before the namespace gets it, under a lock file
+`.lakebench/<name>.lock`. The file keeps the last five nonces; the one the
+namespace carries is never dropped, and the next deploy confirms it. A
+`deploy --dry-run` writes nothing. The directory must be on a local disk, or
+deployed from one host only: the lock is host-local. If the state cannot be
+written, deploy stops before changing the cluster (exit 4).
+
+`destroy`, `stop`, `status` and `logs` with a nameless config act only on a
+deployment the directory can prove is its own, and refuse otherwise
+(exit 3), pointing at `lakebench init --from`:
+
+1. It is the only nameless config in its directory, or `--name NAME` is
+   given.
+2. If `.lakebench/<name>.json` exists, it was written for this directory on
+   this host, has not been moved, and the namespace carries one of its
+   nonces. A copied directory, or a namespace redeployed from elsewhere, is
+   refused.
+3. Otherwise (a v1.6 directory, at most `.lakebench/state.json`): `--name`
+   is required and must equal the name in `state.json` when there is one;
+   the namespace must carry `lakebench.deployment/name: NAME`, must not
+   carry the v1.7 `lakebench.deployment/state-schema` annotation, and its
+   `lakebench.deployment/created-buckets` record (or each bucket's ownership
+   tag) must name all three of the config's buckets.
+
+Destroy then acts only on the namespace incarnation the check proved; a
+redeploy in between stops it before any delete. `status` and `logs` on a
+namespace that does not exist report that and stop. Named configs skip
+these checks and rely on the ownership stamps alone.
+
+To move a deployment's config to another directory without breaking check
+2, use `python -m lakebench.config.deploy_state relocate CONFIG NEWDIR`. It
+copies the config (and a v1.6 `state.json`), writes the state for the new
+directory and marks the old one as moved, so only the new directory is
+accepted from then on. A move to another host is refused.
 
 ### Removed keys
 

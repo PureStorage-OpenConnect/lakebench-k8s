@@ -320,8 +320,9 @@ lakebench stop [CONFIG_FILE]
 ```
 
 Deletes the continuous-mode SparkApplications (`bronze-ingest`, `silver-stream`,
-`gold-refresh`) from the cluster. `--file` / `-f` is the only option, and
-points at the config the same way it does on the other commands.
+`gold-refresh`) from the cluster. `--file` / `-f` points at the config the
+same way it does on the other commands; `--name` names the deployment of a
+nameless config, as for `destroy`.
 
 ### benchmark
 
@@ -385,6 +386,7 @@ lakebench status [CONFIG_FILE] [OPTIONS]
 | `--namespace` | `-n` | from config | Kubernetes namespace to check |
 | `--local` | | `false` | Show local mode status instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
+| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
 
 Displays a table of the deployment's components (PostgreSQL, the configured
 catalog and query engine) with their readiness and replica counts, and the
@@ -494,6 +496,7 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--force-legacy` | | `false` | Proceed on a namespace or bucket with no lakebench ownership annotation or tag. Foreign-owned namespaces and buckets are refused regardless |
 | `--allow-unverified-cluster` | | `false` | Bypass the API-server fingerprint match when it cannot be computed |
 | `--file` | | | Config file (alternative to the positional argument; no short form) |
+| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
 
 Removes everything in this order: ownership check, Spark jobs, orphaned
 pods, datagen jobs, table removal from the catalog, S3 bucket contents
@@ -530,7 +533,8 @@ concurrent destroy of the same deployment finished first and a redeploy has
 re-created the name, destroy stops and leaves the new deployment alone.
 
 Exit codes: `0` everything removed; `1` a step failed (see the summary);
-`3` the user declined the confirmation prompt (no side effects); `4`
+`3` the user declined the confirmation prompt, or a nameless config could
+not prove the deployment is its own (no side effects either way); `4`
 everything else succeeded but the namespace was still terminating at
 `--namespace-timeout` (usually a PVC or pod finalizer; check with
 `kubectl get ns <namespace>` before re-deploying under the same name).
@@ -590,6 +594,7 @@ lakebench logs COMPONENT [CONFIG_FILE] [OPTIONS]
 |---|---|---|---|
 | `--follow` | `-F` | `false` | Follow log output (like `tail -f`; `-f` is deprecated here) |
 | `--lines` | `-n` | `100` | Number of lines to show |
+| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
 
 Valid components: `postgres`, `hive`, `polaris`, `trino`, `spark-driver`.
 

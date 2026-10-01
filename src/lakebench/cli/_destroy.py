@@ -35,6 +35,7 @@ from ._helpers import (
     resolve_config_path,
     stdin_is_tty,
 )
+from ._nameless import NAME_OPTION_HELP, guard_nameless
 
 
 def _build_destroy_list(cfg) -> str:
@@ -203,6 +204,10 @@ def destroy(
             ),
         ),
     ] = 600,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
     keep_buckets: Annotated[
         bool,
         typer.Option(
@@ -236,7 +241,7 @@ def destroy(
     try:
         # A namespace too long to finish deploying (LB-153) still has to be
         # destroyable, so the derived-name length check is skipped here.
-        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)
+        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN, name_override=name)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -255,6 +260,10 @@ def destroy(
         return
 
     namespace = cfg.get_namespace()
+
+    # A nameless config destroys only a deployment it can prove is its own
+    # (SAF-2); the incarnation it proved is the only one destroy may touch.
+    verified_incarnation = guard_nameless(cfg, config_file, allow_absent=False)
 
     # Confirmation
     if not force:
@@ -371,6 +380,7 @@ def destroy(
             force_legacy=force_legacy,
             namespace_wait_timeout=namespace_timeout,
             delete_buckets=not keep_buckets,
+            expected_incarnation=verified_incarnation,
         )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
