@@ -336,6 +336,10 @@ def test_user_conf_is_hashed_never_written():
         make_config(spark={"conf": {**user, "spark.speculation": "false"}}), False
     )
     assert changed["user_conf_sha256"]["silver-build"] != digest
+    # A credential-named key does not enter the digest at all.
+    other_key = {**user, "spark.hadoop.fs.azure.account.key.acct.dfs.core.windows.net": "x"}
+    same = fingerprint_inputs(make_config(spark={"conf": other_key}), False)
+    assert same["user_conf_sha256"]["silver-build"] == digest
     # The default conf is Lakebench's, written in plain text, and no user
     # digest is recorded for it.
     default = fingerprint_inputs(make_config(), False)

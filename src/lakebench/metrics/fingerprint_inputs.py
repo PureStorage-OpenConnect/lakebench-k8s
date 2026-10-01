@@ -60,8 +60,8 @@ FINGERPRINT_LOCATION_SUFFIXES = (".uri", ".warehouse", ".s3.endpoint")
 # Keys that can hold a credential, matched case-insensitively anywhere in the
 # key. The two exceptions are settings, not secrets.
 _CREDENTIAL_KEY = re.compile(
-    r"secret|password|passwd|credential|token|access[._-]?key|private[._-]?key|"
-    r"encryption[._-]?key|keystore",
+    r"secret|password|passwd|credential|token|keystore|keyfile|"
+    r"(access|private|encryption|account|api)[._-]?key|\.sas\.|\.key$",
     re.IGNORECASE,
 )
 _NOT_CREDENTIALS = (".credentials.provider", ".token-refresh-enabled")
@@ -118,11 +118,12 @@ def user_spark_conf(cfg: Any) -> dict[str, str]:
 
 def user_conf_digest(spark_conf: dict[str, Any], user: dict[str, str]) -> str | None:
     """sha256 over the user's ``spark.conf`` entries that reached the manifest
-    unchanged, location keys left out; None when there are none."""
+    unchanged, location and credential keys left out (a credential's hash
+    could be guessed offline); None when there are none."""
     applied = {
         k: str(v)
         for k, v in sorted(spark_conf.items())
-        if k in user and str(v) == user[k] and not is_location_key(k)
+        if k in user and str(v) == user[k] and not is_location_key(k) and not is_credential_key(k)
     }
     if not applied:
         return None
