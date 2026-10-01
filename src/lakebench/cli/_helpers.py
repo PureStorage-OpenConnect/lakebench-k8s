@@ -241,7 +241,9 @@ def _journal_safe(fn, *args, **kwargs) -> None:
             _journal_warned = True
 
 
-def enforce_bronze_gate(cfg, regenerate: bool, allow_stale_bronze: bool = False):
+def enforce_bronze_gate(
+    cfg, regenerate: bool, allow_stale_bronze: bool = False, clear_owned: bool = False
+):
     """Run the SAF-9 bronze gate before datagen; exit 2 on a refusal.
 
     ``lakebench.deploy.datagen.bronze_prefix_gate`` decides (one table for
@@ -255,14 +257,19 @@ def enforce_bronze_gate(cfg, regenerate: bool, allow_stale_bronze: bool = False)
     """
     from lakebench.deploy.datagen import bronze_prefix_gate
 
-    result = bronze_prefix_gate(cfg, regenerate=regenerate, allow_stale_bronze=allow_stale_bronze)
+    result = bronze_prefix_gate(
+        cfg,
+        regenerate=regenerate,
+        allow_stale_bronze=allow_stale_bronze,
+        clear_owned=clear_owned,
+    )
     if not result.proceed:
         print_error(result.message)
         raise typer.Exit(result.exit_code)
     record_stale_bronze(cfg, result.record())
     shown = f"s3://{result.bucket}/{result.prefix}"
     if result.cleared:
-        print_success(f"--regenerate: removed {result.cleared} object(s) under {shown}")
+        print_success(f"cleared {result.cleared} object(s) under {shown} before generating")
     if result.stale_allowed:
         print_warning(
             f"{shown} held {result.objects_before} object(s) before generate and this "
@@ -299,14 +306,26 @@ def record_stale_bronze(cfg, record: dict | None) -> None:
 
 
 def load_stale_bronze(cfg) -> dict | None:
-    """The ``datagen.stale_bronze`` record the last generate left, if any."""
+    """The ``datagen.stale_bronze`` record the last generate left, if any.
+
+    Only a note for this config's bronze bucket and datagen prefix counts; a
+    note for another bucket (the config changed) is ignored.
+    """
     import json
+
+    from lakebench.deploy.datagen import bronze_datagen_prefix
 
     try:
         data = json.loads(_stale_bronze_path(cfg).read_text())
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if data.get("bucket") != cfg.platform.storage.s3.buckets.bronze or data.get(
+        "prefix"
+    ) != bronze_datagen_prefix(cfg).strip("/"):
+        return None
+    return data
 
 
 def write_run_report(metrics_storage, run_id: str) -> Path | None:

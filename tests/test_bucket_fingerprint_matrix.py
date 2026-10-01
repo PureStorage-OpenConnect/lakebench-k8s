@@ -515,7 +515,12 @@ def test_stale_bronze_note_outlives_generate_for_a_later_run(tmp_path, monkeypat
 
     monkeypatch.setattr("lakebench._constants.DEFAULT_OUTPUT_DIR", str(tmp_path))
     cfg = make_config(name=NS)
-    record_stale_bronze(cfg, {"allowed": True, "objects_before": 3, "bucket": B, "prefix": "p"})
+    note = {"allowed": True, "objects_before": 3, "bucket": B, "prefix": "customer/interactions"}
+    record_stale_bronze(cfg, note)
     assert load_stale_bronze(cfg)["objects_before"] == 3
+    # A note for another bronze bucket (the config changed) does not count.
+    cfg.platform.storage.s3.buckets.bronze = "u01-bronze-2"
+    assert load_stale_bronze(cfg) is None
+    cfg.platform.storage.s3.buckets.bronze = B
     record_stale_bronze(cfg, None)  # a later clean generate
     assert load_stale_bronze(cfg) is None

@@ -511,7 +511,6 @@ def _stamp_legacy_proven(engine, s3, namespace: str, plan, guard) -> list[str]:
     and is kept, never emptied by mistake.
     """
     from lakebench.deploy.ownership import (
-        TAG_CREATED_BY_LAKEBENCH,
         TAG_WORKLOAD_SCHEMA,
         cluster_stamp,
         owner_marker_identity,
@@ -535,7 +534,9 @@ def _stamp_legacy_proven(engine, s3, namespace: str, plan, guard) -> list[str]:
                     bucket,
                     deployment,
                     workload_schema=prior.get(TAG_WORKLOAD_SCHEMA),
-                    created=prior.get(TAG_CREATED_BY_LAKEBENCH) == "true",
+                    # Row 3 means the created record lists it: keep that
+                    # proof on the bucket once the record goes.
+                    created=True,
                     cluster=stamp,
                 )
             else:

@@ -313,3 +313,48 @@ def test_destroy_clears_the_bronze_clock_only_with_bronze(clean_buckets):
         data = _destroy(rec, clean_buckets=clean_buckets)
         assert data["rebuild_epoch_c360_iceberg"] == "3"  # counters never go back
         assert data["bronze_data_clock"] == ("" if clean_buckets else "2026-09-30")
+
+
+class TestMultiCycleGate:
+    """The multi-cycle loop runs the gate with clear_owned: an owned prefix is
+    cleared as 1.6 did before cycle 0, and --allow-stale-bronze still applies
+    to an unowned one."""
+
+    def test_owned_prefix_is_cleared_without_regenerate(self):
+        with recording() as rec:
+            cfg = _seed(rec, owned=True, objects=[f"{PREFIX}/part-0", OWNER_MARKER_KEY])
+            got = _gate(cfg, clear_owned=True)
+            assert got.proceed and got.cleared == 1
+            assert list(rec.buckets_store[BRONZE]) == [OWNER_MARKER_KEY]
+
+    def test_unowned_with_allow_stale_proceeds(self):
+        with recording() as rec:
+            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
+            got = _gate(cfg, clear_owned=True, allow_stale_bronze=True)
+            assert got.proceed and got.stale_allowed
+            assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"]
+
+    def test_unowned_without_the_flag_refuses(self):
+        with recording() as rec:
+            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
+            assert not _gate(cfg, clear_owned=True).proceed
+
+    def test_run_wires_the_multicycle_gate_with_clear_owned(self):
+        """[static] the loop's call passes clear_owned=True and the user's flags."""
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parent.parent / "src/lakebench/cli/_run.py"
+        calls = [
+            n
+            for n in ast.walk(ast.parse(src.read_text()))
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "enforce_bronze_gate"
+        ]
+        assert len(calls) == 2
+        multi = [c for c in calls if any(k.arg == "clear_owned" for k in c.keywords)]
+        assert len(multi) == 1
+        assert [ast.unparse(a) for a in multi[0].args] == [
+            "cfg",
+            "regenerate",
+            "allow_stale_bronze",
+        ]

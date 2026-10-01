@@ -2329,7 +2329,7 @@ def run(
         # owned bucket is cleared as 1.6 did (LB-185), so the gate runs with
         # regenerate on: only a bucket this deployment may not empty refuses.
         if total_cycles > 1 and not (include_datagen and not skip_generate):
-            _gate = enforce_bronze_gate(cfg, True, allow_stale_bronze)
+            _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)
             if collector.current_run is not None:
                 collector.current_run.datagen_stale_bronze = _gate.record()
         elif not (include_datagen and not skip_generate) and collector.current_run is not None:

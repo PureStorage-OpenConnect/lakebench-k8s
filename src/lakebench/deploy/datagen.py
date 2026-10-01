@@ -153,7 +153,12 @@ class BronzeGateResult:
 
 
 def bronze_prefix_gate(
-    cfg: Any, *, regenerate: bool, allow_stale_bronze: bool, s3: Any = None
+    cfg: Any,
+    *,
+    regenerate: bool,
+    allow_stale_bronze: bool,
+    s3: Any = None,
+    clear_owned: bool = False,
 ) -> BronzeGateResult:
     """The one bronze safety gate, on the CLI host before any datagen Job (SAF-9).
 
@@ -179,6 +184,11 @@ def bronze_prefix_gate(
     to the bucket. A read failure refuses. The caller exits with the
     result's ``exit_code``. Every "proceed" means bronze is about to be replaced, so the
     silver-state data clock is cleared (LB-231).
+
+    ``clear_owned`` (the multi-cycle loop before cycle 0, which clears an
+    owned prefix as 1.6 did): an owned non-empty prefix is cleared as with
+    ``--regenerate``, and an unowned one takes the ordinary rows, so
+    ``--allow-stale-bronze`` still applies.
     """
     bucket = cfg.platform.storage.s3.buckets.bronze
     prefix = bronze_datagen_prefix(cfg).strip("/")
@@ -225,7 +235,7 @@ def bronze_prefix_gate(
             n,
         )
     if owned:
-        if not regenerate:
+        if not (regenerate or clear_owned):
             return refuse(
                 f"Bronze prefix {held}. Refusing to generate over it: pass --regenerate "
                 "to clear the datagen prefix first, or --skip-generate to reuse the "

@@ -1181,7 +1181,13 @@ def reclaim_bucket(
                     )
 
                     marker = owner_marker_identity(cfg.name, my_cluster, cfg.get_namespace())
-                    displaced = read_owner_marker(s3.raw_client, bucket)
+                    try:
+                        displaced = read_owner_marker(s3.raw_client, bucket)
+                    except Exception as e:  # noqa: BLE001 -- the override replaces it anyway
+                        print_info(
+                            f"bucket {bucket!r}: unreadable owner marker ({e}); replacing it"
+                        )
+                        displaced = None
                     if displaced and (displaced.get("deployment"), displaced.get("cluster")) != (
                         cfg.name,
                         my_cluster,
