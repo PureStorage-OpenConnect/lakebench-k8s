@@ -16,6 +16,14 @@ A release is a `v*` tag on a commit that is on `main`. Pushing the tag runs
 6. the PyPI upload, only after the GitHub Release exists, so a version on
    PyPI always has its binaries.
 
+Steps 5 and 6 run only in `PureStorage-OpenConnect/lakebench-k8s`. On a
+fork they are skipped and `release-dry-run` downloads the same artifacts,
+lists them and prints their SHA-256 checksums instead. A tag on a fork
+therefore runs the build and artifact steps without publishing; the
+GitHub Release and PyPI upload actions themselves run only on a real tag. `release.yml` has no
+`workflow_dispatch` trigger, because a manual run in the upstream
+repository would reach the PyPI upload.
+
 ## What the workflow cannot enforce
 
 A tag runs the `release.yml` of the commit it points at. A tag pushed on an

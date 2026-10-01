@@ -161,15 +161,27 @@ The hooks do not run the tests; run `pytest tests/ -x` yourself.
 `.github/workflows/ci.yml` runs on every branch push and on pull requests to
 `main`. The lint job runs `ruff check src/ tests/ scripts/`,
 `ruff format --check src/ tests/ scripts/` and `mypy src/lakebench/` on
-Python 3.11. The test job runs `pytest tests/ -x` (excluding
-`tests/test_e2e.py` and `tests/test_integration.py`) on Python 3.10, 3.11,
-3.12 and 3.13, and on 3.11 checks per-file coverage floors with
+Python 3.11, and `scripts/check_action_runtimes.py --verify`, which reads
+each action's `action.yml` at its pinned SHA and fails if
+`.github/action-runtimes.json` no longer matches it. The test job runs
+`pytest tests/ -x` (excluding `tests/test_e2e.py` and
+`tests/test_integration.py`) on Python 3.10 and 3.13, the oldest and newest
+supported versions, and on 3.13 checks per-file coverage floors with
 `scripts/check_coverage.py --suite unit`. A Spark job runs `pytest tests/spark`
 with `pyspark==4.0.1` on Java 17 and checks its own floors with
 `scripts/check_coverage.py --suite spark`. The Rust job runs `cargo fmt
 --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test
 --release --locked` in `datagen_rs/`. A gitleaks job scans the working tree
-for credentials. The package build runs only after all of these pass. Because
+for credentials. The package build runs only after all of these pass.
+
+Every job runs on a fixed runner image (`ubuntu-24.04`, never
+`ubuntu-latest`), and every action is pinned by commit SHA with its tag as
+a trailing comment (`owner/repo@<sha> # vX.Y.Z`; `dtolnay/rust-toolchain`
+has no release tags and names its branch and date instead). To change an action, pin
+the new SHA, update its entry in `.github/action-runtimes.json` and run
+`GITHUB_TOKEN=$(gh auth token) python scripts/check_action_runtimes.py
+--verify`; `tests/test_workflows.py` fails on a floating runner label, an
+unpinned or unmapped action, or a Node 20 or older runtime. Because
 the pre-commit hooks and Makefile targets cover only `src/` and `tests/`, run
 the ruff commands above before pushing a change under `scripts/`.
 
