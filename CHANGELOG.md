@@ -159,8 +159,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The build refuses when it cannot read the log's transaction ids, and when
   a later cycle of its epoch is already committed (a manual re-run of an
   earlier cycle, which was a silent no-op). When the metastore is lost and
-  the table files are kept, cycle 0 already refused to adopt the old Delta
-  log; that is unchanged.
+  the table files are kept, cycle 0 on the Hive catalog already refused to
+  adopt the old Delta log; that is unchanged.
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one
