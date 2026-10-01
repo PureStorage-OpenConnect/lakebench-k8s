@@ -13,7 +13,8 @@
   "values_success": "unchanged. effective_maintenance: compaction total/ok 2/2 tables, stmt 6/6 (maintenance_policy.py:324), so ran/on; compaction_detail adds detail keys only, not id or detail_id (maintenance_policy.py:364-390). Settle trigger now counts 10 statements (4 expire + 6 compaction, cli/_run.py:899-922, 2835) but the trigger is a string only; settle still runs, same probes. maintenance_value_reason unchanged (367 -> 367).",
   "c360_correctness": "unchanged from v1: pass.",
   "verdict": "PASSED, reasons [].",
-  "unsure": "Nothing material. The 120 s read and 1800 s statement timeouts assume under 30 s pass between MaintenanceBudget creation and each call, which holds with instant fakes."
+  "unsure": "Nothing material. The 120 s read and 1800 s statement timeouts assume under 30 s pass between MaintenanceBudget creation and each call, which holds with instant fakes.",
+  "er10a": "v2_unavailable joins the experiment block keys: experiment_inputs writes identity_version 2 at run start and batch run() records no corpus observation, so build_experiment stamps exp1 with v2_unavailable (metrics/experiment.py build_experiment). Derived by the independent second agent of the ER-10 goldens from the code, harness not run."
  },
  "exit_code": 0,
  "unscripted": [],
@@ -734,6 +735,7 @@
    "stages",
    "support",
    "system",
+   "v2_unavailable",
    "workload"
   ]
  },

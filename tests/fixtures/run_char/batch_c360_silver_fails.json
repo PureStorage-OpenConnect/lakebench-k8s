@@ -15,7 +15,8 @@
   "values_fail": "effective maintenance with outcomes [] (not None): every operation has no outcome of its kind -> NOT_RUN, detail off (maintenance_policy.py, 'never reached' branch). benchmark absent -> qph None, queries []. scores: composite_qph deleted when query_benchmark is None (collector.py:1600-1603); total_data_processed_gb = 9.917 + 9.917 = 19.834; scale_ratio 0.992; every maintenance score absent.",
   "c360_correctness": "None: the record is never set.",
   "verdict": "metrics/verdict.py:359-417. exit_ok False -> 'Process exit intent was not OK' first; badge reasons in order: benchmark_error None so 'Pipeline crashed or was interrupted' (verdict.py:214-215), scale_ratio 0.9917 not < 0.95, then 'Batch jobs failed: lakebench-silver-build' (job_name); no benchmark so no query reason. Gates: pipeline FAIL, benchmark None (benchmark absent), c360 none -> 'Gate 'pipeline' FAILED' last. Status FAILED.",
-  "unsure": "The order of the four verdict reasons is the only place I would double-check; it follows the code literally. Also assumed: write_run_report succeeds or only warns on a failed run (it catches everything, cli/_helpers.py:288-298), so the trace is unaffected either way."
+  "unsure": "The order of the four verdict reasons is the only place I would double-check; it follows the code literally. Also assumed: write_run_report succeeds or only warns on a failed run (it catches everything, cli/_helpers.py:288-298), so the trace is unaffected either way.",
+  "er10a": "v2_unavailable joins the experiment block keys: experiment_inputs writes identity_version 2 at run start and batch run() records no corpus observation, so build_experiment stamps exp1 with v2_unavailable (metrics/experiment.py build_experiment). Derived by the independent second agent of the ER-10 goldens from the code, harness not run."
  },
  "exit_code": 1,
  "unscripted": [],
@@ -358,6 +359,7 @@
    "stages",
    "support",
    "system",
+   "v2_unavailable",
    "workload"
   ]
  },
