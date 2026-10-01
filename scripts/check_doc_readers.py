@@ -107,8 +107,6 @@ KNOWN_ORPHANS = (
     "docs/internal/design-contradictions.md",
     # Cited only in comments and docstrings, and from the Rust datagen.
     "docs/internal/observability-pushgateway.md",
-    "docs/reproductions/README.md",
-    "docs/reproductions/c360-scale-0-1.yaml",
 )
 
 _CONFIG_READERS = ("Makefile", "pyproject.toml", ".pre-commit-config.yaml")
