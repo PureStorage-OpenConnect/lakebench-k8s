@@ -151,14 +151,16 @@ def jar_coordinates(cfg: LakebenchConfig) -> list[str]:
 
 
 def _deps_key(cfg: LakebenchConfig, key: str) -> str | None:
-    """``platform.deps.<key>``. The keys arrive with SD-4a, which replaces
-    this getattr with direct access to str-typed fields; until then every
-    key reads None and the public repositories apply."""
-    block = getattr(cfg.platform, "deps", None)
-    value = getattr(block, key, None) if block is not None else None
-    if value is None:
-        return None
-    return str(value).strip() or None
+    """``platform.deps.<key>``, or None when it is empty. The schema has
+    already normalised the URL (one trailing slash, or none for the DuckDB
+    repository) and refused credentials, queries and other schemes."""
+    deps = cfg.platform.deps
+    value: str = {
+        "maven_repository": deps.maven_repository,
+        "pypi_index": deps.pypi_index,
+        "duckdb_extension_repository": deps.duckdb_extension_repository,
+    }[key]
+    return value.strip() or None
 
 
 def repositories(cfg: LakebenchConfig) -> list[str]:

@@ -61,12 +61,28 @@ The deployment engine follows this fixed sequence:
    other. With `platform.compute.spark.operator.install: true`, deploy also
    installs the operator when it is missing; with `install: false` (the
    default), a missing or broken operator fails the deploy.
-10. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
+10. **Dependency server** -- Starts `lb-deps` (a Deployment, a Service and the
+    5Gi PVC `lb-deps-data`) in the namespace, on the stock Spark image. Its init
+    containers resolve the jars (and the AML reference wheels, and the DuckDB
+    wheel and extensions when DuckDB is the engine) onto the PVC with a sha256
+    for every file; the serving container re-hashes the set at every start and
+    then serves it read-only. Deploy waits for it to be Ready (up to 900 s,
+    within `--timeout`), reads the set's manifest from the pod with `kubectl
+    exec`, recomputes the set hash from its entries and checks it, and records
+    it in the ConfigMap `lb-deps-manifest` and the namespace annotation
+    `lakebench.deployment/deps-set`. A redeploy with the same config renders
+    the same pod template, so the pod is not restarted and nothing is resolved
+    again; a changed image, table format version, workload, query engine,
+    mirror key or Lakebench resolver resolves once more. The step reads pods,
+    pod logs, events and the named StorageClass, and execs into the server
+    pod. See
+    [Dependency server failures](#dependency-server-failures).
+11. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
     (StatefulSet) with the connector configured to point at the catalog.
     Skipped unless `architecture.query_engine.type` is `trino`.
-11. **Spark Thrift Server** -- Deployed when the query engine is `spark-thrift`.
-12. **DuckDB** -- Deployed when the query engine is `duckdb`.
-13. **Observability** -- Only when `observability.enabled` is true or the
+12. **Spark Thrift Server** -- Deployed when the query engine is `spark-thrift`.
+13. **DuckDB** -- Deployed when the query engine is `duckdb`.
+14. **Observability** -- Only when `observability.enabled` is true or the
     `--include-observability` flag is used. Prometheus and Grafana come from
     one shared `kube-prometheus-stack` release in the `lakebench-observability`
     namespace. Deploy installs it only if no such release exists on the
@@ -76,6 +92,31 @@ The deployment engine follows this fixed sequence:
 
 Run `lakebench validate` to check the operator and StorageClass before
 deploying.
+
+### Dependency server failures
+
+The `deps` step fails at once, naming the container and its `LB_DEPS_ERROR`
+line, when a resolve exits non-zero; it does not wait out the 900 s. The
+common causes and their fixes:
+
+| Message | Fix |
+|---|---|
+| `missing <coordinate> from <repositories> egress: ...` | The cluster cannot reach Maven Central or PyPI. Set `platform.deps.maven_repository` and `platform.deps.pypi_index` (and `duckdb_extension_repository` for DuckDB) to a mirror |
+| `missing ...` without `egress:` | The repository answered but has no such artifact; check the image and table format versions |
+| `pvc lb-deps-data has N MiB free` | Delete PVC `lb-deps-data` and re-run deploy, or set `platform.deps.storage_class` |
+| `Permission denied` on `/deps` | The PVC's StorageClass ignores `fsGroup`; set `platform.deps.storage_class` to one that honours it, delete the PVC and re-run deploy |
+| `serve exited 4: ... hash mismatch` | A file of the set changed on the PVC. Re-run deploy: the pod is replaced and its init containers resolve the set again |
+| `volume node affinity conflict` | The PVC's node is gone (an unreplicated StorageClass). Delete PVC `lb-deps-data` and re-run deploy |
+| `no StorageClass and the cluster has no default one` | Set `platform.deps.storage_class` |
+| `ReplicaSet cannot create its pod ... security context constraint` | On OpenShift the pod runs as UID 185 through the `lakebench-spark-runner` ServiceAccount, which needs the `anyuid` SCC that the Spark RBAC step grants |
+| `exited 127 ... python3 is not on <image>` | `images.spark` (and `images.duckdb`) must be images that ship `python3` |
+
+A re-run after a failure replaces a failing `lb-deps` pod, so it starts a
+fresh resolve rather than reporting the old pod's error. After you delete PVC
+`lb-deps-data`, the re-run scales `lb-deps` to zero so the claim can go, then
+creates a new one and resolves the set onto it; if a pod that mounts the
+claim is stuck Terminating on a lost node, the step says so and the claim
+goes once that pod does.
 
 ### Command Flags
 

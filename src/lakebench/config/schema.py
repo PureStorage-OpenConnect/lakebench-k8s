@@ -7,6 +7,7 @@ matching the specification in lakebench-spec.md Section 4.
 from __future__ import annotations
 
 import logging
+import re
 from enum import Enum
 from typing import Any, ClassVar, Literal
 
@@ -632,12 +633,100 @@ class ComputeConfig(ConfigModel):
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
 
 
+_DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+
+
+def _is_dns1123_subdomain(name: str) -> bool:
+    return len(name) <= 253 and all(_DNS1123_LABEL.match(p) for p in name.split("."))
+
+
+class DepsConfig(ConfigModel):
+    """The deployment's dependency server, ``lb-deps`` (DEP-2, ch01 s2.7).
+
+    Every key is optional. The three URL keys replace the public sources the
+    ``lb-deps`` resolve reads, for clusters without egress to them. Each one
+    enters the request hash, so changing it re-resolves the set at the next
+    deploy; a mirror that serves the same bytes gives the same set hash.
+    Mirrors are read anonymously, over plain HTTP or over HTTPS with a
+    publicly trusted certificate.
+    """
+
+    maven_repository: str = Field(
+        default="",
+        description="The only Maven repository the resolve reads; replaces Maven "
+        "Central and the Google mirror. Empty = the public repositories.",
+    )
+    pypi_index: str = Field(
+        default="",
+        description="PyPI simple index for the AML reference and DuckDB wheels. "
+        "Empty = https://pypi.org/simple/.",
+    )
+    duckdb_extension_repository: str = Field(
+        default="",
+        description="DuckDB extension repository. Empty = http://extensions.duckdb.org.",
+    )
+    storage_class: str = Field(
+        default="",
+        description="StorageClass of the lb-deps-data PVC. Empty = the cluster default. "
+        "Applies when the PVC is created; an existing PVC is never changed.",
+    )
+
+    @field_validator("maven_repository", "pypi_index", "duckdb_extension_repository")
+    @classmethod
+    def _mirror_url(cls, value: str, info: ValidationInfo) -> str:
+        from urllib.parse import urlsplit
+
+        url = value.strip()
+        if not url:
+            return ""
+        key = f"platform.deps.{info.field_name}"
+        if not url.isascii() or any(not c.isprintable() for c in url):
+            raise ValueError(f"{key} must be a plain ASCII URL, not {url!r}")
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname
+            _ = parts.port  # raises on a port that is not a number in range
+            has_userinfo = parts.username is not None or parts.password is not None
+        except ValueError as e:
+            raise ValueError(f"{key} is not a URL: {url!r} ({e})") from e
+        scheme = parts.scheme.lower()
+        if scheme not in ("http", "https") or not host:
+            raise ValueError(f"{key} must be an http:// or https:// URL with a host, not {url!r}")
+        if has_userinfo:
+            # It would be written into the lb-deps request ConfigMap and the
+            # resolve logs. Mirror credentials are not supported.
+            raise ValueError(
+                f"{key} must not carry credentials (user:password@); mirrors are read anonymously"
+            )
+        if parts.query or parts.fragment or any(c.isspace() for c in url):
+            raise ValueError(f"{key} must be a plain base URL, without a query or fragment")
+        # One spelling per mirror (lowercase scheme and host, one trailing
+        # slash or none), so a spelling alone does not change the request
+        # hash and re-resolve the set.
+        url = parts._replace(scheme=scheme, netloc=parts.netloc.lower()).geturl()
+        if info.field_name == "duckdb_extension_repository":
+            return url.rstrip("/")
+        return url.rstrip("/") + "/"
+
+    @field_validator("storage_class")
+    @classmethod
+    def _storage_class_name(cls, value: str) -> str:
+        name = value.strip()
+        if name and not _is_dns1123_subdomain(name):
+            raise ValueError(
+                "platform.deps.storage_class must be a StorageClass name "
+                f"(a lowercase DNS subdomain), not {name!r}"
+            )
+        return name
+
+
 class PlatformConfig(ConfigModel):
     """Layer 1: Platform configuration."""
 
     kubernetes: KubernetesConfig = Field(default_factory=KubernetesConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     compute: ComputeConfig = Field(default_factory=ComputeConfig)
+    deps: DepsConfig = Field(default_factory=DepsConfig)
 
 
 # =============================================================================

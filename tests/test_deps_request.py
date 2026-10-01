@@ -290,16 +290,31 @@ def test_every_request_field_enters_the_hash(field, value):
     assert dataclasses.replace(base, **{field: value}).request_sha256 != base.request_sha256
 
 
-def test_deps_key_reads_platform_deps():
-    """The getattr shim must read platform.deps once SD-4a adds it."""
-    from types import SimpleNamespace
+def _with_deps(**deps):
+    s3 = {"endpoint": "http://minio:9000", "access_key": "k", "secret_key": "s"}
+    return make_config(platform={"storage": {"s3": s3}, "deps": deps})
 
-    cfg = SimpleNamespace(
-        platform=SimpleNamespace(deps=SimpleNamespace(maven_repository=" http://nexus/m2/ "))
-    )
+
+def test_deps_key_reads_platform_deps():
+    """request.py reads the typed platform.deps keys (SD-4a)."""
+    cfg = _with_deps(maven_repository=" http://nexus/m2 ")
     assert req._deps_key(cfg, "maven_repository") == "http://nexus/m2/"
     assert req._deps_key(cfg, "pypi_index") is None
-    assert req._deps_key(SimpleNamespace(platform=SimpleNamespace()), "maven_repository") is None
+    assert req.repositories(cfg) == ["http://nexus/m2/"]
+    assert req.repositories(_with_deps())[0] == req.MAVEN_CENTRAL
+    aml = make_config(recipe="polaris-iceberg-spark-duckdb", workload={"schema": "financial"})
+    mirrored = aml.model_copy(deep=True)
+    mirrored.platform.deps.pypi_index = "http://pypi.lab/simple/"
+    mirrored.platform.deps.duckdb_extension_repository = "http://ext.lab"
+    r = req.select_request(mirrored, tools_digest="t")
+    assert (r.pypi_index, r.duckdb_extension_repository) == (
+        "http://pypi.lab/simple/",
+        "http://ext.lab",
+    )
+    assert r.request_sha256 != req.select_request(aml, tools_digest="t").request_sha256
+    assert req.egress_hosts(mirrored) == sorted(
+        {"repo1.maven.org", "maven-central.storage-download.googleapis.com", "pypi.lab", "ext.lab"}
+    )
 
 
 def test_pypi_files_host_follows_the_index_host(monkeypatch):

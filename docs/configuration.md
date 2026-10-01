@@ -286,6 +286,16 @@ platform:
       # Global driver overrides (null = profile default).
       driver_memory: null
       driver_cores: null
+
+  # Dependency server (lb-deps). deploy resolves the jars and wheels this
+  # deployment needs onto a 5Gi PVC in its namespace and serves them there.
+  # Every key is optional; the URL keys point the resolve at a mirror for
+  # clusters without egress to the public repositories.
+  deps:
+    maven_repository: ""              # Empty = Maven Central, then its Google mirror
+    pypi_index: ""                    # Empty = https://pypi.org/simple/
+    duckdb_extension_repository: ""   # Empty = http://extensions.duckdb.org
+    storage_class: ""                 # PVC lb-deps-data; empty = cluster default
 ```
 
 ### Executor Override Guide
@@ -528,6 +538,30 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 |---|---|---|---|
 | `platform.compute.postgres.storage` | string | `10Gi` | PVC size for PostgreSQL data. |
 | `platform.compute.postgres.storage_class` | string | `""` | StorageClass for PostgreSQL PVC. Empty = cluster default StorageClass (requires one to exist -- see [Prerequisites](getting-started.md#default-storageclass)). |
+
+### Platform -- Dependency server
+
+`deploy` starts one dependency server, `lb-deps`, in the deployment's
+namespace. It resolves the Maven jars (and, for the AML workload, the
+reference detector's Python wheels; for DuckDB, its wheel and extension
+files) onto the PVC `lb-deps-data`, records a sha256 for every file, and
+serves the set read-only inside the namespace. The set is resolved again
+only when the request changes: the Spark or DuckDB image tag, the table
+format or its version, the workload (AML adds the reference wheels), the
+query engine or the DuckDB version, a mirror key, or the resolver shipped
+with Lakebench. The request names images by tag; the manifest records the
+digest each container actually ran.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `platform.deps.maven_repository` | string | `""` | The only Maven repository the resolve reads; replaces Maven Central and the Google mirror. An `http://` or `https://` base URL without credentials, query or fragment; stored with one trailing `/`. |
+| `platform.deps.pypi_index` | string | `""` | PyPI simple index for the AML reference wheels and the DuckDB wheel. Empty = `https://pypi.org/simple/`. A plain-HTTP index is passed to pip as a trusted host. |
+| `platform.deps.duckdb_extension_repository` | string | `""` | DuckDB extension repository. Empty = `http://extensions.duckdb.org`. |
+| `platform.deps.storage_class` | string | `""` | StorageClass of the `lb-deps-data` PVC (5Gi, ReadWriteOnce). Empty = the cluster default StorageClass. Read only when the PVC is created; an existing PVC is never changed, so delete it to move the set. The volume must be writable by UID 185 through `fsGroup`. |
+
+Mirrors are read anonymously, over plain HTTP or over HTTPS with a publicly
+trusted certificate. A mirror that serves the same bytes yields the same
+dependency set hash.
 
 ### Architecture -- Catalog
 
@@ -831,7 +865,8 @@ and `validate`.
 
 The algorithm:
 
-1. **Always-on pods** (Trino coordinator + workers, Hive/Polaris, PostgreSQL)
+1. **Always-on pods** (Trino coordinator + workers, Hive/Polaris, PostgreSQL,
+   and the `lb-deps` dependency server at its 1 CPU / 2 GiB reservation)
    are sized from tier guidance and capped to fit the cluster. They are never
    boosted beyond the tier recommendation.
 2. **Datagen and Spark** share the remaining CPU budget.

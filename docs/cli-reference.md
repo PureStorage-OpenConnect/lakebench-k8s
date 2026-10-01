@@ -224,8 +224,10 @@ StorageClass check (it must already exist; `lakebench admin
 install-scratch-storage-class` installs it), PostgreSQL, catalog (Hive or
 Polaris), Spark RBAC, Unity Catalog (only when `catalog.type` is `unity`; no
 recipe uses it), Spark Operator check and watch-list entry for the
-namespace (under the cluster lock), then the query engine (Trino, Spark
-Thrift or DuckDB), and optionally the shared observability stack. The Spark
+namespace (under the cluster lock), the dependency server (`lb-deps`:
+resolves the jars and wheels onto its own PVC and serves them in the
+namespace), then the query engine (Trino, Spark Thrift or DuckDB), and
+optionally the shared observability stack. The Spark
 Operator step always runs: it checks the operator is ready and adds the
 namespace to its watch list whatever `operator.install` says;
 `operator.install: true` also installs a missing operator.

@@ -33,6 +33,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from lakebench.config.scale import full_compute_guidance
+from lakebench.deps import manifest as _deps_manifest
 
 if TYPE_CHECKING:
     from lakebench.config.schema import LakebenchConfig
@@ -511,6 +512,11 @@ def _round_down_even(n: int) -> int:
     return max(2, n - (n % 2))
 
 
+# The lb-deps pod's reservation (DEP-2): the scheduler keeps the resolve
+# init container's request for the pod's whole life.
+_LB_DEPS_CPU_M = _deps_manifest.POD_REQUEST_CPU_M
+
+
 def _co_resident_label(config: LakebenchConfig) -> str:
     """Human-readable list of the pods ``_co_resident_cpu_m`` counts."""
     engine_type = config.architecture.query_engine.type.value
@@ -524,8 +530,8 @@ def _co_resident_label(config: LakebenchConfig) -> str:
     elif engine_type == "duckdb":
         engine = f"DuckDB {config.architecture.query_engine.duckdb.cores}"
     else:
-        return "catalog/Postgres 1"
-    return f"{engine}, catalog/Postgres 1"
+        return f"catalog/Postgres 1, lb-deps {_LB_DEPS_CPU_M / 1000:g}"
+    return f"{engine}, catalog/Postgres 1, lb-deps {_LB_DEPS_CPU_M / 1000:g}"
 
 
 def _co_resident_cpu_m(config: LakebenchConfig) -> int:
@@ -538,11 +544,13 @@ def _co_resident_cpu_m(config: LakebenchConfig) -> int:
     - **spark-thrift**: Spark Thrift Server driver + executors
     - **none**: No engine overhead
 
-    Hive Metastore and PostgreSQL are always included (~1 CPU total).
+    Hive Metastore and PostgreSQL are always included (~1 CPU total), and so
+    is the ``lb-deps`` dependency server at its pod's effective request
+    (DEP-2; the resolve init container's request stays reserved).
     """
     engine_type = config.architecture.query_engine.type.value
     # Hive + Postgres are small but add up (~1 CPU total)
-    infra_m = 1000
+    infra_m = 1000 + _LB_DEPS_CPU_M
 
     if engine_type == "trino":
         coord = config.architecture.query_engine.trino.coordinator
@@ -614,7 +622,9 @@ def _apply_cluster_scaling(
         # Trino is always running.  Subtract coordinator + infra overhead
         # from the cluster, then compute how many workers fit.
         coord = config.architecture.query_engine.trino.coordinator
-        coord_and_infra_m = _parse_cpu_millicores(coord.cpu) + 1000  # coordinator + Hive/Postgres
+        coord_and_infra_m = (
+            _parse_cpu_millicores(coord.cpu) + 1000 + _LB_DEPS_CPU_M
+        )  # coordinator + Hive/Postgres + lb-deps
         trino_worker_budget_m = max(0, cap.total_cpu_millicores - coord_and_infra_m)
         worker_cpu_m = _parse_cpu_millicores(worker.cpu)
         cluster_max_workers = max(1, trino_worker_budget_m // worker_cpu_m)
