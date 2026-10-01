@@ -89,7 +89,7 @@ deploying.
 | `--file` | `-f` | Config file (alternative to the positional argument) |
 | `--dry-run` | | Show what would be deployed without making changes |
 | `--yes` | `-y` | Skip the confirmation prompt |
-| `--timeout` | `-t` | Global deployment timeout in seconds, checked between steps (default 3600, `0` = no timeout) |
+| `--timeout` | `-t` | Global deployment timeout in seconds (default 3600, `0` = no timeout). Every wait inside a step is bounded by it; when it runs out, the step fails naming the component and what it was waiting for. Helm and API calls already running are not interrupted |
 | `--local` | | Deploy locally with podman or docker instead of Kubernetes |
 | `--workdir` | | Host directory for local mode state (default `~/.lakebench/local/<name>`) |
 | `--force-legacy` | | Claim ownership of a pre-1.5 namespace or untagged bucket without tag proof. Use only for resources you have confirmed are yours |

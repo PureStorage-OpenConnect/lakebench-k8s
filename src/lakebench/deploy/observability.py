@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from lakebench.deploy import deadline as deploy_deadline
 from lakebench.k8s import PlatformType, SecurityVerifier, pinned_helm, pinned_kubectl
 
 from .engine import DeploymentResult, DeploymentStatus
@@ -62,7 +63,7 @@ _READY_JSONPATH = '{range .items[*]}{.status.conditions[?(@.type=="Ready")].stat
 
 def _wait_for_prometheus(
     namespace: str,
-    timeout_s: int = _PROMETHEUS_READY_TIMEOUT_S,
+    timeout_s: float = _PROMETHEUS_READY_TIMEOUT_S,
     context: str | None = None,
 ) -> str:
     """Wait until a Prometheus pod of the release is Ready; '' when it is, else why not."""
@@ -92,6 +93,7 @@ def _wait_for_prometheus(
         except (OSError, subprocess.TimeoutExpired) as e:
             last = str(e)
         if time.time() >= deadline:
+            deploy_deadline.check(f"Prometheus Ready in namespace {namespace}", last)
             return (
                 f"Prometheus in namespace '{namespace}' was not Ready after {timeout_s}s "
                 f"({last}); platform metrics would be empty"
@@ -307,7 +309,11 @@ class ObservabilityDeployer:
             # install does not stall other deployments' lease holders.
             release_ns = (result.details or {}).get("release_namespace")
             if result.status == DeploymentStatus.SUCCESS and release_ns:
-                problem = _wait_for_prometheus(release_ns, context=self._kube_context())
+                problem = _wait_for_prometheus(
+                    release_ns,
+                    timeout_s=deploy_deadline.clamp(_PROMETHEUS_READY_TIMEOUT_S),
+                    context=self._kube_context(),
+                )
                 if problem:
                     return DeploymentResult(
                         component="observability",

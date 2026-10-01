@@ -217,7 +217,7 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 |---|---|---|---|
 | `--dry-run` | | `false` | Show what would be deployed without making changes |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout) |
+| `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout); bounds every wait inside every step |
 | `--local` | | `false` | Deploy locally with podman/docker instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--force-legacy` | | `false` | Claim ownership without tag proof: a pre-1.5 annotation-less namespace or untagged bucket, or a bucket on a backend without tagging that does not match the deployment-name prefix. Use only when you have confirmed the resources are yours |
