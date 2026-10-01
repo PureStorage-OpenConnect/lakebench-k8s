@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`--credentials-env PREFIX` renames them). The recipe's components are
   written as a commented block, so `init --recipe polaris-*` no longer
   writes `catalog.type: hive` and resolves to Hive. No Polaris client
-  secret is written. `init` prints its choices on stderr, with or without a
+  secret is written: deploy generates one per deployment. `init` prints its choices on stderr, with or without a
   terminal, and refuses (exit 2, nothing written) a combination that would
   not load. `--access-key` and `--secret-key` are refused with exit 2 and
   the values are never echoed; `--interactive`, `-i` and `--advanced` print
@@ -33,17 +33,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   silently. `destroy`, `status`, `report` and the inspect commands still
   load such a config as v1.6 did, with a note. Images and engine resources
   stay overridable.
-- **`${VAR}` is substituted into parsed values, not the file text.** A
-  secret holding `#`, a leading `!` or `*`, quotes or only digits used to be
-  truncated, fail the parse with the value in the error, or become a
-  number; it now arrives verbatim. A `${VAR}` in a comment is no longer
-  required to be set, and every unset variable is named in one error. A
-  value that is only `${VAR}` is now a string: decimal numbers and
-  true/false still load into numeric and boolean keys, but hex, `1_000` or
-  date spellings no longer convert. One that resolves to nothing is null,
-  as before. A reference inside a key, or an unclosed `${VAR:-default`, is
-  refused; Spark's `${env:X}` passes through. A reference inside flow
-  syntax (`[${A}, ${B}]`) must be quoted.
+- **`${VAR}` is substituted per value, not in the file text.** An unquoted
+  value (`seed: ${LB_SEED}`) loads exactly as before: the substituted text
+  is trimmed and typed by YAML 1.1, so `0042` is still 34, `0x1F` 31,
+  `true` a bool and an empty value null. A quoted value
+  (`secret_key: "${S3_SECRET}"`) now arrives verbatim as a string: a secret
+  holding ` #`, quotes, a backslash, a leading `!` or `*`, or only digits
+  used to be truncated, retyped, or fail the parse with the value in the
+  error. `init` writes the credential references quoted. Two things fail
+  where they loaded before: an unclosed `${VAR:-default` (a default cut
+  short by ` #` used to load the part before the comment), and a reference
+  inside flow syntax (`[${A}, ${B}]`), which must be quoted. A `${VAR}` in
+  a comment is no longer read, and every unset variable is named in one
+  error.
 - **A config with no `recipe:`, or `recipe: default`, is deprecated.** It
   still resolves as before (to `hive-iceberg-spark-trino` when it sets no
   component, otherwise to the components it sets) and loads with a note

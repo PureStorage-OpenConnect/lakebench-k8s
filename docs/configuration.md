@@ -128,20 +128,22 @@ platform:
   storage:
     s3:
       endpoint: ${S3_ENDPOINT}
-      access_key: ${S3_ACCESS_KEY}
-      secret_key: ${S3_SECRET_KEY}
+      access_key: "${S3_ACCESS_KEY}"
+      secret_key: "${S3_SECRET_KEY}"
 workload:
   datagen:
     scale: ${LAKEBENCH_SCALE:-10}
 ```
 
 Unresolved variables without defaults produce one error naming all of them.
-Substitution runs on the parsed values, not on the file text: a secret that
-contains YAML syntax (`#`, a leading `!` or `*`, quotes, only digits) arrives
-verbatim as a string, and a `${VAR}` inside a comment is not read. A value
-that is only a reference and resolves to nothing is null. A reference inside
-a key, or an unclosed `${VAR:-default` (a default cut short by ` #`), is an
-error. Inside flow syntax (`[${A}, ${B}]`) quote each reference.
+Substitution runs value by value, not on the file text. An unquoted value
+is trimmed and typed as YAML types it (`0042` is octal 34, `true` a bool, an
+empty value null), as in v1.6. A quoted value (`"${S3_SECRET}"`) arrives
+verbatim as a string, so quote every credential reference: a secret with
+` #`, quotes or only digits is then passed through unchanged. A `${VAR}` in
+a comment is not read. An unclosed `${VAR:-default` (a default cut short
+by ` #`) is an error, and inside flow syntax (`[${A}, ${B}]`) each
+reference must be quoted.
 
 ### Nested Config (v1.2 Compatible)
 

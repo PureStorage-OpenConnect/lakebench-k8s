@@ -352,8 +352,8 @@ platform:
   storage:
     s3:
       endpoint: "http://your-s3-endpoint:80"
-      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
-      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
+      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
 # Set by the recipe. Written out, each must agree with it:
 # architecture:
 #   catalog: {type: polaris}

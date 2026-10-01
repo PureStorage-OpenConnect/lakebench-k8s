@@ -86,8 +86,8 @@ platform:
   storage:
     s3:
       endpoint: http://s3.example.com:80
-      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
-      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
+      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
 ```
 
 The name is required by every command that changes data (`deploy`,
@@ -110,8 +110,8 @@ platform:
   storage:
     s3:
       endpoint: http://10.0.1.50:80
-      access_key: ${S3_ACCESS_KEY}   # env var substitution
-      secret_key: ${S3_SECRET_KEY}
+      access_key: "${S3_ACCESS_KEY}"   # env var substitution; quote it
+      secret_key: "${S3_SECRET_KEY}"
 architecture:
   catalog:
     polaris:

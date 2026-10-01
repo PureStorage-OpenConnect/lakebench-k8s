@@ -259,7 +259,7 @@ def version() -> None:
     console.print(f"Lakebench version {__version__}")
 
 
-# init lives in cli/_init.py (CFG-5); registered here to keep its place in --help.
+# init lives in cli/_init.py; registered here to keep its place in --help.
 from lakebench.cli._init import init as _init_fn  # noqa: E402
 
 app.command(name="init")(_init_fn)

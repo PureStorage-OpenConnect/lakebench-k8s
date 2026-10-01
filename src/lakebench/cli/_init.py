@@ -1,12 +1,12 @@
-"""``lakebench init``: write a first-day config (CFG-5).
+"""``lakebench init``: write a first-day config.
 
 The file is built from a small dict and written by a short emitter that
 keeps comments, so it holds only what a first run needs: a unique name, the
 recipe written once, the workload and scale, the S3 endpoint and the two
 credentials as ``${VAR}`` references. The components the recipe sets are
-written commented. No plaintext secret is ever written, and the Polaris
-client secret is not written at all: deploy generates it per deployment
-(SAF-8). Before anything is written the text is validated in-process, so
+written commented. No plaintext secret is ever written, and no Polaris
+client secret is written: deploy generates one per deployment, and this
+module must not ship ahead of that deploy change. Before anything is written the text is validated in-process, so
 ``init`` never leaves a file that does not load.
 
 The guided wizard (``init_wizard.py``) is removed. ``--interactive``, ``-i``
@@ -36,7 +36,7 @@ from lakebench.cli._helpers import (
     warn_deprecated_short_f,
 )
 
-#: The recipe ``init`` writes when ``--recipe`` is not given (K13).
+#: The recipe ``init`` writes when ``--recipe`` is not given.
 DEFAULT_RECIPE = "polaris-iceberg-spark-trino"
 DEFAULT_WORKLOAD = "customer360"
 DEFAULT_SCALE = 1.0
@@ -45,13 +45,19 @@ DEFAULT_SCALE = 1.0
 DEFAULT_CREDENTIALS_ENV = "LAKEBENCH_S3"
 #: Non-comment lines in the default output (design 02 section 2.5).
 LINE_BUDGET = 12
-#: Exit code for a refused flag or a config that would not load. CC-8 moves
-#: every refusal onto its ExitCode enum.
+#: Exit code for a refused flag or a config that would not load.
 _EXIT_REFUSED = 2
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # A YAML plain scalar that reads back as this same string: no quoting needed.
 _PLAIN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+# Bronze per scale unit (docs/data-generation.md): customer360 about 10 GB,
+# financial about 8.4 GB of pacs.008.
+_SCALE_COMMENT = {
+    "customer360": "1 is about 10 GB of bronze",
+    "financial": "1 is about 8.4 GB of bronze",
+}
 
 _WIZARD_REMOVED = "the init wizard is removed; init writes a default config (see init --help)"
 
@@ -62,7 +68,7 @@ def default_name(user: str | None = None, token: str | None = None) -> str:
     The user part is lowercased, reduced to ``[a-z0-9-]`` and cut to 10
     characters, so the name is at most 18 characters and fits the
     23-character namespace a Hive recipe accepts (``schema.py``
-    ``_DERIVED_NAMES``, LB-153).
+    ``_DERIVED_NAMES``).
     """
     if user is None:
         import getpass
@@ -91,7 +97,9 @@ def _scalar(value: Any) -> str:
     text = str(value)
     # Plain only when YAML reads it back as this same string: '0x1f',
     # '2024-01-01', 'yes' or 'a: b' would come back as something else.
-    if _PLAIN.fullmatch(text):
+    # A ${VAR} reference is always quoted: the loader passes a quoted
+    # scalar through verbatim, so the secret it names is never retyped.
+    if _PLAIN.fullmatch(text) and "${" not in text:
         try:
             if yaml.safe_load(text) == text:
                 return text
@@ -180,7 +188,8 @@ def first_day_config(
         credentials_env=credentials_env,
         namespace=namespace,
     )
-    comments = {"workload.datagen.scale": "1 is about 10 GB of bronze"}
+    comments = {"workload.datagen.scale": _SCALE_COMMENT.get(workload, "")}
+    comments = {k: v for k, v in comments.items() if v}
     if not endpoint:
         comments["platform.storage.s3.endpoint"] = "set this, e.g. http://your-s3:80"
     lines = [
@@ -264,7 +273,10 @@ def init(
         typer.Option(
             "--scale",
             "-s",
-            help="Scale factor: 1 is about 10 GB of bronze (default 1; 0.1 with --local)",
+            help=(
+                "Scale factor: 1 is about 10 GB of bronze for customer360, 8.4 GB "
+                "for financial (default 1; 0.1 with --local)"
+            ),
         ),
     ] = None,
     endpoint: Annotated[
@@ -383,14 +395,15 @@ def init(
         print_error(f"File already exists: {output}")
         print_info("Use --overwrite to replace it")
         raise typer.Exit(1)
-    kept_name = None if name else _existing_name(output)
+    replaced = _replaced_config(output) if overwrite else None
+    kept_name = None if name else _name_of(replaced)
     if overwrite and output.is_file() and not name and not kept_name:
         from lakebench.config.deploy_state import read_legacy_name
 
         legacy = read_legacy_name(output)
         if legacy:
             # v1.6 gave every nameless config in this directory that name, so
-            # it may be this file's deployment or a sibling's (SAF-2).
+            # it may be this file's deployment or a sibling's.
             _refuse(
                 f"{output} has no name, and v1.6 recorded '{legacy}' for nameless "
                 f"configs here: pass --name {legacy} if this file deployed it, or "
@@ -413,12 +426,14 @@ def init(
         problem = config_problem(local_text, credentials_env)
         if problem:
             _refuse(f"nothing written: this config would not load: {problem}")
+        if kept_name:
+            _refuse_if_target_moves(output, replaced, local_text)
         _write_local_config(output, local_text, 0.1 if scale is None else scale)
         return
 
     recipe = recipe or DEFAULT_RECIPE
     if recipe == "default":
-        # The alias is deprecated (CFG-8): write what it resolves to.
+        # The alias is deprecated: write what it resolves to.
         from lakebench.config.loader import DEFAULT_RECIPE_RESOLUTION
 
         recipe = DEFAULT_RECIPE_RESOLUTION
@@ -446,6 +461,8 @@ def init(
     problem = config_problem(text, credentials_env)
     if problem:
         _refuse(f"nothing written: this config would not load: {problem}")
+    if kept_name:
+        _refuse_if_target_moves(output, replaced, text)
     output.write_text(text)
 
     _say(f"wrote {output}")
@@ -509,16 +526,67 @@ platform:
 """
 
 
-def _existing_name(path: Path) -> str | None:
-    """The ``name:`` of the config about to be overwritten, if it has one."""
+def _replaced_config(path: Path) -> dict[str, Any] | None:
+    """The raw dict of the config about to be overwritten, if it parses."""
     if not path.is_file():
         return None
     try:
         data = yaml.safe_load(path.read_text())
     except (OSError, yaml.YAMLError, UnicodeDecodeError):
         return None
-    value = data.get("name") if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else None
+
+
+def _name_of(data: dict[str, Any] | None) -> str | None:
+    value = (data or {}).get("name")
     return value if isinstance(value, str) and value else None
+
+
+def _sub(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _deployment_target(data: dict[str, Any]) -> dict[str, str]:
+    """What destroy and status act on for a raw config: namespace, buckets
+    and the recipe its components resolve to (v1.6 precedence)."""
+    from lakebench.config.loader import DEFAULT_RECIPE_RESOLUTION
+    from lakebench.config.recipes import RECIPES, written_recipe
+
+    name = str(data.get("name") or "")
+    platform = _sub(data, "platform")
+    k8s = _sub(platform, "kubernetes")
+    buckets = _sub(_sub(_sub(platform, "storage"), "s3"), "buckets")
+    recipe = data.get("recipe")
+    if recipe in (None, "", "default") or recipe not in RECIPES:
+        recipe = DEFAULT_RECIPE_RESOLUTION
+    target = {
+        "namespace": str(k8s.get("namespace") or name),
+        "recipe": written_recipe(data, str(recipe)) or str(recipe),
+    }
+    for layer in ("bronze", "silver", "gold"):
+        target[f"buckets.{layer}"] = str(buckets.get(layer) or f"{name}-{layer}")
+    return target
+
+
+def _refuse_if_target_moves(output: Path, replaced: dict[str, Any] | None, text: str) -> None:
+    """Refuse an overwrite that keeps the name but moves what it deploys.
+
+    The kept name says "the same deployment"; if the replaced file put it
+    in another namespace, other buckets or another architecture, a later
+    destroy from the new file would aim at the wrong one.
+    """
+    if not replaced:
+        return
+    before = _deployment_target(replaced)
+    after = _deployment_target(yaml.safe_load(text))
+    moved = [f"{k} '{before[k]}' -> '{after[k]}'" for k in before if before[k] != after[k]]
+    if moved:
+        _refuse(
+            f"{output} keeps its name but the new file would move its deployment: "
+            + "; ".join(moved)
+            + ". Pass --name to write a config for a new deployment, or edit the file"
+        )
 
 
 def _local_config_text(output: Path, name: str, scale: float, workload_schema: str = "") -> str:

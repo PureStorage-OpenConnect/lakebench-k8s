@@ -492,13 +492,48 @@ def test_unresolved_env_vars_are_all_named(tmp_path, monkeypatch):
 
 def test_overwrite_keeps_the_existing_name(tmp_path):
     out = tmp_path / "o.yaml"
-    out.write_text("name: my-lakehouse\nrecipe: hive-iceberg-spark-trino\n")
+    out.write_text("name: my-lakehouse\nrecipe: polaris-iceberg-spark-trino\n")
     r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
     assert r.exit_code == 0, r.output
     assert yaml.safe_load(out.read_text())["name"] == "my-lakehouse"
     assert "kept from the file it replaced" in r.stderr
     r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--name", "other-n"])
     assert yaml.safe_load(out.read_text())["name"] == "other-n"
+
+
+@pytest.mark.parametrize(
+    ("old", "moved"),
+    [
+        (
+            "name: team\nrecipe: polaris-iceberg-spark-trino\n"
+            "platform:\n  kubernetes:\n    namespace: team-ns\n",
+            "namespace 'team-ns' -> 'team'",
+        ),
+        (
+            "name: team\nrecipe: polaris-iceberg-spark-trino\n"
+            "platform:\n  storage:\n    s3:\n      buckets:\n        bronze: shared-b\n",
+            "buckets.bronze 'shared-b' -> 'team-bronze'",
+        ),
+        ("name: team\nrecipe: hive-iceberg-spark-trino\n", "recipe 'hive-iceberg-spark-trino'"),
+        (
+            # v1.6 init -r polaris-*: the written catalog won, so it deployed Hive.
+            "name: team\nrecipe: polaris-iceberg-spark-trino\n"
+            "architecture:\n  catalog:\n    type: hive\n",
+            "recipe 'hive-iceberg-spark-trino' -> 'polaris-iceberg-spark-trino'",
+        ),
+        ("name: team\n", "recipe 'hive-iceberg-spark-trino'"),
+    ],
+)
+def test_overwrite_that_moves_the_deployment_is_refused(tmp_path, old, moved):
+    out = tmp_path / "o.yaml"
+    out.write_text(old)
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
+    assert r.exit_code == 2, r.output
+    assert moved in r.output and "--name" in r.output
+    assert out.read_text() == old
+    # Naming a new deployment is the way through.
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--name", "fresh-n"])
+    assert r.exit_code == 0, r.output
 
 
 def test_local_output_is_validated(tmp_path):
@@ -541,19 +576,20 @@ def test_empty_whole_value_reference_is_null(tmp_path, monkeypatch):
     assert cfg.platform.storage.s3.region == "x-"
 
 
-def test_reference_in_a_key_is_refused(tmp_path, monkeypatch):
-    from lakebench.config import ConfigError
-
+def test_reference_in_a_key_is_substituted_as_v16_did(tmp_path, monkeypatch):
     monkeypatch.setenv("LB_B", "bkt")
-    with pytest.raises(ConfigError, match=r"spark\.conf\..*not substituted in keys"):
-        _load_text(tmp_path, "name: k-t\nspark:\n  conf:\n    a.${LB_B}.endpoint: x\n")
+    cfg = _load_text(
+        tmp_path,
+        "name: k-t\nrecipe: hive-iceberg-spark-trino\nspark:\n  conf:\n    a.${LB_B}.endpoint: x\n",
+    )
+    assert cfg.spark.conf["a.bkt.endpoint"] == "x"
 
 
 def test_default_cut_by_a_comment_is_refused(tmp_path, monkeypatch):
     from lakebench.config import ConfigError
 
     monkeypatch.setenv("LB_RG", "eu-1")
-    with pytest.raises(ConfigError, match=r"platform\.storage\.s3\.region.*unclosed"):
+    with pytest.raises(ConfigError, match=r"Unclosed .* at line 5"):
         _load_text(
             tmp_path,
             "name: c-t\nplatform:\n  storage:\n    s3:\n      region: ${LB_RG:-us-east-1 #x}\n",
@@ -578,3 +614,101 @@ def test_overwrite_of_a_nameless_v16_config_needs_a_name(tmp_path):
     assert r.exit_code == 2, r.output
     assert "--name v16-auto" in r.output
     assert out.read_text() == "recipe: hive-iceberg-spark-trino\n"
+
+
+def test_user_set_maps_config_aliases():
+    cfg = LakebenchConfig.model_validate(
+        {"name": "t", "recipe": "hive-iceberg-spark-trino", "workload": {"schema": "financial"}}
+    )
+    assert user_set(cfg, "workload.schema")
+    assert user_set(cfg, "workload.schema_type")
+    assert not user_set(cfg, "workload.datagen.scale")
+
+
+def test_quoted_empty_default_is_an_empty_string(tmp_path, monkeypatch):
+    monkeypatch.delenv("LB_UNSET_R", raising=False)
+    cfg = _load_text(
+        tmp_path,
+        "name: q-t\nrecipe: hive-iceberg-spark-trino\n"
+        'platform:\n  storage:\n    s3:\n      region: "${LB_UNSET_R:-}"\n',
+    )
+    assert cfg.platform.storage.s3.region == ""
+
+
+# -- differential: ${VAR} loads as v1.6 did ---------------------------------
+#
+# v1.6 substituted the raw text and then parsed it. The expected value of a
+# plain scalar is computed that way here, independently of load_yaml; a
+# quoted scalar is expected verbatim (the deliberate change, so a secret is
+# never retyped or truncated).
+
+_ENV_VALUES = [
+    "0042", "010", "42", "-7", "1_000", "0x1F", "12:30", "3.5", "1e3", ".inf",
+    "true", "yes", "off", "null", "~", "", " lb-ns ", "lb-ns\n", "2024-01-01",
+    "abc", "a b", "lb-ns",
+]  # fmt: skip
+
+_PLAIN_FORMS = [
+    "k: ${LB_DIFF}",
+    "k: ${LB_DIFF_UNSET:-%s}",
+    "k: pre-${LB_DIFF}",
+    "k: ${LB_DIFF}${LB_DIFF}",
+]
+
+
+def _v16_expected(form: str, value: str):
+    import os
+
+    from lakebench.config.loader import _ENV_PATTERN
+
+    text = form % value if "%s" in form else form
+
+    def rep(m):
+        got = os.environ.get(m.group(1))
+        return got if got is not None else (m.group(2) or "")
+
+    return yaml.safe_load(_ENV_PATTERN.sub(rep, text) + "\n")["k"]
+
+
+@pytest.mark.parametrize("form", _PLAIN_FORMS)
+@pytest.mark.parametrize("value", _ENV_VALUES)
+def test_plain_reference_loads_as_v16(tmp_path, monkeypatch, form, value):
+    from lakebench.config.loader import load_yaml
+
+    if "%s" in form and value.strip() != value:
+        pytest.skip("a default cannot carry surrounding whitespace in a plain scalar")
+    monkeypatch.setenv("LB_DIFF", value)
+    monkeypatch.delenv("LB_DIFF_UNSET", raising=False)
+    text = form % value if "%s" in form else form
+    p = tmp_path / "d.yaml"
+    p.write_text(text + "\n")
+    try:
+        expected = _v16_expected(form, value)
+    except yaml.YAMLError:
+        pytest.skip("v1.6 could not parse this substitution at all")
+    got = load_yaml(p)["k"]
+    assert got == expected and type(got) is type(expected), (text, value, got, expected)
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize(
+    "value", [*_ENV_VALUES, "x #tail", '"q', "'s", "a\\tb", "!x", "*y", "a: b", "123456"]
+)
+def test_quoted_reference_arrives_verbatim(tmp_path, monkeypatch, quote, value):
+    from lakebench.config.loader import load_yaml
+
+    monkeypatch.setenv("LB_DIFF", value)
+    p = tmp_path / "q.yaml"
+    p.write_text(f"k: {quote}${{LB_DIFF}}{quote}\n")
+    assert load_yaml(p)["k"] == value
+
+
+def test_leading_zero_seed_keeps_its_v16_value(tmp_path, monkeypatch):
+    """A seed from the environment must reach the same corpus as in v1.6."""
+    monkeypatch.setenv("LB_SEED", "0042")
+    cfg = _load_text(
+        tmp_path,
+        "name: s-t\nrecipe: hive-iceberg-spark-trino\n"
+        "workload:\n  datagen:\n    seed: ${LB_SEED}\n",
+    )
+    assert cfg.architecture.workload.datagen.seed == 34

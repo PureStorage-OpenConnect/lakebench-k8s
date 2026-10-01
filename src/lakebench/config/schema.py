@@ -2517,7 +2517,7 @@ class LakebenchConfig(ConfigModel):
         Recipe defaults are merged via ``_deep_setdefault``, so images and
         engine resources the user wrote take precedence. A recipe-owned
         component (``RECIPE_OWNED_KEYS``) written with a different value is
-        refused, naming both keys (CFG-5): before v1.7 the written value won
+        refused, naming both keys: before v1.7 the written value won
         silently, so ``recipe: polaris-...`` with ``catalog.type: hive``
         deployed Hive. The leaf paths the recipe filled in are kept on the
         model as ``_recipe_injected`` for ``recipes.user_set``.
@@ -2578,7 +2578,7 @@ class LakebenchConfig(ConfigModel):
                     )
                 # Destroy, status, report and the inspect commands load it as
                 # v1.6 did, so a deployment made from it can still be found
-                # and torn down (SAF-2's rule for removed keys).
+                # and torn down (the same rule as for removed keys).
                 as_loaded = written or recipe_name
                 emit_note(
                     f"{'; '.join(conflicts)}. Loaded as {as_loaded}, as v1.6 did; "

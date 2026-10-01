@@ -247,7 +247,7 @@ def local_recipes() -> tuple[str, ...]:
 
 #: The component keys a recipe owns. A config that names a recipe may leave
 #: them out, or write the value the recipe sets; any other value is refused
-#: at load (CFG-5). Images and engine resources stay overridable.
+#: at load. Images and engine resources stay overridable.
 RECIPE_OWNED_KEYS: tuple[str, ...] = (
     "architecture.catalog.type",
     "architecture.table_format.type",
@@ -299,7 +299,7 @@ def _raw_value(data: Any, dotted: str) -> Any:
 def recipe_conflicts(data: Mapping[str, Any], recipe: str) -> list[str]:
     """One message per recipe-owned key that *data* sets to another value.
 
-    ``default`` is the CFG-8 alias, under which written components keep
+    ``default`` is the deprecated alias, under which written components keep
     resolving the config as before, so it has no conflicts.
     """
     if recipe == "default" or recipe not in RECIPES:
@@ -378,11 +378,15 @@ def user_set(cfg: Any, path: str) -> bool:
     parts = path.split(".")
     if parts[0] == "workload":
         parts = ["architecture", *parts]
-    if ".".join(parts) in (getattr(cfg, "_recipe_injected", None) or ()):
-        return False
     node = cfg
-    for part in parts:
+    for i, part in enumerate(parts):
         if isinstance(node, BaseModel):
+            fields = type(node).model_fields
+            if part not in fields:
+                # A config spelling (``workload.schema``) names the field by
+                # its alias; the model records the field name.
+                part = next((n for n, f in fields.items() if f.alias == part), part)
+                parts[i] = part
             if part not in node.model_fields_set:
                 return False
             node = getattr(node, part)
@@ -392,4 +396,4 @@ def user_set(cfg: Any, path: str) -> bool:
             node = node[part]
         else:
             return False
-    return True
+    return ".".join(parts) not in (getattr(cfg, "_recipe_injected", None) or ())

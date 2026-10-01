@@ -239,8 +239,9 @@ class ConfigNameRequired(ConfigValidationError):
 def load_yaml(path: Path) -> dict[str, Any]:
     """Load YAML file and return as dictionary.
 
-    Performs ``${VAR}`` / ``${VAR:-default}`` env-var substitution on the
-    parsed string values (``_substitute_in_tree``), never on the raw text.
+    Performs ``${VAR}`` / ``${VAR:-default}`` env-var substitution scalar by
+    scalar while the file is composed (``_EnvLoader``), never on the raw
+    text: a plain scalar resolves as v1.6 did, a quoted one arrives verbatim.
 
     Args:
         path: Path to YAML file
@@ -256,65 +257,63 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ConfigFileNotFoundError(f"Configuration file not found: {path}")
 
+    with open(path) as f:
+        raw = f.read()
+    loader = _EnvLoader(raw)
     try:
-        with open(path) as f:
-            raw = f.read()
-        content = yaml.safe_load(raw)
+        content = loader.get_single_data()
     except yaml.YAMLError as e:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
-    if not content:
-        return {}
-    unresolved: list[str] = []
-    malformed: list[str] = []
-    content = _substitute_in_tree(content, unresolved, malformed)
-    if malformed:
-        raise ConfigError("Malformed environment reference at " + "; ".join(malformed))
-    if unresolved:
-        names = ", ".join(dict.fromkeys(unresolved))
+    finally:
+        loader.dispose()
+    if loader.malformed:
+        raise ConfigError(
+            "Unclosed ${VAR:-default} (a default cut short by a ' #' comment?) at "
+            + ", ".join(loader.malformed)
+        )
+    if loader.unresolved:
+        names = ", ".join(dict.fromkeys(loader.unresolved))
         raise ConfigError(
             f"Unresolved environment variables: {names}. "
             f"Set them or provide defaults with ${{VAR:-default}} syntax."
         )
-    return content  # type: ignore[no-any-return]
+    return content if content else {}
 
 
-def _substitute_in_tree(
-    node: Any, unresolved: list[str], malformed: list[str], path: tuple[str, ...] = ()
-) -> Any:
-    """Substitute ``${VAR}`` in every string value of a parsed YAML tree.
+class _EnvLoader(yaml.SafeLoader):
+    """SafeLoader that substitutes ``${VAR}`` in each scalar as it is composed.
 
-    Substitution runs after parsing, on values only, so a secret holding
-    YAML syntax (``x #y``, a leading ``!`` or ``*``, quotes, all digits)
-    arrives verbatim as a string: on the raw text it was truncated at
-    `` #``, failed the parse with the secret in the error, or became an int.
-    A ``${VAR}`` in a comment is no longer read. A value that is only a
-    reference and resolves to nothing is None, as the empty YAML value was.
-    A reference in a key, or an unclosed ``${VAR:-default`` (a default cut
-    by a `` #`` comment), is collected in *malformed* by its dotted path.
-    Other ``${...}`` text (Spark's ``${env:X}``) passes through, as before.
+    A plain scalar keeps v1.6's meaning: v1.6 substituted the raw text and
+    then parsed it, so the substituted text is stripped and re-resolved
+    with YAML 1.1's implicit types (``0042`` is octal 34, an empty value or
+    ``~`` is null, ``true`` is a bool). A quoted or block scalar arrives
+    verbatim as a string, so a secret holding ``#``, quotes, backslashes or
+    only digits is passed through unchanged (``init`` writes the credential
+    references quoted). Keys are substituted as v1.6 did; comments are not.
     """
-    if isinstance(node, dict):
-        out = {}
-        for k, v in node.items():
-            here = (*path, str(k))
-            if isinstance(k, str) and _ENV_PATTERN.search(k):
-                malformed.append(".".join(here) + " (references are not substituted in keys)")
-            out[k] = _substitute_in_tree(v, unresolved, malformed, here)
-        return out
-    if isinstance(node, list):
-        return [
-            _substitute_in_tree(v, unresolved, malformed, (*path, str(i)))
-            for i, v in enumerate(node)
-        ]
-    if isinstance(node, str) and "${" in node:
-        if _CUT_DEFAULT.search(_ENV_PATTERN.sub("", node)):
-            malformed.append(".".join(path) + " (an unclosed ${VAR:-default}, cut by a comment?)")
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self.unresolved: list[str] = []
+        self.malformed: list[str] = []
+
+    def compose_scalar_node(self, anchor: Any) -> Any:
+        node = super().compose_scalar_node(anchor)
+        value = node.value
+        if "${" not in value:
             return node
-        value = _substitute_env_vars(node, unresolved)
-        if value == "" and _ENV_PATTERN.fullmatch(node):
-            return None
-        return value
-    return node
+        if _CUT_DEFAULT.search(_ENV_PATTERN.sub("", value)):
+            self.malformed.append(f"line {node.start_mark.line + 1}")
+            return node
+        text = _substitute_env_vars(value, self.unresolved)
+        implicit = self.resolve(yaml.ScalarNode, value, (True, False))
+        if node.style is None and node.tag == implicit:
+            # Plain with no explicit tag: resolve the substituted text as
+            # v1.6's parse of the substituted file would have.
+            text = text.strip()
+            node.tag = self.resolve(yaml.ScalarNode, text, (True, False))
+        node.value = text
+        return node
 
 
 def load_config(
@@ -466,18 +465,18 @@ def _load_and_validate(
 
 
 #: What a config with no recipe, or ``recipe: default``, resolves to when it
-#: sets no component (CFG-8).
+#: sets no component.
 DEFAULT_RECIPE_RESOLUTION = "hive-iceberg-spark-trino"
 
 
 def _default_recipe_note(data: dict[str, Any]) -> str | None:
-    """The CFG-8 deprecation note for a config with no recipe, or None.
+    """The deprecation note for a config with no recipe, or None.
 
     A config with no ``recipe``, or ``recipe: default``, resolves to
     ``hive-iceberg-spark-trino`` in v1.7 when it sets no component. One that
     sets components resolves to them (a v1.6 ``init`` wrote
     ``catalog.type`` with no recipe), so the note names the recipe they
-    resolve to rather than claiming Hive (design 02 spec issue 12).
+    resolve to rather than claiming Hive.
     """
     from .recipes import RECIPE_OWNED_KEYS, _raw_value, recipe_components
     from .support import recipe_for
@@ -652,7 +651,7 @@ def save_config(config: LakebenchConfig, path: str | Path) -> None:
     pipeline = arch.get("pipeline") or {}
     if "sustained" in pipeline:
         pipeline["continuous"] = pipeline.pop("sustained")
-    # Every component is written, so name the recipe they make (CFG-8: a
+    # Every component is written, so name the recipe they make (a
     # config with no recipe, or 'default', loads with a deprecation note).
     if data.get("recipe") in (None, "", "default"):
         from .support import recipe_for
@@ -680,7 +679,8 @@ def generate_default_config(
 ) -> LakebenchConfig:
     """Generate a default configuration with common values pre-filled.
 
-    This is used by `lakebench init` to create a starter configuration.
+    A programmatic helper; `lakebench init` writes its file from
+    `cli/_init.first_day_config` instead.
 
     Args:
         name: Deployment name (required)
