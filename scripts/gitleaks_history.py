@@ -10,7 +10,8 @@ Used by the ``secrets-history`` CI job and the release gate's
    nothing;
 2. every commit message reachable from ``--rev`` and every tag's message,
    which ``gitleaks git`` does not read. Each is written to its own file,
-   ``msgs/commits/<sha>.txt`` or ``msgs/tags/<name>.txt``, and scanned with
+   ``msgs/commits/<sha>.txt`` or ``msgs/tags/<object id>.txt`` (holding the
+   tag's name and message), and scanned with
    ``gitleaks dir``, so a finding names its commit or tag and has a stable
    fingerprint (``msgs/commits/<sha>.txt:<rule>:<line>``) for the baseline.
 
@@ -77,20 +78,31 @@ def _safe_name(ref: str) -> str:
 
 def write_messages(repo: Path, rev: str, dest: Path) -> int | None:
     """Write every commit message reachable from *rev* to
-    ``dest/commits/<sha>.txt`` and every tag message to ``dest/tags/<name>.txt``.
-    Returns the number of files, or None if git failed."""
+    ``dest/commits/<sha>.txt`` and every tag's name and message to
+    ``dest/tags/<object id>.txt``. Returns the number of files, or None if git
+    failed or a message holds a NUL."""
     log = _git(repo, "log", "--format=%x00%H%x00%B", rev)
-    tags = _git(repo, "for-each-ref", "refs/tags", "--format=%00%(refname:strip=2)%00%(contents)")
+    # Tag files are named by object id, never by the tag's name: a name such
+    # as "x-gitleaks.toml" would match gitleaks' default path allowlist. The
+    # name goes in the file, so it is scanned too.
+    tags = _git(
+        repo,
+        "for-each-ref",
+        "refs/tags",
+        "--format=%00%(objectname)%00tag %(refname:strip=2)%0a%(contents)",
+    )
     if log.returncode or tags.returncode:
         return None
     n = 0
     for sub, raw in (("commits", log.stdout), ("tags", tags.stdout)):
         (dest / sub).mkdir(parents=True, exist_ok=True)
         fields = raw.split("\0")[1:]
+        if len(fields) % 2:
+            return None  # a NUL inside a message; the pairing cannot be trusted
         for name, body in zip(fields[0::2], fields[1::2], strict=True):
             out = dest / sub / f"{_safe_name(name)}.txt"
             k = 1
-            while out.exists():  # two tag names that differ only in / and _
+            while out.exists():  # two lightweight tags on one commit
                 out = dest / sub / f"{_safe_name(name)}.{k}.txt"
                 k += 1
             out.write_text(body, encoding="utf-8")
@@ -158,7 +170,9 @@ def scan(
         commits = int(m.group(1))
         count = write_messages(repo, rev, Path(cwd) / "msgs")
         if count is None:
-            return _fail("could not read the commit and tag messages")
+            return _fail(
+                "could not read the commit and tag messages (git failed, or one holds a NUL)"
+            )
         res = subprocess.run(
             [gitleaks, "dir", "msgs", *common],
             cwd=cwd,

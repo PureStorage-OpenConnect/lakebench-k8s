@@ -1,7 +1,7 @@
 # gitleaks baseline: findings in published history that are not live
 # credentials. Each entry is a fingerprint <commit>:<path>:<rule>:<line>;
 # none holds a secret value; a commit or tag message finding is
-# msgs/commits/<sha>.txt:<rule>:<line> or msgs/tags/<name>.txt:<rule>:<line>.
+# msgs/commits/<sha>.txt:<rule>:<line> or msgs/tags/<object id>.txt:<rule>:<line>.
 # scripts/gitleaks_history.py passes this file to gitleaks explicitly. CI's
 # history scan uses origin/main's copy (origin/integrate/v1.5.0's while main
 # has none) instead of a branch's; see docs/releasing.md.
