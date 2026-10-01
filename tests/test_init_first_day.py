@@ -645,7 +645,7 @@ def test_quoted_empty_default_is_an_empty_string(tmp_path, monkeypatch):
 _ENV_VALUES = [
     "0042", "010", "42", "-7", "1_000", "0x1F", "12:30", "3.5", "1e3", ".inf",
     "true", "yes", "off", "null", "~", "", " lb-ns ", "lb-ns\n", "2024-01-01",
-    "abc", "a b", "lb-ns",
+    "abc", "a b", "lb-ns", "42\xa0", "\u3000ns", "1:30", "=", "<<",
 ]  # fmt: skip
 
 _PLAIN_FORMS = [
@@ -667,7 +667,8 @@ def _v16_expected(form: str, value: str):
         got = os.environ.get(m.group(1))
         return got if got is not None else (m.group(2) or "")
 
-    return yaml.safe_load(_ENV_PATTERN.sub(rep, text) + "\n")["k"]
+    doc = yaml.safe_load(_ENV_PATTERN.sub(rep, text) + "\n")
+    return doc.get("j", doc["k"])
 
 
 @pytest.mark.parametrize("form", _PLAIN_FORMS)
@@ -675,7 +676,7 @@ def _v16_expected(form: str, value: str):
 def test_plain_reference_loads_as_v16(tmp_path, monkeypatch, form, value):
     from lakebench.config.loader import load_yaml
 
-    if "%s" in form and value.strip() != value:
+    if "%s" in form and (value.strip() != value or value in ("<<", "=")):
         pytest.skip("a default cannot carry surrounding whitespace in a plain scalar")
     monkeypatch.setenv("LB_DIFF", value)
     monkeypatch.delenv("LB_DIFF_UNSET", raising=False)
@@ -686,7 +687,8 @@ def test_plain_reference_loads_as_v16(tmp_path, monkeypatch, form, value):
         expected = _v16_expected(form, value)
     except yaml.YAMLError:
         pytest.skip("v1.6 could not parse this substitution at all")
-    got = load_yaml(p)["k"]
+    doc = load_yaml(p)
+    got = doc.get("j", doc["k"])
     assert got == expected and type(got) is type(expected), (text, value, got, expected)
 
 
@@ -712,3 +714,59 @@ def test_leading_zero_seed_keeps_its_v16_value(tmp_path, monkeypatch):
         "workload:\n  datagen:\n    seed: ${LB_SEED}\n",
     )
     assert cfg.architecture.workload.datagen.seed == 34
+
+
+def test_overwrite_guard_reads_the_flat_namespace(tmp_path):
+    out = tmp_path / "o.yaml"
+    old = "name: alice\nrecipe: polaris-iceberg-spark-trino\nnamespace: team-ns\n"
+    out.write_text(old)
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
+    assert r.exit_code == 2, r.output
+    assert "namespace 'team-ns' -> 'alice'" in r.output
+    assert out.read_text() == old
+
+
+def test_overwrite_guard_runs_when_the_same_name_is_passed(tmp_path):
+    out = tmp_path / "o.yaml"
+    old = "name: alice\nrecipe: hive-iceberg-spark-trino\n"
+    out.write_text(old)
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--name", "alice"])
+    assert r.exit_code == 2, r.output
+    assert "recipe 'hive-iceberg-spark-trino' -> 'polaris-iceberg-spark-trino'" in r.output
+    r = runner.invoke(
+        app,
+        [
+            "init",
+            "-o",
+            str(out),
+            "--overwrite",
+            "--name",
+            "alice",
+            "-r",
+            "hive-iceberg-spark-trino",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+
+
+def test_overwrite_guard_resolves_env_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("LB_G_NS", raising=False)
+    monkeypatch.delenv("LB_G_NAME", raising=False)
+    out = tmp_path / "o.yaml"
+    out.write_text(
+        "name: ${LB_G_NAME:-alice}\nrecipe: polaris-iceberg-spark-trino\n"
+        "platform:\n  kubernetes:\n    namespace: ${LB_G_NS:-alice}\n"
+    )
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
+    assert r.exit_code == 0, r.output
+    assert yaml.safe_load(out.read_text())["name"] == "alice"
+
+
+def test_overwrite_of_an_unreadable_named_config_needs_a_new_name(tmp_path, monkeypatch):
+    monkeypatch.delenv("LB_G_UNSET", raising=False)
+    out = tmp_path / "o.yaml"
+    old = "name: alice\nrecipe: polaris-iceberg-spark-trino\nplatform:\n  kubernetes:\n    namespace: ${LB_G_UNSET}\n"
+    out.write_text(old)
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
+    assert r.exit_code == 2, r.output
+    assert "cannot be read" in r.output and out.read_text() == old

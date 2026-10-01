@@ -137,13 +137,15 @@ workload:
 
 Unresolved variables without defaults produce one error naming all of them.
 Substitution runs value by value, not on the file text. An unquoted value
-is trimmed and typed as YAML types it (`0042` is octal 34, `true` a bool, an
-empty value null), as in v1.6. A quoted value (`"${S3_SECRET}"`) arrives
-verbatim as a string, so quote every credential reference: a secret with
-` #`, quotes or only digits is then passed through unchanged. A `${VAR}` in
-a comment is not read. An unclosed `${VAR:-default` (a default cut short
-by ` #`) is an error, and inside flow syntax (`[${A}, ${B}]`) each
-reference must be quoted.
+is trimmed and, unless it carries a tag such as `!!str`, typed as YAML types
+it (`0042` is octal 34, `true` a bool, an empty value null), as in v1.6. The
+environment value itself is never parsed as YAML: ` #`, quotes or `a: b`
+inside it stay text. A quoted value (`"${S3_SECRET}"`) arrives verbatim as a
+string, so quote every credential reference. A block scalar keeps the
+substituted text inside its own line breaks. A `${VAR}` in a comment is not
+read. An unclosed `${VAR:-default` (a default cut short by ` #`) is an
+error, and inside flow syntax (`[${A}, ${B}]`) each reference must be
+quoted.
 
 ### Nested Config (v1.2 Compatible)
 

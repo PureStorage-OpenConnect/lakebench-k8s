@@ -209,8 +209,9 @@ def first_day_config(
     return "\n".join(lines) + "\n"
 
 
-def config_problem(text: str, credentials_env: str) -> str | None:
-    """Why *text* would not load under a command that changes data, or None.
+def _validate_text(text: str, credentials_env: str) -> tuple[Any, str | None]:
+    """The model *text* loads to under a command that changes data, or the
+    reason it does not load.
 
     The two credential references are given placeholder values, as the
     user's environment will; nothing else is substituted.
@@ -228,7 +229,7 @@ def config_problem(text: str, credentials_env: str) -> str | None:
     try:
         with collecting_notes(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            LakebenchConfig.model_validate(
+            cfg = LakebenchConfig.model_validate(
                 data, context={"purpose": LoadPurpose.MUTATE, "allow_long_names": False}
             )
     except ValidationError as e:
@@ -240,8 +241,13 @@ def config_problem(text: str, credentials_env: str) -> str | None:
             loc = ".".join(parts)
             msg = str(err["msg"]).removeprefix("Value error, ")
             problems.append(f"{loc}: {msg}" if loc else msg)
-        return "; ".join(problems)
-    return None
+        return None, "; ".join(problems)
+    return cfg, None
+
+
+def config_problem(text: str, credentials_env: str) -> str | None:
+    """Why *text* would not load under a command that changes data, or None."""
+    return _validate_text(text, credentials_env)[1]
 
 
 def _refuse(message: str) -> NoReturn:
@@ -396,7 +402,11 @@ def init(
         print_info("Use --overwrite to replace it")
         raise typer.Exit(1)
     replaced = _replaced_config(output) if overwrite else None
-    kept_name = None if name else _name_of(replaced)
+    old_cfg, old_problem = _load_replaced(output) if replaced is not None else (None, None)
+    old_name = old_cfg.name if old_cfg is not None else _name_of(replaced)
+    if old_name and "${" in old_name:
+        old_name = None  # an unresolved reference names no deployment
+    kept_name = None if name else old_name
     if overwrite and output.is_file() and not name and not kept_name:
         from lakebench.config.deploy_state import read_legacy_name
 
@@ -426,8 +436,8 @@ def init(
         problem = config_problem(local_text, credentials_env)
         if problem:
             _refuse(f"nothing written: this config would not load: {problem}")
-        if kept_name:
-            _refuse_if_target_moves(output, replaced, local_text)
+        if old_name and old_name == (name or kept_name or "local-lakehouse"):
+            _refuse_if_target_moves(output, old_cfg, old_problem, local_text, credentials_env)
         _write_local_config(output, local_text, 0.1 if scale is None else scale)
         return
 
@@ -461,8 +471,8 @@ def init(
     problem = config_problem(text, credentials_env)
     if problem:
         _refuse(f"nothing written: this config would not load: {problem}")
-    if kept_name:
-        _refuse_if_target_moves(output, replaced, text)
+    if old_name and old_name == name:
+        _refuse_if_target_moves(output, old_cfg, old_problem, text, credentials_env)
     output.write_text(text)
 
     _say(f"wrote {output}")
@@ -542,50 +552,67 @@ def _name_of(data: dict[str, Any] | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _sub(data: dict[str, Any], key: str) -> dict[str, Any]:
-    value = data.get(key)
-    return value if isinstance(value, dict) else {}
+def _load_replaced(path: Path) -> tuple[Any, str | None]:
+    """The config about to be overwritten, loaded as ``destroy`` would load
+    it (flat keys promoted, ``${VAR}`` substituted, a v1.6 recipe conflict
+    resolved as v1.6 did), or the reason it does not load."""
+    from lakebench.config._load_context import LoadPurpose, collecting_notes
+    from lakebench.config.loader import ConfigError, _load_and_validate
+
+    try:
+        with collecting_notes(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cfg, _ = _load_and_validate(path, LoadPurpose.TEARDOWN, None, True)
+    except (ConfigError, ValueError) as e:
+        return None, str(e).splitlines()[-1].strip(" -")
+    return cfg, None
 
 
-def _deployment_target(data: dict[str, Any]) -> dict[str, str]:
-    """What destroy and status act on for a raw config: namespace, buckets
-    and the recipe its components resolve to (v1.6 precedence)."""
-    from lakebench.config.loader import DEFAULT_RECIPE_RESOLUTION
-    from lakebench.config.recipes import RECIPES, written_recipe
+def _deployment_target(cfg: Any) -> dict[str, str]:
+    """What destroy and status act on: namespace, buckets and the
+    architecture its components make (Polaris and Hive tear down
+    differently)."""
+    from lakebench.config.support import recipe_for
 
-    name = str(data.get("name") or "")
-    platform = _sub(data, "platform")
-    k8s = _sub(platform, "kubernetes")
-    buckets = _sub(_sub(_sub(platform, "storage"), "s3"), "buckets")
-    recipe = data.get("recipe")
-    if recipe in (None, "", "default") or recipe not in RECIPES:
-        recipe = DEFAULT_RECIPE_RESOLUTION
-    target = {
-        "namespace": str(k8s.get("namespace") or name),
-        "recipe": written_recipe(data, str(recipe)) or str(recipe),
-    }
+    arch = cfg.architecture
+    parts = (
+        arch.catalog.type.value,
+        arch.table_format.type.value,
+        arch.pipeline_engine.value,
+        arch.query_engine.type.value,
+    )
+    target = {"namespace": cfg.get_namespace(), "recipe": recipe_for(*parts) or "-".join(parts)}
+    buckets = cfg.platform.storage.s3.buckets
     for layer in ("bronze", "silver", "gold"):
-        target[f"buckets.{layer}"] = str(buckets.get(layer) or f"{name}-{layer}")
+        target[f"buckets.{layer}"] = str(getattr(buckets, layer))
     return target
 
 
-def _refuse_if_target_moves(output: Path, replaced: dict[str, Any] | None, text: str) -> None:
+def _refuse_if_target_moves(
+    output: Path, old_cfg: Any, old_problem: str | None, text: str, credentials_env: str
+) -> None:
     """Refuse an overwrite that keeps the name but moves what it deploys.
 
-    The kept name says "the same deployment"; if the replaced file put it
+    The same name says "the same deployment"; if the replaced file put it
     in another namespace, other buckets or another architecture, a later
     destroy from the new file would aim at the wrong one.
     """
-    if not replaced:
-        return
-    before = _deployment_target(replaced)
-    after = _deployment_target(yaml.safe_load(text))
+    if old_cfg is None:
+        _refuse(
+            f"{output} names the same deployment, but what it deploys cannot be read "
+            f"({old_problem}). Pass --name with a new name, or fix the file first"
+        )
+    new_cfg, _ = _validate_text(text, credentials_env)
+    if new_cfg is None:
+        return  # config_problem refuses it
+    before = _deployment_target(old_cfg)
+    after = _deployment_target(new_cfg)
     moved = [f"{k} '{before[k]}' -> '{after[k]}'" for k in before if before[k] != after[k]]
     if moved:
         _refuse(
-            f"{output} keeps its name but the new file would move its deployment: "
-            + "; ".join(moved)
-            + ". Pass --name to write a config for a new deployment, or edit the file"
+            f"{output} keeps the name '{new_cfg.name}' but the new file would move its "
+            "deployment: " + "; ".join(moved) + ". Pass --name with a new name to write "
+            "a config for a new deployment, or edit the file"
         )
 
 

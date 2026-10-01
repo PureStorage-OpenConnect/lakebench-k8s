@@ -34,18 +34,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   load such a config as v1.6 did, with a note. Images and engine resources
   stay overridable.
 - **`${VAR}` is substituted per value, not in the file text.** An unquoted
-  value (`seed: ${LB_SEED}`) loads exactly as before: the substituted text
-  is trimmed and typed by YAML 1.1, so `0042` is still 34, `0x1F` 31,
-  `true` a bool and an empty value null. A quoted value
-  (`secret_key: "${S3_SECRET}"`) now arrives verbatim as a string: a secret
-  holding ` #`, quotes, a backslash, a leading `!` or `*`, or only digits
-  used to be truncated, retyped, or fail the parse with the value in the
-  error. `init` writes the credential references quoted. Two things fail
-  where they loaded before: an unclosed `${VAR:-default` (a default cut
-  short by ` #` used to load the part before the comment), and a reference
-  inside flow syntax (`[${A}, ${B}]`), which must be quoted. A `${VAR}` in
-  a comment is no longer read, and every unset variable is named in one
-  error.
+  value (`seed: ${LB_SEED}`) is typed as before: the substituted text is
+  trimmed of YAML whitespace and, when untagged, typed by YAML 1.1, so
+  `0042` is still 34, `0x1F` 31, `true` a bool and an empty value null; an
+  explicit tag such as `!!str` still wins. What changed is that the
+  environment value is no longer parsed as YAML: a value holding ` #`,
+  quotes, `[..]`, `{..}` or `a: b` stays that text, where v1.6 cut it at the
+  comment, dropped the quotes or built a list or mapping. A quoted value
+  (`secret_key: "${S3_SECRET}"`) arrives verbatim as a string, so a secret
+  with a backslash, quotes or only digits is no longer retyped or echoed in
+  a parse error; `init` writes the credential references quoted. A block
+  scalar (`|`, `>`) keeps the substituted text inside its own line breaks.
+  Two things fail where they loaded before: an unclosed `${VAR:-default`
+  (a default cut short by ` #`), and a reference inside flow syntax
+  (`[${A}, ${B}]`), which must be quoted. A `${VAR}` in a comment is no
+  longer read, and every unset variable is named in one error.
 - **A config with no `recipe:`, or `recipe: default`, is deprecated.** It
   still resolves as before (to `hive-iceberg-spark-trino` when it sets no
   component, otherwise to the components it sets) and loads with a note

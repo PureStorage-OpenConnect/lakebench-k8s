@@ -25,6 +25,8 @@ from .schema import LakebenchConfig
 # -- Env var substitution ----------------------------------------------------
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+# What a YAML plain scalar trims: spaces, tabs and the YAML line breaks.
+_YAML_SPACE = " \t\r\n\x85\u2028\u2029"
 _CUT_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:-[^}]*$")
 
 
@@ -283,13 +285,15 @@ def load_yaml(path: Path) -> dict[str, Any]:
 class _EnvLoader(yaml.SafeLoader):
     """SafeLoader that substitutes ``${VAR}`` in each scalar as it is composed.
 
-    A plain scalar keeps v1.6's meaning: v1.6 substituted the raw text and
-    then parsed it, so the substituted text is stripped and re-resolved
-    with YAML 1.1's implicit types (``0042`` is octal 34, an empty value or
-    ``~`` is null, ``true`` is a bool). A quoted or block scalar arrives
-    verbatim as a string, so a secret holding ``#``, quotes, backslashes or
-    only digits is passed through unchanged (``init`` writes the credential
-    references quoted). Keys are substituted as v1.6 did; comments are not.
+    A plain scalar keeps v1.6's typing: v1.6 substituted the raw text and
+    then parsed it, so the substituted text is trimmed and, when untagged,
+    typed with YAML 1.1's implicit resolvers (``0042`` is octal 34, an empty
+    value or ``~`` is null, ``true`` is a bool); an explicit tag such as
+    ``!!str`` is kept. The value itself is never parsed as YAML, so an env
+    value holding `` #``, quotes, ``[..]`` or ``a: b`` stays that text
+    instead of being cut or turned into structure. A quoted or block scalar
+    arrives verbatim as a string (``init`` writes the credential references
+    quoted). Keys are substituted as v1.6 did; comments are not.
     """
 
     def __init__(self, stream: str) -> None:
@@ -298,21 +302,26 @@ class _EnvLoader(yaml.SafeLoader):
         self.malformed: list[str] = []
 
     def compose_scalar_node(self, anchor: Any) -> Any:
-        node = super().compose_scalar_node(anchor)
-        value = node.value
-        if "${" not in value:
-            return node
-        if _CUT_DEFAULT.search(_ENV_PATTERN.sub("", value)):
-            self.malformed.append(f"line {node.start_mark.line + 1}")
-            return node
-        text = _substitute_env_vars(value, self.unresolved)
-        implicit = self.resolve(yaml.ScalarNode, value, (True, False))
-        if node.style is None and node.tag == implicit:
-            # Plain with no explicit tag: resolve the substituted text as
-            # v1.6's parse of the substituted file would have.
-            text = text.strip()
-            node.tag = self.resolve(yaml.ScalarNode, text, (True, False))
-        node.value = text
+        # PyYAML's Composer.compose_scalar_node, with the substitution added
+        # between reading the event and resolving its tag.
+        event = self.get_event()
+        tag, value = event.tag, event.value
+        if "${" in value:
+            if _CUT_DEFAULT.search(_ENV_PATTERN.sub("", value)):
+                self.malformed.append(f"line {event.start_mark.line + 1}")
+            else:
+                value = _substitute_env_vars(value, self.unresolved)
+                if event.style is None:
+                    # Plain: v1.6 parsed the substituted text, which trimmed
+                    # YAML whitespace (not every Unicode space).
+                    value = value.strip(_YAML_SPACE)
+        if tag is None or tag == "!":
+            # Untagged plain text is typed from the substituted value, as in
+            # v1.6; a quoted or block scalar resolves to str either way.
+            tag = self.resolve(yaml.ScalarNode, value, event.implicit)
+        node = yaml.ScalarNode(tag, value, event.start_mark, event.end_mark, style=event.style)
+        if anchor is not None:
+            self.anchors[anchor] = node
         return node
 
 
