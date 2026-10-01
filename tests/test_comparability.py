@@ -1002,9 +1002,14 @@ def test_local_identity_does_not_block_exp2():
     from lakebench.metrics import system_identity as si
 
     run = _fresh()
+    run.config_snapshot["local"] = True
     run.config_snapshot["experiment_inputs"]["system_identity"] = si._local_identity(None)
     e = run.to_dict()["experiment"]
-    assert e["schema"] == "exp2"
+    assert e["schema"] == "exp2" and e["system"] == "local"
+    # The same identity on a cluster run is not an observed one.
+    run = _fresh()
+    run.config_snapshot["experiment_inputs"]["system_identity"] = si._local_identity(None)
+    assert run.to_dict()["experiment"]["schema"] == "exp1"
 
 
 class TestWrappers:
@@ -1061,3 +1066,17 @@ def test_reference_with_no_observed_system_is_refused():
         "not comparable: the reference observed no part of its system; "
         "the baseline cannot be matched to a system"
     ]
+
+
+def test_config_only_identity_is_not_v2():
+    """A cluster run whose Kubernetes client failed has only config-derived
+    parts: not an observed system identity."""
+    run = _fresh()
+    ident = copy.deepcopy(SYSID)
+    ident["parts"] = {
+        "api_server_ca": {"not_observed": "no Kubernetes client"},
+        "storage_endpoint": "10.0.1.50:80",
+    }
+    run.config_snapshot["experiment_inputs"]["system_identity"] = ident
+    e = run.to_dict()["experiment"]
+    assert e["schema"] == "exp1" and "system identity" in e["v2_unavailable"]

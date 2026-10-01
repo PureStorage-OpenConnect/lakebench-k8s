@@ -844,14 +844,15 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
             corpus["id_v2_unavailable"] = NOT_OBSERVED
         if corpus.get("id_v2") is None:
             missing.append("corpus id v2")
-        from lakebench.metrics.system_identity import observed_parts
+        from lakebench.metrics.system_identity import CLUSTER_PARTS, observed_parts
 
         if sysid is None or (
-            sysid.get("type") != "local" and not observed_parts(sysid.get("parts") or {})
+            not local and not observed_parts(sysid.get("parts") or {}) & set(CLUSTER_PARTS)
         ):
-            # A stub from a failed sample is kept as evidence, but it is not
-            # an observed system identity. A local run's identity observes no
-            # part by design and is complete as recorded.
+            # A cluster run's identity counts only with a part read from the
+            # cluster itself; a stub from a failed sample, or one built from
+            # the config alone, is kept as evidence but is not one. A local
+            # run's identity observes no part by design and is complete.
             missing.append("system identity")
         from lakebench.metrics.comparability import access_paths
 
