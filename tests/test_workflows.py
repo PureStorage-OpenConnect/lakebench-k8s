@@ -489,3 +489,23 @@ def test_aml_statistics_tests_are_marked_slow():
         else:
             fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == func)
             assert _has_slow_mark(fn), f"{rel}::{func}"
+
+
+# -- OSS-2: the history scan job ----------------------------------------------
+
+
+def test_secrets_history_job_scans_full_history_and_requires_gitleaks():
+    jobs = _load("ci.yml")["jobs"]
+    job = jobs["secrets-history"]
+    assert job["steps"][0]["with"]["fetch-depth"] == 0
+    scan = next(str(s["run"]) for s in job["steps"] if s.get("name") == "Scan history")
+    assert 'gitleaks git "$repo"' in scan and "--exit-code 1" in scan
+    # The whole history, merge commits' own changes included, and no inline allow.
+    assert '--log-opts="--remerge-diff HEAD"' in scan
+    assert "--ignore-gitleaks-allow" in scan
+    # The baseline is a trusted ref's copy, not the scanned tree's.
+    assert '--gitleaks-ignore-path "$ignore"' in scan
+    tests = next(s for s in job["steps"] if "test_pre_push_hook.py" in str(s.get("run", "")))
+    # Without this the gitleaks-backed tests would skip and the step pass.
+    assert tests["env"]["LB_REQUIRE_GITLEAKS"] == "1"
+    assert "secrets-history" in jobs["build"]["needs"]
