@@ -35,11 +35,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bounds sit far above anything lakebench sizes (200 workers at the top
   scale; generator threads follow the pod CPU). A config with a zero,
   negative or out-of-range count, which v1.6 accepted, is refused.
+- **Settings that were recorded but not honoured are refused.**
+  `platform.compute.spark.driver`, `platform.compute.spark.executor` and
+  `platform.storage.scratch.size` sized nothing (each Spark job takes its
+  driver, executor and scratch sizing from its job profile), yet were
+  autosized, graded by `validate` and recorded in `metrics.json`. They are
+  removed: the commands that change data refuse a config that sets them,
+  with the fix (`<job>_executors` for counts, `driver_memory` and
+  `driver_cores` for the driver), and `destroy`, `status` and the read-only
+  commands drop them with a note. The autosizer no longer reports executor
+  "caps" on them, and `validate` no longer grades executor counts and memory.
+- **`operator.install: true` is refused.** The Spark Operator
+  (`platform.compute.spark.operator.install`) and the Stackable operators
+  (`architecture.catalog.hive.operator.install`) are shared cluster
+  infrastructure that a cluster admin installs once; deploy only checks them.
+  `false` loads as before; teardown and read-only commands load `true` as
+  `false` with a note.
+- **`lakebench run` refuses benchmark settings it does not run.** `run`
+  measures one hot power pass with one stream. A config whose
+  `architecture.benchmark` sets `mode: throughput` or `composite`,
+  `cache: cold`, or `streams` above 1 is refused by `run` (use
+  `lakebench benchmark --mode`, `--cold` or `--streams`), and the run's
+  `config_snapshot.benchmark` records the pass that ran instead of the
+  config's values.
+- **Perf-gate fingerprint version 2 and baseline store schema 2.** The
+  fingerprint now also hashes each Spark job's profile and the Spark conf its
+  manifest writes (location and credential keys left out), the query
+  engine's sizing and the catalog's resources; a run stamps
+  `config_snapshot.fingerprint_version` and `fingerprint_inputs` when it
+  starts and the gate reads them. Baselines record `fingerprint_version` and
+  the run's dependency pinset. Runs and baselines from before version 2 are
+  refused by name until re-recorded, a run on another dependency set than
+  its baseline is refused, and `record` refuses a run without a pinset. The
+  three pinned configs drop the removed keys and `streams: 4`.
 - **Flat top-level config keys are deprecated.** `endpoint:`, `scale:` and
   the other flat spellings still load, each with a note naming the nested
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Changed
+- `metrics.json` `config_snapshot`: `spark.driver` and `spark.executor` are
+  gone, `scratch.size` is replaced by `scratch.size_per_job` (from the job
+  profiles), and the HTML report shows each job's requested executors
+  instead of the unused executor block.
+- A config validation error no longer echoes the input it failed on: a
+  model-level error used to print the whole block, which could carry a
+  datagen seed or a key.
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.

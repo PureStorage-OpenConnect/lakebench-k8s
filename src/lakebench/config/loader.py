@@ -373,7 +373,10 @@ def _load_and_validate(
     except ValidationError as e:
         # Messages are rewritten against the model's own locations, before
         # the locations are re-rooted to where the user wrote each key.
-        errors = [_explain_error(dict(err)) for err in e.errors()]
+        # include_input=False: the input of a model-level error is the whole
+        # block, which can carry a datagen seed or a key, and callers print
+        # these dicts.
+        errors = [_explain_error(dict(err)) for err in e.errors(include_input=False)]
         if _top_level_workload:
             errors = [
                 {**err, "loc": tuple(err["loc"][1:])}
@@ -709,7 +712,8 @@ platform:
     #                                    # before `deploy` runs -- a cluster admin
     #                                    # installs it once with
     #                                    # `lakebench admin install-scratch-storage-class`.
-    #   size: 100Gi
+    #                                    # Each executor's PVC size comes from its job
+    #                                    # profile (silver-build 300Gi).
     #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Consumed by
     #                                    # `admin install-scratch-storage-class`. Examples:
     #                                    #   pxd.portworx.com (Portworx)
@@ -722,24 +726,13 @@ platform:
 
   # compute:
   #   spark:
-  #     operator:
-  #       install: false             # Set true to auto-install Spark Operator.
-  #                                  # Default is false -- install the operator
-  #                                  # manually or set true for auto-install.
+  #     operator:                  # Shared; a cluster admin installs it once with
+  #                                  # `lakebench admin install-spark-operator`.
   #       namespace: spark-operator
   #       version: "2.5.1"           # v2.x uses webhook for volume injection
   #
-  #     driver:
-  #       cores: 4
-  #       memory: 8g
-  #
-  #     # Default executor sizing (proven at 1 TB+ scale)
-  #     executor:
-  #       instances: 8
-  #       cores: 4
-  #       memory: 48g
-  #       memory_overhead: 12g       # Critical for stability
-  #
+  #     ## Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed
+  #     ## in the job profiles, proven at 1 TB+ scale.
   #     ## Per-job executor count overrides (null = auto from scale factor).
   #     ## Per-executor sizing (cores, memory, PVC) stays fixed from proven profiles.
   #     # bronze_executors: null
@@ -768,10 +761,8 @@ architecture:
     type: hive                     # hive | polaris | none
     ## Hive Metastore tuning (uncomment to override defaults)
     # hive:
-    #   operator:
-    #     install: false             # Set true to auto-install Stackable operators.
-    #                                # Requires cluster-admin. Installs commons,
-    #                                # listener, secret, and hive operators.
+    #   operator:                    # Shared; a cluster admin installs the Stackable
+    #                                # operators once (docs/component-hive.md).
     #     namespace: stackable
     #     version: "25.7.0"
     #   resources:
@@ -860,11 +851,13 @@ architecture:
   #   mode: power                    # power: single sequential stream (per-query latency)
   #                                  # throughput: N concurrent streams (aggregate QpH)
   #                                  # composite: geometric mean of power + throughput
-  #   streams: 4                     # Concurrent streams (throughput/composite only;
-  #                                  # ignored in power mode)
+  #                                  # `lakebench run` measures power only and refuses
+  #                                  # throughput, composite, cache: cold and streams
+  #                                  # above 1; `lakebench benchmark` runs them all.
+  #   streams: 4                     # Concurrent streams (lakebench benchmark only)
   #   cache: hot                     # hot: caches stay populated between queries
   #                                  # cold: metadata cache flushed before each run
-  #   iterations: 1                  # Runs per query. 1 = raw timing, 3+ = median
+  #   iterations: 3                  # Runs per query. 1 = raw timing, 3+ = median
 
   ## Table name overrides (namespace.table format)
   # tables:

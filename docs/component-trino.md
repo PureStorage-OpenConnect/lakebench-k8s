@@ -66,7 +66,7 @@ architecture:
 | `query_engine.type` | `trino` | Set to `trino` to deploy Trino. Other values skip Trino deployment. |
 | `trino.coordinator.cpu` | `"2"` | CPU request and limit for the coordinator pod. |
 | `trino.coordinator.memory` | `"8Gi"` | Memory request and limit for the coordinator pod. JVM `-Xmx` is 80% of this limit, leaving room for non-heap memory. |
-| `trino.worker.replicas` | `2` | Number of worker pods. Set to `0` for coordinator-only mode (dev/debug). |
+| `trino.worker.replicas` | `2` | Number of worker pods, 1 to 256. `0` (coordinator-only) is refused at load. |
 | `trino.worker.cpu` | `"4"` | CPU request and limit per worker pod. |
 | `trino.worker.memory` | `"16Gi"` | Memory request and limit per worker pod. JVM `-Xmx` is 80% of this limit, leaving room for non-heap memory. |
 | `trino.worker.spill_enabled` | `true` | Enable spill-to-disk when queries exceed memory. |

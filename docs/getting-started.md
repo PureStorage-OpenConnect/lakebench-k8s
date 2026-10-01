@@ -176,7 +176,7 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure; with the default `platform.compute.spark.operator.install: false`, `deploy` does not install it and fails if it is missing (with `install: true` it installs a missing operator). Whatever `install` says, `deploy` always checks the operator and adds its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure: `deploy` never installs it and fails if it is missing (a cluster admin installs it once with `lakebench admin install-spark-operator`; `platform.compute.spark.operator.install: true` is refused). `deploy` always checks the operator and adds its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
 
 The supported installation path is:
 
@@ -210,22 +210,9 @@ Which catalog operators you need depends on your recipe choice:
 | `polaris-*` | Apache Polaris | **None** -- Lakebench deploys Polaris directly |
 
 For **Hive** recipes (the default), the Stackable operators are required.
-You have two options:
-
-**Option A: Auto-install** (add to your config YAML):
-
-```yaml
-architecture:
-  catalog:
-    hive:
-      operator:
-        install: true    # lakebench deploy will install Stackable operators
-```
-
-This installs all four Stackable operators (commons, listener, secret, hive)
-via Helm during `lakebench deploy`. Requires cluster-admin.
-
-**Option B: Manual install:**
+They are shared cluster infrastructure: a cluster admin installs them once,
+and `lakebench deploy` never does
+(`architecture.catalog.hive.operator.install: true` is refused):
 
 ```bash
 helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \

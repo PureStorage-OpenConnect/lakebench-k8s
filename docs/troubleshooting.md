@@ -138,7 +138,7 @@ kubectl logs -n spark-operator -l app.kubernetes.io/component=controller --tail=
 ```
 
 **Fix:** re-run `lakebench deploy <config>`. Deploy adds the namespace to
-`spark.jobNamespaces` whatever `spark.operator.install` says, and `lakebench
+`spark.jobNamespaces`, and `lakebench
 run` re-adds it before submitting jobs. Both take the
 `lakebench-cluster-lock` lease first, so a concurrent deploy or destroy of
 another deployment cannot lose its entry. `lakebench validate` reports a

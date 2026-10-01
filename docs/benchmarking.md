@@ -395,9 +395,16 @@ geometric mean of the two:
 composite_qph = sqrt(power_qph * throughput_qph)
 ```
 
+Throughput and composite runs come from `lakebench benchmark --mode`.
+`lakebench run` measures one power pass with one stream and a hot cache, and
+refuses a config whose `architecture.benchmark` asks it for `throughput`,
+`composite`, `cache: cold` or `streams` above 1, rather than recording a run
+that did not happen; `metrics.json` records the power pass it ran.
+
 ### Cache Modes
 
-Each benchmark mode supports `hot` or `cold` cache. In cold mode the query
+Each benchmark mode supports `hot` or `cold` cache (`lakebench benchmark
+--cold`; `lakebench run` uses hot). In cold mode the query
 engine's metadata cache is flushed before execution (e.g.
 `CALL iceberg.system.flush_metadata_cache()` on Trino, or engine-specific
 equivalents for Spark Thrift and DuckDB). In power mode with cold cache, the

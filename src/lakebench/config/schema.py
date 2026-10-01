@@ -21,7 +21,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from ._load_context import CHANGES_DATA, emit_note, purpose_from_context
+from ._load_context import CHANGES_DATA, LoadPurpose, emit_note, purpose_from_context
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,11 @@ class ConfigModel(BaseModel):
     ``mode="before"`` validator, which runs before the extra-key check.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # hide_input_in_errors: a validation error must not echo the input it
+    # failed on. A model-level error carries the whole block it validated,
+    # which can hold a datagen seed or a credential, and the CLI prints the
+    # error text.
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     # Keys that were once valid and now do nothing. Maps key -> what to do
     # instead. A load for a command that changes data (LoadPurpose MUTATE or
@@ -519,11 +523,13 @@ class ScratchStorageConfig(ConfigModel):
             "lakebench no longer creates StorageClasses; a cluster admin runs "
             "'lakebench admin install-scratch-storage-class' once."
         ),
+        # Nothing sized a PVC from it: each executor's scratch volume is the
+        # job profile's scratch_size (modules/pipeline_engines/spark/job.py).
+        "size": "per-job scratch comes from the job profiles (silver-build 300Gi).",
     }
 
     enabled: bool = False
     storage_class: str = "px-csi-scratch"
-    size: str = "100Gi"
     provisioner: str = "pxd.portworx.com"
     parameters: dict[str, str] = Field(
         default_factory=lambda: {"repl": "1", "io_profile": "auto", "priority_io": "high"}
@@ -537,20 +543,43 @@ class StorageConfig(ConfigModel):
     scratch: ScratchStorageConfig = Field(default_factory=ScratchStorageConfig)
 
 
-class SparkDriverConfig(ConfigModel):
-    """Spark driver resource configuration."""
+def _refuse_operator_install(data: object, info: ValidationInfo, key: str, fix: str) -> object:
+    """``operator.install: true`` is refused by the commands that change data.
 
-    cores: int = Field(default=4, ge=1)
-    memory: str = "8g"
+    Shared operators are cluster infrastructure: a deployment verifies them
+    and never installs them. A command that changes data refuses ``true``
+    with *fix*; teardown and read commands load it as ``false`` with a note,
+    so an old config can still be destroyed and inspected. ``false`` loads
+    as before. A model built without a purpose (not through ``load_config``)
+    keeps the value.
+    """
+    if not isinstance(data, dict) or data.get("install") is not True:
+        return data
+    purpose = purpose_from_context(info.context)
+    if purpose is None:
+        return data
+    if purpose in CHANGES_DATA:
+        raise ValueError(
+            f"'{key}: true' is refused: {fix} Delete the key or set it to false "
+            "(destroy, status and the read-only commands still load it)"
+        )
+    data = dict(data)
+    data["install"] = False
+    emit_note(
+        f"'{key}: true' is ignored: {fix} Commands that change data refuse it.",
+        kind="removed",
+    )
+    return data
 
 
-class SparkExecutorConfig(ConfigModel):
-    """Spark executor resource configuration."""
-
-    instances: int = Field(default=8, ge=1)
-    cores: int = Field(default=4, ge=1)
-    memory: str = "48g"
-    memory_overhead: str = "12g"
+_SPARK_OPERATOR_INSTALL_FIX = (
+    "the Spark Operator is shared cluster infrastructure; a cluster admin installs it "
+    "once with 'lakebench admin install-spark-operator'."
+)
+_STACKABLE_OPERATOR_INSTALL_FIX = (
+    "the Stackable operators are shared cluster infrastructure; a cluster admin installs "
+    "them once with the Helm commands in docs/component-hive.md ('Stackable Operator')."
+)
 
 
 class SparkOperatorConfig(ConfigModel):
@@ -560,13 +589,34 @@ class SparkOperatorConfig(ConfigModel):
     namespace: str = "spark-operator"
     version: str = "2.5.1"  # webhook volume injection gap (gotcha 3) unchanged from 2.4.0; template workaround stays
 
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_install(cls, data: object, info: ValidationInfo) -> object:
+        return _refuse_operator_install(
+            data, info, "platform.compute.spark.operator.install", _SPARK_OPERATOR_INSTALL_FIX
+        )
+
 
 class SparkComputeConfig(ConfigModel):
     """Spark compute configuration."""
 
+    # Per-executor and driver sizing come from the job profiles
+    # (_JOB_PROFILES in modules/pipeline_engines/spark/job.py). These blocks
+    # were recorded and graded but sized nothing.
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "driver": (
+            "per-executor sizing is fixed in the job profiles; use "
+            "platform.compute.spark.<job>_executors for counts and "
+            "driver_memory/driver_cores for the driver."
+        ),
+        "executor": (
+            "per-executor sizing is fixed in the job profiles; use "
+            "platform.compute.spark.<job>_executors for counts and "
+            "driver_memory/driver_cores for the driver."
+        ),
+    }
+
     operator: SparkOperatorConfig = Field(default_factory=SparkOperatorConfig)
-    driver: SparkDriverConfig = Field(default_factory=SparkDriverConfig)
-    executor: SparkExecutorConfig = Field(default_factory=SparkExecutorConfig)
 
     # Per-job executor count overrides (None = auto from scale).
     # When set, these override the auto-scaled executor count for that job.
@@ -675,6 +725,16 @@ class StackableOperatorConfig(ConfigModel):
     install: bool = False
     namespace: str = "stackable"
     version: str = "25.7.0"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_install(cls, data: object, info: ValidationInfo) -> object:
+        return _refuse_operator_install(
+            data,
+            info,
+            "architecture.catalog.hive.operator.install",
+            _STACKABLE_OPERATOR_INSTALL_FIX,
+        )
 
 
 class HiveConfig(ConfigModel):
@@ -1555,7 +1615,7 @@ class WorkloadConfig(ConfigModel):
     # Financial transaction-monitoring operations layer (GOALS P10).
     tm_operations: TmOperationsConfig = Field(default_factory=TmOperationsConfig)
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, hide_input_in_errors=True)
 
     @field_validator("schema_type", mode="after")
     @classmethod
@@ -2026,6 +2086,38 @@ class BenchmarkConfig(ConfigModel):
         ),
     )
     maintenance_settle: MaintenanceSettleConfig = Field(default_factory=MaintenanceSettleConfig)
+
+    @model_validator(mode="after")
+    def _refuse_what_run_does_not_do(self, info: ValidationInfo) -> BenchmarkConfig:
+        """``lakebench run`` measures one hot power pass with one stream.
+
+        A config asking ``run`` for another mode, a cold cache or several
+        streams was recorded as if it had run that way. Under
+        ``LoadPurpose.RUN`` it is refused; ``lakebench benchmark`` honours
+        all three. ``standard`` and ``extended`` are power runs.
+        """
+        if purpose_from_context(info.context) != LoadPurpose.RUN:
+            return self
+        refused: list[str] = []
+        if self.mode in (BenchmarkMode.THROUGHPUT, BenchmarkMode.COMPOSITE):
+            refused.append(
+                f"benchmark.mode {self.mode.value}: run measures one power pass; "
+                "use 'lakebench benchmark --mode' for throughput and composite"
+            )
+        if self.cache == "cold":
+            refused.append(
+                "benchmark.cache cold: run measures a hot cache; use 'lakebench benchmark --cold'"
+            )
+        if "streams" in self.model_fields_set and self.streams > 1:
+            refused.append(
+                f"benchmark.streams {self.streams}: run uses one stream; "
+                "use 'lakebench benchmark --streams'"
+            )
+        if refused:
+            raise ValueError(
+                "; ".join(refused) + ". Delete the setting from the config for 'lakebench run'"
+            )
+        return self
 
 
 class ArchitectureConfig(ConfigModel):

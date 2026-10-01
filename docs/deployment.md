@@ -58,9 +58,10 @@ The deployment engine follows this fixed sequence:
    watches the deployment namespace. If the namespace is not watched, deploy
    adds it to `spark.jobNamespaces` with `helm upgrade`, under the
    `lakebench-cluster-lock` lease so concurrent deploys do not overwrite each
-   other. With `platform.compute.spark.operator.install: true`, deploy also
-   installs the operator when it is missing; with `install: false` (the
-   default), a missing or broken operator fails the deploy.
+   other. Deploy never installs the shared operator: a missing or broken
+   operator fails the deploy, and a cluster admin installs it once with
+   `lakebench admin install-spark-operator`
+   (`platform.compute.spark.operator.install: true` is refused).
 10. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
     (StatefulSet) with the connector configured to point at the catalog.
     Skipped unless `architecture.query_engine.type` is `trino`.

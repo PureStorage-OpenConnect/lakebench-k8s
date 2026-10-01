@@ -46,21 +46,12 @@ platform:
     scratch:
       enabled: true
       storage_class: px-csi-scratch
-      size: 200Gi
 
   compute:
     postgres:
       storage: 10Gi
       storage_class: px-csi-db
     spark:
-      driver:
-        cores: 2
-        memory: 2g
-      executor:
-        instances: 2
-        cores: 2
-        memory: 4g
-        memory_overhead: 1g
       # Per-job executor counts, equal to the scale-1 auto values today
       # (get_executor_count with schema financial).
       bronze_executors: 4
@@ -120,4 +111,3 @@ architecture:
     # Median of 3 timed runs per query (LB-150); a run with a different
     # sample count is refused by the gate.
     iterations: 3
-    streams: 4

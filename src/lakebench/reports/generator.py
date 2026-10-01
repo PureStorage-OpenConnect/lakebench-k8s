@@ -23,6 +23,7 @@ import logging
 from datetime import datetime, timezone
 from html import escape as _html_escape
 from pathlib import Path
+from typing import Any
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
@@ -112,6 +113,29 @@ def _qph_stop_warning(metrics) -> str:
         f'title="{escape(caveat)}">'
         f"WARNING: {escape(caveat)}, so this is not a clean measurement</span>"
     )
+
+
+def _executor_rows(config: dict[str, Any]) -> list[tuple[str, Any]]:
+    """One row per job in the snapshot's job profiles: what its manifest asked for,
+    before any cluster-dependent cap (the continuous concurrent budget)."""
+    inputs = config.get("fingerprint_inputs")
+    profiles = inputs.get("job_profiles") if isinstance(inputs, dict) else None
+    if not isinstance(profiles, dict):
+        return []
+    rows: list[tuple[str, Any]] = []
+    for job, p in profiles.items():
+        if not isinstance(p, dict):
+            continue
+        rows.append(
+            (
+                f"Executors requested, {_html_escape(str(job))}",
+                _html_escape(
+                    f"{p.get('executor_instances')} x {p.get('executor_cores')} cores, "
+                    f"{p.get('executor_memory')} + {p.get('executor_memory_overhead')} overhead"
+                ),
+            )
+        )
+    return rows
 
 
 class ReportGenerator:
@@ -2598,25 +2622,10 @@ class ReportGenerator:
                 config.get("s3", {}).get("endpoint")
                 or config.get("platform", {}).get("storage", {}).get("s3", {}).get("endpoint"),
             ),
-            (
-                "Executor Instances",
-                config.get("spark", {}).get("executor", {}).get("instances")
-                or config.get("platform", {})
-                .get("compute", {})
-                .get("spark", {})
-                .get("executor", {})
-                .get("instances"),
-            ),
-            ("Executor Cores", config.get("spark", {}).get("executor", {}).get("cores")),
-            (
-                "Executor Memory",
-                config.get("spark", {}).get("executor", {}).get("memory")
-                or config.get("platform", {})
-                .get("compute", {})
-                .get("spark", {})
-                .get("executor", {})
-                .get("memory"),
-            ),
+            # Per-job executor sizing as each job's manifest asked for it.
+            # Records before v1.7 carry spark.executor values that sized
+            # nothing, so they are not shown.
+            *_executor_rows(config),
             (
                 "Catalog Type",
                 config.get("catalog")

@@ -42,7 +42,6 @@ from lakebench.config import (
     LoadPurpose,
     generate_example_config_yaml,
     load_config,
-    parse_spark_memory,
 )
 from lakebench.config.schema import is_continuous_mode
 from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
@@ -947,20 +946,16 @@ def validate(
                         hint="Will be auto-installed during deploy (install: true)",
                     )
                 else:
-                    install_hint = (
-                        "Option 1: Set architecture.catalog.hive.operator.install: true\n"
-                        "Option 2: Install manually:\n"
-                        + "\n".join(
-                            f"  helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
-                            f"--version {hive_op_cfg.version} --namespace {hive_op_cfg.namespace}"
-                            " --create-namespace"
-                            for op in [
-                                "commons-operator",
-                                "listener-operator",
-                                "secret-operator",
-                                "hive-operator",
-                            ]
-                        )
+                    install_hint = "A cluster admin installs them once:\n" + "\n".join(
+                        f"  helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
+                        f"--version {hive_op_cfg.version} --namespace {hive_op_cfg.namespace}"
+                        " --create-namespace"
+                        for op in [
+                            "commons-operator",
+                            "listener-operator",
+                            "secret-operator",
+                            "hive-operator",
+                        ]
                     )
                     _check_fail(
                         f"Missing Stackable operators: {', '.join(missing)}",
@@ -1044,9 +1039,8 @@ def validate(
             else:
                 _check_fail(
                     "Not installed",
-                    hint="Install it once per cluster (takes the cluster lock):\n"
-                    "  lakebench admin install-spark-operator\n"
-                    "or set platform.compute.spark.operator.install: true",
+                    hint="A cluster admin installs it once (takes the cluster lock):\n"
+                    "  lakebench admin install-spark-operator",
                 )
     except Exception as e:
         _check_warn(f"Could not check status: {e}")
@@ -1055,8 +1049,9 @@ def validate(
     checks_failed += f
     checks_warned += w
 
-    # 8. Compute adequacy
-    _section_start("Compute")
+    # 8. Scale. Executor counts and per-executor sizing come from the job
+    # profiles at manifest build, so there is no executor setting to grade.
+    _section_start("Scale")
     try:
         from lakebench.config.scale import compute_guidance as _cg
 
@@ -1064,53 +1059,13 @@ def validate(
         dims = cfg.get_scale_dimensions()
         guidance = _cg(scale)
 
-        actual_executors = cfg.platform.compute.spark.executor.instances
-        actual_memory = cfg.platform.compute.spark.executor.memory
-        actual_mem_bytes = parse_spark_memory(actual_memory)
-        rec_mem_bytes = parse_spark_memory(guidance.recommended_memory)
-        min_mem_bytes = parse_spark_memory(guidance.min_memory)
-
-        # Executors
-        if actual_executors >= guidance.recommended_executors:
-            _check_ok(
-                f"Executors: {actual_executors} "
-                f"(rec {guidance.recommended_executors} for scale {scale})"
-            )
-        elif actual_executors >= guidance.min_executors:
-            _check_warn(
-                f"Executors: {actual_executors} "
-                f"(min {guidance.min_executors}, rec {guidance.recommended_executors} "
-                f"for scale {scale})"
-            )
-        else:
-            _check_fail(
-                f"Executors: {actual_executors} below minimum "
-                f"{guidance.min_executors} for scale {scale}"
-            )
-
-        # Memory
-        if actual_mem_bytes >= rec_mem_bytes:
-            _check_ok(
-                f"Memory: {actual_memory} (rec {guidance.recommended_memory} for scale {scale})"
-            )
-        elif actual_mem_bytes >= min_mem_bytes:
-            _check_warn(
-                f"Memory: {actual_memory} "
-                f"(min {guidance.min_memory}, rec {guidance.recommended_memory} "
-                f"for scale {scale})"
-            )
-        else:
-            _check_fail(
-                f"Memory: {actual_memory} below minimum {guidance.min_memory} for scale {scale}"
-            )
-
         _check_ok(f"Scale {scale}: {dims.customers:,} customers, {dims.approx_rows:,} rows")
 
         if guidance.warning:
             _check_warn(guidance.warning)
 
     except Exception as e:
-        _check_warn(f"Could not validate compute adequacy: {e}")
+        _check_warn(f"Could not read the scale: {e}")
     p, f, w = _section_end()
     checks_passed += p
     checks_failed += f

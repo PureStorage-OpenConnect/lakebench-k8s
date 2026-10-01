@@ -6,9 +6,13 @@ snapshot is available the algorithm becomes cluster-aware:
 
 * **Small scales (≤ 50)** -- tier guidance only.  Cluster capacity is used
   solely to *cap* values that don't fit.
-* **Large scales (> 50)** -- datagen and Spark are *scaled up* to use the
-  available cluster budget (after Trino + infra).  This is the only case
-  where resources exceed tier guidance.
+* **Large scales (> 50)** -- datagen is *scaled up* to use the available
+  cluster budget (after Trino + infra).  This is the only case where
+  resources exceed tier guidance.
+
+Spark executor and driver sizing is not autosized here: it is the job
+profiles (``_JOB_PROFILES`` in ``modules/pipeline_engines/spark/job.py``),
+with the executor count scaled from data when each manifest is built.
 
 The algorithm is phase-aware:
 
@@ -17,9 +21,9 @@ The algorithm is phase-aware:
   capped if the cluster is too small.
 * **Batch mode** (MEDALLION pattern): Datagen runs concurrently with Trino
   but exits before Spark starts.  Spark runs after datagen finishes.
-  Because they never overlap, each gets the full remaining budget.
+  Because they never overlap, datagen gets the full remaining budget.
 * **Streaming mode** (STREAMING pattern): Datagen and Spark streaming jobs
-  run concurrently.  The budget is split: 40 % datagen, 60 % streaming Spark.
+  run concurrently.  Datagen gets 40 % of the budget.
 
 Usage::
 
@@ -42,9 +46,9 @@ log = logging.getLogger(__name__)
 
 # What fraction of remaining cluster CPU (after Trino + infra) each phase can use.
 _PHASE_CPU_BUDGET = 0.90
-# In streaming mode, datagen and Spark are concurrent.  Split the budget:
+# In streaming mode, datagen and Spark are concurrent; datagen gets this
+# share of the budget and the streaming Spark jobs the rest.
 _STREAMING_DATAGEN_SHARE = 0.40  # 40 % for datagen
-_STREAMING_SPARK_SHARE = 0.60  # 60 % for streaming Spark jobs
 _POD_MEMORY_HEADROOM = 0.85  # per-pod memory cap vs largest node
 
 
@@ -233,17 +237,20 @@ def resolve_auto_sizing(
 ) -> list[str]:
     """Resolve auto-sized resource fields on *config* in place.
 
-    For each component (Spark executor/driver, Trino worker/coordinator,
-    Datagen) this function:
+    For each component (Trino worker/coordinator, Datagen, Spark Thrift)
+    this function:
 
     1. Resolves datagen mode (auto -> batch or continuous).
     2. Applies scale-derived tier guidance for fields the user
        did not explicitly set.
     3. If *cluster_capacity* is provided:
        - Trino is only capped (never boosted).
-       - For small scales (≤ 50), datagen/Spark are only capped.
-       - For large scales (> 50), datagen/Spark are scaled up to
+       - For small scales (≤ 50), datagen is only capped.
+       - For large scales (> 50), datagen is scaled up to
          use the available cluster budget.
+
+    Spark executor and driver sizing are not autosized: they are the job
+    profiles, applied when each job's manifest is built.
 
     Args:
         config: The Lakebench configuration -- **mutated in place**.
@@ -263,26 +270,9 @@ def resolve_auto_sizing(
     effective_mode = _resolve_datagen_mode(config)
     changes.append(f"datagen.mode={effective_mode}")
 
-    # -- Spark executor --
-    executor = config.platform.compute.spark.executor
-    if _set_if_default(executor, "instances", guidance.spark.recommended_executors):
-        changes.append(f"spark.executor.instances={guidance.spark.recommended_executors}")
-    if _set_if_default(executor, "memory", guidance.spark.recommended_memory):
-        changes.append(f"spark.executor.memory={guidance.spark.recommended_memory}")
-    if _set_if_default(executor, "cores", guidance.spark.recommended_cores):
-        changes.append(f"spark.executor.cores={guidance.spark.recommended_cores}")
-
-    # Memory overhead: ~25% of executor memory
-    overhead_gi = max(1, int(_parse_memory_gi(executor.memory) * 0.25))
-    if _set_if_default(executor, "memory_overhead", f"{overhead_gi}g"):
-        changes.append(f"spark.executor.memory_overhead={overhead_gi}g")
-
-    # -- Spark driver --
-    driver = config.platform.compute.spark.driver
-    if _set_if_default(driver, "cores", guidance.spark.recommended_cores):
-        changes.append(f"spark.driver.cores={guidance.spark.recommended_cores}")
-    if _set_if_default(driver, "memory", guidance.spark.min_memory):
-        changes.append(f"spark.driver.memory={guidance.spark.min_memory}")
+    # Spark executor and driver sizing are not autosized: per-executor
+    # resources are the job profiles (_JOB_PROFILES) and the executor count
+    # scales with data (get_executor_count), both applied at manifest build.
 
     # -- Trino coordinator --
     coord = config.architecture.query_engine.trino.coordinator
@@ -330,13 +320,12 @@ def resolve_auto_sizing(
     if _set_if_default(datagen, "parallelism", guidance.datagen.parallelism):
         changes.append(f"datagen.parallelism={guidance.datagen.parallelism}")
 
-    # -- Schema-specific overrides (ENG-2C.10) --
+    # -- Schema-specific overrides --
     # Workload schemas that differ from Customer360 on baseline resource shape
-    # override defaults here. Financial sets platform.storage.scratch.size to
-    # 200Gi and, on Spark Thrift, raises its memory. Per-executor scratch PVCs do
-    # not come from that field: they are _JOB_PROFILES["scratch_size"]
-    # (silver-build 300Gi) with _SCHEMA_PROFILE_OVERRIDES on top, applied at
-    # manifest-build time in modules/pipeline_engines/spark/job.py.
+    # override defaults here. Financial raises the Spark Thrift memory.
+    # Per-executor scratch PVCs are _JOB_PROFILES["scratch_size"] (silver-build
+    # 300Gi) with _SCHEMA_PROFILE_OVERRIDES on top, applied at manifest-build
+    # time in modules/pipeline_engines/spark/job.py.
     # -- Spark Thrift on Delta (LB-148) --
     # Runs before the schema overrides so the financial 24g heap still wins.
     delta_change = _apply_delta_thrift_default(config, cluster_capacity)
@@ -437,9 +426,8 @@ def _apply_schema_overrides(
     """Apply per-workload-schema default overrides.
 
     Baseline (Customer360) leaves everything at scale-tier guidance.
-    Financial (FinServ-Crime, AML) bumps the shared scratch PVC to 200 Gi
-    for silver_build headroom on pacs.008 rows (spec §2C.21) and lifts
-    the Spark Thrift default from 4g toward 16g -- LB-093, first live
+    Financial (FinServ-Crime, AML) lifts the Spark Thrift default from 4g
+    toward 16g -- LB-093, first live
     S1 run OOM'd every AML benchmark query at 4g because the silver
     aggregation and rule-target joins are heavier than C360's silver.
     Only fields the user did not explicitly set are touched.
@@ -465,10 +453,6 @@ def _apply_schema_overrides(
         return None
 
     changes: list[str] = []
-    scratch = config.platform.storage.scratch
-    if _set_if_default(scratch, "size", "200Gi"):
-        changes.append("storage.scratch.size=200Gi")
-
     if config.architecture.query_engine.type.value == "spark-thrift":
         thrift = config.architecture.query_engine.spark_thrift
         # LB-117: 16g was on the edge for AML analytical queries -- three
@@ -577,29 +561,20 @@ def _apply_cluster_scaling(
     1. **Trino** uses tier guidance only -- never boosted.  If the cluster
        is too small to fit the tier's worker count, replicas are reduced.
     2. **Batch** (MEDALLION/BATCH): Datagen and Spark are sequential phases
-       so each gets the full remaining CPU budget.
+       so datagen gets the full remaining CPU budget.
        **Streaming** (STREAMING): Datagen and Spark run concurrently so
-       the budget is split (40 % datagen, 60 % Spark).
+       datagen gets 40 % of it.
        - For scales ≤ 50: only *cap* to fit.
        - For scales > 50: *scale up* to use the available budget.
-    3. Per-pod memory is capped to 85 % of the largest node.
+    3. Trino worker memory is capped to 85 % of the largest node.
     """
     scale = config.architecture.workload.datagen.scale
-    executor = config.platform.compute.spark.executor
     datagen = config.architecture.workload.datagen
     engine_type = config.architecture.query_engine.type.value
 
     # Max per-pod memory: 85% of largest node
     max_pod_mem_bytes = int(cap.largest_node_memory_bytes * _POD_MEMORY_HEADROOM)
     max_pod_mem_gi = max_pod_mem_bytes / (1024**3)
-
-    # --- Cap per-pod memory ---
-
-    exec_mem_gi = _parse_memory_gi(executor.memory)
-    if exec_mem_gi > max_pod_mem_gi:
-        capped = f"{int(max_pod_mem_gi)}g"
-        object.__setattr__(executor, "memory", capped)
-        changes.append(f"spark.executor.memory capped to {capped} (node limit)")
 
     # --- Trino-specific: cap worker memory and worker count ---
     if engine_type == "trino":
@@ -629,39 +604,17 @@ def _apply_cluster_scaling(
     phase_budget_m = max(0, cap.total_cpu_millicores - co_resident_m)
     phase_budget_m = int(phase_budget_m * _PHASE_CPU_BUDGET)
 
-    # In STREAMING mode, datagen and Spark are concurrent -- split the budget.
-    # In BATCH/MEDALLION mode, they are sequential -- each gets the full budget.
+    # In STREAMING mode, datagen and Spark are concurrent -- datagen gets its
+    # share of the budget. In BATCH/MEDALLION mode, they are sequential --
+    # datagen gets the full budget. Spark executor counts are not sized here
+    # (job profiles; the concurrent streaming budget is applied at submit).
     from lakebench.config.schema import ProcessingPattern
 
     is_streaming = config.architecture.pipeline.pattern == ProcessingPattern.STREAMING
     if is_streaming:
-        spark_budget_m = int(phase_budget_m * _STREAMING_SPARK_SHARE)
         datagen_budget_m = int(phase_budget_m * _STREAMING_DATAGEN_SHARE)
     else:
-        spark_budget_m = phase_budget_m
         datagen_budget_m = phase_budget_m
-
-    # --- Spark executors: cap or scale up ---
-    exec_cpu_m = executor.cores * 1000
-    cluster_max_executors = _round_down_even(spark_budget_m // exec_cpu_m)
-
-    if "instances" not in executor.model_fields_set:
-        if scale > 50 and cluster_max_executors > executor.instances:
-            # Large scale: use the cluster
-            object.__setattr__(executor, "instances", cluster_max_executors)
-            changes.append(
-                f"spark.executor.instances scaled to {cluster_max_executors} "
-                f"(cluster has {cap.total_cpu_millicores // 1000} cores)"
-            )
-        elif executor.instances > cluster_max_executors:
-            object.__setattr__(executor, "instances", cluster_max_executors)
-            changes.append(
-                f"spark.executor.instances capped to {cluster_max_executors} (cluster CPU)"
-            )
-    elif executor.instances > cluster_max_executors:
-        # User-set value still gets capped to fit
-        object.__setattr__(executor, "instances", cluster_max_executors)
-        changes.append(f"spark.executor.instances capped to {cluster_max_executors} (cluster CPU)")
 
     # --- Datagen parallelism: cap or scale up ---
     if datagen.parallelism > 0:
