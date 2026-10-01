@@ -46,6 +46,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   job installs, so a local gate fits the same model as the cluster.
 
 ### Changed
+- typer is capped below 0.28 (`typer>=0.12.0,<0.28`), so a new typer minor
+  cannot change the CLI without a tested raise of the cap.
 - The `[dev]` extra includes `[aml]`, so a development install now gets the
   pinned AML libraries (scikit-learn 1.7.2, numpy 2.2.6, pandas 2.3.3, scipy
   1.15.3) instead of the newest releases. These pins support Python 3.10 to
