@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pyspark")
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts"
+_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 pytestmark = pytest.mark.usefixtures("load_script")
 
 

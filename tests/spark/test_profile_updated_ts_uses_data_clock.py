@@ -7,9 +7,9 @@ so a byte-identical silver rebuild becomes impossible even when the
 input bronze has not changed. Deriving ``profile_updated_ts`` from the
 resolved data clock keeps rebuilds byte-identical for a fixed bronze.
 
-The first test is a pure text check (portable, no pyspark), so
-fix-reverted verification runs on any host. The signature + runtime
-tests need pyspark and are gated by ``pytest.importorskip``.
+The first two tests are text checks; the signature and runtime tests
+import the script, which needs pyspark, so the file is in the Spark tier
+(CI's unit legs have no pyspark and would skip them).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
+_SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 
 pytestmark = pytest.mark.usefixtures("load_script")
 
@@ -75,48 +75,37 @@ def test_build_entity_profiles_signature_takes_data_clock():
     )
 
 
-def test_build_entity_profiles_uses_data_clock_expression():
-    """Runtime: the emitted profile_updated_ts value equals the passed clock."""
-    import pytest
-
-    pytest.importorskip("pyspark")
-
+def test_build_entity_profiles_uses_data_clock_expression(spark_session):
+    """Runtime: the emitted profile_updated_ts is the passed clock's
+    midnight in the session time zone (UTC, as the product sets it).
+    Read back as a string in that zone: ``collect()`` would convert the
+    instant to the host's local time and move the day on a host west of
+    UTC."""
     from datetime import date, datetime
 
     import silver_build_financial as sbf
-    from pyspark.sql import Row, SparkSession
+    from pyspark.sql import Row
 
-    spark = (
-        SparkSession.builder.master("local[1]")
-        .appName("test-profile-updated-ts")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    try:
-        rows = [
-            Row(
-                originator_id="E1",
-                beneficiary_id="E2",
-                txn_timestamp=datetime(2024, 3, 1, 0, 0, 0),
-                txn_amount_usd=100.0,
-            ),
-            Row(
-                originator_id="E2",
-                beneficiary_id="E1",
-                txn_timestamp=datetime(2024, 4, 1, 0, 0, 0),
-                txn_amount_usd=50.0,
-            ),
-        ]
-        txns = spark.createDataFrame(rows)
-        clock = date(2025, 6, 15)
-        profiles = sbf.build_entity_profiles(txns, data_clock=clock)
-        collected = profiles.select("entity_id", "profile_updated_ts").collect()
-        assert collected, "expected at least one profile row"
-        for row in collected:
-            got = row["profile_updated_ts"]
-            assert got is not None
-            assert got.year == clock.year
-            assert got.month == clock.month
-            assert got.day == clock.day
-    finally:
-        spark.stop()
+    assert spark_session.conf.get("spark.sql.session.timeZone") == "UTC"
+    rows = [
+        Row(
+            originator_id="E1",
+            beneficiary_id="E2",
+            txn_timestamp=datetime(2024, 3, 1, 0, 0, 0),
+            txn_amount_usd=100.0,
+        ),
+        Row(
+            originator_id="E2",
+            beneficiary_id="E1",
+            txn_timestamp=datetime(2024, 4, 1, 0, 0, 0),
+            txn_amount_usd=50.0,
+        ),
+    ]
+    txns = spark_session.createDataFrame(rows)
+    clock = date(2025, 6, 15)
+    profiles = sbf.build_entity_profiles(txns, data_clock=clock)
+    got = [
+        r["ts"] for r in profiles.selectExpr("CAST(profile_updated_ts AS STRING) AS ts").collect()
+    ]
+    assert got, "expected at least one profile row"
+    assert set(got) == {"2025-06-15 00:00:00"}, got

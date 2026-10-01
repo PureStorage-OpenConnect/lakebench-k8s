@@ -86,7 +86,10 @@ scripts directory on `sys.path` or a script module in `sys.modules`.
 ### The Spark tier and its jars
 
 `pytest tests/spark` needs pyspark (4.0.1 or 4.1.1), pyarrow and a Java 17
-runtime. Tests that need Iceberg or Delta read the jars from
+runtime. A test that imports pyspark, Delta or py4j, or calls
+`pytest.importorskip` on one, goes under `tests/spark`: the unit legs in CI
+have no pyspark and would skip it, so `tests/test_pyspark_tests_in_spark_tier.py`
+fails on such a test anywhere else under `tests/`. Tests that need Iceberg or Delta read the jars from
 `LB_SPARK_TEST_JARS`, a comma-separated list of jar files for the installed
 Spark line:
 

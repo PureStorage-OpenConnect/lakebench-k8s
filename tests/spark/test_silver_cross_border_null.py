@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pyspark")
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts"
+_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 pytestmark = pytest.mark.usefixtures("load_script")
 
 
@@ -131,10 +131,10 @@ def test_deploy_and_script_ddl_cross_border_nullable():
         raise AssertionError("cross_border column not found")
 
     deploy = (
-        Path(__file__).resolve().parent.parent / "src/lakebench/deploy/financial_ddl.py"
+        Path(__file__).resolve().parents[2] / "src/lakebench/deploy/financial_ddl.py"
     ).read_text()
     script = (
-        Path(__file__).resolve().parent.parent
+        Path(__file__).resolve().parents[2]
         / "src/lakebench/spark/scripts/silver_build_financial.py"
     ).read_text()
 
