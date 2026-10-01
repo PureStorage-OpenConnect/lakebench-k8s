@@ -86,6 +86,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `detail.compaction_failures`. The maintenance policy id and the effective
   maintenance `id` are unchanged.
 ### Changed
+- **`destroy` removes what it used to leave in a surviving namespace.** With
+  `create_namespace: false`, destroy left the PostgreSQL ServiceAccount, the
+  `lakebench-ca-certificate` Secret (with `s3.ca_cert`) and, with
+  observability on, the Pushgateway Deployment, Service and PVC, the
+  Prometheus ConfigMap and five PodMonitors. A new step, after the component
+  steps and before the namespace step, deletes them by name from the
+  Category-1 registry (`deploy/category1.py`). The registry lists every
+  object deploy and run create in the namespace and the step that deletes
+  it; a unit test runs deploy and the run-time creators against it, and
+  checks every template. The `lakebench-silver-state` ConfigMap is kept on
+  purpose (its rebuild counters must not reset while table data can outlive
+  destroy), and so are the deployment's identity annotations.
+- **`destroy` keeps a namespace an operator pod still watches.** After it
+  removes the namespace from the Spark Operator watch list and the operator
+  restarts, destroy waits inside the cluster lease (up to 120 s) until no
+  operator pod that is still running, and no operator Deployment template,
+  lists the namespace in `--namespaces=`. A stale pod nobody is replacing
+  gets one more restart of the shared operator's controller and webhook (as
+  the watch-list change itself does). If something still lists it, destroy keeps
+  the namespace and exits 1 with "operator pods [...] still watch it",
+  because the operator crash-loops on a watched namespace that no longer
+  exists.
+- **The legacy SecretClass cleanup in `destroy` runs under the cluster
+  lease.** The cluster-wide count of other lakebench namespaces and the
+  deletes of `lakebench-s3-credentials-class` and
+  `lakebench-s3-ca-cert-class` used to run without it. The lease is taken
+  only when one of them exists; if it stays held for 600 s the cleanup is
+  skipped and they are kept.
+- **The cluster lease holder names the process (LB-178).** The `holder`
+  field is now `<host>@<user>@<sha>#<pid>-<8 hex>`, unique to each acquire,
+  and release matches the lease's write nonce, so a process never deletes a
+  lease another run from the same host wrote in the same second. An acquire
+  that fails or is interrupted after its write landed (a lost reply, a 504,
+  a Ctrl-C, a SIGTERM) releases that lease instead of leaving it to the
+  3600 s TTL, and an acquire whose own write comes back as a conflict adopts
+  it instead of waiting on itself.
+- **`destroy` deletes the PostgreSQL data PVC when the namespace survives
+  (LB-187).** With `create_namespace: false`, `data-lakebench-postgres-<n>`
+  and the catalog metadata on it used to survive destroy, because the cleanup
+  selected on a label the claim never carried; the next deploy then started
+  on the old metastore. Destroy now deletes the claims by name. It no longer
+  selects on `app.kubernetes.io/component=postgres`, which could only ever
+  match another application's claim in a shared namespace.
 - **Spark scripts ship in one ConfigMap per role (DEP-1, LB-207).** The single
   `lakebench-spark-scripts` ConfigMap, about 45 KB from the 1 MiB limit with
   every AML addition, is replaced by six maps (`lakebench-scripts-common`,
@@ -99,6 +142,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   changed since its run applied them. The first 1.7 `run` deletes the 1.6 map
   unless a running SparkApplication still mounts it; `destroy` deletes all
   scripts maps, also when `create_namespace: false`.
+- **Interrupts wait for the cluster lease to be released.** A Ctrl-C,
+  SIGTERM or SIGHUP while a command holds the `lakebench-cluster-lock`
+  lease no longer stops it between a `helm upgrade` of the shared Spark
+  Operator and the operator restart. The command prints the hold budget
+  left (750 s, 1800 s for `admin` commands), finishes the shared change,
+  releases the lease, then stops; a third interrupt aborts at once and
+  still releases the lease. `kubectl`, `helm` and `oc` run under the lease
+  in their own session with a timeout from that budget, and are stopped
+  with SIGTERM rather than killed, so a terminal Ctrl-C or a timeout no
+  longer leaves the release `pending-upgrade`. A leased command that runs
+  out of time fails deploy or destroy closed (destroy keeps the namespace);
+  for helm the error names `helm rollback` and
+  `lakebench admin repair-operator`.
 ### Fixed
 - **Spark Thrift on Spark 4.1 with Iceberg 1.11 loaded the 4.0 runtime.**
   Thrift picked the Iceberg runtime from the Spark version alone, so it loaded

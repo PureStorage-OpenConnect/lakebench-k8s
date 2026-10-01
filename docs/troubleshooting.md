@@ -149,6 +149,30 @@ watch list still names namespaces that no longer exist, run
 `lakebench admin repair-operator` (use `--dry-run` first) and then deploy
 again.
 
+**Destroy says "operator pods [...] still watch it".** Destroy removed the
+namespace from the Spark Operator watch list and restarted the operator, but
+a pod with the old `--namespaces=` list was still there after 120 s (usually
+one still terminating, or one a restart did not replace; destroy restarts
+the operator once more for that). Deleting the namespace then would
+crash-loop the operator for every deployment, so destroy kept it and exited
+1. Check `kubectl get pods -n spark-operator`; once the old pods are gone,
+re-run `lakebench destroy`. When the list names a `deployment/...`, an
+operator Deployment's pod template still lists the namespace while the helm
+values do not, usually an upgrade that did not apply (check `helm history
+spark-operator -n spark-operator`). `lakebench admin repair-operator` does
+not compare the Deployments yet, so a cluster admin has to re-apply the
+release before destroy can finish.
+
+**Ctrl-C does not stop the command at once.** If the command holds the
+cluster lease, it prints "interrupt received while holding the cluster
+lease" and finishes the shared change first (its hold budget is 750 s,
+1800 s for `admin` commands), then releases the lease and stops. Press
+Ctrl-C twice more to abort at once; the lease is still released. If a helm
+upgrade was running, run `helm history spark-operator -n spark-operator`:
+a `pending-upgrade` revision blocks every deployment's watch-list change,
+so roll it back with `helm rollback spark-operator <last deployed
+revision> -n spark-operator`, then run `lakebench admin repair-operator`.
+
 Do not edit `spark.jobNamespaces` with `helm upgrade --reuse-values` by hand.
 That skips the lease, and a list copied from an earlier read silently drops
 any namespace another deployment added in the meantime.

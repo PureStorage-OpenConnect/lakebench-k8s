@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
@@ -22,13 +22,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Cluster-scoped resources shared by every lakebench deployment (Stackable
-# SecretClass, the scratch StorageClass, etc.) must not be deleted while
-# another lakebench namespace still uses them. Deleting them out from under
-# a running parallel deploy has crashed other users' Hive Metastore pods
-# and killed other users' Spark PVC provisioning. See findings in the
-# deploy/destroy adversarial review.
-LAKEBENCH_NAMESPACE_LABEL = "app.kubernetes.io/managed-by=lakebench"
+# Cluster-scoped resources shared by every lakebench deployment must not be
+# deleted while another lakebench namespace may still use them. Deleting them
+# out from under a running parallel deploy has crashed other users' Hive
+# Metastore pods. The only such resources destroy still deletes are the two
+# legacy fixed-name SecretClasses (_legacy_secretclass_cleanup); the scratch
+# StorageClass is never deleted.
+_LEGACY_SECRETCLASSES = ("lakebench-s3-credentials-class", "lakebench-s3-ca-cert-class")
+
+# The PostgreSQL StatefulSet's claims: <claim template "data">-<statefulset>-
+# <ordinal> (templates/postgres/statefulset.yaml.j2). The claim template
+# carries no labels, and cannot gain one without making a v1.7 deploy over a
+# v1.6 StatefulSet fail (volumeClaimTemplates are immutable), so destroy
+# finds the claims by name (LB-187).
+_POSTGRES_PVC_RE = re.compile(r"^data-lakebench-postgres-\d+$")
 
 
 # LB-157: a namespace delete returns as soon as the API server accepts it; the
@@ -49,6 +56,21 @@ _TABLE_STEP_CAP = 1800
 
 # Delays before each in-lease namespace delete attempt (seconds).
 _IN_LEASE_DELETE_BACKOFF = (0.0, 2.0, 5.0)
+
+# SAF-4 (DESIGN ch01 3.3): inside the lease, before the namespace delete,
+# destroy waits up to this long (clamped to the lease's hold budget) for every
+# Spark Operator pod still listing the namespace in --namespaces= to go. The
+# restart before it already waited for the rollout, so this covers pods that
+# are still terminating.
+_OPERATOR_POD_WAIT_S = 120.0
+_OPERATOR_POD_POLL_S = 3.0
+# A pod in these phases runs no container, so it watches nothing (an evicted
+# controller pod stays in Failed with its old args).
+_FINISHED_POD_PHASES = frozenset({"Succeeded", "Failed"})
+
+# SAF-4 (3.2): how long the optional legacy SecretClass cleanup waits for the
+# cluster lease before it skips.
+_LEGACY_CLEANUP_LOCK_TIMEOUT_S = 600.0
 
 # Indirection so tests can drive the wait with a fake clock.
 _monotonic = time.monotonic
@@ -122,6 +144,160 @@ class _NamespaceReplaced(Exception):
 
 class _NamespaceUnverifiable(Exception):
     """The namespace UID could not be read, so its incarnation is unknown."""
+
+
+class _OperatorStillWatching(Exception):
+    """Spark Operator pods still list the namespace in ``--namespaces=`` (SAF-4)."""
+
+    def __init__(self, pods: list[str]) -> None:
+        super().__init__(", ".join(pods))
+        self.pods = pods
+
+
+def _namespaces_flag_values(argv: list[str]) -> list[str]:
+    """Every value of ``--namespaces`` in ``argv`` (``--namespaces=a,b`` or ``--namespaces a,b``)."""
+    out: list[str] = []
+    for i, a in enumerate(argv):
+        if a.startswith("--namespaces="):
+            out.append(a.split("=", 1)[1])
+        elif a == "--namespaces" and i + 1 < len(argv):
+            out.append(argv[i + 1])
+    return out
+
+
+def _containers_list(containers: Any, namespace: str) -> bool:
+    """Whether any container's ``--namespaces`` lists ``namespace``.
+
+    Quotes are stripped as ``SparkOperatorManager._get_active_namespaces``
+    strips them; an empty value (watch everything) lists nothing.
+    """
+    for c in containers or []:
+        argv = [str(x) for x in (*(c.command or []), *(c.args or []))]
+        for value in _namespaces_flag_values(argv):
+            names = {
+                n.strip().strip('"').strip("'") for n in value.strip('"').strip("'").split(",")
+            }
+            if namespace in names:
+                return True
+    return False
+
+
+@dataclass(frozen=True)
+class _OperatorWatchers:
+    """What in the operator namespace still lists a namespace in ``--namespaces``."""
+
+    deployments: tuple[str, ...] = ()  # pod templates: new pods would list it too
+    live: tuple[str, ...] = ()  # running or pending pods, not being deleted
+    terminating: tuple[str, ...] = ()  # pods with a deletionTimestamp
+
+    def names(self) -> list[str]:
+        return [*(f"deployment/{d}" for d in self.deployments), *self.live, *self.terminating]
+
+    def __bool__(self) -> bool:
+        return bool(self.deployments or self.live or self.terminating)
+
+
+def _operator_pods_listing(
+    core_v1: Any, apps_v1: Any, operator_ns: str, namespace: str
+) -> _OperatorWatchers:
+    """The operator Deployments and pods whose ``--namespaces`` still lists ``namespace``.
+
+    Lists every pod and Deployment in the operator namespace, so controller
+    and webhook are covered whatever the chart labels them, and so are pods
+    that are terminating. A pod that has finished (Succeeded, Failed: an
+    evicted controller keeps its old args) runs nothing and is skipped; a
+    Deployment whose pod template still lists the namespace would start a
+    replacement that watches it, so it counts unless it is scaled to zero.
+    Any read error raises ``_NamespaceUnverifiable``.
+    """
+    from lakebench.deploy.cluster_lock import LEASE_REQUEST_TIMEOUT
+
+    try:
+        pods = core_v1.list_namespaced_pod(
+            operator_ns, _request_timeout=LEASE_REQUEST_TIMEOUT
+        ).items
+        deployments = apps_v1.list_namespaced_deployment(
+            operator_ns, _request_timeout=LEASE_REQUEST_TIMEOUT
+        ).items
+    except Exception as e:  # noqa: BLE001
+        reason = getattr(e, "reason", None) or e
+        raise _NamespaceUnverifiable(
+            f"could not list the Spark Operator pods in {operator_ns}: {reason}"
+        ) from e
+    deps = sorted(
+        d.metadata.name
+        for d in deployments or []
+        # Scaled to zero runs no pod; it would only matter once scaled up.
+        if getattr(d.spec, "replicas", 1) != 0
+        and _containers_list(
+            getattr(getattr(getattr(d.spec, "template", None), "spec", None), "containers", None),
+            namespace,
+        )
+    )
+    live: list[str] = []
+    terminating: list[str] = []
+    for pod in pods or []:
+        if getattr(getattr(pod, "status", None), "phase", None) in _FINISHED_POD_PHASES:
+            continue
+        if not _containers_list(getattr(getattr(pod, "spec", None), "containers", None), namespace):
+            continue
+        if getattr(pod.metadata, "deletion_timestamp", None):
+            terminating.append(pod.metadata.name)
+        else:
+            live.append(pod.metadata.name)
+    return _OperatorWatchers(tuple(deps), tuple(sorted(live)), tuple(sorted(terminating)))
+
+
+def _await_operator_unwatch(
+    core_v1: Any,
+    apps_v1: Any,
+    operator_ns: str,
+    namespace: str,
+    restart: Callable[[], bool] | None = None,
+) -> list[str]:
+    """Poll ``_operator_pods_listing`` until nothing lists ``namespace``.
+
+    Every ``_OPERATOR_POD_POLL_S`` for up to ``lease_clamp(_OPERATOR_POD_WAIT_S)``
+    (the hold budget left caps it). A Deployment whose template still lists
+    it ends the wait at once: no amount of waiting changes it. A pod that is
+    still running with the old list and is not being deleted means no
+    restart replaced it (the restart failed, or an earlier destroy removed
+    the entry from the helm values and stopped before the delete); then
+    ``restart`` runs once, inside the lease. Returns what still lists the
+    namespace at the end, ``[]`` once nothing does.
+    """
+    from lakebench.deploy.cluster_lock import lease_clamp
+
+    deadline = _monotonic() + lease_clamp(_OPERATOR_POD_WAIT_S)
+    restarted = restart is None
+    while True:
+        found = _operator_pods_listing(core_v1, apps_v1, operator_ns, namespace)
+        if not found:
+            return []
+        if found.deployments:
+            return found.names()
+        if found.live and not restarted:
+            restarted = True
+            logger.warning(
+                "Spark Operator pods %s still watch %s and are not being replaced; "
+                "restarting the operator once",
+                ", ".join(found.live),
+                namespace,
+            )
+            assert restart is not None
+            if not restart():
+                logger.warning("the Spark Operator restart did not complete")
+            continue
+        left = deadline - _monotonic()
+        if left <= 0:
+            return found.names()
+        logger.info(
+            "waiting for Spark Operator pods %s to stop watching %s (%.0f s left)",
+            ", ".join(found.names()),
+            namespace,
+            left,
+        )
+        _sleep(min(_OPERATOR_POD_POLL_S, left))
 
 
 def _read_incarnation(engine, namespace: str) -> str:
@@ -902,32 +1078,146 @@ def _buckets_destroy_empties(
     return set(bplan.buckets), ""
 
 
-def _is_last_lakebench_namespace(namespace_names: list[str], current: str) -> bool:
-    """Return True iff `current` is the only lakebench-labeled namespace left.
+def _other_lakebench_namespaces(all_ns: list[Any], namespace: str) -> list[str]:
+    """Names of the lakebench namespaces in ``all_ns`` other than ``namespace``.
 
-    Extracted as a pure function so refcount behavior can be unit-tested
-    without a live cluster.
+    A namespace counts when it carries the ``lakebench.deployment/name``
+    annotation (PR-1 and later), or the ``app.kubernetes.io/managed-by`` or
+    ``app.kubernetes.io/name`` label set to ``lakebench`` (pre-PR-1
+    deployments predate the annotation). Every phase counts, Terminating
+    included: a namespace still being torn down can still have pods that
+    mount a legacy SecretClass, so counting it errs toward keeping the
+    shared object. The one refcount for ``_legacy_secretclass_cleanup``
+    (DEP-7).
     """
-    others = [n for n in namespace_names if n != current]
-    return not others
+    out: list[str] = []
+    for n in all_ns:
+        meta = getattr(n, "metadata", None)
+        name = getattr(meta, "name", None)
+        if meta is None or not name or name == namespace:
+            continue
+        anns = meta.annotations or {}
+        labels = meta.labels or {}
+        if (
+            anns.get("lakebench.deployment/name")
+            or labels.get("app.kubernetes.io/managed-by") == "lakebench"
+            or labels.get("app.kubernetes.io/name") == "lakebench"
+        ):
+            out.append(name)
+    return out
 
 
-def _other_lakebench_namespaces_exist(core_v1, current_namespace: str) -> bool:
-    """Return True if any lakebench-labeled namespace exists BESIDES the one
-    being destroyed. Fail-safe: on any listing error, return True (assume
-    others exist) so we don't delete a shared resource on flaky read.
+def _legacy_secretclasses_present(custom_api: Any) -> bool:
+    """Whether either legacy SecretClass may exist (read only, outside the lease).
+
+    False only when both reads answer 404 (no object, or no SecretClass
+    CRD); any other answer is True and the leased check decides. A False
+    can only skip the cleanup, never cause a delete, so a stale read costs
+    at most a cleanup the next destroy does.
     """
+    from kubernetes.client.rest import ApiException
+
+    for legacy_name in _LEGACY_SECRETCLASSES:
+        try:
+            custom_api.get_cluster_custom_object(
+                group="secrets.stackable.tech",
+                version="v1alpha1",
+                plural="secretclasses",
+                name=legacy_name,
+            )
+            return True
+        except ApiException as e:
+            if e.status != 404:
+                return True
+        except Exception:  # noqa: BLE001 -- unknown: let the leased check decide
+            return True
+    return False
+
+
+def _legacy_secretclass_cleanup(core_v1: Any, custom_api: Any, namespace: str) -> list[str]:
+    """Delete the legacy fixed-name SecretClasses when no other deployment remains.
+
+    ADR-F6: ``lakebench-s3-credentials-class`` and
+    ``lakebench-s3-ca-cert-class`` belong to pre-PR-2 deployments. They exist
+    only if a deployment was migrated with ``admin migrate-deployment``,
+    which copies them and does not delete them. They are cluster-scoped and
+    shared, so they go only when no other lakebench namespace is left
+    (``_other_lakebench_namespaces``), and the count and the deletes run
+    inside the cluster lease (SAF-4), where ``migrate-deployment`` also
+    works. When neither exists the lease is not taken. A lease that stays
+    held for ``_LEGACY_CLEANUP_LOCK_TIMEOUT_S``, or a namespace list that
+    fails, deletes nothing. The cleanup is optional: every error is logged
+    and swallowed.
+
+    Returns the names deleted.
+    """
+    from lakebench.deploy.cluster_lock import ClusterLockHeld, cluster_lock
+
+    if not _legacy_secretclasses_present(custom_api):
+        return []
     try:
-        ns_list = core_v1.list_namespace(label_selector=LAKEBENCH_NAMESPACE_LABEL)
-        names = [ns.metadata.name for ns in ns_list.items]
-    except Exception as e:
+        with cluster_lock(core_v1, timeout=_LEGACY_CLEANUP_LOCK_TIMEOUT_S):
+            return _legacy_secretclass_cleanup_locked(core_v1, custom_api, namespace)
+    except ClusterLockHeld as e:
         logger.warning(
-            "Could not list lakebench namespaces (%s); assuming others exist "
-            "to avoid deleting a shared cluster-scoped resource.",
+            "Legacy SecretClass cleanup skipped: the cluster lease is held by %s; "
+            "the legacy SecretClasses are kept (optional cleanup)",
+            e.holder,
+        )
+    except Exception as e:  # noqa: BLE001 -- lease errors and transport errors alike
+        logger.warning(
+            "Legacy SecretClass cleanup skipped: could not take the cluster lease (%s); "
+            "the legacy SecretClasses are kept (optional cleanup)",
             e,
         )
-        return True
-    return not _is_last_lakebench_namespace(names, current_namespace)
+    return []
+
+
+def _legacy_secretclass_cleanup_locked(core_v1: Any, custom_api: Any, namespace: str) -> list[str]:
+    """The refcount and the deletes of ``_legacy_secretclass_cleanup``; the lease is held."""
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.deploy.cluster_lock import LEASE_REQUEST_TIMEOUT
+
+    try:
+        all_ns = core_v1.list_namespace(_request_timeout=LEASE_REQUEST_TIMEOUT).items
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Legacy SecretClass cleanup skipped: could not list namespaces (%s); "
+            "they are kept in case another deployment still uses them",
+            e,
+        )
+        return []
+    others = _other_lakebench_namespaces(all_ns, namespace)
+    if others:
+        logger.debug(
+            "Legacy SecretClasses kept: %d other lakebench namespace(s) remain (%s)",
+            len(others),
+            ", ".join(sorted(others)[:5]),
+        )
+        return []
+    deleted: list[str] = []
+    for legacy_name in _LEGACY_SECRETCLASSES:
+        try:
+            custom_api.delete_cluster_custom_object(
+                group="secrets.stackable.tech",
+                version="v1alpha1",
+                plural="secretclasses",
+                name=legacy_name,
+                _request_timeout=LEASE_REQUEST_TIMEOUT,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                logger.debug("Legacy SecretClass %s not present", legacy_name)
+            else:
+                logger.warning("Legacy SecretClass %s not deleted: %s", legacy_name, e.reason)
+            continue
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Legacy SecretClass %s not deleted: %s", legacy_name, e)
+            continue
+        deleted.append(legacy_name)
+        logger.info("Removed legacy SecretClass %s (last lakebench deployment)", legacy_name)
+    return deleted
 
 
 def _buckets_hold_data(engine) -> bool | None:
@@ -983,6 +1273,181 @@ def _no_engine_table_message(
         else "no files are removed (bucket cleanup is off)"
     )
     return f"{fmt} tables not dropped: {why}; {catalog}; {files}"
+
+
+_SINGULAR = {
+    "configmaps": "config_map",
+    "secrets": "secret",
+    "services": "service",
+    "serviceaccounts": "service_account",
+    "persistentvolumeclaims": "persistent_volume_claim",
+    "deployments": "deployment",
+    "statefulsets": "stateful_set",
+    "jobs": "job",
+    "roles": "role",
+    "rolebindings": "role_binding",
+}
+
+
+def _category1_api(api: str) -> Any:
+    from kubernetes import client as k8s_client
+
+    return {
+        "core_v1": k8s_client.CoreV1Api,
+        "apps_v1": k8s_client.AppsV1Api,
+        "batch_v1": k8s_client.BatchV1Api,
+        "rbac_v1": k8s_client.RbacAuthorizationV1Api,
+        "custom": k8s_client.CustomObjectsApi,
+    }[api]()
+
+
+def _category1_names(entry: Any, client: Any, namespace: str, deployment: str) -> list[str]:
+    """The object names one ``category1`` entry deletes."""
+    if entry.name:
+        return [entry.name]
+    selector = entry.label_selector.format(name=deployment)
+    if entry.api == "custom":
+        listed = client.list_namespaced_custom_object(
+            group=entry.group,
+            version=entry.version,
+            namespace=namespace,
+            plural=entry.kind,
+            label_selector=selector,
+        )
+        return [i["metadata"]["name"] for i in listed.get("items", [])]
+    lister = getattr(client, f"list_namespaced_{_SINGULAR[entry.kind]}")
+    return [i.metadata.name for i in lister(namespace, label_selector=selector).items]
+
+
+def _category1_delete(entry: Any, client: Any, namespace: str, name: str) -> None:
+    """Delete one object; a 404 (gone, or its kind not installed) is success."""
+    from kubernetes.client.rest import ApiException
+
+    try:
+        if entry.api == "custom":
+            client.delete_namespaced_custom_object(
+                group=entry.group,
+                version=entry.version,
+                namespace=namespace,
+                plural=entry.kind,
+                name=name,
+            )
+        else:
+            deleter = getattr(client, f"delete_namespaced_{_SINGULAR[entry.kind]}")
+            deleter(name, namespace, propagation_policy="Background")
+    except ApiException as e:
+        if e.status != 404:
+            raise
+
+
+def _category1_step(
+    namespace: str,
+    deployment: str,
+    *,
+    ns_goes: bool,
+    conditions: frozenset[str] = frozenset(),
+) -> DeploymentResult:
+    """Delete the ``category1`` registry entries and the Category-1 annotations.
+
+    ``deploy/category1.py`` lists every object Lakebench creates in the
+    namespace; the entries whose step is ``category1`` are the ones no
+    component step deletes. They go in registry order, each by name or by
+    a deployment-scoped selector, in this deployment's namespace only. An
+    entry whose ``when`` condition is not in ``conditions`` is still tried,
+    but a 403 for it is ignored. Every entry is tried; any failure is FAILED
+    when the namespace survives, and SKIPPED when the namespace step is
+    meant to delete it.
+
+    When the namespace survives (``ns_goes`` false), one patch then removes
+    ``CATEGORY1_ANNOTATIONS``, conditional on the resourceVersion just read,
+    so a redeploy writing the namespace meanwhile keeps its annotations.
+    When the namespace step is meant to delete it, the annotations are left:
+    if that step then keeps the namespace (an operator pod still watching
+    it, say), the deployment is still whole.
+    """
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.deploy.category1 import (
+        CATEGORY1_ANNOTATIONS,
+        CATEGORY1_OBJECTS,
+        CATEGORY1_STEP,
+    )
+
+    deleted = 0
+    problems: list[str] = []
+    for entry in CATEGORY1_OBJECTS:
+        if entry.step != CATEGORY1_STEP:
+            continue
+        # An entry whose condition is off (observability turned off since
+        # deploy, or never on) is still tried, so nothing it created is left,
+        # but a 403 or 404 for it is not a failure: a user without rights on
+        # a kind the deployment never used must not fail every destroy.
+        optional = bool(entry.when) and entry.when not in conditions
+        what = f"{entry.kind}/{entry.name or entry.label_selector}"
+        try:
+            client = _category1_api(entry.api)
+            names = _category1_names(entry, client, namespace, deployment)
+        except ApiException as e:
+            if e.status == 404 or (optional and e.status == 403):
+                continue  # the kind is not installed, or not ours to see
+            problems.append(f"{what}: {e.reason}")
+            continue
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"{what}: {e}")
+            continue
+        for name in names:
+            try:
+                _category1_delete(entry, client, namespace, name)
+                deleted += 1
+            except ApiException as e:
+                if optional and e.status == 403:
+                    continue
+                problems.append(f"{entry.kind}/{name}: {e.reason}")
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{entry.kind}/{name}: {e}")
+    try:
+        if not ns_goes:
+            core_v1 = _category1_api("core_v1")
+            ns_obj = core_v1.read_namespace(namespace)
+            anns = ns_obj.metadata.annotations or {}
+            present = [a for a in CATEGORY1_ANNOTATIONS if a in anns]
+            if present:
+                core_v1.patch_namespace(
+                    namespace,
+                    {
+                        "metadata": {
+                            "annotations": dict.fromkeys(present),
+                            "resourceVersion": ns_obj.metadata.resource_version,
+                        }
+                    },
+                )
+    except ApiException as e:
+        if e.status == 409:
+            problems.append("namespace annotations: the namespace changed during destroy")
+        elif e.status != 404:
+            problems.append(f"namespace annotations: {e.reason}")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"namespace annotations: {e}")
+    if not problems:
+        return DeploymentResult(
+            component="category1",
+            status=DeploymentStatus.SUCCESS,
+            message=f"Removed the remaining namespaced objects ({deleted} delete calls)",
+        )
+    summary = "; ".join(problems[:5]) + (
+        f"; and {len(problems) - 5} more" if len(problems) > 5 else ""
+    )
+    if ns_goes:
+        msg = (
+            f"Category-1 cleanup incomplete ({summary}); the namespace delete, when it "
+            "runs, removes them"
+        )
+        status = DeploymentStatus.SKIPPED
+    else:
+        msg = f"Category-1 cleanup failed: {summary}"
+        status = DeploymentStatus.FAILED
+    logger.warning(msg)
+    return DeploymentResult(component="category1", status=status, message=msg)
 
 
 def destroy_all(
@@ -1315,6 +1780,23 @@ def destroy_all(
                 # deleted namespace. Errors fall back to the delete below.
                 if not namespace_uid_at_start:
                     return
+                # SAF-4: never delete a namespace a live operator pod still
+                # lists; it would crash-loop on the missing namespace. The
+                # lease is held, so no deploy can re-add it meanwhile.
+                try:
+                    watching = _await_operator_unwatch(
+                        k8s_client.CoreV1Api(),
+                        k8s_client.AppsV1Api(),
+                        spark_op_cfg.namespace,
+                        namespace,
+                        restart=op_mgr._restart_operator,  # noqa: SLF001
+                    )
+                except _NamespaceUnverifiable as e:
+                    in_lease["error"] = e
+                    return
+                if watching:
+                    in_lease["error"] = _OperatorStillWatching(watching)
+                    return
                 errored = False
                 for attempt, delay in enumerate(_IN_LEASE_DELETE_BACKOFF, start=1):
                     if delay:
@@ -1374,14 +1856,15 @@ def destroy_all(
                     in_lease["issued"] = False
 
             spark_op_cfg = engine.config.platform.compute.spark.operator
+            op_mgr = SparkOperatorManager(
+                namespace=spark_op_cfg.namespace,
+                version=spark_op_cfg.version,
+                job_namespace=namespace,
+                kube_context=engine.config.platform.kubernetes.context,
+            )
             watch_list_ok = True
             try:
-                SparkOperatorManager(
-                    namespace=spark_op_cfg.namespace,
-                    version=spark_op_cfg.version,
-                    job_namespace=namespace,
-                    kube_context=engine.config.platform.kubernetes.context,
-                ).remove_namespace_from_watch(
+                op_mgr.remove_namespace_from_watch(
                     namespace,
                     strict=True,
                     precondition=_same_incarnation_in_lease,
@@ -1401,11 +1884,40 @@ def destroy_all(
                     # re-add the entry first (operator crash loop). Keep the
                     # namespace: it is un-watched but intact, and a re-run of
                     # destroy deletes it.
-                    msg = (
-                        f"Namespace {namespace!r} NOT deleted: the delete failed while the "
-                        f"watch-list lease was held ({in_lease['error']}). It is no longer "
-                        "watched by the Spark Operator; re-run destroy to delete it."
-                    )
+                    err = in_lease["error"]
+                    if isinstance(err, _OperatorStillWatching):
+                        if any(p.startswith("deployment/") for p in err.pods):
+                            hint = (
+                                "an operator Deployment's pod template still lists it, "
+                                "so the operator's helm release and its Deployments "
+                                "disagree (an upgrade that did not apply); check "
+                                f"`helm history spark-operator -n {spark_op_cfg.namespace}`. "
+                                "`lakebench admin repair-operator` does not compare the "
+                                "Deployments yet; until it does, the release has to be "
+                                "re-applied by the cluster admin"
+                            )
+                        else:
+                            hint = (
+                                "they did not roll after a restart; check "
+                                f"`kubectl get pods -n {spark_op_cfg.namespace}` and re-run "
+                                "destroy when only new pods remain"
+                            )
+                        msg = (
+                            f"Namespace {namespace!r} NOT deleted: operator pods "
+                            f"[{', '.join(err.pods)}] still watch it; {hint}"
+                        )
+                    elif isinstance(err, _NamespaceUnverifiable):
+                        msg = (
+                            f"Namespace {namespace!r} NOT deleted: {err}, so no running "
+                            "Spark Operator pod is proven to have stopped watching it. "
+                            "It is off the watch list; re-run destroy to delete it."
+                        )
+                    else:
+                        msg = (
+                            f"Namespace {namespace!r} NOT deleted: the delete failed while "
+                            f"the watch-list lease was held ({err}). It is no longer "
+                            "watched by the Spark Operator; re-run destroy to delete it."
+                        )
                     logger.error(msg)
                     results.append(
                         DeploymentResult(
@@ -2880,13 +3392,19 @@ def destroy_all(
             core_v1.delete_namespaced_service("lakebench-postgres", namespace)
         except ApiException as e:
             logger.debug("Postgres service delete skipped: %s", e.reason)
-        # Delete PVCs
-        pvcs = core_v1.list_namespaced_persistent_volume_claim(
-            namespace,
-            label_selector="app.kubernetes.io/component=postgres",
-        )
+        # The StatefulSet's claims, by name (LB-187: the claim template has
+        # no labels, so the old component-label selector matched none of
+        # ours and only ever could match another app's claim).
+        pvcs = core_v1.list_namespaced_persistent_volume_claim(namespace)
         for pvc in pvcs.items:
-            core_v1.delete_namespaced_persistent_volume_claim(pvc.metadata.name, namespace)
+            pvc_name = pvc.metadata.name
+            if not _POSTGRES_PVC_RE.match(pvc_name or ""):
+                continue
+            try:
+                core_v1.delete_namespaced_persistent_volume_claim(pvc_name, namespace)
+            except ApiException as e:
+                if e.status != 404:
+                    raise
         results.append(
             DeploymentResult(
                 component="postgres",
@@ -2970,7 +3488,11 @@ def destroy_all(
             core_v1.delete_namespaced_service_account(SPARK_SERVICE_ACCOUNT, namespace)
         except ApiException as e:
             logger.debug("ServiceAccount delete skipped: %s", e.reason)
-        for secret in ["lakebench-s3-credentials", "lakebench-postgres-secret"]:
+        for secret in [
+            "lakebench-s3-credentials",
+            "lakebench-postgres-secret",
+            "lakebench-ca-certificate",  # only when s3.ca_cert is set
+        ]:
             try:
                 core_v1.delete_namespaced_secret(secret, namespace)
             except ApiException as e:
@@ -2992,64 +3514,9 @@ def destroy_all(
                 )
             except ApiException as e:
                 logger.debug("SecretClass %s delete skipped: %s", sc_name, e.reason)
-        # ADR-F6: legacy fixed-name SecretClasses (`lakebench-s3-credentials-class`,
-        # `lakebench-s3-ca-cert-class`) belong to pre-PR-2 deployments. They
-        # only exist in cluster state if this or another deployment was
-        # migrated from pre-PR-2 via `admin migrate-deployment` (which
-        # copies but does not delete). It is safe to clean them up when
-        # this destroy is the last remaining deployment that could
-        # depend on them -- i.e. no other lakebench-annotated namespace
-        # remains cluster-wide, and no annotationless legacy namespace
-        # is still around either. If either is present we leave the
-        # legacy names in place; the operator can reclaim them once the
-        # final deployment migrates and destroys.
-        try:
-            all_ns = core_v1.list_namespace().items
-
-            # ADR-F6b: a legacy pre-PR-1 deployment predates the
-            # annotation. Detect it via the managed-by LABEL that both
-            # PR-1 (annotated) and pre-PR-1 (annotationless) namespaces
-            # carry. Also skip cleanup on any namespace still in
-            # ``Active`` phase to avoid ripping the legacy SC out from
-            # under a mid-run Terminating tenant.
-            def _is_other_lakebench(n) -> bool:
-                if n.metadata.name == namespace:
-                    return False
-                anns = n.metadata.annotations or {}
-                labels = n.metadata.labels or {}
-                if anns.get("lakebench.deployment/name"):
-                    return True
-                if labels.get("app.kubernetes.io/managed-by") == "lakebench":
-                    return True
-                if labels.get("app.kubernetes.io/name") == "lakebench":
-                    return True
-                return False
-
-            other_lakebench = [n for n in all_ns if _is_other_lakebench(n)]
-            if not other_lakebench:
-                for legacy_name in (
-                    "lakebench-s3-credentials-class",
-                    "lakebench-s3-ca-cert-class",
-                ):
-                    try:
-                        custom_api.delete_cluster_custom_object(
-                            group="secrets.stackable.tech",
-                            version="v1alpha1",
-                            plural="secretclasses",
-                            name=legacy_name,
-                        )
-                        logger.info(
-                            "Removed legacy SecretClass %s (last migrated deployment)",
-                            legacy_name,
-                        )
-                    except ApiException as e:
-                        logger.debug(
-                            "Legacy SecretClass %s delete skipped: %s",
-                            legacy_name,
-                            e.reason,
-                        )
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Legacy SecretClass cluster-wide check skipped: %s", e)
+        # ADR-F6: the legacy fixed-name SecretClasses, only when no other
+        # lakebench namespace remains.
+        _legacy_secretclass_cleanup(core_v1, custom_api, namespace)
         results.append(
             DeploymentResult(
                 component="rbac",
@@ -3066,6 +3533,23 @@ def destroy_all(
                 message=str(e),
             )
         )
+
+    # Step 8c: the Category-1 registry (cluster-safety 14): what no component
+    # step deleted, and the Category-1 namespace annotations. It matters when
+    # create_namespace=false keeps the namespace; with true it runs anyway
+    # (one code path) and a failure is only a skip.
+    stopped = _stop_if_changed("the Category-1 teardown")
+    if stopped is not None:
+        return stopped
+    report("category1", DeploymentStatus.IN_PROGRESS, "Removing remaining namespaced objects...")
+    cat1 = _category1_step(
+        namespace,
+        engine.config.name,
+        ns_goes=engine.config.platform.kubernetes.create_namespace is True,
+        conditions=frozenset({"observability"} if engine.config.observability.enabled else ()),
+    )
+    results.append(cat1)
+    report("category1", cat1.status, cat1.message)
 
     # Step 9: StorageClass is Category 2 shared infrastructure. lakebench
     # never deletes it -- another parallel deployment on the same cluster

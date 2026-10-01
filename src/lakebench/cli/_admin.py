@@ -18,6 +18,7 @@ rationale.
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 from typing import Annotated
 
@@ -412,8 +413,11 @@ def install_scratch_storage_class(
     ``parameters``). Runs under the cluster lease.
     """
     from lakebench.deploy.cluster_lock import (
+        ADMIN_MAX_HOLD_S,
+        LEASE_REQUEST_TIMEOUT,
         ClusterLockError,
         ClusterLockHeld,
+        LeaseHoldExceeded,
         cluster_lock,
     )
 
@@ -435,9 +439,11 @@ def install_scratch_storage_class(
     # "already exists no-op" instead of a spurious 409 for whichever
     # loses the race.
     try:
-        with cluster_lock(core_v1, timeout=600):
+        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
             try:
-                storage_v1.read_storage_class(scratch.storage_class)
+                storage_v1.read_storage_class(
+                    scratch.storage_class, _request_timeout=LEASE_REQUEST_TIMEOUT
+                )
                 print_info(f"StorageClass {scratch.storage_class!r} already exists; no-op")
                 return
             except ApiException as e:
@@ -458,7 +464,9 @@ def install_scratch_storage_class(
                 "parameters": scratch.parameters,
             }
             try:
-                storage_v1.create_storage_class(body=manifest)
+                storage_v1.create_storage_class(
+                    body=manifest, _request_timeout=LEASE_REQUEST_TIMEOUT
+                )
             except ApiException as e:
                 if e.status == 409:
                     # A third writer sneaked in (or a stale-cache read
@@ -472,6 +480,11 @@ def install_scratch_storage_class(
         raise typer.Exit(1) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
+        raise typer.Exit(1) from e
+    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+        # A command inside the lease ran out of its hold budget; the lease
+        # has been released.
+        print_error(str(e))
         raise typer.Exit(1) from e
 
     print_success(
@@ -531,8 +544,10 @@ def install_spark_operator(
         print_error(f"--controller-tmp-size: {e}")
         raise typer.Exit(2) from e
     from lakebench.deploy.cluster_lock import (
+        ADMIN_MAX_HOLD_S,
         ClusterLockError,
         ClusterLockHeld,
+        LeaseHoldExceeded,
         cluster_lock,
     )
     from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
@@ -552,7 +567,7 @@ def install_spark_operator(
     core_v1 = _get_core_v1(context=kube_ctx)
 
     try:
-        with cluster_lock(core_v1, timeout=600):
+        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
             mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
             ok = mgr.install(version=v, tmp_size=controller_tmp_size)
     except ClusterLockHeld as e:
@@ -560,6 +575,11 @@ def install_spark_operator(
         raise typer.Exit(1) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
+        raise typer.Exit(1) from e
+    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+        # A command inside the lease ran out of its hold budget; the lease
+        # has been released.
+        print_error(str(e))
         raise typer.Exit(1) from e
 
     if not ok:
@@ -620,8 +640,10 @@ def migrate_deployment(
     from kubernetes.client.exceptions import ApiException
 
     from lakebench.deploy.cluster_lock import (
+        ADMIN_MAX_HOLD_S,
         ClusterLockError,
         ClusterLockHeld,
+        LeaseHoldExceeded,
         cluster_lock,
     )
     from lakebench.deploy.ownership import (
@@ -683,7 +705,7 @@ def migrate_deployment(
     custom_api = k8s_client.CustomObjectsApi()
 
     try:
-        with cluster_lock(core_v1, timeout=600):
+        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
             # Rename legacy SecretClasses. On a clean cluster where the
             # legacy names never existed, both branches 404 cleanly.
             _migrate_secretclass(
@@ -715,6 +737,11 @@ def migrate_deployment(
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
         raise typer.Exit(1) from e
+    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+        # A command inside the lease ran out of its hold budget; the lease
+        # has been released.
+        print_error(str(e))
+        raise typer.Exit(1) from e
 
     from lakebench.deploy.ownership import IdentityVerdict
 
@@ -741,12 +768,15 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
     """
     from kubernetes.client.exceptions import ApiException
 
+    from lakebench.k8s.lease_state import request_timeout_kw
+
     try:
         legacy = custom_api.get_cluster_custom_object(
             group="secrets.stackable.tech",
             version="v1alpha1",
             plural="secretclasses",
             name=legacy_name,
+            **request_timeout_kw(),
         )
     except ApiException as e:
         if e.status == 404:
@@ -772,6 +802,7 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
             version="v1alpha1",
             plural="secretclasses",
             name=new_name,
+            **request_timeout_kw(),
         )
         legacy_backend = legacy.get("spec", {}).get("backend")
         existing_backend = existing.get("spec", {}).get("backend")
@@ -808,6 +839,7 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
         version="v1alpha1",
         plural="secretclasses",
         body=body,
+        **request_timeout_kw(),
     )
 
 
@@ -854,8 +886,10 @@ def repair_operator(
     and the installed chart version, and rolls the controller once.
     """
     from lakebench.deploy.cluster_lock import (
+        ADMIN_MAX_HOLD_S,
         ClusterLockError,
         ClusterLockHeld,
+        LeaseHoldExceeded,
         cluster_lock,
     )
     from lakebench.modules.pipeline_engines.spark.operator import (
@@ -967,7 +1001,7 @@ def repair_operator(
     # helper inside a single lease scope so the whole reconcile is one
     # atomic mutation.
     try:
-        with cluster_lock(core_v1, timeout=600):
+        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
             for n in to_drop:
                 if not mgr._remove_namespace_from_watch_impl(n):  # noqa: SLF001
                     print_error(
@@ -987,6 +1021,11 @@ def repair_operator(
         raise typer.Exit(1) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
+        raise typer.Exit(1) from e
+    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+        # A command inside the lease ran out of its hold budget; the lease
+        # has been released.
+        print_error(str(e))
         raise typer.Exit(1) from e
 
     if to_drop:
@@ -1032,8 +1071,10 @@ def reclaim_bucket(
     ``--force-nonempty``.
     """
     from lakebench.deploy.cluster_lock import (
+        ADMIN_MAX_HOLD_S,
         ClusterLockError,
         ClusterLockHeld,
+        LeaseHoldExceeded,
         cluster_lock,
     )
     from lakebench.deploy.ownership import (
@@ -1066,7 +1107,7 @@ def reclaim_bucket(
 
     workload_schema = getattr(cfg, "workload_schema", None)
     try:
-        with cluster_lock(core_v1, timeout=600):
+        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
             # ADR-F3: object-count check MUST run inside the lease.
             # Two admins racing this command without --force-nonempty
             # can each observe 0 keys before the first commits any
@@ -1152,6 +1193,11 @@ def reclaim_bucket(
         raise typer.Exit(1) from e
     except ClusterLockError as e:
         print_error(f"could not acquire cluster lock: {e}")
+        raise typer.Exit(1) from e
+    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+        # A command inside the lease ran out of its hold budget; the lease
+        # has been released.
+        print_error(str(e))
         raise typer.Exit(1) from e
 
     print_success(
