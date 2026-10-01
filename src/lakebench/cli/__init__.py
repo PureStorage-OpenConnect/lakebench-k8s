@@ -1610,7 +1610,7 @@ def info(
         ]
 
     # Peak requested resources from the one sizing source (CC-22): the same
-    # plan_requirements() that plan, config show and run's capacity
+    # plan_requirements() that config show, recommend and run's capacity
     # preflight use. Offline, so batch datagen is before cluster scaling.
     from lakebench.config.sizing import breakdown_text, floor_text, plan_requirements
 
@@ -1619,9 +1619,6 @@ def info(
         ("Peak requested", floor_text(plan)),
         ("  of which", breakdown_text(plan)),
     ]
-    _overrides = (streaming_override_map if is_sustained else override_map).values()
-    if any(v is not None for v in _overrides):
-        lines.append(("", "peak uses profile executor counts; per-job overrides are not included"))
 
     lines += [
         ("S3 endpoint", s3.endpoint or "(not set)"),
@@ -1660,15 +1657,17 @@ def info(
             raise ValueError("Could not detect cluster capacity")
         cluster_cores = cap.total_cpu_millicores // 1000
         cluster_gb = cap.total_memory_bytes // (1024**3)
-        # The run preflight's decision: datagen and Trino sized against
-        # this cluster, as run sizes them.
+        # The run preflight's decision for run --generate: datagen and
+        # Trino sized against this cluster, as run sizes them. A plain batch
+        # run creates no datagen pod and is checked without one.
         from lakebench.config.sizing import check_capacity
 
         verdict = check_capacity(cfg, cap)
         fitted = verdict.plan.floor
         request = (
             f"{cluster_cores} cores / {cluster_gb} GB allocatable; "
-            f"peak request {fitted.cpu_cores} cores / {fitted.memory_gb} GB on this cluster"
+            f"peak request {fitted.cpu_cores} cores / {fitted.memory_gb} GB on this cluster "
+            "(with datagen)"
         )
         if verdict.status == "fits":
             console.print(f"  [green]Cluster OK:[/green] {request}")

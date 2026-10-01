@@ -1839,11 +1839,21 @@ def run(
             from lakebench.cli._sustained import _datagen_job_state
 
             _datagen_runs = _datagen_job_state(cfg.get_namespace())[0] != "finished"
-        elif skip_generate:
-            # Batch generates before the Spark jobs; with --skip-generate no
-            # datagen pod is created, so none is counted (CC-22).
-            _datagen_runs = False
-        prereq_report = run_prerequisites(cfg, sustained=_use_sustained, datagen_runs=_datagen_runs)
+        elif not _use_sustained:
+            # Batch creates datagen pods only in Phase 3 (--generate without
+            # --skip-generate) or per cycle of a multi-cycle run; otherwise
+            # none is counted (CC-22).
+            _datagen_runs = bool(
+                (include_datagen and not skip_generate) or cfg.architecture.pipeline.cycles > 1
+            )
+        # cluster_cap is what resolve_auto_sizing sized cfg against above, so
+        # the preflight checks the Trino and datagen sizes this run deploys.
+        prereq_report = run_prerequisites(
+            cfg,
+            sustained=_use_sustained,
+            datagen_runs=_datagen_runs,
+            sizing_capacity=cluster_cap,
+        )
         for check in prereq_report.checks:
             icon = "[green]+[/green]" if check.passed else "[red]x[/red]"
             console.print(f"  {icon} {check.name}: {check.message}")

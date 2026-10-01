@@ -23,31 +23,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   512 GB, was quoted before), AML continuous at scale 1 is 138 cores /
   1,011 GB (was 118 / 980). The Spark peak is unchanged; no per-executor
   sizing changed.
-- **The capacity preflight sizes the config as `run` does**, on a copy
-  auto-sized against the cluster, whether or not the caller resolved it.
-  Its largest-pod check now covers the 8-core datagen pod and the
-  query-engine pods, so nodes smaller than 8 cores are refused. Batch
-  `run --skip-generate` no longer counts datagen.
-- **`recommend` and `config recommend` use the same model.** The separate
-  model (Customer 360 dimensions for every workload, a guessed 4-core
-  infrastructure line and 15% headroom) is gone. With a cluster, "largest
-  scale that fits" is the largest scale at which every scale up to it
-  passes the preflight's check, bounded by the workload's datagen ceiling.
+- **The capacity preflight checks what the run deploys.** It sizes the
+  config against the same cluster capacity `run` auto-sized it with (and
+  offline when `run` could not read the cluster), so Trino and datagen are
+  checked at the sizes deployed. Its largest-pod check now covers the
+  query-engine pods and, when the run creates datagen pods, the 8-core
+  datagen pod. A batch `run` creates datagen pods only with `--generate`
+  (without `--skip-generate`) or in a multi-cycle run, and counts datagen
+  only then. The Spark Thrift pod is counted at its pod request (heap plus
+  overhead) rather than its heap.
+- **`recommend` and `config recommend` use the preflight's model.** The
+  separate model (Customer 360 dimensions for every workload, a guessed
+  4-core infrastructure line and 15% headroom) is gone. With a cluster,
+  "largest scale that fits" is the largest scale at which every scale up to
+  it passes the preflight's check, bounded by the workload's datagen
+  ceiling; a scale above the largest measured one (300) is labelled
+  unverified. In batch that is the check for `run --generate`. In
+  continuous `recommend` prints two answers, a plain `run` (datagen counted
+  beside the streams) and a corpus generated first (`generate`, then
+  `run --skip-generate`).
   `config recommend` sizes the config itself (its query engine and datagen
   settings) and fails on a config that does not load, where it used to fall
   back to Customer 360 batch. `--slow-datagen` is ignored, and
   `--scale` must be 1 or more.
 
 ### Known limitations
-- **Continuous above scale 50 must generate first.** The autosizer sizes
-  the datagen Job to about 90% of the cluster's CPU, and the capacity
-  preflight counts it beside the streams, so a continuous `run` that
-  generates its own corpus above scale 50 is refused on any cluster. Run
-  `lakebench generate`, then `lakebench run --skip-generate` within an hour
-  of generation finishing (the finished datagen Job is deleted after
+- **Continuous above scale 50 should generate first.** The autosizer sizes
+  the datagen Job to about 90% of the CPU left after the always-on pods,
+  and the capacity preflight counts it beside the streams, so a continuous
+  `run` that generates its own corpus above scale 50 is refused, or
+  admitted only with its streams capped hard, depending on the cluster.
+  Run `lakebench generate`, then `lakebench run --skip-generate` within an
+  hour of generation finishing (the finished datagen Job is deleted after
   3,600 s, and an absent Job is counted as still running).
-- **Per-job executor overrides are not counted** in the sizing figures yet;
-  `config show` and `info` say so when a config sets one.
+- **Per-job executor overrides and the driver overrides are not counted**
+  in the sizing figures yet; `config show` and `info` say so when a config
+  sets one.
 
 ## [1.6.0] - 2026-09-30
 

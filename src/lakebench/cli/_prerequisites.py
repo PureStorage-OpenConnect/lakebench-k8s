@@ -9,6 +9,9 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass, field
+from typing import Any
+
+from lakebench.config.sizing import SAME_CAPACITY
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,11 @@ class PrereqReport:
 
 
 def run_prerequisites(
-    cfg, *, sustained: bool | None = None, datagen_runs: bool = True
+    cfg,
+    *,
+    sustained: bool | None = None,
+    datagen_runs: bool = True,
+    sizing_capacity: Any = SAME_CAPACITY,
 ) -> PrereqReport:
     """Run all 9 prerequisite checks.
 
@@ -48,7 +55,10 @@ def run_prerequisites(
 
     ``sustained`` overrides ``pipeline.mode`` for the capacity check (the
     ``run --sustained`` flag does not write back to the config), and
-    ``datagen_runs=False`` (``--skip-generate``) leaves datagen out of it.
+    ``datagen_runs=False`` (the run creates no datagen pod) leaves datagen
+    out of it. ``sizing_capacity`` is the capacity the caller already
+    auto-sized *cfg* against (``run`` passes its own fetch, or None when
+    that failed), so the check sizes the config as it will deploy.
     """
     report = PrereqReport()
 
@@ -79,7 +89,12 @@ def run_prerequisites(
 
     # 9. Cluster has capacity to schedule the pipeline
     report.checks.append(
-        _check_cluster_capacity(cfg, sustained=sustained, datagen_runs=datagen_runs)
+        _check_cluster_capacity(
+            cfg,
+            sustained=sustained,
+            datagen_runs=datagen_runs,
+            sizing_capacity=sizing_capacity,
+        )
     )
 
     return report
@@ -359,7 +374,11 @@ def _check_namespace(cfg) -> PrereqResult:
 
 
 def _check_cluster_capacity(
-    cfg, *, sustained: bool | None = None, datagen_runs: bool = True
+    cfg,
+    *,
+    sustained: bool | None = None,
+    datagen_runs: bool = True,
+    sizing_capacity: Any = SAME_CAPACITY,
 ) -> PrereqResult:
     """Check that the cluster can schedule the config's floor request.
 
@@ -369,7 +388,7 @@ def _check_cluster_capacity(
     actionable error.
 
     The decision is ``config.sizing.check_capacity`` (CC-22), the one
-    sizing source ``plan``, ``info``, ``config show``, ``recommend`` and the
+    sizing source ``info``, ``config show``, ``recommend`` and the
     docs tables also use. It checks that the floor (the Spark peak, or one
     batch datagen pod, plus the always-on pods and continuous datagen) fits
     the cluster, and that the largest pod fits the largest node. A batch
@@ -396,7 +415,13 @@ def _check_cluster_capacity(
                 hint="Requires permission to list nodes",
             )
 
-        verdict = check_capacity(cfg, capacity, run_mode=run_mode, datagen_runs=datagen_runs)
+        verdict = check_capacity(
+            cfg,
+            capacity,
+            run_mode=run_mode,
+            datagen_runs=datagen_runs,
+            sizing_capacity=sizing_capacity,
+        )
         plan = verdict.plan
         gib = 1024**3
         avail_cores = capacity.total_cpu_millicores / 1000.0
@@ -407,7 +432,7 @@ def _check_cluster_capacity(
             f"{plan.co_resident.label}"
         )
         if plan.overrides_not_counted:
-            summary += "; per-job executor overrides are not counted"
+            summary += "; per-job executor and driver overrides are not counted"
         hint_lines = "\n".join(f"  {s}" for s in verdict.shortfalls)
 
         if verdict.status == "degraded":

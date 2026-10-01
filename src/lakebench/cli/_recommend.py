@@ -14,14 +14,15 @@ config for the workload and mode otherwise.
   scale at which every scale up to it is admitted
   (``largest_fitting_scale``).
 
-In batch that is exactly the preflight's decision for ``run``. In
-continuous it is the decision for a corpus generated before the streams
-start (``generate``, then ``run --skip-generate`` within an hour, while the
-finished datagen Job still exists; a finished Job is not counted, LB-158). A plain continuous ``run`` is also checked with its
-datagen Job counted beside the streams, and above scale 50 the autosizer
-sizes that Job to about 90% of the cluster's CPU, so the preflight refuses
-it on any cluster; recommend says so rather than report a scale that
-shrinks as the cluster grows.
+In batch that is the preflight's decision for ``run --generate``. In
+continuous there are two answers and recommend prints both: a plain
+``run``, whose datagen Job is counted beside the streams, and a corpus
+generated first (``generate``, then ``run --skip-generate`` within an hour,
+while the finished datagen Job still exists; a finished Job is not
+counted, LB-158). Above scale 50 the autosizer sizes the continuous datagen
+Job to about 90% of the CPU left after the always-on pods, so a plain run
+there is refused or admitted only with its streams capped hard, depending
+on the cluster.
 """
 
 from __future__ import annotations
@@ -132,7 +133,7 @@ def recommend_impl(
         plan_requirements,
         plan_shortfalls,
     )
-    from lakebench.config.support import DATAGEN_SCALE_BANDS
+    from lakebench.config.support import DATAGEN_SCALE_BANDS, datagen_scale_problem
 
     if base_cfg is not None:
         workload = base_cfg.architecture.workload.schema_type.value
@@ -152,8 +153,15 @@ def recommend_impl(
         base = default_sizing_config(workload, mode_label, 1)
     ceiling = int(DATAGEN_SCALE_BANDS[workload][1])
 
-    def plan_at(scale: int) -> SizingPlan:
-        return plan_requirements(_config_at(base, scale))
+    def plan_at(scale: int, *, datagen_runs: bool = True) -> SizingPlan:
+        return plan_requirements(_config_at(base, scale), datagen_runs=datagen_runs)
+
+    def unverified_note(scale: int) -> str | None:
+        problem = datagen_scale_problem(workload, float(scale))
+        if problem is None or problem[0] != "unverified":
+            return None
+        supported_max = int(DATAGEN_SCALE_BANDS[workload][0])
+        return f"scales above {supported_max} are unverified for {workload}: {problem[1]}"
 
     def data_size(scale: int) -> str:
         return _format_data_size(get_dimensions(workload, scale).approx_bronze_gb)
@@ -177,10 +185,11 @@ def recommend_impl(
         )
         console.print(f"  Minimum cluster: [bold]{floor_text(plan)}[/bold]")
         console.print(f"  Of which:        {breakdown_text(plan)}")
-        if plan.full != plan.floor:
+        if mode_label == "continuous":
+            first = plan_at(target_scale, datagen_runs=False)
             console.print(
-                f"  All datagen pods at once: {plan.full.cpu_cores} cores / "
-                f"{plan.full.memory_gb} GB"
+                f"  Corpus generated first (generate, then run --skip-generate within an "
+                f"hour): {first.floor.cpu_cores} cores / {first.floor.memory_gb} GB"
             )
         pod = plan.largest_pod
         console.print(
@@ -192,6 +201,9 @@ def recommend_impl(
                 "  [dim]Datagen is before cluster scaling: run caps it to the cluster, and "
                 "above scale 50 raises it to use the cluster.[/dim]"
             )
+        note = unverified_note(target_scale)
+        if note:
+            console.print(f"  [yellow]{note}[/yellow]")
         if target_scale > ceiling:
             console.print(
                 f"  [yellow]Scale {target_scale:,} is above the {workload} datagen ceiling of "
@@ -239,78 +251,101 @@ def recommend_impl(
     console.print()
 
     continuous = mode_label == "continuous"
-    if continuous:
-        console.print(
-            "  [dim]Continuous: sized for a corpus generated before the streams start "
-            "(generate, then run --skip-generate within an hour).[/dim]"
-        )
-    verdicts: dict[int, CapacityVerdict] = {}
+    # Batch: the decision for run --generate (datagen counted). Continuous:
+    # "first" is a corpus generated before the streams start, "plain" a run
+    # that generates its own corpus beside them.
+    verdicts: dict[tuple[int, bool], CapacityVerdict] = {}
 
-    def verdict_at(scale: int) -> CapacityVerdict:
-        if scale not in verdicts:
-            verdicts[scale] = check_capacity(
-                _config_at(base, scale),
-                cluster,
-                check_pod=check_pod,
-                datagen_runs=not continuous,
+    def verdict_at(scale: int, datagen_runs: bool | None = None) -> CapacityVerdict:
+        dg = (not continuous) if datagen_runs is None else datagen_runs
+        if (scale, dg) not in verdicts:
+            verdicts[(scale, dg)] = check_capacity(
+                _config_at(base, scale), cluster, check_pod=check_pod, datagen_runs=dg
             )
-        return verdicts[scale]
+        return verdicts[(scale, dg)]
 
     best = largest_fitting_scale(lambda s: verdict_at(s).admitted, upper=ceiling)
     full = largest_fitting_scale(lambda s: verdict_at(s).status == "fits", upper=best)
+    plain = (
+        largest_fitting_scale(lambda s: verdict_at(s, True).admitted, upper=ceiling)
+        if continuous
+        else best
+    )
     if best == 0:
         console.print("[yellow]The cluster is below the minimum for scale 1.[/yellow]")
         console.print(f"[dim]Scale 1 needs {floor_text(verdict_at(1).plan)}.[/dim]")
         return 0
 
-    console.print(
-        f"[green]Largest scale that fits:[/green] [bold]{best:,}[/bold] (~{data_size(best)})"
-    )
-    if full < best:
+    if continuous:
         console.print(
-            f"[yellow]Above scale {full:,} the run caps its streams to fit (degraded).[/yellow]"
+            f"[green]Largest scale that fits, plain run:[/green] [bold]{plain:,}[/bold]"
+            + (f" (~{data_size(plain)})" if plain else " (scale 1 is refused)")
+            + " [dim](datagen counted beside the streams)[/dim]"
+        )
+        console.print(
+            f"[green]Largest scale that fits, corpus generated first:[/green] "
+            f"[bold]{best:,}[/bold] (~{data_size(best)}) [dim](generate, then run "
+            "--skip-generate within an hour of generation finishing)[/dim]"
+        )
+    else:
+        console.print(
+            f"[green]Largest scale that fits:[/green] [bold]{best:,}[/bold] (~{data_size(best)})"
+        )
+    if full < best:
+        who = "a run on a corpus generated first" if continuous else "the run"
+        console.print(
+            f"[yellow]Above scale {full:,} {who} caps its streams to fit (degraded).[/yellow]"
         )
     if best == ceiling:
         console.print(
             f"[dim]Bounded by the {workload} datagen ceiling of {ceiling}, not by the "
             "cluster.[/dim]"
         )
-    if continuous and best > 50:
-        console.print(
-            "[yellow]Above scale 50 a continuous run that generates its own corpus is "
-            "refused by the preflight (datagen is sized to the cluster and counted beside "
-            "the streams); generate first, then run --skip-generate within an hour of "
-            "generation finishing.[/yellow]"
-        )
+    note = unverified_note(best)
+    if note:
+        console.print(f"[yellow]{note}[/yellow]")
 
-    table = Table(title="Scale options (what run requests on this cluster)")
+    title = "Scale options (what run requests on this cluster"
+    title += ", corpus generated first)" if continuous else ")"
+    table = Table(title=title)
     table.add_column("Scale", justify="right", style="cyan")
     table.add_column("Data", justify="right")
     table.add_column("Cores", justify="right")
     table.add_column("Memory", justify="right")
     table.add_column("Status")
+    if continuous:
+        # Per scale: plain-run admission is not monotonic in scale, so a
+        # scale above the plain answer can show OK here.
+        table.add_column("Plain run (this scale)")
     points = sorted({*(m for m in _MILESTONES if m <= ceiling), best})
     nxt = [m for m in points if m > best]
-    for scale in [m for m in points if m <= best] + nxt[:1]:
-        v = verdict_at(scale)
+
+    def status_of(v: CapacityVerdict, largest: bool) -> str:
         if v.status == "refused":
             short = plan_shortfalls(v.plan, cluster, check_pod=check_pod)
-            status = f"[red]needs {', '.join(short) or 'more capacity'}[/red]"
-        elif scale == best:
-            status = "[green bold]<- largest[/green bold]"
+            return f"[red]needs {', '.join(short) or 'more capacity'}[/red]"
+        if largest:
+            text = "[green bold]<- largest[/green bold]"
         elif v.status == "degraded":
-            status = "[yellow]OK, streams capped[/yellow]"
+            text = "[yellow]OK, streams capped[/yellow]"
         else:
-            status = "[green]OK[/green]"
+            text = "[green]OK[/green]"
         if v.warnings and v.status == "fits":
-            status += " [dim](datagen pods queue)[/dim]"
-        table.add_row(
+            text += " [dim](datagen pods queue)[/dim]"
+        return text
+
+    for scale in [m for m in points if m <= best] + nxt[:1]:
+        v = verdict_at(scale)
+        row = [
             f"{scale:,}",
             data_size(scale),
             f"{v.plan.floor.cpu_cores:,}",
             f"{v.plan.floor.memory_gb:,} GB",
-            status,
-        )
+            status_of(v, scale == best),
+        ]
+        if continuous:
+            row.append(status_of(verdict_at(scale, True), False))
+        table.add_row(*row)
     console.print(table)
     console.print(f"\n[dim]Next: lakebench init --scale {best}[/dim]")
     return 0

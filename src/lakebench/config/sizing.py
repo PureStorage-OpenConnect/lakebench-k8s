@@ -1,5 +1,5 @@
-"""One sizing source for ``plan``, the capacity preflight, ``info``,
-``config show``, ``recommend`` and the generated docs tables (CC-22).
+"""One sizing source for the capacity preflight, ``info``, ``config show``,
+``recommend``, the generated docs tables and (CC-23) ``plan`` (CC-22).
 
 Every figure the CLI or the docs quote for "how big a cluster does this
 config need" comes from :func:`plan_requirements`, and every capacity
@@ -43,7 +43,7 @@ import logging
 import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from lakebench.config.schema import LakebenchConfig
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BEFORE_CLUSTER_SCALING",
+    "SAME_CAPACITY",
     "CapacityVerdict",
     "CoResidentRequest",
     "DatagenRequest",
@@ -77,16 +78,23 @@ BEFORE_CLUSTER_SCALING = "before cluster scaling"
 #: PostgreSQL pod memory request (templates/postgres/statefulset.yaml.j2).
 POSTGRES_MEMORY_GI = 1.0
 
-#: The per-job executor overrides, by pipeline mode. Until the peak counts
-#: them (CFG-2), a plan whose config sets one says so.
+#: The Spark overrides the peak does not count yet (CFG-2): the per-job
+#: executor counts, by pipeline mode, and the global driver overrides the
+#: manifests apply to every job. A plan whose config sets one says so.
+_DRIVER_OVERRIDE_FIELDS = ("driver_cores", "driver_memory")
 _OVERRIDE_FIELDS = {
-    "batch": ("bronze_executors", "silver_executors", "gold_executors"),
+    "batch": ("bronze_executors", "silver_executors", "gold_executors", *_DRIVER_OVERRIDE_FIELDS),
     "continuous": (
         "bronze_ingest_executors",
         "silver_stream_executors",
         "gold_refresh_executors",
+        *_DRIVER_OVERRIDE_FIELDS,
     ),
 }
+
+#: Passed as ``sizing_capacity`` to mean "size against the same capacity
+#: the plan is checked against".
+SAME_CAPACITY = object()
 
 
 @dataclass(frozen=True)
@@ -157,8 +165,8 @@ class SizingPlan:
     scratch_gb: int
     scratch_enabled: bool
     scratch_storage_class: str
-    #: The config sets a per-job executor count the Spark peak does not
-    #: count yet (CFG-2).
+    #: The config sets a per-job executor count or a driver override the
+    #: Spark peak does not count yet (CFG-2).
     overrides_not_counted: bool
     #: Auto-sizing cuts made to fit ``capacity`` (empty offline).
     cuts: tuple[str, ...]
@@ -166,7 +174,11 @@ class SizingPlan:
 
     @property
     def floor_driver(self) -> str:
-        """The job that sets the Spark part of the floor."""
+        """What sets the CPU part of the floor before the always-on pods:
+        the driving Spark job, or one batch datagen pod when it is larger."""
+        dg = self.datagen
+        if dg is not None and _ceil(dg.pod_cpu_cores) > self.spark.cpu_cores:
+            return "one datagen pod"
         return self.spark.driving_job
 
 
@@ -239,9 +251,13 @@ def _resolved_copy(
     ``model_copy(deep=True)`` keeps each model's ``model_fields_set``, so
     the copy tells user-set fields from defaults exactly as *cfg* does.
     Re-resolving a config that was already resolved against the same
-    capacity gives the same values (the autosizer derives every default
-    from scale, schema and capacity, never from its own earlier output;
-    ``tests/test_sizing.py::test_resolved_config_sizes_the_same``).
+    capacity gives the same plan
+    (``tests/test_sizing.py::test_resolved_config_sizes_the_same``). Not
+    every resolved field is a fixed point: a user-set ``executor.memory``
+    above the node cap gets a different ``memory_overhead`` on a second
+    pass, because the autosizer derives the overhead before it caps the
+    memory. No plan figure reads those fields; the Spark peak comes from
+    the job profiles.
     """
     from lakebench.config.autosizer import resolve_auto_sizing
 
@@ -289,9 +305,18 @@ def _engine_pods(cfg: LakebenchConfig) -> list[tuple[str, float, float]]:
             for _ in range(worker.replicas)
         )
     elif engine == "spark-thrift":
-        pods.append(
-            ("Spark Thrift", float(qe.spark_thrift.cores), _parse_memory_gi(qe.spark_thrift.memory))
-        )
+        # The pod requests the heap plus overhead, as deploy renders it. A
+        # heap deploy cannot parse (a Kubernetes unit such as "30Gi") fails
+        # loudly at deploy; here it is sized as written rather than raising
+        # inside the preflight, which would skip the whole check.
+        from lakebench.deploy.engine import thrift_pod_memory_limit
+
+        heap = qe.spark_thrift.memory
+        try:
+            pod_gi = _parse_memory_gi(thrift_pod_memory_limit(heap))
+        except ValueError:
+            pod_gi = _parse_memory_gi(heap)
+        pods.append(("Spark Thrift", float(qe.spark_thrift.cores), pod_gi))
     elif engine == "duckdb":
         pods.append(("DuckDB", float(qe.duckdb.cores), _parse_memory_gi(qe.duckdb.memory)))
     return pods
@@ -371,6 +396,8 @@ def _plan(
     capacity: ClusterCapacity | None,
     datagen_runs: bool,
 ) -> tuple[SizingPlan, LakebenchConfig]:
+    """*capacity* is what auto-sizing sizes the copy against (None:
+    offline, the declared or default parallelism)."""
     from lakebench.config.schema import is_continuous_mode
 
     mode = _mode_of(cfg, run_mode)
@@ -515,8 +542,8 @@ def default_sizing_config(workload: str, mode: str, scale: float) -> LakebenchCo
 
 
 def floor_text(plan: SizingPlan) -> str:
-    """One line: the floor and the scratch PVC total."""
-    scratch = f"{plan.scratch_gb} GB scratch"
+    """One line: the floor and the scratch PVC total (PVCs are sized in Gi)."""
+    scratch = f"{plan.scratch_gb} Gi scratch"
     if not plan.scratch_enabled:
         scratch += " (not requested: scratch disabled)"
     return f"{plan.floor.cpu_cores} cores / {plan.floor.memory_gb} GB memory / {scratch}"
@@ -535,8 +562,12 @@ def breakdown_text(plan: SizingPlan) -> str:
         )
     co = plan.co_resident
     parts.append(f"always on {_n(co.cpu_cores, 'core')} / {co.memory_gb} GB ({co.label})")
+    if plan.full != plan.floor:
+        parts.append(
+            f"every datagen pod at once {plan.full.cpu_cores} cores / {plan.full.memory_gb} GB"
+        )
     if plan.overrides_not_counted:
-        parts.append("per-job executor overrides not counted")
+        parts.append("per-job executor and driver overrides not counted")
     return "; ".join(parts)
 
 
@@ -569,6 +600,7 @@ def check_capacity(
     run_mode: str | None = None,
     datagen_runs: bool = True,
     check_pod: bool = True,
+    sizing_capacity: ClusterCapacity | None | object = SAME_CAPACITY,
 ) -> CapacityVerdict:
     """Can *capacity* hold *cfg*? The one capacity decision: the ``run``
     preflight and ``recommend`` both call it.
@@ -578,10 +610,24 @@ def check_capacity(
     is ``"degraded"`` instead when the streams capped to the cluster's
     concurrent budget fit, since ``run`` caps them and warns. In batch a
     full request that does not fit adds a warning: some datagen pods queue.
+
+    *sizing_capacity* is the capacity auto-sizing sizes the config against
+    before the check. By default it is *capacity*, which is right for a
+    caller that has not resolved the config itself (``info``,
+    ``recommend``). ``run`` resolved its config against the capacity it
+    fetched (or None when that fetch failed) and passes that, so the plan
+    checked is the one it deploys even if *capacity* differs (CC-24 checks
+    free capacity, while ``run`` sizes against the total).
     """
     from lakebench.config.schema import is_continuous_mode
 
-    plan, resolved = _plan(cfg, run_mode=run_mode, capacity=capacity, datagen_runs=datagen_runs)
+    size_against = capacity if sizing_capacity is SAME_CAPACITY else sizing_capacity
+    plan, resolved = _plan(
+        cfg,
+        run_mode=run_mode,
+        capacity=cast("ClusterCapacity | None", size_against),
+        datagen_runs=datagen_runs,
+    )
     spark, co, dg = plan.spark, plan.co_resident, plan.datagen
     gib = 1024**3
     avail_cores = capacity.total_cpu_millicores / 1000.0
@@ -637,7 +683,8 @@ def check_capacity(
             warnings.append(
                 f"datagen: {dg.pods} pods need {dg.cpu_cores} cores / {dg.memory_gb} GB "
                 f"beside the always-on pods; about {at_once} run at once and the rest "
-                "queue, so generation takes longer"
+                "queue, so generation takes longer and must still finish within the "
+                "datagen timeout"
             )
         return CapacityVerdict("fits", plan, (), tuple(warnings))
 
@@ -704,12 +751,12 @@ TABLE_SCALES: tuple[int, ...] = (1, 10, 100)
 
 _TABLE_LABELS = {"customer360": "Customer 360", "financial": "AML"}
 
-_BEGIN = "<!-- BEGIN GENERATED: {name} -->"
+# The marker format and the block finder are config/support.py's, so every
+# generated docs block reads the same way.
 _REGEN = (
     "<!-- Generated from the code by `python3.11 scripts/gen_sizing_tables.py`; "
     "do not edit by hand. -->"
 )
-_END = "<!-- END GENERATED: {name} -->"
 
 
 def table_plans() -> list[SizingPlan]:
@@ -782,6 +829,8 @@ DOCS_WITH_BLOCKS: dict[str, tuple[str, ...]] = {
 
 def expected_block(name: str) -> str:
     """The full generated block *name*, markers included."""
+    from lakebench.config.support import _BEGIN, _END
+
     return "\n".join(
         [
             _BEGIN.format(name=name),
@@ -796,9 +845,6 @@ def expected_block(name: str) -> str:
 
 def block_in(text: str, name: str) -> str | None:
     """The generated block *name* as it appears in *text*, or None."""
-    begin, end = _BEGIN.format(name=name), _END.format(name=name)
-    i = text.find(begin)
-    j = text.find(end, i + 1) if i >= 0 else -1
-    if i < 0 or j < 0:
-        return None
-    return text[i : j + len(end)]
+    from lakebench.config.support import block_in as _block_in
+
+    return _block_in(text, name)

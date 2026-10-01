@@ -286,6 +286,8 @@ class TestCoResidentPodsAreCounted:
         seen: dict = {}
 
         def fake_prereqs(cfg, **kw):
+            # The capacity run sized cfg against; None here (no cluster).
+            assert kw.pop("sizing_capacity") is None
             seen.update(kw)
             raise SystemExit(3)
 
@@ -309,13 +311,25 @@ class TestCoResidentPodsAreCounted:
                 app, ["run", str(cfg_file), "--sustained", "--skip-generate", "--yes"]
             )
             assert seen == {"sustained": True, "datagen_runs": True}, state
+        # Batch creates datagen pods only with --generate (and without
+        # --skip-generate) or in a multi-cycle run (CC-22).
         seen.clear()
         CliRunner().invoke(app, ["run", str(cfg_file), "--yes"])
-        assert seen == {"sustained": False, "datagen_runs": True}
-        # Batch --skip-generate creates no datagen pod (CC-22).
-        seen.clear()
-        CliRunner().invoke(app, ["run", str(cfg_file), "--skip-generate", "--yes"])
         assert seen == {"sustained": False, "datagen_runs": False}
+        seen.clear()
+        CliRunner().invoke(app, ["run", str(cfg_file), "--generate", "--yes"])
+        assert seen == {"sustained": False, "datagen_runs": True}
+        seen.clear()
+        CliRunner().invoke(app, ["run", str(cfg_file), "--generate", "--skip-generate", "--yes"])
+        assert seen == {"sustained": False, "datagen_runs": False}
+        cycles_file = tmp_path / "cycles.yaml"
+        cycles_file.write_text(
+            cfg_file.read_text().replace("name: cap-flag\n", "name: cap-cycles\n")
+            + "architecture:\n  pipeline:\n    cycles: 3\n"
+        )
+        seen.clear()
+        CliRunner().invoke(app, ["run", str(cycles_file), "--skip-generate", "--yes"])
+        assert seen == {"sustained": False, "datagen_runs": True}
 
 
 class TestPrerequisiteWiring:

@@ -106,7 +106,7 @@ def config_show(
         ]
 
         # Peak requested resources from the one sizing source (CC-22), the
-        # same plan_requirements() that plan, info and run's capacity
+        # same plan_requirements() that info, recommend and run's capacity
         # preflight use. Auto-sizing first, as info and run do, so the
         # displayed fields match what the plan sized.
         from lakebench.config.autosizer import resolve_auto_sizing

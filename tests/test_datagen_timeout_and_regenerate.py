@@ -319,7 +319,7 @@ def _stub_full_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
 
     monkeypatch.setattr(
         "lakebench.cli._prerequisites.run_prerequisites",
-        lambda cfg, sustained=False, datagen_runs=True: _PassingReport(),
+        lambda cfg, **kw: _PassingReport(),
     )
 
     # Spark Operator manager: ready and watches the namespace.

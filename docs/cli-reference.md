@@ -418,8 +418,11 @@ logic on your config. It sizes the default recipe (`hive-iceberg-spark-trino`)
 of the workload and mode with `lakebench.config.sizing`: `--scale` and the
 reference table print the minimum without a cluster (datagen at its default
 parallelism), and with a cluster each scale is decided by the same check the
-`run` capacity preflight makes. Continuous mode is sized for a corpus
-generated before the streams start (`generate`, then `run --skip-generate`).
+`run` capacity preflight makes (batch: a `run --generate`). Continuous mode
+prints two answers: a plain `run`, whose datagen Job is counted beside the
+streams, and a corpus generated before the streams start (`generate`, then
+`run --skip-generate` within an hour). A scale above the workload's largest
+measured scale (300) is labelled unverified.
 
 Show cluster sizing guidance for lakebench workloads.
 

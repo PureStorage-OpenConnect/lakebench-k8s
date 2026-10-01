@@ -3,8 +3,8 @@
 
 The tables are the minimum cluster per workload x mode x scale, computed
 by ``lakebench.config.sizing.plan_requirements`` (the one sizing source
-``plan``, ``info``, ``config show``, ``recommend`` and the capacity
-preflight use). Each sits between ``<!-- BEGIN GENERATED: sizing-... -->``
+``info``, ``config show``, ``recommend`` and the capacity preflight
+use). Each sits between ``<!-- BEGIN GENERATED: sizing-... -->``
 and ``<!-- END GENERATED: sizing-... -->`` markers.
 
 Usage:

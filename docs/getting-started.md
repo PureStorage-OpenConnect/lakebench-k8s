@@ -119,15 +119,22 @@ that does not fit, or when a single pod fits no node. An explicit
 Lakebench checks this for you. The prerequisite phase of `lakebench run`
 compares the minimum against your cluster's allocatable capacity and fails
 immediately with the specific shortfall, rather than leaving pods `Pending`
-until the job times out. Skipped when you pass `--skip-preflight`.
+until the job times out. Skipped when you pass `--skip-preflight`. A batch
+`run` counts datagen only when it creates datagen pods: with `--generate`
+(and not `--skip-generate`), or in a multi-cycle run. A plain batch `run`
+over data from an earlier `lakebench generate` checks the Spark peak and the
+always-on pods.
 
-Above scale 50 a continuous run that generates its own corpus is refused on
-any cluster today: the autosizer sizes the datagen Job to about 90% of the
-cluster's CPU, and the preflight counts it beside the streams. Generate the
-corpus first (`lakebench generate`), then start the streams with
-`lakebench run --skip-generate` within an hour of generation finishing: a
-finished datagen Job is not counted, but Kubernetes deletes it after 3,600 s
-and an absent Job is counted as still running.
+Above scale 50 a continuous run that generates its own corpus is refused,
+or admitted only with its streams capped hard (one bronze-ingest executor,
+for example), depending on the cluster: the autosizer sizes the datagen Job
+to about 90% of the CPU left after the always-on pods, and the preflight
+counts it beside the streams. To run the streams at their full size,
+generate the corpus first (`lakebench generate`), then start the streams
+with `lakebench run --skip-generate` within an hour of generation
+finishing: a finished datagen Job is not counted, but Kubernetes deletes it
+after 3,600 s and an absent Job is counted as still running.
+`lakebench config recommend` prints the largest scale for both ways.
 
 Run `lakebench config recommend lakebench.yaml` after install to find the
 largest scale your cluster holds for that config, and

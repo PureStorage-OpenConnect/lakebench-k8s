@@ -1,8 +1,8 @@
-"""CC-22: one sizing source for plan, the capacity preflight, info,
-config show, recommend and the docs tables (CLI-3).
+"""CC-22: one sizing source for the capacity preflight, info, config show,
+recommend, the docs tables and (CC-23) plan (CLI-3).
 
 Every caller sizes a config through ``config.sizing.plan_requirements``.
-These tests hold the callers to it, pin four cells to figures derived by
+These tests hold the callers to it, pin five cells to figures derived by
 hand from ``_JOB_PROFILES`` and the autosizer guidance (independently of
 the code under test), and name the cases that fail with CC-22 reverted.
 """
@@ -153,9 +153,10 @@ def test_sizing_one_source(tmp_path):
     cluster the preflight prints plan_requirements with that capacity; that
     equals the table for every batch cell and for continuous at scale 50 or
     below. Continuous above scale 50 differs: the autosizer raises datagen
-    to about 90% of the cluster's CPU and the floor counts it beside the
-    streams (an autosizer defect older than CC-22, reported to the main
-    lane). The equality with plan_requirements still holds there.
+    to about 90% of the CPU left after the always-on pods and the floor
+    counts it beside the streams (an autosizer behaviour older than CC-22,
+    reported to the main lane). The equality with plan_requirements still
+    holds there.
     """
     readme = _doc_rows("README.md")
     started = _doc_rows("docs/getting-started.md")
@@ -175,7 +176,7 @@ def test_sizing_one_source(tmp_path):
             assert need == want[:2], (wl, mode, scale)
 
         path = _write_cfg(tmp_path, wl, mode, scale)
-        floor = f"{want[0]} cores / {want[1]} GB memory / {want[2]} GB scratch"
+        floor = f"{want[0]} cores / {want[1]} GB memory / {want[2]} Gi scratch"
         for argv in (["info", str(path)], ["config", "show", str(path)]):
             with mock.patch("lakebench.cli.get_k8s_client", side_effect=RuntimeError("no cluster")):
                 res = runner.invoke(app, argv, env={"COLUMNS": "400"})
@@ -234,6 +235,103 @@ def test_preflight_largest_pod_counts_datagen():
         res = _check_cluster_capacity(cfg)
     assert not res.passed
     assert "Largest pod (datagen pod) needs 8 cores" in res.hint
+
+
+def test_batch_run_without_generate_counts_no_datagen_pod():
+    """Review finding (HIGH): a plain batch run creates no datagen pod, but
+    the preflight counted one and refused 7.9-core nodes that hold every
+    Spark pod (4 cores). run passes datagen_runs=False there
+    (tests/test_capacity.py::test_run_passes_the_resolved_mode_to_the_check)."""
+    from tests.conftest import make_config
+
+    cfg = make_config(workload={"datagen": {"scale": 1}})
+    cap = ClusterCapacity(16 * 7900, 16 * 61 * GIB, 16, 7900, 61 * GIB)
+    with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+        get_client.return_value.get_cluster_capacity.return_value = cap
+        assert _check_cluster_capacity(cfg, datagen_runs=False).passed
+        assert not _check_cluster_capacity(cfg).passed
+
+
+def test_preflight_sizes_against_the_capacity_run_sized_with():
+    """Review finding: the preflight re-sized the config against its own
+    capacity fetch. When run's fetch failed it deployed uncapped Trino and
+    datagen while the preflight checked a capped copy; under CC-24 (free
+    capacity) that would be every run. With sizing_capacity the plan
+    checked is the one run sized."""
+    cfg = default_sizing_config("customer360", "continuous", 50)
+    cap = _cap(80, 960)
+    own = check_capacity(cfg, cap)
+    as_run = check_capacity(cfg, cap, sizing_capacity=None)
+    assert as_run.plan == plan_requirements(cfg)
+    assert own.plan == plan_requirements(cfg, capacity=cap)
+    assert as_run.plan.floor.cpu_cores > own.plan.floor.cpu_cores
+    with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+        get_client.return_value.get_cluster_capacity.return_value = cap
+        res = _check_cluster_capacity(cfg, sizing_capacity=None)
+    assert f"needs ~{as_run.plan.floor.cpu_cores} cores" in res.message
+
+
+def test_run_passes_its_sizing_capacity_to_the_preflight(tmp_path, monkeypatch):
+    """run hands the preflight the capacity it auto-sized cfg against."""
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text(
+        "name: cap-pass\n"
+        "platform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
+        "      access_key: x\n      secret_key: y\n"
+    )
+    cap = _cap(434, 4349)
+    seen: dict = {}
+
+    def fake_prereqs(cfg, **kw):
+        seen.update(kw)
+        raise SystemExit(3)
+
+    monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", fake_prereqs)
+    client = mock.MagicMock()
+    client.get_cluster_capacity.return_value = cap
+    monkeypatch.setattr("lakebench.k8s.get_k8s_client", lambda *a, **k: client)
+    CliRunner().invoke(app, ["run", str(cfg_file), "--yes"])
+    assert seen.get("sizing_capacity") is cap
+
+
+def test_thrift_pod_memory_counts_its_overhead():
+    """Review finding: the Spark Thrift pod requests heap + max(10%, 1 GiB)
+    (deploy/engine.py thrift_pod_memory_limit); sizing counted the heap."""
+    from lakebench.config.sizing import co_resident_request
+    from tests.conftest import make_config
+
+    cfg = make_config(
+        recipe="hive-iceberg-spark-thrift",
+        architecture={"query_engine": {"spark_thrift": {"memory": "30g"}}},
+    )
+    co = co_resident_request(cfg, False)
+    assert co.memory_gb == 30 + 3 + 5  # heap, 10% overhead, Hive + Postgres
+    pod = plan_requirements(cfg).largest_pod
+    assert pod.memory_gb >= 33
+    # A heap deploy refuses ("30Gi" is a Kubernetes unit) is sized as
+    # written instead of raising inside the preflight's catch-all.
+    odd = make_config(
+        recipe="hive-iceberg-spark-thrift",
+        architecture={"query_engine": {"spark_thrift": {"memory": "30Gi"}}},
+    )
+    assert co_resident_request(odd, False).memory_gb == 30 + 5
+
+
+def test_driver_overrides_are_flagged():
+    from tests.conftest import make_config
+
+    for field, value in (("driver_memory", "64g"), ("driver_cores", 8)):
+        cfg = make_config(platform={"compute": {"spark": {field: value}}})
+        assert plan_requirements(cfg).overrides_not_counted, field
+
+
+def test_floor_driver_names_a_datagen_pod_when_it_sets_the_floor():
+    from tests.conftest import make_config
+
+    cfg = make_config(workload={"datagen": {"scale": 1, "cpu": "64"}})
+    plan = plan_requirements(cfg)
+    assert plan.floor_driver == "one datagen pod"
+    assert plan_requirements(cfg, datagen_runs=False).floor_driver == plan.spark.driving_job
 
 
 def test_info_shows_batch_datagen_offline(tmp_path):
@@ -320,42 +418,78 @@ def test_largest_fitting_scale_is_contiguous():
     assert largest_fitting_scale(lambda s: False, upper=600) == 0
 
 
+def _recommend_answer(wl: str, mode: str, capacity: ClusterCapacity) -> int:
+    """``recommend``'s printed answer on a detected cluster (the CLI, not a
+    re-implementation of its predicate). Continuous: the corpus-generated-
+    first answer."""
+    with mock.patch("lakebench.cli.get_k8s_client") as get_client:
+        get_client.return_value.get_cluster_capacity.return_value = capacity
+        res = CliRunner().invoke(
+            app, ["recommend", "--mode", mode, "--schema", wl], env={"COLUMNS": "400"}
+        )
+    assert res.exit_code == 0, res.output
+    out = " ".join(res.output.split())
+    if "below the minimum for scale 1" in out:
+        return 0
+    label = ", corpus generated first:" if mode == "continuous" else ":"
+    m = re.search(rf"Largest scale that fits{label} ([\d,]+)", out)
+    assert m, out
+    return int(m.group(1).replace(",", ""))
+
+
 @pytest.mark.parametrize("wl,mode", [(w, m) for w in TABLE_WORKLOADS for m in TABLE_MODES])
 def test_recommend_monotonic(wl, mode):
-    """The largest scale that fits never shrinks as the cluster grows, the
-    next scale is refused (or it is the datagen ceiling), and the answer
-    equals the preflight's decision. Clusters from 40 to 1,000 cores reach
+    """The largest scale ``recommend`` prints never shrinks as the cluster
+    grows, the preflight admits every scale up to it and refuses the next
+    (or it is the datagen ceiling). Clusters from 40 to 1,000 cores reach
     scales 1 to the ceiling."""
     ceiling = int(DATAGEN_SCALE_BANDS[wl][1])
+    dg = mode != "continuous"
     previous = 0
     for cores in (40, 100, 160, 250, 400, 600, 1000):
         cap = _cap(cores, cores * 12)
-        admitted = _admitted_at(wl, mode, cap)
-        best = largest_fitting_scale(admitted, upper=ceiling)
+        best = _recommend_answer(wl, mode, cap)
         assert best >= previous, (cores, best, previous)
-        if best < ceiling:
-            cfg = default_sizing_config(wl, mode, best + 1)
-            with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
-                get_client.return_value.get_cluster_capacity.return_value = cap
-                res = _check_cluster_capacity(cfg, datagen_runs=mode != "continuous")
-                assert not res.passed, (cores, best + 1)
+        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+            get_client.return_value.get_cluster_capacity.return_value = cap
+            for s in sorted({1, max(1, best // 2), best}) if best else ():
+                cfg = default_sizing_config(wl, mode, s)
+                assert _check_cluster_capacity(cfg, datagen_runs=dg).passed, (cores, s)
+            if best < ceiling:
+                cfg = default_sizing_config(wl, mode, best + 1)
+                assert not _check_cluster_capacity(cfg, datagen_runs=dg).passed, (cores, best)
         previous = best
     assert previous == ceiling  # 1,000 cores / 12,000 GB holds every scale
 
 
-def test_continuous_recommend_says_generate_first():
-    """Above scale 50 a continuous run that generates its own corpus is
-    refused on any cluster (autosizer defect, reported); recommend names
-    the workaround instead of reporting a scale that shrinks with the
-    cluster."""
+def test_continuous_recommend_prints_both_answers():
+    """Review finding: continuous recommend answered only for a corpus
+    generated first, under a title saying "what run requests", so a user
+    could plan a plain run the preflight refuses. It prints the plain-run
+    answer, which the preflight's datagen-counted decision bounds, beside
+    the generate-first one."""
     res = CliRunner().invoke(
         app,
         ["recommend", "--cores", "434", "--memory", "4349", "--mode", "continuous"],
-        env={"COLUMNS": "300"},
+        env={"COLUMNS": "400"},
     )
     assert res.exit_code == 0, res.output
     out = " ".join(res.output.split())
-    assert "generate first, then run --skip-generate" in out
+    plain = int(re.search(r"Largest scale that fits, plain run: ([\d,]+)", out).group(1))
+    first = int(
+        re.search(r"Largest scale that fits, corpus generated first: ([\d,]+)", out).group(1)
+    )
+    assert 0 < plain < first
+    assert "run --skip-generate within an hour" in out
+    plain_ok = largest_fitting_scale(
+        lambda s: (
+            check_capacity(
+                default_sizing_config("customer360", "continuous", s), _cap(434, 4349)
+            ).admitted
+        ),
+        upper=600,
+    )
+    assert plain == plain_ok
     cfg = default_sizing_config("customer360", "continuous", 100)
     with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
         get_client.return_value.get_cluster_capacity.return_value = REFERENCE
