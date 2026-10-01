@@ -8,7 +8,7 @@ that name a request and its resolved content:
   redeploy needs a new resolve and is not identity: a mirror change alters
   it without changing what a run means.
 * ``pinset_sha256`` names what was resolved: the sorted ``(group, file,
-  sha256)`` triples and nothing else. It is content-addressed, enters the
+  sha256)`` triples plus the jar order. It is content-addressed, enters the
   Architecture identity group and names the directory the set is served
   from. ``deploy/deps_tools/lb_deps.py`` computes the same value with the
   standard library alone; the two must stay byte-for-byte equal.
@@ -293,12 +293,27 @@ def select_request(cfg: LakebenchConfig, *, tools_digest: str | None = None) -> 
     )
 
 
-def pinset_sha256(groups: Mapping[str, Iterable[Mapping[str, Any]]]) -> str:
-    """Content hash of a resolved set: sorted ``[group, file, sha256]``
-    triples as compact JSON. Size, timestamps, hosts and repositories do
-    not enter it."""
-    triples = sorted([g, e["file"], e["sha256"]] for g, entries in groups.items() for e in entries)
-    return hashlib.sha256(json.dumps(triples, separators=(",", ":")).encode()).hexdigest()
+def pinset_sha256(
+    groups: Mapping[str, Iterable[Mapping[str, Any]]], jar_order: Iterable[str]
+) -> str:
+    """Content hash of a resolved set: the sorted ``[group, file, sha256]``
+    triples and the jar order, as compact sorted-key JSON
+    ``{"files": [...], "jar_order": [...]}``. The order is Spark's own
+    ``--packages`` order, which the jobs keep in ``spark.jars``; it decides
+    which of two jars holding the same class wins, so the same files in
+    another order are another set. Size, timestamps, hosts and repositories
+    do not enter it. ``jar_order`` must name each file of ``jars`` once."""
+    entries = {g: list(es) for g, es in groups.items()}  # iterables are read twice
+    triples = sorted([g, e["file"], e["sha256"]] for g, es in entries.items() for e in es)
+    order = list(jar_order)
+    jars = sorted(e["file"] for e in entries.get("jars", ()))
+    if sorted(order) != jars or len(set(order)) != len(order):
+        raise ValueError(f"jar_order {order} is not an ordering of the jars group {jars}")
+    return hashlib.sha256(
+        json.dumps(
+            {"files": triples, "jar_order": order}, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
 
 
 def _canonical(data: Any) -> str:

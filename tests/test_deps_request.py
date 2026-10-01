@@ -158,8 +158,8 @@ def test_request_hash_mirror_sensitive_pinset_not(monkeypatch):
     mirrored = req.select_request(cfg, tools_digest="t").request_sha256
     assert mirrored != public
     groups = {"jars": [{"file": "a.jar", "sha256": "11", "size": 1, "coordinate": "g:a:1"}]}
-    assert req.pinset_sha256(groups) == req.pinset_sha256(
-        {"jars": [{"file": "a.jar", "sha256": "11", "size": 999, "resolved_at": "x"}]}
+    assert req.pinset_sha256(groups, ["a.jar"]) == req.pinset_sha256(
+        {"jars": [{"file": "a.jar", "sha256": "11", "size": 999, "resolved_at": "x"}]}, ["a.jar"]
     )
 
 
@@ -196,21 +196,27 @@ def test_aml_request_reads_reference_pins_in_place():
 
 
 def test_pinset_canonical_form():
-    """lb_deps.py (stdlib only) must compute the same value: compact JSON of
-    the sorted [group, file, sha256] triples."""
+    """lb_deps.py (stdlib only) must compute the same value: compact
+    sorted-key JSON of the sorted [group, file, sha256] triples and the jar
+    order."""
     groups = {
         "py-reference": [{"file": "six-1.17.0-py2.py3-none-any.whl", "sha256": "bb"}],
         "jars": [{"file": "b.jar", "sha256": "02"}, {"file": "a.jar", "sha256": "01"}],
     }
-    literal = '[["jars","a.jar","01"],["jars","b.jar","02"],["py-reference","six-1.17.0-py2.py3-none-any.whl","bb"]]'
-    assert req.pinset_sha256(groups) == hashlib.sha256(literal.encode()).hexdigest()
+    order = ["b.jar", "a.jar"]
+    literal = (
+        '{"files":[["jars","a.jar","01"],["jars","b.jar","02"],'
+        '["py-reference","six-1.17.0-py2.py3-none-any.whl","bb"]],"jar_order":["b.jar","a.jar"]}'
+    )
+    assert req.pinset_sha256(groups, order) == hashlib.sha256(literal.encode()).hexdigest()
     changed = {
         **groups,
         "jars": [{"file": "b.jar", "sha256": "03"}, {"file": "a.jar", "sha256": "01"}],
     }
-    assert req.pinset_sha256(changed) != req.pinset_sha256(groups)
+    assert req.pinset_sha256(changed, order) != req.pinset_sha256(groups, order)
     moved = {"duckdb-ext": groups["jars"], "py-reference": groups["py-reference"]}
-    assert req.pinset_sha256(moved) != req.pinset_sha256(groups)
+    assert req.pinset_sha256(moved, []) != req.pinset_sha256(groups, order)
+    assert req.pinset_sha256(groups, ["a.jar", "b.jar"]) != req.pinset_sha256(groups, order)
 
 
 def test_tools_sha256_raises_when_resolver_missing(tmp_path):
@@ -310,3 +316,10 @@ def test_manifest_groups_cover_every_request_group():
         "py-reference": ("py-reference",),
         "duckdb": ("duckdb-wheels", "duckdb-ext"),
     }
+
+
+def test_pinset_accepts_iterables_read_once():
+    groups = {"jars": [{"file": "a.jar", "sha256": "11"}]}
+    assert req.pinset_sha256({"jars": iter(groups["jars"])}, iter(["a.jar"])) == req.pinset_sha256(
+        groups, ["a.jar"]
+    )
