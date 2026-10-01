@@ -1,0 +1,12 @@
+{
+  "_doc": "Held-out AML seeds as salted hashes. Append-only: a hash may be appended to a role's list, a seed to spent (a held-out seed only after its look is recorded in aml_registered_looks.json), and absence_check may move from report to enforce. Nothing else changes; config/datagen_seed.py heldout_history_problems is the rule. The salt is public.",
+  "format": 1,
+  "algorithm": "sha256(bytes.fromhex(salt) + b':' + decimal(seed))",
+  "salt": "267910981b7370a7aaed163588284507373136289bfeec908df42ae15e1d75aa",
+  "roles": {
+    "evaluation": [],
+    "robustness": []
+  },
+  "spent": [],
+  "absence_check": "report"
+}

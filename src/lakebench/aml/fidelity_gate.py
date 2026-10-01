@@ -1,6 +1,6 @@
 """AML fidelity gate: pre-registered evaluation over a per-entity frame.
 
-Computes what AML-GOALS sections 3-5a gate on, from a pandas frame of scored
+Computes what the pre-registered gates test, from a pandas frame of scored
 customers (one row per customer, the pre-registered feature columns, one 0/1
 ``label:<typology>`` column per in-scope typology, optional ``weight``):
 
@@ -812,14 +812,35 @@ def _density(counts: dict | None, prereg: dict) -> dict | None:
     }
 
 
+def _heldout_role(seed: int) -> str | None:
+    """datagen_seed.heldout_role: the package copy, or the flat copy that
+    ships next to this module on the Spark driver."""
+    try:
+        from lakebench.config.datagen_seed import heldout_role
+    except ImportError:  # flat on the driver
+        from datagen_seed import heldout_role  # type: ignore[import-not-found,no-redef]
+    return heldout_role(seed)
+
+
 def corpus_role(seed, prereg: dict) -> str:
-    """calibration / evaluation / robustness by the pre-registered seeds, or
-    unknown. R3: tuning happens on calibration only; a report that says
-    evaluation or robustness before the freeze is a burned seed."""
+    """calibration / evaluation / robustness by the registered seeds, or
+    unknown. Tuning happens on calibration only; a report that says
+    evaluation or robustness before the freeze is a burned seed. The
+    calibration seeds are plaintext in the pre-registration; the evaluation
+    and robustness seeds are known only as salted hashes in
+    heldout_hashes.json, so they are matched by hash (an unreadable hash file
+    raises rather than labelling a held-out corpus "other")."""
     if seed is None:
         return "unknown"
-    for role in ("calibration", "evaluation", "robustness"):
-        if str(prereg["corpora"].get(f"{role}_seed")) == str(seed):
+    if str(prereg["corpora"].get("calibration_seed")) == str(seed):
+        return "calibration"
+    try:
+        as_int = int(str(seed))
+    except ValueError:
+        as_int = None
+    if as_int is not None:
+        role = _heldout_role(as_int)
+        if role is not None:
             return role
     # D8's scale-2 replicates of the calibration corpus (registered in v3.6.0,
     # unchanged through v3.6.1) are calibration corpora: tuning may look at them.

@@ -406,7 +406,10 @@ def test_load_preregistration_prefers_flat_copy(tmp_path, monkeypatch):
     assert fg.load_preregistration()[0] == {"version": "x"}
 
 
-def test_passes_summary_and_corpus_role():
+def test_passes_summary_and_corpus_role(monkeypatch):
+    from tests.fixtures import heldout_test_seeds as ts
+
+    ts.use_fixture(monkeypatch)
     p = _prereg()
     rep = fg.evaluate_gate(
         _frame(), p, provenance={"corpus_seed": p["corpora"]["calibration_seed"]}
@@ -415,7 +418,8 @@ def test_passes_summary_and_corpus_role():
     assert rep["passes"]["d5_leakage_behavioural"] is False
     assert rep["passes"]["all"] is False
     assert rep["passes"]["d2_timing_mixture"] is None  # not supplied, not counted
-    assert fg.corpus_role(p["corpora"]["evaluation_seed"], p) == "evaluation"
+    # The evaluation seed is matched by hash (a test-only seed in the fixture).
+    assert fg.corpus_role(ts.TEST_EVALUATION_SEED, p) == "evaluation"
     assert fg.corpus_role(7, p) == "other" and fg.corpus_role(None, p) == "unknown"
 
 
