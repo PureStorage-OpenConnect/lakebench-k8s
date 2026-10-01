@@ -44,6 +44,7 @@ def test_config_message_golden(name):
     with pytest.raises(ConfigValidationError) as e:
         load_config(path)
     assert expected in str(e.value).splitlines()
+    assert len(e.value.errors) == 1, e.value.errors  # the golden is the only error
 
 
 def test_unknown_key_error_keeps_its_location_in_errors(tmp_path):

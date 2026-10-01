@@ -103,9 +103,12 @@ wrong section is pointed at the right one:
   - platform.storage.scale: unknown key; did you mean `workload.datagen.scale`?
 ```
 
-An unknown recipe names the nearest recipe, or lists them all. Counts are
-bounded (for example `trino.worker.replicas` 1 to 256, `datagen.generators`
-0 to 1024, ports 1 to 65535). A setting that belongs to the other workload,
+An unknown recipe names the nearest recipe, or lists them all; a name whose
+every part is a real component (`unity-delta-spark-trino`) is reported as a
+combination that is not a recipe, not corrected to a different one. Counts
+are bounded (for example `trino.worker.replicas` 1 to 256,
+`datagen.generators` 0 to 1024, ports 1 to 65535, every core count at
+least 1). A setting that belongs to the other workload,
 such as `customer360.unique_customers` or `dirty_data_ratio` under `schema:
 financial`, or `tm_operations` or `w1_max_vertices` under `schema:
 customer360`, loads with a note that the workload does not read it. Under

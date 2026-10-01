@@ -26,6 +26,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `config upgrade` and `admin` still load such a config and list the
   dropped keys in one "Upgrade notes" block on stderr. An old
   `datagen.file_size` is treated the same way.
+- **Counts are bounded at load.** `trino.worker.replicas` 1 to 256,
+  `datagen.generators` 0 to 1024 (0 is auto), the Polaris and Unity ports
+  1 to 65535, and at least 1 for every core count (Spark driver and
+  executor, `driver_cores`, Spark Thrift, DuckDB), the Hive thrift thread
+  counts, `executor.instances`, the per-job executor overrides and
+  `customer360.unique_customers` and `date_range_days`. The two upper
+  bounds sit far above anything lakebench sizes (200 workers at the top
+  scale; generator threads follow the pod CPU). A config with a zero,
+  negative or out-of-range count, which v1.6 accepted, is refused.
 - **Flat top-level config keys are deprecated.** `endpoint:`, `scale:` and
   the other flat spellings still load, each with a note naming the nested
   key to write. Both spellings set: the flat value still wins, with a note.
@@ -34,9 +43,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.
-- Counts are bounded at load: `trino.worker.replicas` 1 to 256,
-  `datagen.generators` 0 to 1024, catalog ports 1 to 65535, and the core,
-  thread and override counts at least 1.
 - A setting of the other workload (`customer360.*` or `dirty_data_ratio`
   under `schema: financial`; `tm_operations` or
   `w1_max_vertices` under `schema: customer360`) loads with a note that the

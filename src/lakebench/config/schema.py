@@ -473,7 +473,7 @@ class StorageConfig(ConfigModel):
 class SparkDriverConfig(ConfigModel):
     """Spark driver resource configuration."""
 
-    cores: int = Field(default=4, ge=1, le=64)
+    cores: int = Field(default=4, ge=1)
     memory: str = "8g"
 
 
@@ -481,7 +481,7 @@ class SparkExecutorConfig(ConfigModel):
     """Spark executor resource configuration."""
 
     instances: int = Field(default=8, ge=1)
-    cores: int = Field(default=4, ge=1, le=64)
+    cores: int = Field(default=4, ge=1)
     memory: str = "48g"
     memory_overhead: str = "12g"
 
@@ -547,7 +547,6 @@ class SparkComputeConfig(ConfigModel):
     driver_cores: int | None = Field(
         default=None,
         ge=1,
-        le=64,
         description="Override driver cores. None = profile default (typically 4).",
     )
 
@@ -582,8 +581,8 @@ class PlatformConfig(ConfigModel):
 class HiveThriftConfig(ConfigModel):
     """Hive Metastore thrift server configuration."""
 
-    min_threads: int = Field(default=10, ge=1, le=10000)
-    max_threads: int = Field(default=50, ge=1, le=10000)
+    min_threads: int = Field(default=10, ge=1)
+    max_threads: int = Field(default=50, ge=1)
     client_timeout: str = "300s"
 
 
@@ -816,7 +815,7 @@ class TrinoConfig(ConfigModel):
 class SparkThriftConfig(ConfigModel):
     """Spark Thrift Server configuration."""
 
-    cores: int = Field(default=2, ge=1, le=64)
+    cores: int = Field(default=2, ge=1)
     memory: str = "4g"
     catalog_name: str = "lakehouse"
 
@@ -824,7 +823,7 @@ class SparkThriftConfig(ConfigModel):
 class DuckDBConfig(ConfigModel):
     """DuckDB query engine configuration."""
 
-    cores: int = Field(default=2, ge=1, le=64)
+    cores: int = Field(default=2, ge=1)
     memory: str = "4g"
     catalog_name: str = "lakehouse"
     # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
@@ -1369,9 +1368,7 @@ class TmOperationsConfig(ConfigModel):
             "run reports it as not run; only violated workflow invariants fail a run"
         ),
     )
-    seed: int = Field(
-        default=20260924, ge=0, le=2**63 - 1, description="Seed for every simulated decision"
-    )
+    seed: int = Field(default=20260924, description="Seed for every simulated decision")
     analyst_accuracy: float = Field(default=0.90, ge=0.5, le=1.0)
     investigator_accuracy: float = Field(default=0.95, ge=0.5, le=1.0)
     qa_sample_rate: float = Field(
@@ -2365,6 +2362,29 @@ RESERVED_NAMESPACES: dict[str, str] = {
 }
 
 
+def _is_recipe_shaped(name: str, recipes: Any) -> bool:
+    """Whether every slot of *name* names a known component.
+
+    Recipe names are ``<catalog>-<format>-<engine>-<query engine>``. A slot
+    is known when a recipe uses it or the schema has that component (so
+    ``unity-delta-spark-trino`` is a combination, not a typo). The query
+    engine slot spells Spark Thrift as ``thrift``.
+    """
+    slots: list[set[str]] = [
+        {c.value for c in CatalogType},
+        {f.value for f in TableFormatType},
+        {e.value for e in PipelineEngineType},
+        {q.value for q in QueryEngineType if q is not QueryEngineType.SPARK_THRIFT} | {"thrift"},
+    ]
+    for known in recipes:
+        parts = known.split("-", 3)
+        if len(parts) == 4:
+            for i, part in enumerate(parts):
+                slots[i].add(part)
+    parts = name.split("-", 3)
+    return len(parts) == 4 and all(p in slots[i] for i, p in enumerate(parts))
+
+
 class LakebenchConfig(ConfigModel):
     """Root configuration for Lakebench.
 
@@ -2417,15 +2437,27 @@ class LakebenchConfig(ConfigModel):
         if recipe_name:
             from lakebench.config.recipes import RECIPES, _deep_setdefault
 
+            if not isinstance(recipe_name, str):
+                raise PydanticCustomError(
+                    "unknown_recipe",
+                    "{text}",
+                    {"text": f"recipe must be one name, not {type(recipe_name).__name__}"},
+                )
             defaults = RECIPES.get(recipe_name)
             if not defaults:
                 from lakebench.config._hints import nearest
 
-                near = nearest(str(recipe_name), RECIPES)
-                if near:
+                valid = "valid recipes: " + ", ".join(sorted(RECIPES))
+                if _is_recipe_shaped(recipe_name, RECIPES):
+                    # Every slot names a real component, so the nearest
+                    # spelling would swap a component the user chose (a
+                    # Unity recipe offered as Hive): say the combination
+                    # is not a recipe instead.
+                    detail = f"that combination is not a recipe; {valid}"
+                elif near := nearest(recipe_name, RECIPES):
                     detail = f"did you mean '{near}'?"
                 else:
-                    detail = "valid recipes: " + ", ".join(sorted(RECIPES))
+                    detail = valid
                 # The text goes in through the context, so braces in a
                 # user's recipe name are not read as template fields.
                 raise PydanticCustomError(
