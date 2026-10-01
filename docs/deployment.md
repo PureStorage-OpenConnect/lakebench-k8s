@@ -196,22 +196,30 @@ The destroy engine follows a specific sequence to ensure clean removal:
     (`data-lakebench-postgres-<n>`, found by name), also when
     `create_namespace: false` keeps the namespace.
 11. **RBAC and Secrets** -- Removes the Spark ServiceAccount, Role,
-    RoleBinding, and Secrets.
+    RoleBinding, and Secrets (`lakebench-s3-credentials`,
+    `lakebench-postgres-secret`, and `lakebench-ca-certificate` when
+    `s3.ca_cert` is set).
 12. **Remaining namespaced objects** -- Deletes, by name, what no step above
-    removes: the PostgreSQL ServiceAccount, and with observability the
-    Pushgateway Deployment, Service and PVC, the Prometheus ConfigMap and the
-    PodMonitors. It also removes the `lakebench.deployment/state-schema`
-    namespace annotation. The list is the Category-1 registry in
-    `src/lakebench/deploy/category1.py`; a unit test runs deploy and the
-    objects `run` creates against it and fails on anything destroy would
-    leave. With `create_namespace: false` one object is kept on purpose: the
+    removes: the PostgreSQL ServiceAccount, and with observability enabled
+    the Pushgateway Deployment, Service and PVC, the Prometheus ConfigMap and
+    the PodMonitors. When the namespace survives it also removes the
+    `lakebench.deployment/state-schema` namespace annotation. The list is the
+    Category-1 registry in `src/lakebench/deploy/category1.py`; a unit test
+    runs deploy and the objects `run` creates against it, and checks every
+    template, so an object destroy would leave fails it. With
+    `create_namespace: false` one object is kept on purpose: the
     `lakebench-silver-state` ConfigMap, whose silver rebuild-epoch counters
     must not go back while table data written under them may outlive destroy
     (a reset counter makes Delta skip writes as already committed). The
-    deployment's identity annotations also stay on a surviving namespace.
+    deployment's identity annotations (`lakebench.deployment/name` and the
+    rest) also stay, so a re-run of a destroy that stopped half way still
+    finds its record; a deployment with another name cannot deploy into that
+    namespace until they are removed.
 13. **Namespace** -- Removes the namespace from the Spark Operator watch list,
-    deletes it (only when `create_namespace` is true), and waits until it is
-    NotFound before reporting it deleted.
+    then, still inside the cluster lease, waits up to 120 s until no running
+    operator pod lists it, deletes it (only when `create_namespace` is true),
+    and waits until it is NotFound before reporting it deleted. If an
+    operator pod still lists it, the namespace is kept and destroy exits 1.
 
 Destroy never deletes the scratch StorageClass. It is shared, cluster-scoped
 infrastructure that other deployments on the same cluster use.

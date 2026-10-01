@@ -37,6 +37,7 @@ RECIPES = (
     "hive-delta-spark-thrift",
     "polaris-iceberg-spark-none",
     "hive-iceberg-spark-trino+observability",
+    "hive-iceberg-spark-trino+ca",
 )
 WORKLOADS = ("c360-batch", "aml-batch", "c360-continuous")
 _CREATE_VERBS = frozenset({"create", "replace", "patch", "apply"})
@@ -67,7 +68,7 @@ def _instant_waits(mp: pytest.MonkeyPatch) -> None:
     mp.setattr("lakebench.deploy.observability._wait_for_prometheus", lambda *a, **k: "")
 
 
-def _config(recipe: str, workload: str):
+def _config(recipe: str, workload: str, tmp_path: Path | None = None):
     from tests.conftest import make_config
 
     recipe, _, extra = recipe.partition("+")
@@ -84,6 +85,12 @@ def _config(recipe: str, workload: str):
         from lakebench.config.schema import PipelineMode
 
         cfg.architecture.pipeline.mode = PipelineMode.CONTINUOUS
+    if extra == "ca":
+        # An HTTPS endpoint with a custom CA: deploy adds lakebench-ca-certificate.
+        assert tmp_path is not None
+        pem = tmp_path / "ca.pem"
+        pem.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+        cfg.platform.storage.s3.ca_cert = str(pem)
     cfg.platform.kubernetes.create_namespace = True
     return cfg
 
@@ -190,15 +197,29 @@ def _destroy(rec: K8sRecorder, cfg) -> list:
         return destroy_all(engine, clean_buckets=False)
 
 
+def _labels(obj) -> dict:
+    md = obj.get("metadata") if isinstance(obj, dict) else getattr(obj, "metadata", None)
+    labels = md.get("labels") if isinstance(md, dict) else getattr(md, "labels", None)
+    return dict(labels or {})
+
+
+def _registered(kind: str, name: str, labels: dict | None) -> bool:
+    from lakebench.deploy.category1 import CATEGORY1_OBJECTS, KEPT_ON_DESTROY
+
+    if any(k.kind == kind and k.name == name for k in KEPT_ON_DESTROY):
+        return True
+    return any(e.matches(kind, name, labels, NS) for e in CATEGORY1_OBJECTS)
+
+
 @pytest.mark.parametrize("workload", WORKLOADS)
 @pytest.mark.parametrize("recipe", RECIPES)
-def test_teardown_covers_every_created_object(recipe, workload, monkeypatch):
+def test_teardown_covers_every_created_object(recipe, workload, monkeypatch, tmp_path):
     from lakebench.deploy.category1 import CATEGORY1_ANNOTATIONS, KEPT_ON_DESTROY
     from lakebench.deploy.engine import DeploymentEngine
     from lakebench.k8s.client import K8sClient
 
     _instant_waits(monkeypatch)
-    cfg = _config(recipe, workload)
+    cfg = _config(recipe, workload, tmp_path)
     with recording() as rec:
         rec.for_config(cfg)
         _seed_cluster(rec)
@@ -211,6 +232,13 @@ def test_teardown_covers_every_created_object(recipe, workload, monkeypatch):
         # The check below reads the store, so every create must have landed.
         absent = sorted(o for o in created if (o[0], NS, o[1]) not in rec.store)
         assert absent == [], f"creates the fake did not apply: {absent}"
+        # The registry is the authority: every created object has its entry.
+        unlisted = sorted(
+            (kind, name)
+            for kind, name in created
+            if not _registered(kind, name, _labels(rec.store[(kind, NS, name)]))
+        )
+        assert unlisted == [], f"objects with no CATEGORY1_OBJECTS entry: {unlisted}"
         # The deploy really ran: a sample of what every recipe creates.
         assert ("statefulsets", "lakebench-postgres") in created
         assert ("sparkapplications", f"lakebench-{_job_types(workload)[0].value}") in created
@@ -244,20 +272,129 @@ def test_teardown_covers_every_created_object(recipe, workload, monkeypatch):
 def test_registry_entries_have_owner():
     from lakebench.deploy.category1 import CATEGORY1_OBJECTS, KEPT_ON_DESTROY
 
+    steps = set(_step_order(ast.parse((SRC / "deploy" / "destroy.py").read_text())))
     for e in CATEGORY1_OBJECTS:
-        assert e.owner_wi and e.step, e
+        assert e.owner_wi and e.step in steps, e
         assert bool(e.name) != bool(e.label_selector), e
+        assert e.when in ("", "observability"), e
     for k in KEPT_ON_DESTROY:
         assert k.owner_wi and k.reason, k
 
 
-def test_category1_selectors_are_deployment_scoped():
-    """A selector delete in the category1 step can only match this deployment."""
+# Selector entries that are not scoped to the deployment, and why that is
+# acceptable: fixed object names (lakebench-postgres and the rest) already
+# make two deployments in one namespace impossible.
+_NAMESPACE_WIDE_SELECTORS = {
+    "app.kubernetes.io/managed-by=lakebench",  # datagen-jobs, pre-1.7
+    "app.kubernetes.io/component=trino-worker",  # the worker claims, pre-1.7
+}
+
+
+def test_selectors_are_deployment_scoped():
+    """A selector delete can only match this deployment, or is a listed pre-1.7 one."""
     from lakebench.deploy.category1 import CATEGORY1_OBJECTS
 
-    for e in CATEGORY1_OBJECTS:
-        if e.step == "category1" and e.label_selector:
+    selectors = [e for e in CATEGORY1_OBJECTS if e.label_selector]
+    assert selectors
+    for e in selectors:
+        assert (
+            "app.kubernetes.io/instance={name}" in e.label_selector
+            or e.label_selector in _NAMESPACE_WIDE_SELECTORS
+        ), e
+        if e.step == "category1":
             assert "app.kubernetes.io/instance={name}" in e.label_selector, e
+
+
+def test_scripts_entry_is_the_spark_scripts_step_selector():
+    from lakebench.deploy.category1 import CATEGORY1_OBJECTS
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import scripts_label_selector
+
+    (entry,) = [e for e in CATEGORY1_OBJECTS if e.step == "spark-scripts"]
+    assert entry.label_selector == scripts_label_selector("{name}")
+
+
+def test_entry_matching():
+    from lakebench.deploy.category1 import Cat1Entry
+
+    pvc = Cat1Entry("core_v1", "persistentvolumeclaims", name="data-lakebench-postgres-<n>")
+    assert pvc.matches("persistentvolumeclaims", "data-lakebench-postgres-12", None, NS)
+    assert not pvc.matches("persistentvolumeclaims", "data-lakebench-postgres-0-x", None, NS)
+    assert not pvc.matches("configmaps", "data-lakebench-postgres-0", None, NS)
+    sel = Cat1Entry("core_v1", "configmaps", label_selector="a=1,app.kubernetes.io/instance={name}")
+    assert sel.matches("configmaps", "x", {"a": "1", "app.kubernetes.io/instance": NS}, NS)
+    assert not sel.matches("configmaps", "x", {"a": "1", "app.kubernetes.io/instance": "u02"}, NS)
+    assert Cat1Entry("custom", "sparkapplications", name="*").matches(
+        "sparkapplications", "y", None, NS
+    )
+
+
+# Templates rendered by nothing: HiveDeployer.LEGACY_TEMPLATES (deprecated).
+_UNUSED_TEMPLATES = {"hive/configmap.yaml.j2", "hive/deployment.yaml.j2"}
+_NOT_NAMESPACED = {"Namespace", "SecretClass", "StorageClass"}
+_PLURAL = {
+    "ConfigMap": "configmaps",
+    "Secret": "secrets",
+    "Service": "services",
+    "ServiceAccount": "serviceaccounts",
+    "PersistentVolumeClaim": "persistentvolumeclaims",
+    "Deployment": "deployments",
+    "StatefulSet": "statefulsets",
+    "Job": "jobs",
+    "Role": "roles",
+    "RoleBinding": "rolebindings",
+    "HiveCluster": "hiveclusters",
+    "PodMonitor": "podmonitors",
+}
+
+
+def _template_objects():
+    """``(template, kind, name, namespace, labels)`` for every document in templates/."""
+    import re
+
+    root = SRC / "templates"
+    for path in sorted(root.rglob("*.j2")):
+        for doc in re.split(r"(?m)^---\s*$", path.read_text()):
+            kind = re.search(r"(?m)^kind:\s*(\S+)", doc)
+            meta = re.search(r"(?m)^metadata:\s*\n((?:[ \t]+.*\n?)*)", doc)
+            if not kind or not meta:
+                continue
+            block = meta.group(1)
+            name = re.search(r"(?m)^  name:\s*(.+)$", block)
+            ns = re.search(r"(?m)^  namespace:\s*(.+)$", block)
+            labels_block = re.search(r"(?m)^  labels:\s*\n((?:    .*\n?)*)", block)
+            labels = {}
+            if labels_block:
+                for line in labels_block.group(1).splitlines():
+                    k, _, v = line.strip().partition(":")
+                    if k and not k.startswith("#"):
+                        labels[k.strip()] = v.strip().replace("{{ name }}", NS)
+            yield (
+                path.relative_to(root).as_posix(),
+                kind.group(1),
+                name.group(1).strip() if name else "",
+                ns.group(1).strip() if ns else "",
+                labels,
+            )
+
+
+def test_every_template_object_is_registered():
+    """[static] a template that makes a namespaced object needs its registry entry."""
+    from lakebench.modules.catalogs.hive.deployer import HiveDeployer
+
+    assert set(HiveDeployer.LEGACY_TEMPLATES) - {"hive/service.yaml.j2"} == _UNUSED_TEMPLATES
+    hive_src = (SRC / "modules/catalogs/hive/deployer.py").read_text()
+    assert hive_src.count("LEGACY_TEMPLATES") == 1, "LEGACY_TEMPLATES is rendered now"
+    missing = []
+    seen = 0
+    for tpl, kind, name, ns, labels in _template_objects():
+        if tpl in _UNUSED_TEMPLATES or kind in _NOT_NAMESPACED or ns != "{{ namespace }}":
+            continue
+        seen += 1
+        plural = _PLURAL.get(kind)
+        if plural is None or not _registered(plural, name, labels):
+            missing.append(f"{tpl}: {kind}/{name}")
+    assert seen > 30
+    assert missing == [], missing
 
 
 def _step_order(tree: ast.Module) -> list[str]:
@@ -295,12 +432,92 @@ def test_category1_failure_is_reported(ns_goes, status):
         rec.add_namespace(NS, annotations={"lakebench.deployment/state-schema": "lb-state/1"})
         rec.add("serviceaccounts", {"metadata": {"name": "lakebench-postgres"}}, namespace=NS)
         rec.fail(verb="delete", kind="serviceaccounts", name="lakebench-postgres", status=500)
-        result = _category1_step(NS, NS, ns_goes=ns_goes)
+        result = _category1_step(NS, NS, ns_goes=ns_goes, conditions=frozenset({"observability"}))
         assert result.status.value == status
         assert "serviceaccounts/lakebench-postgres" in result.message
-        # The other entries and the annotation patch still ran.
+        # The other entries still ran.
         rec.assert_recorded(
             verb="delete", kind="persistentvolumeclaims", name="lakebench-pushgateway"
         )
         anns = rec.store[("namespaces", None, NS)].metadata.annotations or {}
-        assert "lakebench.deployment/state-schema" not in anns
+        # Removed only from a surviving namespace; when the namespace step is
+        # meant to delete it, a namespace that step keeps stays whole.
+        assert ("lakebench.deployment/state-schema" in anns) is ns_goes
+
+
+def test_category1_skips_observability_entries_when_off():
+    """No PodMonitor or Pushgateway call for a deployment that never had them (no 403)."""
+    from lakebench.deploy.destroy import _category1_step
+
+    with recording(NS) as rec:
+        rec.add_namespace(NS)
+        result = _category1_step(NS, NS, ns_goes=False)
+        assert result.status.value == "success"
+        kinds = {c.kind for c in rec.calls if c.verb == "delete"}
+        assert kinds == {"serviceaccounts"}
+
+
+def test_category1_annotation_patch_is_conditional():
+    """A namespace that changed since the read (a redeploy) keeps its annotations."""
+    from lakebench.deploy.destroy import _category1_step
+
+    with recording(NS) as rec:
+        rec.add_namespace(NS, annotations={"lakebench.deployment/state-schema": "lb-state/1"})
+        rec.fail(verb="patch", kind="namespaces", name=NS, status=409)
+        result = _category1_step(NS, NS, ns_goes=False)
+        assert result.status.value == "failed"
+        assert "changed during destroy" in result.message
+    core = MagicMock()
+    core.read_namespace.return_value.metadata.annotations = {
+        "lakebench.deployment/state-schema": "lb-state/1",
+        "lakebench.deployment/name": NS,
+    }
+    core.read_namespace.return_value.metadata.resource_version = "42"
+    with patch("lakebench.deploy.destroy._category1_api", return_value=core):
+        _category1_step(NS, NS, ns_goes=False)
+    body = core.patch_namespace.call_args.args[1]
+    assert body == {
+        "metadata": {
+            "annotations": {"lakebench.deployment/state-schema": None},
+            "resourceVersion": "42",
+        }
+    }
+
+
+def test_trino_worker_claims_are_deleted(monkeypatch):
+    """The worker StatefulSet's claims (its controller makes them) go with the trino step."""
+    from lakebench.deploy.engine import DeploymentEngine
+    from lakebench.k8s.client import K8sClient
+
+    _instant_waits(monkeypatch)
+    cfg = _config("hive-iceberg-spark-trino", "c360-batch")
+    cfg.architecture.query_engine.trino.worker.storage_class = "px-csi-db"
+    with recording() as rec:
+        rec.for_config(cfg)
+        _seed_cluster(rec)
+        assert not [
+            r
+            for r in DeploymentEngine(cfg, k8s_client=K8sClient(namespace=NS)).deploy_all()
+            if r.status.value == "failed"
+        ]
+        sts = rec.store[("statefulsets", NS, "lakebench-trino-worker")]
+        (template,) = sts.spec.volume_claim_templates
+        for i in range(2):
+            rec.add(
+                "persistentvolumeclaims",
+                {
+                    "metadata": {
+                        "name": f"data-lakebench-trino-worker-{i}",
+                        "labels": dict(template.metadata.labels),
+                    },
+                    "spec": {"accessModes": ["ReadWriteOnce"]},
+                },
+                namespace=NS,
+            )
+            assert _registered(
+                "persistentvolumeclaims",
+                f"data-lakebench-trino-worker-{i}",
+                template.metadata.labels,
+            )
+        _destroy(rec, cfg)
+        assert not [k for k in rec.store if k[0] == "persistentvolumeclaims" and k[1] == NS]

@@ -327,9 +327,11 @@ def stamp_namespace(
 
     from kubernetes.client.rest import ApiException  # local import: light dep
 
+    from lakebench.k8s.lease_state import request_timeout_kw
+
     for attempt in range(max_retries):
         try:
-            ns = core_v1.read_namespace(namespace)
+            ns = core_v1.read_namespace(namespace, **request_timeout_kw())
         except ApiException as e:
             if e.status == 404:
                 return IdentityReport(
@@ -406,7 +408,7 @@ def stamp_namespace(
             }
         }
         try:
-            core_v1.patch_namespace(namespace, body)
+            core_v1.patch_namespace(namespace, body, **request_timeout_kw())
         except ApiException as e:
             if e.status == 409:
                 # Conflict: someone else patched the namespace between our

@@ -67,20 +67,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   maintenance `id` are unchanged.
 ### Changed
 - **`destroy` removes what it used to leave in a surviving namespace.** With
-  `create_namespace: false`, destroy left the PostgreSQL ServiceAccount and,
-  with observability on, the Pushgateway Deployment, Service and PVC, the
-  Prometheus ConfigMap and five PodMonitors. A new last step deletes them by
-  name from the Category-1 registry (`deploy/category1.py`), which lists every
+  `create_namespace: false`, destroy left the PostgreSQL ServiceAccount, the
+  `lakebench-ca-certificate` Secret (with `s3.ca_cert`) and, with
+  observability on, the Pushgateway Deployment, Service and PVC, the
+  Prometheus ConfigMap and five PodMonitors. A new step, after the component
+  steps and before the namespace step, deletes them by name from the
+  Category-1 registry (`deploy/category1.py`). The registry lists every
   object deploy and run create in the namespace and the step that deletes
-  it. The `lakebench-silver-state` ConfigMap is kept on purpose (its rebuild
-  counters must not reset while table data can outlive destroy).
+  it; a unit test runs deploy and the run-time creators against it, and
+  checks every template. The `lakebench-silver-state` ConfigMap is kept on
+  purpose (its rebuild counters must not reset while table data can outlive
+  destroy), and so are the deployment's identity annotations.
 - **`destroy` keeps a namespace an operator pod still watches.** After it
   removes the namespace from the Spark Operator watch list and the operator
-  restarts, destroy waits inside the cluster lease (up to 120 s) for every
-  running operator pod whose `--namespaces=` still lists the namespace to go.
-  If one is still there it keeps the namespace and exits 1 with "operator pods
-  [...] still watch it; re-run destroy after they roll", because the operator
-  crash-loops on a watched namespace that no longer exists.
+  restarts, destroy waits inside the cluster lease (up to 120 s) until no
+  operator pod that is still running, and no operator Deployment template,
+  lists the namespace in `--namespaces=`. A stale pod nobody is replacing
+  gets one more operator restart. If something still lists it, destroy keeps
+  the namespace and exits 1 with "operator pods [...] still watch it",
+  because the operator crash-loops on a watched namespace that no longer
+  exists.
 - **The legacy SecretClass cleanup in `destroy` runs under the cluster
   lease.** The cluster-wide count of other lakebench namespaces and the
   deletes of `lakebench-s3-credentials-class` and
@@ -90,9 +96,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The cluster lease holder names the process (LB-178).** The `holder`
   field is now `<host>@<user>@<sha>#<pid>-<8 hex>`, unique to each acquire,
   and release matches the lease's write nonce, so a process never deletes a
-  lease another run from the same host wrote in the same second. An
-  interrupt inside the acquire releases the lease it wrote instead of
-  leaving it to the 3600 s TTL.
+  lease another run from the same host wrote in the same second. An acquire
+  that fails or is interrupted after its write landed (a lost reply, a 504,
+  a Ctrl-C, a SIGTERM) releases that lease instead of leaving it to the
+  3600 s TTL, and an acquire whose own write comes back as a conflict adopts
+  it instead of waiting on itself.
 - **`destroy` deletes the PostgreSQL data PVC when the namespace survives
   (LB-187).** With `create_namespace: false`, `data-lakebench-postgres-<n>`
   and the catalog metadata on it used to survive destroy, because the cleanup

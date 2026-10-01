@@ -172,12 +172,17 @@ class TestPostgresClaims:
             self._pvc(rec, "spark-scratch-1")
             results = _destroy(rec, create_namespace=False)
             assert _status(results, "postgres") == "success"
-            deleted = sorted(
+            left = sorted(name for kind, ns, name in rec.store if kind == "persistentvolumeclaims")
+            assert left == ["data-lakebench-postgres-0-backup", "pg-data", "spark-scratch-1"]
+            # The Postgres step deleted exactly its two claims.
+            postgres_deletes = sorted(
                 c.name
                 for c in rec.mutations()
-                if c.verb == "delete" and c.kind == "persistentvolumeclaims"
+                if c.verb == "delete"
+                and c.kind == "persistentvolumeclaims"
+                and c.name.startswith("data-lakebench-postgres")
             )
-            assert deleted == ["data-lakebench-postgres-0", "data-lakebench-postgres-1"]
+            assert postgres_deletes == ["data-lakebench-postgres-0", "data-lakebench-postgres-1"]
 
     def test_claim_template_stays_unlabelled(self):
         """Labels added to volumeClaimTemplates would make a v1.7 deploy over a

@@ -34,6 +34,7 @@ already carries (v1.6 objects have no ``lakebench.io/deployment`` label).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 __all__ = [
@@ -71,6 +72,33 @@ class Cat1Entry:
     # Custom objects only (``api="custom"``).
     group: str = ""
     version: str = ""
+    # A config condition the category1 step needs before it deletes the
+    # entry: "" always, "observability" when observability.enabled. A user
+    # without rights on a kind the deployment never used (PodMonitor) then
+    # gets no 403.
+    when: str = ""
+
+    def matches(self, kind: str, name: str, labels: dict[str, str] | None, deployment: str) -> bool:
+        """Whether this entry covers the object ``kind``/``name`` with ``labels``.
+
+        ``name`` may be exact, ``*`` (every object of the kind) or carry
+        ``<n>`` for an ordinal; a selector is ``k=v`` pairs, ``{name}`` the
+        deployment.
+        """
+        if kind != self.kind:
+            return False
+        if self.name is not None:
+            if self.name == "*":
+                return True
+            pattern = re.escape(self.name).replace(re.escape("<n>"), r"\d+")
+            return re.fullmatch(pattern, name) is not None
+        assert self.label_selector is not None
+        have = labels or {}
+        for term in self.label_selector.format(name=deployment).split(","):
+            key, _, value = term.partition("=")
+            if have.get(key.strip()) != value.strip():
+                return False
+        return True
 
 
 @dataclass(frozen=True)
@@ -107,6 +135,15 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
     *_named("apps_v1", "statefulsets", "trino", "lakebench-trino-worker"),
     *_named("core_v1", "services", "trino", "lakebench-trino", "lakebench-trino-worker"),
     *_named("core_v1", "configmaps", "trino", "lakebench-trino-config"),
+    # The worker StatefulSet's claims, made by its controller when a worker
+    # storage class is set; the trino step selects them by component.
+    Cat1Entry(
+        "core_v1",
+        "persistentvolumeclaims",
+        label_selector="app.kubernetes.io/component=trino-worker",
+        owner_wi=_PRE,
+        step="trino",
+    ),
     *_named("apps_v1", "deployments", "spark-thrift", "lakebench-spark-thrift"),
     *_named("core_v1", "services", "spark-thrift", "lakebench-spark-thrift"),
     *_named("apps_v1", "deployments", "duckdb", "lakebench-duckdb"),
@@ -122,6 +159,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         version="v1alpha1",
     ),
     *_named("core_v1", "services", "hive", "lakebench-hive-metastore"),
+    *_named("apps_v1", "deployments", "hive", "lakebench-hive-metastore"),
     *_named("apps_v1", "deployments", "polaris", "lakebench-polaris"),
     *_named("core_v1", "services", "polaris", "lakebench-polaris"),
     *_named("batch_v1", "jobs", "polaris", "lakebench-polaris-bootstrap"),
@@ -140,13 +178,18 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         "data-lakebench-postgres-<n>",
         owner="SD-14",
     ),
-    # Scripts ConfigMaps (DEP-1): the role maps and the v1.6 single map. The
-    # selector keys on app.kubernetes.io/instance (v1.6 maps carry no
-    # lakebench.io/deployment label).
+    # Scripts ConfigMaps (DEP-1): the role maps and the v1.6 single map, by
+    # scripts_maps.scripts_label_selector, which keys on
+    # app.kubernetes.io/instance (v1.6 maps carry no lakebench.io/deployment
+    # label).
     Cat1Entry(
         "core_v1",
         "configmaps",
-        label_selector="app.kubernetes.io/instance={name},app.kubernetes.io/component=spark-scripts",
+        label_selector=(
+            "app.kubernetes.io/component=spark-scripts,"
+            "app.kubernetes.io/managed-by=lakebench,"
+            "app.kubernetes.io/instance={name}"
+        ),
         owner_wi="SD-8",
         step="spark-scripts",
     ),
@@ -154,14 +197,41 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
     *_named("core_v1", "serviceaccounts", "rbac", "lakebench-spark-runner"),
     *_named("rbac_v1", "roles", "rbac", "lakebench-spark-runner"),
     *_named("rbac_v1", "rolebindings", "rbac", "lakebench-spark-runner"),
-    *_named("core_v1", "secrets", "rbac", "lakebench-s3-credentials", "lakebench-postgres-secret"),
-    # The category1 step (SD-21): objects no component step deleted. Order
-    # matters: a Deployment goes before the claim its pod mounts.
+    *_named(
+        "core_v1",
+        "secrets",
+        "rbac",
+        "lakebench-s3-credentials",
+        "lakebench-postgres-secret",
+        "lakebench-ca-certificate",
+    ),
+    # The category1 step (SD-21): objects no component step deleted. The
+    # deletes do not wait; a claim still mounted by a terminating pod is held
+    # by the pvc-protection finalizer until the pod is gone.
     *_named("core_v1", "serviceaccounts", CATEGORY1_STEP, "lakebench-postgres"),
-    *_named("apps_v1", "deployments", CATEGORY1_STEP, "lakebench-pushgateway"),
-    *_named("core_v1", "services", CATEGORY1_STEP, "lakebench-pushgateway"),
-    *_named("core_v1", "persistentvolumeclaims", CATEGORY1_STEP, "lakebench-pushgateway"),
-    *_named("core_v1", "configmaps", CATEGORY1_STEP, "lakebench-prometheus-config"),
+    *(
+        Cat1Entry(
+            api,
+            kind,
+            name="lakebench-pushgateway",
+            owner_wi=_PRE,
+            step=CATEGORY1_STEP,
+            when="observability",
+        )
+        for api, kind in (
+            ("apps_v1", "deployments"),
+            ("core_v1", "services"),
+            ("core_v1", "persistentvolumeclaims"),
+        )
+    ),
+    Cat1Entry(
+        "core_v1",
+        "configmaps",
+        name="lakebench-prometheus-config",
+        owner_wi=_PRE,
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
     *(
         Cat1Entry(
             "custom",
@@ -171,6 +241,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
             step=CATEGORY1_STEP,
             group="monitoring.coreos.com",
             version="v1",
+            when="observability",
         )
         for n in (
             "lakebench-spark-driver",
@@ -196,6 +267,8 @@ KEPT_ON_DESTROY: tuple[KeptObject, ...] = (
         "holds the silver rebuild-epoch counters, which must never go back while "
         "table data written under them can outlive destroy (bucket cleanup off, or "
         "buckets this deployment does not own); a reset counter makes Delta skip "
-        "writes as already committed. Deploy backfills it and keeps its values",
+        "writes as already committed. Deploy backfills it and keeps its values. "
+        "Its bronze_data_clock survives too, so a later deploy's silver stages read "
+        "the old clock until bronze-verify rewrites it",
     ),
 )
