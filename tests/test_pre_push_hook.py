@@ -239,6 +239,7 @@ def test_real_gitleaks_refuses_an_inline_allow(repo):
     tip = _commit(repo, "conf.txt", f"k: {_planted_key()}  # gitleaks:allow\n", "allow it")
     res = _run(repo, [_new_branch(tip)], os.environ["PATH"])
     assert res.returncode == 1, res.stderr
+    assert "gitleaks findings" in res.stderr, res.stderr  # a finding, not a failure
 
 
 def test_real_gitleaks_ignores_the_pushing_trees_baseline(repo):
@@ -253,6 +254,7 @@ def test_real_gitleaks_ignores_the_pushing_trees_baseline(repo):
     )
     res = _run(repo, [_new_branch(tip)], os.environ["PATH"])
     assert res.returncode == 1, res.stderr
+    assert "gitleaks findings" in res.stderr, res.stderr  # a finding, not a failure
 
 
 def test_real_gitleaks_refuses_a_key_added_in_a_merge(repo):
@@ -268,3 +270,4 @@ def test_real_gitleaks_refuses_a_key_added_in_a_merge(repo):
     assert _git(repo, "rev-list", "--parents", "-n", "1", tip).count(" ") == 2
     res = _run(repo, [_new_branch(tip)], os.environ["PATH"])
     assert res.returncode == 1, res.stderr
+    assert "gitleaks findings" in res.stderr, res.stderr  # a finding, not a failure
