@@ -635,7 +635,7 @@ def test_config_recommend_refuses_a_context_not_in_the_kubeconfig(
     from lakebench.cli import app
 
     res = CliRunner().invoke(app, ["config", "recommend", str(_config_file(tmp_path, "C"))])
-    assert res.exit_code == 1, res.output
+    assert res.exit_code == 4, res.output  # k8s.unreachable: the context does not load
     assert "not in the kubeconfig" in res.output
     assert hosts == []
 

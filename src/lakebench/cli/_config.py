@@ -391,7 +391,7 @@ def config_recommend(
     except Exception as e:
         mode = None
         console.print(
-            f"[yellow]{config_file} did not load ({type(e).__name__}); sizing against "
+            f"[yellow]{esc(config_file)} did not load ({esc(type(e).__name__)}); sizing against "
             "the kubeconfig's current context and the default mode.[/yellow]"
         )
 
@@ -407,7 +407,7 @@ def config_recommend(
             pin_command(cfg)
         except ConfigException as e:
             console.print(f"[red]Cannot use the config's cluster context:[/red] {escape(str(e))}")
-            raise typer.Exit(1) from None
+            raise typer.Exit(ExitCode.PREREQUISITE) from None
 
     _recommend(mode=mode, schema_type=schema)
 
