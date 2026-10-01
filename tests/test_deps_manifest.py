@@ -25,6 +25,18 @@ from tests.test_lb_deps import ext_repo  # noqa: F401 -- the fixture
 H = "0" * 64
 
 
+@pytest.fixture(autouse=True)
+def _restore_signal_handlers():
+    """The contract tests run lb_deps.py resolve in this process, which
+    installs a SIGTERM handler; restore it for the tests after them."""
+    import signal
+
+    saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    yield
+    for s, handler in saved.items():
+        signal.signal(s, handler)
+
+
 def _h(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
