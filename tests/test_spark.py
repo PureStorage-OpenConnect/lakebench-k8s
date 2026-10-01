@@ -1769,7 +1769,7 @@ class TestReferenceScoreWiring:
         the bare `from reference_score import` resolves on the driver."""
         from tests.test_scripts_maps import FakeK8s
 
-        k8s = FakeK8s()
+        k8s = FakeK8s(legacy_owner=None)
         mgr = SparkJobManager(_make_config(), k8s)
 
         result = mgr.deploy_scripts_configmap()

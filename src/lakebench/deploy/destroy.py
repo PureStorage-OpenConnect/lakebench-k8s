@@ -2904,13 +2904,15 @@ def destroy_all(
             )
         )
 
-    # Step 8: Remove RBAC and Secrets
+    # Step 8: scripts ConfigMaps, RBAC and Secrets
     stopped = _stop_if_changed("RBAC, secrets and SecretClass teardown")
     if stopped is not None:
         return stopped
-    # Step 7b: the scripts ConfigMaps (DEP-1): the per-role maps and the v1.6
-    # single map, by label in this namespace. With create_namespace=false the
-    # namespace survives destroy, so nothing else removes them.
+    # Step 8a: the scripts ConfigMaps (DEP-1): the per-role maps and the v1.6
+    # single map, by this deployment's label in its own namespace. With
+    # create_namespace=false the namespace survives destroy, so nothing else
+    # removes them; with true the namespace delete would, so a failure to
+    # list or delete them is only a skip.
     report("spark-scripts", DeploymentStatus.IN_PROGRESS, "Removing scripts ConfigMaps...")
     try:
         from lakebench.modules.pipeline_engines.spark.scripts_maps import (
@@ -2937,13 +2939,18 @@ def destroy_all(
         )
         report("spark-scripts", DeploymentStatus.SUCCESS, msg)
     except Exception as e:  # noqa: BLE001
-        msg = f"Scripts ConfigMap cleanup failed: {e}"
+        reason = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+        if engine.config.platform.kubernetes.create_namespace is True:
+            msg = f"Scripts ConfigMap cleanup skipped ({reason}); the namespace delete removes them"
+            status = DeploymentStatus.SKIPPED
+        else:
+            msg = f"Scripts ConfigMap cleanup failed: {reason}"
+            status = DeploymentStatus.FAILED
         logger.warning(msg)
-        results.append(
-            DeploymentResult(component="spark-scripts", status=DeploymentStatus.FAILED, message=msg)
-        )
-        report("spark-scripts", DeploymentStatus.FAILED, msg)
+        results.append(DeploymentResult(component="spark-scripts", status=status, message=msg))
+        report("spark-scripts", status, msg)
 
+    # Step 8b: RBAC and Secrets
     report("rbac", DeploymentStatus.IN_PROGRESS, "Removing RBAC and secrets...")
     try:
         rbac_v1 = k8s_client.RbacAuthorizationV1Api()

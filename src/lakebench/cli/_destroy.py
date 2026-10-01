@@ -304,6 +304,7 @@ def destroy(
         "hive": "Removing infrastructure",
         "polaris": "Removing infrastructure",
         "postgres": "Removing infrastructure",
+        "spark-scripts": "Removing infrastructure",
         "rbac": "Removing infrastructure",
         "scratch-sc": "Removing infrastructure",
         "namespace": "Removing namespace",

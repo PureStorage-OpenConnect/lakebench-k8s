@@ -22,14 +22,17 @@ one flat directory, at `/opt/spark/scripts` in both driver and executor pods:
 | `lakebench-scripts-aml-data` | the AML reference and pre-registration JSON |
 
 The file list is `SCRIPT_MAPS` in `modules/pipeline_engines/spark/scripts_maps.py`.
-`run` (and `lakebench financial`) applies every map, reads each back and compares
-its `lakebench.io/scripts-sha256` annotation, and only then submits jobs. A listed
-file missing from the installed package, or a map over 838,860 bytes (80% of the
-1 MiB ConfigMap limit, counted as the API server counts it: key plus value bytes),
-stops the run with one line naming the file or map. The single
-`lakebench-spark-scripts` map used by 1.6 and earlier is deleted on the first
-1.7 run, and `destroy` deletes all of them, including when
-`create_namespace: false` keeps the namespace.
+`run` (and `lakebench financial`) applies every map, reads each back and checks
+that its data still hashes to its `lakebench.io/scripts-sha256` annotation, and
+only then submits jobs. Before each later job it re-reads the annotations, so a
+second run from another tree that rewrites the maps stops this run instead of
+changing its scripts mid-pipeline. A listed file missing from the installed
+package, or a map over 838,860 bytes (80% of the 1 MiB ConfigMap limit, counting
+key and value bytes), stops the run with one line naming the file or map. The
+single `lakebench-spark-scripts` map used by 1.6 and earlier is deleted on the
+first 1.7 run, unless a SparkApplication that is still running mounts it, and
+`destroy` deletes all of them, including when `create_namespace: false` keeps
+the namespace.
 
 ## Spark Operator
 

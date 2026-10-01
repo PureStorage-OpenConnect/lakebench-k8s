@@ -2690,7 +2690,15 @@ def _run_sustained(
 
         # Deploy scripts ConfigMap (includes streaming scripts) -- must succeed
         print_info("Deploying Spark scripts...")
-        if not job_manager.deploy_scripts_configmap():
+        from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
+
+        try:
+            scripts_ok = job_manager.deploy_scripts_configmap()
+        except ScriptsMapError as e:
+            print_error(f"Spark scripts not deployed: {e}")
+            _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
+            raise typer.Exit(1) from None
+        if not scripts_ok:
             print_error("Failed to deploy Spark scripts ConfigMap -- pipeline cannot proceed")
             _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
             raise typer.Exit(1)

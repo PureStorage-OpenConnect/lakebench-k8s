@@ -68,8 +68,14 @@ def _get_job_manager(cfg):
         context=cfg.platform.kubernetes.context,
         namespace=cfg.get_namespace(),
     )
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
+
     job_manager = get_engine(cfg, k8s)
-    if not job_manager.deploy_scripts_configmap():
+    try:
+        scripts_ok = job_manager.deploy_scripts_configmap()
+    except ScriptsMapError as e:
+        raise typer.Exit(f"Spark scripts not deployed: {e}") from None
+    if not scripts_ok:
         raise typer.Exit("Failed to deploy Spark scripts ConfigMap")
     return job_manager
 

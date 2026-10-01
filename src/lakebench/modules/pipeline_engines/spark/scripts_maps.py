@@ -9,9 +9,9 @@ scripts expect: ``local:///opt/spark/scripts/<script>`` main files, bare
 the AML JSON read by file name.
 
 Every file is listed explicitly; there are no globs. The builder measures the
-bytes it is about to apply, the same way the API server's ConfigMap
-validation does (key bytes plus value bytes over ``data``), and refuses a map
-over :data:`MAP_BUDGET_BYTES`. A listed file that is not in the package
+bytes it is about to apply (UTF-8 key plus value bytes over ``data``; the API
+server counts only the values, so this is slightly conservative) and refuses
+a map over :data:`MAP_BUDGET_BYTES`. A listed file that is not in the package
 raises instead of being skipped.
 """
 
@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
+# job.py imports this module lazily (inside functions) because JobType lives
+# there; keep it that way, or move JobType to a leaf module first.
 from lakebench.modules.pipeline_engines.spark.job import JobType
 
 if TYPE_CHECKING:
@@ -45,12 +47,17 @@ SCRIPTS_MOUNT_PATH = "/opt/spark/scripts"
 SCRIPTS_VOLUME_NAME = "spark-scripts"
 
 
-class ScriptsManifestError(Exception):
-    """The script manifest names a file the package does not have, or two
-    roles ship the same key."""
+class ScriptsMapError(Exception):
+    """The scripts ConfigMaps cannot be built. The message is one line that
+    names the file or map; the CLI prints it and exits 1."""
 
 
-class ScriptsBudgetError(Exception):
+class ScriptsManifestError(ScriptsMapError):
+    """The script manifest names a file the package does not have or cannot
+    read, or two roles ship the same key."""
+
+
+class ScriptsBudgetError(ScriptsMapError):
     """A role's ConfigMap is over :data:`MAP_BUDGET_BYTES`."""
 
     def __init__(self, role: str, size: int, budget: int = MAP_BUDGET_BYTES):
@@ -167,8 +174,8 @@ def map_name(role: str) -> str:
 
 
 def map_data_size(data: Mapping[str, str]) -> int:
-    """Bytes the API server counts against the 1 MiB limit: UTF-8 key plus
-    value, summed over ``data``."""
+    """UTF-8 key plus value bytes, summed over ``data``. The API server's
+    1 MiB check counts the values only, so this is the larger figure."""
     return sum(len(k.encode("utf-8")) + len(v.encode("utf-8")) for k, v in data.items())
 
 
@@ -180,7 +187,7 @@ def data_sha256(data: Mapping[str, str]) -> str:
 
 def scripts_sha256(maps: Iterable[Mapping[str, Any]]) -> str:
     """One hash over every map: sha256 of the sorted ``(name, scripts-sha256)``
-    pairs. Recorded as ``provenance.scripts_sha256`` (EVD-5)."""
+    pairs. For ``provenance.scripts_sha256`` (EVD-5, written by ER-6)."""
     pairs = sorted(
         (m["metadata"]["name"], m["metadata"]["annotations"][SCRIPTS_SHA256_ANNOTATION])
         for m in maps
@@ -198,6 +205,10 @@ def _read_role(role: str, package_dir: Path) -> dict[str, str]:
         except FileNotFoundError:
             raise ScriptsManifestError(
                 f"{src.path} is listed for map {role} but is not in the package"
+            ) from None
+        except OSError as e:
+            raise ScriptsManifestError(
+                f"{src.path} (map {role}) cannot be read: {e.strerror or e}"
             ) from None
         try:
             data[src.key] = raw.decode("utf-8")
@@ -232,7 +243,7 @@ def build_script_configmaps(
             if src.key in seen:
                 raise ScriptsManifestError(
                     f"key {src.key} is listed for map {role} and map {seen[src.key]}; "
-                    "a projected volume refuses duplicate paths"
+                    "in one projected volume the later map would silently shadow the earlier"
                 )
             seen[src.key] = role
 
@@ -267,13 +278,22 @@ def build_script_configmaps(
 
 def scripts_volume(job_type: JobType) -> dict[str, Any]:
     """The ``spark-scripts`` pod-template volume for a job type: one projected
-    volume with a ``configMap`` source per role it mounts, none optional."""
+    volume with a ``configMap`` source per role it mounts, none optional.
+
+    Kubelet merges a projected volume's sources path by path and the last
+    source wins, so a key in two mounted roles would shadow silently; that is
+    refused here as well as in the builder.
+    """
+    roles = MOUNTS_BY_JOB_TYPE[job_type]
+    keys = [s.key for role in roles for s in SCRIPT_MAPS[role]]
+    if len(keys) != len(set(keys)):
+        dup = sorted({k for k in keys if keys.count(k) > 1})
+        raise ScriptsManifestError(f"{job_type.value} mounts {dup} from more than one map")
     return {
         "name": SCRIPTS_VOLUME_NAME,
         "projected": {
             "sources": [
-                {"configMap": {"name": map_name(role), "optional": False}}
-                for role in MOUNTS_BY_JOB_TYPE[job_type]
+                {"configMap": {"name": map_name(role), "optional": False}} for role in roles
             ]
         },
     }
@@ -281,7 +301,13 @@ def scripts_volume(job_type: JobType) -> dict[str, Any]:
 
 def scripts_label_selector(deployment_name: str) -> str:
     """Selects this deployment's scripts ConfigMaps, the role maps and the
-    legacy single map alike (both carry these labels)."""
+    legacy single map alike.
+
+    It keys on ``app.kubernetes.io/instance``, not ``lakebench.io/deployment``:
+    the v1.6 map carries only the ``app.kubernetes.io/*`` labels, and a
+    deployment made by 1.6 and destroyed by 1.7 without a 1.7 run must still
+    lose it. The Category-1 registry (SD-21) keeps this selector as is.
+    """
     return (
         f"app.kubernetes.io/component={COMPONENT_LABEL},"
         "app.kubernetes.io/managed-by=lakebench,"

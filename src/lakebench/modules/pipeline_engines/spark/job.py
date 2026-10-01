@@ -5,6 +5,7 @@ Handles SparkApplication submission and lifecycle.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -20,6 +21,12 @@ if TYPE_CHECKING:
     from lakebench.k8s import K8sClient
 
 logger = logging.getLogger(__name__)
+
+
+def _one_line(e: BaseException) -> str:
+    """First line of an exception's text (an ApiException runs to many)."""
+    text = str(e).strip()
+    return text.splitlines()[0] if text else type(e).__name__
 
 
 # ---------------------------------------------------------------------------
@@ -1539,6 +1546,13 @@ class SparkJobManager:
             Initial JobStatus
         """
         job_name = f"lakebench-{job_type.value}"
+        # The scripts this run applied must still be the ones its pods mount:
+        # a second run from another tree against the same deployment would
+        # otherwise switch the scripts under this run's later stages (DEP-1).
+        changed = self.scripts_changed_since_apply(job_type)
+        if changed:
+            logger.error("%s: %s", job_name, changed)
+            return JobStatus(name=job_name, state=JobState.FAILED, message=changed)
         # Delete existing job if present
         self._delete_job(job_name)
 
@@ -3002,66 +3016,59 @@ class SparkJobManager:
 
         The maps are rendered by ``scripts_maps.build_script_configmaps`` and
         mounted together at /opt/spark/scripts through one projected volume.
-        Each map is read back and its ``lakebench.io/scripts-sha256``
-        annotation compared with what was written, then the v1.6 single map
-        (``lakebench-spark-scripts``) is deleted if present.
+        Each map is read back; its data must hash to the
+        ``lakebench.io/scripts-sha256`` annotation written, and the annotation
+        must be the one written. Then the v1.6 single map
+        (``lakebench-spark-scripts``) is deleted when it is this deployment's
+        and no live SparkApplication still mounts it.
+
+        Raises:
+            ScriptsMapError: a listed file is missing or unreadable, or a map
+                is over budget. The message is one line; the CLI prints it.
 
         Returns:
-            True when every map applied and read back unchanged. False on a
-            manifest or budget error (logged as one line naming the file or
-            map), an apply failure or a read-back mismatch; the caller exits
-            before any job is submitted.
+            True when every map applied and read back unchanged. False on an
+            apply failure or a read-back mismatch (logged as one line); the
+            caller exits before any job is submitted.
         """
+        # Lazy import: scripts_maps imports JobType from this module.
         from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
 
-        try:
-            maps = sm.build_script_configmaps(self.config, self.namespace)
-        except (sm.ScriptsManifestError, sm.ScriptsBudgetError) as e:
-            logger.error("Spark scripts not deployed: %s", e)
-            return False
+        maps = sm.build_script_configmaps(self.config, self.namespace)
 
         written: dict[str, str] = {}
         for cm in maps:
             name = cm["metadata"]["name"]
-            want = cm["metadata"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION]
             try:
                 if not self.k8s.apply_manifest(cm):
                     logger.error("Failed to apply scripts ConfigMap %s", name)
                     return False
             except Exception as e:  # noqa: BLE001
-                logger.error("Failed to apply scripts ConfigMap %s: %s", name, e)
+                logger.error("Failed to apply scripts ConfigMap %s: %s", name, _one_line(e))
                 return False
-            written[name] = want
+            written[name] = cm["metadata"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION]
             logger.info("Applied scripts ConfigMap %s (%d files)", name, len(cm["data"]))
 
         for name, want in written.items():
             try:
-                annotations = self.k8s.get_configmap_annotations(name, self.namespace)
+                got = self.k8s.get_configmap(name, self.namespace)
             except Exception as e:  # noqa: BLE001
-                logger.error("Could not read back scripts ConfigMap %s: %s", name, e)
+                logger.error("Could not read back scripts ConfigMap %s: %s", name, _one_line(e))
                 return False
-            got = (annotations or {}).get(sm.SCRIPTS_SHA256_ANNOTATION)
-            if got != want:
+            ann = (got or {}).get("annotations", {}).get(sm.SCRIPTS_SHA256_ANNOTATION)
+            data_hash = sm.data_sha256((got or {}).get("data", {})) if got else None
+            if ann != want or data_hash != want:
                 logger.error(
-                    "Scripts ConfigMap %s reads back with scripts-sha256 %s, not the %s "
-                    "just written; another writer changed it. Not submitting jobs.",
+                    "Scripts ConfigMap %s reads back changed (annotation %s, data %s, "
+                    "written %s); another writer replaced it. Not submitting jobs.",
                     name,
-                    got,
+                    ann,
+                    data_hash,
                     want,
                 )
                 return False
 
-        # The v1.6 single map. Nothing mounts it any more; a 1.6 continuous
-        # pod that still does keeps its already-mounted files.
-        try:
-            if self.k8s.delete_configmap(sm.LEGACY_MAP_NAME, self.namespace):
-                logger.info("Deleted legacy ConfigMap %s", sm.LEGACY_MAP_NAME)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "Could not delete legacy ConfigMap %s (%s); destroy removes it",
-                sm.LEGACY_MAP_NAME,
-                e,
-            )
+        self._delete_legacy_scripts_map(sm.LEGACY_MAP_NAME)
 
         self.scripts_provenance = {
             "scripts_sha256": sm.scripts_sha256(maps),
@@ -3071,8 +3078,94 @@ class SparkJobManager:
                 ]
                 for cm in maps
             },
+            "files_sha256": {
+                key: hashlib.sha256(text.encode("utf-8")).hexdigest()
+                for cm in maps
+                for key, text in sorted(cm["data"].items())
+            },
         }
         return True
+
+    def _delete_legacy_scripts_map(self, name: str) -> None:
+        """Delete the v1.6 single scripts map if it is this deployment's and no
+        live SparkApplication mounts it. Best effort: a kept map is removed by
+        ``destroy`` (label selector), so a failure here is only logged."""
+        try:
+            legacy = self.k8s.get_configmap(name, self.namespace)
+            if legacy is None:
+                return
+            owner = legacy.get("labels", {}).get("app.kubernetes.io/instance")
+            if owner != self.config.name:
+                logger.warning(
+                    "Kept ConfigMap %s: it belongs to deployment %r, not %r",
+                    name,
+                    owner,
+                    self.config.name,
+                )
+                return
+            in_use = self._live_apps_mounting(name)
+            if in_use:
+                logger.info(
+                    "Kept legacy ConfigMap %s: still mounted by %s; destroy removes it",
+                    name,
+                    ", ".join(in_use),
+                )
+                return
+            if self.k8s.delete_configmap(name, self.namespace):
+                logger.info("Deleted legacy ConfigMap %s", name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Could not delete legacy ConfigMap %s (%s); destroy removes it", name, _one_line(e)
+            )
+
+    def _live_apps_mounting(self, configmap: str) -> list[str]:
+        """SparkApplications in this namespace, not in a terminal state, whose
+        pod templates mount ``configmap``. Raises when they cannot be listed,
+        so the caller keeps the map."""
+        from kubernetes import client as k8s_client
+
+        apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
+            group="sparkoperator.k8s.io",
+            version="v1beta2",
+            namespace=self.namespace,
+            plural="sparkapplications",
+        )
+        terminal = {"COMPLETED", "FAILED"}
+        out: list[str] = []
+        for app in apps.get("items", []):
+            state = ((app.get("status") or {}).get("applicationState") or {}).get("state", "")
+            if state in terminal:
+                continue
+            spec = app.get("spec") or {}
+            for side in ("driver", "executor"):
+                vols = ((spec.get(side) or {}).get("template") or {}).get("spec", {})
+                for v in vols.get("volumes") or []:
+                    if (v.get("configMap") or {}).get("name") == configmap:
+                        out.append(app["metadata"]["name"])
+        return sorted(set(out))
+
+    def scripts_changed_since_apply(self, job_type: JobType) -> str | None:
+        """None when every scripts map ``job_type`` mounts still carries the
+        hash this process applied; otherwise a one-line reason. None also
+        when no maps were applied by this process (nothing to compare)."""
+        if self.scripts_provenance is None:
+            return None
+        from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
+        recorded = self.scripts_provenance["scripts_maps"]
+        for role in sm.MOUNTS_BY_JOB_TYPE[job_type]:
+            name = sm.map_name(role)
+            try:
+                got = self.k8s.get_configmap(name, self.namespace)
+            except Exception as e:  # noqa: BLE001
+                return f"could not read scripts ConfigMap {name}: {_one_line(e)}"
+            ann = (got or {}).get("annotations", {}).get(sm.SCRIPTS_SHA256_ANNOTATION)
+            if ann != recorded.get(role):
+                return (
+                    f"scripts ConfigMap {name} changed since this run applied it "
+                    "(another run or tree wrote it); not submitting"
+                )
+        return None
 
     # Alias for backward compatibility
     def deploy_scripts(self) -> bool:

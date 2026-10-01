@@ -8,6 +8,7 @@ the driver failed three attempts later with an ImportError).
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,16 +25,32 @@ from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManage
 PKG = Path(_resources.__file__).parent
 
 
-class FakeK8s:
-    """Records applies; reads back what was applied (or ``overrides``)."""
+LEGACY = "lakebench-spark-scripts"
 
-    def __init__(self, fail_apply_of: str | None = None, overrides: dict | None = None):
+
+class FakeK8s:
+    """Records applies; reads back what was applied (or ``overrides``).
+
+    Holds a v1.6 legacy map owned by ``legacy_owner`` (None: no legacy map).
+    """
+
+    def __init__(
+        self,
+        fail_apply_of: str | None = None,
+        overrides: dict | None = None,
+        legacy_owner: str | None = "sd8",
+    ):
         self.applied: list[dict[str, Any]] = []
         self.deleted: list[str] = []
-        self.store: dict[str, dict[str, str]] = {}
+        self.store: dict[str, dict[str, Any]] = {}
         self.fail_apply_of = fail_apply_of
         self.overrides = overrides or {}
-        self.legacy_present = True
+        if legacy_owner is not None:
+            self.store[LEGACY] = {
+                "labels": {"app.kubernetes.io/instance": legacy_owner},
+                "annotations": {},
+                "data": {"common.py": "# 1.6"},
+            }
 
     def get_cluster_capacity(self):
         return None
@@ -43,19 +60,28 @@ class FakeK8s:
         if name == self.fail_apply_of:
             return False
         self.applied.append(manifest)
-        self.store[name] = dict(manifest["metadata"].get("annotations", {}))
+        md = manifest["metadata"]
+        self.store[name] = {
+            "labels": dict(md.get("labels", {})),
+            "annotations": dict(md.get("annotations", {})),
+            "data": dict(manifest["data"]),
+        }
         return True
 
-    def get_configmap_annotations(self, name, namespace=None):
+    def get_configmap(self, name, namespace=None):
         if name in self.overrides:
             return self.overrides[name]
         return self.store.get(name)
 
     def delete_configmap(self, name, namespace=None):
         self.deleted.append(name)
-        present = self.legacy_present
-        self.legacy_present = False
-        return present
+        return self.store.pop(name, None) is not None
+
+
+@pytest.fixture(autouse=True)
+def _no_live_apps(monkeypatch):
+    """No SparkApplication mounts the legacy map unless a test says so."""
+    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", lambda self, cm: [])
 
 
 def _cfg(schema: str = "customer360", fmt: str = "iceberg") -> LakebenchConfig:
@@ -160,8 +186,54 @@ def test_deploy_refuses_when_listed_file_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(_resources, "_package_dir", lambda: pkg)
     k8s = FakeK8s()
     mgr = SparkJobManager(_cfg("financial"), k8s)
-    assert mgr.deploy_scripts_configmap() is False
+    with pytest.raises(sm.ScriptsMapError, match="tm_operations.py is listed for map aml-rules"):
+        mgr.deploy_scripts_configmap()
     assert k8s.applied == [], "nothing may be applied when the manifest is incomplete"
+
+
+def test_unreadable_listed_file_raises_manifest_error(tmp_path):
+    pkg = _copy_package(tmp_path)
+    path = pkg / "spark/scripts/common.py"
+    path.unlink()
+    path.mkdir()  # IsADirectoryError, not FileNotFoundError
+    with pytest.raises(sm.ScriptsManifestError, match=r"common.py \(map common\) cannot be read"):
+        sm.build_script_configmaps(_cfg(), "ns", package_dir=pkg)
+
+
+def test_every_shipped_import_is_shipped():
+    """A flat import in a shipped script whose module is a lakebench file
+    must itself ship, or the driver hits the LB-207 ImportError. Imports of
+    ``lakebench.*`` are the out-of-cluster branch of a try/except."""
+    import ast
+
+    local = {
+        p.stem
+        for d in ("spark/scripts", "aml", "config")
+        for p in (PKG / d).glob("*.py")
+        if p.stem != "__init__"
+    }
+    # d8_shards: only scripts/aml_gate.py (local harness) calls d8_shard_plan.
+    allowed_unshipped = {"d8_shards"}
+    shipped = {s.key for srcs in sm.SCRIPT_MAPS.values() for s in srcs}
+    missing: list[str] = []
+    for srcs in sm.SCRIPT_MAPS.values():
+        for src in srcs:
+            if not src.key.endswith(".py"):
+                continue
+            tree = ast.parse((PKG / src.path).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    mods = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    mods = [node.module]
+                else:
+                    continue
+                for mod in mods:
+                    root = mod.split(".", 1)[0]
+                    if root in local and f"{root}.py" not in shipped:
+                        if root not in allowed_unshipped:
+                            missing.append(f"{src.key} imports {root}")
+    assert missing == []
 
 
 def test_no_duplicate_keys():
@@ -322,26 +394,105 @@ def test_deploy_applies_every_role_reads_back_and_drops_legacy():
     assert mgr.scripts_provenance is None
     assert mgr.deploy_scripts_configmap() is True
     assert [cm["metadata"]["name"] for cm in k8s.applied] == [sm.map_name(r) for r in sm.ROLES]
-    assert k8s.deleted == ["lakebench-spark-scripts"]
+    assert k8s.deleted == [LEGACY]
     prov = mgr.scripts_provenance
     assert prov is not None
     assert set(prov["scripts_maps"]) == set(sm.ROLES)
     assert prov["scripts_sha256"] == sm.scripts_sha256(k8s.applied)
+    prereg = (PKG / "spark/data/aml/aml_preregistration.json").read_bytes()
+    assert prov["files_sha256"]["aml_preregistration.json"] == hashlib.sha256(prereg).hexdigest()
 
 
 def test_deploy_fails_on_read_back_mismatch():
-    k8s = FakeK8s(
-        overrides={"lakebench-scripts-aml-gate": {sm.SCRIPTS_SHA256_ANNOTATION: "0" * 64}}
-    )
+    bad = {"labels": {}, "annotations": {sm.SCRIPTS_SHA256_ANNOTATION: "0" * 64}, "data": {}}
+    k8s = FakeK8s(overrides={"lakebench-scripts-aml-gate": bad})
     mgr = SparkJobManager(_cfg(), k8s)
     assert mgr.deploy_scripts_configmap() is False
     assert k8s.deleted == [], "the legacy map stays until the new maps read back"
     assert mgr.scripts_provenance is None
 
 
+def test_deploy_fails_when_data_does_not_match_its_annotation():
+    """The read-back hashes the returned data, not only the annotation."""
+
+    class Tamper(FakeK8s):
+        def get_configmap(self, name, namespace=None):
+            got = super().get_configmap(name, namespace)
+            if name == "lakebench-scripts-aml-data" and got:
+                got = {**got, "data": {**got["data"], "synthetic_corridors.json": "{}"}}
+            return got
+
+    assert SparkJobManager(_cfg(), Tamper()).deploy_scripts_configmap() is False
+
+
 def test_deploy_fails_when_a_map_is_missing_on_read_back():
     k8s = FakeK8s(overrides={"lakebench-scripts-common": None})
     assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+
+
+def test_foreign_legacy_map_is_kept():
+    k8s = FakeK8s(legacy_owner="someone-else")
+    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is True
+    assert k8s.deleted == []
+    assert LEGACY in k8s.store
+
+
+def test_legacy_map_kept_while_a_live_app_mounts_it(monkeypatch):
+    monkeypatch.setattr(
+        SparkJobManager, "_live_apps_mounting", lambda self, cm: ["lakebench-silver-stream"]
+    )
+    k8s = FakeK8s()
+    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is True
+    assert k8s.deleted == []
+
+
+def test_legacy_map_kept_when_apps_cannot_be_listed(monkeypatch):
+    def boom(self, cm):
+        raise RuntimeError("403 forbidden")
+
+    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", boom)
+    k8s = FakeK8s()
+    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is True
+    assert k8s.deleted == []
+
+
+def test_live_apps_mounting_reads_templates(monkeypatch):
+    def app(name, state, cm):
+        tpl = {"spec": {"volumes": [{"name": "spark-scripts", "configMap": {"name": cm}}]}}
+        return {
+            "metadata": {"name": name},
+            "spec": {"driver": {"template": tpl}},
+            "status": {"applicationState": {"state": state}},
+        }
+
+    listing = {
+        "items": [
+            app("a-running", "RUNNING", LEGACY),
+            app("b-done", "COMPLETED", LEGACY),
+            app("c-new", "RUNNING", "lakebench-scripts-common"),
+            app("d-submitted", "", LEGACY),
+        ]
+    }
+    api = MagicMock()
+    api.list_namespaced_custom_object.return_value = listing
+    monkeypatch.undo()  # drop the autouse stub for this test
+    with patch("kubernetes.client.CustomObjectsApi", return_value=api):
+        got = SparkJobManager(_cfg(), FakeK8s())._live_apps_mounting(LEGACY)
+    assert got == ["a-running", "d-submitted"]
+
+
+def test_submit_refuses_when_scripts_changed_after_apply():
+    k8s = FakeK8s()
+    mgr = SparkJobManager(_cfg(), k8s)
+    assert mgr.deploy_scripts_configmap() is True
+    assert mgr.scripts_changed_since_apply(JobType.SILVER_BUILD) is None
+    k8s.store["lakebench-scripts-common"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION] = "f" * 64
+    created = MagicMock()
+    with patch("kubernetes.client.CustomObjectsApi", return_value=created):
+        status = mgr.submit_job(JobType.SILVER_BUILD)
+    assert status.state.name == "FAILED"
+    assert "lakebench-scripts-common changed since this run applied it" in status.message
+    created.create_namespaced_custom_object.assert_not_called()
 
 
 def test_partial_apply_stops_before_the_rest():
@@ -353,37 +504,65 @@ def test_partial_apply_stops_before_the_rest():
     ]
 
 
-def test_budget_error_returns_false_with_one_line(tmp_path, monkeypatch, caplog):
+def test_budget_error_reaches_the_cli_as_one_line(tmp_path, monkeypatch):
+    """`lakebench financial ...` exits naming the map, not a traceback."""
+    import typer
+
+    from lakebench.cli import _financial
+
     pkg = _copy_package(tmp_path)
     _pad_common_to(pkg, sm.MAP_BUDGET_BYTES + 1)
     monkeypatch.setattr(_resources, "_package_dir", lambda: pkg)
     k8s = FakeK8s()
-    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is False
+    with (
+        patch("lakebench.k8s.get_k8s_client", return_value=k8s),
+        pytest.raises(typer.Exit) as ei,
+    ):
+        _financial._get_job_manager(_cfg("financial"))
+    msg = str(ei.value.exit_code)
+    assert msg.startswith("Spark scripts not deployed: scripts ConfigMap lakebench-scripts-common")
+    assert "\n" not in msg and "budget" in msg
     assert k8s.applied == []
-    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
-    assert len(errors) == 1 and "\n" not in errors[0]
-    assert "lakebench-scripts-common" in errors[0] and "budget" in errors[0]
+
+
+def test_pyinstaller_spec_bundles_every_file_outside_spark():
+    """Files shipped from outside spark/ must be bundled as files in the
+    binary, or the builder raises on every run from it."""
+    spec = (PKG.parents[1] / "lakebench.spec").read_text(encoding="utf-8")
+    for srcs in sm.SCRIPT_MAPS.values():
+        for src in srcs:
+            if not src.path.startswith("spark/"):
+                assert f'"src/lakebench/{src.path}"' in spec, src.path
+
+
+def test_client_configmap_helpers_treat_404_as_absent():
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.k8s.client import K8sClient
+
+    c = K8sClient.__new__(K8sClient)
+    c._namespace = "ns"
+    c._core_v1 = MagicMock()
+    c._core_v1.read_namespaced_config_map.side_effect = ApiException(status=404)
+    c._core_v1.delete_namespaced_config_map.side_effect = ApiException(status=404)
+    assert c.get_configmap("x") is None
+    assert c.delete_configmap("x") is False
+    c._core_v1.read_namespaced_config_map.side_effect = ApiException(status=403)
+    with pytest.raises(ApiException):
+        c.get_configmap("x")
 
 
 # -- destroy ------------------------------------------------------------------
 
 
-def test_destroy_deletes_this_deployments_scripts_maps():
-    """Fix-reverted: with create_namespace=false the namespace survives
-    destroy, and v1.6 destroy never deleted the scripts ConfigMap."""
+def _destroy(core, create_namespace: bool = False):
     from lakebench.deploy.destroy import destroy_all
     from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
     engine = MagicMock()
     engine.config.name = "u02"
     engine.config.get_namespace.return_value = "u02"
-    engine.config.platform.kubernetes.create_namespace = False
-
-    core = MagicMock()
-    names = ["lakebench-scripts-common", "lakebench-spark-scripts"]
-    core.list_namespaced_config_map.return_value = SimpleNamespace(
-        items=[SimpleNamespace(metadata=SimpleNamespace(name=n)) for n in names]
-    )
+    engine.config.platform.kubernetes.create_namespace = create_namespace
     match = IdentityReport(
         verdict=IdentityVerdict.MATCH,
         resource_name="u02",
@@ -394,22 +573,56 @@ def test_destroy_deletes_this_deployments_scripts_maps():
         patch("lakebench.deploy.ownership.verify_namespace_identity", return_value=match),
         patch("lakebench.deploy.ownership.verify_bucket_ownership", return_value=match),
         patch("kubernetes.client.CoreV1Api", return_value=core),
+        patch("lakebench.spark.SparkOperatorManager", MagicMock()),
         patch("lakebench.deploy.destroy.logger"),
     ):
-        results = destroy_all(engine, clean_buckets=False)
+        return destroy_all(engine, clean_buckets=False)
 
-    selector_calls = [
+
+def _scripts_list_calls(core):
+    return [
         c
         for c in core.list_namespaced_config_map.call_args_list
         if "spark-scripts" in str(c.kwargs.get("label_selector", ""))
     ]
-    assert selector_calls, "destroy never listed the scripts ConfigMaps"
-    sel = selector_calls[0].kwargs["label_selector"]
-    assert selector_calls[0].args[0] == "u02"
+
+
+def test_destroy_deletes_this_deployments_scripts_maps():
+    """Fix-reverted: with create_namespace=false the namespace survives
+    destroy, and v1.6 destroy never deleted the scripts ConfigMap."""
+    core = MagicMock()
+    names = ["lakebench-scripts-common", LEGACY]
+    core.list_namespaced_config_map.return_value = SimpleNamespace(
+        items=[SimpleNamespace(metadata=SimpleNamespace(name=n)) for n in names]
+    )
+    results = _destroy(core)
+
+    calls = _scripts_list_calls(core)
+    assert calls, "destroy never listed the scripts ConfigMaps"
+    sel = calls[0].kwargs["label_selector"]
+    assert calls[0].args[0] == "u02"
     assert "app.kubernetes.io/component=spark-scripts" in sel
     assert "app.kubernetes.io/instance=u02" in sel, "the selector must name this deployment"
     deleted = [c.args for c in core.delete_namespaced_config_map.call_args_list]
     assert ("lakebench-scripts-common", "u02") in deleted
-    assert ("lakebench-spark-scripts", "u02") in deleted
+    assert (LEGACY, "u02") in deleted
     step = [r for r in results if r.component == "spark-scripts"]
     assert step and step[-1].message == "Deleted 2 scripts ConfigMaps"
+
+
+@pytest.mark.parametrize("create_namespace,status", [(False, "FAILED"), (True, "SKIPPED")])
+def test_destroy_scripts_step_list_failure(create_namespace, status):
+    """A surviving namespace keeps the maps, so a failure is FAILED; when the
+    namespace delete follows, it removes them and the step only skips."""
+    core = MagicMock()
+
+    def listing(ns, label_selector=""):
+        if "spark-scripts" in label_selector:
+            raise RuntimeError("403 forbidden: configmaps is forbidden\nmore detail")
+        return SimpleNamespace(items=[])
+
+    core.list_namespaced_config_map.side_effect = listing
+    results = _destroy(core, create_namespace=create_namespace)
+    step = [r for r in results if r.component == "spark-scripts"]
+    assert step and step[-1].status.name == status
+    assert "\n" not in step[-1].message and "403 forbidden" in step[-1].message
