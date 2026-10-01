@@ -15,7 +15,7 @@ path yet says so.
 |---|---|---|---|
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception` |
-| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage` |
+| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.upgrade_refused` |
 | 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | no command yet |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | no command yet |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty` |
@@ -37,6 +37,7 @@ the CLI down every path listed here and checks the code.
 | `version.ok` | 0 | `lakebench version` prints the version |
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `click.usage` | 2 | an unknown flag, a missing argument or a bad value |
+| `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
 | `confirm.non_tty` | 5 | a confirmation prompt got no answer (no terminal, end of input) or was declined |
 | `sigint` | 130 | any command interrupted with Ctrl-C |
 

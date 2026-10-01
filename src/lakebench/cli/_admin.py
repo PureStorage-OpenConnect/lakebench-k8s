@@ -319,7 +319,7 @@ def doctor(
         print_warning(
             f"Cluster lease held by {state.holder!r} is EXPIRED "
             f"(acquired {state.acquired_at}); reclaim with "
-            "`lakebench admin release-lock --expired-only`"
+            "`lakebench admin release-lock`"
         )
     else:
         print_info(f"Cluster lease active (holder={state.holder}, acquired={state.acquired_at})")
@@ -332,13 +332,6 @@ def doctor(
 
 @admin_app.command("release-lock")
 def release_lock(
-    expired_only: Annotated[
-        bool,
-        typer.Option(
-            "--expired-only",
-            help="Refuse to release a lease still within its TTL.",
-        ),
-    ] = True,
     force: Annotated[
         bool,
         typer.Option(
@@ -350,9 +343,9 @@ def release_lock(
 ) -> None:
     """Force-release a stale cluster lease.
 
-    Default is ``--expired-only``: a live lease is left alone. Pass
-    ``--force`` (which flips off ``--expired-only``) only when you are
-    certain the prior holder crashed.
+    Only an expired lease is released: a live lease is left alone. Pass
+    ``--force`` to release a live one, only when you are certain the prior
+    holder crashed.
     """
     from lakebench.deploy.cluster_lock import (
         ClusterLockError,
@@ -361,9 +354,8 @@ def release_lock(
     )
 
     core_v1 = _get_core_v1()
-    effective_expired_only = expired_only and not force
     try:
-        state = force_release_cluster_lock(core_v1, expired_only=effective_expired_only)
+        state = force_release_cluster_lock(core_v1, expired_only=not force)
     except ClusterLockHeld as e:
         print_error(
             f"lease is held by {e.holder!r} and still within TTL "
@@ -371,8 +363,6 @@ def release_lock(
             "First check who the holder is (namespace, session, or lane) "
             "and whether they are still running: releasing a live holder "
             "can corrupt a concurrent deploy or destroy. "
-            "If the lease is expired, run: "
-            "lakebench admin release-lock --expired-only. "
             "Only if you have confirmed the holder crashed and cannot "
             "release itself, re-run with --force as a last resort and "
             "type y/N to confirm."

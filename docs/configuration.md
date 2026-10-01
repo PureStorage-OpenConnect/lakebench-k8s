@@ -893,7 +893,7 @@ resolved resources are approximately:
 Recommended timeouts:
 
 ```bash
-lakebench generate lakebench.yaml --wait --timeout 14400  # 4 hours
+lakebench generate lakebench.yaml --timeout 14400  # 4 hours
 lakebench run lakebench.yaml --timeout 7200               # 2 hours
 ```
 

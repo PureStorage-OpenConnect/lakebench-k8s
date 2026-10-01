@@ -19,7 +19,7 @@ cluster-corrupting actions:
 
 - ``Pass --force to release`` (the cluster lease): the release-lock command
   must first steer the user to check the holder and, if the lease is
-  expired, to use ``--expired-only``. ``--force`` on a live lease can
+  expired, to release it without ``--force``. ``--force`` on a live lease can
   corrupt a concurrent deploy or destroy and must only appear as a
   last-resort suggestion, never as a bare one-liner.
 
@@ -246,7 +246,7 @@ def test_no_bare_force_release_of_lease(path: Path) -> None:
     """Refuse a bare ``Pass --force to release`` hint for the cluster lease.
 
     ``admin release-lock`` must first steer the user to check the holder and,
-    if the lease is expired, use ``--expired-only``. ``--force`` on a live
+    if the lease is expired, release it without ``--force``. ``--force`` on a live
     lease can corrupt a concurrent deploy or destroy and must only appear as
     a last-resort suggestion accompanied by an explicit check.
     """

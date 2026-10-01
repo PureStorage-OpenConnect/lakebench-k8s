@@ -131,14 +131,14 @@ def test_destroy_refuses_a_v16_name_two_nameless_configs_share(tmp_path, monkeyp
 
 @pytest.mark.parametrize(
     "argv",
-    [["stop", "CFG"], ["clean", "bronze", "CFG", "--force"], ["config", "upgrade", "CFG"]],
-    ids=["stop", "clean", "config-upgrade"],
+    [["stop", "CFG"], ["clean", "bronze", "CFG", "--force"]],
+    ids=["stop", "clean"],
 )
-def test_nameless_config_refused_by_stop_clean_and_upgrade(argv, tmp_path, monkeypatch):
+def test_nameless_config_refused_by_stop_and_clean(argv, tmp_path, monkeypatch):
     # stop is a teardown (no v1.6 state here, so no deployment is this
-    # config's), clean changes data, and config upgrade must not bake a
-    # name the input never chose into its output. Each refuses and writes
-    # nothing.
+    # config's) and clean changes data. Each refuses and writes nothing.
+    # `config upgrade` is removed for every config (CC-5, SAF-3); its
+    # refusal opens no file (tests/test_cli_removed.py).
     monkeypatch.setenv("KUBECONFIG", "/nonexistent")
     monkeypatch.chdir(tmp_path)
     cfg_path = _write(tmp_path, NAMELESS)

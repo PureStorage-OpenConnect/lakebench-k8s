@@ -446,7 +446,7 @@ def init(
         print_info("Next steps:")
         print_info("  1. lakebench config validate -- check config for errors")
         print_info("  2. lakebench deploy          -- deploy infrastructure")
-        print_info("  3. lakebench generate --wait -- generate test data")
+        print_info("  3. lakebench generate -- generate test data")
         print_info("  4. lakebench run             -- run pipeline + benchmark")
         return
 

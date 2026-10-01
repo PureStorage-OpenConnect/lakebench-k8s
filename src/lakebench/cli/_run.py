@@ -1817,7 +1817,6 @@ def run(
         _deploy_cmd(config_file=config_file, yes=yes)
         _generate_cmd(
             config_file=config_file,
-            wait=True,
             timeout=timeout or 14400,
             yes=yes,
             regenerate=regenerate,

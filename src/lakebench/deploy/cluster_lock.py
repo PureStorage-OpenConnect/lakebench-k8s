@@ -149,8 +149,8 @@ class ClusterLockHeld(ClusterLockError):
         super().__init__(
             f"cluster lease held by {holder!r} since {acquired_at} "
             f"(ttl {ttl_seconds}s, expires {expires_at}); "
-            f"pass --wait to block, or `lakebench admin release-lock "
-            f"--expired-only` after the TTL"
+            "wait for the holder to finish, or run `lakebench admin "
+            "release-lock` after the TTL"
         )
 
 

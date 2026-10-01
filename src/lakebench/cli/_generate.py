@@ -51,14 +51,6 @@ def generate(
             help="Path to configuration YAML file (alternative to positional argument)",
         ),
     ] = None,
-    wait: Annotated[
-        bool,
-        typer.Option(
-            "--wait",
-            "-w",
-            help="Wait for data generation to complete",
-        ),
-    ] = True,
     timeout: Annotated[
         int,
         typer.Option(
@@ -200,7 +192,6 @@ def generate(
     j.begin_command(
         CommandName.GENERATE,
         {
-            "wait": wait,
             "timeout": timeout,
         },
     )
@@ -250,11 +241,6 @@ def generate(
                 "bucket": cfg.platform.storage.s3.buckets.bronze,
             },
         )
-
-        if not wait:
-            print_info("Use 'lakebench status' to check progress")
-            _journal_safe(j.end_command, success=True, message="Job submitted (no-wait)")
-            return
 
         # Wait for completion with progress bar
         import time

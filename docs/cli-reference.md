@@ -18,8 +18,7 @@ Several commands prompt for confirmation before running. Use `--yes` / `-y`
 to skip the prompt; `destroy` and `clean` also accept `--force` as the same
 flag.
 
-Exit codes are listed in [Exit Codes](exit-codes.md). A prompt that is
-declined, or that cannot be answered because there is no terminal, exits 5.
+Exit codes are listed in [Exit Codes](exit-codes.md).
 
 ## Commands
 
@@ -142,7 +141,6 @@ lakebench config validate CONFIG_FILE   # validate config + test connectivity
 lakebench config storage CONFIG_FILE    # check the S3 backend supports what lakebench needs
 lakebench config recommend CONFIG_FILE  # show cluster sizing guidance for the config's mode
 lakebench config recipes [NAME]         # list recipes, what each one trades off, and support states
-lakebench config upgrade CONFIG_FILE    # upgrade a v1.2 config to v2 flat format (-o to write elsewhere)
 ```
 
 `config validate` and `validate` load the config as `deploy` does, so they
@@ -215,7 +213,6 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--dry-run` | | `false` | Show what would be deployed without making changes |
-| `--include-observability` | | `false` | Deploy Prometheus and Grafana |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout) |
 | `--local` | | `false` | Deploy locally with podman/docker instead of Kubernetes |
@@ -247,7 +244,6 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting; `0` computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--regenerate` | | `false` | Empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 2) so existing datagen output is never overwritten silently. |
@@ -668,7 +664,7 @@ the cluster-wide `lakebench-cluster-lock` lease.
 | `admin repair-operator [CONFIG]` | `--dry-run`, `--controller-tmp-size` (default 8Gi), `-f/--file` | Remove stale watch-list entries and raise a controller `/tmp` smaller than the given size |
 | `admin migrate-deployment NAMESPACE [CONFIG]` | `--api-server-fingerprint`, `-f/--file` | Stamp identity annotations on a legacy pre-ownership namespace |
 | `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment (refused when the bucket holds objects unless `--force-nonempty`) |
-| `admin release-lock` | `--expired-only` (default), `--force` | Release a stale cluster lease |
+| `admin release-lock` | `--force` | Release an expired cluster lease; `--force` releases a live one (last resort) |
 
 The Spark Operator runs spark-submit in its controller pod, which caches
 jars under `/tmp`; the chart default of 1Gi is too small and gets the

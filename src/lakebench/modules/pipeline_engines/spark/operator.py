@@ -987,7 +987,7 @@ class SparkOperatorManager:
         except ClusterLockHeld as e:
             raise WatchListMutationError(
                 f"another lakebench process holds the cluster lock ({e.holder}); "
-                "wait for it or run `lakebench admin release-lock --expired-only`. "
+                "wait for it, or run `lakebench admin release-lock` once its lease has expired. "
                 "The operator's watch list was NOT modified."
             ) from e
         except ClusterLockError as e:

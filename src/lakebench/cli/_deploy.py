@@ -236,13 +236,6 @@ def deploy(
             help="Show what would be deployed without making changes",
         ),
     ] = False,
-    include_observability: Annotated[
-        bool,
-        typer.Option(
-            "--include-observability",
-            help="Deploy Prometheus and Grafana monitoring stack",
-        ),
-    ] = False,
     yes: Annotated[
         bool,
         typer.Option(
@@ -322,10 +315,6 @@ def deploy(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
-
-    # Enable observability if flag is set
-    if include_observability:
-        cfg.observability.enabled = True
 
     # Local mode has its own path: no namespace, no operator, no preflight
     # against a cluster that is not there.

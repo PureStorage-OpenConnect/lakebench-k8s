@@ -402,7 +402,7 @@ Alternatively, run each step separately for more control:
 ```bash
 lakebench deploy lakebench.yaml --yes     # deploy infrastructure
 lakebench status lakebench.yaml           # verify deployment
-lakebench generate lakebench.yaml --wait  # generate test data (~5 min at scale 1)
+lakebench generate lakebench.yaml  # generate test data (~5 min at scale 1)
 lakebench run lakebench.yaml              # run pipeline + benchmark
 ```
 
@@ -448,7 +448,7 @@ lakebench report --list
 
 ```bash
 lakebench deploy lakebench-polaris.yaml --yes
-lakebench generate lakebench-polaris.yaml --wait
+lakebench generate lakebench-polaris.yaml
 lakebench compare lakebench.yaml lakebench-polaris.yaml
 ```
 
@@ -494,7 +494,7 @@ idempotent -- components that already exist are skipped.
 **Generate fails or times out:** Increase the timeout with `--timeout 14400`
 (4 hours). The Rust generator has no checkpoint-resume, so a re-run starts
 from the beginning, and because the failed run left partial data in bronze,
-the re-run needs `--regenerate` (`lakebench generate lakebench.yaml --wait
+the re-run needs `--regenerate` (`lakebench generate lakebench.yaml
 --regenerate`), which empties the bronze bucket first. Without it `generate`
 exits 2 and names the non-empty prefix.
 
@@ -653,7 +653,7 @@ guidance before scaling up. At scale 100+ you will want to increase the `--timeo
 and run commands:
 
 ```bash
-lakebench generate lakebench.yaml --wait --timeout 14400
+lakebench generate lakebench.yaml --timeout 14400
 lakebench run lakebench.yaml --timeout 7200
 ```
 
@@ -756,7 +756,7 @@ optional re-score after a rule change or replay:
 
 ```bash
 lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
-lakebench generate examples/polaris-iceberg-spark-financial.yaml --wait
+lakebench generate examples/polaris-iceberg-spark-financial.yaml
 lakebench run      examples/polaris-iceberg-spark-financial.yaml
 
 # Optional re-score. Path prefix is pacs008/ under the default template.

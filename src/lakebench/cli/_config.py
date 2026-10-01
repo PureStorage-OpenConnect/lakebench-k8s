@@ -1,7 +1,8 @@
 """Config subcommands for Lakebench CLI.
 
-Provides ``lakebench config show``, ``lakebench config validate``,
-``lakebench config recommend``, and ``lakebench config upgrade``.
+Provides ``lakebench config show``, ``lakebench config validate`` and
+``lakebench config recommend``. ``lakebench config upgrade`` is removed and
+refuses (SAF-3).
 """
 
 from __future__ import annotations
@@ -507,92 +508,33 @@ def _print_recipe_detail(name: str) -> None:
     console.print()
 
 
-@config_app.command("upgrade")
+@config_app.command("upgrade", hidden=True)
 def config_upgrade(
     config_file: Annotated[
-        Path,
-        typer.Argument(help="v1 configuration file to upgrade", exists=True),
-    ] = Path("lakebench.yaml"),
+        Path | None,
+        # No exists=True: a missing path must reach the refusal, not a Click
+        # error that echoes the argument.
+        typer.Argument(help="Ignored: the command is removed."),
+    ] = None,
     output: Annotated[
         Path | None,
-        typer.Option("--output", "-o", help="Output path (default: overwrite in place)"),
+        typer.Option("--output", "-o", help="Ignored: the command is removed."),
     ] = None,
 ) -> None:
-    """Upgrade a v1.2 config to v2 flat format."""
-    import yaml
+    """Removed: refuses before opening any file (SAF-3).
 
-    from lakebench.config import LoadPurpose, load_config
-    from lakebench.config.loader import name_resolution
+    It rewrote configs lossily, in place by default, and wrote the S3
+    secret key into the result in plaintext. The arguments stay declared so
+    old invocations get this refusal rather than a usage error; neither is
+    read or printed.
+    """
+    from lakebench.cli._exit import UsageError
 
-    try:
-        # INSPECT, so an old config's removed keys are dropped rather than
-        # refused: converting old configs is what this command is for.
-        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
-    except Exception as e:
-        console.print(f"[red]Error loading config: {e}[/red]")
-        raise typer.Exit(1) from None
-    resolution = name_resolution(cfg)
-    if resolution is None or resolution.nameless:
-        # The output is a config for deploy; it must not carry a name the
-        # input never chose.
-        console.print(
-            "[red]Error: the config has no name; add 'name:' to it before upgrading.[/red]"
-        )
-        raise typer.Exit(1)
-
-    # Build v2 flat config
-    v2: dict = {"name": cfg.name}
-
-    # Extract flat fields from resolved config
-    v2["endpoint"] = cfg.platform.storage.s3.endpoint
-    v2["access_key"] = cfg.platform.storage.s3.access_key
-    v2["secret_key"] = cfg.platform.storage.s3.secret_key
-    v2["scale"] = cfg.architecture.workload.datagen.scale
-
-    # Optional fields (only include if non-default)
-    ns = cfg.get_namespace()
-    if ns != cfg.name:
-        v2["namespace"] = ns
-
-    mode = cfg.architecture.pipeline.mode.value
-    if mode != "batch":
-        v2["mode"] = mode
-
-    cycles = cfg.architecture.pipeline.cycles
-    if cycles != 1:
-        v2["cycles"] = cycles
-
-    # Recipe detection
-    from lakebench.config.recipes import RECIPES
-
-    for recipe_name, recipe_defaults in RECIPES.items():
-        if recipe_name == "default":
-            continue
-        arch = recipe_defaults.get("architecture", {})
-        if (
-            arch.get("catalog", {}).get("type") == cfg.architecture.catalog.type.value
-            and arch.get("table_format", {}).get("type") == cfg.architecture.table_format.type.value
-            and arch.get("query_engine", {}).get("type") == cfg.architecture.query_engine.type.value
-        ):
-            v2["recipe"] = recipe_name
-            break
-
-    # Preserve spark conf overrides from the original config
-    from lakebench.config.loader import load_yaml
-
-    raw = load_yaml(config_file)
-    spark_conf = raw.get("spark", {}).get("conf")
-    if spark_conf:
-        v2["spark"] = {"conf": spark_conf}
-
-    out_path = output or config_file
-    with open(out_path, "w") as f:
-        yaml.safe_dump(v2, f, default_flow_style=False, sort_keys=False)
-
-    console.print(f"[green]Upgraded config written to {out_path}[/green]")
-    console.print()
-    for k, v in v2.items():
-        console.print(f"  [cyan]{k}:[/cyan] {v}")
+    raise UsageError(
+        "`config upgrade` is removed: it rewrote configs lossily and wrote secrets in plaintext.",
+        next="lakebench init --from OLD.yaml -o NEW.yaml",
+        path="config.upgrade_refused",
+    )
 
 
 # -- Helpers -----------------------------------------------------------------

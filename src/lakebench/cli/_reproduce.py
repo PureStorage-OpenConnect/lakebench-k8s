@@ -887,7 +887,7 @@ def _run_pipeline(
     start_watermark = datetime.now(timezone.utc)
 
     _deploy_cmd(config_file=config_file, yes=True)
-    _generate_cmd(config_file=config_file, wait=True, timeout=timeout or 14400, yes=True)
+    _generate_cmd(config_file=config_file, timeout=timeout or 14400, yes=True)
     _run_cmd(config_file=config_file, yes=True, timeout=timeout)
 
     result = _find_reproduce_run(storage, deployment_name, start_watermark)

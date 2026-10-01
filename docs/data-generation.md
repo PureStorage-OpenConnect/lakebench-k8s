@@ -52,7 +52,6 @@ workload:
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting. `0` auto-computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
@@ -219,7 +218,7 @@ existing corpus is never overwritten by accident. To regenerate, pass
 multipart uploads) before datagen starts:
 
 ```bash
-lakebench generate my-config.yaml --wait --regenerate
+lakebench generate my-config.yaml --regenerate
 ```
 
 To keep the existing corpus instead, run the pipeline with `run

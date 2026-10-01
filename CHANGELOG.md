@@ -223,6 +223,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a datagen timeout keep those codes until they are converted; the table
   lists them.
 
+### Removed
+- **`config upgrade` refuses (SAF-3).** It rewrote configs lossily, in place
+  by default, and wrote the S3 secret key into the result in plaintext. It
+  now exits 2 before opening any file and names the replacement,
+  `lakebench init --from OLD.yaml -o NEW.yaml`.
+- **Dead flags (CLI-8).** `generate --wait` / `-w` (generate always waited;
+  there was no `--no-wait`), `admin release-lock --expired-only` (always on;
+  `release-lock` releases only an expired lease unless `--force` is given)
+  and `deploy --include-observability` (set `observability.enabled: true`
+  in the config instead). Each is now an unknown option and exits 2.
+
 ## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and

@@ -323,7 +323,13 @@ def _scenario_sigint(monkeypatch, tmp_path):
     return _runner().invoke(app, ["status", str(tmp_path / "c.yaml")])
 
 
+def _scenario_config_upgrade_refused(monkeypatch, tmp_path):
+    (tmp_path / "c.yaml").write_text("name: x\n")
+    return _runner().invoke(app, ["config", "upgrade", str(tmp_path / "c.yaml")])
+
+
 SCENARIOS = {
+    "config.upgrade_refused": _scenario_config_upgrade_refused,
     "version.ok": _scenario_version_ok,
     "click.usage": _scenario_click_usage,
     "unhandled_exception": _scenario_unhandled_exception,
@@ -333,6 +339,7 @@ SCENARIOS = {
 
 # The line each path must print on stderr, where it prints one.
 EXPECTED_STDERR = {
+    "config.upgrade_refused": "ERROR  `config upgrade` is removed",
     "unhandled_exception": "ERROR  RuntimeError: unexpected [/tmp] failure",
     "confirm.non_tty": "ERROR  Not confirmed",
     "sigint": "ERROR  Interrupted.",
