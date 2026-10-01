@@ -144,8 +144,7 @@ lakebench config recipes [NAME]         # list recipes, what each one trades off
 ```
 
 `config validate` and `validate` load the config as `deploy` does, so they
-fail on a config with no `name:` or with a removed key. `config upgrade`
-refuses a config with no `name:`.
+fail on a config with no `name:` or with a removed key.
 
 `config show` prints the config's support state and its peak requested
 resources. `config recipes` lists, for every recipe, its support state per

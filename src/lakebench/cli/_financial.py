@@ -25,8 +25,8 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
-from rich.markup import escape
 
+from lakebench.cli._helpers import print_error
 from lakebench.exit_codes import ExitCode, LakebenchError
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def _load_config(config_path: Path):
         cfg = load_config(str(config_path), purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         # One line, not a traceback.
-        console.print(f"[red]ERROR[/red] {escape(str(e))}")
+        print_error(str(e))  # one ERROR line on stderr, like every load error
         raise typer.Exit(ExitCode.USAGE) from None  # config.validation, config.name_required
     _assert_financial_schema(cfg)
     return cfg

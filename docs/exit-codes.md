@@ -41,7 +41,7 @@ the CLI down every path listed here and checks the code.
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `cli.bad_argument` | 2 | a command refuses an argument it checks itself: an unknown recipe, component, stage or example, a missing file, conflicting options |
 | `click.usage` | 2 | an unknown flag, a missing argument or a bad value |
-| `config.name_required` | 2 | a command that changes data, or tears a deployment down, was given a config with no name |
+| `config.name_required` | 2 | a command that changes data or tears a deployment down was given a config with no name; a read command (`status`, `logs`, `report`) too, in a directory whose v1.6 state names a deployment |
 | `config.unsupported` | 2 | the workload, recipe and mode combination is unsupported, or the scale is above the workload's datagen ceiling |
 | `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
 | `config.validation` | 2 | the config fails to load or validate |

@@ -233,7 +233,9 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "config.name_required",
         _C.USAGE,
-        "a command that changes data, or tears a deployment down, was given a config with no name",
+        "a command that changes data or tears a deployment down was given a config with "
+        "no name; a read command (`status`, `logs`, `report`) too, in a directory whose "
+        "v1.6 state names a deployment",
         v16_code=0,
     ),
     ExitPath("run.args", _C.USAGE, "a `run` argument or combination is refused", "CC-6"),
