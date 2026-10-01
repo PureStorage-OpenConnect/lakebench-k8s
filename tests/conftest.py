@@ -183,7 +183,7 @@ def stub_experiment(
     names in *failed*, as the runner records a failed query). Keyword
     overrides replace identity fields (seed=..., scale=...)."""
     from lakebench.benchmark.fingerprint import fingerprint_rows
-    from lakebench.metrics.experiment import EXPERIMENT_SCHEMA
+    from lakebench.metrics.experiment import EXPERIMENT_SCHEMA_V1
     from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
     results: dict = {
@@ -196,7 +196,7 @@ def stub_experiment(
     # A continuous run carries the fingerprints of its end-of-run result
     # check (metrics/experiment.py _continuous_results), like a batch run.
     return {
-        "schema": EXPERIMENT_SCHEMA,
+        "schema": EXPERIMENT_SCHEMA_V1,
         "workload": {"name": "customer360", "version": "c360-1", "parameters_id": "p"},
         "corpus": {
             "id": "corpus",

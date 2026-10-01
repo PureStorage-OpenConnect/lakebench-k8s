@@ -796,21 +796,37 @@ def scrub_text(text: str, record: Mapping[str, Any] | None = None) -> str:
     return out
 
 
-#: Where a record holds an ER-8 system identity observation.
-_SYSTEM_IDENTITY_AT = (
-    ("experiment", "system_identity"),
-    ("config_snapshot", "experiment_inputs", "system_identity"),
-)
 #: The parts the scrubber may rewrite (an endpoint host); any other part
 #: changing is refused.
 _SCRUBBABLE_PARTS = frozenset({"storage_endpoint"})
 
 
+def _system_identity_paths(obj: Any, path: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Every ``system_identity`` mapping with ``parts`` in a record, at any
+    depth: the experiment block, the run-start inputs, and the copies a
+    snapshot carries (``pipeline_benchmark.config_snapshot``)."""
+    out: list[tuple[str, ...]] = []
+    if isinstance(obj, Mapping):
+        for key, value in obj.items():
+            here = (*path, str(key))
+            if key == "system_identity" and isinstance(value, Mapping) and "parts" in value:
+                out.append(here)
+            else:
+                out += _system_identity_paths(value, here)
+    elif isinstance(obj, list):
+        for i, value in enumerate(obj):
+            out += _system_identity_paths(value, (*path, str(i)))
+    return out
+
+
 def _at(obj: Any, path: tuple[str, ...]) -> Any:
     for key in path:
-        if not isinstance(obj, Mapping):
+        if isinstance(obj, list) and key.isdigit() and int(key) < len(obj):
+            obj = obj[int(key)]
+        elif isinstance(obj, Mapping):
+            obj = obj.get(key)
+        else:
             return None
-        obj = obj.get(key)
     return obj
 
 
@@ -825,7 +841,7 @@ def _recompute_system_fingerprints(
     from lakebench.metrics.system_identity import fingerprint_of
 
     out = []
-    for path in _SYSTEM_IDENTITY_AT:
+    for path in _system_identity_paths(record):
         src, dst = _at(record, path), _at(scrubbed, path)
         if not isinstance(src, Mapping) or not isinstance(dst, dict):
             continue

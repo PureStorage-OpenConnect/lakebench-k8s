@@ -444,11 +444,12 @@ class TestBlockFollowsTheRecord:
         e = storage.load_run(run.run_id).to_dict()["experiment"]
         assert "not_checked" not in e["results"] and e["results"]["fingerprints"]
         assert e["benchmark_source"].startswith("lakebench benchmark")
-        assert {
-            k: v
-            for k, v in e.items()
-            if k not in ("results", "limits", "repetitions", "benchmark_source")
-        } == {k: v for k, v in stored.items() if k not in ("results", "limits", "repetitions")}
+        moved = ("results", "limits", "repetitions", "stages", "benchmark_source")
+        assert {k: v for k, v in e.items() if k not in moved} == {
+            k: v for k, v in stored.items() if k not in moved
+        }
+        assert "benchmark (not run)" in stored["stages"]["skipped"]
+        assert not any(x.startswith("benchmark (") for x in e["stages"]["skipped"])
 
     def test_run_ending_before_maintenance_is_not_run(self):
         run = _run()

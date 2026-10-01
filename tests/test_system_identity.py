@@ -519,7 +519,8 @@ def test_load_sums_schedulable_workers_and_other_namespaces() -> None:
         "nodes": 2,
     }
     assert out["cotenant_requested"] == {"cpu": 6.5, "memory_gib": 17.0, "pods": 2}
-    assert calls[1] == ("pods", "status.phase!=Succeeded,status.phase!=Failed", (5, 60))
+    assert out["cotenant_pending"] == {"cpu": 16.0, "memory_gib": 16.0, "pods": 1}
+    assert calls[1][:3] == ("pods", "status.phase!=Succeeded,status.phase!=Failed", (5, 60))
     assert out["at"]
 
 
@@ -564,7 +565,7 @@ def test_run_samples_land_in_the_inputs_and_the_block(cluster) -> None:
     inputs = run.config_snapshot["experiment_inputs"]
     assert inputs["system_identity"]["fingerprint"]
     observed = inputs["observed"]
-    assert set(observed) == {"allocatable", "cotenant_requested"}
+    assert set(observed) == {"allocatable", "cotenant_requested", "cotenant_pending"}
     for half in observed.values():
         assert set(half) == {"start", "end"} and half["start"]["at"]
     assert observed["cotenant_requested"]["end"]["cpu"] == 2.0
@@ -582,3 +583,87 @@ def test_run_sampling_never_raises() -> None:
     si.sample_run_start(run, Boom(), k8s=Boom())
     si.sample_run_end(run, Boom(), k8s=Boom())
     si.sample_run_start(NS(config_snapshot=None), Boom())
+
+
+def test_load_quantities_in_any_canonical_form() -> None:
+    pods = [
+        _pod("o", "w0", "250m", "107374182400m"),  # 0.1 GiB in milli-bytes
+        _pod("o", "w0", "1", "1Pi"),
+    ]
+    k8s, _ = _load_cluster(pods=pods)
+    out = si.observe_load(k8s, "mine")["cotenant_requested"]
+    assert out["cpu"] == 1.25 and out["pods"] == 2
+    assert out["memory_gib"] == round((0.1 * 1024**3 + 1024**5) / 1024**3, 1)
+
+
+def test_one_unreadable_pod_is_counted_not_fatal() -> None:
+    k8s, _ = _load_cluster(pods=[_pod("o", "w0", "1", "1Gi"), _pod("o", "w0", "bogus", "1Gi")])
+    out = si.observe_load(k8s, "mine")["cotenant_requested"]
+    assert (out["cpu"], out["pods"], out["unreadable_pods"]) == (1.0, 1, 1)
+
+
+def test_sidecars_and_pod_level_requests() -> None:
+    side = _pod("o", "w0", "1", "1Gi", init=[("2", "1Gi")])
+    side.spec.init_containers[0].restart_policy = "Always"  # a native sidecar
+    pod_level = _pod("o", "w0", "1", "1Gi")
+    pod_level.spec.resources = NS(requests={"cpu": "4", "memory": "8Gi"})
+    k8s, _ = _load_cluster(pods=[side, pod_level])
+    assert si.observe_load(k8s, "mine")["cotenant_requested"]["cpu"] == 3.0 + 4.0
+
+
+def test_pod_list_is_paged() -> None:
+    pages = [
+        NS(items=[_pod("o", "w0", "1", "1Gi")], metadata=NS(_continue="t1")),
+        NS(items=[_pod("o", "w1", "2", "1Gi")], metadata=NS(_continue=None)),
+    ]
+    seen: list[Any] = []
+
+    class Core:
+        def list_node(self, **kw):
+            return NS(items=_default_nodes())
+
+        def list_pod_for_all_namespaces(self, **kw):
+            seen.append((kw.get("limit"), kw.get("_continue")))
+            return pages[len(seen) - 1]
+
+    out = si.observe_load(NS(_core_v1=Core()), "mine")
+    assert out["cotenant_requested"]["cpu"] == 3.0
+    assert seen == [(500, None), (500, "t1")]
+
+
+def test_reasons_carry_no_address() -> None:
+    exc = ConnectionError(
+        "HTTPSConnectionPool(host='api.lab.example', port=6443): Max retries "
+        "(Caused by ... http://192.0.2.15:80/bucket)"
+    )
+    reason = si._reason(exc)
+    assert "api.lab.example" not in reason and "192.0.2.15" not in reason
+
+
+def test_start_sample_is_bounded_by_its_deadline(monkeypatch) -> None:
+    import threading
+
+    gate = threading.Event()
+
+    class Core:
+        def list_node(self, **kw):
+            gate.wait(10)
+            return NS(items=[])
+
+    monkeypatch.setattr(si, "START_DEADLINE_S", 0.2)
+    from tests.test_experiment import _cfg as exp_cfg
+    from tests.test_experiment import _metrics
+
+    cfg = exp_cfg()
+    run = _metrics(cfg)
+    si.sample_run_start(run, cfg, k8s=NS(_core_v1=Core(), _custom=None))
+    gate.set()
+    inputs = run.config_snapshot["experiment_inputs"]
+    assert "system_identity" not in inputs
+    assert "not sampled within" in inputs["observed"]["allocatable"]["start"]["not_observed"]
+
+
+def test_local_identity_names_nothing() -> None:
+    ident = si._local_identity(None)
+    assert ident["type"] == "local" and ident["partial"] is True
+    assert not si.observed_parts(ident["parts"])
