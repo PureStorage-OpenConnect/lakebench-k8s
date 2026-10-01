@@ -215,3 +215,210 @@ def test_release_dry_run_only_on_forks():
     assert sorted(map(str, downloads(dry))) == sorted(map(str, real))
     runs = " ".join(str(s.get("run", "")) for s in dry["steps"])
     assert "ls -R" in runs and "sha256sum" in runs
+
+
+# -- QA-3: fail-fast, triggers, concurrency, pip cache, skip reasons ---------
+
+
+def _matrix_jobs():
+    for name, wf in _workflows().items():
+        for job_name, job in (wf.get("jobs") or {}).items():
+            if "matrix" in (job.get("strategy") or {}):
+                yield name, job_name, job
+
+
+def test_matrix_does_not_fail_fast():
+    jobs = list(_matrix_jobs())
+    assert jobs, "no matrix job found; the check reads nothing"
+    bad = [f"{n}:{j}" for n, j, job in jobs if job["strategy"].get("fail-fast") is not False]
+    # fail-fast defaults to true, so a sibling leg is cancelled and its result lost.
+    assert not bad, f"matrix jobs without `fail-fast: false`: {bad}"
+
+
+def test_prs_to_integrate_trigger_ci():
+    on = _on(_load("ci.yml"))
+    assert "integrate/**" in on["pull_request"]["branches"]
+    assert "main" in on["pull_request"]["branches"]
+    # Train and look branches are pushed, never opened as PRs, and need CI.
+    assert on["push"]["branches"] == ["**"]
+
+
+_TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|[()!,])|'((?:[^']|'')*)'|([A-Za-z_][\w.\-]*))")
+
+
+def _eval_expr(expr: str, ctx: dict[str, str]):
+    """Evaluate the GitHub expression subset the concurrency group uses:
+    string literals, context names, == != ! && || and startsWith/format."""
+    toks: list[tuple[str, str]] = []
+    pos = 0
+    expr = expr.strip()
+    while pos < len(expr):
+        m = _TOKEN.match(expr, pos)
+        assert m and m.end() > pos, f"cannot parse {expr[pos:]!r}"
+        op, lit, name = m.groups()
+        toks.append(
+            ("op", op)
+            if op
+            else ("str", lit.replace("''", "'"))
+            if lit is not None
+            else ("name", name)
+        )
+        pos = m.end()
+    toks.append(("end", ""))
+    i = 0
+
+    def peek(v=None):
+        return toks[i][1] == v if v else toks[i]
+
+    def take():
+        nonlocal i
+        i += 1
+        return toks[i - 1]
+
+    def primary():
+        kind, val = take()
+        if kind == "op" and val == "(":
+            v = disj()
+            assert take()[1] == ")"
+            return v
+        if kind == "op" and val == "!":
+            return not primary()
+        if kind == "str":
+            return val
+        assert kind == "name", (kind, val)
+        if peek("("):
+            take()
+            args = [disj()]
+            while peek(","):
+                take()
+                args.append(disj())
+            assert take()[1] == ")"
+            if val == "startsWith":
+                return str(args[0]).lower().startswith(str(args[1]).lower())
+            if val == "format":
+                return str(args[0]).format(*args[1:])
+            raise AssertionError(f"function {val} not supported")
+        return ctx[val]
+
+    def cmp():
+        v = primary()
+        while peek("==") or peek("!="):
+            op = take()[1]
+            r = primary()
+            # GitHub compares strings ignoring case.
+            a, b = (x.lower() if isinstance(x, str) else x for x in (v, r))
+            v = (a == b) if op == "==" else (a != b)
+        return v
+
+    def conj():
+        v = cmp()
+        while peek("&&"):
+            take()
+            r = cmp()
+            v = r if v else v
+        return v
+
+    def disj():
+        v = conj()
+        while peek("||"):
+            take()
+            r = conj()
+            v = v if v else r
+        return v
+
+    out = disj()
+    assert peek()[0] == "end", toks[i:]
+    return out
+
+
+def _render(template: str, ctx: dict[str, str]) -> str:
+    return re.sub(
+        r"\$\{\{(.*?)\}\}", lambda m: str(_eval_expr(m.group(1), ctx)), template, flags=re.S
+    )
+
+
+def test_expression_evaluator_follows_github_rules():
+    ctx = {"a": "x", "e": ""}
+    assert _eval_expr("a == 'x' && 'yes' || 'no'", ctx) == "yes"
+    assert _eval_expr("a == 'y' && 'yes' || 'no'", ctx) == "no"
+    assert _eval_expr("!(e) && startsWith('refs/heads/Main', 'refs/heads/main')", ctx) is True
+    assert _eval_expr("format('-{0}', a)", ctx) == "-x"
+    assert _eval_expr("a == 'X'", ctx) is True
+
+
+def test_concurrency_cancels_only_lane_and_pr_runs():
+    conc = _load("ci.yml")["concurrency"]
+    assert conc["cancel-in-progress"] is True
+
+    def group(ref: str, run_id: str, workflow: str = "CI") -> str:
+        ctx = {"github.workflow": workflow, "github.ref": ref, "github.run_id": run_id}
+        return _render(conc["group"], ctx).lower()  # GitHub matches groups ignoring case
+
+    # Two runs of a lane branch or a PR share a group, so the newer cancels the older.
+    for ref in ("refs/heads/lane/v17-x", "refs/heads/lane/ci-hygiene", "refs/pull/7/merge"):
+        assert group(ref, "1") == group(ref, "2"), ref
+    # Any other ref keeps every run: a shared group would cancel a pending one.
+    # Train runs are merge evidence; unknown branches default to kept.
+    for ref in (
+        "refs/heads/integrate/v1.5.0",
+        "refs/heads/main",
+        "refs/heads/train/1003-am",
+        "refs/heads/release/1.7",
+        "refs/heads/lanes-old",
+        "refs/tags/v1.7.0",
+    ):
+        assert group(ref, "1") != group(ref, "2"), ref
+    # release.yml calls ci.yml on a tag; github.workflow is then the caller's.
+    assert group("refs/tags/v1.7.0", "1", "Release") != group("refs/tags/v1.7.0", "2", "Release")
+    # Different refs never share a group.
+    assert group("refs/heads/lane/a", "1") != group("refs/heads/lane/b", "1")
+
+
+def _pip_cache_keys() -> dict[str, tuple]:
+    """{job: (python, dependency paths)} for each ci.yml job that installs
+    `.[dev]`; the paths are None when the job sets no pip cache."""
+    out = {}
+    for job_name, job in _load("ci.yml")["jobs"].items():
+        steps = job.get("steps") or []
+        if not any('".[dev]"' in str(s.get("run", "")) for s in steps):
+            continue
+        for step in steps:
+            if str(step.get("uses", "")).startswith("actions/setup-python@"):
+                w = step.get("with") or {}
+                paths = str(w.get("cache-dependency-path", "")).split() or None
+                out[job_name] = (
+                    str(w.get("python-version")),
+                    paths if w.get("cache") == "pip" else None,
+                )
+    return out
+
+
+def test_setup_python_caches_pip():
+    keys = _pip_cache_keys()
+    assert keys, "no job installs .[dev]; the check reads nothing"
+    bad = [j for j, (_, paths) in keys.items() if not paths or "pyproject.toml" not in paths]
+    assert not bad, f"jobs installing .[dev] without a pip cache keyed on pyproject.toml: {bad}"
+    # Caches are immutable and the first job to finish saves the key, so a job
+    # that installs more (pyspark) than another on the same Python needs its
+    # own key, or its extra packages are never cached.
+    by_key: dict[tuple, list[str]] = {}
+    for job, (py, paths) in keys.items():
+        by_key.setdefault((py, tuple(paths or ())), []).append(job)
+    for jobs in by_key.values():
+        extras = {
+            j: "pyspark"
+            in " ".join(str(s.get("run", "")) for s in _load("ci.yml")["jobs"][j]["steps"])
+            for j in jobs
+        }
+        assert len(set(extras.values())) == 1, (
+            f"jobs share a pip cache key but install different packages: {extras}"
+        )
+
+
+def test_unit_step_prints_skips_and_does_not_stop_early():
+    steps = _load("ci.yml")["jobs"]["test"]["steps"]
+    run = next(str(s["run"]) for s in steps if s.get("name") == "Run unit tests")
+    args = run.split()
+    # -x hides every failure after the first; -rs prints each skip reason.
+    assert "-x" not in args and "--exitfirst" not in args, run
+    assert "-rs" in args, run

@@ -5,8 +5,10 @@ on:
   # which is how a credential reached a pushed branch unnoticed.
   push:
     branches: ['**']
+  # Pull requests to integrate/** (the v1.7 integration branches) get CI as
+  # well as pull requests to main.
   pull_request:
-    branches: [main]
+    branches: [main, 'integrate/**']
   # release.yml calls this workflow on the tagged commit and publishes only
   # if it passes. That binds only tags whose commit carries the current
   # release.yml; see docs/releasing.md for the repository settings that
@@ -15,6 +17,20 @@ on:
 
 permissions:
   contents: read
+
+# A newer push to the same lane/* branch or pull request cancels the older
+# run. Every other ref (main, integrate/**, train/*, tags, and any branch added
+# later) puts the run id in its group, so no run of it is ever cancelled: a
+# shared group would not do, because GitHub cancels a pending run when a newer
+# one joins the group even with cancel-in-progress off. A push runs CI on its
+# head commit only, so this keeps every pushed head's run, not a run for every
+# commit in a multi-commit push.
+concurrency:
+  group: >-
+    ci-${{ github.workflow }}-${{ github.ref }}${{
+    !(startsWith(github.ref, 'refs/heads/lane/') || startsWith(github.ref, 'refs/pull/'))
+    && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
 
 jobs:
   lint:
@@ -26,6 +42,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -51,6 +69,9 @@ jobs:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-24.04
     strategy:
+      # One failing Python version must not cancel the other: both results
+      # are needed to tell a version-specific failure from a real one.
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
     steps:
@@ -59,6 +80,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -70,7 +93,7 @@ jobs:
       # floor check stop silently (tests/test_workflows.py checks this).
       - name: Run unit tests
         run: >-
-          pytest tests/ -x --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
+          pytest tests/ -rs --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
           ${{ matrix.python-version == '3.13' && '--cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered' || '' }}
 
       # Per-file floors on the scoring and metrics code (GOALS P8.3).
@@ -136,9 +159,15 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      # The key adds ci.yml, which names the pyspark version, so this job's
+      # cache (with the built pyspark wheel) is not the lint job's.
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/workflows/ci.yml
 
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
@@ -152,7 +181,7 @@ jobs:
 
       - name: Run Spark tests
         run: >-
-          pytest tests/spark -q
+          pytest tests/spark -q -rs
           --cov=src/lakebench/spark/scripts --cov-report=json:coverage-spark.json
 
       # detection_rules.py is imported by path as a top-level module, so it
@@ -167,6 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      # No pip cache: it installs only `build`, and would share the lint key.
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
