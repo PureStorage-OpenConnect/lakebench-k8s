@@ -17,13 +17,12 @@ of the assertion is exercised by tests/spark under the local-Spark tier.
 from __future__ import annotations
 
 import importlib
-import sys
 from pathlib import Path
 
 import pytest
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(_SCRIPTS_DIR))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 # --- Direct behaviour: the common-only path raises SilverAbort ---
@@ -32,12 +31,8 @@ sys.path.insert(0, str(_SCRIPTS_DIR))
 def test_silver_abort_symbol_is_public_from_common():
     """SilverAbort is exported from common.py so silver_build can import it.
 
-    Full-suite test-ordering guard: other tests earlier in the run (e.g.
-    test_delta_silver_layout.py) pop and re-import `common` inside their
-    test bodies, so a module-level `from common import SilverAbort`
-    captured at import time may go stale relative to sys.modules['common']
-    by the time this test runs. Resolve dynamically from the live module
-    so we test what silver_build.py would actually see.
+    ``common`` comes from this test's load_script namespace, the same copy
+    silver_build.py would import.
     """
     common = importlib.import_module("common")
     assert hasattr(common, "SilverAbort")

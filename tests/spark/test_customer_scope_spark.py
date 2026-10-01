@@ -17,12 +17,13 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+# Module-scoped fixtures below run scripts, so the module shares one
+# private script namespace.
+pytestmark = pytest.mark.usefixtures("load_script_module")
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 CUSTOMERS = set(range(1, 10))
@@ -207,7 +208,7 @@ def _watchlist(spark, path):
 
 
 @pytest.fixture(scope="module", autouse=True)
-def watchlist_env(spark, tmp_path_factory):
+def watchlist_env(load_script_module, spark, tmp_path_factory):
     import os
 
     wl = str(tmp_path_factory.mktemp("watchlist") / "watchlist.parquet")
@@ -222,7 +223,7 @@ def watchlist_env(spark, tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def alerts(spark, watchlist_env):
+def alerts(load_script_module, spark, watchlist_env):
     txns, entities = _silver(spark)
     out = {}
     for rule in CUSTOMER_ONLY + GRAPH:

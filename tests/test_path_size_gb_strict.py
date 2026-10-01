@@ -11,15 +11,14 @@ metrics-only callers that do not need the distinction.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"))
 
-from common import path_size_gb, path_size_gb_strict  # noqa: E402
+@pytest.fixture
+def common(load_script):
+    return load_script("common")
 
 
 class _RaisingPath:
@@ -71,15 +70,15 @@ def _fake_spark(exc):
     return SimpleNamespace(_jvm=_RaisingJvm(exc), _jsc=_JavaSc())
 
 
-def test_path_size_gb_strict_reraises_listing_failure():
+def test_path_size_gb_strict_reraises_listing_failure(common):
     """The strict variant must not swallow the listing exception."""
     exc = RuntimeError("simulated S3 500 while listing s3a://lb-bronze/")
     spark = _fake_spark(exc)
     with pytest.raises(RuntimeError, match="simulated S3 500"):
-        path_size_gb_strict(spark, "s3a://lb-bronze/customer/interactions")
+        common.path_size_gb_strict(spark, "s3a://lb-bronze/customer/interactions")
 
 
-def test_path_size_gb_swallows_listing_failure():
+def test_path_size_gb_swallows_listing_failure(common):
     """The non-strict variant preserves the existing 0.0-on-error contract.
 
     Metrics-only callers rely on 0.0 as "unknown size" without failing the run.
@@ -88,4 +87,4 @@ def test_path_size_gb_swallows_listing_failure():
     """
     exc = RuntimeError("simulated S3 500 while listing s3a://lb-bronze/")
     spark = _fake_spark(exc)
-    assert path_size_gb(spark, "s3a://lb-bronze/customer/interactions") == 0.0
+    assert common.path_size_gb(spark, "s3a://lb-bronze/customer/interactions") == 0.0

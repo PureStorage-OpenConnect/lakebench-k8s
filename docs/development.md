@@ -54,6 +54,77 @@ pytest tests/ -v -m "integration"    # Integration tests (K8s + S3)
 pytest tests/ -v -m "e2e"            # Full deploy/run/destroy workflow
 ```
 
+### Testing the Spark scripts
+
+The scripts in `src/lakebench/spark/scripts/` import each other by plain
+name (`from common import ...`), as they do in the driver pod. Tests load
+them through the `load_script` fixture in `tests/conftest.py`, which gives
+each test a private copy of every script it imports, `common` included:
+
+```python
+def test_gate(load_script):
+    sbf, common = load_script("silver_build_financial", extra=("common",))
+```
+
+A module whose tests import scripts inside the test body can mark itself
+with `pytestmark = pytest.mark.usefixtures("load_script")`; while a test
+runs, `import common` resolves to that test's copy. `load_script_module`
+keeps one copy per test module, for module-scoped fixtures that run script
+code. Do not put the scripts directory on `sys.path` or pop script modules
+out of `sys.modules`: `tests/test_script_loader_static.py` fails on it, and
+a teardown hook in `tests/conftest.py` fails the test that leaves the
+scripts directory on `sys.path` or a script module in `sys.modules`.
+
+### The Spark tier and its jars
+
+`pytest tests/spark` needs pyspark (4.0.1 or 4.1.1), pyarrow and a Java 17
+runtime. Tests that need Iceberg or Delta read the jars from
+`LB_SPARK_TEST_JARS`, a comma-separated list of jar files for the installed
+Spark line:
+
+| Line | Jars |
+|------|------|
+| pyspark 4.0.1 | `iceberg-spark-runtime-4.0_2.13-1.11.0.jar`, `delta-spark_2.13-4.0.0.jar`, `delta-storage-4.0.0.jar` |
+| pyspark 4.1.1 | `iceberg-spark-runtime-4.1_2.13-1.11.0.jar`, `delta-spark_4.1_2.13-4.1.0.jar`, `delta-storage-4.1.0.jar` |
+
+These are the product defaults in `modules/pipeline_engines/spark/job.py`.
+The harness (`tests/spark/conftest.py`) checks each jar against the
+installed line with the product's own rules, so a jar built for the other
+line, a missing file or a directory fails the tests that need jars instead
+of skipping them. There is no ivy-cache fallback, and `LB_TEST_ICEBERG_JAR`
+is still read but deprecated.
+
+A test declares what it needs with `@pytest.mark.requires_jars("iceberg")`,
+`("delta")` or both. Without the jars it skips with a reason starting
+`LB-JARS missing:`; with `LB_REQUIRE_JARS=1` it fails instead, and the run
+refuses to start if pyspark itself cannot be imported. Under
+`LB_REQUIRE_JARS=1` the run also fails on any skip whose reason mentions
+jars, Iceberg or Delta, on any xfail whose reason mentions jars, and on any
+other skip not listed in `tests/spark/skip_allowance.txt` (which is empty):
+
+```bash
+export LB_SPARK_TEST_JARS=/path/iceberg-spark-runtime-4.0_2.13-1.11.0.jar,/path/delta-spark_2.13-4.0.0.jar,/path/delta-storage-4.0.0.jar
+LB_REQUIRE_JARS=1 pytest tests/spark -q -rs
+pytest tests/spark -q --lb-reverse   # the same tests in reverse order
+```
+
+Two fixtures give a test a Spark with the jars. The JVM starts once per
+pytest process with the jars and no session settings, and `spark_session`
+is one session per test module on it, stopped at the module's end. It is shaped like the
+product's session for the formats the module's tests declare: the Iceberg
+or Delta SQL extension, and Delta as `spark_catalog` for Delta. A module
+adds static settings with `pytestmark = pytest.mark.spark_static_conf({...})`
+and Iceberg catalogs with the `iceberg_catalog` fixture. A test that needs
+a fresh JVM runs a child with `spark_subprocess(script, *args)`, which
+passes the jars, `PYSPARK_PYTHON` and a `PYTHONPATH` holding the Spark
+scripts and `tests/spark`; on a non-zero exit or a timeout it writes the
+whole output to `spark-subprocess.log` under pytest's temporary directory
+and shows the last 60 lines plus every `Caused by:` line.
+To run such a child by hand, give it the same path:
+`PYTHONPATH=src/lakebench/spark/scripts:tests/spark:src python tests/spark/test_x.py ...`.
+`--lb-reverse` is defined in `tests/spark/conftest.py`, so pass it with
+`tests/spark` (or a file in it) on the command line.
+
 ### Test Markers
 
 Tests are organized with pytest markers defined in `pyproject.toml`:

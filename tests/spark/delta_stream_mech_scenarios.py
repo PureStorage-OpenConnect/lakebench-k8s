@@ -1,10 +1,10 @@
 """Delta silver-stream mechanics scenarios (B4 startup-race, I8 version-race).
 
 Not collected by pytest (no ``test_`` prefix). The pytest wrapper modules run
-this in a subprocess so the Delta jars sit on the driver classpath at JVM
-launch and no earlier test's plain JVM interferes.
+this in a subprocess, so the scenarios get a JVM with their own static Spark
+conf, apart from the other Spark tests in the pytest process.
 
-Usage: python delta_stream_mech_scenarios.py <scenario> <jar_dir> <work_dir>
+Usage: python delta_stream_mech_scenarios.py <scenario> <jars> <work_dir>  (jars: comma-separated)
 
 Scenarios:
     startup_race   -- two threads race the not-exists branch of
@@ -20,24 +20,18 @@ Prints one JSON object on the last stdout line.
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import sys
 import threading
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from c360_stream_scenarios import bronze_df  # noqa: E402
 
 
-def _session(jar_dir, work):
+def _session(jars, work):
     from pyspark.sql import SparkSession
 
-    jars = ",".join(sorted(glob.glob(os.path.join(jar_dir, "*.jar"))))
     return (
         SparkSession.builder.master("local[4]")
         .config("spark.ui.enabled", "false")
@@ -194,15 +188,15 @@ def main():
     if len(sys.argv) < 4:
         print(
             json.dumps(
-                {"error": "usage: delta_stream_mech_scenarios.py <scenario> <jar_dir> <work_dir>"}
+                {"error": "usage: delta_stream_mech_scenarios.py <scenario> <jars> <work_dir>"}
             )
         )
         sys.exit(2)
-    scenario, jar_dir, work = sys.argv[1], sys.argv[2], sys.argv[3]
+    scenario, jars, work = sys.argv[1], sys.argv[2], sys.argv[3]
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     # Delta's hive-catalog path is what silver_stream_delta uses in this test.
     os.environ.setdefault("LB_CATALOG_TYPE", "hive")
-    spark = _session(jar_dir, work)
+    spark = _session(jars, work)
     from common import set_utc_session
 
     set_utc_session(spark)
@@ -218,4 +212,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # Run by spark_subprocess, which puts the scripts and tests/spark on PYTHONPATH.
     main()

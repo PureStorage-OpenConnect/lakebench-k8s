@@ -6,9 +6,7 @@ it, and per-silver-table row counts become a labeled gauge.
 
 from __future__ import annotations
 
-import importlib
 import socket
-import sys
 import threading
 from pathlib import Path
 
@@ -18,15 +16,8 @@ _SCRIPTS = str(Path(__file__).resolve().parents[1] / "src" / "lakebench" / "spar
 
 
 @pytest.fixture
-def common():
-    # Import spark/scripts/common.py by path; pop afterwards so suite ordering
-    # cannot leave a stale binding (LB flake lesson).
-    if _SCRIPTS not in sys.path:
-        sys.path.insert(0, _SCRIPTS)
-    sys.modules.pop("common", None)
-    mod = importlib.import_module("common")
-    yield mod
-    sys.modules.pop("common", None)
+def common(load_script):
+    return load_script("common")
 
 
 def _one_shot_listener():

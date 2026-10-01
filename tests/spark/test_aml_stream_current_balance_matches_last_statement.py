@@ -15,31 +15,18 @@ across all three batches, some IBANs appearing multiple times), asserts:
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_HERE = Path(__file__).resolve().parent
-_SCRIPTS = _HERE.parents[1] / "src/lakebench/spark/scripts"
-
-sys.path.insert(0, str(_HERE))
-from _d_full_helpers import iceberg_jar  # noqa: E402
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-def test_current_balance_matches_last_statement_in_a_fresh_jvm():
-    jar = iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+def test_current_balance_matches_last_statement_in_a_fresh_jvm(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # Every touched iban's current_balance matches its latest statement.
     assert out["mismatches"] == [], out
@@ -48,7 +35,7 @@ def test_current_balance_matches_last_statement_in_a_fresh_jvm():
     assert out["untouched_current_balance_is_null"] is True, out
 
 
-def _run(jar):
+def _run(jars):
     from datetime import timedelta
 
     from _d_full_helpers import (
@@ -79,7 +66,7 @@ def _run(jar):
     ]
 
     with tempfile.TemporaryDirectory() as work:
-        spark = build_spark(work, jar)
+        spark = build_spark(work, jars)
         bootstrap_catalog(spark)
         # Seed silver.accounts for the touched IBANs and one untouched
         # control iban (IT99). The stream must never touch IT99.
@@ -129,6 +116,6 @@ def _run(jar):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(_SCRIPTS), str(_HERE)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts and tests/spark on
+    # PYTHONPATH and passes the jar classpath.
     _run(sys.argv[1])

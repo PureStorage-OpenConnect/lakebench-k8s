@@ -1,52 +1,33 @@
 """Executed: a reused Iceberg table moves from days() to months() partitioning,
 and a full overwrite afterwards leaves exactly one copy of the data.
 
-Runs in a fresh Python process: the Iceberg jar must be on the JVM's classpath
-at startup, and another module's session may already own this process's JVM.
-Needs LB_SPARK_TEST_JARS (a directory or comma-separated jars, as for
-tests/spark/test_c360_stream_replay_spark.py).
+Runs in a fresh Python process through ``spark_subprocess``: the Iceberg jar
+from ``LB_SPARK_TEST_JARS`` must be on the JVM's classpath at startup, and
+another module's session may already own this process's JVM.
 """
 
 from __future__ import annotations
 
-import glob
-import os
-import subprocess
-import sys
 import textwrap
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
-SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 
 
-def _jars() -> str:
-    paths = []
-    for part in filter(None, os.environ.get("LB_SPARK_TEST_JARS", "").split(",")):
-        paths += (
-            glob.glob(os.path.join(part, "iceberg-spark-runtime*.jar"))
-            if os.path.isdir(part)
-            else [part]
-        )
-    return ",".join(p for p in paths if "iceberg" in os.path.basename(p))
-
-
+# argv: <jars> <warehouse>. spark_subprocess puts the scripts on PYTHONPATH.
 SCENARIO = textwrap.dedent(
     """
-    import os, sys
-    sys.path.insert(0, sys.argv[1])
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    import sys
     from pyspark.sql import SparkSession
     from pyspark.sql.functions import lit
     s = (SparkSession.builder.master("local[1]")
          .config("spark.ui.enabled", "false")
-         .config("spark.jars", sys.argv[2])
+         .config("spark.jars", sys.argv[1])
          .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
          .config("spark.sql.catalog.t", "org.apache.iceberg.spark.SparkCatalog")
          .config("spark.sql.catalog.t.type", "hadoop")
-         .config("spark.sql.catalog.t.warehouse", sys.argv[3])
+         .config("spark.sql.catalog.t.warehouse", sys.argv[2])
          .config("spark.sql.session.timeZone", "UTC")
          .getOrCreate())
     from common import _partition_transforms, ensure_partition_transform
@@ -68,14 +49,7 @@ SCENARIO = textwrap.dedent(
 )
 
 
-def test_days_to_months_then_overwrite(tmp_path):
-    jars = _jars()
-    if not jars:
-        pytest.skip("LB_SPARK_TEST_JARS has no Iceberg runtime jar")
-    r = subprocess.run(
-        [sys.executable, "-c", SCENARIO, str(SCRIPTS), jars, str(tmp_path / "wh")],
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
+@pytest.mark.requires_jars("iceberg")
+def test_days_to_months_then_overwrite(tmp_path, spark_subprocess, spark_jars):
+    r = spark_subprocess("-c", SCENARIO, spark_jars.classpath, tmp_path / "wh", timeout=600)
     assert "SCENARIO-OK" in r.stdout, r.stdout[-2000:] + r.stderr[-4000:]

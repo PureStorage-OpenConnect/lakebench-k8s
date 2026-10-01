@@ -22,7 +22,7 @@ import pytest
 
 pytest.importorskip("pyspark")
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(_SCRIPTS_DIR))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 @pytest.fixture(scope="module")

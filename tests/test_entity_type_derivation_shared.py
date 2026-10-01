@@ -15,7 +15,6 @@ helpers no longer produce the same label for the same name.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -27,7 +26,7 @@ pytest.importorskip("pyspark")
 
 _HERE = Path(__file__).resolve().parent
 _SCRIPTS = _HERE.parent / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(_SCRIPTS))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def test_batch_and_stream_use_the_same_helper():

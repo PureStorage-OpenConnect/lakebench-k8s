@@ -9,7 +9,6 @@ every recorded seed is spent.
 
 from __future__ import annotations
 
-import importlib.util
 import itertools
 import json
 from pathlib import Path
@@ -165,10 +164,9 @@ def test_malformed_or_missing_record_fails_closed(record, monkeypatch, tmp_path)
 
 
 def _runner():
-    spec = importlib.util.spec_from_file_location("aml_gate_runner", ROOT / "scripts/aml_gate.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    from tests.conftest import exec_repo_script
+
+    return exec_repo_script(ROOT / "scripts/aml_gate.py", "aml_gate_runner")
 
 
 def test_registered_look_records_the_hash_before_printing_the_verdict(

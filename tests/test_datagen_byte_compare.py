@@ -6,15 +6,14 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+from tests.conftest import exec_repo_script
 
-import datagen_byte_compare as bc  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
+bc = exec_repo_script(ROOT / "scripts" / "datagen_byte_compare.py", "datagen_byte_compare")
 
 
 def _obj(key: str, size: int = 10, sha: str = "a" * 64) -> dict:

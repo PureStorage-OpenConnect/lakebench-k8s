@@ -24,7 +24,7 @@ pytest.importorskip("pyspark")
 # Silver scripts import `common` and `silver_build_financial` as top-level
 # modules (job.py adds the scripts dir to sys.path at submit time).
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(_SCRIPTS_DIR))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 @pytest.fixture(scope="module")

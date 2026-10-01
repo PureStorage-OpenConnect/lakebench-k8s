@@ -298,23 +298,16 @@ def test_declared_must_match_the_corpus():
 
 
 @pytest.fixture
-def scorer(monkeypatch):
+def scorer(monkeypatch, load_script):
     """score_financial_reference with pyspark stubbed (not installed here)."""
-    import importlib
-
     for mod in ("pyspark", "pyspark.sql", "pyspark.sql.functions"):
         monkeypatch.setitem(sys.modules, mod, MagicMock())
-    monkeypatch.syspath_prepend(str(REPO / "src/lakebench/spark/scripts"))
-    monkeypatch.syspath_prepend(str(REPO / "src/lakebench/aml"))
-    sys.modules.pop("score_financial_reference", None)
-    ref = importlib.import_module("score_financial_reference")
-    import fidelity_gate
+    ref, fidelity_gate = load_script("score_financial_reference", extra=("fidelity_gate",))
 
     opened = json.loads(json.dumps(PREREG))
     opened["corpora"]["registered_looks_open"] = True
     monkeypatch.setattr(fidelity_gate, "load_preregistration", lambda *a, **k: (opened, "x"))
-    yield ref
-    sys.modules.pop("score_financial_reference", None)
+    return ref
 
 
 class _FakeAf:

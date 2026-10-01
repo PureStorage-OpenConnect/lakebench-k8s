@@ -56,6 +56,15 @@ os.environ.pop("FORCE_COLOR", None)
 # this is its documented off switch.
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
+import functools  # noqa: E402
+import importlib  # noqa: E402
+import importlib.abc  # noqa: E402
+import importlib.util  # noqa: E402
+import sys  # noqa: E402
+from collections.abc import Callable, Iterator  # noqa: E402
+from pathlib import Path  # noqa: E402
+from types import ModuleType  # noqa: E402
+from typing import Any  # noqa: E402
 from unittest.mock import MagicMock, patch  # noqa: E402
 
 import pytest  # noqa: E402
@@ -64,6 +73,213 @@ from lakebench.config import LakebenchConfig  # noqa: E402
 
 # SAF-4 / DEP-3 oracle (SD-9): `recording_k8s` is available to every test.
 from tests.fixtures.recording_k8s import recording_k8s  # noqa: E402, F401
+
+# ---------------------------------------------------------------------------
+# Spark script loader (QA-2). The Spark scripts import each other by plain
+# name (``from common import ...``), as they do in the driver pod, where the
+# scripts ConfigMap is one flat directory. Tests used to put the scripts
+# directory on sys.path and import them, so every test in the process shared
+# one ``common``: a monkeypatch or a ``sys.modules.pop("common")`` in one test
+# changed what a later test saw. ``load_script`` gives each test (or each test
+# module, with ``load_script_module``) its own private copy of the scripts it
+# loads, ``common`` included, and puts sys.modules back afterwards.
+# Two guards keep it that way: tests/test_script_loader_static.py fails on
+# the usual hand-made loads (sys.path edits, sys.modules pops), and the
+# pytest_runtest_teardown hook fails any test that leaves the scripts
+# directory on sys.path or a script module in sys.modules outside a namespace,
+# whatever code did it.
+# ---------------------------------------------------------------------------
+
+_SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
+SPARK_SCRIPTS_DIR = _SRC / "spark" / "scripts"
+
+
+@functools.cache
+def _shipped_script_modules() -> tuple[tuple[str, Path], ...]:
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import SCRIPT_MAPS
+
+    names = {p.stem: p for p in SPARK_SCRIPTS_DIR.glob("*.py")}
+    for sources in SCRIPT_MAPS.values():
+        for src in sources:
+            if src.key.endswith(".py"):
+                names[src.key[: -len(".py")]] = _SRC / src.path
+    return tuple(sorted(names.items()))
+
+
+def shipped_script_modules() -> dict[str, Path]:
+    """Every plain module name a Spark script can import in the driver pod,
+    with its file: the .py files the scripts ConfigMaps ship flat under one
+    directory (scripts_maps.SCRIPT_MAPS, which also ships reference_score,
+    fidelity_gate and datagen_seed from outside spark/scripts), plus any
+    script in spark/scripts the maps miss (tests/test_script_loader.py checks
+    there is none)."""
+    return dict(_shipped_script_modules())
+
+
+class _ScriptFinder(importlib.abc.MetaPathFinder):
+    """Resolves the shipped plain names to their files while a namespace is
+    active, without putting the scripts directory on sys.path."""
+
+    def __init__(self, files: dict[str, Path]) -> None:
+        self._files = files
+
+    def find_spec(self, fullname, path=None, target=None):  # noqa: ANN001
+        f = self._files.get(fullname)
+        if f is None or path is not None:
+            return None
+        return importlib.util.spec_from_file_location(fullname, f)
+
+
+class ScriptNamespace:
+    """One private set of script modules.
+
+    ``activate`` saves and removes every shipped name from sys.modules and
+    installs a finder, so the first import of ``common`` (by the test, or by
+    a script at top level or inside a function) executes a fresh copy, and
+    every later import in the same namespace gets that copy. ``deactivate``
+    removes the finder and every shipped name, then restores what was in
+    sys.modules before.
+    """
+
+    active: list[ScriptNamespace] = []
+
+    def __init__(self, scope: str, owner: str) -> None:
+        self.scope = scope
+        self.owner = owner
+        self._files = shipped_script_modules()
+        self._finder = _ScriptFinder(self._files)
+        self._saved: dict[str, ModuleType] = {}
+
+    def activate(self) -> None:
+        for name in self._files:
+            mod = sys.modules.pop(name, None)
+            if mod is not None:
+                self._saved[name] = mod
+        sys.meta_path.insert(0, self._finder)
+        ScriptNamespace.active.append(self)
+
+    def deactivate(self) -> None:
+        if self in ScriptNamespace.active:
+            ScriptNamespace.active.remove(self)
+        if self._finder in sys.meta_path:
+            sys.meta_path.remove(self._finder)
+        for name in self._files:
+            sys.modules.pop(name, None)
+        sys.modules.update(self._saved)
+        self._saved = {}
+
+    def load(self, name: str, *, extra: tuple[str, ...] = ()) -> Any:
+        """Import *name* (and each of *extra*) in this namespace. Returns the
+        module, or a tuple ``(module, *extra_modules)`` when *extra* is given.
+        A module a script imports is the same object the test gets back:
+        ``load("silver_stream_financial", extra=("common",))`` returns the
+        ``common`` that silver_stream_financial uses."""
+        if ScriptNamespace.active[-1:] != [self]:
+            raise RuntimeError(f"the script namespace of {self.owner} is not the active one")
+        for n in (name, *extra):
+            if n not in self._files:
+                raise ValueError(f"{n!r} is not a Spark script module ({SPARK_SCRIPTS_DIR})")
+        mod = importlib.import_module(name)
+        if not extra:
+            return mod
+        return (mod, *(importlib.import_module(n) for n in extra))
+
+
+def _script_namespace(scope: str, request: pytest.FixtureRequest) -> Iterator[Callable[..., Any]]:
+    owner = request.node.nodeid
+    outer = [ns for ns in ScriptNamespace.active if ns.scope == "module"]
+    if scope == "function" and outer:
+        raise RuntimeError(
+            f"{owner}: load_script and load_script_module in one test module; use one "
+            f"(the module namespace of {outer[-1].owner} is active)"
+        )
+    ns = ScriptNamespace(scope, owner)
+    ns.activate()
+    try:
+        yield ns.load
+    finally:
+        ns.deactivate()
+
+
+def exec_repo_script(path: Path, name: str) -> ModuleType:
+    """Exec a repository tool script (``scripts/*.py``) as module *name*.
+    Some of these put ``src`` or the Spark scripts directory on sys.path at
+    import, for their command-line use; the path is restored afterwards so
+    the scripts directory does not stay importable for later tests."""
+    saved = list(sys.path)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path[:] = saved
+    return mod
+
+
+def _script_leaks() -> list[str]:
+    """Script state left behind: the scripts directory on sys.path (never
+    needed, the finder resolves the names), or a script module in
+    sys.modules while no namespace is active."""
+    found = []
+    scripts = str(SPARK_SCRIPTS_DIR)
+    on_path = [p for p in sys.path if p and os.path.realpath(p) == os.path.realpath(scripts)]
+    if on_path:
+        found.append(f"{scripts} is on sys.path")
+    if not ScriptNamespace.active:
+        found += [f"{n!r} is in sys.modules" for n in shipped_script_modules() if n in sys.modules]
+    return found
+
+
+def _clear_script_leaks() -> None:
+    scripts = os.path.realpath(str(SPARK_SCRIPTS_DIR))
+    sys.path[:] = [p for p in sys.path if not p or os.path.realpath(p) != scripts]
+    if not ScriptNamespace.active:
+        for n in shipped_script_modules():
+            sys.modules.pop(n, None)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Any:
+    """Fail a test that leaves the Spark scripts importable for later tests:
+    the scripts directory on sys.path, or a script module in sys.modules
+    outside a load_script namespace. It runs after the fixtures this test's
+    teardown finalizes (its function fixtures with monkeypatch undo, and on
+    the last test of a module or session the wider-scoped ones too), so a
+    leak made by the test is reported as that test's teardown error and not
+    the next test's. A leak made in a module or session fixture's own
+    teardown lands on the last test of that scope. If a fixture teardown
+    raises, the leak is cleared but only that error is reported. The state
+    is cleared either way, so the next test starts without it."""
+    try:
+        result = yield
+    except BaseException:
+        _clear_script_leaks()
+        raise
+    leaks = _script_leaks()
+    if leaks:
+        _clear_script_leaks()
+        pytest.fail(
+            "Spark script state leaked (use load_script): " + "; ".join(leaks), pytrace=False
+        )
+    return result
+
+
+@pytest.fixture
+def load_script(request: pytest.FixtureRequest) -> Iterator[Callable[..., Any]]:
+    """Load a Spark script with a private ``common`` for this test:
+    ``mod = load_script("silver_build_financial")``. While the test runs, a
+    plain ``import common`` (or of any other script), in the test or inside a
+    script, resolves to the same private copy."""
+    yield from _script_namespace("function", request)
+
+
+@pytest.fixture(scope="module")
+def load_script_module(request: pytest.FixtureRequest) -> Iterator[Callable[..., Any]]:
+    """``load_script`` with one private namespace for the whole test module,
+    for modules whose tests share a loaded script or a Spark session that
+    uses one."""
+    yield from _script_namespace("module", request)
 
 
 @pytest.fixture(autouse=True)

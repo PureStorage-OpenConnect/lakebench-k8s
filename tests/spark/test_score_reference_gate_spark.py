@@ -17,8 +17,7 @@ pytest.importorskip("pyspark")
 pytest.importorskip("sklearn")
 ROOT = Path(__file__).resolve().parents[2]
 PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
-sys.path.insert(0, str(ROOT / "src/lakebench/spark/scripts"))
-sys.path.insert(0, str(ROOT / "src/lakebench/aml"))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 @pytest.fixture(scope="module")

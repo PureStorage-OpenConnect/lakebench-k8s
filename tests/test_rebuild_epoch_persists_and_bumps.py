@@ -13,14 +13,13 @@ would silently commit zero rows. This test asserts that:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent / "src/lakebench/spark/scripts"))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def test_delta_batch_txn_options_shape():

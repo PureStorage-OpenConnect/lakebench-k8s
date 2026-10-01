@@ -12,9 +12,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from lakebench.metrics.collector import MetricsCollector, StreamingJobMetrics
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
+
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def _driver_log(scale_cap: str = "measured_up_to_scale_10", admission: str = "ok") -> str:
@@ -107,9 +111,7 @@ def _driver_env(scale=None):
 
 def _call_helper(monkeypatch, scale=None, envelope=10):
     """Import common and call emit_stream_scale_admission with LB_SCALE set."""
-    import sys
 
-    sys.path.insert(0, str(_SCRIPTS_DIR))
     monkeypatch.delenv("LB_SCALE", raising=False)
     if scale is not None:
         monkeypatch.setenv("LB_SCALE", str(scale))

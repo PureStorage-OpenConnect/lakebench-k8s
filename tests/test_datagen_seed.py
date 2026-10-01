@@ -186,14 +186,11 @@ def test_reference_job_records_the_declared_role(monkeypatch, looks_open):
 
 
 def _gate():
-    import importlib.util
+    from tests.conftest import exec_repo_script
 
-    spec = importlib.util.spec_from_file_location(
-        "aml_gate_runner", Path(__file__).resolve().parents[1] / "scripts/aml_gate.py"
+    return exec_repo_script(
+        Path(__file__).resolve().parents[1] / "scripts/aml_gate.py", "aml_gate_runner"
     )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def test_gate_guard_refuses_unregistered_looks(looks_open):

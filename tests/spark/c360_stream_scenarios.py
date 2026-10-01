@@ -1,9 +1,9 @@
 """Replay scenarios for the c360 continuous writers, run in a fresh JVM.
 
 Not collected by pytest (no ``test_`` prefix). ``test_c360_stream_replay_spark``
-runs it as a subprocess because the Iceberg and Delta jars must be on the
-driver classpath at JVM launch, and another test module may already have
-started a plain JVM in the pytest process.
+runs it as a subprocess, so the scenarios get a JVM with their own static
+Spark conf (both formats' extensions, DeltaCatalog as spark_catalog),
+apart from the other Spark tests in the pytest process.
 
 Each scenario runs a real Structured Streaming query whose foreachBatch
 commits to the table and then raises, the state a driver killed between the
@@ -12,21 +12,18 @@ from the same checkpoint, Spark replays the batch with the same id, and the
 scenario reports how many rows the table holds. A naive-append control
 proves the harness does produce a replay.
 
-Usage: python c360_stream_scenarios.py <jar_dir> <work_dir>
+Usage: python c360_stream_scenarios.py <jars> <work_dir>  (jars: comma-separated)
 Prints one JSON object on the last stdout line.
 """
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
 
 
 class SimulatedCrash(RuntimeError):
@@ -97,10 +94,10 @@ def bronze_df(spark, n, start=0):
     return spark.createDataFrame([tuple(r[c] for c in cols) for r in rows], BRONZE_DDL)
 
 
-def session(jar_dir, work):
+def session(jars, work):
+    """*jars*: the comma-separated test jar classpath."""
     from pyspark.sql import SparkSession
 
-    jars = ",".join(sorted(glob.glob(os.path.join(jar_dir, "*.jar"))))
     return (
         SparkSession.builder.master("local[2]")
         .config("spark.ui.enabled", "false")
@@ -209,9 +206,9 @@ def gold_merge(spark, script):
 
 
 def main():
-    jar_dir, work = sys.argv[1], sys.argv[2]
+    jars, work = sys.argv[1], sys.argv[2]
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    spark = session(jar_dir, work)
+    spark = session(jars, work)
     from common import set_utc_session
 
     set_utc_session(spark)
@@ -364,4 +361,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # Run by spark_subprocess, which puts the scripts and tests/spark on PYTHONPATH.
     main()

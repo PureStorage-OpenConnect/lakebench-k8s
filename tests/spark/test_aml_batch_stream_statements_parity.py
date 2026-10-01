@@ -41,32 +41,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
 import sys
 import tempfile
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_HERE = Path(__file__).resolve().parent
-_SCRIPTS = _HERE.parents[1] / "src/lakebench/spark/scripts"
-
-sys.path.insert(0, str(_HERE))
-from _d_full_helpers import iceberg_jar  # noqa: E402
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-def test_batch_stream_parity_in_a_fresh_jvm():
-    jar = iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=900
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+def test_batch_stream_parity_in_a_fresh_jvm(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=900)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     assert out["statements_row_hash_batch"] == out["statements_row_hash_stream"], out
     assert out["current_balance_batch"] == out["current_balance_stream"], out
@@ -74,7 +61,7 @@ def test_batch_stream_parity_in_a_fresh_jvm():
     assert out["batch_row_count"] > 0, out
 
 
-def _run(jar):
+def _run(jars):
     from _d_full_helpers import (
         BASE_TS,
         STATEMENTS_DDL,
@@ -86,7 +73,7 @@ def _run(jar):
     )
 
     with tempfile.TemporaryDirectory() as work:
-        spark = build_spark(work, jar)
+        spark = build_spark(work, jars)
         bootstrap_catalog(spark)
 
         # Five micro-batches; strictly monotonic book_ts per iban across
@@ -196,6 +183,6 @@ def _copy_accounts(spark, src, dst):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(_SCRIPTS), str(_HERE)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts and tests/spark on
+    # PYTHONPATH and passes the jar classpath.
     _run(sys.argv[1])
