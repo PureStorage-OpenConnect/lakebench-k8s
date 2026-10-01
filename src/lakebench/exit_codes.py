@@ -230,7 +230,6 @@ PATHS: tuple[ExitPath, ...] = (
         "config.upgrade_refused",
         _C.USAGE,
         "`config upgrade` is removed; the message names `init --from`",
-        v16_code=0,
     ),
     ExitPath(
         "run.protected_corpus",

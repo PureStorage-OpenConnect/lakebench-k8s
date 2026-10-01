@@ -126,7 +126,7 @@ def compare(
     # Panel, header and the child runs' own output go to stderr.
     machine = _requested_format != "table" and output is None
     human = err_console if machine else console
-    child_stdout = sys.stderr if machine else None
+    child_stdout = _stderr_fd() if machine else None
 
     # Different workloads, corpora, seeds, scales or modes are different
     # experiments; say so before hours are spent running them. The runs still
@@ -299,6 +299,18 @@ def _higher_is_better(metric: str) -> bool:
 def _is_neutral(metric: str) -> bool:
     """Whether a change in this score is neither better nor worse."""
     return metric.lower() in _NEUTRAL
+
+
+def _stderr_fd() -> int:
+    """A file descriptor for stderr that subprocess can use.
+
+    An in-memory sys.stderr (pytest capture, CliRunner, an embedding) has no
+    fileno; fd 2 is still the process's stderr.
+    """
+    try:
+        return sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        return 2
 
 
 def _recipe_summary(cfg) -> str:

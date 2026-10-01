@@ -422,4 +422,17 @@ def test_compare_machine_output_is_only_data(fmt, monkeypatch, tmp_path):
     else:
         assert out.splitlines()[0] == "metric,config_a,config_b,comparable,like_for_like"
     assert "Running configuration A" in _stderr(result)
-    assert run_single.call_args.kwargs["child_stdout"] is not None
+    assert isinstance(run_single.call_args.kwargs["child_stdout"], int)
+
+
+def test_compare_child_stdout_fd_without_a_real_stderr(monkeypatch):
+    """subprocess needs a descriptor; an in-memory stderr has no fileno."""
+    import io
+    import subprocess
+
+    from lakebench.cli import _compare
+
+    monkeypatch.setattr("sys.stderr", io.StringIO())
+    fd = _compare._stderr_fd()
+    assert fd == 2
+    assert subprocess.run(["true"], stdout=fd, check=False).returncode == 0
