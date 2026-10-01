@@ -176,7 +176,8 @@ revision> -n spark-operator`, then run `lakebench admin repair-operator`.
 **An interrupted `run` left a job running.** `run` deletes the jobs it
 created when it is interrupted, but leaves any it cannot show to be its own
 (another invocation recreated it, or the interrupt landed while it was
-being created) or could not reach within its 60 s cleanup budget. The run
+being created) or could not reach within its cleanup budget of about
+60 s. The run
 prints a `kubectl delete` line for each, and the record's
 `interrupted.left` lists them with the reason. A later `run` that submits
 the same stage, or deploys datagen, deletes the left object by name first.

@@ -309,20 +309,30 @@ fingerprints the query set over the settled tables. See
 
 **Interrupting a run.** Ctrl-C (SIGINT) or SIGTERM stops `run` and exits
 130. The run first deletes the SparkApplications and the datagen Job it
-created and has not seen finish (a stage that completed keeps its
-application, so its driver logs stay readable). Each delete carries the uid
-of the object this run created, so an object of the same name that another
-invocation created since is left alone. The record is still saved: its
-verdict is INTERRUPTED (FAILED when something had already failed before
-the interrupt, never PASSED), and its `interrupted` block names the signal,
-the stage, and the objects stopped, left and skipped. Press Ctrl-C again to
-skip the rest of the cleanup; the record is still written. A third press
-stops at once and may lose the record. For anything left, the run prints
-the `kubectl delete` that stops it. While the run holds the cluster lease
-(the Spark Operator watch-list heal at the start), the interrupt waits for
-that shared change to finish, as for any command (see
-[Troubleshooting](troubleshooting.md)). The HTML report shows an
-interrupted run as failed, with the interrupt as its reason.
+created and has not seen finish: a stage, or a datagen Job, that completed
+is kept, so its logs stay readable. Each delete carries the uid of the
+object this run created, so an object of the same name that another
+invocation created since is left alone. The cleanup takes at most about
+60 s. The record is then saved: its verdict is INTERRUPTED (FAILED when
+something had already failed before the interrupt, never PASSED), and its
+`interrupted` block names the signal, the stage, and the objects stopped,
+left and skipped. After an interrupt the run does not measure bucket sizes
+or read Prometheus. A signal that arrives while the results are being
+gathered at the end of a run does not stop the record being written; the
+record is sealed the same way, at stage `results`.
+
+Press Ctrl-C a second time to cut the cleanup short: what it had not reached
+is recorded as skipped (a quick double press can skip all of it). A third
+press stops at once and may lose the record. For anything left or skipped
+the run prints the `kubectl delete` that stops it. While the run holds the
+cluster lease (the Spark Operator watch-list heal at the start), the
+interrupt waits for that shared change to finish, as for any command (see
+[Troubleshooting](troubleshooting.md)). SIGHUP (a closed terminal or a
+dropped SSH session) is not handled and ends the run without a record or a
+cleanup: run long jobs under `tmux` or `nohup`. Trino queries of an
+interrupted benchmark or maintenance step are not cancelled. `report
+--list` shows such a run as Interrupted; the HTML report shows it as
+failed, with the interrupt as its reason.
 
 A recipe without a query engine (`*-none`) skips the benchmark and exits 0
 with no QpH. `run` refuses an unsupported workload x recipe x mode

@@ -3024,6 +3024,9 @@ def _run_sustained(
         job_manager.datagen_running = not _datagen_released(
             cfg.get_namespace(), deployed_here=not skip_generate
         )
+        if not job_manager.datagen_running:
+            # Finished (or gone): nothing of it to stop on an interrupt.
+            _interrupt.finished("Job", "lakebench-datagen")
 
         # Launch all streaming jobs concurrently
         _stage = "streams-start"
@@ -3882,12 +3885,19 @@ def _run_sustained(
         pipeline_success = False
         raise
     finally:
+        # A signal from here on does not stop the record being written (a
+        # third one still does, cli/_interrupt.py).
+        _interrupt.begin_seal()
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
         if _total_s3_objects is None and _interrupted is None:
             # Not after an interrupt: partial data, and a long listing would
             # hold the record back from a user who has just pressed Ctrl-C.
             _total_s3_objects = _measure_bucket_sizes(cfg, collector)
+        if _interrupted is None and _interrupt.late_signal():
+            # Interrupted while the run was being wound up: sealed the same way.
+            _interrupted = _interrupt.seal(at_stage="results", prior_failure=not pipeline_success)
+            pipeline_success = False
 
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:

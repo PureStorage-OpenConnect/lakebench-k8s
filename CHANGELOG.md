@@ -76,15 +76,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Job. Now the run deletes every SparkApplication and datagen Job it created
   and has not seen finish, each with the uid of the object it created as a
   precondition, so an object of the same name created since by another
-  invocation is never deleted (it is listed as left). metrics.json gains
-  `interrupted` (signal, stage, time, `prior_failure`, and the objects
-  stopped, left and skipped) and the verdict gate `interrupt`; the verdict is
-  INTERRUPTED, or FAILED when something had already failed, never PASSED.
-  `run` exits 130 for both signals. A second Ctrl-C skips the rest of the
-  cleanup and still writes the record; a third stops at once. After an
-  interrupt the run does not measure bucket sizes or read Prometheus.
-  Inside the cluster lease the signal still waits for the shared change to
-  finish first.
+  invocation is never deleted (it is listed as left). The cleanup takes at
+  most about 60 s. metrics.json gains `interrupted` (signal, stage, time,
+  `prior_failure`, and the objects stopped, left and skipped) and the
+  verdict gate `interrupt`; the verdict is INTERRUPTED, or FAILED when
+  something had already failed, never PASSED. The run then exits 130. A
+  signal while the results are gathered no longer loses the record. A
+  second Ctrl-C cuts the cleanup short and still writes the record; a third
+  stops at once. After an interrupt the run does not measure bucket sizes or
+  read Prometheus. `report --list` shows such a run as Interrupted. Inside
+  the cluster lease the signal still waits for the shared change to finish
+  first. SIGHUP is not handled.
 ### Fixed
 
 - `run --continuous --skip-generate` no longer journals a "Datagen started"

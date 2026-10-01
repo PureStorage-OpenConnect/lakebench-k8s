@@ -297,6 +297,11 @@ class Recorder:
     interrupt_delete_after: int | None = None
     #: The bronze datagen prefix is empty (a batch --generate scenario).
     fresh_bronze: bool = False
+    #: The datagen Job this run deployed has not finished.
+    datagen_running: bool = False
+    #: With ``interrupt``: the state the monitor reports before the signal
+    #: ("completed", "failed"): the application ended, its log is being read.
+    interrupt_after_state: str | None = None
 
     def add(self, *entry: Any) -> None:
         self.calls.append(list(entry))
@@ -626,8 +631,8 @@ class FakeCustomObjectsApi(_FakeApi):
             _precondition_uid(body),
             getattr(body, "propagation_policy", None),
         )
-        if plural != "sparkapplications":
-            raise self._rec.refuse(f"delete of {plural}/{name}")
+        if (group, version, plural) != ("sparkoperator.k8s.io", "v1beta2", "sparkapplications"):
+            raise self._rec.refuse(f"delete of {group}/{version} {plural}/{name}")
         _delete_with_uid(self._rec, "SparkApplication", name, namespace, body)
         return {"status": "Success"}
 
@@ -640,9 +645,10 @@ class FakeBatchV1Api(_FakeApi):
         if name != "lakebench-datagen" or namespace != self._rec.namespace:
             raise _api_exception(404)
         cond = SimpleNamespace(type="Complete", status="True")
+        running = self._rec.datagen_running and self._rec.datagen_uid is not None
         return SimpleNamespace(
             metadata=SimpleNamespace(name=name, uid=self._rec.datagen_uid or "uid-datagen-pre"),
-            status=SimpleNamespace(conditions=[cond]),
+            status=SimpleNamespace(conditions=[] if running else [cond]),
         )
 
     def delete_namespaced_job(self, name, namespace, body=None, **kw):
@@ -939,7 +945,11 @@ class FakeMonitor:
         if a["progress_callback"] is not None:
             a["progress_callback"](running)
         if self._rec.interrupt is not None and self._rec.interrupt[0] == stage:
-            # Ctrl-C (or SIGTERM) while the stage's application runs.
+            # Ctrl-C (or SIGTERM) while the stage's application runs, or, with
+            # interrupt_after_state, once it has ended and its log is read.
+            ended = self._rec.interrupt_after_state
+            if ended is not None and a["progress_callback"] is not None:
+                a["progress_callback"](JobStatus(name=job_name, state=JobState(ended), message=""))
             send_interrupt(self._rec.interrupt[1])
         failed = stage in self._failing
         final = JobStatus(
@@ -1267,6 +1277,8 @@ class FakeBenchmark:
             a["fingerprint"],
         )
         progress = a["progress_callback"]
+        if self._rec.interrupt is not None and self._rec.interrupt[0] == "benchmark":
+            send_interrupt(self._rec.interrupt[1])
         queries = self._queries()
         if a["fingerprint"]:
             # The batch benchmark and the continuous result check: fixed
@@ -1437,6 +1449,8 @@ class FakeDatagenDeployer:
         """Batch --generate's progress poll: both pods have finished."""
         _checked(self._rec, self._real.get_progress, *args, **kwargs)
         self._rec.add("Datagen", "get_progress")
+        if self._rec.interrupt is not None and self._rec.interrupt[0] == "datagen":
+            send_interrupt(self._rec.interrupt[1])
         return {"running": False, "completions": 2, "succeeded": 2}
 
     def __getattr__(self, attr: str):
@@ -1545,6 +1559,9 @@ class Scenario:
     lease_signal: str | None = None
     #: (window second, "SIGINT" | "SIGTERM" | "namespace_gone").
     events: tuple[tuple[float, str], ...] = ()
+    #: The continuous datagen Job is still running when the streams start.
+    datagen_running: bool = False
+    interrupt_after_state: str | None = None
     foreign: tuple[str, ...] = ()
     interrupt_delete_after: int | None = None
 
@@ -1672,6 +1689,8 @@ def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     rec.foreign = set(scenario.foreign)
     rec.interrupt_delete_after = scenario.interrupt_delete_after
     rec.fresh_bronze = "--generate" in scenario.argv
+    rec.datagen_running = scenario.datagen_running
+    rec.interrupt_after_state = scenario.interrupt_after_state
     recall = FIXTURES / scenario.logs / "recall.json"
     if recall.exists():
         # The score stage's sidecar, at the key the run reads.

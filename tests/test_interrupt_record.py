@@ -160,7 +160,6 @@ def handlers():
     yield
     for s, h in saved.items():
         signal.signal(s, h)
-    _interrupt._ACTIVE = None
 
 
 def test_install_and_restore(handlers):
@@ -181,12 +180,13 @@ def test_ignored_signal_stays_ignored(handlers):
     assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
 
 
-def test_a_leaked_instance_is_restored_by_the_next(handlers):
+def test_a_leaked_instance_is_replaced_not_chained(handlers):
     before = signal.getsignal(signal.SIGTERM)
     first = RunInterrupt("ns")
-    first.install()
+    first.install()  # never restored: an error in its run's finally
     second = RunInterrupt("ns")
     second.install()
+    assert second._saved[signal.SIGTERM] == before
     second.restore()
     assert signal.getsignal(signal.SIGTERM) == before
 
@@ -199,21 +199,21 @@ def test_first_raises_second_skips_third_stops(handlers, capsys):
     assert ri.sealing and ri.received == ["SIGTERM"]
     ri._on_signal(signal.SIGINT, None)  # does not raise
     assert ri.skip
-    assert "Skipping the rest of the cleanup" in capsys.readouterr().err
+    assert "the run record is still being written" in capsys.readouterr().err
     with pytest.raises(KeyboardInterrupt):
         ri._on_signal(signal.SIGINT, None)
     assert signal.getsignal(signal.SIGTERM) != ri._on_signal  # restored
     assert ri.interrupt_signal(KeyboardInterrupt()) == "SIGTERM"
 
 
-def test_lease_abort_names_its_signal_and_the_lease():
+def test_lease_abort_names_its_signal():
     from lakebench.deploy.cluster_lock import LeaseAbort
 
     ri = RunInterrupt("ns")
     rec = ri.seal(at_stage="operator-check", prior_failure=False, exc=LeaseAbort(signal.SIGHUP))
     assert rec["signal"] == "SIGHUP"
-    assert rec["left"][0]["object"] == "Spark Operator watch-list change"
-    assert "repair-operator" in rec["left"][0]["reason"]
+    # cluster_lock itself names the recovery when it aborts inside the lease.
+    assert rec["left"] == []
 
 
 def test_no_handler_means_sigint():
@@ -245,7 +245,7 @@ def test_cleanup_deadline_leaves_the_rest(monkeypatch):
 
     clock = iter([0.0, 0.0, 1000.0, 1000.0])
     monkeypatch.setattr(_interrupt, "time", SimpleNamespace(monotonic=lambda: next(clock)))
-    monkeypatch.setattr(RunInterrupt, "_stop_one", lambda self, e: ("stopped", ""))
+    monkeypatch.setattr(RunInterrupt, "_stop_one", lambda self, e, api, timeout: ("stopped", ""))
     rec = ri.seal(at_stage="x", prior_failure=False)
     ri.stop_owned(rec)
     assert rec["stopped"] == ["SparkApplication/lakebench-a"]
@@ -269,7 +269,9 @@ def test_delete_carries_the_uid_precondition():
     assert kwargs["name"] == "lakebench-datagen" and kwargs["namespace"] == "ns"
     assert kwargs["body"].preconditions.uid == "u-dg"
     assert kwargs["body"].propagation_policy == "Background"
-    assert kwargs["_request_timeout"] == _interrupt.CLEANUP_REQUEST_TIMEOUT
+    connect, read = kwargs["_request_timeout"]
+    assert connect == _interrupt.CLEANUP_CONNECT_TIMEOUT_S
+    assert 0 < read <= _interrupt.CLEANUP_READ_TIMEOUT_S
     assert rec["stopped"] == ["Job/lakebench-datagen"]
 
 
@@ -293,7 +295,7 @@ def test_delete_answers(status, outcome):
         assert [x["object"] for x in rec["left"]] == ["SparkApplication/lakebench-x"]
 
 
-def test_unknown_uid_job_is_left_without_an_api_call():
+def test_unknown_uid_job_without_this_runs_id_is_left():
     ri = RunInterrupt("ns", run_id="r1")
     ri.creating("Job", "lakebench-datagen")
     batch = MagicMock()
@@ -301,7 +303,28 @@ def test_unknown_uid_job_is_left_without_an_api_call():
         rec = ri.seal(at_stage="datagen", prior_failure=False)
         ri.stop_owned(rec)
     batch.delete_namespaced_job.assert_not_called()
-    assert rec["left"][0]["reason"].startswith("uid unknown")
+    assert rec["left"][0]["reason"].startswith("exists, but")
+
+
+def test_unknown_uid_absent_object_is_not_recorded():
+    """The interrupt landed before the create: nothing to stop, nothing left."""
+    from kubernetes.client.rest import ApiException
+
+    ri = RunInterrupt("ns", run_id="r1")
+    ri.creating("Job", "lakebench-datagen")
+    batch = MagicMock()
+    batch.read_namespaced_job.side_effect = ApiException(status=404, reason="Not Found")
+    with patch("kubernetes.client.BatchV1Api", return_value=batch):
+        rec = ri.seal(at_stage="datagen", prior_failure=False)
+        ri.stop_owned(rec)
+    batch.delete_namespaced_job.assert_not_called()
+    assert rec["stopped"] == rec["left"] == rec["skipped"] == []
+
+
+def test_cleanup_client_does_not_retry():
+    api_client = _interrupt._cleanup_api_client()
+    assert api_client.configuration.retries is False
+    api_client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -324,3 +347,24 @@ def test_submit_job_returns_the_created_uid():
     api.create_namespaced_custom_object.return_value = {}
     with patch("kubernetes.client.CustomObjectsApi", return_value=api):
         assert mgr.submit_job(JobType.SILVER_BUILD).uid is None
+
+
+def test_report_list_shows_interrupted(tmp_path, monkeypatch):
+    """`lakebench report --list` names an interrupted run, not "Failed"."""
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from lakebench.metrics.storage import MetricsStorage
+
+    monkeypatch.setenv("COLUMNS", "200")
+    storage = MetricsStorage(tmp_path / "runs")
+    for rid, intr in (("20261001-120000-aaaaaa", _intr()), ("20261001-130000-bbbbbb", None)):
+        m = _metrics(intr, [_job("bronze-verify")])
+        m.run_id = rid
+        m.end_time = T0
+        storage.save_run(m)
+    result = CliRunner().invoke(app, ["report", "--metrics", str(tmp_path / "runs"), "--list"])
+    assert result.exit_code == 0, result.output
+    rows = {line.split()[1]: line for line in result.output.splitlines() if "2026100" in line}
+    assert "Interrupted" in rows["20261001-120000-aaaaaa"]
+    assert "Failed" in rows["20261001-130000-bbbbbb"]

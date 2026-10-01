@@ -1971,8 +1971,10 @@ def run(
     _interrupt = RunInterrupt(cfg.get_namespace(), run_id)
     _interrupt.install()
     _stage = "operator-check"
-    # The stage whose SparkApplication is running: (stage name, start).
+    # The stage whose SparkApplication is running: (stage name, start), and
+    # the last state the monitor reported for it.
     _inflight: tuple[str, Any] | None = None
+    _inflight_state: Any = None
     _interrupted: dict | None = None
 
     try:
@@ -2052,7 +2054,7 @@ def run(
                     TimeRemainingColumn,
                 )
 
-                from lakebench.deploy import DatagenDeployer, DeploymentEngine
+                from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
                 # A4 (v1.6): CLI-level bronze safety. Refuse a non-empty
                 # bronze prefix unless --regenerate was passed; with the
@@ -2062,8 +2064,11 @@ def run(
                 dg_engine = DeploymentEngine(cfg)
                 datagen_deployer = DatagenDeployer(dg_engine)
                 _interrupt.creating("Job", "lakebench-datagen")
-                datagen_deployer.deploy()
-                _interrupt.datagen_created()
+                _dg_deploy = datagen_deployer.deploy()
+                if _dg_deploy.status == DeploymentStatus.SUCCESS:
+                    _interrupt.datagen_created()
+                else:
+                    _interrupt.not_created("Job", "lakebench-datagen")
 
                 # Progress bar (same as standalone generate command)
                 _dg_start = _time.time()
@@ -2090,6 +2095,7 @@ def run(
                                 raise typer.Exit(1)
                             _dg_bar.update(_dg_task, completed=_total_pods)
                             _dg_timed_out = False
+                            _interrupt.finished("Job", "lakebench-datagen")
                             break
                         if _dg_prog.get("oom_pods"):
                             _dg_bar.stop()
@@ -2277,6 +2283,7 @@ def run(
                             print_error(f"Datagen did not complete: {dg_wait.message}")
                             pipeline_success = False
                             break
+                        _interrupt.finished("Job", "lakebench-datagen")
                 except Exception as e:
                     print_error(f"Cycle datagen failed: {e}")
                     pipeline_success = False
@@ -2346,6 +2353,7 @@ def run(
                 # same point the monitor's elapsed counted from.
                 job_submitted = utc_now()
                 _inflight = (stage_name, job_start)
+                _inflight_state = None
 
                 # Wait for completion -- capture max executor count seen
                 _max_executors = 0
@@ -2354,7 +2362,11 @@ def run(
                 _last_heartbeat_ts = job_start
 
                 def on_progress(status, _start=job_start, _hb=[job_start]):  # noqa: B006
-                    nonlocal _max_executors, _last_reported_executors
+                    nonlocal _max_executors, _last_reported_executors, _inflight_state
+                    # The monitor reports each state change, the terminal one
+                    # too, before it reads the driver log: an interrupt during
+                    # that read knows how the application ended.
+                    _inflight_state = status.state
                     if status.state == JobState.RUNNING:
                         _max_executors = max(_max_executors, status.executor_count)
                         elapsed = (utc_now() - _start).total_seconds()
@@ -2378,6 +2390,10 @@ def run(
                 _inflight = None
                 if result.success:
                     _interrupt.finished("SparkApplication", f"lakebench-{stage_name}")
+                else:
+                    # Before the log parse and bucket listing below: an
+                    # interrupt there must still find the run failed.
+                    pipeline_success = False
                 # The poll that saw the end, less the driver-log fetch the
                 # monitor did after it.
                 job_observed_end = job_submitted + timedelta(seconds=result.elapsed_seconds)
@@ -3127,7 +3143,18 @@ def run(
         # signal cannot leave the record without its interrupt block; then
         # this run's unfinished objects are deleted, by uid. Not re-raised:
         # the finally writes the record and exits 130.
-        _interrupted = _interrupt.seal(at_stage=_stage, prior_failure=not pipeline_success, exc=e)
+        from lakebench.modules.pipeline_engines.spark.job import FAILURE_STATES, SUCCESS_STATES
+
+        # The monitor may have seen the stage end before the interrupt landed
+        # (it reads the driver log after the terminal state).
+        _inflight_failed = _inflight is not None and _inflight_state in FAILURE_STATES
+        if _inflight is not None and _inflight_state in SUCCESS_STATES:
+            _interrupt.finished("SparkApplication", f"lakebench-{_inflight[0]}")
+        _interrupted = _interrupt.seal(
+            at_stage=_stage,
+            prior_failure=not pipeline_success or _inflight_failed,
+            exc=e,
+        )
         pipeline_success = False
         _pipeline_exit_code = EXIT_INTERRUPTED
         if _inflight is not None:
@@ -3141,13 +3168,22 @@ def run(
                     elapsed_seconds=(_end - _inflight[1]).total_seconds(),
                     timing_source="interrupted",
                     success=False,
-                    error_message="interrupted",
+                    # A stage that had already failed is a failed job, not
+                    # the one the interrupt stopped.
+                    error_message=(
+                        f"{_inflight_state.value} (interrupted before its result was read)"
+                        if _inflight_failed
+                        else "interrupted"
+                    ),
                 )
             )
         console.print()
         print_warning(f"Interrupted by {_interrupted['signal']} during {_stage}")
         _interrupt.stop_owned(_interrupted, console)
     finally:
+        # A signal from here on does not stop the record being written (a
+        # third one still does, cli/_interrupt.py).
+        _interrupt.begin_seal()
         # -- Phase 7/7: Results ----------------------------------------------------
         console.print()
         console.print("[bold dim]Phase 7/7: Results[/bold dim]")
@@ -3179,6 +3215,11 @@ def run(
                 )
             except Exception as e:
                 console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
+        if _interrupted is None and _interrupt.late_signal():
+            # Interrupted while the results were gathered: sealed the same way.
+            _interrupted = _interrupt.seal(at_stage="results", prior_failure=not pipeline_success)
+            pipeline_success = False
+            _pipeline_exit_code = EXIT_INTERRUPTED
 
         # Always save metrics, even on failure
         run_metrics = collector.end_run(success=pipeline_success)
