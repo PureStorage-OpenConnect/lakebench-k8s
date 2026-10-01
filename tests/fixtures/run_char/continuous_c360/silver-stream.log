@@ -1,0 +1,140 @@
+[lb] 2026-10-01T15:05:59.658835 - ============================================================
+[lb] 2026-10-01T15:05:59.658910 - Silver Stream (Structured Streaming)
+[lb] 2026-10-01T15:05:59.658923 - ============================================================
+[lb] 2026-10-01T15:05:59.658928 - Source table: lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:05:59.658936 - Target table: lakehouse.silver.customer_interactions_enriched
+[lb] 2026-10-01T15:05:59.658943 - Checkpoint:   s3a://runchar-silver/checkpoints/silver-stream/
+[lb] 2026-10-01T15:05:59.658949 - Trigger:      60 seconds
+[lb] 2026-10-01T15:05:59.658996 - silver_stream_scale_cap: measured_up_to_scale_10
+[lb] 2026-10-01T15:05:59.659003 - silver_stream_scale_admission: ok
+[lb] 2026-10-01T15:05:59.659009 - Creating Iceberg namespace...
+[lb] 2026-10-01T15:06:02.394578 - Created namespace lakehouse.silver
+[lb] 2026-10-01T15:06:03.707753 - Data clock (recency anchor): 2024-12-31 from LB_DATA_CLOCK
+[lb] 2026-10-01T15:06:03.796207 - Waiting for lakehouse.default.bronze_raw to be created (0s elapsed)...
+[lb] 2026-10-01T15:06:19.343745 - Bronze table lakehouse.default.bronze_raw exists (waited 15s)
+[lb] 2026-10-01T15:06:22.351250 - [b5] WARNING: sidecar s3a://runchar-silver/checkpoints/silver-stream/bronze_fingerprint.json was missing; wrote current fingerprint (1740981236689018541). Guard is active from next start onward.
+[lb] 2026-10-01T15:06:22.957677 - Streaming query started, awaiting termination...
+[lb] 2026-10-01T15:06:27.696411 - Batch 0: transforming 30,982 rows
+[lb] 2026-10-01T15:06:35.782317 - Batch 0: 30,415 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:06:35.860035 - Batch 0: creating Silver table with partitioning
+[lb] 2026-10-01T15:06:45.341093 - Batch 0: committed to lakehouse.silver.customer_interactions_enriched in 21.5s
+[lb] 2026-10-01T15:07:01.935160 - Batch 1: transforming 30,982 rows
+[lb] 2026-10-01T15:07:07.198010 - Batch 1: 30,360 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:07:12.710755 - Batch 1: committed to lakehouse.silver.customer_interactions_enriched in 12.4s
+[lb] 2026-10-01T15:08:01.064929 - Batch 2: transforming 61,964 rows
+[lb] 2026-10-01T15:08:07.065719 - Batch 2: 60,676 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:08:11.614610 - Batch 2: committed to lakehouse.silver.customer_interactions_enriched in 11.3s
+[lb] 2026-10-01T15:09:00.985753 - Batch 3: transforming 61,964 rows
+[lb] 2026-10-01T15:09:06.263727 - Batch 3: 60,719 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:09:10.615859 - Batch 3: committed to lakehouse.silver.customer_interactions_enriched in 10.3s
+[lb] 2026-10-01T15:10:00.914178 - Batch 4: transforming 61,964 rows
+[lb] 2026-10-01T15:10:04.465915 - Batch 4: 60,750 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:10:08.250585 - Batch 4: committed to lakehouse.silver.customer_interactions_enriched in 8.0s
+[lb] 2026-10-01T15:11:01.085808 - Batch 5: transforming 61,964 rows
+[lb] 2026-10-01T15:11:04.664801 - Batch 5: 60,679 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:11:08.200631 - Batch 5: committed to lakehouse.silver.customer_interactions_enriched in 7.7s
+[lb] 2026-10-01T15:12:00.867041 - Batch 6: transforming 61,964 rows
+[lb] 2026-10-01T15:12:04.108469 - Batch 6: 60,701 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:12:07.718760 - Batch 6: committed to lakehouse.silver.customer_interactions_enriched in 7.4s
+[lb] 2026-10-01T15:13:00.892487 - Batch 7: transforming 61,964 rows
+[lb] 2026-10-01T15:13:04.641209 - Batch 7: 60,692 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:13:08.119025 - Batch 7: committed to lakehouse.silver.customer_interactions_enriched in 7.8s
+[lb] 2026-10-01T15:14:00.857061 - Batch 8: transforming 61,964 rows
+[lb] 2026-10-01T15:14:04.311778 - Batch 8: 60,788 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:14:07.754040 - Batch 8: committed to lakehouse.silver.customer_interactions_enriched in 7.5s
+[lb] 2026-10-01T15:15:00.844057 - Batch 9: transforming 61,964 rows
+[lb] 2026-10-01T15:15:04.348801 - Batch 9: 60,738 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:15:08.057768 - Batch 9: committed to lakehouse.silver.customer_interactions_enriched in 7.8s
+[lb] 2026-10-01T15:16:00.819216 - Batch 10: transforming 61,964 rows
+[lb] 2026-10-01T15:16:04.314043 - Batch 10: 60,681 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:16:07.861736 - Batch 10: committed to lakehouse.silver.customer_interactions_enriched in 7.6s
+[lb] 2026-10-01T15:17:00.867788 - Batch 11: transforming 61,964 rows
+[lb] 2026-10-01T15:17:04.221328 - Batch 11: 60,703 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:17:07.613726 - Batch 11: committed to lakehouse.silver.customer_interactions_enriched in 7.4s
+[lb] 2026-10-01T15:18:00.856032 - Batch 12: transforming 61,964 rows
+[lb] 2026-10-01T15:18:04.322697 - Batch 12: 60,738 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:18:07.696510 - Batch 12: committed to lakehouse.silver.customer_interactions_enriched in 7.4s
+[lb] 2026-10-01T15:19:00.831398 - Batch 13: transforming 61,964 rows
+[lb] 2026-10-01T15:19:03.950494 - Batch 13: 60,769 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:19:07.144153 - Batch 13: committed to lakehouse.silver.customer_interactions_enriched in 6.9s
+[lb] 2026-10-01T15:20:00.876071 - Batch 14: transforming 61,964 rows
+[lb] 2026-10-01T15:20:04.251645 - Batch 14: 60,779 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:20:07.565711 - Batch 14: committed to lakehouse.silver.customer_interactions_enriched in 7.3s
+[lb] 2026-10-01T15:21:00.858571 - Batch 15: transforming 61,964 rows
+[lb] 2026-10-01T15:21:04.100085 - Batch 15: 60,718 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:21:07.294335 - Batch 15: committed to lakehouse.silver.customer_interactions_enriched in 7.0s
+[lb] 2026-10-01T15:22:00.859821 - Batch 16: transforming 61,964 rows
+[lb] 2026-10-01T15:22:04.168742 - Batch 16: 60,684 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:22:07.344753 - Batch 16: committed to lakehouse.silver.customer_interactions_enriched in 7.1s
+[lb] 2026-10-01T15:23:00.961581 - Batch 17: transforming 61,964 rows
+[lb] 2026-10-01T15:23:04.308384 - Batch 17: 60,707 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:23:07.549502 - Batch 17: committed to lakehouse.silver.customer_interactions_enriched in 7.2s
+[lb] 2026-10-01T15:24:00.801257 - Batch 18: transforming 61,964 rows
+[lb] 2026-10-01T15:24:04.032299 - Batch 18: 60,768 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:24:07.201418 - Batch 18: committed to lakehouse.silver.customer_interactions_enriched in 7.0s
+[lb] 2026-10-01T15:25:00.814330 - Batch 19: transforming 61,964 rows
+[lb] 2026-10-01T15:25:04.181628 - Batch 19: 60,685 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:25:07.353642 - Batch 19: committed to lakehouse.silver.customer_interactions_enriched in 7.1s
+[lb] 2026-10-01T15:26:00.820158 - Batch 20: transforming 61,964 rows
+[lb] 2026-10-01T15:26:04.108378 - Batch 20: 60,685 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:26:07.301845 - Batch 20: committed to lakehouse.silver.customer_interactions_enriched in 7.0s
+[lb] 2026-10-01T15:27:00.798241 - Batch 21: transforming 61,964 rows
+[lb] 2026-10-01T15:27:04.032801 - Batch 21: 60,737 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:27:07.312007 - Batch 21: committed to lakehouse.silver.customer_interactions_enriched in 7.1s
+[lb] 2026-10-01T15:28:00.839079 - Batch 22: transforming 61,964 rows
+[lb] 2026-10-01T15:28:04.159648 - Batch 22: 60,697 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:28:07.377648 - Batch 22: committed to lakehouse.silver.customer_interactions_enriched in 7.1s
+[lb] 2026-10-01T15:29:00.812517 - Batch 23: transforming 61,964 rows
+[lb] 2026-10-01T15:29:04.131467 - Batch 23: 60,754 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:29:07.215412 - Batch 23: committed to lakehouse.silver.customer_interactions_enriched in 7.0s
+[lb] 2026-10-01T15:30:00.780194 - Batch 24: transforming 61,964 rows
+[lb] 2026-10-01T15:30:04.058015 - Batch 24: 60,737 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:30:07.077166 - Batch 24: committed to lakehouse.silver.customer_interactions_enriched in 6.8s
+[lb] 2026-10-01T15:31:00.786833 - Batch 25: transforming 61,964 rows
+[lb] 2026-10-01T15:31:03.849359 - Batch 25: 60,699 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:31:07.025895 - Batch 25: committed to lakehouse.silver.customer_interactions_enriched in 6.8s
+[lb] 2026-10-01T15:32:00.808349 - Batch 26: transforming 61,964 rows
+[lb] 2026-10-01T15:32:03.957081 - Batch 26: 60,684 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:32:07.038228 - Batch 26: committed to lakehouse.silver.customer_interactions_enriched in 6.8s
+[lb] 2026-10-01T15:33:00.814817 - Batch 27: transforming 61,964 rows
+[lb] 2026-10-01T15:33:04.000286 - Batch 27: 60,722 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:33:07.050768 - Batch 27: committed to lakehouse.silver.customer_interactions_enriched in 6.8s
+[lb] 2026-10-01T15:34:00.808835 - Batch 28: transforming 61,964 rows
+[lb] 2026-10-01T15:34:03.879148 - Batch 28: 60,723 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:34:06.945206 - Batch 28: committed to lakehouse.silver.customer_interactions_enriched in 6.7s
+[lb] 2026-10-01T15:35:00.807985 - Batch 29: transforming 61,964 rows
+[lb] 2026-10-01T15:35:04.055447 - Batch 29: 60,688 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:35:07.090127 - Batch 29: committed to lakehouse.silver.customer_interactions_enriched in 6.9s
+[lb] 2026-10-01T15:36:00.797246 - Batch 30: transforming 61,964 rows
+[lb] 2026-10-01T15:36:03.924493 - Batch 30: 60,646 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:36:06.963168 - Batch 30: committed to lakehouse.silver.customer_interactions_enriched in 6.7s
+[lb] 2026-10-01T15:37:00.804417 - Batch 31: transforming 61,964 rows
+[lb] 2026-10-01T15:37:04.006827 - Batch 31: 60,698 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:37:07.024166 - Batch 31: committed to lakehouse.silver.customer_interactions_enriched in 6.8s
+[lb] 2026-10-01T15:38:00.754712 - Batch 32: transforming 61,964 rows
+[lb] 2026-10-01T15:38:03.874070 - Batch 32: 60,716 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:38:06.923173 - Batch 32: committed to lakehouse.silver.customer_interactions_enriched in 6.7s
+[lb] 2026-10-01T15:39:00.810501 - Batch 33: transforming 61,964 rows
+[lb] 2026-10-01T15:39:04.040080 - Batch 33: 60,737 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:39:07.117991 - Batch 33: committed to lakehouse.silver.customer_interactions_enriched in 6.9s
+[lb] 2026-10-01T15:40:00.776206 - Batch 34: transforming 61,964 rows
+[lb] 2026-10-01T15:40:04.100387 - Batch 34: 60,767 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:40:07.091730 - Batch 34: committed to lakehouse.silver.customer_interactions_enriched in 6.9s
+[lb] 2026-10-01T15:41:00.775009 - Batch 35: transforming 61,964 rows
+[lb] 2026-10-01T15:41:03.905335 - Batch 35: 60,708 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:41:06.938910 - Batch 35: committed to lakehouse.silver.customer_interactions_enriched in 6.7s
+[lb] 2026-10-01T15:42:00.840948 - Batch 36: transforming 61,964 rows
+[lb] 2026-10-01T15:42:04.008141 - Batch 36: 60,665 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:42:07.049812 - Batch 36: committed to lakehouse.silver.customer_interactions_enriched in 6.8s
+[lb] 2026-10-01T15:43:00.792627 - Batch 37: transforming 61,964 rows
+[lb] 2026-10-01T15:43:04.175773 - Batch 37: 60,678 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:43:07.172922 - Batch 37: committed to lakehouse.silver.customer_interactions_enriched in 7.0s
+[lb] 2026-10-01T15:44:00.790797 - Batch 38: transforming 61,964 rows
+[lb] 2026-10-01T15:44:03.958376 - Batch 38: 60,739 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:44:07.069637 - Batch 38: committed to lakehouse.silver.customer_interactions_enriched in 6.8s
+[lb] 2026-10-01T15:45:00.780257 - Batch 39: transforming 61,964 rows
+[lb] 2026-10-01T15:45:04.085807 - Batch 39: 60,622 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:45:07.024176 - Batch 39: committed to lakehouse.silver.customer_interactions_enriched in 6.8s
+[lb] 2026-10-01T15:46:00.786923 - Batch 40: transforming 61,964 rows
+[lb] 2026-10-01T15:46:03.967887 - Batch 40: 60,709 rows after transforms (filtered ~2%)
+[lb] 2026-10-01T15:46:06.939428 - Batch 40: committed to lakehouse.silver.customer_interactions_enriched in 6.7s

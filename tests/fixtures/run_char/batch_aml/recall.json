@@ -1,0 +1,373 @@
+{
+ "chance_by_rule": {
+  "W17_layering_chain": 0.00281214848143982,
+  "W4_risk_propagation": 0.07761529808773904,
+  "W7_cross_border_high_risk": 0.0421822272215973,
+  "W8_dormant_reactivation": 0.0686164229471316
+ },
+ "computed_by": "lb-score-financial",
+ "fp_alerts": 709589,
+ "fp_rate": 0.9863170024171813,
+ "fp_rate_by_rule": {
+  "W17_layering_chain": 0.9897681059098382,
+  "W2_structuring": 0.996600084997875,
+  "W3_round_tripping": 0.7259259259259259,
+  "W4_risk_propagation": 0.9934794714726877,
+  "W5_sanctions_match": 0.6111111111111112,
+  "W6_pep_counterparty": 0.9517652909000497,
+  "W7_cross_border_high_risk": 0.9971849939580358,
+  "W8_dormant_reactivation": 0.9974044602301834
+ },
+ "random_control_floor": 0.1766029246344207,
+ "rules": [
+  {
+   "alert_count": 46228,
+   "reason": null,
+   "rule_id": "W17_layering_chain",
+   "status": "ran",
+   "target_typology": "stack"
+  },
+  {
+   "alert_count": null,
+   "reason": "giant-component",
+   "rule_id": "W1_connected_components",
+   "status": "skipped",
+   "target_typology": "gather_scatter"
+  },
+  {
+   "alert_count": 2353,
+   "reason": null,
+   "rule_id": "W2_structuring",
+   "status": "ran",
+   "target_typology": "micro_structuring"
+  },
+  {
+   "alert_count": 1620,
+   "reason": null,
+   "rule_id": "W3_round_tripping",
+   "status": "ran",
+   "target_typology": "cycle"
+  },
+  {
+   "alert_count": 98765,
+   "reason": null,
+   "rule_id": "W4_risk_propagation",
+   "status": "ran",
+   "target_typology": "rapid_layering"
+  },
+  {
+   "alert_count": 126,
+   "reason": null,
+   "rule_id": "W5_sanctions_match",
+   "status": "ran",
+   "target_typology": "sanctions_match"
+  },
+  {
+   "alert_count": 2011,
+   "reason": null,
+   "rule_id": "W6_pep_counterparty",
+   "status": "ran",
+   "target_typology": "pep_match"
+  },
+  {
+   "alert_count": 509768,
+   "reason": null,
+   "rule_id": "W7_cross_border_high_risk",
+   "status": "ran",
+   "target_typology": "corridor_high_risk"
+  },
+  {
+   "alert_count": 58562,
+   "reason": null,
+   "rule_id": "W8_dormant_reactivation",
+   "status": "ran",
+   "target_typology": "dormant_reactivation"
+  }
+ ],
+ "run_id": "20261001-114528-37810a-c1",
+ "subject_customer_check": {
+  "by_typology": {
+   "bipartite": {
+    "not_customer": 0,
+    "subjects": 111,
+    "unmapped": 0
+   },
+   "corridor_high_risk": {
+    "not_customer": 0,
+    "subjects": 594,
+    "unmapped": 0
+   },
+   "cross_border_cycle": {
+    "not_customer": 0,
+    "subjects": 356,
+    "unmapped": 0
+   },
+   "cycle": {
+    "not_customer": 0,
+    "subjects": 444,
+    "unmapped": 0
+   },
+   "dormant_reactivation": {
+    "not_customer": 0,
+    "subjects": 356,
+    "unmapped": 0
+   },
+   "fan_in": {
+    "not_customer": 0,
+    "subjects": 356,
+    "unmapped": 0
+   },
+   "fan_out": {
+    "not_customer": 0,
+    "subjects": 356,
+    "unmapped": 0
+   },
+   "gather_scatter": {
+    "not_customer": 0,
+    "subjects": 222,
+    "unmapped": 0
+   },
+   "micro_structuring": {
+    "not_customer": 0,
+    "subjects": 222,
+    "unmapped": 0
+   },
+   "pep_match": {
+    "not_customer": 0,
+    "subjects": 65,
+    "unmapped": 0
+   },
+   "random": {
+    "not_customer": 0,
+    "subjects": 1778,
+    "unmapped": 0
+   },
+   "rapid_layering": {
+    "not_customer": 0,
+    "subjects": 889,
+    "unmapped": 0
+   },
+   "sanctions_match": {
+    "not_customer": 0,
+    "subjects": 40,
+    "unmapped": 0
+   },
+   "scatter_gather": {
+    "not_customer": 0,
+    "subjects": 178,
+    "unmapped": 0
+   },
+   "stack": {
+    "not_customer": 0,
+    "subjects": 444,
+    "unmapped": 0
+   },
+   "synthetic_identity": {
+    "not_customer": 0,
+    "subjects": 593,
+    "unmapped": 0
+   },
+   "tbml_repeated_invoice": {
+    "not_customer": 0,
+    "subjects": 296,
+    "unmapped": 0
+   }
+  },
+  "failing_typologies": [],
+  "not_customer": 0,
+  "status": "ok",
+  "subjects": 7300,
+  "unmapped": 0,
+  "unresolved_typologies": []
+ },
+ "total_alerts": 719433,
+ "txn_precision_by_rule": {
+  "W17_layering_chain": 0.012849732238985445,
+  "W2_structuring": 0.003486120077469335,
+  "W3_round_tripping": 0.27942101950912523,
+  "W4_risk_propagation": 0.0004287743149740181,
+  "W5_sanctions_match": 0.28431372549019607,
+  "W6_pep_counterparty": 0.04823470909995027,
+  "W7_cross_border_high_risk": 0.0028150060419641874,
+  "W8_dormant_reactivation": 0.0025955397698166046
+ },
+ "typologies": [
+  {
+   "designated_rules": null,
+   "detection_status": "no_rule",
+   "incidental_recall": 0.7387387387387387,
+   "instance_count": 111,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "bipartite",
+   "workload_category": "W1_synthetic_id"
+  },
+  {
+   "designated_rules": "W7_cross_border_high_risk",
+   "detection_status": "scored",
+   "incidental_recall": 0.8484848484848485,
+   "instance_count": 594,
+   "recall": 0.8013468013468014,
+   "subjects_not_customer": 0,
+   "typology_type": "corridor_high_risk",
+   "workload_category": "W3_round_tripping"
+  },
+  {
+   "designated_rules": null,
+   "detection_status": "no_rule",
+   "incidental_recall": 1.0,
+   "instance_count": 356,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "cross_border_cycle",
+   "workload_category": "W3_round_tripping"
+  },
+  {
+   "designated_rules": "W3_round_tripping",
+   "detection_status": "scored",
+   "incidental_recall": 1.0,
+   "instance_count": 444,
+   "recall": 1.0,
+   "subjects_not_customer": 0,
+   "typology_type": "cycle",
+   "workload_category": "W3_round_tripping"
+  },
+  {
+   "designated_rules": "W8_dormant_reactivation",
+   "detection_status": "scored",
+   "incidental_recall": 0.5646067415730337,
+   "instance_count": 356,
+   "recall": 0.398876404494382,
+   "subjects_not_customer": 0,
+   "typology_type": "dormant_reactivation",
+   "workload_category": "W2_structuring"
+  },
+  {
+   "designated_rules": null,
+   "detection_status": "no_rule",
+   "incidental_recall": 0.4157303370786517,
+   "instance_count": 356,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "fan_in",
+   "workload_category": "W2_structuring"
+  },
+  {
+   "designated_rules": null,
+   "detection_status": "no_rule",
+   "incidental_recall": 0.40168539325842695,
+   "instance_count": 356,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "fan_out",
+   "workload_category": "W2_structuring"
+  },
+  {
+   "designated_rules": "W1_connected_components",
+   "detection_status": "rule_skipped",
+   "incidental_recall": 0.6171171171171171,
+   "instance_count": 222,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "gather_scatter",
+   "workload_category": "W2_structuring"
+  },
+  {
+   "designated_rules": "W2_structuring",
+   "detection_status": "scored",
+   "incidental_recall": 0.6576576576576577,
+   "instance_count": 222,
+   "recall": 0.036036036036036036,
+   "subjects_not_customer": 0,
+   "typology_type": "micro_structuring",
+   "workload_category": "W2_structuring"
+  },
+  {
+   "designated_rules": "W6_pep_counterparty",
+   "detection_status": "scored",
+   "incidental_recall": 0.8,
+   "instance_count": 65,
+   "recall": 0.7076923076923077,
+   "subjects_not_customer": 0,
+   "typology_type": "pep_match",
+   "workload_category": "W6_pep"
+  },
+  {
+   "designated_rules": null,
+   "detection_status": "no_rule",
+   "incidental_recall": 0.1766029246344207,
+   "instance_count": 1778,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "random",
+   "workload_category": "W2_structuring"
+  },
+  {
+   "designated_rules": "W4_risk_propagation",
+   "detection_status": "scored",
+   "incidental_recall": 0.7300337457817773,
+   "instance_count": 889,
+   "recall": 0.6816647919010124,
+   "subjects_not_customer": 0,
+   "typology_type": "rapid_layering",
+   "workload_category": "W3_round_tripping"
+  },
+  {
+   "designated_rules": "W5_sanctions_match",
+   "detection_status": "scored",
+   "incidental_recall": 0.8,
+   "instance_count": 40,
+   "recall": 0.725,
+   "subjects_not_customer": 0,
+   "typology_type": "sanctions_match",
+   "workload_category": "W5_sanctions"
+  },
+  {
+   "designated_rules": null,
+   "detection_status": "no_rule",
+   "incidental_recall": 0.7303370786516854,
+   "instance_count": 178,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "scatter_gather",
+   "workload_category": "W3_round_tripping"
+  },
+  {
+   "designated_rules": "W17_layering_chain",
+   "detection_status": "scored",
+   "incidental_recall": 0.9977477477477478,
+   "instance_count": 444,
+   "recall": 0.9977477477477478,
+   "subjects_not_customer": 0,
+   "typology_type": "stack",
+   "workload_category": "W2_structuring"
+  },
+  {
+   "designated_rules": null,
+   "detection_status": "no_rule",
+   "incidental_recall": 0.3642495784148398,
+   "instance_count": 593,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "synthetic_identity",
+   "workload_category": "W1_synthetic_id"
+  },
+  {
+   "designated_rules": null,
+   "detection_status": "no_rule",
+   "incidental_recall": 0.38175675675675674,
+   "instance_count": 296,
+   "recall": null,
+   "subjects_not_customer": 0,
+   "typology_type": "tbml_repeated_invoice",
+   "workload_category": "W2_structuring"
+  }
+ ],
+ "typology_counts": {
+  "no_rule": 8,
+  "partial": 0,
+  "rule_error": 0,
+  "rule_skipped": 1,
+  "scored": 8
+ }
+}

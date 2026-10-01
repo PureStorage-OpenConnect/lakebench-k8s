@@ -97,3 +97,57 @@ def test_seam_fakes_refuse_calls_the_real_signature_would():
     with pytest.raises(Unscripted):
         _checked(rec, real, object(), ns="ns")
     assert len(rec.unscripted) == 1
+
+
+def test_continuous_c360(tmp_path, monkeypatch):
+    trace = run_scenario("continuous_c360", tmp_path, monkeypatch)
+    assert_trace_equal(trace, load_golden("continuous_c360"))
+
+
+def test_seeded_continuous_window_change_fails(tmp_path, monkeypatch):
+    """A seeded change to the continuous runner, through the real
+    _run_sustained(): the streams no longer receive their window length,
+    and the characterisation fails on the first stream submission."""
+    import lakebench.cli._sustained as sustained
+
+    real = sustained._streaming_job_env
+
+    def without_window(run_id, run_duration):
+        env = real(run_id, run_duration)
+        env.pop("LB_CONTINUOUS_WINDOW_S")
+        return env
+
+    monkeypatch.setattr(sustained, "_streaming_job_env", without_window)
+    trace = run_scenario("continuous_c360", tmp_path, monkeypatch)
+    with pytest.raises(TraceMismatch, match=r"submits\[1\]"):
+        assert_trace_equal(trace, load_golden("continuous_c360"))
+
+
+def test_stream_logs_are_cut_at_the_cluster_clock():
+    from datetime import datetime
+
+    from tests.harness.run_harness import log_until
+
+    text = (
+        "[lb] 2026-10-01T15:05:58.280383 - start\n"
+        "untimed line\n"
+        "[lb] 2026-10-01T15:06:30.000000 - batch 1\n"
+        "[lb] 2026-10-01T15:07:00.000000 - batch 2\n"
+    )
+    cut = log_until(text, datetime(2026, 10, 1, 15, 6, 30))
+    assert cut.splitlines() == [
+        "[lb] 2026-10-01T15:05:58.280383 - start",
+        "untimed line",
+        "[lb] 2026-10-01T15:06:30.000000 - batch 1",
+    ]
+    assert log_until(text, datetime(2026, 10, 1, 15, 0)) == ""
+
+
+def test_batch_aml(tmp_path, monkeypatch):
+    trace = run_scenario("batch_aml", tmp_path, monkeypatch)
+    assert_trace_equal(trace, load_golden("batch_aml"))
+
+
+def test_continuous_c360_skip_generate(tmp_path, monkeypatch):
+    trace = run_scenario("continuous_c360_skip_generate", tmp_path, monkeypatch)
+    assert_trace_equal(trace, load_golden("continuous_c360_skip_generate"))

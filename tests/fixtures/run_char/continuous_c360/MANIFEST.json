@@ -1,0 +1,29 @@
+{
+  "scenario": "continuous_c360",
+  "source_run": "run-20261001-090400-db3ffe",
+  "source_deployment": "lb17-sd19-c360 (hive-iceberg-spark-trino, Customer 360 continuous, scale 1, 1800 s window, 2024-01-01 to 2025-01-01)",
+  "scrubber": "tests.harness.run_harness.scrub_driver_log, source name lb17-sd19-c360 -> runchar",
+  "files": {
+    "bronze-verify.log": {
+      "source": "lb17-sd19-c360 lakebench-bronze-verify-driver pod log (captured after the job completed)",
+      "source_sha256": "eb6002394c25918d9d243df717bab965374f19f15e7d83104be15d06b0112d41",
+      "sha256": "c461a172c480db68a64cf496f6d4bcbe103682983fde33b93990b196a394d3a9"
+    },
+    "bronze-ingest.log": {
+      "source": "lb17-sd19-c360 lakebench-bronze-ingest-driver pod log (the last capture before the streams stopped; its first lines are byte-equal to the run's window-end capture)",
+      "source_sha256": "02df40a946ecb8c4bfd685b5532871d463dee21549adaf909f752c3eb35229af",
+      "sha256": "b199a6b9aedd42a55ed5abf091f403dba108e7d20b67aa5509509530b7ffb408"
+    },
+    "silver-stream.log": {
+      "source": "lb17-sd19-c360 lakebench-silver-stream-driver pod log (the last capture before the streams stopped; its first lines are byte-equal to the run's window-end capture)",
+      "source_sha256": "39943756d3fd02c06516340e1f146e3cdae1c9ee7eb82967ffdb6ad2750593a1",
+      "sha256": "a35abd5dafc81c753434420f5110a5ff2883fcdaea9b9fdd3c5b7987b277fa9f"
+    },
+    "gold-refresh.log": {
+      "source": "lb17-sd19-c360 lakebench-gold-refresh-driver pod log (the last capture before the streams stopped; its first lines are byte-equal to the run's window-end capture)",
+      "source_sha256": "4a692a321db596e19c1dbea4a52326b6ffd780954248718ac47ae41f955a0ea3",
+      "sha256": "9c1a9612857dae8de586fd3d9f7d52f9dca0b1da4d92e92f410d5faddebcfa31"
+    }
+  },
+  "fingerprints.json": "continuous.result_check.fingerprints of the source run, unchanged"
+}
