@@ -258,15 +258,15 @@ def test_no_bare_force_release_of_lease(path: Path) -> None:
         if not m:
             continue
         window = block.lower()
-        # Require at least one of: mention of "expired-only", "last resort",
-        # "confirm", or "holder" nearby (the safer paths).
-        allowed = ("expired-only", "last resort", "check the holder", "check who")
+        # Require at least one of: "last resort", or a check of the holder
+        # nearby (the safer paths).
+        allowed = ("last resort", "check the holder", "check who")
         assert any(w in window for w in allowed), (
             f"{path}: hint block at offset {start} suggests `Pass --force to "
             "release` for the cluster lease without steering the user to "
-            "`--expired-only` first and without flagging `--force` as a "
+            "check the holder first and without flagging `--force` as a "
             "last-resort with confirmation. Rephrase to check the holder, "
-            "prefer `--expired-only`, mention `--force` last."
+            "prefer `release-lock` without `--force`, mention `--force` last."
         )
 
 

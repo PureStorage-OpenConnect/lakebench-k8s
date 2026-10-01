@@ -508,7 +508,12 @@ def _print_recipe_detail(name: str) -> None:
     console.print()
 
 
-@config_app.command("upgrade", hidden=True)
+@config_app.command(
+    "upgrade",
+    hidden=True,
+    # Any old argument or flag reaches the refusal, so Click never echoes one.
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
 def config_upgrade(
     config_file: Annotated[
         Path | None,

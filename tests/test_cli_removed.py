@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +13,8 @@ from typer.testing import CliRunner
 
 from lakebench.cli import app
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src" / "lakebench"
 SENTINEL = "SENTINEL-SECRET-0f3c9a7e"
 
 
@@ -29,11 +31,26 @@ def _sha(path: Path) -> str:
 
 @pytest.mark.parametrize(
     "extra",
-    [[], ["-o", "NEW.yaml"], ["--output", "NEW.yaml"]],
-    ids=["in-place", "short-output", "long-output"],
+    [
+        [],
+        ["-o", "NEW.yaml"],
+        ["--output", "NEW.yaml"],
+        ["/secret/path-s3cr3t.yaml"],
+        ["--in-place", "--other=s3cr3t"],
+    ],
+    ids=["in-place", "short-output", "long-output", "extra-argument", "unknown-flags"],
 )
 def test_config_upgrade_refused(tmp_path, monkeypatch, extra):
+    import lakebench.config as config_pkg
+    import lakebench.config.loader as loader
+
+    def must_not_load(*_a, **_k):
+        raise AssertionError("config upgrade opened the config")
+
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_pkg, "load_config", must_not_load)
+    monkeypatch.setattr(loader, "load_config", must_not_load)
+    monkeypatch.setattr(loader, "load_yaml", must_not_load)
     cfg = tmp_path / "old-config.yaml"
     body = (
         "name: upgrade-me\n"
@@ -54,6 +71,7 @@ def test_config_upgrade_refused(tmp_path, monkeypatch, extra):
     assert SENTINEL not in out
     assert "upgrade-me" not in out
     assert str(cfg) not in out and "old-config" not in out
+    assert "s3cr3t" not in out
     assert "ERROR" in out and "config upgrade` is removed" in out
     assert "lakebench init --from OLD.yaml -o NEW.yaml" in out
 
@@ -69,9 +87,22 @@ def test_config_upgrade_missing_path_reaches_the_refusal(tmp_path, monkeypatch):
 
 
 def test_config_upgrade_hidden_from_help():
-    result = CliRunner().invoke(app, ["config", "--help"])
-    assert result.exit_code == 0
-    assert "upgrade" not in result.output
+    import typer
+
+    group = typer.main.get_command(app).commands["config"]
+    assert group.commands["upgrade"].hidden
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="`init --from` arrives with CC-16; CC-16 removes this marker, so the "
+    "refusal's Next line cannot name a command that does not exist",
+)
+def test_config_upgrade_next_command_exists(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "OLD.yaml").write_text("name: x\n")
+    result = CliRunner().invoke(app, ["init", "--from", "OLD.yaml", "-o", "NEW.yaml"])
+    assert result.exit_code != 2 or "No such option" not in result.output
 
 
 @pytest.mark.parametrize(
@@ -135,11 +166,19 @@ def test_no_internal_caller_passes_include_observability_to_deploy():
 
 
 def test_no_hint_names_a_removed_flag():
-    stale = ("--expired-only", "--include-observability", "generate --wait")
+    """No code hint, doc or example tells a user to pass a removed flag."""
+    stale = re.compile(r"--expired-only|--include-observability|generate\b[^\n`]*\s--wait\b")
+    files = [
+        *SRC.rglob("*.py"),
+        *(ROOT / "docs").rglob("*.md"),
+        *(ROOT / "examples").rglob("*"),
+        ROOT / "README.md",
+        ROOT / "CONTRIBUTING.md",
+    ]
     hits = [
-        f"{p.relative_to(SRC)}: {s}"
-        for p in SRC.rglob("*.py")
-        for s in stale
-        if s in p.read_text(encoding="utf-8")
+        f"{p.relative_to(ROOT)}: {m.group(0)}"
+        for p in files
+        if p.is_file()
+        for m in stale.finditer(p.read_text(encoding="utf-8", errors="replace"))
     ]
     assert not hits
