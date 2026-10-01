@@ -219,9 +219,16 @@ def test_unread_fields_at_their_defaults_do_not_warn(tmp_path):
 
 
 def test_generated_config_template_carries_no_unread_keys():
-    from lakebench.config.loader import generate_example_config_yaml
+    # init writes the first-day config (the commented template is gone);
+    # neither it nor the --local file may teach a key nothing reads.
+    from pathlib import Path
 
-    text = generate_example_config_yaml()
+    from lakebench.cli._init import _local_config_text, first_day_config
+    from lakebench.config.support import recipe_names
+
+    texts = [first_day_config(name="t", recipe=r) for r in recipe_names()]
+    texts.append(_local_config_text(Path("l.yaml"), "t", 0.1))
+    text = "\n".join(texts)
     for key in ("secret_ref", "uploaders:", "checkpoint:", "min_threads", "max_threads"):
         assert key not in text, key
     # The dead polaris.version and observability.storage_class lines.
