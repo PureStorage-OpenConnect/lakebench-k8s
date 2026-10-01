@@ -457,11 +457,9 @@ def run_fidelity_gate(
             report["secondary_lifetime"] = {"gated": False, **{k: sec.get(k) for k in keys}}
         except Exception as e:  # noqa: BLE001
             report["secondary_lifetime"] = {"gated": False, "verdict": "error", "note": str(e)}
-    if "corpus_seed_matches_claim" in provenance:
-        # Checked over every manifest row by the corpus verdict.
-        seed_ok = provenance["corpus_seed_matches_claim"] is True
-    else:
-        seed_ok = seed_check["matched_share"] == 1
+    # Checked over every manifest row by the corpus verdict; a provenance
+    # without it is not verified (the 200-row sample never decides).
+    seed_ok = provenance.get("corpus_seed_matches_claim") is True
     if seed_check["claimed_seed"] is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":

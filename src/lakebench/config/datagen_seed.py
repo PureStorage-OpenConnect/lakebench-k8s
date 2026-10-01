@@ -359,7 +359,10 @@ def spent_from(corpora: dict) -> frozenset[int]:
     if not isinstance(raw, list) or not all(
         isinstance(x, int) and not isinstance(x, bool) for x in raw
     ):
-        raise ValueError(f"corpora.spent_seeds must be a list of integers, got {raw!r}")
+        # Types only, never the values: a held-out seed appended here by
+        # mistake must not be echoed into a driver log or a SystemExit.
+        got = type(raw).__name__ if not isinstance(raw, list) else "a list holding a non-integer"
+        raise ValueError(f"corpora.spent_seeds must be a list of integers, got {got}")
     return frozenset(raw)
 
 
@@ -386,10 +389,12 @@ def calibration_seed() -> int:
 # guard holds a salted SHA-256 per held-out seed, read at run time from
 # heldout_hashes.json (next to the pre-registration, flat next to this module
 # on the Spark driver, or LB_HELDOUT_HASHES on the datagen pod). The file may
-# only be appended to (heldout_history_problems is the rule the frozen guard
-# applies), and the hashes registered when it
-# was created are also compiled in below (_HELDOUT_FLOOR), checked under their
-# own salt, so a stripped or re-salted file still protects those seeds.
+# only be appended to: heldout_history_problems is the rule, which the frozen
+# guard (QR-10) calls for every commit once it lands. The hashes registered
+# when the file was created are also compiled in below (_HELDOUT_FLOOR),
+# checked under their own salt, so a stripped or re-salted file still protects
+# those seeds. The salt is public: a hash hides only a seed drawn uniformly
+# from 63 bits; an 8-digit seed is recovered from its hash in seconds.
 
 HELDOUT_FILENAME = "heldout_hashes.json"
 HELDOUT_FORMAT = 1
@@ -491,6 +496,13 @@ def _heldout_doc_problems(doc) -> list[str]:
         isinstance(x, int) and not isinstance(x, bool) for x in spent
     ):
         out.append("spent must be a list of integers")
+    else:
+        # A seed is a non-negative i64. Anything else, such as seed - 2**64,
+        # hashes to no role, so it would pass the spent rule while publishing
+        # a held-out seed in a trivially reversible form.
+        for i, x in enumerate(spent):
+            if not 0 <= x < 1 << 63:
+                out.append(f"spent[{i}] is outside 0..2^63-1")
     if doc.get("absence_check") not in ABSENCE_MODES:
         out.append(f"absence_check must be one of {ABSENCE_MODES}")
     return out
@@ -830,11 +842,18 @@ def heldout_history_problems(old: dict | None, new: dict, looks: dict | None) ->
 
 
 # Integer tokens: every maximal run of decimal digits (underscores allowed
-# between digits) wherever it sits, so a seed inside an identifier or a path
-# (seed_123_s1, run123, 123ms) is found, plus every 0x hex literal. The hash
-# compare makes a false hit impossible, so no boundary is needed. Bare hex
-# without 0x is not scanned as hex.
+# between digits) wherever it sits, so a seed bounded by letters or
+# punctuation (seed_123_s1, run123, 123ms) is found, plus every 0x hex
+# literal. Two more shapes are scanned: every window of 6 to 19 digits inside
+# a longer digit run (a seed embedded in a timestamp, a longer number, or
+# written as decimal digits after "0x"), and thousands groups separated by
+# commas or spaces (12,345,678). The hash compare makes a false hit
+# impossible, so no boundary is needed. Not scanned: bare hex without 0x,
+# octal, binary, and floats or scientific notation.
 _TOKEN = re.compile(r"0[xX][0-9a-fA-F_]+|[0-9](?:[0-9_]*[0-9])?")
+_DIGITS = re.compile(r"[0-9]{7,}")
+_GROUPED = re.compile(r"(?<![0-9])[0-9]{1,3}(?:[, ][0-9]{3})+(?![0-9])")
+_WINDOW_MIN, _WINDOW_MAX = 6, 19
 
 
 def absence_problems(
@@ -843,7 +862,9 @@ def absence_problems(
     exclude: Iterable[int] | None = None,
 ) -> list[str]:
     """Every ``texts`` key holding an integer token that hashes to a held-out
-    seed. Each decimal or hex token (underscores allowed) in 1..2^63 is hashed
+    seed. Each decimal or hex token (underscores allowed), each 6-19 digit
+    window of a longer digit run and each comma- or space-grouped number
+    (the shapes listed at ``_TOKEN``) in 1..2^63 is hashed
     under the file's salt and the floor's and compared with the role hashes;
     the value is never kept or printed. Spent seeds are public and never
     reported: ``exclude`` lists them; None means the recorded looks, the
@@ -883,6 +904,17 @@ def absence_problems(
                     continue
                 if 1 <= v < 1 << 63:
                     values.add(v)
+        for m in _DIGITS.finditer(text):
+            run = m.group(0)
+            for w in range(_WINDOW_MIN, min(_WINDOW_MAX, len(run)) + 1):
+                for i in range(len(run) - w + 1):
+                    v = int(run[i : i + w])
+                    if 1 <= v < 1 << 63:
+                        values.add(v)
+        for m in _GROUPED.finditer(text):
+            v = int(m.group(0).replace(",", "").replace(" ", ""))
+            if 1 <= v < 1 << 63:
+                values.add(v)
         for v in values - skip:
             r = heldout_role(v, h)
             if r is not None:

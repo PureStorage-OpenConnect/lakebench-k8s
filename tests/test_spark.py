@@ -1805,14 +1805,44 @@ class TestReferenceScoreWiring:
         )
 
     def test_reference_score_module_is_self_contained(self):
-        """reference_score.py must not import from lakebench (it ships flat with
-        no package around it)."""
+        """reference_score.py and fidelity_gate.py ship flat with no package
+        around them: a lakebench import is allowed only inside a try whose
+        ImportError handler imports the same names from a flat module."""
+        import ast
+
         from lakebench._resources import _package_dir
 
+        def lb(node) -> bool:
+            if isinstance(node, ast.ImportFrom):
+                return (node.module or "").split(".")[0] == "lakebench"
+            if isinstance(node, ast.Import):
+                return any(a.name.split(".")[0] == "lakebench" for a in node.names)
+            return False
+
+        def names(nodes) -> set[str]:
+            return {
+                a.asname or a.name
+                for n in nodes
+                if isinstance(n, (ast.Import, ast.ImportFrom))
+                for a in n.names
+            }
+
         for mod in ("reference_score.py", "fidelity_gate.py"):
-            src = (_package_dir() / "aml" / mod).read_text()
-            assert "from lakebench" not in src and "import lakebench" not in src, (
-                f"{mod} imports lakebench; it cannot ship as a flat driver module"
+            tree = ast.parse((_package_dir() / "aml" / mod).read_text())
+            guarded: set[int] = set()
+            for t in ast.walk(tree):
+                if not isinstance(t, ast.Try):
+                    continue
+                body_lb = [n for n in t.body if lb(n)]
+                for h in t.handlers:
+                    catches = isinstance(h.type, ast.Name) and h.type.id == "ImportError"
+                    flat = [n for n in h.body if isinstance(n, ast.ImportFrom) and not lb(n)]
+                    if catches and body_lb and names(body_lb) <= names(flat):
+                        guarded.update(id(n) for n in body_lb)
+            bare = [n.lineno for n in ast.walk(tree) if lb(n) and id(n) not in guarded]
+            assert not bare, (
+                f"{mod} imports lakebench at lines {bare} without a flat fallback; "
+                "it cannot ship as a flat driver module"
             )
 
     def test_reference_script_uses_real_silver_column(self):
