@@ -168,7 +168,7 @@ class ConfigNameRequired(ConfigValidationError):
     that look at a deployment refuse one whose name comes from the v1.6
     ``.lakebench/state.json``: v1.6 gave every nameless config in the
     directory that name, so nothing ties it to this one (a v1.6 directory
-    is refused without ``--name``). ``siblings`` lists the other
+    is refused; a ``--name`` way through is still to come). ``siblings`` lists the other
     nameless configs found there, for the message (None when the directory
     could not be listed).
     """
@@ -355,7 +355,7 @@ def _load_and_validate(
             # without --name. v1.6 gave every nameless config here this one
             # name, so destroy, stop, admin or status from any of them would
             # act on, or report, whichever deployment it names. Naming the
-            # config that deployed it (or a --name with the stamp
+            # config that deployed it (or, later, a --name with the stamp
             # check) is the way through.
             raise ConfigNameRequired(resolution, teardown=True, siblings=siblings)
         data["name"] = resolution.name

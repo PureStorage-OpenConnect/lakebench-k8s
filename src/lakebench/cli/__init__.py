@@ -1345,7 +1345,7 @@ def stop(
 
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)  # no length check; stops only
+        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)  # no name-length check; stops
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
