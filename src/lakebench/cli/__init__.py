@@ -17,6 +17,7 @@ from rich.table import Table
 
 from lakebench import __version__
 from lakebench._constants import DEFAULT_OUTPUT_DIR
+from lakebench.cli._exit import LakebenchGroup
 from lakebench.cli._helpers import (
     DEFAULT_CONFIG as DEFAULT_CONFIG,
 )
@@ -69,6 +70,8 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="lakebench",
+    cls=LakebenchGroup,
+    pretty_exceptions_enable=False,
     help="Deploy and benchmark lakehouse architectures on Kubernetes",
     add_completion=False,
     no_args_is_help=True,

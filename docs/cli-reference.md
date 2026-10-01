@@ -18,6 +18,9 @@ Several commands prompt for confirmation before running. Use `--yes` / `-y`
 to skip the prompt; `destroy` and `clean` also accept `--force` as the same
 flag.
 
+Exit codes are listed in [Exit Codes](exit-codes.md). A prompt that is
+declined, or that cannot be answered because there is no terminal, exits 5.
+
 ## Commands
 
 ### init
