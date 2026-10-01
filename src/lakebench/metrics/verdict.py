@@ -245,9 +245,9 @@ def compute_badge_status(
         abort = getattr(metrics, "abort_reason", None)
         if interrupted is not None:
             reasons.append(interrupt_reason(interrupted))
-        elif isinstance(abort, Mapping) and abort.get("reason"):
+        if isinstance(abort, Mapping) and abort.get("reason"):
             reasons.append(f"Run stopped: {abort['reason']}")
-        else:
+        if interrupted is None and not (isinstance(abort, Mapping) and abort.get("reason")):
             reasons.append("Pipeline crashed or was interrupted")
 
     pb = metrics.pipeline_benchmark

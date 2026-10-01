@@ -305,13 +305,15 @@ In continuous mode (`--continuous`), `run` launches the three stream jobs
 benchmark rounds and maintenance during the measurement window, gates on
 continuous output inside the window, then lets the corpus settle and
 fingerprints the query set over the settled tables. See
-[Running Pipelines](running-pipelines.md#continuous-mode). During the
-window the run reads its namespace every 30 s and before each benchmark,
-maintenance and compaction round: when the namespace is gone (deleted,
-being deleted, or deleted and deployed again), or three reads in a row
-fail, the run stops at once, exits 1 and saves its record with
-`abort_reason` (the reason and the window second). It does not try to stop
-streams that went with the namespace.
+[Running Pipelines](running-pipelines.md#continuous-mode). The run reads
+its namespace every 30 s during the window and the settle wait, before and
+after each benchmark round, before each maintenance and compaction round,
+and before it stops its streams. When the namespace is gone (deleted, being
+deleted, or deleted and deployed again), or three reads in a row fail, the
+run stops at that read, exits 1 and saves its record with `abort_reason`
+(the reason and the run second). A maintenance or compaction statement in
+flight finishes first. The run does not try to stop streams that went with
+the namespace, or that belong to a deployment that replaced it.
 
 **Interrupting a run.** Ctrl-C (SIGINT) or SIGTERM stops `run` and exits
 130. The run first deletes the SparkApplications and the datagen Job it

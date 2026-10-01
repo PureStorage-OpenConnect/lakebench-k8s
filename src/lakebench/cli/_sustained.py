@@ -12,7 +12,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.panel import Panel
@@ -2297,26 +2297,39 @@ NAMESPACE_READ_STRIKES = 3
 
 
 class NamespaceWatch:
-    """Notices, within one loop interval, that the run's namespace is gone.
+    """Notices, within one poll interval, that the run's namespace is gone.
 
     ``start`` records the namespace's uid when the window opens; ``check``
     reads it again and raises :class:`NamespaceGone` on a 404, a namespace
     being deleted (deletion timestamp or phase Terminating), a different uid
     (destroyed and deployed again), or after ``NAMESPACE_READ_STRIKES``
-    consecutive failed reads. A single failed read is not a reason.
+    consecutive failed reads. A single failed read is not a reason. Reads
+    go through a client that does not retry, so one costs at most 15 s.
     """
 
     def __init__(self, namespace: str) -> None:
         self.namespace = namespace
         self.uid: str | None = None
         self.failures = 0
-        self.reads = 0
+        self._api_client: Any = None
 
     def _read(self):
         from kubernetes import client as k8s_client
 
-        self.reads += 1
-        return k8s_client.CoreV1Api().read_namespace(self.namespace, _request_timeout=(5, 10))
+        from lakebench.cli._interrupt import no_retry_api_client
+
+        if self._api_client is None:
+            self._api_client = no_retry_api_client()
+        api = k8s_client.CoreV1Api(api_client=self._api_client)
+        return api.read_namespace(self.namespace, _request_timeout=(5, 10))
+
+    def close(self) -> None:
+        if self._api_client is not None:
+            try:
+                self._api_client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._api_client = None
 
     def start(self) -> None:
         try:
@@ -2662,10 +2675,16 @@ def settle_budget_seconds(cfg, datagen_rows: int, bronze_rows: int, rows_per_s: 
 
 
 def wait_for_settle(
-    monitor, job_names: list[str], datagen_rows: int, budget_s: float, poll_s: float = 30.0
+    monitor,
+    job_names: list[str],
+    datagen_rows: int,
+    budget_s: float,
+    poll_s: float = 30.0,
+    probe=None,
 ) -> dict:
     """Keep polling the stream logs until the whole corpus has reached gold
-    (continuous_window.settle_state) or *budget_s* runs out.
+    (continuous_window.settle_state) or *budget_s* runs out. *probe* runs
+    after every sleep (the namespace read, which raises when it is gone).
     Returns {"settled", "seconds", "reason"}."""
     from lakebench.metrics.continuous_window import settle_state
 
@@ -2686,6 +2705,8 @@ def wait_for_settle(
         if waited + poll_s > budget_s:
             return {"settled": False, "seconds": round(waited, 1), "reason": reason}
         time.sleep(poll_s)
+        if probe is not None:
+            probe()
 
 
 def continuous_result_check(bench_runner) -> tuple[dict, list[dict]]:
@@ -3371,6 +3392,9 @@ def _run_sustained(
                     j=j,
                     k8s=k8s,
                 )
+                # A round takes minutes, and the loop goes straight on to
+                # the next pass without a sleep.
+                _ns_watch.check(time.time() - start)
                 last_round_seconds = time.time() - round_start
                 # Next round at interval from round completion
                 next_round_at = (time.time() - start) + bench_interval
@@ -3701,8 +3725,13 @@ def _run_sustained(
                     f"Letting the pipeline take in the rest of the corpus for the result "
                     f"check (up to {_need:.0f}s, not scored)..."
                 )
+                _settle_start = time.time()
                 settle = wait_for_settle(
-                    monitor, [n for _, n in submitted], _datagen_output_rows, _need
+                    monitor,
+                    [n for _, n in submitted],
+                    _datagen_output_rows,
+                    _need,
+                    probe=lambda: _ns_watch.check(run_duration + time.time() - _settle_start),
                 )
                 if settle["settled"]:
                     print_success(f"Corpus settled in gold after {settle['seconds']:.0f}s")
@@ -3713,8 +3742,10 @@ def _run_sustained(
                         "results are not established, so it cannot be compared."
                     )
 
-        # Stop streaming jobs
+        # Stop streaming jobs. By name: so first make sure the namespace is
+        # still this run's (a redeployment's streams have the same names).
         _stage = "stop-streams"
+        _ns_watch.check(run_duration)
         _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
         for _job_type, job_name in submitted:
@@ -3997,9 +4028,11 @@ def _run_sustained(
         _interrupt.begin_seal()
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
-        if _total_s3_objects is None and _interrupted is None:
+        _ns_watch.close()
+        if _total_s3_objects is None and _interrupted is None and _abort is None:
             # Not after an interrupt: partial data, and a long listing would
             # hold the record back from a user who has just pressed Ctrl-C.
+            # Not after the namespace went: its buckets may be a redeployment's.
             _total_s3_objects = _measure_bucket_sizes(cfg, collector)
         if _interrupted is None and _interrupt.late_signal():
             # Interrupted while the run was being wound up: sealed the same way.
@@ -4087,7 +4120,7 @@ def _run_sustained(
             message=(
                 f"interrupted ({_interrupted['signal']} during {_interrupted['at_stage']})"
                 if _interrupted is not None
-                else ""
+                else (f"stopped: {_abort['reason']}" if _abort is not None else "")
             ),
         )
         _interrupt.restore()

@@ -12,7 +12,7 @@
   "calls_count": "236 calls (continuous_c360: 238)",
   "rerecord_sd8": "SD-8 (integrate 2f28d4e, merged before this golden) moved one call and nothing else: _run_sustained now only builds the scripts maps (build_script_configmaps, pure, reads the packaged scripts, cli/_sustained.py:2828) where it used to deploy them, and deploys them (JobManager.deploy_scripts_configmap, cli/_sustained.py:2875) after _stop_leftover_streams and _reset_continuous_state (:2868-2869), so a changed map is not replaced while a leftover stream still mounts it. In calls the deploy_scripts_configmap entry moves from after Benchmark init to after the last reset delete_prefix, before the reset preflight's bronze-verify submit (no Datagen deploy under --skip-generate). Call count unchanged (236); every other section is unchanged. Moved by hand from the SD-8 diff, then checked against the harness on b587651. Line citations in the other _derivation keys are against the tree named in 'tree' (pre-SD-8): on b587651 cli/_sustained.py lines from about 2823 to 2867 sit 6 lower and lines after 2867 sit 21 lower (DatagenDeployer.deploy is now 2891-2892, the reset preflight about 2979-2986), and cli/_run.py lines after 1999 sit 8 lower. The early build_script_configmaps call is real code in the harness, not a seam, so it is not in calls; removing it would not move this golden.",
   "rerecord_cd16": "CD-16 with LB-233 (lane/v17-run-cd16): journal_events[2] generate.start removed, by hand from the code. With --skip-generate no datagen is deployed, and the GENERATE_START 'Datagen started for continuous pipeline' record now sits inside the branch that deploys it (cli/_sustained.py, after RunInterrupt.datagen_created). calls do not move: the skip branch makes no datagen deploy and so no uid read. The counts in calls_count and delta_calls were written against continuous_c360 at 238 calls; since CD-16 that golden has 239 (its extra call is the datagen uid read after Datagen deploy, which --skip-generate does not make), so the delta from it is now net 236 = 239 - 3 (as before) + 1 - 1 (no uid read); this golden still has 236.",
-  "rerecord_cd17": "CD-17 (lane/v17-run-cd16, stacked on CD-16): 49 CoreV1Api read_namespace runchar calls added, by hand from the loop_schedule above, not from the harness. NamespaceWatch.start() reads the namespace once after stream_identities (the window start), and check() reads it after every loop sleep before the health line, and at the top of every benchmark round, maintenance round and compaction round that runs (cli/_sustained.py). From the schedule: start + 10 health probes (30..300) + round-1 probe before round 1; 6 health probes (466.5..600) + maintenance-1 probe before maintenance 1; 5 (630..736.5) + round-2 probe before round 2; 10 (898.1..1168.1) + round-3 probe before round 3; the maintenance-2 probe and the compaction probe of the 1326.1 iteration before their calls; 11 health probes (1519.1..1626.1, 1656.1..1776.1, 1800.0) before the window-end get_job_status. The round due at 1626.1 is skipped (late) and gets no round probe. Nothing else moves."
+  "rerecord_cd17": "CD-17 (lane/v17-run-cd16, stacked on CD-16): 82 CoreV1Api read_namespace runchar calls added, by hand from the loop_schedule above and the settle record, not from the harness. NamespaceWatch.start() reads the namespace once after stream_identities (the window start); check() reads it after every loop sleep before the health line, at the top of every benchmark, maintenance and compaction round that runs, right after every benchmark round (the loop continues without a sleep), after every settle poll's sleep, and once before the by-name stream stop (cli/_sustained.py). In the window, from the schedule: start + 10 health probes (30..300) + round-1 probe before round 1; after-round-1 probe + 6 health probes (466.5..600) + maintenance-1 probe before maintenance 1; 5 (630..736.5) + round-2 probe before round 2; after-round-2 probe + 10 (898.1..1168.1) + round-3 probe before round 3; after-round-3 probe + maintenance-2 probe (the 1326.1 iteration) before maintenance 2; the compaction probe before compaction; 11 health probes (1519.1..1626.1, 1656.1..1776.1, 1800.0) before the window-end get_job_status: 52. The round due at 1626.1 is skipped (late) and gets no probe. Settle (continuous.settle.seconds 870, 30 s polls): 30 polls of three driver-log reads, a probe after each of the 29 sleeps, i.e. before every poll but the first: 29. One before the three delete_custom_resource of _stop_streams. Nothing else moves."
  },
  "exit_code": 0,
  "unscripted": [],
@@ -628,6 +628,11 @@
   ],
   [
    "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "CoreV1Api",
    "list_namespaced_pod",
    "runchar",
    "app=lakebench-trino,component=coordinator"
@@ -833,6 +838,11 @@
   ],
   [
    "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "CoreV1Api",
    "list_namespaced_pod",
    "runchar",
    "app=lakebench-trino,component=coordinator"
@@ -890,6 +900,11 @@
    1,
    300,
    false
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "CoreV1Api",
@@ -1180,19 +1195,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1210,19 +1215,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1240,19 +1235,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1270,19 +1255,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1300,19 +1275,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1330,19 +1295,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1360,19 +1315,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1390,19 +1335,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1420,19 +1355,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1450,19 +1375,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1480,19 +1395,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1510,19 +1415,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1540,19 +1435,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1570,19 +1455,9 @@
    "lakebench-gold-refresh"
   ],
   [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-bronze-ingest"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-silver-stream"
-  ],
-  [
-   "SparkJobMonitor",
-   "_get_driver_logs",
-   "lakebench-gold-refresh"
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "SparkJobMonitor",
@@ -1600,6 +1475,11 @@
    "lakebench-gold-refresh"
   ],
   [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
    "SparkJobMonitor",
    "_get_driver_logs",
    "lakebench-bronze-ingest"
@@ -1613,6 +1493,291 @@
    "SparkJobMonitor",
    "_get_driver_logs",
    "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-bronze-ingest"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-silver-stream"
+  ],
+  [
+   "SparkJobMonitor",
+   "_get_driver_logs",
+   "lakebench-gold-refresh"
+  ],
+  [
+   "CoreV1Api",
+   "read_namespace",
+   "runchar"
   ],
   [
    "k8s",
