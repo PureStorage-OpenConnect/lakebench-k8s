@@ -268,7 +268,8 @@ The destroy engine follows a specific sequence to ensure clean removal:
     `create_namespace: false` one object is kept on purpose: the
     `lakebench-silver-state` ConfigMap, whose silver rebuild-epoch counters
     must not go back while table data written under them may outlive destroy
-    (a reset counter makes Delta skip writes as already committed). The
+    (a reset counter makes Delta skip writes as already committed); its
+    `bronze_data_clock` is cleared when destroy empties the bronze bucket. The
     deployment's identity annotations (`lakebench.deployment/name` and the
     rest) also stay, so a re-run of a destroy that stopped half way still
     finds its record; a deployment with another name cannot deploy into that

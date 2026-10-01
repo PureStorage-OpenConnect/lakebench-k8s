@@ -26,7 +26,7 @@ from ._helpers import (
     _journal_safe,
     check_datagen_scale,
     console,
-    enforce_bronze_regenerate,
+    enforce_bronze_gate,
     esc,
     journal_open,
     print_error,
@@ -80,9 +80,22 @@ def generate(
         typer.Option(
             "--regenerate",
             help=(
-                "Empty the bronze bucket before generating. Without this "
-                "flag, a non-empty bronze prefix is refused (exit 3) so "
-                "existing datagen output is never overwritten silently."
+                "Clear the datagen prefix in the bronze bucket before "
+                "generating, when this deployment created the bucket. "
+                "Without this flag, a non-empty bronze prefix is refused "
+                "(exit 3) so existing datagen output is never overwritten "
+                "silently. Never clears a bucket this deployment did not create."
+            ),
+        ),
+    ] = False,
+    allow_stale_bronze: Annotated[
+        bool,
+        typer.Option(
+            "--allow-stale-bronze",
+            help=(
+                "Generate over objects already in the datagen prefix of a "
+                "bronze bucket this deployment did not create. Rows may be "
+                "over-counted; the run records it."
             ),
         ),
     ] = False,
@@ -214,12 +227,13 @@ def generate(
                 _dt.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
             )
 
-        # A4 (v1.6): refuse to over-write an existing bronze prefix unless
-        # --regenerate was passed; with --regenerate, empty the bucket first.
-        enforce_bronze_regenerate(cfg, regenerate)
+        # SAF-9: refuse to write over an existing bronze prefix unless
+        # --regenerate (owned bucket: clear the datagen prefix) or
+        # --allow-stale-bronze (any other bucket).
+        enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
 
         engine = DeploymentEngine(cfg)
-        datagen = DatagenDeployer(engine)
+        datagen = DatagenDeployer(engine, allow_stale_bronze=allow_stale_bronze)
 
         # Submit job
         print_info("Submitting datagen job...")

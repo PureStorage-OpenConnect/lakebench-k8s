@@ -404,6 +404,12 @@ class PipelineMetrics:
     # Shape: dict from FleetSummary.to_dict().
     datagen_fleet: dict[str, Any] | None = None
 
+    # SAF-9: set when datagen wrote over objects already in the datagen
+    # prefix of a bronze bucket this deployment did not create
+    # (--allow-stale-bronze): {allowed, objects_before, bucket, prefix}.
+    # Serialised as ``datagen.stale_bronze``.
+    datagen_stale_bronze: dict[str, Any] | None = None
+
     # Financial (AML) recall scoring (optional -- populated for a batch
     # financial run when `financial score` is folded into `run` (LB-123)).
     # Shape: the recall.json sidecar written by score_financial.py --
@@ -542,6 +548,8 @@ class PipelineMetrics:
             d["cycles"] = [c.to_dict() for c in self.cycles]
         if self.datagen_fleet is not None:
             d["datagen_fleet"] = self.datagen_fleet
+        if self.datagen_stale_bronze is not None:
+            d.setdefault("datagen", {})["stale_bronze"] = dict(self.datagen_stale_bronze)
         if self.financial_scoring is not None:
             d["financial_scoring"] = self.financial_scoring
         if self.tm_operations is not None:

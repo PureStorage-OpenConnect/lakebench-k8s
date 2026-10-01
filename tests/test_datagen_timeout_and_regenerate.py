@@ -11,10 +11,12 @@ Covers three related fixes on the datagen run path.
   orphan compute behind.
 - ``lakebench generate`` and ``lakebench run --generate`` refuse a
   non-empty bronze prefix (exit 3, refused; 2 in 1.6) unless ``--regenerate`` is passed;
-  with the flag, ``S3Client.empty_bucket()`` is called before datagen
-  submits.
-- The multi-cycle datagen path (``deploy_cycle``) is not touched by the
-  gate: it clears the bronze prefix itself under LB-185's rules.
+  with the flag, on a bucket this deployment may empty, the datagen prefix
+  is cleared (``S3Client.delete_prefix``) before datagen submits. SAF-9
+  (v1.7) replaced the whole-bucket empty; tests/test_bronze_gate.py covers
+  the unowned rows.
+- The deployer's cycle path (``deploy_cycle``) does not call the CLI gate;
+  the multi-cycle loop in ``run`` does, before cycle 0.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 import typer
 
-from lakebench.cli._helpers import enforce_bronze_regenerate
+from lakebench.cli._helpers import enforce_bronze_gate
 from lakebench.cli._run import DATAGEN_TIMED_OUT, _handle_datagen_timeout
 from lakebench.cli._sustained import _STREAM_APPS
 from lakebench.exit_codes import ExitCode
@@ -49,19 +51,43 @@ class _FakeS3:
         self.kw = _kw
         self._init_error = _FakeS3._next_init_error
         self.empty_calls: list[str] = []
+        self.prefix_calls: list[tuple[str, str]] = []
         self.get_calls: list[tuple[str, str]] = []
         _FakeS3.instances.append(self)
 
-    def get_bucket_size(self, bucket: str, prefix: str = "") -> BucketInfo:
-        self.get_calls.append((bucket, prefix))
+    def _info(self, bucket: str) -> BucketInfo:
         info = _FakeS3._next_info
         if info is None:
             return BucketInfo(name=bucket, exists=True, object_count=0, size_bytes=0)
         return info
 
+    def get_bucket_size(self, bucket: str, prefix: str = "") -> BucketInfo:
+        self.get_calls.append((bucket, prefix))
+        return self._info(bucket)
+
+    def bucket_exists(self, bucket: str) -> bool:
+        return self._info(bucket).exists
+
+    def has_user_objects(self, bucket: str, prefix: str = "") -> bool:
+        self.get_calls.append((bucket, prefix))
+        return bool(self._info(bucket).object_count)
+
     def empty_bucket(self, bucket: str, **_kw: object) -> int:
         self.empty_calls.append(bucket)
         return 42
+
+    def delete_prefix(self, bucket: str, prefix: str, **_kw: object) -> int:
+        # The gate clears only the datagen prefix (SAF-9); recorded as an empty.
+        self.empty_calls.append(bucket)
+        self.prefix_calls.append((bucket, prefix))
+        return 42
+
+
+@pytest.fixture(autouse=True)
+def _owned_bronze(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about the owned-bucket rows; tests/test_bronze_gate.py
+    covers ownership itself."""
+    monkeypatch.setattr("lakebench.deploy.datagen.deployment_may_empty", lambda *a, **k: True)
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +171,7 @@ class TestHandleDatagenTimeout:
         assert job_manager._delete_job.call_count == len(_STREAM_APPS)
 
 
-# --- enforce_bronze_regenerate ---------------------------------------------
+# --- enforce_bronze_gate ----------------------------------------------------
 
 
 class TestEnforceBronzeRegenerate:
@@ -154,7 +180,7 @@ class TestEnforceBronzeRegenerate:
     def test_empty_bronze_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
         _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=0, size_bytes=0)
-        enforce_bronze_regenerate(_cfg(), regenerate=False)
+        enforce_bronze_gate(_cfg(), regenerate=False)
         # Nothing was emptied.
         assert _FakeS3.instances[0].empty_calls == []
 
@@ -162,7 +188,7 @@ class TestEnforceBronzeRegenerate:
         # Fresh deploy: bronze does not exist yet, no refusal.
         monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
         _FakeS3._next_info = BucketInfo(name="b", exists=False)
-        enforce_bronze_regenerate(_cfg(), regenerate=False)
+        enforce_bronze_gate(_cfg(), regenerate=False)
         assert _FakeS3.instances[0].empty_calls == []
 
     def test_non_empty_without_regenerate_refuses_with_exit_3(
@@ -173,12 +199,12 @@ class TestEnforceBronzeRegenerate:
             name="b", exists=True, object_count=17, size_bytes=42 * (1024**3)
         )
         with pytest.raises(typer.Exit) as exc_info:
-            enforce_bronze_regenerate(_cfg(), regenerate=False)
+            enforce_bronze_gate(_cfg(), regenerate=False)
         assert exc_info.value.exit_code == ExitCode.REFUSED  # run.bronze_nonempty
         # empty_bucket must NOT be called on a refusal.
         assert _FakeS3.instances[0].empty_calls == []
 
-    def test_non_empty_with_regenerate_calls_empty_bucket(
+    def test_non_empty_with_regenerate_clears_the_datagen_prefix(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
@@ -186,16 +212,17 @@ class TestEnforceBronzeRegenerate:
             name="b", exists=True, object_count=17, size_bytes=42 * (1024**3)
         )
         cfg = _cfg()
-        enforce_bronze_regenerate(cfg, regenerate=True)
+        enforce_bronze_gate(cfg, regenerate=True)
         fake = _FakeS3.instances[0]
-        assert fake.empty_calls == [cfg.platform.storage.s3.buckets.bronze]
+        bronze = cfg.platform.storage.s3.buckets.bronze
+        assert fake.prefix_calls == [(bronze, "customer/interactions")]
 
     def test_financial_prefix_checked(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # AML on the C360 default template writes under ``pacs008`` -- the gate
         # must check the same prefix as the deployer writes to.
         monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
         _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=0, size_bytes=0)
-        enforce_bronze_regenerate(_cfg(schema="financial"), regenerate=False)
+        enforce_bronze_gate(_cfg(schema="financial"), regenerate=False)
         fake = _FakeS3.instances[0]
         assert fake.get_calls[0][1].startswith("pacs008")
 
@@ -205,7 +232,7 @@ class TestEnforceBronzeRegenerate:
         monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
         _FakeS3._next_init_error = "endpoint unreachable"
         with pytest.raises(typer.Exit) as exc_info:
-            enforce_bronze_regenerate(_cfg(), regenerate=True)
+            enforce_bronze_gate(_cfg(), regenerate=True)
         assert exc_info.value.exit_code == ExitCode.PREREQUISITE  # S3 cannot be read
 
 
@@ -262,7 +289,7 @@ class TestGenerateStandaloneRegenerate:
         cfg_file = _write_cfg(tmp_path)
         res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes"])
         assert res.exit_code == ExitCode.REFUSED, res.output
-        assert "not empty" in res.output.lower()
+        assert "refusing to generate over it" in res.output.lower()
         assert "--regenerate" in res.output
         assert deploy_engine_seen["called"] is False
 
@@ -347,7 +374,7 @@ def _stub_full_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
 class _FakeDatagenDeployer:
     """Records _delete_existing_job / deploy / get_progress; stays running."""
 
-    def __init__(self, engine: object) -> None:
+    def __init__(self, engine: object, **_kw: object) -> None:
         self.engine = engine
         self.deploy_calls = 0
         self.delete_calls: list[tuple[str, int | None]] = []
@@ -387,7 +414,7 @@ class TestRunGenerateTimeout:
 
         deployers: list[_FakeDatagenDeployer] = []
 
-        def _make_deployer(engine):
+        def _make_deployer(engine, **_kw):
             d = _FakeDatagenDeployer(engine)
             deployers.append(d)
             return d
@@ -469,7 +496,7 @@ class TestRunGenerateRegenerate:
         # DatagenDeployer construction must not be reached.
         seen = {"deploy": False}
 
-        def _boom(engine):
+        def _boom(engine, **_kw):
             seen["deploy"] = True
             raise AssertionError("DatagenDeployer should not be constructed after refusal")
 
@@ -505,13 +532,13 @@ class TestRunGenerateRegenerate:
         # Stop after DatagenDeployer.deploy() so we can assert ordering: the
         # empty happened first, then deploy() was called.
         call_order: list[str] = []
-        orig_empty = _FakeS3.empty_bucket
+        orig_empty = _FakeS3.delete_prefix
 
-        def _empty_wrap(self, bucket, **kw):
+        def _empty_wrap(self, bucket, prefix, **kw):
             call_order.append("empty")
-            return orig_empty(self, bucket, **kw)
+            return orig_empty(self, bucket, prefix, **kw)
 
-        monkeypatch.setattr(_FakeS3, "empty_bucket", _empty_wrap)
+        monkeypatch.setattr(_FakeS3, "delete_prefix", _empty_wrap)
 
         class _StopAfterDeploy(_FakeDatagenDeployer):
             def deploy(self):
@@ -541,8 +568,8 @@ class TestRunGenerateRegenerate:
 
 
 class TestMultiCycleNotTouched:
-    """The multi-cycle datagen path (``deploy_cycle``) clears its own bronze
-    prefix under LB-185 rules and must not go through the A4 gate."""
+    """The deployer's cycle path (``deploy_cycle``) never calls the CLI gate
+    itself; ``run``'s multi-cycle loop calls it once, before cycle 0."""
 
     def test_deploy_cycle_does_not_call_enforce(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # If the multi-cycle path were routed through the gate, this
@@ -551,9 +578,9 @@ class TestMultiCycleNotTouched:
 
         def _boom(*_a, **_kw):
             called["enforce"] = True
-            raise AssertionError("multi-cycle path must not call enforce_bronze_regenerate")
+            raise AssertionError("deploy_cycle must not call enforce_bronze_gate")
 
-        monkeypatch.setattr("lakebench.cli._helpers.enforce_bronze_regenerate", _boom)
+        monkeypatch.setattr("lakebench.cli._helpers.enforce_bronze_gate", _boom)
         # The deployer's cycle path only touches the K8s / S3 / template
         # layers, all mocked here; we just prove it does not import or
         # invoke the CLI gate.

@@ -37,8 +37,10 @@ class FakeBoto:
         # Owned but not marked created (adopted); tests override as needed.
         return {"TagSet": [{"Key": "lakebench.deployment", "Value": "a"}]}
 
-    def list_objects_v2(self, Bucket, MaxKeys=1000):
-        keys = self.buckets.get(Bucket, [])[:MaxKeys]
+    def list_objects_v2(self, Bucket, MaxKeys=1000, Prefix="", StartAfter=""):
+        keys = sorted(
+            k for k in self.buckets.get(Bucket, []) if k.startswith(Prefix) and k > StartAfter
+        )[:MaxKeys]
         return {"KeyCount": len(keys), "Contents": [{"Key": k} for k in keys]}
 
     def head_bucket(self, Bucket):

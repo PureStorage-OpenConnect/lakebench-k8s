@@ -574,6 +574,7 @@ class MetricsStorage:
             platform_metrics=data.get("platform_metrics"),
             cycles=_deserialize_cycles(data.get("cycles", []), recorded_at),
             datagen_fleet=data.get("datagen_fleet"),
+            datagen_stale_bronze=(data.get("datagen") or {}).get("stale_bronze"),
             financial_scoring=data.get("financial_scoring"),
             tm_operations=data.get("tm_operations"),
             c360_correctness=data.get("c360_correctness"),

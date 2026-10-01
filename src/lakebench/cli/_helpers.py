@@ -241,81 +241,35 @@ def _journal_safe(fn, *args, **kwargs) -> None:
             _journal_warned = True
 
 
-def enforce_bronze_regenerate(cfg, regenerate: bool) -> None:
-    """Refuse to start datagen over a non-empty bronze prefix (A4, v1.6).
+def enforce_bronze_gate(cfg, regenerate: bool, allow_stale_bronze: bool = False):
+    """Run the SAF-9 bronze gate before datagen; exit 2 on a refusal.
 
-    Before A4 both ``lakebench generate`` and ``run --generate`` deployed
-    datagen straight onto whatever was in bronze; the deployer's LB-185
-    clear ran only for buckets this deployment recorded creating, so any
-    other case silently over-wrote existing part-* files. This gate is the
-    CLI-level counterpart: without ``--regenerate`` the command exits 3
-    (refused, ``run.bronze_nonempty``) and names the prefix, so the operator opts in explicitly instead of
-    discovering the wipe later. With ``--regenerate`` the whole bronze
-    bucket is emptied via ``S3Client.empty_bucket`` (which also aborts
-    dangling multipart uploads on FlashBlade) before datagen submits.
+    ``lakebench.deploy.datagen.bronze_prefix_gate`` decides (one table for
+    every caller: ``generate``, ``run --generate``, the multi-cycle loop
+    before cycle 0). A non-empty datagen prefix is refused unless
+    ``--regenerate`` (a bucket this deployment may empty: the datagen prefix
+    is cleared) or ``--allow-stale-bronze`` (any other bucket: datagen writes
+    over the objects and the run records it). ``--regenerate`` never clears a
+    bucket this deployment did not create. Returns the gate's result; a refusal exits with the gate's code
+    (refused, ``run.bronze_nonempty``; prerequisite when bronze cannot be read).
     """
-    from lakebench.deploy.datagen import bronze_datagen_prefix
-    from lakebench.s3 import S3Client
+    from lakebench.deploy.datagen import bronze_prefix_gate
 
-    prefix = bronze_datagen_prefix(cfg)
-    prefix_norm = prefix.strip("/")
-    s3_cfg = cfg.platform.storage.s3
-    bucket = s3_cfg.buckets.bronze
-    s3 = S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    )
-    if s3._init_error:
-        # No S3 available: cannot check safely, so refuse rather than proceed
-        # blind and wipe under --regenerate what we cannot even list.
-        print_error(
-            f"Cannot check bronze bucket {bucket} for existing data "
-            f"({s3._init_error}); refusing to generate."
+    result = bronze_prefix_gate(cfg, regenerate=regenerate, allow_stale_bronze=allow_stale_bronze)
+    if not result.proceed:
+        print_error(result.message)
+        raise typer.Exit(result.exit_code)
+    shown = f"s3://{result.bucket}/{result.prefix}"
+    if result.cleared:
+        print_success(f"--regenerate: removed {result.cleared} object(s) under {shown}")
+    if result.stale_allowed:
+        print_warning(
+            f"{shown} held {result.objects_before} object(s) before generate and this "
+            "deployment did not create the bucket; generating over them "
+            "(--allow-stale-bronze). Rows may be over-counted; the scale-ratio check "
+            "flags it."
         )
-        raise typer.Exit(ExitCode.PREREQUISITE)
-    try:
-        list_prefix = prefix_norm + "/" if prefix_norm else ""
-        info = s3.get_bucket_size(bucket, prefix=list_prefix)
-    except Exception as e:  # noqa: BLE001
-        print_error(f"Could not list bronze prefix s3://{bucket}/{prefix}: {e}")
-        raise typer.Exit(ExitCode.PREREQUISITE) from e
-    object_count = info.object_count or 0
-    if not info.exists or object_count == 0:
-        return
-    if not regenerate:
-        size_gb = (info.size_bytes or 0) / (1024**3)
-        print_error(
-            f"Bronze prefix s3://{bucket}/{prefix} is not empty "
-            f"({object_count} object(s), {size_gb:.2f} GB). "
-            "Refusing to generate over it: pass --regenerate to empty the "
-            "bronze bucket first, or --skip-generate to reuse the existing "
-            "data."
-        )
-        raise typer.Exit(ExitCode.REFUSED)
-    # empty_bucket does NOT accept a Prefix filter today (LB-185's helper
-    # aborts multipart uploads across the bucket to catch FlashBlade
-    # ghosts, so the wipe is bucket-wide). Anything else the bronze bucket
-    # holds (streaming checkpoints, previous-run scratch, a co-tenant that
-    # shares this bucket via a distinct path_template) goes with it.
-    # Prefix-scoped regenerate is a follow-up.
-    print_info(
-        f"--regenerate: emptying the ENTIRE bucket s3://{bucket} before "
-        f"datagen. Datagen prefix {prefix!r} has {object_count} object(s); "
-        "any other prefixes in the same bucket (streaming checkpoints, "
-        "previous-run scratch, or a co-tenant sharing this bucket) will "
-        "also be removed."
-    )
-    try:
-        deleted = s3.empty_bucket(bucket)
-    except Exception as e:
-        print_error(f"--regenerate: could not empty s3://{bucket}: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-    print_success(f"--regenerate: removed {deleted} object(s) from s3://{bucket}")
+    return result
 
 
 def write_run_report(metrics_storage, run_id: str) -> Path | None:

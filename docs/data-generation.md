@@ -217,25 +217,38 @@ kubectl logs -n <namespace> -l job-name=lakebench-datagen --tail=50
 
 ## Re-running Data Generation
 
-`lakebench generate` (and `run --generate`) refuses to write into a bronze
-prefix that already holds data: it exits 3 (refused) and names the prefix, so an
-existing corpus is never overwritten by accident. To regenerate, pass
-`--regenerate`, which empties the whole bronze bucket (and aborts dangling
-multipart uploads) before datagen starts:
+`lakebench generate` (and `run --generate`, and a multi-cycle run before
+its first cycle) refuses to write into a bronze datagen prefix that already
+holds data: it exits 3 (refused) and names the prefix, so an existing corpus is never
+overwritten by accident. What it does next depends on whether this
+deployment owns the bronze bucket (it created it, or adopted it while empty
+with `--force-legacy`, and the bucket carries this cluster's stamp):
+
+| Bucket | Prefix | Flag | Result |
+|---|---|---|---|
+| owned | empty | any | generate |
+| owned | holds data | none | exit 3 |
+| owned | holds data | `--regenerate` | clear the datagen prefix (and abort its incomplete multipart uploads), then generate |
+| not owned | empty | any | generate |
+| not owned | holds data | none | exit 3: pass `--allow-stale-bronze`, or clear the prefix yourself |
+| not owned | holds data | `--regenerate` | exit 3: Lakebench never empties a bucket this deployment did not create |
+| not owned | holds data | `--allow-stale-bronze` | generate over it; `metrics.json` records `datagen.stale_bronze` and the report says "bronze held N objects before generate; rows may be over-counted" |
 
 ```bash
 lakebench generate my-config.yaml --regenerate
 ```
 
-To keep the existing corpus instead, run the pipeline with `run
---skip-generate`, or without `--generate`.
+`--regenerate` clears only the datagen prefix; other data in the bucket
+(stream checkpoints, another workload's prefix) stays. To keep the existing
+corpus instead, run the pipeline with `run --skip-generate`, or without
+`--generate`.
 
-The deployer also clears the datagen prefix before the first cycle when
-this deployment created the bronze bucket (LB-185), so a smaller generate
-never inherits a larger earlier generate's `part-*` files. It does not
-touch a bucket it did not create or one with `create_buckets: false`; for
-those, empty the bronze data yourself (`lakebench clean bronze
-my-config.yaml`) or use `--regenerate`.
+The deployer applies the same rule before the first cycle (LB-185): it
+clears the datagen prefix of an owned bucket, so a smaller generate never
+inherits a larger earlier generate's `part-*` files, and refuses a non-empty
+prefix in any other bucket unless `--allow-stale-bronze` was passed. Before
+1.7 it skipped such a bucket silently and silver over-counted the stale
+files.
 
 ## Configuration Options
 

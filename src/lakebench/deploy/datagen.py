@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from lakebench.config.datagen_seed import config_perturbation, config_seed
+from lakebench.exit_codes import ExitCode
 
 from .engine import DeploymentResult, DeploymentStatus
 
@@ -51,12 +53,211 @@ def bronze_datagen_prefix(config: LakebenchConfig) -> str:
     return "customer/interactions"
 
 
+class StaleBronzeRefused(RuntimeError):
+    """Datagen would write over objects in a bronze bucket this deployment may not empty.
+
+    Raised by ``DatagenDeployer``'s cycle-0 path when the CLI gate was
+    skipped (SAF-9): stale ``part-*`` files there would be read by silver as
+    this run's data and over-counted (LB-185).
+    """
+
+
+def _s3_client_for(cfg: Any) -> Any:
+    from lakebench.s3 import S3Client
+
+    s3_cfg = cfg.platform.storage.s3
+    return S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    )
+
+
+def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None) -> bool:
+    """Whether this deployment may delete data in ``bucket`` (SAF-9, SAF-10).
+
+    The rule destroy uses to empty a bucket: the SAF-10 verdict is MATCH (the
+    bucket carries this deployment's and this cluster's stamp) or
+    LEGACY_PROVEN (no cluster stamp, but this namespace's created or
+    adopted-empty record lists it). Fail-safe: any error, an unreachable
+    cluster or S3, or another verdict, is False.
+    """
+    try:
+        from kubernetes import client as k8s_client
+
+        from lakebench.deploy.ownership import (
+            IdentityVerdict,
+            api_server_fingerprint,
+            read_adopted_empty_buckets,
+            read_created_buckets,
+            verify_bucket_ownership,
+        )
+
+        if s3 is None:
+            s3 = _s3_client_for(cfg)
+        if getattr(s3, "_init_error", None):
+            return False
+        core_v1 = k8s_client.CoreV1Api()
+        namespace = cfg.get_namespace()
+        record = read_created_buckets(core_v1, namespace) | read_adopted_empty_buckets(
+            core_v1, namespace
+        )
+        v = verify_bucket_ownership(
+            s3.raw_client,
+            bucket,
+            cfg.name,
+            expected_cluster=api_server_fingerprint(cfg.platform.kubernetes.context or ""),
+            created_record=record,
+        )
+        return v.verdict in (IdentityVerdict.MATCH, IdentityVerdict.LEGACY_PROVEN)
+    except Exception as e:  # noqa: BLE001
+        logger.info("could not prove this deployment may empty %s (%s); it may not", bucket, e)
+        return False
+
+
+@dataclass
+class BronzeGateResult:
+    """What ``bronze_prefix_gate`` decided before datagen (SAF-9)."""
+
+    proceed: bool
+    bucket: str
+    prefix: str
+    owned: bool
+    objects_before: int = 0
+    stale_allowed: bool = False
+    cleared: int = 0
+    message: str = ""
+    #: The exit code of a refusal: refused, or prerequisite when bronze could not
+    #: be read, or failed when --regenerate could not clear it.
+    exit_code: ExitCode = ExitCode.REFUSED
+
+    def record(self) -> dict[str, Any] | None:
+        """``metrics.json`` ``datagen.stale_bronze``, when stale objects were allowed."""
+        if not self.stale_allowed:
+            return None
+        return {
+            "allowed": True,
+            "objects_before": self.objects_before,
+            "bucket": self.bucket,
+            "prefix": self.prefix,
+        }
+
+
+def bronze_prefix_gate(
+    cfg: Any, *, regenerate: bool, allow_stale_bronze: bool, s3: Any = None
+) -> BronzeGateResult:
+    """The one bronze safety gate, on the CLI host before any datagen Job (SAF-9).
+
+    ``owned`` is ``deployment_may_empty``; ``nonempty`` means the datagen
+    prefix holds an object that is not Lakebench's own.
+
+    ======  =========  ======================  ====================================
+    owned   non-empty  flags                   result
+    ======  =========  ======================  ====================================
+    yes     no         any                     proceed
+    yes     yes        none                    refuse (pass --regenerate)
+    yes     yes        --regenerate            clear the datagen prefix, proceed
+    no      no         any                     proceed
+    no      yes        none                    refuse (--allow-stale-bronze or clear
+                                               it yourself)
+    no      yes        --regenerate            refuse: never empties a bucket this
+                                               deployment did not create
+    no      yes        --allow-stale-bronze    proceed, recorded
+    ======  =========  ======================  ====================================
+
+    ``--regenerate`` deletes only the datagen prefix, aborting its incomplete
+    multipart uploads (GOTCHAS 2); an empty prefix is refused, never widened
+    to the bucket. A read failure refuses. The caller exits with the
+    result's ``exit_code``.
+    """
+    bucket = cfg.platform.storage.s3.buckets.bronze
+    prefix = bronze_datagen_prefix(cfg).strip("/")
+    shown = f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
+
+    def refuse(
+        message: str, owned: bool, n: int = 0, code: ExitCode = ExitCode.REFUSED
+    ) -> BronzeGateResult:
+        return BronzeGateResult(False, bucket, prefix, owned, n, message=message, exit_code=code)
+
+    if s3 is None:
+        s3 = _s3_client_for(cfg)
+    if getattr(s3, "_init_error", None):
+        return refuse(
+            f"cannot check {shown} for existing data ({s3._init_error}); refusing to generate",
+            owned=False,
+            code=ExitCode.PREREQUISITE,
+        )
+    try:
+        if not s3.bucket_exists(bucket):
+            return BronzeGateResult(True, bucket, prefix, owned=False)
+        nonempty = s3.has_user_objects(bucket, prefix + "/" if prefix else "")
+    except Exception as e:  # noqa: BLE001
+        return refuse(f"could not list {shown}: {e}", owned=False, code=ExitCode.PREREQUISITE)
+    owned = deployment_may_empty(cfg, bucket, s3)
+    if not nonempty:
+        return BronzeGateResult(True, bucket, prefix, owned)
+    try:
+        info = s3.get_bucket_size(bucket, prefix=prefix + "/" if prefix else "")
+        n = int(info.object_count or 0)
+        size_gb = (info.size_bytes or 0) / (1024**3)
+    except Exception:  # noqa: BLE001 -- the count is for the message only
+        n, size_gb = 0, 0.0
+    held = f"{shown} holds {n} object(s) ({size_gb:.2f} GB)"
+    if regenerate and not prefix:
+        return refuse(
+            f"{held}, and the datagen prefix is empty: --regenerate clears only the "
+            "datagen prefix and never a whole bucket. Set "
+            "architecture.pipeline.medallion.bronze.path_template, or clear the "
+            "bucket yourself.",
+            owned,
+            n,
+        )
+    if owned:
+        if not regenerate:
+            return refuse(
+                f"Bronze prefix {held}. Refusing to generate over it: pass --regenerate "
+                "to clear the datagen prefix first, or --skip-generate to reuse the "
+                "existing data.",
+                owned,
+                n,
+            )
+        try:
+            cleared = s3.delete_prefix(bucket, prefix, abort_multipart=True)
+        except Exception as e:  # noqa: BLE001
+            return refuse(
+                f"--regenerate: could not clear {shown}: {e}", owned, n, code=ExitCode.FAILED
+            )
+        return BronzeGateResult(True, bucket, prefix, owned, n, cleared=cleared)
+    if regenerate:
+        return refuse(
+            f"{held} and this deployment did not create {bucket}: Lakebench does not "
+            "empty a bucket this deployment did not create. Clear the prefix yourself, "
+            "or pass --allow-stale-bronze to generate over it.",
+            owned,
+            n,
+        )
+    if not allow_stale_bronze:
+        return refuse(
+            f"{held} and this deployment did not create {bucket}. Pass "
+            "--allow-stale-bronze to generate over them (the scale-ratio check flags "
+            "an over-count), or clear the prefix yourself.",
+            owned,
+            n,
+        )
+    return BronzeGateResult(True, bucket, prefix, owned, n, stale_allowed=True)
+
+
 class DatagenDeployer:
     """Deploys and monitors the datagen job."""
 
     TEMPLATES = ["datagen/job.yaml.j2"]
 
-    def __init__(self, engine: DeploymentEngine):
+    def __init__(self, engine: DeploymentEngine, allow_stale_bronze: bool = False):
+        self.allow_stale_bronze = allow_stale_bronze
         self.engine = engine
         self.config = engine.config
         self.k8s = engine.k8s
@@ -296,101 +497,68 @@ class DatagenDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _bronze_bucket_is_owned(self, bucket: str) -> bool:
-        """True only when this deployment's namespace records creating ``bucket``.
-
-        The clear below is destructive, so it must respect the same ownership
-        model as destroy and clean: on FlashBlade bucket tagging is unsupported
-        (LB-088), so the namespace's created-buckets record is the authoritative
-        proof of ownership. Fail-safe: any uncertainty (record unreadable,
-        namespace absent, bucket not listed) returns False, so a generate into a
-        shared, adopted or foreign bronze bucket never deletes another
-        deployment's data (invariant 4). `lakebench generate` calls the deployer
-        directly and never runs the deploy engine's bucket-ownership guard, so
-        this check is the only thing standing between the clear and foreign data.
-        """
-        try:
-            from kubernetes import client as k8s_client
-
-            from lakebench.deploy.ownership import read_created_buckets
-
-            core_v1 = k8s_client.CoreV1Api()
-            namespace = self.config.get_namespace()
-            return bucket in read_created_buckets(core_v1, namespace)
-        except Exception as e:  # noqa: BLE001
-            logger.info(
-                "LB-185: could not confirm this deployment created %s (%s); not clearing it",
-                bucket,
-                e,
-            )
-            return False
-
     def _clear_bronze_prefix_if_fresh(self, cycle_index: int, path_prefix: str) -> None:
-        """Clear stale datagen files before a fresh generate (LB-185).
+        """Before cycle 0: clear stale datagen files, or refuse to write over them.
 
-        A re-generate into a reused bronze bucket must not inherit part-* files
-        a larger earlier generate left behind: they share the ``part-NNNNNN``
-        naming, so the bronze read cannot tell them apart and silver over-counts
-        (a smaller generate over a larger one's leftovers). Clear the workload's
-        bronze prefix before cycle 0 writes; append cycles (n > 0) keep the
-        earlier cycles' files. Skipped when the operator manages the bucket
-        (``create_buckets`` false) or when this deployment cannot prove it
-        created the bucket (invariant 4). Scoped to the datagen prefix via
-        ``delete_prefix``, which refuses an empty or root prefix.
-
-        For an owned bucket the clear MUST succeed: a half-cleared prefix leaves
-        stale files that silver over-counts, the exact LB-185 bug, so a clearing
-        failure raises and fails the generate rather than proceeding with a PASS
-        on wrong data (invariant 3).
+        A re-generate into a reused bronze bucket must not inherit part-*
+        files a larger earlier generate left behind: they share the
+        ``part-NNNNNN`` naming, so silver cannot tell them apart and
+        over-counts (LB-185). Append cycles (n > 0) keep earlier cycles'
+        files. On a bucket this deployment may empty
+        (``deployment_may_empty``) the datagen prefix is cleared, scoped by
+        ``delete_prefix`` with its incomplete uploads aborted; a failure
+        raises and fails the generate (invariant 3). On any other bucket a
+        non-empty prefix raises ``StaleBronzeRefused`` unless the deployer was
+        built with ``allow_stale_bronze`` (SAF-9: the defence for a caller
+        that skipped the CLI's ``bronze_prefix_gate``).
         """
         if cycle_index != 0:
             return
-        s3_cfg = self.config.platform.storage.s3
-        if not s3_cfg.create_buckets:
-            logger.info(
-                "LB-185: create_buckets is false; leaving the bronze prefix for "
-                "the operator to manage"
-            )
-            return
         prefix = path_prefix.strip("/")
-        if not prefix:
-            logger.warning("LB-185: datagen path prefix is empty; not clearing the bronze bucket")
-            return
-        bucket = s3_cfg.buckets.bronze
-        if not self._bronze_bucket_is_owned(bucket):
-            logger.info(
-                "LB-185: %s is not recorded as created by this deployment; not clearing it "
-                "(a re-generate into a reused bucket may inherit stale files)",
-                bucket,
-            )
-            return
-        # Owned: the prefix must be empty before datagen writes. Any failure
-        # propagates so deploy()/deploy_cycle() report FAILED rather than
-        # generating over a half-cleared prefix.
-        from lakebench.s3 import S3Client
-
-        s3 = S3Client(
-            endpoint=s3_cfg.endpoint,
-            access_key=s3_cfg.access_key,
-            secret_key=s3_cfg.secret_key,
-            region=s3_cfg.region,
-            path_style=s3_cfg.path_style,
-            ca_cert=s3_cfg.ca_cert,
-            verify_ssl=s3_cfg.verify_ssl,
-        )
+        bucket = self.config.platform.storage.s3.buckets.bronze
+        s3 = _s3_client_for(self.config)
         if s3._init_error:
             raise RuntimeError(
-                f"LB-185: cannot clear the bronze prefix s3://{bucket}/{prefix} before a "
+                f"LB-185: cannot check the bronze prefix s3://{bucket}/{prefix} before a "
                 f"fresh generate: {s3._init_error}"
             )
-        n = s3.delete_prefix(bucket, prefix)
-        if n:
-            logger.info(
-                "LB-185: cleared %d stale object(s) under s3://%s/%s before a fresh generate",
-                n,
+        if not s3.bucket_exists(bucket):
+            return
+        if not prefix:
+            # Nothing to scope a clear to: a whole bucket is never cleared here.
+            if s3.has_user_objects(bucket) and not self.allow_stale_bronze:
+                raise StaleBronzeRefused(
+                    f"s3://{bucket} holds objects and the datagen prefix is empty, so "
+                    "they cannot be cleared before a fresh generate. Clear the bucket "
+                    "yourself, or pass --allow-stale-bronze."
+                )
+            return
+        if deployment_may_empty(self.config, bucket, s3):
+            n = s3.delete_prefix(bucket, prefix, abort_multipart=True)
+            if n:
+                logger.info(
+                    "LB-185: cleared %d stale object(s) under s3://%s/%s before a fresh generate",
+                    n,
+                    bucket,
+                    prefix,
+                )
+            return
+        if not s3.has_user_objects(bucket, prefix + "/"):
+            return
+        if self.allow_stale_bronze:
+            logger.warning(
+                "s3://%s/%s holds objects and this deployment did not create %s; "
+                "generating over them (--allow-stale-bronze)",
                 bucket,
                 prefix,
+                bucket,
             )
+            return
+        raise StaleBronzeRefused(
+            f"s3://{bucket}/{prefix} holds objects and this deployment did not create "
+            f"{bucket}. Pass --allow-stale-bronze to generate over them, or clear the "
+            "prefix yourself."
+        )
 
     def deploy(self) -> DeploymentResult:
         """Deploy the datagen job.

@@ -1442,12 +1442,29 @@ def _remove_deps_set_annotation(namespace: str) -> None:
         logger.warning("could not remove %s first: %s", ANNOTATION_DEPS_SET, e)
 
 
+def _clear_bronze_data_clock(namespace: str) -> None:
+    """Set ``lakebench-silver-state``'s ``bronze_data_clock`` to "" (LB-231)."""
+    from lakebench.deploy.engine import DeploymentEngine
+
+    core_v1 = _category1_api("core_v1")
+    cm = core_v1.read_namespaced_config_map(DeploymentEngine.SILVER_STATE_CONFIGMAP, namespace)
+    key = DeploymentEngine._SILVER_STATE_CLOCK_KEY  # noqa: SLF001
+    if not (cm.data or {}).get(key):
+        return
+    core_v1.patch_namespaced_config_map(
+        DeploymentEngine.SILVER_STATE_CONFIGMAP,
+        namespace,
+        {"data": {key: ""}, "metadata": {"resourceVersion": cm.metadata.resource_version}},
+    )
+
+
 def _category1_step(
     namespace: str,
     deployment: str,
     *,
     ns_goes: bool,
     conditions: frozenset[str] = frozenset(),
+    bronze_emptied: bool = False,
 ) -> DeploymentResult:
     """Delete the ``category1`` registry entries and the Category-1 annotations.
 
@@ -1466,6 +1483,12 @@ def _category1_step(
     When the namespace step is meant to delete it, the annotations are left:
     if that step then keeps the namespace (an operator pod still watching
     it, say), the deployment is still whole.
+
+    LB-231: ``lakebench-silver-state`` is kept (KEPT_ON_DESTROY), but its
+    ``bronze_data_clock`` describes the bronze data. When this destroy
+    emptied the bronze bucket and the namespace survives, the clock is
+    cleared, so a later deploy's silver stages do not read the old data's
+    clock; the rebuild-epoch counters are left alone.
     """
     from kubernetes.client.rest import ApiException
 
@@ -1507,6 +1530,14 @@ def _category1_step(
                 problems.append(f"{entry.kind}/{name}: {e.reason}")
             except Exception as e:  # noqa: BLE001
                 problems.append(f"{entry.kind}/{name}: {e}")
+    if bronze_emptied and not ns_goes:
+        try:
+            _clear_bronze_data_clock(namespace)
+        except ApiException as e:
+            if e.status != 404:
+                problems.append(f"lakebench-silver-state bronze_data_clock: {e.reason}")
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"lakebench-silver-state bronze_data_clock: {e}")
     try:
         if not ns_goes:
             core_v1 = _category1_api("core_v1")
@@ -2808,6 +2839,9 @@ def destroy_all(
             return stopped
 
     # Step 4: Clean S3 buckets (optional)
+    # LB-231: whether this destroy emptied the bronze bucket (its data clock
+    # in lakebench-silver-state is then stale).
+    bronze_emptied = False
     if clean_buckets and not data_steps_allowed:
         results.append(
             DeploymentResult(
@@ -2915,6 +2949,8 @@ def destroy_all(
                         vanished = bucket
                         break
                     total_deleted += deleted
+                    if bucket == s3_cfg.buckets.bronze:
+                        bronze_emptied = True
                 # LB-159: emptying alone leaked one empty bucket per
                 # deployment. Delete only buckets proven to be this
                 # deployment's (ownership tag, or the name-prefix claim
@@ -3756,6 +3792,7 @@ def destroy_all(
         engine.config.name,
         ns_goes=engine.config.platform.kubernetes.create_namespace is True,
         conditions=frozenset({"observability"} if engine.config.observability.enabled else ()),
+        bronze_emptied=bronze_emptied,
     )
     results.append(cat1)
     report("category1", cat1.status, cat1.message)

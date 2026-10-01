@@ -258,6 +258,14 @@ def compute_badge_status(
     pb = metrics.pipeline_benchmark
     is_sustained = _is_sustained(metrics)
 
+    # SAF-9: datagen wrote over objects it did not clear (--allow-stale-bronze).
+    stale = getattr(metrics, "datagen_stale_bronze", None)
+    if stale:
+        warnings.append(
+            f"bronze held {stale.get('objects_before', 0)} objects before generate; "
+            "rows may be over-counted"
+        )
+
     # Data completeness
     if pb is not None:
         if is_sustained and pb.ingest_ratio is None:
