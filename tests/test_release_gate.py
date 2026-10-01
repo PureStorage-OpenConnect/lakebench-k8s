@@ -356,7 +356,12 @@ def test_gitleaks_history_check_sees_merges_and_inline_allow(tmp_path, monkeypat
     git("checkout", "-q", "main")
     (tmp_path / "a.txt").write_text("main\n")
     git("commit", "-q", "-am", "main")
-    subprocess.run(["git", "-C", str(tmp_path), "merge", "-q", "side"], capture_output=True)
+    m = subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "merge", "side"],
+        capture_output=True,
+        text=True,
+    )
+    assert (tmp_path / ".git" / "MERGE_HEAD").exists(), m.stdout + m.stderr  # a conflicted merge
     (tmp_path / "a.txt").write_text(f"key: {key}\n")
     git("add", "a.txt")
     git("commit", "-q", "-m", "merge")

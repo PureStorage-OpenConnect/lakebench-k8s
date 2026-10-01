@@ -263,9 +263,13 @@ def test_real_gitleaks_refuses_a_key_added_in_a_merge(repo):
     _commit(repo, "a.txt", "side\n", "side")
     _git(repo, "checkout", "-q", "main")
     _commit(repo, "a.txt", "main\n", "main")
-    subprocess.run(
-        ["git", "-C", str(repo), "merge", "-q", "side"], capture_output=True, env=_clean_env()
+    m = subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "merge", "side"],
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
     )
+    assert (repo / ".git" / "MERGE_HEAD").exists(), m.stdout + m.stderr  # a conflicted merge
     tip = _commit(repo, "a.txt", f"k: {_planted_key()}\n", "merge")
     assert _git(repo, "rev-list", "--parents", "-n", "1", tip).count(" ") == 2
     res = _run(repo, [_new_branch(tip)], os.environ["PATH"])

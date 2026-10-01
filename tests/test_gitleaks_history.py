@@ -123,7 +123,13 @@ def test_key_in_a_merge_commit_only_fails(repo, ignore):
     _git(repo, "checkout", "-q", "main")
     (repo / "a.txt").write_text("main\n")
     _git(repo, "commit", "-q", "-am", "main")
-    subprocess.run(["git", "-C", str(repo), "merge", "-q", "side"], capture_output=True, env=_env())
+    m = subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "merge", "side"],
+        capture_output=True,
+        text=True,
+        env=_env(),
+    )
+    assert (repo / ".git" / "MERGE_HEAD").exists(), m.stdout + m.stderr  # a conflicted merge
     (repo / "a.txt").write_text(f"key: {_key('Q')}\n")
     _git(repo, "add", "a.txt")
     _git(repo, "commit", "-q", "-m", "merge")
