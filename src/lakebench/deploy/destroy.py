@@ -207,8 +207,8 @@ def _operator_pods_listing(
     that are terminating. A pod that has finished (Succeeded, Failed: an
     evicted controller keeps its old args) runs nothing and is skipped; a
     Deployment whose pod template still lists the namespace would start a
-    replacement that watches it, so it counts. Any read error raises
-    ``_NamespaceUnverifiable``.
+    replacement that watches it, so it counts unless it is scaled to zero.
+    Any read error raises ``_NamespaceUnverifiable``.
     """
     from lakebench.deploy.cluster_lock import LEASE_REQUEST_TIMEOUT
 
@@ -227,7 +227,9 @@ def _operator_pods_listing(
     deps = sorted(
         d.metadata.name
         for d in deployments or []
-        if _containers_list(
+        # Scaled to zero runs no pod; it would only matter once scaled up.
+        if getattr(d.spec, "replicas", 1) != 0
+        and _containers_list(
             getattr(getattr(getattr(d.spec, "template", None), "spec", None), "containers", None),
             namespace,
         )
@@ -1350,10 +1352,11 @@ def _category1_step(
     ``deploy/category1.py`` lists every object Lakebench creates in the
     namespace; the entries whose step is ``category1`` are the ones no
     component step deletes. They go in registry order, each by name or by
-    a deployment-scoped selector, in this deployment's namespace only; an
-    entry with a ``when`` condition not in ``conditions`` is skipped. Every
-    entry is tried; any failure is FAILED when the namespace survives, and
-    SKIPPED when the namespace step is meant to delete it.
+    a deployment-scoped selector, in this deployment's namespace only. An
+    entry whose ``when`` condition is not in ``conditions`` is still tried,
+    but a 403 for it is ignored. Every entry is tried; any failure is FAILED
+    when the namespace survives, and SKIPPED when the namespace step is
+    meant to delete it.
 
     When the namespace survives (``ns_goes`` false), one patch then removes
     ``CATEGORY1_ANNOTATIONS``, conditional on the resourceVersion just read,
@@ -1373,15 +1376,20 @@ def _category1_step(
     deleted = 0
     problems: list[str] = []
     for entry in CATEGORY1_OBJECTS:
-        if entry.step != CATEGORY1_STEP or (entry.when and entry.when not in conditions):
+        if entry.step != CATEGORY1_STEP:
             continue
+        # An entry whose condition is off (observability turned off since
+        # deploy, or never on) is still tried, so nothing it created is left,
+        # but a 403 or 404 for it is not a failure: a user without rights on
+        # a kind the deployment never used must not fail every destroy.
+        optional = bool(entry.when) and entry.when not in conditions
         what = f"{entry.kind}/{entry.name or entry.label_selector}"
         try:
             client = _category1_api(entry.api)
             names = _category1_names(entry, client, namespace, deployment)
         except ApiException as e:
-            if e.status == 404:  # the kind is not installed: nothing of it exists
-                continue
+            if e.status == 404 or (optional and e.status == 403):
+                continue  # the kind is not installed, or not ours to see
             problems.append(f"{what}: {e.reason}")
             continue
         except Exception as e:  # noqa: BLE001
@@ -1391,9 +1399,12 @@ def _category1_step(
             try:
                 _category1_delete(entry, client, namespace, name)
                 deleted += 1
+            except ApiException as e:
+                if optional and e.status == 403:
+                    continue
+                problems.append(f"{entry.kind}/{name}: {e.reason}")
             except Exception as e:  # noqa: BLE001
-                reason = getattr(e, "reason", None) or str(e)
-                problems.append(f"{entry.kind}/{name}: {reason}")
+                problems.append(f"{entry.kind}/{name}: {e}")
     try:
         if not ns_goes:
             core_v1 = _category1_api("core_v1")
@@ -1877,9 +1888,13 @@ def destroy_all(
                     if isinstance(err, _OperatorStillWatching):
                         if any(p.startswith("deployment/") for p in err.pods):
                             hint = (
-                                "an operator Deployment's pod template still lists it, so "
-                                "its helm values and the Deployment disagree; run "
-                                "`lakebench admin repair-operator`, then re-run destroy"
+                                "an operator Deployment's pod template still lists it, "
+                                "so the operator's helm release and its Deployments "
+                                "disagree (an upgrade that did not apply); check "
+                                f"`helm history spark-operator -n {spark_op_cfg.namespace}`. "
+                                "`lakebench admin repair-operator` does not compare the "
+                                "Deployments yet; until it does, the release has to be "
+                                "re-applied by the cluster admin"
                             )
                         else:
                             hint = (

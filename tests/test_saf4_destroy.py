@@ -308,7 +308,7 @@ class TestOperatorPodCheck:
             assert _namespace_deletes(rec) == []
             ns = _ns_result(results)
             assert "deployment/spark-operator-controller-2" in ns.message
-            assert "repair-operator" in ns.message
+            assert "helm history spark-operator" in ns.message
             assert clock.sleeps == [] or set(clock.sleeps) == {0.0}
 
     def test_pod_list_404_keeps_namespace(self):
@@ -589,3 +589,63 @@ def test_an_abort_during_the_grace_kills_the_child():
     with pytest.raises(LeaseAbort):
         _pinned._stop_gently(Proc())
     assert sent == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_a_deployment_scaled_to_zero_does_not_block():
+    from lakebench.deploy import destroy
+
+    core, apps = MagicMock(), MagicMock()
+    core.list_namespaced_pod.return_value.items = []
+    dep = MagicMock()
+    dep.metadata.name = "old-controller"
+    dep.spec.replicas = 0
+    dep.spec.template.spec.containers = [MagicMock(command=None, args=[f"--namespaces={NS}"])]
+    apps.list_namespaced_deployment.return_value.items = [dep]
+    assert not destroy._operator_pods_listing(core, apps, OP_NS, NS)
+    dep.spec.replicas = 1
+    assert destroy._operator_pods_listing(core, apps, OP_NS, NS).deployments == ("old-controller",)
+
+
+def test_a_second_ctrl_c_in_a_failed_acquire_still_releases():
+    """SIGINT is not deferred during the acquire; a KeyboardInterrupt at the start
+    of the finally must not skip the release of a landed write."""
+    from lakebench.deploy import cluster_lock as cl
+
+    real_try = cl._try_acquire_once
+    real_quiet = cl._SignalDeferral.quiet
+    calls = []
+
+    def landed_then_failed(*a, **kw):
+        real_try(*a, **kw)
+        raise cl.ClusterLockError("cannot create lease: (504)")
+
+    def quiet(self):
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        real_quiet(self)
+
+    with (
+        recording(NS) as rec,
+        patch.object(cl, "_try_acquire_once", landed_then_failed),
+        patch.object(cl._SignalDeferral, "quiet", quiet),
+    ):
+        with pytest.raises(KeyboardInterrupt), cl.cluster_lock(_core(), timeout=0):
+            pytest.fail("body must not run")
+        assert ("configmaps", cl.LOCK_NAMESPACE, cl.LOCK_CONFIGMAP_NAME) not in rec.store
+
+
+def test_a_failed_acquire_leaves_an_outer_lease_state_alone():
+    from lakebench.deploy import cluster_lock as cl
+    from lakebench.k8s import lease_state
+
+    outer = lease_state.HeldLease("outer", 100.0, 1e12)
+    token = lease_state._LEASE.set(outer)
+    try:
+        with recording(NS) as rec:
+            rec.seed_lease()
+            with pytest.raises(cl.ClusterLockHeld), cl.cluster_lock(_core(), timeout=0):
+                pass
+        assert lease_state._LEASE.get() is outer
+    finally:
+        lease_state._LEASE.reset(token)

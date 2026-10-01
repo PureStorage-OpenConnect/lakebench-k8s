@@ -72,10 +72,11 @@ class Cat1Entry:
     # Custom objects only (``api="custom"``).
     group: str = ""
     version: str = ""
-    # A config condition the category1 step needs before it deletes the
-    # entry: "" always, "observability" when observability.enabled. A user
-    # without rights on a kind the deployment never used (PodMonitor) then
-    # gets no 403.
+    # The config condition under which deploy creates the object: "" always,
+    # "observability" when observability.enabled. The category1 step still
+    # tries an entry whose condition is off (it may have been on at deploy),
+    # but ignores a 403 for it: a user without rights on a kind the
+    # deployment never used (PodMonitor) must not fail every destroy.
     when: str = ""
 
     def matches(self, kind: str, name: str, labels: dict[str, str] | None, deployment: str) -> bool:

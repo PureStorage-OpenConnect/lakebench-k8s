@@ -83,7 +83,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   restarts, destroy waits inside the cluster lease (up to 120 s) until no
   operator pod that is still running, and no operator Deployment template,
   lists the namespace in `--namespaces=`. A stale pod nobody is replacing
-  gets one more operator restart. If something still lists it, destroy keeps
+  gets one more restart of the shared operator's controller and webhook (as
+  the watch-list change itself does). If something still lists it, destroy keeps
   the namespace and exits 1 with "operator pods [...] still watch it",
   because the operator crash-loops on a watched namespace that no longer
   exists.

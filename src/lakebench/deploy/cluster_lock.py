@@ -900,7 +900,8 @@ def cluster_lock(
     holder_id = holder or build_holder_id()
     handle: LeaseHandle | None = None
     token = None
-    pending: LeaseAbort | None = None
+    pending: BaseException | None = None
+    entered = False
     deferral = _SignalDeferral()
     deferral.guard_acquire()
     try:
@@ -911,14 +912,17 @@ def cluster_lock(
             holder=holder_id,
             adopt_own=holder is None,
         )
+        entered = True
         held, token = lease_state.enter(handle.holder, max_hold_s)
         deferral.install(held)
         yield handle
     finally:
-        # First, so a signal landing as the body ends cannot skip the release.
+        # First, so a signal landing as the body ends (the third interrupt,
+        # or a Ctrl-C during a failed acquire, before SIGINT is deferred)
+        # cannot skip the release.
         try:
             deferral.quiet()
-        except LeaseAbort as e:
+        except KeyboardInterrupt as e:  # LeaseAbort included
             pending = e
             deferral.quiet()
         try:
@@ -939,7 +943,10 @@ def cluster_lock(
                 _release_interrupted_acquire(core_v1, holder_id)
         finally:
             try:
-                lease_state.leave(token)
+                if entered:
+                    # Only a lease this call entered: a failed acquire must not
+                    # clear an outer holder's state.
+                    lease_state.leave(token)
             finally:
                 deferral.restore()
                 # After the release: the saved handler now sees the signal.
