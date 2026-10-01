@@ -1211,6 +1211,144 @@ def _no_engine_table_message(
     return f"{fmt} tables not dropped: {why}; {catalog}; {files}"
 
 
+_SINGULAR = {
+    "configmaps": "config_map",
+    "secrets": "secret",
+    "services": "service",
+    "serviceaccounts": "service_account",
+    "persistentvolumeclaims": "persistent_volume_claim",
+    "deployments": "deployment",
+    "statefulsets": "stateful_set",
+    "jobs": "job",
+    "roles": "role",
+    "rolebindings": "role_binding",
+}
+
+
+def _category1_api(api: str) -> Any:
+    from kubernetes import client as k8s_client
+
+    return {
+        "core_v1": k8s_client.CoreV1Api,
+        "apps_v1": k8s_client.AppsV1Api,
+        "batch_v1": k8s_client.BatchV1Api,
+        "rbac_v1": k8s_client.RbacAuthorizationV1Api,
+        "custom": k8s_client.CustomObjectsApi,
+    }[api]()
+
+
+def _category1_names(entry: Any, client: Any, namespace: str, deployment: str) -> list[str]:
+    """The object names one ``category1`` entry deletes."""
+    if entry.name:
+        return [entry.name]
+    selector = entry.label_selector.format(name=deployment)
+    if entry.api == "custom":
+        listed = client.list_namespaced_custom_object(
+            group=entry.group,
+            version=entry.version,
+            namespace=namespace,
+            plural=entry.kind,
+            label_selector=selector,
+        )
+        return [i["metadata"]["name"] for i in listed.get("items", [])]
+    lister = getattr(client, f"list_namespaced_{_SINGULAR[entry.kind]}")
+    return [i.metadata.name for i in lister(namespace, label_selector=selector).items]
+
+
+def _category1_delete(entry: Any, client: Any, namespace: str, name: str) -> None:
+    """Delete one object; a 404 (gone, or its kind not installed) is success."""
+    from kubernetes.client.rest import ApiException
+
+    try:
+        if entry.api == "custom":
+            client.delete_namespaced_custom_object(
+                group=entry.group,
+                version=entry.version,
+                namespace=namespace,
+                plural=entry.kind,
+                name=name,
+            )
+        else:
+            deleter = getattr(client, f"delete_namespaced_{_SINGULAR[entry.kind]}")
+            deleter(name, namespace, propagation_policy="Background")
+    except ApiException as e:
+        if e.status != 404:
+            raise
+
+
+def _category1_step(namespace: str, deployment: str, *, ns_goes: bool) -> DeploymentResult:
+    """Delete the ``category1`` registry entries and the Category-1 annotations.
+
+    ``deploy/category1.py`` lists every object Lakebench creates in the
+    namespace; the entries whose step is ``category1`` are the ones no
+    component step deletes. They go in registry order, each by name or by
+    a deployment-scoped selector, in this deployment's namespace only. Then
+    one patch removes ``CATEGORY1_ANNOTATIONS`` from the namespace. Every
+    entry is tried; any failure is FAILED when the namespace survives, and
+    SKIPPED when the namespace delete that follows removes them anyway.
+    """
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.deploy.category1 import (
+        CATEGORY1_ANNOTATIONS,
+        CATEGORY1_OBJECTS,
+        CATEGORY1_STEP,
+    )
+
+    deleted = 0
+    problems: list[str] = []
+    for entry in (e for e in CATEGORY1_OBJECTS if e.step == CATEGORY1_STEP):
+        what = f"{entry.kind}/{entry.name or entry.label_selector}"
+        try:
+            client = _category1_api(entry.api)
+            names = _category1_names(entry, client, namespace, deployment)
+        except ApiException as e:
+            if e.status == 404:  # the kind is not installed: nothing of it exists
+                continue
+            problems.append(f"{what}: {e.reason}")
+            continue
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"{what}: {e}")
+            continue
+        for name in names:
+            try:
+                _category1_delete(entry, client, namespace, name)
+                deleted += 1
+            except Exception as e:  # noqa: BLE001
+                reason = getattr(e, "reason", None) or str(e)
+                problems.append(f"{entry.kind}/{name}: {reason}")
+    try:
+        core_v1 = _category1_api("core_v1")
+        ns_obj = core_v1.read_namespace(namespace)
+        present = [a for a in CATEGORY1_ANNOTATIONS if a in (ns_obj.metadata.annotations or {})]
+        if present:
+            core_v1.patch_namespace(
+                namespace, {"metadata": {"annotations": dict.fromkeys(present)}}
+            )
+    except ApiException as e:
+        if e.status != 404:
+            problems.append(f"namespace annotations: {e.reason}")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"namespace annotations: {e}")
+    if not problems:
+        return DeploymentResult(
+            component="category1",
+            status=DeploymentStatus.SUCCESS,
+            message=f"Removed the remaining namespaced objects ({deleted} delete calls)",
+        )
+    summary = "; ".join(problems[:5]) + (
+        f"; and {len(problems) - 5} more" if len(problems) > 5 else ""
+    )
+    if ns_goes:
+        msg = f"Category-1 cleanup incomplete ({summary}); the namespace delete removes them"
+        status = DeploymentStatus.SKIPPED
+    else:
+        msg = f"Category-1 cleanup failed: {summary}"
+        status = DeploymentStatus.FAILED
+    logger.warning(msg)
+    return DeploymentResult(component="category1", status=status, message=msg)
+
+
 def destroy_all(
     engine: DeploymentEngine,
     progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
@@ -3270,6 +3408,22 @@ def destroy_all(
                 message=str(e),
             )
         )
+
+    # Step 8c: the Category-1 registry (cluster-safety 14): what no component
+    # step deleted, and the Category-1 namespace annotations. It matters when
+    # create_namespace=false keeps the namespace; with true it runs anyway
+    # (one code path) and a failure is only a skip.
+    stopped = _stop_if_changed("the Category-1 teardown")
+    if stopped is not None:
+        return stopped
+    report("category1", DeploymentStatus.IN_PROGRESS, "Removing remaining namespaced objects...")
+    cat1 = _category1_step(
+        namespace,
+        engine.config.name,
+        ns_goes=engine.config.platform.kubernetes.create_namespace is True,
+    )
+    results.append(cat1)
+    report("category1", cat1.status, cat1.message)
 
     # Step 9: StorageClass is Category 2 shared infrastructure. lakebench
     # never deletes it -- another parallel deployment on the same cluster
