@@ -88,6 +88,33 @@ def test_fixture_is_clean(path: Path) -> None:
     assert scrub.check_clean(json.loads(path.read_text())) == []
 
 
+def test_manifest_pins_each_fixture() -> None:
+    """A hand-edited fixture (a doctored row count) no longer matches the
+    sha256 the import recorded."""
+    for run_id, entry in sr.manifest()["records"].items():
+        assert scrub.sha256_of(sr.record_path(run_id)) == entry["fixture_sha256"], run_id
+
+
+_SOURCE_ROOTS = {
+    "lakebench-k8s": Path("/home/repos/lakebench-k8s"),
+    "lakebench-k8s-integrate": Path("/home/repos/lakebench-k8s-integrate"),
+}
+
+
+@pytest.mark.parametrize("run_id", sorted(EXPECTED["records"]))
+def test_fixture_reproduces_from_its_source(run_id: str) -> None:
+    """Rule 5 lineage, where the local sources exist (never in CI): the
+    fixture is exactly the scrubber's output on the recorded source."""
+    entry = sr.manifest()["records"][run_id]
+    src = _SOURCE_ROOTS[entry["source"]["root"]] / entry["source"]["path"]
+    if not src.exists():
+        pytest.skip("source record not on this host")
+    assert scrub.sha256_of(src) == entry["source_sha256"]
+    scrubbed, changed = scrub.scrub_record(json.loads(src.read_text()))
+    assert scrub.dump(scrubbed) == sr.record_path(run_id).read_text()
+    assert changed == entry["rewritten"]
+
+
 @pytest.mark.parametrize("run_id", sorted(EXPECTED["records"]))
 def test_fixture_is_scrubber_output(run_id: str) -> None:
     rec = sr.load_record(run_id)
@@ -145,7 +172,7 @@ def test_check_clean_flags_each_kind() -> None:
     assert "endpoint host is not the placeholder" in text
     assert "address outside the placeholder set" in text
     assert "credential-named key with a literal value" in text
-    assert "value has a credential format" in text
+    assert "credential format" in text
     assert "bucket name 'dep-x-bronze' is not scrubbed" in text
 
 
@@ -169,14 +196,157 @@ def test_protected_seed_refused_without_printing_it(monkeypatch) -> None:
     assert str(seed) not in str(exc.value)
 
 
-def test_rewrite_reaching_identity_refused() -> None:
-    """A lab registry inside the generator image reference is identity: the
-    scrubber refuses rather than move the record's identity digest."""
+def test_rewrite_inside_experiment_block_refused() -> None:
+    """A lab registry inside the stored generator image reference is
+    evidence: the scrubber refuses rather than edit the experiment block."""
     rec = sr.load_record("5105a0")
     image = rec["experiment"]["corpus"]["generator_image"]
     rec["experiment"]["corpus"]["generator_image"] = f"{LAB_ADDR}:5000/{image}"
+    with pytest.raises(scrub.ScrubError, match="rewrite evidence"):
+        scrub.scrub_record(rec)
+
+
+def test_rewrite_reaching_rebuilt_identity_refused() -> None:
+    """The same registry in the run-start inputs moves the identity of the
+    block experiment_block() rebuilds: refused by the identity guard."""
+    rec = sr.load_record("5105a0")
+    corpus = rec["config_snapshot"]["experiment_inputs"]["corpus"]
+    corpus["generator_image"] = f"{LAB_ADDR}:5000/{corpus['generator_image']}"
     with pytest.raises(scrub.ScrubError, match="identity"):
         scrub.scrub_record(rec)
+
+
+def test_bucket_names_replaced_only_as_whole_tokens() -> None:
+    """Default bucket names are prefixes of job names: a bucket
+    lakebench-bronze must not turn job lakebench-bronze-verify into
+    scrubbed-bronze-verify."""
+    rec = sr.load_record("5105a0")
+    s3 = rec["config_snapshot"]["s3"]
+    s3["buckets"] = {"bronze": "lakebench-bronze", "silver": "lakebench-silver", "gold": "gb"}
+    rec["jobs"][0]["job_name"] = "lakebench-bronze-verify"
+    rec["jobs"][0]["error_message"] = "listing s3a://lakebench-bronze/x and lakebench-silver/y"
+    with pytest.raises(scrub.ScrubError, match="shorter than any valid S3 bucket"):
+        scrub.scrub_record(rec)
+    s3["buckets"]["gold"] = "lakebench-gold"
+    out, changed = scrub.scrub_record(rec)
+    assert out["jobs"][0]["job_name"] == "lakebench-bronze-verify"
+    assert out["experiment"] == rec["experiment"]
+    assert out["jobs"][0]["error_message"] == (
+        "listing s3a://scrubbed-bronze/x and scrubbed-silver/y"
+    )
+
+
+def test_bucket_named_like_a_stage_is_refused_not_rewritten() -> None:
+    """A bucket literally named silver is a whole token in
+    experiment.stages.executed: refuse rather than edit the stages run."""
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["buckets"]["silver"] = "silver"
+    with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*stages\.executed"):
+        scrub.scrub_record(rec)
+
+
+def test_bucket_name_in_a_job_name_is_refused() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["buckets"]["bronze"] = "dep-x-bronze"
+    rec["jobs"][0]["job_name"] = "dep-x-bronze"
+    with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*jobs\[0\]\.job_name"):
+        scrub.scrub_record(rec)
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["dotted_spark_conf", "camel_case", "aws_env_name", "env_list", "credentials_dict", "dict_key"],
+)
+def test_other_credential_and_endpoint_shapes(where: str) -> None:
+    rec = sr.load_record("5105a0")
+    extra: dict = rec.setdefault("config_snapshot", {}).setdefault("extra", {})
+    secret = "abc/def+ghi" * 4
+    if where == "dotted_spark_conf":
+        extra["spark.hadoop.fs.s3a.endpoint"] = "http://fb.lab.corp:80"
+        extra["spark.hadoop.fs.s3a.secret.key"] = secret
+    elif where == "camel_case":
+        extra["endpointOverride"] = "fb.lab.corp:80"
+        extra["secretAccessKey"] = secret
+    elif where == "aws_env_name":
+        extra["AWS_ENDPOINT_URL_S3"] = "http://fb.lab.corp"
+        extra["AWS_SECRET_ACCESS_KEY"] = secret
+    elif where == "env_list":
+        extra["env"] = [
+            {"name": "AWS_SECRET_ACCESS_KEY", "value": secret},
+            {"name": "S3_ENDPOINT", "value": "http://fb.lab.corp:80"},
+        ]
+    elif where == "credentials_dict":
+        extra["credentials"] = {"id": "PSKEYID", "key": secret}
+        extra["endpoint"] = "http://fb.lab.corp:80"
+    else:
+        extra[f"{LAB_ADDR}:80"] = {"endpoint": "http://fb.lab.corp:80"}
+    rec["jobs"][0]["error_message"] = "connect to fb.lab.corp timed out"
+    assert scrub.check_clean(rec) != []
+    out, _ = scrub.scrub_record(rec)
+    text = json.dumps(out)
+    assert "fb.lab.corp" not in text
+    assert secret not in text
+    assert "PSKEYID" not in text
+    assert LAB_ADDR not in text
+    assert scrub.check_clean(out) == []
+
+
+def test_url_userinfo_dropped() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["endpoint"] = "http://user:pw@fb.lab.corp:80"
+    rec["jobs"][0]["error_message"] = "GET https://bob:hunter2@mirror.example.org/x failed"
+    assert any("user-info" in p for p in scrub.check_clean(rec))
+    out, _ = scrub.scrub_record(rec)
+    assert out["config_snapshot"]["s3"]["endpoint"] == "http://10.0.1.50:80"
+    assert out["jobs"][0]["error_message"] == "GET https://mirror.example.org/x failed"
+
+
+def test_non_addresses_left_alone() -> None:
+    """A four-part version is not a lab address, and a path under an
+    endpoint-named key is not a host."""
+    rec = sr.load_record("5105a0")
+    extra = rec["config_snapshot"].setdefault("extra", {})
+    extra["jdk"] = "17.0.12.7"
+    extra["metrics_endpoint"] = "/metrics"
+    out, changed = scrub.scrub_record(rec)
+    assert out["config_snapshot"]["extra"] == {"jdk": "17.0.12.7", "metrics_endpoint": "/metrics"}
+    assert not [p for p in changed if ".extra." in p]
+
+
+@pytest.mark.parametrize("shape", ["string", "argv", "camel", "list"])
+def test_protected_seed_in_other_shapes_refused(monkeypatch, shape: str) -> None:
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {987654: "robustness"})
+    rec = sr.load_record("5105a0")
+    extra = rec["config_snapshot"].setdefault("extra", {})
+    if shape == "string":
+        extra["seed"] = "987654"
+    elif shape == "argv":
+        extra["args"] = "generate --seed 987654 --scale 1"
+    elif shape == "camel":
+        extra["randomSeed"] = 987654
+    else:
+        extra["instance_seeds"] = [1, 987654]
+    with pytest.raises(scrub.ScrubError, match="robustness seed") as exc:
+        scrub.scrub_record(rec)
+    assert "987654" not in str(exc.value)
+
+
+def test_top_level_list_refused() -> None:
+    with pytest.raises(scrub.ScrubError, match="JSON object"):
+        scrub.scrub_record([{"run_id": "x"}])
+
+
+def test_scrub_text_for_logs() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["endpoint"] = "http://fb.lab.corp:80"
+    bucket = rec["config_snapshot"]["s3"]["buckets"]["bronze"]
+    log = f"[lb] read s3a://{bucket}/a from fb.lab.corp via {LAB_ADDR}\n"
+    out = scrub.scrub_text(log, rec)
+    assert out == "[lb] read s3a://scrubbed-bronze/a from 10.0.1.50 via 10.0.1.50\n"
+    with pytest.raises(scrub.ScrubError, match="credential format"):
+        scrub.scrub_text("key AKIA" + "ABCDEFGHIJKLMNOP")
 
 
 def test_cli_check_and_scrub(tmp_path: Path, capsys) -> None:
