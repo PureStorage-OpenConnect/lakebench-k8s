@@ -21,8 +21,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not load. `--access-key` and `--secret-key` are refused with exit 2 and
   the values are never echoed; `--interactive`, `-i` and `--advanced` print
   one line and write the default. `--overwrite` is the new spelling of
-  `--force`; overwriting a config keeps its `name:` unless `--name` is
-  given. The 330-line commented template (`generate_example_config_yaml`)
+  `--force`. Overwriting a config keeps its `name:` unless `--name` is
+  given, and refuses (exit 2) when the new file would keep that name but
+  move the deployment: another namespace, bucket, S3 endpoint (filling in
+  an empty one is fine) or recipe. The replaced file is read as `destroy`
+  reads it; when where it deploys depends on a variable this shell has not
+  set, the overwrite is refused until it is set. The 330-line commented template (`generate_example_config_yaml`)
   is removed; docs/configuration.md is the key reference.
 - **A component that contradicts its recipe is refused at load.**
   `architecture.catalog.type`, `table_format.type`, `pipeline_engine` and
@@ -40,8 +44,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   explicit tag such as `!!str` still wins. What changed is that the
   environment value is no longer parsed as YAML: a value holding ` #`,
   quotes, `[..]`, `{..}` or `a: b` stays that text, where v1.6 cut it at the
-  comment, dropped the quotes or built a list or mapping. A quoted value
-  (`secret_key: "${S3_SECRET}"`) arrives verbatim as a string, so a secret
+  comment, dropped the quotes or built a list or mapping, and its line
+  breaks and repeated spaces are kept rather than folded. A quoted value
+  (`secret_key: "${S3_SECRET}"`) arrives verbatim as a string (unless it
+  carries a tag such as `!!int`), so a secret
   with a backslash, quotes or only digits is no longer retyped or echoed in
   a parse error; `init` writes the credential references quoted. A block
   scalar (`|`, `>`) keeps the substituted text inside its own line breaks.

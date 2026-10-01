@@ -38,7 +38,7 @@ lakebench init [OPTIONS]
 | `--namespace` | | `""` | Kubernetes namespace (default: the name) |
 | `--recipe` | `-r` | `polaris-iceberg-spark-trino` | Architecture recipe (`lakebench config recipes`) |
 | `--workload` | `-w` | `customer360` | Workload schema: `customer360` or `financial` |
-| `--overwrite` | | `false` | Overwrite an existing file |
+| `--overwrite` | | `false` | Overwrite an existing file; keeps its name, and refuses a change of namespace, buckets, endpoint or recipe under that name |
 | `--force` | | `false` | Old spelling of `--overwrite` (`-f` is deprecated here) |
 | `--local` | | `false` | Generate a config for local mode (podman/docker, no Kubernetes) |
 

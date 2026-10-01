@@ -770,3 +770,32 @@ def test_overwrite_of_an_unreadable_named_config_needs_a_new_name(tmp_path, monk
     r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
     assert r.exit_code == 2, r.output
     assert "cannot be read" in r.output and out.read_text() == old
+
+
+def test_rerunning_init_over_its_own_file_before_export_works(tmp_path, monkeypatch):
+    monkeypatch.delenv("LAKEBENCH_S3_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("LAKEBENCH_S3_SECRET_KEY", raising=False)
+    out = tmp_path / "c.yaml"
+    assert runner.invoke(app, ["init", "-o", str(out)]).exit_code == 0
+    first = yaml.safe_load(out.read_text())["name"]
+    # Filling in the endpoint the first file left empty is not a move.
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--endpoint", "http://s3:80"])
+    assert r.exit_code == 0, r.output
+    assert yaml.safe_load(out.read_text())["name"] == first
+    # Changing a set endpoint under the same name is.
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--endpoint", "http://other:80"])
+    assert r.exit_code == 2 and "endpoint 'http://s3:80' -> 'http://other:80'" in r.output
+    assert "LAKEBENCH_S3_ACCESS_KEY" not in __import__("os").environ
+
+
+def test_overwrite_of_a_file_with_a_typed_reference_does_not_crash(tmp_path, monkeypatch):
+    monkeypatch.setenv("LB_T_SEED", "7")
+    out = tmp_path / "t.yaml"
+    out.write_text(
+        "name: tseed\nrecipe: polaris-iceberg-spark-trino\n"
+        "workload:\n  datagen:\n    seed: !!int ${LB_T_SEED}\n"
+    )
+    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
+    assert r.exception is None or isinstance(r.exception, SystemExit), r.output
+    assert r.exit_code == 0, r.output
+    assert yaml.safe_load(out.read_text())["name"] == "tseed"

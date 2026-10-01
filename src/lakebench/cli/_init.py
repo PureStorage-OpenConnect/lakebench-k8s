@@ -401,13 +401,13 @@ def init(
         print_error(f"File already exists: {output}")
         print_info("Use --overwrite to replace it")
         raise typer.Exit(1)
-    replaced = _replaced_config(output) if overwrite else None
-    old_cfg, old_problem = _load_replaced(output) if replaced is not None else (None, None)
-    old_name = old_cfg.name if old_cfg is not None else _name_of(replaced)
-    if old_name and "${" in old_name:
+    replacing = overwrite and output.is_file()
+    old_cfg, old_problem = _load_replaced(output) if replacing else (None, None)
+    old_name = old_cfg.name if old_cfg is not None else _name_of(_replaced_config(output))
+    if old_name and ("${" in old_name or _UNSET in old_name):
         old_name = None  # an unresolved reference names no deployment
     kept_name = None if name else old_name
-    if overwrite and output.is_file() and not name and not kept_name:
+    if replacing and not name and not kept_name:
         from lakebench.config.deploy_state import read_legacy_name
 
         legacy = read_legacy_name(output)
@@ -542,7 +542,7 @@ def _replaced_config(path: Path) -> dict[str, Any] | None:
         return None
     try:
         data = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+    except Exception:  # noqa: BLE001 -- e.g. a typed tag on a ${VAR} reference
         return None
     return data if isinstance(data, dict) else None
 
@@ -552,25 +552,54 @@ def _name_of(data: dict[str, Any] | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+#: Stands in for a variable the replaced file references but this shell has
+#: not set (init's own file references the two S3 keys before they are
+#: exported). Valid as a name, namespace or bucket, so a target that depends
+#: on it is seen, and reported as unreadable rather than compared.
+_UNSET = "lbunsetvar0"
+
+
 def _load_replaced(path: Path) -> tuple[Any, str | None]:
     """The config about to be overwritten, loaded as ``destroy`` would load
     it (flat keys promoted, ``${VAR}`` substituted, a v1.6 recipe conflict
-    resolved as v1.6 did), or the reason it does not load."""
+    resolved as v1.6 did), or the reason it does not load. Unset variables
+    get ``_UNSET``; nothing is printed or written."""
+    import logging
+    import os
+
     from lakebench.config._load_context import LoadPurpose, collecting_notes
-    from lakebench.config.loader import ConfigError, _load_and_validate
+    from lakebench.config.loader import _ENV_PATTERN, _load_and_validate
 
     try:
+        raw = path.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        return None, str(e)
+    # Only references with no default: a default is what destroy would use.
+    unset = {
+        m.group(1)
+        for m in _ENV_PATTERN.finditer(raw)
+        if m.group(2) is None and m.group(1) not in os.environ
+    }
+    schema_log = logging.getLogger("lakebench.config.schema")
+    level = schema_log.level
+    try:
+        os.environ.update(dict.fromkeys(unset, _UNSET))
+        schema_log.setLevel(logging.CRITICAL)
         with collecting_notes(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             cfg, _ = _load_and_validate(path, LoadPurpose.TEARDOWN, None, True)
-    except (ConfigError, ValueError) as e:
-        return None, str(e).splitlines()[-1].strip(" -")
+    except Exception as e:  # noqa: BLE001 -- any failure means "cannot read it"
+        return None, (str(e).splitlines() or [type(e).__name__])[-1].strip(" -")
+    finally:
+        schema_log.setLevel(level)
+        for var in unset:
+            os.environ.pop(var, None)
     return cfg, None
 
 
 def _deployment_target(cfg: Any) -> dict[str, str]:
-    """What destroy and status act on: namespace, buckets and the
-    architecture its components make (Polaris and Hive tear down
+    """What destroy and status act on: namespace, buckets, the S3 endpoint
+    and the architecture its components make (Polaris and Hive tear down
     differently)."""
     from lakebench.config.support import recipe_for
 
@@ -581,10 +610,15 @@ def _deployment_target(cfg: Any) -> dict[str, str]:
         arch.pipeline_engine.value,
         arch.query_engine.type.value,
     )
-    target = {"namespace": cfg.get_namespace(), "recipe": recipe_for(*parts) or "-".join(parts)}
-    buckets = cfg.platform.storage.s3.buckets
+    s3 = cfg.platform.storage.s3
+    target = {
+        "name": cfg.name,
+        "namespace": cfg.get_namespace(),
+        "recipe": recipe_for(*parts) or "-".join(parts),
+        "endpoint": str(s3.endpoint or ""),
+    }
     for layer in ("bronze", "silver", "gold"):
-        target[f"buckets.{layer}"] = str(getattr(buckets, layer))
+        target[f"buckets.{layer}"] = str(getattr(s3.buckets, layer))
     return target
 
 
@@ -594,25 +628,30 @@ def _refuse_if_target_moves(
     """Refuse an overwrite that keeps the name but moves what it deploys.
 
     The same name says "the same deployment"; if the replaced file put it
-    in another namespace, other buckets or another architecture, a later
-    destroy from the new file would aim at the wrong one.
+    in another namespace, other buckets, on another endpoint or another
+    architecture, a later destroy from the new file would aim at the wrong
+    one. Filling in an endpoint the replaced file left empty is not a move.
     """
-    if old_cfg is None:
+    fix = "set its variables and re-run, or edit the file instead of overwriting it"
+    before = _deployment_target(old_cfg) if old_cfg is not None else None
+    if before is None or any(_UNSET in v for v in before.values()):
+        why = old_problem or "it depends on variables this shell has not set"
         _refuse(
-            f"{output} names the same deployment, but what it deploys cannot be read "
-            f"({old_problem}). Pass --name with a new name, or fix the file first"
+            f"{output} names this deployment, but where it deploys cannot be read ({why}): {fix}"
         )
     new_cfg, _ = _validate_text(text, credentials_env)
     if new_cfg is None:
         return  # config_problem refuses it
-    before = _deployment_target(old_cfg)
     after = _deployment_target(new_cfg)
+    if not before["endpoint"]:
+        after["endpoint"] = ""
     moved = [f"{k} '{before[k]}' -> '{after[k]}'" for k in before if before[k] != after[k]]
     if moved:
         _refuse(
             f"{output} keeps the name '{new_cfg.name}' but the new file would move its "
-            "deployment: " + "; ".join(moved) + ". Pass --name with a new name to write "
-            "a config for a new deployment, or edit the file"
+            "deployment: " + "; ".join(moved) + ". Edit the file instead, or pass "
+            "--name with another name to write a config for a new deployment (the "
+            "existing deployment then needs the old file to destroy it)"
         )
 
 
