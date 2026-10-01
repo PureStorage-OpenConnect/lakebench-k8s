@@ -1046,3 +1046,18 @@ def test_scrub_refuses_a_rewrite_of_another_part() -> None:
     sysid["fingerprint"] = fingerprint_of(sysid["parts"])
     with pytest.raises(scrub.ScrubError, match="parts other than an endpoint"):
         scrub.scrub_record(rec)
+
+
+def test_scrub_recomputes_every_system_identity_copy() -> None:
+    """The snapshot copy inside pipeline_benchmark is a third copy."""
+    from lakebench.metrics.system_identity import fingerprint_of
+
+    rec = _with_system_identity(sr.load_record("5105a0"), f"{LAB_ADDR}:80")
+    pb_inputs = rec["pipeline_benchmark"]["config_snapshot"].setdefault("experiment_inputs", {})
+    pb_inputs["system_identity"] = json.loads(json.dumps(rec["experiment"]["system_identity"]))
+    out, _ = scrub.scrub_record(rec)
+    copies = scrub._system_identity_paths(out)
+    assert len(copies) == 3
+    for path in copies:
+        sysid = scrub._at(out, path)
+        assert sysid["fingerprint"] == fingerprint_of(sysid["parts"]), path
