@@ -32,93 +32,107 @@ You need admin-level access to the target namespace (or permission to create
 one). On OpenShift, Lakebench automatically handles Security Context
 Constraints for the Spark service account.
 
-Minimum cluster size depends on the scale factor. These figures are the peak
-resources Lakebench actually requests from Kubernetes, derived from the Spark
-job profiles:
+Minimum cluster size depends on the workload, the pipeline mode and the
+scale factor. The table below is the minimum cluster for the default recipe
+(`hive-iceberg-spark-trino`), computed without a cluster by
+`lakebench.config.sizing.plan_requirements`, the function behind
+`lakebench config show`, `lakebench config recommend` and the `run`
+capacity preflight. On a real cluster the preflight sizes datagen and Trino
+against that cluster first, as `run` does, so its datagen figure can differ
+from the default-parallelism column below:
 
-| Scale | Bronze data | Minimum CPU | Minimum RAM | Scratch PVC |
-|------:|------------:|------------:|------------:|------------:|
-| 1 | ~10 GB | 36 cores | 512 GB | 2,400 Gi |
-| 10 | ~100 GB | 36 cores | 512 GB | 2,400 Gi |
-| 50 | ~500 GB | 52 cores | 752 GB | 3,600 Gi |
-| 100 | ~1 TB | 76 cores | 1,112 GB | 5,400 Gi |
+<!-- BEGIN GENERATED: sizing-detail -->
+<!-- Generated from the code by `python3.11 scripts/gen_sizing_tables.py`; do not edit by hand. -->
 
-Three things surprise people about this table:
+| Workload | Mode | Scale | Minimum CPU | Minimum RAM | Spark peak | Datagen (default parallelism) | Always on | Scratch PVC (if enabled) | Largest pod |
+|:---|:---|---:|---:|---:|:---|:---|:---|---:|---:|
+| Customer 360 | batch | 1 | 40 cores | 529 GB | 36 cores / 512 GB | 2 pods, 16 cores / 8 GB | 4 cores / 17 GB | 2,400 Gi | 8 cores / 60 GB |
+| Customer 360 | batch | 10 | 47 cores | 557 GB | 36 cores / 512 GB | 4 pods, 32 cores / 16 GB | 11 cores / 45 GB | 2,400 Gi | 8 cores / 60 GB |
+| Customer 360 | batch | 100 | 113 cores | 1,325 GB | 76 cores / 1,112 GB | 10 pods, 80 cores / 40 GB | 37 cores / 213 GB | 5,400 Gi | 8 cores / 60 GB |
+| Customer 360 | continuous | 1 | 58 cores | 297 GB | 38 cores / 272 GB | in always on | 20 cores / 25 GB | 640 Gi | 8 cores / 40 GB |
+| Customer 360 | continuous | 10 | 81 cores | 333 GB | 38 cores / 272 GB | in always on | 43 cores / 61 GB | 640 Gi | 8 cores / 40 GB |
+| Customer 360 | continuous | 100 | 201 cores | 943 GB | 84 cores / 690 GB | in always on | 117 cores / 253 GB | 1,700 Gi | 8 cores / 48 GB |
+| AML | batch | 1 | 40 cores | 529 GB | 36 cores / 512 GB | 2 pods, 16 cores / 14 GB | 4 cores / 17 GB | 2,400 Gi | 8 cores / 60 GB |
+| AML | batch | 10 | 47 cores | 557 GB | 36 cores / 512 GB | 4 pods, 32 cores / 28 GB | 11 cores / 45 GB | 2,400 Gi | 8 cores / 60 GB |
+| AML | batch | 100 | 113 cores | 1,325 GB | 76 cores / 1,112 GB | 10 pods, 80 cores / 80 GB | 37 cores / 213 GB | 5,500 Gi | 8 cores / 60 GB |
+| AML | continuous | 1 | 138 cores | 1,011 GB | 118 cores / 980 GB | in always on | 20 cores / 31 GB | 2,300 Gi | 8 cores / 40 GB |
+| AML | continuous | 10 | 161 cores | 1,053 GB | 118 cores / 980 GB | in always on | 43 cores / 73 GB | 2,300 Gi | 8 cores / 40 GB |
+| AML | continuous | 100 | 339 cores | 2,241 GB | 222 cores / 1,948 GB | in always on | 117 cores / 293 GB | 4,660 Gi | 8 cores / 48 GB |
 
-- **Scale 1 and scale 10 request the same resources.** Executor counts are
-  fixed for every scale at or below 10, so the smallest run is no cheaper
-  than a 100 GB run. Below scale 10 you are choosing how much data to
-  process, not how much cluster to use.
-- **The `silver-build` job sets the peak.** It requests 8 executors at 4
-  cores and 60 GB each (48 GB heap plus 12 GB overhead). The medallion jobs
-  run sequentially, so the cluster only needs to satisfy the largest one,
-  not the sum of all three.
-- **Individual pods must fit on a single node.** A `silver-build` executor
-  needs 60 GB on one node. A cluster with 512 GB spread across sixteen 32 GB
-  nodes has enough total memory on paper and still cannot schedule the job.
+<!-- END GENERATED: sizing-detail -->
 
-The table above is the Customer360 workload. AML (`schema: financial`) batch
-requests come from the same function, `compute_peak_requirements(scale,
-"batch", "financial")`. They match Customer360 except for scratch at scale
-100, where the AML bronze-verify job (11 executors with 500 Gi PVCs, for its
-CTAS fallback) sets the scratch peak:
+How to read it:
 
-| Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
-|:---------|------:|------------:|------------:|------------:|
-| AML batch | 1-10 | 36 cores | 512 GB | 2,400 Gi |
-| AML batch | 50 | 52 cores | 752 GB | 3,600 Gi |
-| AML batch | 100 | 76 cores | 1,112 GB | 5,500 Gi |
+- **Minimum CPU and RAM** is what must fit at once. In batch mode datagen
+  runs first and the Spark jobs after it. The datagen Job is elastic: pods
+  the cluster cannot place wait and run as others finish, so only one of its
+  pods has to fit and the minimum is the Spark peak plus the always-on pods.
+  In continuous mode the three stream jobs run at once, so the minimum is
+  their sum plus the always-on pods, and datagen is counted in the always-on
+  line while its Job runs.
+- **Spark peak** comes from the Spark job profiles
+  (`compute_peak_requirements()`). Per-executor sizing is fixed; executor
+  counts grow with scale above scale 10, up to 28 per job. In batch,
+  `silver-build` sets the peak: 8 executors of 4 cores and 60 GB (48 GB heap
+  plus 12 GB overhead) at scale 10 and below.
+- **Datagen** is the default `workload.datagen.parallelism`, before cluster
+  scaling. `run` caps it to fit the cluster it finds, and above scale 50
+  raises it to use about 90% of the CPU left after the always-on pods: the
+  AML scale-100 generate in run-20260925-104703-c02890 ran 44 pods at 8
+  cores, about 350 cores at once (measured, n=1). When the whole Job does not
+  fit at once the preflight passes with a warning that some pods queue.
+- **Always on** is the query engine (here Trino, sized by scale tier), the
+  Hive Metastore and Postgres (their memory requests, and one core between
+  them as the autosizer budgets it). Other recipes change this line;
+  `lakebench config show` prints it for your config.
+- **Scratch PVC** is the Spark scratch request when
+  `platform.storage.scratch` is enabled (AML batch at scale 100 sets it with
+  `bronze-verify`, 11 executors of 500 Gi for its CTAS fallback). With
+  scratch disabled, the default, no PVC is requested.
+- **Largest pod** must fit on one node. A cluster with 512 GB spread across
+  sixteen 32 GB nodes has enough memory on paper and still cannot schedule a
+  60 GB `silver-build` executor. The 8 cores are a datagen pod.
+- Per-job executor overrides (`silver_executors` and the like) are not
+  counted in these figures yet; `config show` says so when a config sets one.
 
-These are the Spark pipeline's requests. Data generation runs before the
-pipeline and can be the larger demand: the AML scale-100 generate in
-run-20260925-104703-c02890 ran 44 datagen pods at 8 cores, about 350 cores
-at once (measured, not derived from `compute_peak_requirements`). The pod
-count is `workload.datagen.parallelism`; set it lower on a
-smaller cluster and generation takes longer.
-
-Continuous mode runs its three stream jobs at the same time, so the
-minimum is their sum, and it differs by workload. AML (`schema: financial`)
-sizes all three from a measured scale-10 run: bronze-ingest 5 executors x 4
-cores so the corpus drains inside a 30-minute window, silver-stream 10 x 4 so
-a micro-batch finishes inside its 60 s trigger, and gold-refresh 12 x 4 so a
-detection tick over the whole scale-10 silver finishes inside the 5-minute
-refresh interval. gold-refresh grows with scale to the 28-executor cap
+AML (`schema: financial`) continuous sizes its three stream jobs from a
+measured scale-10 run: bronze-ingest 5 executors x 4 cores so the corpus
+drains inside a 30-minute window, silver-stream 10 x 4 so a micro-batch
+finishes inside its 60 s trigger, and gold-refresh 12 x 4 so a detection
+tick over the whole scale-10 silver finishes inside the 5-minute refresh
+interval. The AML scale-10 continuous run run-20260925-180003-bb3df4 ran at
+exactly this split. gold-refresh grows with scale to the 28-executor cap
 (reached near scale 23); past that a tick outgrows the interval and time to
-detect grows with it:
+detect grows with it.
 
-| Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
-|:---------|------:|------------:|------------:|------------:|
-| Customer360 | 1-10 | 38 cores | 272 GB | 640 Gi |
-| AML | 1-10 | 118 cores | 980 GB | 2,300 Gi |
-| Customer360 | 50 | 56 cores | 438 GB | 1,060 Gi |
-| AML | 50 | 198 cores | 1,756 GB | 4,220 Gi |
-| Customer360 | 100 | 84 cores | 690 GB | 1,700 Gi |
-| AML | 100 | 222 cores | 1,948 GB | 4,660 Gi |
-
-The AML scale-10 continuous run run-20260925-180003-bb3df4 ran at exactly
-this split (bronze-ingest 5, silver-stream 10, gold-refresh 12 executors at 4
-cores each).
-
-On a smaller cluster the run caps the stream jobs to what fits and warns
-naming each capped job. Each AML stage keeps at least the cores the
+On a smaller cluster a continuous run caps the stream jobs to what fits and
+warns naming each capped job. Each AML stage keeps at least the cores the
 Customer360 split would give it, and the room above that goes upstream first
 (bronze-ingest, then silver-stream up to the count that keeps pace with
 bronze, then gold-refresh, then the rest of silver-stream), since a stage
 runs no faster than its input arrives. The capacity preflight passes such a
 cluster with a WARNING naming the capped stages, as long as the capped
-request plus Trino, Hive/Postgres and datagen fits (AML scale 1-10: 57
-cores); it fails only when even that does not fit, or when a single pod fits
-no node. An explicit `*_executors` count is not capped and is counted as
-set.
+request plus Trino, Hive/Postgres and datagen fits; it fails only when even
+that does not fit, or when a single pod fits no node. An explicit
+`*_executors` count is not capped and is counted as set.
 
 Lakebench checks this for you. The prerequisite phase of `lakebench run`
-compares the peak request against your cluster's allocatable capacity and
-fails immediately with the specific shortfall, rather than leaving pods
-`Pending` until the job times out. Skipped when you pass `--skip-preflight`.
+compares the minimum against your cluster's allocatable capacity and fails
+immediately with the specific shortfall, rather than leaving pods `Pending`
+until the job times out. Skipped when you pass `--skip-preflight`.
 
-Run `lakebench config recommend lakebench.yaml` after install to check your
-cluster's maximum supported scale, and `lakebench config show lakebench.yaml`
-to see the peak request for the scale in your config.
+Above scale 50 a continuous run that generates its own corpus is refused on
+any cluster today: the autosizer sizes the datagen Job to about 90% of the
+cluster's CPU, and the preflight counts it beside the streams. Generate the
+corpus first (`lakebench generate`), then start the streams with
+`lakebench run --skip-generate` within an hour of generation finishing: a
+finished datagen Job is not counted, but Kubernetes deletes it after 3,600 s
+and an absent Job is counted as still running.
+
+Run `lakebench config recommend lakebench.yaml` after install to find the
+largest scale your cluster holds for that config, and
+`lakebench config show lakebench.yaml` to see the request at the scale in
+your config.
 
 ### CLI tools on PATH
 

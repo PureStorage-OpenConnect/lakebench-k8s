@@ -1839,6 +1839,10 @@ def run(
             from lakebench.cli._sustained import _datagen_job_state
 
             _datagen_runs = _datagen_job_state(cfg.get_namespace())[0] != "finished"
+        elif skip_generate:
+            # Batch generates before the Spark jobs; with --skip-generate no
+            # datagen pod is created, so none is counted (CC-22).
+            _datagen_runs = False
         prereq_report = run_prerequisites(cfg, sustained=_use_sustained, datagen_runs=_datagen_runs)
         for check in prereq_report.checks:
             icon = "[green]+[/green]" if check.passed else "[red]x[/red]"

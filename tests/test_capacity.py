@@ -4,13 +4,13 @@ Covers ``compute_peak_requirements()`` (the single source of truth for
 documented minimums) and ``_check_cluster_capacity()`` (prerequisite check 9).
 """
 
-import re
-from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from lakebench.cli._prerequisites import _check_cluster_capacity
+from lakebench.config.autosizer import resolve_auto_sizing
+from lakebench.config.sizing import co_resident_request
 from lakebench.k8s.client import ClusterCapacity
 from lakebench.modules.pipeline_engines.spark.job import (
     BATCH_JOB_TYPES,
@@ -96,20 +96,19 @@ class TestComputePeakRequirements:
         assert compute_peak_requirements(5, "SUSTAINED").per_job[0].job_type in STREAMING_JOB_TYPES
 
 
-def _cfg(scale=1, mode="batch"):
-    """Minimal config stub with the paths the capacity check reads."""
-    cfg = mock.MagicMock()
-    cfg.architecture.workload.datagen.scale = scale
-    cfg.architecture.pipeline.mode = mode
-    cfg.platform.kubernetes.context = None
-    cfg.get_namespace.return_value = "lakebench"
-    # Co-resident pods (LB-155): no query engine, so only catalog/Postgres
-    # (1 core) and, in continuous mode, datagen are added to the peak.
-    cfg.architecture.query_engine.type.value = "none"
-    cfg.architecture.workload.datagen.parallelism = 4
-    cfg.architecture.workload.datagen.cpu = "8"
-    cfg.architecture.workload.datagen.memory = "12Gi"
-    return cfg
+def _cfg(scale=1, mode="batch", schema="customer360"):
+    """A real config with no query engine, so only catalog/Postgres (1 core)
+    and, in continuous mode, datagen sit beside the Spark jobs (LB-155).
+
+    A real model rather than a MagicMock: the check sizes the config through
+    ``config.sizing.plan_requirements``, which auto-sizes a deep copy.
+    """
+    from tests.conftest import make_config
+
+    return make_config(
+        workload={"schema": schema, "datagen": {"scale": scale}},
+        architecture={"pipeline": {"mode": mode}, "query_engine": {"type": "none"}},
+    )
 
 
 @pytest.fixture
@@ -167,10 +166,10 @@ class TestClusterCapacityCheck:
     def test_sustained_mode_uses_streaming_profiles(self, patched_capacity):
         result = patched_capacity(
             ClusterCapacity(652_000, 4000 * GIB, 20, 64_000, 256 * GIB),
-            cfg=_cfg(mode="sustained"),
+            cfg=_cfg(mode="continuous"),
         )
         assert result.passed
-        assert "sustained" in result.message
+        assert "(continuous)" in result.message
 
     def test_capacity_check_plumbs_schema_to_compute_peak(self):
         """LB-118 review finding: the fix is only operator-visible if
@@ -178,18 +177,19 @@ class TestClusterCapacityCheck:
         to compute_peak_requirements. A refactor that drops the schema
         arg would leave every unit test green while silently reverting
         AML sizing to c360."""
-        cfg = _cfg()
-        cfg.architecture.workload.schema_type.value = "financial"
+        from lakebench.modules.pipeline_engines.spark import job
+
+        cfg = _cfg(schema="financial")
+        real = job.compute_peak_requirements
         with (
             mock.patch("lakebench.k8s.get_k8s_client") as get_client,
-            mock.patch(
-                "lakebench.modules.pipeline_engines.spark.job.compute_peak_requirements"
-            ) as peak,
+            mock.patch.object(job, "compute_peak_requirements", side_effect=real) as peak,
         ):
             get_client.return_value.get_cluster_capacity.return_value = ClusterCapacity(
                 652_000, 4000 * GIB, 20, 64_000, 256 * GIB
             )
-            _check_cluster_capacity(cfg)
+            result = _check_cluster_capacity(cfg)
+        assert result.passed, result.message
         assert peak.called
         # positional-arg or kwarg both fine; the third value is the schema.
         args, kwargs = peak.call_args
@@ -207,10 +207,8 @@ class TestCoResidentPodsAreCounted:
         from tests.conftest import make_config
 
         return make_config(
-            architecture={
-                "workload": {"datagen": {"scale": scale}},
-                "pipeline": {"mode": mode},
-            }
+            workload={"datagen": {"scale": scale}},
+            architecture={"pipeline": {"mode": mode}},
         )
 
     def _check(self, cfg, cores, memory_gb=4000):
@@ -231,23 +229,21 @@ class TestCoResidentPodsAreCounted:
         assert not self._check(self._real_cfg("sustained"), 40).passed
 
     def test_batch_counts_engine_but_not_datagen(self):
-        from lakebench.cli._prerequisites import _co_resident_request
-
         cfg = self._real_cfg("batch")
-        batch = _co_resident_request(cfg, sustained=False)
-        cont = _co_resident_request(cfg, sustained=True)
-        assert "datagen" not in batch[2] and "datagen" in cont[2]
-        assert cont[0] > batch[0] > 1
+        resolve_auto_sizing(cfg)
+        batch = co_resident_request(cfg, sustained=False)
+        cont = co_resident_request(cfg, sustained=True)
+        assert "datagen" not in batch.label and "datagen" in cont.label
+        assert cont.cpu_cores > batch.cpu_cores > 1
         peak = compute_peak_requirements(10, "batch", "customer360")
         assert not self._check(cfg, peak.cpu_cores).passed
-        assert self._check(cfg, peak.cpu_cores + batch[0]).passed
+        assert self._check(cfg, peak.cpu_cores + batch.cpu_cores).passed
 
     def test_memory_counts_co_residents(self):
-        from lakebench.cli._prerequisites import _co_resident_request
-
         cfg = self._real_cfg("batch")
+        resolve_auto_sizing(cfg)
         peak = compute_peak_requirements(10, "batch", "customer360")
-        _, co_gb, _ = _co_resident_request(cfg, sustained=False)
+        co_gb = co_resident_request(cfg, sustained=False).memory_gb
         assert co_gb > 0
         assert not self._check(cfg, 1000, memory_gb=peak.memory_gb).passed
         assert self._check(cfg, 1000, memory_gb=peak.memory_gb + co_gb).passed
@@ -263,14 +259,13 @@ class TestCoResidentPodsAreCounted:
         assert not res.passed and "(continuous)" in res.message
 
     def test_skip_generate_leaves_datagen_out(self):
-        from lakebench.cli._prerequisites import _co_resident_request
-
         cfg = self._real_cfg("sustained")
-        with_dg = _co_resident_request(cfg, True)
-        without = _co_resident_request(cfg, True, datagen_runs=False)
-        assert "datagen" not in without[2] and without[0] < with_dg[0]
+        resolve_auto_sizing(cfg)
+        with_dg = co_resident_request(cfg, True)
+        without = co_resident_request(cfg, True, datagen_runs=False)
+        assert "datagen" not in without.label and without.cpu_cores < with_dg.cpu_cores
         peak = compute_peak_requirements(10, "sustained", "customer360")
-        cores = peak.cpu_cores + without[0]
+        cores = peak.cpu_cores + without.cpu_cores
         cap = ClusterCapacity(cores * 1000, 4000 * GIB, 8, 64_000, 256 * GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
@@ -317,85 +312,10 @@ class TestCoResidentPodsAreCounted:
         seen.clear()
         CliRunner().invoke(app, ["run", str(cfg_file), "--yes"])
         assert seen == {"sustained": False, "datagen_runs": True}
-
-
-class TestDocumentedMinimumsMatchCode:
-    """The published docs table must stay in sync with _JOB_PROFILES.
-
-    LB-050: the README claimed 8 CPU / 32 GB for scale 1 when the code
-    requested 36 cores / 512 GB. This test makes that drift a test failure
-    rather than something a user discovers with Pending pods.
-    """
-
-    DOC = Path(__file__).resolve().parents[1] / "docs" / "getting-started.md"
-    ROW = re.compile(
-        r"^\| (\d+) \| [^|]+ \| ([\d,]+) cores \| ([\d,]+) GB \| ([\d,]+) Gi \|",
-        re.MULTILINE,
-    )
-
-    @pytest.mark.skipif(not DOC.exists(), reason="docs not present in this checkout")
-    def test_getting_started_table_matches_profiles(self):
-        rows = self.ROW.findall(self.DOC.read_text())
-        assert rows, "minimums table not found in docs/getting-started.md"
-
-        for scale, cores, memory, scratch in rows:
-            peak = compute_peak_requirements(int(scale))
-            documented = (
-                int(cores.replace(",", "")),
-                int(memory.replace(",", "")),
-                int(scratch.replace(",", "")),
-            )
-            assert (peak.cpu_cores, peak.memory_gb, peak.scratch_gb) == documented, (
-                f"docs/getting-started.md scale {scale} is stale. "
-                f"Regenerate from compute_peak_requirements()."
-            )
-
-
-class TestContinuousDocsTable:
-    """The continuous-mode minimums in getting-started.md come from
-    compute_peak_requirements(scale, "sustained", schema)."""
-
-    DOC = Path(__file__).resolve().parents[1] / "docs" / "getting-started.md"
-    ROW = re.compile(
-        r"^\| (Customer360|AML) \| ([\d-]+) \| ([\d,]+) cores \| ([\d,]+) GB \| ([\d,]+) Gi \|",
-        re.MULTILINE,
-    )
-
-    @pytest.mark.skipif(not DOC.exists(), reason="docs not present in this checkout")
-    def test_continuous_table_matches_profiles(self):
-        rows = self.ROW.findall(self.DOC.read_text())
-        assert len(rows) == 6, "continuous minimums table not found in docs/getting-started.md"
-        schema = {"Customer360": "customer360", "AML": "financial"}
-        for workload, scales, cores, memory, scratch in rows:
-            documented = tuple(int(v.replace(",", "")) for v in (cores, memory, scratch))
-            for scale in {int(x) for x in scales.split("-")}:
-                peak = compute_peak_requirements(scale, "sustained", schema[workload])
-                assert (peak.cpu_cores, peak.memory_gb, peak.scratch_gb) == documented, (
-                    f"docs/getting-started.md continuous {workload} scale {scale} is stale."
-                )
-
-
-class TestAmlBatchDocsTable:
-    """The AML batch minimums in getting-started.md come from
-    compute_peak_requirements(scale, "batch", "financial")."""
-
-    DOC = Path(__file__).resolve().parents[1] / "docs" / "getting-started.md"
-    ROW = re.compile(
-        r"^\| AML batch \| ([\d-]+) \| ([\d,]+) cores \| ([\d,]+) GB \| ([\d,]+) Gi \|",
-        re.MULTILINE,
-    )
-
-    @pytest.mark.skipif(not DOC.exists(), reason="docs not present in this checkout")
-    def test_aml_batch_table_matches_profiles(self):
-        rows = self.ROW.findall(self.DOC.read_text())
-        assert len(rows) == 3, "AML batch minimums table not found in docs/getting-started.md"
-        for scales, cores, memory, scratch in rows:
-            documented = tuple(int(v.replace(",", "")) for v in (cores, memory, scratch))
-            for scale in {int(x) for x in scales.split("-")}:
-                peak = compute_peak_requirements(scale, "batch", "financial")
-                assert (peak.cpu_cores, peak.memory_gb, peak.scratch_gb) == documented, (
-                    f"docs/getting-started.md AML batch scale {scale} is stale."
-                )
+        # Batch --skip-generate creates no datagen pod (CC-22).
+        seen.clear()
+        CliRunner().invoke(app, ["run", str(cfg_file), "--skip-generate", "--yes"])
+        assert seen == {"sustained": False, "datagen_runs": False}
 
 
 class TestPrerequisiteWiring:
@@ -404,7 +324,9 @@ class TestPrerequisiteWiring:
     def test_capacity_check_is_registered(self):
         from lakebench.cli._prerequisites import run_prerequisites
 
-        cfg = _cfg()
+        # run_prerequisites reads only attributes here; a MagicMock keeps the
+        # catalog off the Hive-only Stackable check without a Polaris secret.
+        cfg = mock.MagicMock()
         cfg.architecture.catalog.type.value = "polaris"
         cfg.platform.storage.s3.endpoint = ""
         cfg.platform.storage.s3.access_key = ""

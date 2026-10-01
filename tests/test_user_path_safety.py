@@ -113,34 +113,36 @@ class TestInfoPeakRequest:
         from typer.testing import CliRunner
 
         import lakebench.cli as cli_mod
-        from lakebench.cli import app, info_peak_request
+        from lakebench.cli import app
         from lakebench.config import load_config
+        from lakebench.config.sizing import floor_text, plan_requirements
         from lakebench.k8s.client import ClusterCapacity
         from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
 
         cfg = load_config(trino_example)
         scale = cfg.architecture.workload.datagen.get_effective_scale()
-        peak, co_cores, co_gb, _ = info_peak_request(cfg, scale, False)
+        plan = plan_requirements(cfg)
         ref = compute_peak_requirements(scale, "batch", cfg.architecture.workload.schema_type.value)
-        assert (peak.cpu_cores, peak.memory_gb) == (ref.cpu_cores, ref.memory_gb)
-        assert peak.cpu_cores >= 36 and peak.memory_gb >= 512  # scale 1 silver-build
+        assert (plan.spark.cpu_cores, plan.spark.memory_gb) == (ref.cpu_cores, ref.memory_gb)
+        assert plan.spark.cpu_cores >= 36 and plan.spark.memory_gb >= 512  # silver-build
 
-        k8s = MagicMock()
-        k8s.get_cluster_capacity.return_value = ClusterCapacity(
+        cap = ClusterCapacity(
             total_cpu_millicores=434_000,
             total_memory_bytes=4349 * 1024**3,
             node_count=10,
             largest_node_cpu_millicores=64_000,
             largest_node_memory_bytes=512 * 1024**3,
         )
+        k8s = MagicMock()
+        k8s.get_cluster_capacity.return_value = cap
         monkeypatch.setattr(cli_mod, "get_k8s_client", lambda *a, **k: k8s)
-        result = CliRunner().invoke(app, ["info", str(trino_example)], env={"COLUMNS": "200"})
+        result = CliRunner().invoke(app, ["info", str(trino_example)], env={"COLUMNS": "300"})
         assert result.exit_code == 0, result.output
         out = " ".join(result.output.split())
-        needed = ref.cpu_cores + co_cores
         assert "Peak requested" in out
-        assert f"{needed} cores / {ref.memory_gb + co_gb} GB memory" in out
-        assert f"peak request {needed} cores" in out
+        assert floor_text(plan) in out
+        fitted = plan_requirements(cfg, capacity=cap).floor
+        assert f"peak request {fitted.cpu_cores} cores / {fitted.memory_gb} GB" in out
         assert "17 needed" not in out
 
 
@@ -149,49 +151,51 @@ class TestInfoPeakRequest:
 )
 def test_config_show_reports_peak_request(monkeypatch, example):
     """`config show` is the non-deprecated place for sizing; it must carry
-    the same peak figure as info and the run preflight."""
+    the same figure as info and the run preflight (one sizing source)."""
     import pathlib
 
     from typer.testing import CliRunner
 
-    from lakebench.cli import app, info_peak_request
+    from lakebench.cli import app
     from lakebench.config import load_config
+    from lakebench.config.sizing import floor_text, plan_requirements
 
     for var in ("LAKEBENCH_S3_ACCESS_KEY", "LAKEBENCH_S3_SECRET_KEY"):
         monkeypatch.setenv(var, "placeholder")
     path = pathlib.Path(__file__).resolve().parents[1] / "examples" / example
-    cfg = load_config(path)
-    from lakebench.config.autosizer import resolve_auto_sizing
-
-    resolve_auto_sizing(cfg)  # as info and run do
-    peak, co_cores, co_gb, _ = info_peak_request(
-        cfg, cfg.architecture.workload.datagen.scale, False
-    )
-    result = CliRunner().invoke(app, ["config", "show", str(path)], env={"COLUMNS": "200"})
+    plan = plan_requirements(load_config(path))
+    result = CliRunner().invoke(app, ["config", "show", str(path)], env={"COLUMNS": "400"})
     assert result.exit_code == 0, result.output
-    assert (
-        f"{peak.cpu_cores + co_cores} cores / {peak.memory_gb + co_gb} GB memory" in result.output
-    )
+    assert floor_text(plan) in " ".join(result.output.split())
 
 
-@pytest.mark.parametrize("mode", ["batch", "sustained"])
+def _recommend_floor(out: str) -> tuple[int, int]:
+    import re
+
+    m = re.search(r"Minimum cluster:\s+([\d,]+) cores / ([\d,]+) GB memory", out)
+    assert m, out
+    return int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))
+
+
+@pytest.mark.parametrize("mode", ["batch", "continuous"])
 def test_recommend_never_below_compute_peak_requirements(mode):
     """`recommend --scale` (and `config recommend`) sized Spark from the
-    advisory compute_guidance(): 8 cores at scale 1 against 36 requested."""
+    advisory compute_guidance(): 8 cores at scale 1 against 36 requested.
+    It now prints the one sizing source's floor (CC-22)."""
     from typer.testing import CliRunner
 
     from lakebench.cli import app
+    from lakebench.config.sizing import default_sizing_config, plan_requirements
     from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
 
     peak = compute_peak_requirements(1, mode)
     result = CliRunner().invoke(
-        app, ["recommend", "--scale", "1", "--mode", mode], env={"COLUMNS": "200"}
+        app, ["recommend", "--scale", "1", "--mode", mode], env={"COLUMNS": "300"}
     )
     assert result.exit_code == 0, result.output
-    import re
-
-    cores = int(re.search(r"CPU cores:\s+([\d,]+)", result.output).group(1).replace(",", ""))
-    mem = int(re.search(r"Memory:\s+([\d,]+) GB", result.output).group(1).replace(",", ""))
+    cores, mem = _recommend_floor(result.output)
+    floor = plan_requirements(default_sizing_config("customer360", mode, 1)).floor
+    assert (cores, mem) == (floor.cpu_cores, floor.memory_gb)
     assert cores >= peak.cpu_cores
     assert mem >= peak.memory_gb
 
@@ -255,24 +259,27 @@ class TestWatchListEditsKeepTheInstalledChart:
 def test_recommend_sizes_the_financial_schema():
     """Review: config recommend passed only the mode, so AML continuous was
     sized as Customer360 (38 cores against 118 requested at scale 1)."""
-    import re
-
     from typer.testing import CliRunner
 
     from lakebench.cli import app
+    from lakebench.config.sizing import default_sizing_config, plan_requirements
     from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
 
-    peak = compute_peak_requirements(1, "sustained", "financial")
+    peak = compute_peak_requirements(1, "continuous", "financial")
     out = (
         CliRunner()
         .invoke(
             app,
-            ["recommend", "--scale", "1", "--mode", "sustained", "--schema", "financial"],
-            env={"COLUMNS": "200"},
+            ["recommend", "--scale", "1", "--mode", "continuous", "--schema", "financial"],
+            env={"COLUMNS": "300"},
         )
         .output
     )
-    cores = int(re.search(r"CPU cores:\s+([\d,]+)", out).group(1).replace(",", ""))
+    cores, _ = _recommend_floor(out)
+    assert (
+        cores
+        == plan_requirements(default_sizing_config("financial", "continuous", 1)).floor.cpu_cores
+    )
     assert cores >= peak.cpu_cores
 
 

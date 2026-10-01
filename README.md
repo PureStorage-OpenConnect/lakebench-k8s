@@ -213,16 +213,35 @@ See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blo
 ## Prerequisites
 
 - `kubectl` and `helm` on PATH
-- Kubernetes 1.26+ with capacity for the Spark job profiles. Customer360 or
-  AML batch at scale 1 requests a peak of **36 cores and 512 GB RAM**
-  (driven by `silver-build`), and a single executor pod needs 60 GB on one
-  node. AML continuous at scale 1-10 requests **118 cores and 980 GB**,
-  because its three stream jobs run at once; AML batch at scale 100
-  peaks at 76 cores for the pipeline, but its data generation ran about
-  350 cores (44 pods x 8 cores, measured in run-20260925-104703-c02890).
-  The request figures come from `compute_peak_requirements()`. See
+- Kubernetes 1.26+ with room for the minimum below: what must fit at once,
+  for the default recipe (`hive-iceberg-spark-trino`), from the sizing
+  function behind `lakebench config show`, `config recommend` and the `run`
+  capacity preflight. Batch datagen pods that do not fit wait their turn, so
+  the batch minimum is the Spark peak plus the always-on pods. See
   [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)
-  for the full table. `lakebench run` fails fast if the cluster is too small.
+  for what each figure is built from. `lakebench run` fails fast if the
+  cluster is too small.
+
+<!-- BEGIN GENERATED: sizing-minimums -->
+<!-- Generated from the code by `python3.11 scripts/gen_sizing_tables.py`; do not edit by hand. -->
+
+| Workload | Mode | Scale | Minimum CPU | Minimum RAM | Scratch PVC (if enabled) | Largest pod |
+|:---|:---|---:|---:|---:|---:|---:|
+| Customer 360 | batch | 1 | 40 cores | 529 GB | 2,400 Gi | 8 cores / 60 GB |
+| Customer 360 | batch | 10 | 47 cores | 557 GB | 2,400 Gi | 8 cores / 60 GB |
+| Customer 360 | batch | 100 | 113 cores | 1,325 GB | 5,400 Gi | 8 cores / 60 GB |
+| Customer 360 | continuous | 1 | 58 cores | 297 GB | 640 Gi | 8 cores / 40 GB |
+| Customer 360 | continuous | 10 | 81 cores | 333 GB | 640 Gi | 8 cores / 40 GB |
+| Customer 360 | continuous | 100 | 201 cores | 943 GB | 1,700 Gi | 8 cores / 48 GB |
+| AML | batch | 1 | 40 cores | 529 GB | 2,400 Gi | 8 cores / 60 GB |
+| AML | batch | 10 | 47 cores | 557 GB | 2,400 Gi | 8 cores / 60 GB |
+| AML | batch | 100 | 113 cores | 1,325 GB | 5,500 Gi | 8 cores / 60 GB |
+| AML | continuous | 1 | 138 cores | 1,011 GB | 2,300 Gi | 8 cores / 40 GB |
+| AML | continuous | 10 | 161 cores | 1,053 GB | 2,300 Gi | 8 cores / 40 GB |
+| AML | continuous | 100 | 339 cores | 2,241 GB | 4,660 Gi | 8 cores / 48 GB |
+
+<!-- END GENERATED: sizing-minimums -->
+
 - S3-compatible object storage. FlashBlade and Garage are validated; others are
   expected to work. Run `lakebench config storage` to check yours. See
   [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md).

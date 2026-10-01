@@ -288,7 +288,7 @@ This table is generated from the code:
 
 ## Using `lakebench config recommend`
 
-The `config recommend` command shows sizing guidance for your cluster: the scale factor it can hold, or what a larger scale needs. It does not select a recipe, but it helps size the deployment. It takes an optional config file, used to detect the pipeline mode (default `lakebench.yaml`):
+The `config recommend` command shows sizing guidance for your cluster: the largest scale it can hold for your config, and what a larger scale needs. It sizes the config as written (its recipe, workload, mode and datagen settings) at each scale, with the same function the `run` capacity preflight uses. It does not select a recipe, but it helps size the deployment. It takes an optional config file (default `lakebench.yaml`); a config that does not load is an error:
 
 ```bash
 lakebench config recommend

@@ -137,7 +137,7 @@ Configuration management subcommands.
 lakebench config show CONFIG_FILE       # show resolved config with source annotations
 lakebench config validate CONFIG_FILE   # validate config + test connectivity
 lakebench config storage CONFIG_FILE    # check the S3 backend supports what lakebench needs
-lakebench config recommend CONFIG_FILE  # show cluster sizing guidance for the config's mode
+lakebench config recommend CONFIG_FILE  # largest scale the cluster holds, sized from this config
 lakebench config recipes [NAME]         # list recipes, what each one trades off, and support states
 lakebench config upgrade CONFIG_FILE    # upgrade a v1.2 config to v2 flat format (-o to write elsewhere)
 ```
@@ -403,15 +403,23 @@ lakebench info [CONFIG_FILE]
 Displays deployment name, namespace, recipe, schema, scale factor, derived
 dimensions (customers, rows, data size), per-job executor counts (auto vs
 override), catalog type, table format, query engine, S3 endpoint, and bucket
-names, and the peak CPU / memory / scratch the pipeline requests
-(`compute_peak_requirements()` plus the query engine and catalog). No
-additional flags.
+names, and the minimum CPU / memory / scratch the config requests: the
+Spark peak (`compute_peak_requirements()`) plus the query engine, catalog
+and Postgres, with batch datagen at its default parallelism shown beside it
+(`lakebench.config.sizing.plan_requirements`, the source `config show`,
+`config recommend` and the `run` capacity preflight also use). With a
+cluster it also prints the preflight's decision and any auto-sizing cuts.
+No additional flags.
 
 ### recommend
 
 Deprecated and hidden; `lakebench config recommend [CONFIG_FILE]` runs the same
-logic for the config's pipeline mode. The Spark figure is never below
-`compute_peak_requirements()`, the request the `run` capacity preflight checks.
+logic on your config. It sizes the default recipe (`hive-iceberg-spark-trino`)
+of the workload and mode with `lakebench.config.sizing`: `--scale` and the
+reference table print the minimum without a cluster (datagen at its default
+parallelism), and with a cluster each scale is decided by the same check the
+`run` capacity preflight makes. Continuous mode is sized for a corpus
+generated before the streams start (`generate`, then `run --skip-generate`).
 
 Show cluster sizing guidance for lakebench workloads.
 
@@ -424,12 +432,16 @@ lakebench recommend [OPTIONS]
 | `--cores` | `-c` | auto-detect | Total cluster CPU cores |
 | `--memory` | `-m` | auto-detect | Total cluster memory in GB |
 | `--scale` | `-s` | auto | Target scale factor to check requirements for |
-| `--slow-datagen` | | `false` | Reduce datagen parallelism to fit smaller clusters (slower generation, same Spark resources). `--extended` / `-e` is a deprecated alias |
+| `--slow-datagen` | | `false` | Ignored: datagen pods that do not fit queue, so datagen never limits the scale. `--extended` / `-e` is a deprecated alias |
 | `--mode` | | `batch` | Pipeline mode: `batch` or `continuous` |
 | `--schema` | | `customer360` | Workload schema: `customer360` or `financial` |
 
 Without arguments, auto-detects the connected cluster capacity and shows the
-maximum feasible scale. Use `--scale` to check what a specific scale requires.
+largest scale at which every scale up to it fits, bounded by the workload's
+datagen ceiling (600 for Customer 360, 800 for AML). With `--cores` and
+`--memory` the node sizes are unknown, so the largest-pod check is skipped.
+Use `--scale` (1 or more) to see what one scale requests and what the figure
+is built from.
 
 ```bash
 lakebench recommend                        # auto-detect cluster
