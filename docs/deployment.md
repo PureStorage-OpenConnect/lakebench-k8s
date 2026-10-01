@@ -117,8 +117,9 @@ common causes and their fixes:
 | `exited 127 ... python3 is not on <image>` | `images.spark` (and `images.duckdb`) must be images that ship `python3` |
 
 A re-run after a failure replaces a failing `lb-deps` pod, so it starts a
-fresh resolve rather than reporting the old pod's error. After you delete PVC
-`lb-deps-data`, the re-run scales `lb-deps` to zero so the claim can go, then
+fresh resolve rather than reporting the old pod's error. Delete the PVC with
+`kubectl delete pvc lb-deps-data -n <namespace> --wait=false` (a plain delete
+waits while the server pod still mounts it); the re-run scales `lb-deps` to zero so the claim can go, then
 creates a new one and resolves the set onto it; if a pod that mounts the
 claim is stuck Terminating on a lost node, the step says so and the claim
 goes once that pod does.

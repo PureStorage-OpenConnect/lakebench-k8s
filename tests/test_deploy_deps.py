@@ -1009,3 +1009,78 @@ def test_the_manifest_records_the_images_that_ran(recording_k8s, monkeypatch):
     )
     assert set(images) == {"serve", "resolve-spark"}
     assert "image_id" in images["serve"]
+
+
+# --- brief-pass fixes ----------------------------------------------------------------
+
+
+def test_a_stale_replica_failure_still_fails_after_its_grace(recording_k8s, monkeypatch):
+    from kubernetes.client.models import V1DeploymentCondition, V1DeploymentStatus
+
+    rec = recording_k8s
+    monkeypatch.setattr(deps_mod, "STALE_REPLICA_FAILURE_GRACE_S", 0)
+    cfg = _cfg()
+    engine = _setup(rec, cfg)
+    cond = V1DeploymentCondition(type="ReplicaFailure", status="True", message="quota")
+    rec.add("deployments", {"metadata": {"name": m.SERVER_NAME, "generation": 1}, "spec": {
+        "selector": {"matchLabels": dict(m.SELECTOR_LABELS)}, "template": {}}}, namespace=NS)  # fmt: skip
+    rec.store[("deployments", NS, m.SERVER_NAME)].status = V1DeploymentStatus(
+        observed_generation=1, conditions=[cond]
+    )
+
+    def still_refused(deployer, core, sha):
+        dep = rec.store[("deployments", NS, m.SERVER_NAME)]
+        dep.metadata.generation = 1
+        dep.status = V1DeploymentStatus(observed_generation=1, conditions=[cond])
+        return set()
+
+    monkeypatch.setattr(DependencyServerDeployer, "_delete_stale_failed_pods", still_refused)
+    result = DependencyServerDeployer(engine).deploy()
+    assert result.status == DeploymentStatus.FAILED
+    assert "cannot create its pod: quota" in result.message and "re-run deploy" in result.message
+
+
+def test_a_transient_error_inside_an_apply_reaches_the_engine_retry(recording_k8s):
+    from kubernetes.client.rest import ApiException
+
+    rec = recording_k8s
+    cfg = _cfg()
+    engine = _setup(rec, cfg)
+    rec.fail("create", "services", m.SERVER_NAME, status=503, times=1)
+    with pytest.raises(ApiException) as info:
+        DependencyServerDeployer(engine).deploy()
+    assert info.value.status == 503
+
+
+def test_a_failed_step_clears_an_annotation_written_meanwhile(recording_k8s, monkeypatch):
+    """Another deploy of the namespace may write the annotation while this one
+    runs and then lose its server to this one's rollout."""
+    rec = recording_k8s
+    cfg = _cfg()
+    engine = _setup(rec, cfg)
+    request = req.select_request(cfg)
+    Controller(rec, monkeypatch)
+
+    def concurrent_write(sha):
+        ns = rec.store[("namespaces", None, NS)]
+        ns.metadata.annotations = {**ns.metadata.annotations, m.ANNOTATION_DEPS_SET: "d" * 64}
+        return fake_shown(request, pinset_sha256="e" * 64)  # this deploy's check fails
+
+    _show(rec, concurrent_write)
+    result = DependencyServerDeployer(engine).deploy()
+    assert result.status == DeploymentStatus.FAILED
+    assert m.ANNOTATION_DEPS_SET not in _ns_annotations(rec)
+
+
+def test_warnings_do_not_repeat_on_a_retry(recording_k8s, monkeypatch):
+    rec = recording_k8s
+    cfg = _cfg(platform={"deps": {"storage_class": "px-csi-db"}})
+    engine = _setup(rec, cfg)
+    rec.fail("read", "storageclasses", "px-csi-db", status=403)
+    request = req.select_request(cfg)
+    Controller(rec, monkeypatch)
+    _show(rec, lambda sha: fake_shown(request))
+    d = DependencyServerDeployer(engine)
+    d.deploy()
+    result = d.deploy()
+    assert result.message.count("(403)") == 1

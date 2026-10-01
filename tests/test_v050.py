@@ -169,8 +169,8 @@ class TestDuckDBCoResidentCpu:
 
         cfg = _make_config(recipe="hive-iceberg-spark-duckdb")
         result = _co_resident_cpu_m(cfg)
-        # DuckDB: default 2 cores = 2000m + 1000m infra = 3000m
-        assert result == 3000
+        # DuckDB: default 2 cores = 2000m + 1000m infra + 1000m lb-deps
+        assert result == 4000
 
     def test_co_resident_cpu_duckdb_custom_cores(self):
         from lakebench.config.autosizer import _co_resident_cpu_m
@@ -184,8 +184,8 @@ class TestDuckDBCoResidentCpu:
             },
         )
         result = _co_resident_cpu_m(cfg)
-        # DuckDB: 4 cores = 4000m + 1000m infra = 5000m
-        assert result == 5000
+        # DuckDB: 4 cores = 4000m + 1000m infra + 1000m lb-deps
+        assert result == 6000
 
 
 # ===========================================================================
