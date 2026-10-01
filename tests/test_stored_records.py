@@ -773,3 +773,62 @@ def test_seed_cut_by_the_key_slice_is_not_printed(monkeypatch) -> None:
     rec["config_snapshot"]["extra"] = {"a" * 25 + "10.99.1.2_987654": 1}
     problems = scrub.check_clean(rec)
     assert problems and not any("98765" in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{\\"secretKey\\":\\"hunter2secret\\"}',
+        'payload={\\"password\\": \\"hunter2secret\\"}',
+        "password:\r\n  hunter2secret\r\nuser: x",
+        "password: |\r\n  hunter2secret\r\n",
+        "password:\n  c2VjcmV0cGFzcw==\n",
+        "password:\n  hunter2:secret\n",
+        'password="abc\\"hunter2secret" end',
+        "password: |  # pem\n  hunter2secret\n",
+        "password: |2\n  hunter2secret\n",
+        "password: |\n  line1\n\n  hunter2secret\n",
+        "password: |\n\n  hunter2secret\n",
+        "password:\n  part1\n  hunter2secret\n",
+        "run --password hunter2secret --scale 1",
+    ],
+)
+def test_fourth_pass_text_shapes_leave_no_secret(text: str) -> None:
+    """Fourth fix pass: each shape either scrubs the secret away or is
+    refused; it never comes back with the secret and a clean check."""
+    try:
+        out = scrub.scrub_text(text)
+    except scrub.ScrubError:
+        return
+    assert "hunter2" not in out and "c2VjcmV0" not in out and "part1" not in out
+
+
+def test_backstop_refuses_what_the_rewrite_misses() -> None:
+    # Header credentials are a refused format, not a rewritten pair.
+    rec = sr.load_record("5105a0")
+    rec["jobs"][0]["error_message"] = "Authorization: Basic aHVudGVyMnNlY3JldA=="
+    assert any("credential format" in p for p in scrub.check_clean(rec))
+    with pytest.raises(scrub.ScrubError, match="credential format"):
+        scrub.scrub_text("Authorization: Bearer abc.def.ghi")
+
+
+def test_userinfo_secret_with_a_slash_refused() -> None:
+    with pytest.raises(scrub.ScrubError, match="user-info"):
+        scrub.scrub_text("s3a://MYACCESS:hunter2/secret@bucket/path")
+
+
+def test_partial_placeholder_leaf_is_rewritten() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["secret_key"] = "${X}hunter2secret"
+    out, _ = scrub.scrub_record(rec)
+    assert out["config_snapshot"]["s3"]["secret_key"] == "${LAKEBENCH_S3_SECRET_KEY}"
+
+
+def test_many_text_credentials_scrub_in_linear_time() -> None:
+    import time
+
+    text = "password=x\n" * 50_000
+    t0 = time.monotonic()
+    out = scrub.scrub_text(text)
+    assert time.monotonic() - t0 < 5.0
+    assert out.count("${LAKEBENCH_CREDENTIAL}") == 50_000
