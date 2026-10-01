@@ -995,11 +995,31 @@ pulls the latest version.
 
 ## Generating a Starter Config
 
-Use `lakebench init` to generate a starter configuration file interactively:
+Use `lakebench init` to write a starter configuration file:
 
 ```bash
 lakebench init --output my-config.yaml
 ```
 
-This creates a well-commented YAML file with all defaults that you can
-customize for your environment.
+It writes 12 lines of settings: a unique name (`lb-<user>-<4 hex>` unless
+`--name` is given), `recipe:` once (`polaris-iceberg-spark-trino` unless
+`--recipe` is given), the workload and scale (1), the S3 endpoint and the
+two credentials as `${LAKEBENCH_S3_ACCESS_KEY}` and
+`${LAKEBENCH_S3_SECRET_KEY}` (`--credentials-env PREFIX` renames them).
+Every other key keeps its default and is described on this page. See
+[cli-reference.md](cli-reference.md#init) for the flags.
+
+### Recipes and components
+
+A recipe sets `architecture.catalog.type`, `architecture.table_format.type`,
+`architecture.pipeline_engine` and `architecture.query_engine.type`. A
+config may leave them out or write the value the recipe sets; any other
+value is refused at load with both keys named, for example
+`architecture.catalog.type is 'hive' but recipe 'polaris-iceberg-spark-trino'
+sets 'polaris'; delete one of them`. Images and engine resources stay
+overridable under a recipe.
+
+A config with no `recipe:`, or `recipe: default`, resolves as in v1.6: to
+`hive-iceberg-spark-trino` when it sets no component, otherwise to the
+components it sets. It loads with a deprecation note naming the recipe to
+write; v1.8 requires `recipe:`.

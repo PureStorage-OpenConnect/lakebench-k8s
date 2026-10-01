@@ -7,6 +7,8 @@ through Typer's test harness -- no K8s cluster or S3 required.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from typer.testing import CliRunner
 
@@ -52,12 +54,14 @@ class TestInitCommand:
         assert "name:" in content
 
     def test_init_default_name(self, tmp_path, monkeypatch):
+        """The default name is unique per init, not a shared my-lakehouse."""
         monkeypatch.chdir(tmp_path)
         output = tmp_path / "out.yaml"
         result = runner.invoke(app, ["init", "--output", str(output)])
         assert result.exit_code == 0
         content = output.read_text()
-        assert "my-lakehouse" in content
+        assert "my-lakehouse" not in content
+        assert re.search(r"(?m)^name: lb-[a-z0-9-]+-[0-9a-f]{4}$", content), content
 
     def test_init_custom_name(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -83,6 +87,14 @@ class TestInitCommand:
         assert result.exit_code == 1
         assert "already exists" in result.output
 
+    def test_init_overwrite_overwrites(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        output = tmp_path / "existing.yaml"
+        output.write_text("old content")
+        result = runner.invoke(app, ["init", "--output", str(output), "--overwrite"])
+        assert result.exit_code == 0
+        assert "name:" in output.read_text()
+
     def test_init_force_overwrites(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         output = tmp_path / "existing.yaml"
@@ -103,26 +115,16 @@ class TestInitCommand:
         content = output.read_text()
         assert "polaris-iceberg-spark-trino" in content
 
-    def test_init_with_s3_creds(self, tmp_path, monkeypatch):
+    def test_init_with_endpoint(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         output = tmp_path / "out.yaml"
         result = runner.invoke(
-            app,
-            [
-                "init",
-                "--output",
-                str(output),
-                "--endpoint",
-                "http://minio:9000",
-                "--access-key",
-                "minioadmin",
-                "--secret-key",
-                "miniosecret",
-            ],
+            app, ["init", "--output", str(output), "--endpoint", "http://minio:9000"]
         )
         assert result.exit_code == 0
         content = output.read_text()
         assert "http://minio:9000" in content
+        assert "${LAKEBENCH_S3_ACCESS_KEY}" in content
 
 
 # =============================================================================
@@ -411,217 +413,3 @@ class TestReportSummary:
         assert result.exit_code == 0
         assert "Report Rendered" not in result.output
         assert "Benchmark Summary" in result.output
-
-
-# =============================================================================
-# Init wizard unit tests (v1.1.0)
-# =============================================================================
-
-
-class TestInitWizard:
-    """Tests for the init wizard steps and state."""
-
-    def test_wizard_state_defaults(self):
-        from lakebench.init_wizard import WizardState
-
-        s = WizardState()
-        assert s.name == "my-lakehouse"
-        assert s.namespace == ""
-        assert s.recipe == ""
-        assert s.endpoint == ""
-        assert s.scale == 10
-        assert s.mode == "batch"
-        assert s.cycles == 1
-
-    def test_step_identity(self):
-        from unittest.mock import patch
-
-        from rich.console import Console
-
-        from lakebench.init_wizard import WizardState, step_identity
-
-        state = WizardState()
-        console = Console(quiet=True)
-
-        with patch("typer.prompt", side_effect=["test-lake", "test-ns"]):
-            ok = step_identity(console, state)
-
-        assert ok is True
-        assert state.name == "test-lake"
-        assert state.namespace == "test-ns"
-
-    def test_step_identity_back(self):
-        from unittest.mock import patch
-
-        from rich.console import Console
-
-        from lakebench.init_wizard import WizardState, step_identity
-
-        state = WizardState()
-        console = Console(quiet=True)
-
-        with patch("typer.prompt", return_value="back"):
-            ok = step_identity(console, state)
-
-        assert ok is False
-
-    def test_step_recipe(self):
-        from unittest.mock import patch
-
-        from rich.console import Console
-
-        from lakebench.init_wizard import WizardState, step_recipe
-
-        state = WizardState()
-        console = Console(quiet=True)
-
-        # Select recipe #1 (default)
-        with patch("typer.prompt", return_value="1"):
-            ok = step_recipe(console, state)
-
-        assert ok is True
-        assert state.recipe == "default"
-
-    def test_step_storage(self):
-        from unittest.mock import patch
-
-        from rich.console import Console
-
-        from lakebench.init_wizard import WizardState, step_storage
-
-        state = WizardState()
-        console = Console(quiet=True)
-
-        # Endpoint, access key, secret key, region
-        with patch(
-            "typer.prompt", side_effect=["http://minio:9000", "admin", "secret", "us-east-1"]
-        ):
-            ok = step_storage(console, state)
-
-        assert ok is True
-        assert state.endpoint == "http://minio:9000"
-        assert state.access_key == "admin"
-        assert state.secret_key == "secret"
-
-    def test_step_workload_batch(self):
-        from unittest.mock import patch
-
-        from rich.console import Console
-
-        from lakebench.init_wizard import WizardState, step_workload
-
-        state = WizardState()
-        console = Console(quiet=True)
-
-        # Scale=100, mode=batch(1), cycles=3
-        with patch("typer.prompt", side_effect=["100", "1", "3"]):
-            ok = step_workload(console, state)
-
-        assert ok is True
-        assert state.scale == 100
-        assert state.mode == "batch"
-        assert state.cycles == 3
-
-    def test_step_workload_continuous(self):
-        from unittest.mock import patch
-
-        from rich.console import Console
-
-        from lakebench.init_wizard import WizardState, step_workload
-
-        state = WizardState()
-        console = Console(quiet=True)
-
-        # Scale=10, mode=continuous(2) -- no cycles prompt for continuous
-        with patch("typer.prompt", side_effect=["10", "2"]):
-            ok = step_workload(console, state)
-
-        assert ok is True
-        assert state.mode == "continuous"
-        assert state.cycles == 1
-
-    def test_step_review(self):
-        from rich.console import Console
-
-        from lakebench.init_wizard import WizardState, step_review
-
-        state = WizardState(
-            name="test-lake",
-            namespace="test-ns",
-            endpoint="http://s3:80",
-            access_key="key",
-            secret_key="secret",
-            scale=10,
-        )
-        console = Console(quiet=True)
-        ok = step_review(console, state)
-        assert ok is True
-        assert state.config_yaml != ""
-        assert "test-lake" in state.config_yaml
-
-    def test_build_config_yaml_continuous(self):
-        from lakebench.init_wizard import WizardState, _build_config_yaml
-
-        state = WizardState(
-            name="stream-lake",
-            mode="continuous",
-            endpoint="http://s3:80",
-            access_key="a",
-            secret_key="b",
-        )
-        yaml = _build_config_yaml(state)
-        assert "mode: continuous" in yaml
-        assert "mode: sustained" not in yaml
-
-    def test_build_config_yaml_cycles(self):
-        from lakebench.init_wizard import WizardState, _build_config_yaml
-
-        state = WizardState(
-            name="cycle-lake",
-            mode="batch",
-            cycles=5,
-            endpoint="http://s3:80",
-            access_key="a",
-            secret_key="b",
-        )
-        yaml = _build_config_yaml(state)
-        assert "cycles: 5" in yaml
-
-    def test_validate_endpoint(self):
-        from lakebench.init_wizard import _validate_endpoint
-
-        assert _validate_endpoint("http://minio:9000") is None
-        assert _validate_endpoint("https://s3.amazonaws.com") is None
-        assert _validate_endpoint("") is not None
-        assert _validate_endpoint("ftp://bad") is not None
-        assert _validate_endpoint("just-a-hostname") is not None
-
-    def test_init_no_interactive_with_flags(self, tmp_path, monkeypatch):
-        """When flags are passed, wizard is skipped even though interactive=True default."""
-        monkeypatch.chdir(tmp_path)
-        output = tmp_path / "flagged.yaml"
-        result = runner.invoke(
-            app,
-            [
-                "init",
-                "--output",
-                str(output),
-                "--endpoint",
-                "http://minio:9000",
-                "--access-key",
-                "aaa",
-                "--secret-key",
-                "bbb",
-            ],
-        )
-        assert result.exit_code == 0
-        content = output.read_text()
-        assert "http://minio:9000" in content
-
-    def test_init_no_interactive_explicit(self, tmp_path, monkeypatch):
-        """--no-interactive creates config without wizard."""
-        monkeypatch.chdir(tmp_path)
-        output = tmp_path / "nointeractive.yaml"
-        result = runner.invoke(app, ["init", "--output", str(output), "--no-interactive"])
-        assert result.exit_code == 0
-        assert output.exists()

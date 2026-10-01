@@ -2468,6 +2468,23 @@ def _is_recipe_shaped(name: str, recipes: Any) -> bool:
     return len(parts) == 4 and all(p in slots[i] for i, p in enumerate(parts))
 
 
+class _InjectedPaths(frozenset[str]):
+    """The leaf paths a recipe filled in: provenance, not configuration.
+
+    It compares equal to any other set of paths, so two configs with the
+    same values stay equal (a config rebuilt from ``model_dump`` has no
+    injected paths, since every field is then written).
+    """
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, frozenset)
+
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
+
+    __hash__ = frozenset.__hash__
+
+
 class LakebenchConfig(ConfigModel):
     """Root configuration for Lakebench.
 
@@ -2504,21 +2521,30 @@ class LakebenchConfig(ConfigModel):
     # resolved (config/loader.py load_notes, name_resolution).
     _load_notes: Any = PrivateAttr(default=None)
     _name_resolution: Any = PrivateAttr(default=None)
+    # The dotted leaf paths the recipe filled in (apply_recipe_defaults);
+    # recipes.user_set subtracts them.
+    _recipe_injected: frozenset[str] = PrivateAttr(default_factory=_InjectedPaths)
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def apply_recipe_defaults(cls, data: object) -> object:
+    def apply_recipe_defaults(cls, data: object, handler: Any) -> Any:
         """Expand recipe defaults into the config dict.
 
-        Recipe defaults are merged via ``_deep_setdefault`` so user-specified
-        values always take precedence.
+        Recipe defaults are merged via ``_deep_setdefault``, so images and
+        engine resources the user wrote take precedence. A recipe-owned
+        component (``RECIPE_OWNED_KEYS``) written with a different value is
+        refused, naming both keys (CFG-5): before v1.7 the written value won
+        silently, so ``recipe: polaris-...`` with ``catalog.type: hive``
+        deployed Hive. The leaf paths the recipe filled in are kept on the
+        model as ``_recipe_injected`` for ``recipes.user_set``.
         """
         if not isinstance(data, dict):
-            return data
+            return handler(data)
         data = resolve_workload_location(data)
+        injected: list[str] = []
         recipe_name = data.get("recipe")
         if recipe_name:
-            from lakebench.config.recipes import RECIPES, _deep_setdefault
+            from lakebench.config.recipes import RECIPES, _deep_setdefault, recipe_conflicts
 
             if not isinstance(recipe_name, str):
                 raise PydanticCustomError(
@@ -2548,8 +2574,15 @@ class LakebenchConfig(ConfigModel):
                     "{text}",
                     {"text": f"unknown recipe '{recipe_name}'; {detail}"},
                 )
-            _deep_setdefault(data, defaults)
-        return data
+            conflicts = recipe_conflicts(data, recipe_name)
+            if conflicts:
+                raise PydanticCustomError(
+                    "recipe_conflict", "{text}", {"text": "; ".join(conflicts)}
+                )
+            _deep_setdefault(data, defaults, injected)
+        model = handler(data)
+        model._recipe_injected = _InjectedPaths(injected)
+        return model
 
     @property
     def workload(self) -> WorkloadConfig:

@@ -15,7 +15,7 @@ architecture:
       client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # every Polaris recipe needs one
 ```
 
-Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
+Recipe defaults are merged without overwriting: images, versions and engine resources you set always take precedence. The four components a recipe sets (`architecture.catalog.type`, `architecture.table_format.type`, `architecture.pipeline_engine`, `architecture.query_engine.type`) may be left out or written with the recipe's value; a different value is refused at load, naming both keys. A config with no `recipe:`, or `recipe: default`, still resolves to `hive-iceberg-spark-trino` (or to the components it sets) with a deprecation note; v1.8 requires `recipe:`. Available recipe names: `hive-iceberg-spark-trino` (`default` is a deprecated alias), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
 
 ## Quick Reference
 
@@ -336,7 +336,7 @@ observability:
   enabled: true                        # deploy Prometheus + Grafana
 ```
 
-Recipe defaults are merged via `_deep_setdefault` -- your explicit values always take precedence. See the [Configuration Reference](configuration.md) for the full YAML schema.
+Recipe defaults are merged via `_deep_setdefault`: your explicit values take precedence, except the four recipe-owned components, which must agree with the recipe. See the [Configuration Reference](configuration.md) for the full YAML schema.
 
 ## Cross-References
 

@@ -7,6 +7,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **`init` writes a first-day config, and the wizard is removed.** The file
+  has 12 lines of settings: a unique name (`lb-<user>-<4 hex>`, new on every
+  `init`, where `my-lakehouse` was shared), `recipe:` once
+  (`polaris-iceberg-spark-trino` unless `--recipe` is given), the workload,
+  scale 1 (was 10), the endpoint, and the two S3 credentials as
+  `${LAKEBENCH_S3_ACCESS_KEY}` and `${LAKEBENCH_S3_SECRET_KEY}`
+  (`--credentials-env PREFIX` renames them). The recipe's components are
+  written as a commented block, so `init --recipe polaris-*` no longer
+  writes `catalog.type: hive` and resolves to Hive. No Polaris client
+  secret is written. `init` prints its choices on stderr, with or without a
+  terminal, and refuses (exit 2, nothing written) a combination that would
+  not load. `--access-key` and `--secret-key` are refused with exit 2 and
+  the values are never echoed; `--interactive`, `-i` and `--advanced` print
+  one line and write the default. `--overwrite` is the new spelling of
+  `--force`. The 330-line commented template (`generate_example_config_yaml`)
+  is removed; docs/configuration.md is the key reference.
+- **A component that contradicts its recipe is refused at load.**
+  `architecture.catalog.type`, `table_format.type`, `pipeline_engine` and
+  `query_engine.type` may be left out under a recipe or written with the
+  recipe's value; another value fails naming both keys. v1.6 let the
+  written value win silently. Images and engine resources stay overridable.
+- **A config with no `recipe:`, or `recipe: default`, is deprecated.** It
+  still resolves as before (to `hive-iceberg-spark-trino` when it sets no
+  component, otherwise to the components it sets) and loads with a note
+  naming the recipe to write. v1.8 requires `recipe:`.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to

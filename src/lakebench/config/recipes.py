@@ -11,6 +11,8 @@ One alias exists: ``default`` = ``hive-iceberg-spark-trino``.
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -243,14 +245,138 @@ def local_recipes() -> tuple[str, ...]:
     return tuple(sorted(n for n, note in RECIPE_NOTES.items() if note.runs_locally))
 
 
-def _deep_setdefault(target: dict, defaults: dict) -> None:
+#: The component keys a recipe owns. A config that names a recipe may leave
+#: them out, or write the value the recipe sets; any other value is refused
+#: at load (CFG-5). Images and engine resources stay overridable.
+RECIPE_OWNED_KEYS: tuple[str, ...] = (
+    "architecture.catalog.type",
+    "architecture.table_format.type",
+    "architecture.pipeline_engine",
+    "architecture.query_engine.type",
+)
+
+
+def recipe_components(name: str) -> dict[str, str]:
+    """The value of each of ``RECIPE_OWNED_KEYS`` that recipe *name* sets.
+
+    The pipeline engine is not written in the recipe dicts; it is the third
+    slot of the name (``spark`` for every recipe today).
+    """
+    arch = RECIPES[name]["architecture"]
+    slots = name.split("-")
+    return {
+        "architecture.catalog.type": str(arch["catalog"]["type"]),
+        "architecture.table_format.type": str(arch["table_format"]["type"]),
+        "architecture.pipeline_engine": str(
+            arch.get("pipeline_engine") or (slots[2] if len(slots) == 4 else "spark")
+        ),
+        "architecture.query_engine.type": str(arch["query_engine"]["type"]),
+    }
+
+
+_MISSING = object()
+
+
+def _raw_value(data: Any, dotted: str) -> Any:
+    """The value at *dotted* in a raw config dict, or ``_MISSING``.
+
+    Programmatic callers can pass a sub-model instead of a dict, so an
+    attribute is read as well as a key.
+    """
+    node = data
+    for part in dotted.split("."):
+        if isinstance(node, Mapping):
+            if part not in node:
+                return _MISSING
+            node = node[part]
+        elif hasattr(node, part):
+            node = getattr(node, part)
+        else:
+            return _MISSING
+    return node
+
+
+def recipe_conflicts(data: Mapping[str, Any], recipe: str) -> list[str]:
+    """One message per recipe-owned key that *data* sets to another value.
+
+    ``default`` is the CFG-8 alias, under which written components keep
+    resolving the config as before, so it has no conflicts.
+    """
+    if recipe == "default" or recipe not in RECIPES:
+        return []
+    problems = []
+    for dotted, want in recipe_components(recipe).items():
+        got = _raw_value(data, dotted)
+        if got is _MISSING or got is None:
+            continue
+        got_text = str(getattr(got, "value", got))
+        if got_text != want:
+            problems.append(
+                f"{dotted} is '{got_text}' but recipe '{recipe}' sets '{want}'; delete one of them"
+            )
+    return problems
+
+
+def _leaf_paths(value: Any, prefix: tuple[str, ...]) -> list[str]:
+    if isinstance(value, dict) and value:
+        out: list[str] = []
+        for key, sub in value.items():
+            out.extend(_leaf_paths(sub, (*prefix, str(key))))
+        return out
+    return [".".join(prefix)]
+
+
+def _deep_setdefault(
+    target: dict,
+    defaults: dict,
+    injected: list[str] | None = None,
+    _prefix: tuple[str, ...] = (),
+) -> None:
     """Recursively merge *defaults* into *target* without overwriting existing keys.
 
     Only dict values are merged recursively; scalar and list values in *target*
-    are never replaced.
+    are never replaced. Inserted values are copies, so a later change to the
+    config dict never reaches ``RECIPES``. When *injected* is given, the
+    dotted path of every leaf inserted is appended to it.
     """
     for key, default_value in defaults.items():
         if key not in target:
-            target[key] = default_value
+            target[key] = copy.deepcopy(default_value)
+            if injected is not None:
+                injected.extend(_leaf_paths(default_value, (*_prefix, str(key))))
         elif isinstance(target[key], dict) and isinstance(default_value, dict):
-            _deep_setdefault(target[key], default_value)
+            _deep_setdefault(target[key], default_value, injected, (*_prefix, str(key)))
+
+
+def user_set(cfg: Any, path: str) -> bool:
+    """Whether the user wrote the leaf field *path* in the config.
+
+    *path* is a dotted model path (``images.spark``,
+    ``architecture.catalog.type``); a leading ``workload`` means
+    ``architecture.workload``, where the model stores it. A field the
+    recipe filled in looks set to Pydantic (``_deep_setdefault`` writes it
+    into the dict before validation), so the paths the recipe injected
+    (``LakebenchConfig._recipe_injected``) are subtracted. A config rebuilt
+    from ``model_dump`` sets every field, so this only answers for a config
+    validated from what the user wrote.
+    """
+    from pydantic import BaseModel
+
+    parts = path.split(".")
+    if parts[0] == "workload":
+        parts = ["architecture", *parts]
+    if ".".join(parts) in (getattr(cfg, "_recipe_injected", None) or ()):
+        return False
+    node = cfg
+    for part in parts:
+        if isinstance(node, BaseModel):
+            if part not in node.model_fields_set:
+                return False
+            node = getattr(node, part)
+        elif isinstance(node, Mapping):
+            if part not in node:
+                return False
+            node = node[part]
+        else:
+            return False
+    return True

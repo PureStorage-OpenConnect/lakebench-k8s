@@ -20,7 +20,7 @@ ROOT_CMD = typer.main.get_command(app)
 DEPRECATED_F = {
     "destroy": ("force_short_f", "-y"),
     "clean": ("force_short_f", "-y"),
-    "init": ("force_short_f", "--force"),
+    "init": ("force_short_f", "--overwrite"),
     "results": ("format_short_f", "-o"),
     "logs": ("follow_short_f", "-F"),
 }
@@ -103,7 +103,7 @@ def test_init_old_short_f_still_overwrites_and_warns(tmp_path):
     out.write_text("old: true\n")
     result = runner.invoke(app, ["init", "--no-interactive", "--name", "t", "-o", str(out), "-f"])
     assert result.exit_code == 0, result.output
-    assert "deprecated" in result.output and "--force" in result.output
+    assert "deprecated" in result.output and "--overwrite" in result.output
     assert "old: true" not in out.read_text()
 
 
