@@ -72,7 +72,7 @@ from typing import Any
 #: Bump when a rule changes; recorded in tests/fixtures/records/MANIFEST.json.
 SCRUBBER_VERSION = 3
 
-#: The documented placeholder host (CLAUDE.md section 8).
+#: The documented placeholder host for the lab S3 address.
 PLACEHOLDER_HOST = "10.0.1.50"
 
 #: Hosts that may stay in a fixture.

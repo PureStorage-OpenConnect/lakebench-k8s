@@ -9,6 +9,7 @@ endpoints, bucket names and credentials without moving identity.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -95,9 +96,13 @@ def test_manifest_pins_each_fixture() -> None:
         assert scrub.sha256_of(sr.record_path(run_id)) == entry["fixture_sha256"], run_id
 
 
+#: Directories holding the raw source records, one environment variable per
+#: MANIFEST root (LB_FIXTURE_SOURCES_MAINTAINER_EVIDENCE,
+#: LB_FIXTURE_SOURCES_INTEGRATE_RUNS). Unset in CI, where the lineage test
+#: skips; set on the host that holds the raw records.
 _SOURCE_ROOTS = {
-    "lakebench-k8s": Path("/home/repos/lakebench-k8s"),
-    "lakebench-k8s-integrate": Path("/home/repos/lakebench-k8s-integrate"),
+    root: os.environ.get("LB_FIXTURE_SOURCES_" + root.upper().replace("-", "_"), "")
+    for root in ("maintainer-evidence", "integrate-runs")
 }
 
 
@@ -106,8 +111,9 @@ def test_fixture_reproduces_from_its_source(run_id: str) -> None:
     """Rule 5 lineage, where the local sources exist (never in CI): the
     fixture is exactly the scrubber's output on the recorded source."""
     entry = sr.manifest()["records"][run_id]
-    src = _SOURCE_ROOTS[entry["source"]["root"]] / entry["source"]["path"]
-    if not src.exists():
+    root = _SOURCE_ROOTS[entry["source"]["root"]]
+    src = Path(root) / entry["source"]["path"]
+    if not root or not src.exists():
         pytest.skip("source record not on this host")
     assert scrub.sha256_of(src) == entry["source_sha256"]
     scrubbed, changed = scrub.scrub_record(json.loads(src.read_text()))
