@@ -90,10 +90,13 @@ def test_operator_retry_of_a_committed_cycle_is_still_a_no_op(result):
     assert case["held_after_retry"] == case["held"], _why(case)
 
 
-def test_the_keys_are_read_back_through_checkpoints(result):
-    """Both tables passed a checkpoint, so the keys came from one too."""
-    assert result["epoch_reset"]["checkpoints"] > 0
-    assert result["stale_cycle"]["checkpoints"] > 0
+def test_the_deciding_reads_come_from_a_checkpoint(result):
+    """The cycle that would collide reads its keys with a checkpoint already
+    in the log (checkpointInterval 2), as on a long-lived table."""
+    reset = result["epoch_reset"]["log"][-1]
+    assert reset["cycle"] == 1 and reset["checkpoints_before"] >= 1
+    stale = [e for e in result["stale_cycle"]["log"] if e["epoch"] == 0 and e["cycle"] == 1][-1]
+    assert stale["checkpoints_before"] > 0
 
 
 def test_catalog_lost_cycle0_refuses_the_surviving_log(result):

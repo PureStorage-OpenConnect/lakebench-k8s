@@ -21,6 +21,8 @@ from enum import Enum
 
 from common import (
     SilverAbort,
+    _is_unity_catalog,
+    _s3_table_path,
     apply_silver_transformations_anchored,
     assert_progress,
     c360_bronze_path,
@@ -30,6 +32,7 @@ from common import (
     files_added_by_last_commit,
     log,
     path_size_gb_strict,
+    refuse_orphan_delta_log,
     resolve_data_clock,
     sample_key_profile,
     set_utc_session,
@@ -309,8 +312,10 @@ def committed_epochs(spark, silver_tbl):
     """{rebuild epoch: last committed cycle} from the table's Delta log.
 
     Reads the SetTransaction entries Delta keeps for every txnAppId that has
-    written to the table (they survive overwrites, so a table holds the keys
-    of every epoch that ever wrote to it). Only this build's app ids
+    written to the table (they survive overwrites, and nothing sets
+    delta.setTransactionRetentionDuration, so a table holds the keys of every
+    epoch that ever wrote to it; a key that did expire would not be skipped
+    by Delta either). Only this build's app ids
     (``delta_batch_txn_options``) are returned. Any failure to read them
     raises: without them a write cannot be shown not to be skipped.
     """
@@ -351,7 +356,9 @@ def resolve_txn_epoch(committed, configured, appending, cycle):
       no table) takes an epoch above every epoch in the log, so its key is
       new by construction and it starts the newest epoch;
     - an append continues the newest epoch in the log, which is the one this
-      run's full build started, whatever the configured epoch reads. Its own
+      run's full build started (a full build over a log the catalog does not
+      know is refused, so it never resumes an old epoch), whatever the
+      configured epoch reads. Its own
       cycle already committed there is an operator retry, which Delta skips
       as intended; a later cycle already committed there cannot be this
       run's (a manual re-run of an earlier cycle) and is refused.
@@ -590,6 +597,12 @@ if not appending and _table_exists(spark, silver_tbl):
 # (the ConfigMap was lost or recreated while the table survived, or job.py's
 # read fell back to 0), and Delta would then skip this run's cycles as
 # committed: silver short, exit 0. The table's own log decides the epoch.
+if _is_unity_catalog() and not _table_exists(spark, silver_tbl):
+    # write_delta_table checks for a surviving log only on the Hive path;
+    # on Unity a build would append under a key the old log may hold.
+    refuse_orphan_delta_log(
+        spark, silver_tbl, _s3_table_path(silver_uri, silver_tbl.split(".", 1)[-1])
+    )
 _committed = committed_epochs(spark, silver_tbl) if _table_exists(spark, silver_tbl) else {}
 _txn_epoch = resolve_txn_epoch(_committed, _rebuild_epoch, appending, _cycle)
 log(

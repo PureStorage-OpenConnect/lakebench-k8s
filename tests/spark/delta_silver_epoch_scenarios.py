@@ -79,6 +79,7 @@ def stage_bronze(spark, work, run, cycle):
 
 def silver_job(jar_dir, work, cycle, epoch, force=False, strategy="simple", log=None):
     """Run silver_build_delta.py as one driver; return its exit code."""
+    ckpts_before = checkpoints(work)
     env = dict(os.environ)
     env.update(
         {
@@ -106,6 +107,7 @@ def silver_job(jar_dir, work, cycle, epoch, force=False, strategy="simple", log=
     if log is not None:
         log.append(
             {
+                "checkpoints_before": ckpts_before,
                 "cycle": cycle,
                 "epoch": epoch,
                 "force": force,
@@ -196,7 +198,6 @@ def main():
     out["epoch_reset"] = {
         "rcs": [first, second],
         "held": silver_cycles(spark, work),
-        "checkpoints": checkpoints(work),
         "log": log,
     }
 
@@ -218,7 +219,6 @@ def main():
         "held": held_after_run,
         "retry_rc": retry_rc,
         "held_after_retry": silver_cycles(spark, work),
-        "checkpoints": checkpoints(work),
         "log": log,
     }
 
