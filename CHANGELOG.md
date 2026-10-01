@@ -87,6 +87,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   read Prometheus. `report --list` shows such a run as Interrupted. Inside
   the cluster lease the signal still waits for the shared change to finish
   first. SIGHUP is not handled.
+- **A continuous run notices that its namespace is gone.** It used to keep
+  looping to the end of its window after `destroy`. It now reads the
+  namespace every 30 s and before each benchmark, maintenance and
+  compaction round, and when the namespace was deleted, is being deleted
+  or was deleted and deployed again (or three reads in a row fail), it
+  stops, exits 1 and saves the record with `abort_reason`.
 ### Fixed
 
 - `run --continuous --skip-generate` no longer journals a "Datagen started"

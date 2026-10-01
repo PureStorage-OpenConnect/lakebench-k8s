@@ -242,11 +242,13 @@ def compute_badge_status(
     if metrics.benchmark_error:
         reasons.append(f"Benchmark did not complete ({metrics.benchmark_error}); no QpH")
     elif not metrics.success:
-        reasons.append(
-            interrupt_reason(interrupted)
-            if interrupted is not None
-            else "Pipeline crashed or was interrupted"
-        )
+        abort = getattr(metrics, "abort_reason", None)
+        if interrupted is not None:
+            reasons.append(interrupt_reason(interrupted))
+        elif isinstance(abort, Mapping) and abort.get("reason"):
+            reasons.append(f"Run stopped: {abort['reason']}")
+        else:
+            reasons.append("Pipeline crashed or was interrupted")
 
     pb = metrics.pipeline_benchmark
     is_sustained = _is_sustained(metrics)

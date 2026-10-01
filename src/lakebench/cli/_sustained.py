@@ -2282,6 +2282,91 @@ def _size_mb(size: str) -> float:
     return float(text.rstrip("B")) / (1024 * 1024)
 
 
+class NamespaceGone(Exception):
+    """The run's namespace was deleted (or deleted and created again) mid-run."""
+
+    def __init__(self, reason: str, at_elapsed: float) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.at_elapsed = at_elapsed
+
+
+#: Consecutive failed namespace reads (other than 404) before the run stops:
+#: one 503 must not end a good run.
+NAMESPACE_READ_STRIKES = 3
+
+
+class NamespaceWatch:
+    """Notices, within one loop interval, that the run's namespace is gone.
+
+    ``start`` records the namespace's uid when the window opens; ``check``
+    reads it again and raises :class:`NamespaceGone` on a 404, a namespace
+    being deleted (deletion timestamp or phase Terminating), a different uid
+    (destroyed and deployed again), or after ``NAMESPACE_READ_STRIKES``
+    consecutive failed reads. A single failed read is not a reason.
+    """
+
+    def __init__(self, namespace: str) -> None:
+        self.namespace = namespace
+        self.uid: str | None = None
+        self.failures = 0
+        self.reads = 0
+
+    def _read(self):
+        from kubernetes import client as k8s_client
+
+        self.reads += 1
+        return k8s_client.CoreV1Api().read_namespace(self.namespace, _request_timeout=(5, 10))
+
+    def start(self) -> None:
+        try:
+            ns = self._read()
+            uid = getattr(getattr(ns, "metadata", None), "uid", None)
+            self.uid = uid if isinstance(uid, str) and uid else None
+        except Exception as e:  # noqa: BLE001 -- the checks still see a 404
+            logger.warning("Could not read namespace %s at the window start: %s", self.namespace, e)
+
+    def gone(self) -> str | None:
+        """Why the namespace is gone, or None while it is there (or unread)."""
+        from kubernetes.client.rest import ApiException
+
+        try:
+            ns = self._read()
+        except ApiException as e:
+            if e.status == 404:
+                return f"namespace {self.namespace} was deleted"
+            return self._strike(f"{e.status} {e.reason}")
+        except Exception as e:  # noqa: BLE001 -- transport errors
+            return self._strike(str(e))
+        self.failures = 0
+        meta = getattr(ns, "metadata", None)
+        phase = getattr(getattr(ns, "status", None), "phase", None)
+        if getattr(meta, "deletion_timestamp", None) is not None or phase == "Terminating":
+            return f"namespace {self.namespace} is being deleted"
+        uid = getattr(meta, "uid", None)
+        if self.uid is not None and isinstance(uid, str) and uid and uid != self.uid:
+            return f"namespace {self.namespace} was deleted and created again"
+        return None
+
+    def _strike(self, error: str) -> str | None:
+        self.failures += 1
+        logger.warning(
+            "Could not read namespace %s (%d of %d): %s",
+            self.namespace,
+            self.failures,
+            NAMESPACE_READ_STRIKES,
+            error,
+        )
+        if self.failures >= NAMESPACE_READ_STRIKES:
+            return f"namespace {self.namespace} unreadable ({error})"
+        return None
+
+    def check(self, elapsed: float) -> None:
+        reason = self.gone()
+        if reason is not None:
+            raise NamespaceGone(reason, elapsed)
+
+
 def _stop_streams(k8s, namespace: str, submitted: list) -> None:
     console.print("[bold]Stopping continuous jobs...[/bold]")
     for _job_type, job_name in submitted:
@@ -2779,6 +2864,9 @@ def _run_sustained(
     # Exit 130 at the end: an interrupt, or a late signal in a run that had
     # not failed (a failed run keeps its own exit).
     _exit_interrupted = False
+    # Set when the namespace went away mid-window: {reason, at_elapsed}.
+    _abort: dict | None = None
+    _ns_watch = NamespaceWatch(cfg.get_namespace())
 
     try:
         # Check Spark operator
@@ -3114,6 +3202,9 @@ def _run_sustained(
         _host_window_start = utc_naive(datetime.now(timezone.utc))
         window_start = _host_window_start + _shift
         opened_identity = stream_identities(job_manager, [n for _, n in submitted])
+        # The namespace as the window opens: destroyed (or destroyed and
+        # deployed again) mid-run ends the run within one loop interval.
+        _ns_watch.start()
         _first_up = min(
             (datetime.fromisoformat(w.running_at) for w in stream_watch.values() if w.running_at),
             default=None,
@@ -3264,6 +3355,7 @@ def _run_sustained(
                 and remaining >= min_remaining
                 and bench_runner_instream is not None
             ):
+                _ns_watch.check(elapsed)
                 round_index += 1
                 console.print(
                     f"\n  [{elapsed:.0f}s / {run_duration}s] "
@@ -3301,6 +3393,7 @@ def _run_sustained(
 
             # Iceberg retention maintenance
             if elapsed >= next_maintenance_at:
+                _ns_watch.check(elapsed)
                 # A plan-building error (a bad retention string, an engine
                 # lookup failure) must not end the continuous run.
                 bounds = continuous_round_bounds(
@@ -3345,6 +3438,7 @@ def _run_sustained(
             # maintenance round above, so the two cannot overrun the window.
             if compaction_enabled and elapsed >= next_compaction_at:
                 now = time.time() - start
+                _ns_watch.check(now)
                 bounds = continuous_round_bounds(compaction_interval, run_duration - now)
                 if now < compaction_hold_until:
                     console.print(
@@ -3388,6 +3482,7 @@ def _run_sustained(
             # Periodic health check
             elapsed = time.time() - start
             remaining = run_duration - elapsed
+            _ns_watch.check(elapsed)
             console.print(
                 f"  [{elapsed:.0f}s / {run_duration}s] "
                 f"Streaming jobs running... ({remaining:.0f}s remaining)"
@@ -3884,6 +3979,14 @@ def _run_sustained(
         console.print()
         print_warning(f"Interrupted by {_interrupted['signal']} during {_stage}")
         _interrupt.stop_owned(_interrupted, console)
+    except NamespaceGone as e:
+        # Destroyed under the run: its streams, datagen Job and pods went
+        # with it, so nothing is stopped (a redeployed namespace's objects
+        # are not this run's either).
+        _abort = {"reason": e.reason, "at_elapsed": round(e.at_elapsed, 1)}
+        pipeline_success = False
+        streams_stopped = True
+        print_error(f"{e.reason} mid-run; stopping")
     except BaseException:
         # Any other error is not a pass.
         pipeline_success = False
@@ -3907,8 +4010,9 @@ def _run_sustained(
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
             run_metrics.interrupted = _interrupted
+            run_metrics.abort_reason = _abort
             # Collect platform metrics from Prometheus (best-effort)
-            if _interrupted is None:
+            if _interrupted is None and _abort is None:
                 _collect_platform_metrics(cfg, run_metrics)
 
             # Build pipeline benchmark (stage-matrix view)
@@ -3989,3 +4093,5 @@ def _run_sustained(
         _interrupt.restore()
         if _exit_interrupted:
             raise typer.Exit(EXIT_INTERRUPTED)
+        if _abort is not None:
+            raise typer.Exit(1)
