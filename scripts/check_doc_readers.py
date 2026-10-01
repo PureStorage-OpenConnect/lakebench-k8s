@@ -647,7 +647,7 @@ def _split_bases(bases: Sequence[Path | str]) -> tuple[list[Path], list[tuple[st
     mapped: list[tuple[str, Path]] = []
     for b in bases:
         text = str(b)
-        if "=" in text:
+        if "=" in text and not Path(text).exists():
             prefix, _, d = text.partition("=")
             mapped.append((prefix, Path(d)))
         else:
@@ -672,7 +672,12 @@ def unresolved_paths(
         if p.is_absolute():
             ok = p.exists()
         else:
-            owner = [d for prefix, d in mapped if tok.startswith(prefix)]
+            # The longest matching prefix owns the token.
+            owner = [
+                d
+                for prefix, d in sorted(mapped, key=lambda pd: -len(pd[0]))
+                if tok.startswith(prefix)
+            ]
             roots = [path.parent] if is_link else (owner[:1] or plain)
             ok = any((b / tok).exists() for b in roots)
         if not ok:
