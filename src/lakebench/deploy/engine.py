@@ -480,50 +480,15 @@ class DeploymentEngine:
 
     @staticmethod
     def _build_spark_thrift_packages(cfg: Any) -> str:
-        """Build ``spark.jars.packages`` CSV for Spark Thrift Server.
+        """``spark.jars.packages`` CSV for Spark Thrift Server.
 
-        Format-aware: uses Iceberg or Delta packages depending on the
-        configured table format.
+        The same list the Spark jobs load (``deps.request.jar_coordinates``),
+        so Thrift and the jobs run one Iceberg runtime (UX D2). SD-5b
+        replaces this with a fetch from the deployment's lb-deps server.
         """
-        from lakebench.modules.pipeline_engines.spark.job import iceberg_runtime_suffix_for
-        from lakebench.spark.job import (
-            _delta_spark_artifact,
-            _parse_spark_major,
-            _parse_spark_major_minor,
-            _spark_compat,
-        )
+        from lakebench.deps.request import jar_coordinates
 
-        table_format = cfg.architecture.table_format.type.value
-        scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
-
-        if table_format == "delta":
-            delta_version = cfg.architecture.table_format.delta.version
-            catalog_type = cfg.architecture.catalog.type.value
-            packages = [
-                _delta_spark_artifact(scala_suffix, delta_version),
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-            if catalog_type == "unity":
-                unity_version = cfg.architecture.catalog.unity.spark_connector_version
-                packages.append(f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}")
-        else:
-            iceberg_version = cfg.architecture.table_format.iceberg.version
-            # The same choice the jobs make (job.py _build_manifest): Iceberg
-            # 1.11+ on Spark 4.1 has a native 4.1 runtime. Reading the
-            # fallback table directly put the 4.0 runtime on Thrift while the
-            # jobs loaded 4.1 (UX D2).
-            key = _parse_spark_major_minor(cfg.images.spark)
-            iceberg_suffix = iceberg_runtime_suffix_for(key, iceberg_version)
-            packages = [
-                f"org.apache.iceberg:iceberg-spark-runtime-{iceberg_suffix}{scala_suffix}:{iceberg_version}",
-                f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-        if _parse_spark_major(cfg.images.spark) < 4:
-            packages.append(
-                f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
-            )
-        return ",".join(packages)
+        return ",".join(jar_coordinates(cfg))
 
     @staticmethod
     def _read_ca_cert_pem(path: str) -> str:
