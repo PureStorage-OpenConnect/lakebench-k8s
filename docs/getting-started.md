@@ -584,11 +584,11 @@ requests at the configured scale.
 ### Stream component logs
 
 ```bash
-lakebench logs trino lakebench.yaml            # Trino coordinator
-lakebench logs hive lakebench.yaml             # Hive Metastore
-lakebench logs postgres lakebench.yaml         # PostgreSQL
-lakebench logs spark-driver lakebench.yaml     # Latest Spark driver pod
-lakebench logs trino lakebench.yaml --follow   # Tail in real time
+lakebench logs lakebench.yaml trino            # Trino coordinator
+lakebench logs lakebench.yaml hive             # Hive Metastore
+lakebench logs lakebench.yaml silver-build     # the silver-build Spark driver
+lakebench logs lakebench.yaml datagen          # the datagen pods
+lakebench logs lakebench.yaml trino --follow   # Tail in real time
 ```
 
 ### Run ad-hoc queries

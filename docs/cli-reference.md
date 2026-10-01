@@ -312,15 +312,23 @@ continuous mode.
 
 ### stop
 
-Stop running continuous-mode jobs.
+Stop every job Lakebench started in the deployment.
 
 ```
-lakebench stop [CONFIG_FILE]
+lakebench stop [CONFIG_FILE] [OPTIONS]
 ```
 
-Deletes the continuous-mode SparkApplications (`bronze-ingest`, `silver-stream`,
-`gold-refresh`) from the cluster. `--file` / `-f` is the only option, and
-points at the config the same way it does on the other commands.
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--file` | `-f` | `./lakebench.yaml` | Path to the config (alternative to the positional argument) |
+| `--dry-run` | | `false` | List what would be stopped without deleting anything |
+
+Deletes every SparkApplication named `lakebench-*` in the deployment's
+namespace (the continuous streams and any batch stage left running by a CLI
+that died) and the datagen Job `lakebench-datagen`, with its pods. A job
+already gone is reported as not running. When a deletion fails, `stop` still
+tries every other one, prints one line per failure and exits 1. A missing
+namespace means nothing to stop (exit 0).
 
 ### benchmark
 
@@ -390,6 +398,12 @@ catalog and query engine) with their readiness and replica counts, and the
 datagen job's progress while it runs. With only `--namespace` and no config,
 it lists every component lakebench can deploy, plus the shared Prometheus and
 Grafana.
+
+Exit codes: 0 when every component of the config is ready; 1 when the
+namespace does not exist, or a component is not ready, scaled to zero or not
+found (drift). With only `--namespace`, a component that is absent is not
+drift, but one that is not ready is, and so is a namespace with none of
+them. 4 when the cluster is unreachable or a read is refused.
 
 ### info
 
@@ -579,18 +593,33 @@ volumes, executor counts, and timing for each stage.
 
 ### logs
 
-Stream logs from a deployed component.
+Show logs from a component of the deployment.
 
 ```
-lakebench logs COMPONENT [CONFIG_FILE] [OPTIONS]
+lakebench logs CONFIG_FILE COMPONENT [OPTIONS]
 ```
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--follow` | `-F` | `false` | Follow log output (like `tail -f`; `-f` is deprecated here) |
-| `--lines` | `-n` | `100` | Number of lines to show |
+| `--file` | | `./lakebench.yaml` | Path to the config (then give only `COMPONENT`) |
+| `--follow` | `-F` | `false` | Follow log output of the newest matching pod (like `tail -f`; `-f` is deprecated here) |
+| `--lines` | `-n` | `100` | Number of lines to show per pod |
+| `--previous` | | `false` | Read the previous container of each pod (after a crash or restart) |
 
-Valid components: `postgres`, `hive`, `polaris`, `trino`, `spark-driver`.
+Components: `datagen` (the datagen Job pods); each pipeline stage's Spark
+driver (`bronze-verify`, `silver-build`, `gold-finalize`, `bronze-ingest`,
+`silver-stream`, `gold-refresh`, `replay-financial`, `reproduce-financial`,
+`score-financial`, `score-financial-reference`); `spark-driver` (every Spark
+driver); `trino` (coordinator), `trino-worker`, `thrift`, `duckdb`, `hive`,
+`polaris` and `postgres`.
+
+`logs` reads through the Kubernetes API, not `kubectl`. Log text goes to
+stdout unformatted; when several pods match, each pod's lines follow a
+header on stderr. `lakebench logs COMPONENT` alone uses `./lakebench.yaml`,
+and the 1.6 order `lakebench logs COMPONENT CONFIG_FILE` still works with a
+one-line warning. Exit codes: 1 when no pod matches, 2 for an unknown
+component, 4 for an API error or an unreachable cluster (including
+`--previous` on a pod that has no previous container).
 
 ### journal
 

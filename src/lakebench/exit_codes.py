@@ -180,7 +180,7 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like", planned=True
     ),
-    ExitPath("status.ok", _C.OK, "`status` finds the deployment as configured", planned=True),
+    ExitPath("status.ok", _C.OK, "`status` finds every listed component ready"),
     ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity", planned=True),
     # 1
     ExitPath(
@@ -208,12 +208,18 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "status.drift",
         _C.FAILED,
-        "`status` finds the deployment drifted from its config",
-        planned=True,
+        "`status` finds a component of the config not ready or not found (with only "
+        "`--namespace`: one not ready, or none found)",
+        v16_code=0,
     ),
-    ExitPath("status.namespace_missing", _C.FAILED, "`status` finds no namespace", planned=True),
-    ExitPath("stop.api_error", _C.FAILED, "`stop` hit an API error stopping a job", planned=True),
-    ExitPath("logs.no_pod", _C.FAILED, "`logs` found no pod for the component", planned=True),
+    ExitPath("status.namespace_missing", _C.FAILED, "`status` finds no namespace", v16_code=0),
+    ExitPath(
+        "stop.api_error",
+        _C.FAILED,
+        "`stop` could not list or delete a job; it still tried every other deletion",
+        v16_code=0,
+    ),
+    ExitPath("logs.no_pod", _C.FAILED, "`logs` found no pod for the component", v16_code=0),
     ExitPath(
         "financial.reproduce.mismatch",
         _C.FAILED,
@@ -385,6 +391,13 @@ PATHS: tuple[ExitPath, ...] = (
         _C.PREREQUISITE,
         "the Kubernetes config does not load or the API is unreachable; nothing ran",
         v16_code=1,
+    ),
+    ExitPath(
+        "k8s.api_error",
+        _C.PREREQUISITE,
+        "`logs` or `status` got an API error reading the deployment (a permission gap, "
+        "a server error), or `logs --previous` found no previous container; nothing changed",
+        v16_code=0,
     ),
     ExitPath(
         "s3.unreachable",
