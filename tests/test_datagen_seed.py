@@ -231,10 +231,18 @@ def test_mixed_corpus_counts_as_the_guarded_seed():
 
 
 def test_guard_ships_flat_to_the_spark_driver():
-    from lakebench.modules.pipeline_engines.spark import job as jobmod
+    from lakebench.config import LakebenchConfig
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import build_script_configmaps
 
-    src = Path(jobmod.__file__).read_text()
-    assert '_package_dir() / "config" / "datagen_seed.py"' in src
+    seed_src = (
+        Path(__file__).resolve().parents[1] / "src/lakebench/config/datagen_seed.py"
+    ).read_text()
+    shipped = {
+        k: v
+        for cm in build_script_configmaps(LakebenchConfig(name="t"), "ns")
+        for k, v in cm["data"].items()
+    }
+    assert shipped["datagen_seed.py"] == seed_src, "the guard ships flat, byte for byte"
     ref = (
         Path(__file__).resolve().parents[1]
         / "src/lakebench/spark/scripts/score_financial_reference.py"

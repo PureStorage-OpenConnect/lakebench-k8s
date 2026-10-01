@@ -81,7 +81,7 @@ class FakeK8s:
 @pytest.fixture(autouse=True)
 def _no_live_apps(monkeypatch):
     """No SparkApplication mounts the legacy map unless a test says so."""
-    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", lambda self, cm: [])
+    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", lambda self, cm: [], raising=False)
 
 
 def _cfg(schema: str = "customer360", fmt: str = "iceberg") -> LakebenchConfig:
