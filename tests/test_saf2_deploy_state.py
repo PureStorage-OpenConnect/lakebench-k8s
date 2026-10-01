@@ -939,3 +939,82 @@ def test_relocate_moves_a_nameless_state_keyed_by_name(tmp_path):
     assert moved.config_dir == str((tmp_path / "dst").resolve())
     old = ds.read_state_file(ds.state_path(cfg_path, NAME))
     assert old is not None and old.moved_to
+
+
+# -- fix pass 2 -------------------------------------------------------------------
+
+
+def test_a_failed_directory_fsync_does_not_fail_the_write(tmp_path, monkeypatch):
+    """The rename has landed; raising then would make callers roll back a
+    state that is already in place."""
+    cfg_path = _named(tmp_path)
+    real_fsync = os.fsync
+    calls = {"n": 0}
+
+    def fsync(fd):
+        calls["n"] += 1
+        if calls["n"] > 1:  # the file's own fsync passes, the directory's fails
+            raise OSError(22, "Invalid argument")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    path = _v17_state(cfg_path, [("n1", "confirmed")])
+    st = ds.read_state_file(path)
+    assert st is not None and st.kept_nonces() == ["n1"]
+
+
+def test_directory_identity_ignores_the_device_number(tmp_path, monkeypatch):
+    """An NFS or overlay remount can change st_dev; only the inode counts."""
+    cfg_path = _named(tmp_path)
+    _v17_state(cfg_path, [("n1", "confirmed")])
+    real_stat = os.stat
+
+    def remounted(p, *a, **k):
+        st = real_stat(p, *a, **k)
+        return os.stat_result((st.st_mode, st.st_ino, st.st_dev + 1, *tuple(st)[3:]))
+
+    monkeypatch.setattr(os, "stat", remounted)
+    st = ds.read_state_file(ds.state_path(cfg_path, NAME))
+    assert st is not None and ds.not_here(st, cfg_path) is None
+
+
+def test_relocate_accepts_a_directory_renamed_with_mv(tmp_path):
+    a = tmp_path / "a"
+    a.mkdir()
+    cfg_a = _named(a)
+    _v17_state(cfg_a, [("n1", "confirmed")])
+    b = tmp_path / "b"
+    a.rename(b)
+    st = ds.read_state_file(ds.state_path(b / cfg_a.name, NAME))
+    assert st is not None and ds.not_here(st, b / cfg_a.name) is not None
+    assert ds.moved_with_its_directory(st, b / cfg_a.name)
+    dst = ds.relocate_state(b / cfg_a.name, tmp_path / "c")
+    moved = ds.read_state_file(ds.state_path(dst, NAME))
+    assert moved is not None and ds.not_here(moved, dst) is None
+
+
+@pytest.mark.parametrize("bad", ["State", "STATE", "a\x00b", "a\\b"])
+def test_state_path_refuses_more_unsafe_names(tmp_path, bad):
+    with pytest.raises(ds.StateError):
+        ds.state_path(tmp_path / "a.yaml", bad)
+
+
+def test_relocate_name_must_match_the_config_name(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    cfg_path = _named(src)
+    _v17_state(cfg_path, [("n1", "confirmed")])
+    with pytest.raises(ds.RelocateRefused, match="does not match"):
+        ds.relocate_state(cfg_path, tmp_path / "dst", name="lb-other")
+
+
+def test_dry_run_reports_a_copied_state(tmp_path, monkeypatch, capsys):
+    from lakebench.cli import _deploy
+
+    cfg_path = _named(tmp_path)
+    _v17_state(cfg_path, [("n1", "confirmed")], config_dir="/elsewhere")
+    core = FakeCore()
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    cfg = load_config(cfg_path, purpose=LoadPurpose.MUTATE)
+    assert _deploy._record_deploy_nonce(cfg, cfg_path, dry_run=True, nonce=None) is None
+    assert "exit 3" in capsys.readouterr().out

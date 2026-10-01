@@ -58,7 +58,10 @@ deploy waits at most 120 s for another deploy from the same directory. If
 the state cannot be written or read, deploy stops before changing the
 cluster (exit 4). A state written for another directory or host (a copied
 directory, including a `cp -r` copy at the same path) stops deploy with
-exit 3 (`deploy.state_copied`). When the config's
+exit 3 (`deploy.state_copied`): if the directory was only renamed with
+`mv`, run `relocate` (below) from it; if the copy is meant to be a new
+deployment directory, remove only its `.lakebench/<name>.json` (the other
+files there may be the only record of other deployments). When the config's
 `platform.kubernetes.namespace` changes, the next deploy starts a fresh
 nonce list for the new namespace. Deployment names that are not plain file
 names, and the name `state`, cannot be recorded (exit 4).
@@ -93,8 +96,8 @@ To move a deployment's config to another directory without breaking check
 (add `--name NAME` for a nameless config). It copies the config (and a v1.6
 `state.json`), writes the state for the new directory and marks the old one
 as moved, so only the new directory is accepted from then on. Only the
-directory that wrote the state can move it: a copy, or a move to another
-host, is refused. A v1.6 directory has no v1.7 state to move, so after
+directory that wrote the state, or that directory renamed with `mv`, can
+move it: a copy, or a move to another host, is refused. A v1.6 directory has no v1.7 state to move, so after
 relocate both directories can still tear the deployment down with
 `--name` through the namespace's own stamps (check 3).
 

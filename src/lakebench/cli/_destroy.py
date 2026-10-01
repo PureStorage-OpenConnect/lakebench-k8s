@@ -396,7 +396,11 @@ def destroy(
         _journal_safe(j.close_session)
         raise SafetyRefusal(
             mismatch.message,
-            why="the namespace was redeployed after this command checked it",
+            why=(
+                "the namespace was redeployed after this command checked it"
+                if (mismatch.details or {}).get("found")
+                else "the namespace is gone (another destroy may have finished it)"
+            ),
             next="check which deployment the namespace now holds before destroying it",
             path="destroy.incarnation_mismatch",
         )

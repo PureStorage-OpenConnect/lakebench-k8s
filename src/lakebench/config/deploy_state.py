@@ -192,8 +192,8 @@ class DeployState:
     moved_to: str | None = None
     recorded_at: str = ""
     schema: str = STATE_SCHEMA
-    #: ``st_dev:st_ino`` of the config's directory when the state was
-    #: written there: ``cp -r`` and rsync change it, a rename does not.
+    #: Inode of the config's directory when the state was written there:
+    #: ``cp -r`` and rsync change it, a rename does not.
     config_dir_id: str | None = None
 
     @property
@@ -263,11 +263,13 @@ def _config_file(config_path: str | Path) -> Path:
 
 
 def _dir_id(directory: str | Path) -> str | None:
+    """The directory's inode number. Not ``st_dev``: NFS, overlay and btrfs
+    mounts can get another device number after a remount."""
     try:
         st = os.stat(directory)
     except OSError:
         return None
-    return f"{st.st_dev}:{st.st_ino}"
+    return str(st.st_ino)
 
 
 def state_dir(config_path: str | Path) -> Path:
@@ -280,9 +282,26 @@ def state_path(config_path: str | Path, name: str) -> Path:
     Raises :class:`StateError` for a name that is not a plain file name, or
     is ``state`` (the v1.6 file).
     """
-    if not name or name.startswith(".") or "/" in name or "\\" in name or name == "state":
+    if (
+        not name
+        or name.startswith(".")
+        or any(c in name for c in "/\\\x00")
+        or name.lower() == "state"
+    ):
         raise StateError(f"deployment name {name!r} cannot name a state file")
     return state_dir(config_path) / f"{name}.json"
+
+
+def moved_with_its_directory(state: DeployState, config_path: str | Path) -> bool:
+    """The state's directory was renamed (``mv``) to this one: same host,
+    same inode, another path."""
+    here = _config_file(config_path).parent
+    return (
+        state.host == _host()
+        and state.config_dir_id is not None
+        and state.config_dir_id == _dir_id(here)
+        and Path(state.config_dir).resolve() != here
+    )
 
 
 def not_here(state: DeployState, config_path: str | Path) -> str | None:
@@ -361,12 +380,17 @@ def write_state(path: Path, state: DeployState) -> None:
             pass
         raise
     # The rename itself survives a host crash only once the directory is
-    # synced; the namespace may already carry the nonce by then.
-    dfd = os.open(path.parent, os.O_RDONLY)
+    # synced; the namespace may already carry the nonce by then. The state is
+    # written whatever this returns (some FUSE and 9p mounts refuse a
+    # directory fsync), so it never raises.
     try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+        dfd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
 
 
 #: How long a deploy waits for another deploy from the same directory to
@@ -573,7 +597,19 @@ def relocate_state(
         raise RelocateRefused(f"{src} is not a file")
     if dst_dir == src.parent:
         raise RelocateRefused(f"{dst_dir} is the config's own directory")
-    name = name or _config_name(src)
+    if name:
+        import yaml
+
+        try:
+            raw = yaml.safe_load(src.read_text()) or {}
+        except (OSError, yaml.YAMLError) as e:
+            raise StateError(f"cannot read {src}: {e}") from e
+        try:
+            name = resolve_name(src, raw if isinstance(raw, dict) else {}, name).name
+        except ValueError as e:
+            raise RelocateRefused(str(e)) from e
+    else:
+        name = _config_name(src)
     src_state_path = state_path(src, name)
     with state_lock(src, name):
         state = read_state_file(src_state_path)
@@ -583,9 +619,10 @@ def relocate_state(
                     f"{src_state_path} already moved to {state.moved_to}; run from there"
                 )
             why = not_here(state, src)
-            if why is not None:
+            if why is not None and not moved_with_its_directory(state, src):
                 raise RelocateRefused(
-                    f"{src_state_path}: {why}; only the directory that deployed can move it"
+                    f"{src_state_path}: {why}; only the directory that deployed (or that "
+                    "directory renamed with mv) can move it"
                 )
         dst = dst_dir / src.name
         dst_state_path = state_path(dst, name)

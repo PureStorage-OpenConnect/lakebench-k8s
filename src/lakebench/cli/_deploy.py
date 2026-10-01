@@ -251,7 +251,7 @@ def _record_deploy_nonce(cfg, config_file: Path, *, dry_run: bool, nonce: str | 
         raise PrerequisiteError(
             str(e),
             why="deploy records the nonce in <config dir>/.lakebench/<name>.json (SAF-2)",
-            next="give the config a plain DNS-style name",
+            next="give the config a name without '/', a leading '.', or the value 'state'",
             path="deploy.state_unrecordable",
         ) from e
     if dry_run:
@@ -260,6 +260,10 @@ def _record_deploy_nonce(cfg, config_file: Path, *, dry_run: bool, nonce: str | 
             state = ds.read_state_file(path)
         except ds.StateError as e:
             print_warning(f"State: {e}; a real deploy stops here (exit 4)")
+            return None
+        why_not = ds.not_here(state, config_file) if state is not None else None
+        if why_not is not None:
+            print_warning(f"State: {path}: {why_not}; a real deploy stops here (exit 3)")
             return None
         carries = state is not None and ident is not None and ident.nonce in state.kept_nonces()
         print_info(
@@ -291,9 +295,13 @@ def _record_deploy_nonce(cfg, config_file: Path, *, dry_run: bool, nonce: str | 
                         why="a copied directory would add its nonces to another "
                         "directory's record of the deployment",
                         where=str(path),
-                        next="deploy from the directory that wrote it, move it with "
-                        "`python -m lakebench.config.deploy_state relocate`, or remove "
-                        "the copied .lakebench/ here",
+                        next=(
+                            "this directory was renamed: run `python -m "
+                            "lakebench.config.deploy_state relocate CONFIG NEWDIR` from it"
+                            if ds.moved_with_its_directory(state, config_file)
+                            else "deploy from the directory that wrote it; if this copy is "
+                            f"meant to be a new deployment directory, remove only {path}"
+                        ),
                         path="deploy.state_copied",
                     )
                 if ds.retarget(state, cfg.get_namespace()):
@@ -490,6 +498,22 @@ def _deploy_impl(
     # Enable observability if flag is set
     if include_observability:
         cfg.observability.enabled = True
+
+    if not local:
+        # A name the deploy state cannot record stops here, before the
+        # prompt and preflight, not after them (SAF-2).
+        from lakebench.config import deploy_state as _ds
+        from lakebench.exit_codes import PrerequisiteError
+
+        try:
+            _ds.state_path(config_file, cfg.name)
+        except _ds.StateError as e:
+            raise PrerequisiteError(
+                str(e),
+                why="deploy records the nonce in <config dir>/.lakebench/<name>.json (SAF-2)",
+                next="give the config a name without '/', a leading '.', or the value 'state'",
+                path="deploy.state_unrecordable",
+            ) from e
 
     # Local mode has its own path: no namespace, no operator, no preflight
     # against a cluster that is not there.
