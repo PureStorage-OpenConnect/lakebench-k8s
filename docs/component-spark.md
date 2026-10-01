@@ -9,8 +9,32 @@ on Kubernetes. Spark runs PySpark scripts that move data through three layers:
 - **Continuous mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` -- run
   concurrently as structured streaming jobs with configurable trigger intervals.
 
-All scripts are deployed as a ConfigMap (`lakebench-spark-scripts`) and mounted
-at `/opt/spark/scripts` in both driver and executor pods.
+The scripts are deployed as one ConfigMap per role and projected together, as
+one flat directory, at `/opt/spark/scripts` in both driver and executor pods:
+
+| ConfigMap | Contents |
+|---|---|
+| `lakebench-scripts-common` | `common.py` |
+| `lakebench-scripts-c360` | the Customer 360 stage scripts, Iceberg and Delta |
+| `lakebench-scripts-aml-rules` | `detection_rules.py`, `tm_operations.py` |
+| `lakebench-scripts-aml-jobs` | the AML stage and operator-action scripts |
+| `lakebench-scripts-aml-gate` | the reference scorer and the pre-registered gate modules |
+| `lakebench-scripts-aml-data` | the AML reference and pre-registration JSON |
+
+The file list is `SCRIPT_MAPS` in `modules/pipeline_engines/spark/scripts_maps.py`.
+`run` (and `lakebench financial`) applies every map, reads each back and checks
+that its data still hashes to its `lakebench.io/scripts-sha256` annotation, and
+only then submits jobs. It refuses to change a map that another deployment
+owns, or one that a still-running SparkApplication mounts (Kubernetes would
+swap the files under the running pods), and it re-checks the maps before each
+later job, so no stage is submitted on scripts other than the ones its run
+applied. A listed file missing from the installed
+package, or a map over 838,860 bytes (80% of the 1 MiB ConfigMap limit, counting
+key and value bytes), stops the run with one line naming the file or map. The
+single `lakebench-spark-scripts` map used by 1.6 and earlier is deleted on the
+first 1.7 run, unless a SparkApplication that is still running mounts it, and
+`destroy` deletes all of them, including when `create_namespace: false` keeps
+the namespace.
 
 ## Spark Operator
 
@@ -18,7 +42,7 @@ Lakebench requires **Kubeflow Spark Operator v2.x** (2.5.1 is the current
 default). ConfigMap volumes cannot use Spark's native
 `spark.kubernetes.*.volumes.*` conf properties, because Spark's
 `KubernetesVolumeUtils` has no `configMap` volume type, so lakebench defines
-its volumes (the scripts ConfigMap and the work-dir and Ivy-cache emptyDirs)
+its volumes (the projected scripts volume and the work-dir and Ivy-cache emptyDirs)
 in `driver.template`/`executor.template` pod templates; see `_build_manifest()`
 in `modules/pipeline_engines/spark/job.py`. Only the executor scratch PVC uses
 the conf-property path. The operator's webhook injection was checked against

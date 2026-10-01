@@ -451,10 +451,13 @@ def test_deploy_scripts_configmap_ships_aml_json():
     the pre-fix deploy_scripts_configmap did not ship it. Without it,
     W7 previously crashed inside the driver.
     """
-    p = Path(__file__).resolve().parents[1] / "src/lakebench/modules/pipeline_engines/spark/job.py"
-    src = p.read_text()
-    assert "get_aml_data_dir" in src, (
-        "deploy_scripts_configmap must ship AML reference JSONs alongside "
+    from lakebench.config import LakebenchConfig
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import build_script_configmaps
+
+    cfg = LakebenchConfig(name="t")
+    shipped = {k for cm in build_script_configmaps(cfg, "ns") for k in cm["data"]}
+    assert "high_risk_jurisdictions.json" in shipped, (
+        "the scripts ConfigMaps must ship the AML reference JSONs alongside "
         "the pipeline scripts; W7 crashes in the driver otherwise"
     )
 
@@ -747,31 +750,6 @@ def test_aml_data_candidates_env_override_is_authoritative():
         "_aml_data_candidates must return [override] when LB_AML_DATA_DIR "
         "is set; anything that adds more candidates enables split-brain "
         "reference data (finding G)"
-    )
-
-
-def test_configmap_size_guardrail():
-    """Adversarial-review test coverage #4: adding a large future
-    AML reference file (e.g. a real ~5 MB OFAC SDN list) would
-    silently break deploy with an opaque `Request entity too large`
-    since K8s hard-rejects ConfigMap >1 MiB. Cap the shipped set of
-    (scripts + AML reference JSONs) at 900 KiB total so the failure
-    mode is a test rather than a broken deploy.
-    """
-    from lakebench._resources import get_aml_data_dir, get_scripts_dir
-
-    total = 0
-    for p in get_scripts_dir().glob("*.py"):
-        total += p.stat().st_size
-    aml_dir = get_aml_data_dir()
-    if aml_dir is not None:
-        for p in aml_dir.glob("*.json"):
-            total += p.stat().st_size
-    assert total < 900 * 1024, (
-        f"combined scripts + AML data size {total} bytes exceeds 900 KiB; "
-        f"K8s ConfigMap limit is 1 MiB and the deploy will fail with "
-        f"`Request entity too large`. Trim reference files or split the "
-        f"ConfigMap."
     )
 
 

@@ -133,11 +133,9 @@ def test_spark_jobs_get_tm_env_and_the_module():
     exec_env = {e["name"] for e in manifest["spec"]["executor"]["env"]}
     assert "LB_TM_SEED" in exec_env
 
-    import inspect
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import SCRIPT_MAPS
 
-    from lakebench.modules.pipeline_engines.spark.job import SparkJobManager as M
-
-    assert '"tm_operations.py"' in inspect.getsource(M.deploy_scripts_configmap)
+    assert "tm_operations.py" in {s.key for s in SCRIPT_MAPS["aml-rules"]}
 
 
 def test_status_lines_parse_and_last_wins():
