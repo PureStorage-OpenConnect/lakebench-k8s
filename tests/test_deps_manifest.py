@@ -479,6 +479,13 @@ def test_rendered_objects_select_only_the_server():
     docs = {d["kind"]: d for d in DependencyServerDeployer(eng).render(req.select_request(cfg))}
     ns = cfg.get_namespace()
     assert {d["metadata"]["namespace"] for d in docs.values()} == {ns}
+    # The templates spell the names out (the Category-1 registry scan reads
+    # them); they must be the constants the deployer and destroy use.
+    assert docs["Deployment"]["metadata"]["name"] == m.SERVER_NAME
+    assert docs["Service"]["metadata"]["name"] == m.SERVER_NAME
+    assert docs["PersistentVolumeClaim"]["metadata"]["name"] == m.PVC_NAME
+    claim = docs["Deployment"]["spec"]["template"]["spec"]["volumes"][1]
+    assert claim["persistentVolumeClaim"]["claimName"] == m.PVC_NAME
     assert docs["Deployment"]["spec"]["selector"]["matchLabels"] == m.SELECTOR_LABELS
     assert docs["Service"]["spec"]["selector"] == m.SELECTOR_LABELS
     tmpl = docs["Deployment"]["spec"]["template"]["metadata"]["labels"]

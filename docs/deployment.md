@@ -243,8 +243,11 @@ The destroy engine follows a specific sequence to ensure clean removal:
 12. **Remaining namespaced objects** -- Deletes, by name, what no step above
     removes: the PostgreSQL ServiceAccount, and with observability enabled
     the Pushgateway Deployment, Service and PVC, the Prometheus ConfigMap and
-    the PodMonitors. When the namespace survives it also removes the
-    `lakebench.deployment/state-schema` namespace annotation. The list is the
+    the PodMonitors, and last the dependency server (the `lb-deps`
+    Deployment and Service, the `lb-deps-manifest` and `lb-deps-tools-*`
+    ConfigMaps, then the `lb-deps-data` PVC). When the namespace survives it
+    also removes the `lakebench.deployment/state-schema` and
+    `lakebench.deployment/deps-set` namespace annotations. The list is the
     Category-1 registry in `src/lakebench/deploy/category1.py`; a unit test
     runs deploy and the objects `run` creates against it, and checks every
     template, so an object destroy would leave fails it. With
