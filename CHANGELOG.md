@@ -145,6 +145,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   annotations.
 ### Fixed
 
+- A multi-cycle Customer 360 batch run no longer loses silver rows when a
+  later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
+  tagged every row with that cycle, so an operator retry of the cycle, which
+  deletes the cycle's rows before appending them again, deleted the whole
+  rebuild and kept only that cycle, and the run exited 0. Rebuilt rows now
+  take the cycle in their bronze file's name. The rebuild, on Iceberg and
+  Delta, also reads only this run's bronze files (cycle 0 up to the current
+  cycle, the files bronze-verify counts), not files an earlier and longer run
+  left under the prefix.
+- Silver-build no longer rebuilds a populated table without
+  `--force-rebuild` when its check for existing rows fails. A failed read
+  counted as an empty table; it is now a refusal that names the error.
 - A Delta Customer 360 multi-cycle batch run no longer loses cycles when the
   deployment's rebuild epoch reads lower than one the silver table already
   used: the `lakebench-silver-state` ConfigMap lost or recreated while the

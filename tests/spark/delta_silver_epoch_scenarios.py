@@ -39,7 +39,25 @@ ROWS_PER_CYCLE = 10  # bronze rows; every 10th is filtered, so 9 reach silver
 SILVER_PER_CYCLE = 9
 
 
-def _submit_args(jars, work):
+ICEBERG_CATALOG = "ice"
+
+
+def _submit_args(jars, work, fmt="delta"):
+    if fmt == "iceberg":
+        confs = {
+            "spark.ui.enabled": "false",
+            "spark.sql.shuffle.partitions": "2",
+            "spark.sql.extensions": (
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+            ),
+            f"spark.sql.catalog.{ICEBERG_CATALOG}": "org.apache.iceberg.spark.SparkCatalog",
+            f"spark.sql.catalog.{ICEBERG_CATALOG}.type": "hadoop",
+            f"spark.sql.catalog.{ICEBERG_CATALOG}.warehouse": f"file://{work}/ice-wh",
+        }
+        parts = ["--master", "local[2]", "--jars", jars]
+        for k, v in confs.items():
+            parts += ["--conf", f"{k}={v}"]
+        return " ".join(parts) + " pyspark-shell"
     confs = {
         "spark.ui.enabled": "false",
         "spark.sql.shuffle.partitions": "2",
@@ -76,14 +94,15 @@ def stage_bronze(spark, work, run, cycle):
     shutil.rmtree(tmp)
 
 
-def silver_job(jars, work, cycle, epoch, force=False, strategy="simple", log=None):
-    """Run silver_build_delta.py as one driver; return its exit code."""
+def silver_job(jars, work, cycle, epoch, force=False, strategy="simple", log=None, fmt="delta"):
+    """Run silver_build_delta.py (or silver_build.py for Iceberg) as one
+    driver; return its exit code."""
     ckpts_before = checkpoints(work)
     env = dict(os.environ)
     env.update(
         {
-            "PYSPARK_SUBMIT_ARGS": _submit_args(jars, work),
-            "LB_ICEBERG_CATALOG": "spark_catalog",
+            "PYSPARK_SUBMIT_ARGS": _submit_args(jars, work, fmt),
+            "LB_ICEBERG_CATALOG": ICEBERG_CATALOG if fmt == "iceberg" else "spark_catalog",
             "LB_BRONZE_URI": f"file://{work}/bronze/",
             "LB_SILVER_URI": f"file://{work}/silver/",
             "LB_DATA_CLOCK": "2031-01-01",
@@ -96,7 +115,10 @@ def silver_job(jars, work, cycle, epoch, force=False, strategy="simple", log=Non
         }
     )
     proc = subprocess.run(
-        [sys.executable, str(_SCRIPTS / "silver_build_delta.py")],
+        [
+            sys.executable,
+            str(_SCRIPTS / ("silver_build.py" if fmt == "iceberg" else "silver_build_delta.py")),
+        ],
         cwd=work,
         env=env,
         capture_output=True,
@@ -117,7 +139,9 @@ def silver_job(jars, work, cycle, epoch, force=False, strategy="simple", log=Non
     return proc.returncode
 
 
-def _table_dir(work):
+def _table_dir(work, fmt="delta"):
+    if fmt == "iceberg":
+        return f"{work}/ice-wh/silver/customer_interactions_enriched"
     return f"{work}/warehouse/silver.db/customer_interactions_enriched"
 
 
@@ -125,17 +149,31 @@ def checkpoints(work):
     return len(glob.glob(f"{_table_dir(work)}/_delta_log/*.checkpoint*.parquet"))
 
 
-def silver_cycles(spark, work):
+def silver_cycles(spark, work, fmt="delta"):
     """Which (run, cycle) pairs silver holds, with the row count of each."""
-    path = _table_dir(work)
+    path = _table_dir(work, fmt)
+    if fmt == "iceberg":
+        rows = spark.read.format("iceberg").load(path).select("id").collect()
+    else:
+        rows = spark.read.format("delta").load(path).select("id").collect()
     held = {}
-    for r in spark.read.format("delta").load(path).select("id").collect():
+    for r in rows:
         key = f"{r['id'] // 100_000 - 1}:{(r['id'] % 100_000) // 1_000}"
         held[key] = held.get(key, 0) + 1
     return dict(sorted(held.items()))
 
 
-def run(spark, jars, work, run_no, epochs, force_cycle0=False, strategy="simple", log=None):
+def run(
+    spark,
+    jars,
+    work,
+    run_no,
+    epochs,
+    force_cycle0=False,
+    strategy="simple",
+    log=None,
+    fmt="delta",
+):
     """Cycles 0..n-1 of one `lakebench run`; ``epochs`` is LB_REBUILD_EPOCH per cycle."""
     rcs = []
     for cycle, epoch in enumerate(epochs):
@@ -149,6 +187,7 @@ def run(spark, jars, work, run_no, epochs, force_cycle0=False, strategy="simple"
                 force=force_cycle0 and cycle == 0,
                 strategy=strategy,
                 log=log,
+                fmt=fmt,
             )
         )
         if rcs[-1] != 0:

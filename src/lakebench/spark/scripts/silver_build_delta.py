@@ -26,11 +26,13 @@ from common import (
     apply_silver_transformations_anchored,
     assert_progress,
     c360_bronze_path,
+    c360_bronze_run_path,
     cluster_by_partition,
     delta_batch_txn_options,
     env,
     files_added_by_last_commit,
     log,
+    one_line,
     path_size_gb_strict,
     refuse_orphan_delta_log,
     resolve_data_clock,
@@ -573,7 +575,12 @@ _rebuild_epoch = int(os.environ.get("LB_REBUILD_EPOCH", "0"))
 # Cycles 2+ of a multi-cycle run append only their own bronze files; a full
 # build reads every file. Profile, size and read the same path.
 appending = incremental_mode and _table_exists(spark, silver_tbl)
-bronze_source = c360_bronze_path(bronze_uri, appending)
+# A full build at a later cycle (no table to append to) reads this run's
+# files only, cycle 0 and cycles 1..k, as bronze-verify counts them, not
+# files an earlier and longer run left under the prefix.
+bronze_source = (
+    c360_bronze_path(bronze_uri, True) if appending else c360_bronze_run_path(bronze_uri)
+)
 log(f"Bronze source: {bronze_source}")
 
 # B1 full-rebuild epoch guard: cycle 0 with an already-populated silver
@@ -585,8 +592,15 @@ _force_rebuild = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
 if not appending and _table_exists(spark, silver_tbl):
     try:
         _has_rows = spark.table(silver_tbl).limit(1).count() > 0
-    except Exception:  # noqa: BLE001
-        _has_rows = False
+    except Exception as e:  # noqa: BLE001
+        # A read that fails says nothing about the rows: counting it as
+        # empty rebuilt a populated table without --force-rebuild.
+        if not _force_rebuild:
+            raise SilverAbort(
+                f"silver-build: cannot tell whether {silver_tbl} holds rows ({one_line(e)}); "
+                "refusing a full rebuild without --force-rebuild"
+            ) from e
+        _has_rows = True
     if _has_rows and not _force_rebuild:
         raise SilverAbort(
             f"silver-build: refusing full rebuild of populated {silver_tbl}; "

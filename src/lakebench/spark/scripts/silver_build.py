@@ -22,9 +22,11 @@ from common import (
     apply_silver_transformations_anchored,
     assert_progress,
     c360_bronze_path,
+    c360_bronze_run_path,
     ensure_column,
     env,
     log,
+    one_line,
     path_size_gb_strict,
     resolve_data_clock,
     sample_key_profile,
@@ -34,7 +36,9 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
     lit,
+    regexp_extract,
     to_date,
+    when,
 )
 from pyspark.sql.functions import max as max_
 from pyspark.sql.functions import min as min_
@@ -356,13 +360,30 @@ def reassert_silver_iceberg_props(spark, silver_tbl) -> None:
     spark.sql(f"ALTER TABLE {silver_tbl} SET TBLPROPERTIES ({props_sql})")
 
 
+def tag_batch(df_bronze, cycle, appending):
+    """``df_bronze`` with ``_batch_id``: the cycle whose rows these are.
+
+    An append reads one cycle's files, so every row is that cycle's. A full
+    build can read several cycles' files (a later cycle that found no table
+    rebuilds from cycle 0 up), so each row takes the cycle in its file's name
+    (``part-c<n>-*`` is cycle n, any other name cycle 0; common.c360_bronze_path).
+    Tagging the whole rebuild with the current cycle made an operator retry,
+    which deletes that cycle's rows before re-appending them, delete all of it.
+    """
+    if appending:
+        return df_bronze.withColumn("_batch_id", lit(int(cycle)).cast("bigint"))
+    n = regexp_extract(col("_metadata.file_path"), r"/part-c(\d+)-[^/]*$", 1)
+    return df_bronze.withColumn("_batch_id", when(n == "", lit(0)).otherwise(n).cast("bigint"))
+
+
 def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB.
 
-    B1: every row carries ``_batch_id = cycle`` so a re-submission of the
-    same cycle DELETEs the earlier attempt's rows before re-inserting them,
-    matching the DELETE + APPEND pattern silver_stream.py already uses.
-    Cycle 0 is the full rebuild (createOrReplace); cycles 1+ append.
+    B1: every row carries the ``_batch_id`` of its cycle (``tag_batch``) so a
+    re-submission of the same cycle DELETEs the earlier attempt's rows before
+    re-inserting them, matching the DELETE + APPEND pattern silver_stream.py
+    already uses. Cycle 0 is the full rebuild (createOrReplace); cycles 1+
+    append.
     """
     log("Executing SIMPLE strategy...")
 
@@ -375,8 +396,8 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
     # missing env here is a plumbing break, not a legitimate greenfield.
     anchor = resolve_data_clock(df_bronze, strict=True)
 
-    silver_df = apply_silver_transformations_anchored(df_bronze, anchor).withColumn(
-        "_batch_id", lit(int(cycle)).cast("bigint")
+    silver_df = apply_silver_transformations_anchored(
+        tag_batch(df_bronze, cycle, appending), anchor
     )
     silver_count = silver_df.count()
 
@@ -442,8 +463,8 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
     anchor = resolve_data_clock(df_bronze, strict=True)
 
     # Apply transformations - all column operations, no joins
-    silver_df = apply_silver_transformations_anchored(df_bronze, anchor).withColumn(
-        "_batch_id", lit(int(cycle)).cast("bigint")
+    silver_df = apply_silver_transformations_anchored(
+        tag_batch(df_bronze, cycle, appending), anchor
     )
 
     # LB-049: distribution-mode is overridable via Spark conf for scale
@@ -541,7 +562,12 @@ _cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
 # Cycles 2+ of a multi-cycle run append only their own bronze files; a full
 # build reads every file. Profile, size and read the same path.
 appending = incremental_mode and _table_exists(spark, silver_tbl)
-bronze_source = c360_bronze_path(bronze_uri, appending)
+# A full build at a later cycle (no table to append to) reads this run's
+# files only, cycle 0 and cycles 1..k, as bronze-verify counts them, not
+# files an earlier and longer run left under the prefix.
+bronze_source = (
+    c360_bronze_path(bronze_uri, True) if appending else c360_bronze_run_path(bronze_uri)
+)
 log(f"Bronze source: {bronze_source}")
 
 # B1 full-rebuild epoch guard: cycle 0 with an already-populated silver
@@ -553,8 +579,15 @@ _force_rebuild = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
 if not appending and _table_exists(spark, silver_tbl):
     try:
         _has_rows = spark.table(silver_tbl).limit(1).count() > 0
-    except Exception:  # noqa: BLE001
-        _has_rows = False
+    except Exception as e:  # noqa: BLE001
+        # A read that fails says nothing about the rows: counting it as
+        # empty rebuilt a populated table without --force-rebuild.
+        if not _force_rebuild:
+            raise SilverAbort(
+                f"silver-build: cannot tell whether {silver_tbl} holds rows ({one_line(e)}); "
+                "refusing a full rebuild without --force-rebuild"
+            ) from e
+        _has_rows = True
     if _has_rows and not _force_rebuild:
         raise SilverAbort(
             f"silver-build: refusing full rebuild of populated {silver_tbl}; "

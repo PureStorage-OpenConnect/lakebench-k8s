@@ -1,9 +1,12 @@
 """B1: --force-rebuild bumps the silver rebuild-epoch counter and Delta
 txnAppId moves to a new namespace.
 
-Delta short-circuits any (txnAppId, txnVersion) commit it has recorded, so
-cycle 0 of a rebuild that shared its appId with the last epoch's cycle 0
-would silently commit zero rows. This test asserts that:
+The counter is a floor, not the defence against a skipped Delta write: the
+Delta silver build takes its epoch from the table's own SetTransaction ids
+(``silver_build_delta.resolve_txn_epoch``; executed in
+tests/spark/test_silver_build_delta_epoch_spark.py), so a counter that reads
+low, or a failed bump, cannot make Delta skip a cycle. The CLI still refuses
+to submit after a failed bump. This test asserts that:
 
 1. The generated ``delta_batch_txn_options`` result changes across two
    ``--force-rebuild`` invocations.
