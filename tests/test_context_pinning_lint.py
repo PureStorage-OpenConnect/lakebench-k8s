@@ -14,7 +14,14 @@ lint fails on every path that can produce an unpinned configuration:
    ``SparkOperatorManager`` sends every literal argv through its ``_run``,
    which calls the pinned helpers; those files are exempt;
 4. a shell string starting with one of the tools (``os.system``,
-   ``shell=True``, ``asyncio.create_subprocess_shell``).
+   ``shell=True``, ``asyncio.create_subprocess_shell``), or a tool started
+   with varargs (``asyncio.create_subprocess_exec("kubectl", ...)``,
+   ``os.execlp``);
+5. in ``operator.py``, a ``subprocess`` call outside ``_run`` (the file is
+   exempt from rule 3 only because every argv goes through ``_run``);
+6. ``cli_args`` asked for another tool's flag spelling, or an argv that
+   names ``--context``/``--kube-context`` after ``cli_args`` (overriding the
+   pin); an assignment to ``Configuration._default``.
 
 The tree covered is ``src/lakebench/`` (minus ``spark/scripts/``, which runs
 inside the Spark driver pod) and ``scripts/``.
@@ -120,6 +127,66 @@ def _argv_pinned(elts: list[ast.expr]) -> bool:
     return isinstance(inner, ast.Call) and _call_name(inner) == "cli_args"
 
 
+_SUBPROCESS_CALLS = {
+    "run",
+    "Popen",
+    "call",
+    "check_call",
+    "check_output",
+    "getoutput",
+    "getstatusoutput",
+}
+_VARARG_EXEC = {"create_subprocess_exec", "execlp", "execl", "execle", "execlpe", "spawnlp"}
+_CONTEXT_FLAGS = {"--context", "--kube-context"}
+
+
+def _operator_subprocess_outside_run(tree: ast.Module) -> list[int]:
+    """Line numbers of ``subprocess.X(...)`` calls outside ``_run``."""
+    inside: set[int] = set()
+    modules = {"subprocess"}
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_run":
+            inside.update(id(n) for n in ast.walk(node))
+        elif isinstance(node, ast.Import):
+            modules.update(a.asname for a in node.names if a.name == "subprocess" and a.asname)
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            names.update(a.asname or a.name for a in node.names if a.name in _SUBPROCESS_CALLS)
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or id(node) in inside:
+            continue
+        f = node.func
+        if (
+            isinstance(f, ast.Attribute)
+            and f.attr in _SUBPROCESS_CALLS
+            and isinstance(f.value, ast.Name)
+            and f.value.id in modules
+        ) or (isinstance(f, ast.Name) and f.id in names):
+            lines.append(node.lineno)
+    return lines
+
+
+def _call_or_attr_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _argv_problem(elts: list[ast.expr]) -> str | None:
+    """Why a pinned-looking argv is still wrong, or None."""
+    tool = str(getattr(elts[0], "value", "")).rsplit("/", 1)[-1]
+    inner = elts[1].value  # type: ignore[attr-defined]
+    if inner.args and isinstance(inner.args[0], ast.Constant) and inner.args[0].value != tool:
+        return f"{tool} argv asks cli_args() for {inner.args[0].value!r}'s flag"
+    for e in elts[2:]:
+        if isinstance(e, ast.Constant) and e.value in _CONTEXT_FLAGS:
+            return f"{tool} argv overrides the pinned context with {e.value}"
+    return None
+
+
 def _shell_string_runs_tool(first: ast.expr) -> bool:
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
         return _is_tool(first.value.split(" ", 1)[0])
@@ -164,6 +231,23 @@ def _violations(path: Path, tree: ast.Module) -> list[str]:
             )
             if shell_call and node.args and _shell_string_runs_tool(node.args[0]):
                 out.append(f"{rel}:{node.lineno}: shell string runs a cluster tool")
+            if (
+                name in _VARARG_EXEC
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and _is_tool(node.args[0].value)
+            ):
+                out.append(f"{rel}:{node.lineno}: {name}() starts a cluster tool unpinned")
+        # Rule 6: a hand-set default configuration.
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and path != TARGET_PY:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if (
+                    isinstance(t, ast.Attribute)
+                    and t.attr == "_default"
+                    and _call_or_attr_name(t.value) == "Configuration"
+                ):
+                    out.append(f"{rel}:{node.lineno}: assignment to Configuration._default")
         # Rule 3: argv literals.
         if isinstance(node, (ast.List, ast.Tuple)) and path not in ARGV_EXEMPT:
             elts = node.elts
@@ -178,6 +262,12 @@ def _violations(path: Path, tree: ast.Module) -> list[str]:
                     f"{rel}:{node.lineno}: {elts[0].value} argv not built with "
                     "k8s.target.cli_args()"
                 )
+            elif (problem := _argv_problem(elts)) is not None:
+                out.append(f"{rel}:{node.lineno}: {problem}")
+    # Rule 5: operator.py is argv-exempt only because _run pins every call.
+    if path == OPERATOR_PY:
+        for line in _operator_subprocess_outside_run(tree):
+            out.append(f"{rel}:{line}: subprocess call outside SparkOperatorManager._run")
     return out
 
 
@@ -226,6 +316,12 @@ _FAKE = SRC_ROOT / "cli" / "_fake_lint_target.py"
         ("cmd = ['/usr/bin/kubectl', 'get']\n", "argv not built"),
         ("os.system('kubectl get pods')\n", "shell string"),
         ("subprocess.run(f'helm list -n {ns}', shell=True)\n", "shell string"),
+        ("asyncio.create_subprocess_exec('kubectl', 'get', 'pods')\n", "unpinned"),
+        ("os.execlp('helm', 'helm', 'list')\n", "unpinned"),
+        ("x = ['kubectl', *cli_args('helm', c), 'get']\n", "asks cli_args() for 'helm'"),
+        ("x = ['helm', *cli_args('helm', c), '--kube-context', o]\n", "overrides the pinned"),
+        ("x = ['oc', *cli_args('oc'), 'get', '--context', o]\n", "overrides the pinned"),
+        ("from kubernetes import client\nclient.Configuration._default = c\n", "_default"),
     ],
 )
 def test_lint_catches(snippet: str, expected: str) -> None:
@@ -248,3 +344,36 @@ def test_lint_catches(snippet: str, expected: str) -> None:
 )
 def test_lint_allows(snippet: str) -> None:
     assert _violations(_FAKE, ast.parse(snippet)) == []
+
+
+def test_operator_subprocess_only_inside_run() -> None:
+    """Rule 5 on a snippet shaped like ``operator.py``."""
+    snippet = (
+        "import subprocess\n"
+        "class M:\n"
+        "    def _run(self, cmd):\n"
+        "        return subprocess.run(cmd)\n"
+        "    def upgrade(self):\n"
+        "        cmd = ['helm', 'upgrade']\n"
+        "        return subprocess.run(cmd)\n"
+    )
+    found = _violations(OPERATOR_PY, ast.parse(snippet))
+    assert len(found) == 1 and "outside SparkOperatorManager._run" in found[0], found
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "import subprocess as sp\ndef upgrade():\n    sp.run(cmd)\n",
+        "from subprocess import run\ndef upgrade():\n    run(cmd)\n",
+        "from subprocess import check_output as co\ndef upgrade():\n    co(cmd)\n",
+        "import subprocess\ndef upgrade():\n    subprocess.getoutput(cmd)\n",
+    ],
+)
+def test_operator_subprocess_aliases_are_caught(snippet: str) -> None:
+    found = _violations(OPERATOR_PY, ast.parse(snippet))
+    assert any("outside SparkOperatorManager._run" in f for f in found), found
+
+
+def test_default_rule_ignores_unrelated_attributes() -> None:
+    assert _violations(_FAKE, ast.parse("self._default = 3\n")) == []

@@ -78,7 +78,10 @@ class TestK8sClientInit:
     def test_with_context(self):
         from lakebench.k8s.client import K8sClient
 
-        with patch("lakebench.k8s.target._k8s_config.load_kube_config") as load:
+        with (
+            patch("lakebench.k8s.target._k8s_config.load_kube_config") as load,
+            patch("lakebench.k8s.target._kubeconfig_cluster_block", return_value=None),
+        ):
             with patch("lakebench.k8s.client.client"):
                 K8sClient(context="my-context")
                 assert load.call_count == 1

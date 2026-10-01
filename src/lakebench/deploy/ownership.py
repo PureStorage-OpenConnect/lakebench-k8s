@@ -167,17 +167,19 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
     except ImportError:  # pragma: no cover -- kubernetes lib is a hard dep
         return None
 
-    if not context:
-        # No configured context: fingerprint the cluster this process's API
-        # clients are pinned to (SAF-7), not whatever the kubeconfig's
-        # current context has become since.
-        from lakebench.k8s.target import active_target
+    # The cluster this process's API clients are pinned to (SAF-7): its CA
+    # was hashed when the context was loaded, so a kubeconfig rewritten
+    # since cannot change what a deploy stamps or a destroy compares.
+    from lakebench.k8s.target import active_target
 
-        pinned = active_target()
-        if pinned is not None:
-            if pinned.in_cluster:
-                return _try_incluster_fingerprint()
-            context = pinned.context
+    pinned = active_target()
+    if pinned is not None and (not context or context == pinned.context):
+        if pinned.ca_fp_known:
+            return pinned.ca_fingerprint
+        # The cluster entry could not be read at activation: read it now.
+        if pinned.in_cluster:
+            return _try_incluster_fingerprint()
+        context = pinned.context
 
     try:
         contexts, active = _kube_config.list_kube_config_contexts()
@@ -245,43 +247,10 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
 
 
 def _load_ca_bytes(cluster_block: dict[str, Any]) -> bytes:
-    """Return the CA certificate bytes for a kubeconfig cluster block.
+    """CA bytes of a kubeconfig cluster block (``k8s.target.load_ca_bytes``)."""
+    from lakebench.k8s.target import load_ca_bytes
 
-    kubeconfig stores the CA as either:
-    - ``certificate-authority-data``: base64-encoded PEM (inline),
-    - ``certificate-authority``: path to a PEM file on disk.
-
-    Some producers write hex instead of base64 into
-    ``certificate-authority-data`` when they emit the file. We treat
-    both encodings as valid CA material and decode to raw bytes so all
-    paths (workstation, in-cluster, inline, file) hash the same thing.
-    """
-    import base64
-    import binascii
-
-    inline = cluster_block.get("certificate-authority-data", "")
-    if isinstance(inline, bytes):
-        return inline
-    if isinstance(inline, str) and inline:
-        # Try base64 first (the standard); fall back to hex.
-        try:
-            return base64.b64decode(inline, validate=True)
-        except (binascii.Error, ValueError):
-            try:
-                return bytes.fromhex(inline)
-            except ValueError:
-                # Not decodable -- treat as the raw string bytes.
-                return inline.encode()
-
-    ca_path = cluster_block.get("certificate-authority")
-    if isinstance(ca_path, str) and ca_path:
-        try:
-            with open(ca_path, "rb") as f:
-                return f.read()
-        except OSError:
-            return b""
-
-    return b""
+    return load_ca_bytes(cluster_block)
 
 
 def _try_incluster_fingerprint() -> str | None:

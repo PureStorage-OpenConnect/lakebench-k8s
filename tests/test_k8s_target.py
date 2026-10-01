@@ -8,12 +8,13 @@ reaches a network.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
-from kubernetes.client import V1NamespaceList
+from kubernetes.client import V1Namespace, V1NamespaceList, V1ObjectMeta
 from kubernetes.client.rest import ApiException
 from kubernetes.config import ConfigException
 from typer.testing import CliRunner
@@ -163,12 +164,180 @@ def test_reactivation_refuses_a_context_that_moved_to_another_server(kubeconfig)
 
 
 def test_cli_args_follow_the_active_target(kubeconfig) -> None:
-    assert cli_args("kubectl", None) == []
     assert cli_args("oc", "A") == ["--context", "A"]
+    assert target_mod.active_target() is None
     ClusterTarget.resolve(None).activate()
     assert cli_args("kubectl", None) == ["--context", "B"]
     assert cli_args("helm", "") == ["--kube-context", "B"]
     assert cli_args("oc", "B") == ["--context", "B"]
+
+
+def test_cli_args_pins_the_current_context_on_a_first_tool_call(kubeconfig) -> None:
+    """A tool call before any API client pins the context it names, so a
+    later use-context cannot split the process across two contexts."""
+    assert cli_args("kubectl", None) == ["--context", "B"]
+    assert target_mod.active_target().context == "B"
+    _use_context(kubeconfig, "A")
+    assert cli_args("helm", None) == ["--kube-context", "B"]
+    with pytest.raises(ContextConflictError):
+        ClusterTarget.resolve(context="A").activate()
+
+
+def test_cli_args_without_any_kubeconfig_names_no_context(tmp_path, monkeypatch) -> None:
+    point_kubeconfig_at(monkeypatch, tmp_path / "missing")
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    assert cli_args("kubectl", None) == []
+    assert target_mod.active_target() is None
+
+
+def test_current_context_follows_kubectl_first_file_rule(tmp_path, monkeypatch) -> None:
+    """kubectl takes current-context from the first file that sets it; the
+    Python client's merger takes the last. Resolution follows kubectl."""
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    write_kubeconfig(first, {"A": SERVER_A}, current="A")
+    write_kubeconfig(second, {"admin": SERVER_B}, current="admin")
+    point_kubeconfig_at(monkeypatch, f"{first}{os.pathsep}{second}")
+    assert ClusterTarget.resolve(None).context == "A"
+    t = ClusterTarget.resolve(None).activate()
+    assert t.api_server == SERVER_A
+
+
+def test_activate_freezes_the_ca_fingerprint(tmp_path, monkeypatch) -> None:
+    """The ownership fingerprint is the CA loaded at activation; a kubeconfig
+    rewritten afterwards changes neither it nor what a reload accepts."""
+    import base64
+
+    from lakebench.deploy.ownership import api_server_fingerprint
+
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A}, current="A")
+    doc = yaml.safe_load(path.read_text())
+    cluster = doc["clusters"][0]["cluster"]
+    cluster.pop("insecure-skip-tls-verify")
+    cluster["certificate-authority-data"] = base64.b64encode(b"CA-ONE").decode()
+    path.write_text(yaml.safe_dump(doc))
+    point_kubeconfig_at(monkeypatch, path)
+
+    before = api_server_fingerprint("A")
+    t = ClusterTarget.resolve(None).activate()
+    assert t.ca_fingerprint == before is not None
+
+    cluster["certificate-authority-data"] = base64.b64encode(b"CA-TWO").decode()
+    path.write_text(yaml.safe_dump(doc))
+    assert api_server_fingerprint(None) == before
+    assert api_server_fingerprint("A") == before
+    with pytest.raises(ContextConflictError, match="different cluster CA"):
+        ClusterTarget.resolve(None).activate()
+
+
+def _with_ca(path: Path, ca: bytes, *, as_file: Path | None = None) -> dict:
+    """Give every cluster in the kubeconfig at ``path`` the CA ``ca``."""
+    import base64
+
+    doc = yaml.safe_load(path.read_text())
+    for cl in doc["clusters"]:
+        cl["cluster"].pop("insecure-skip-tls-verify", None)
+        cl["cluster"].pop("certificate-authority-data", None)
+        cl["cluster"].pop("certificate-authority", None)
+        if as_file is not None:
+            as_file.write_bytes(ca)
+            cl["cluster"]["certificate-authority"] = str(as_file)
+        else:
+            cl["cluster"]["certificate-authority-data"] = base64.b64encode(ca).decode()
+    path.write_text(yaml.safe_dump(doc))
+    return doc
+
+
+def test_pinned_fingerprint_equals_the_file_read_for_a_ca_file(tmp_path, monkeypatch) -> None:
+    """Same bytes as a stamp written by the file-based read (v1.6 deploys)."""
+    from lakebench.deploy.ownership import api_server_fingerprint
+
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A}, current="A")
+    _with_ca(path, b"CA-FILE", as_file=tmp_path / "ca.crt")
+    point_kubeconfig_at(monkeypatch, path)
+    before = api_server_fingerprint("A")
+    assert before is not None
+    assert ClusterTarget.resolve(None).activate().ca_fingerprint == before
+    assert api_server_fingerprint(None) == before
+
+
+def test_unreadable_cluster_entry_on_reload_keeps_the_pinned_fingerprint(
+    tmp_path, monkeypatch
+) -> None:
+    """A kubeconfig read mid-rewrite is not a CA change."""
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A}, current="A")
+    _with_ca(path, b"CA-ONE")
+    point_kubeconfig_at(monkeypatch, path)
+    first = ClusterTarget.resolve(None).activate()
+    assert first.ca_fp_known and first.ca_fingerprint
+    with patch.object(target_mod, "_kubeconfig_cluster_block", return_value=None):
+        again = ClusterTarget.resolve(None).activate()
+    assert again.ca_fingerprint == first.ca_fingerprint and again.ca_fp_known
+
+
+def test_unreadable_cluster_entry_at_first_activation_falls_back_to_a_read(
+    tmp_path, monkeypatch
+) -> None:
+    from lakebench.deploy.ownership import api_server_fingerprint
+
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A}, current="A")
+    _with_ca(path, b"CA-ONE")
+    point_kubeconfig_at(monkeypatch, path)
+    expected = api_server_fingerprint("A")
+    with patch.object(target_mod, "_kubeconfig_cluster_block", return_value=None):
+        t = ClusterTarget.resolve(None).activate()
+    assert not t.ca_fp_known
+    assert api_server_fingerprint(None) == expected
+
+
+def test_activate_refuses_a_server_that_changed_during_the_load(kubeconfig) -> None:
+    moved = {"server": "https://127.0.0.1:9"}
+    with patch.object(target_mod, "_kubeconfig_cluster_block", return_value=moved):
+        with pytest.raises(ContextConflictError, match="changed while it was being loaded"):
+            ClusterTarget.resolve(context="A").activate()
+    assert target_mod.active_target() is None
+
+
+def test_cli_args_refuses_when_the_pinned_ca_changed(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A}, current="A")
+    _with_ca(path, b"CA-ONE")
+    point_kubeconfig_at(monkeypatch, path)
+    ClusterTarget.resolve(None).activate()
+    assert cli_args("kubectl", None) == ["--context", "A"]
+    _with_ca(path, b"CA-TWO")
+    with pytest.raises(ContextConflictError, match="different cluster CA"):
+        cli_args("kubectl", None)
+
+
+@pytest.mark.parametrize("later", ["", "nowhere"])
+def test_first_file_current_context_wins_over_a_later_empty_or_dangling_one(
+    tmp_path, monkeypatch, later
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    write_kubeconfig(first, {"A": SERVER_A}, current="A")
+    write_kubeconfig(second, {"B": SERVER_B}, current="B")
+    doc = yaml.safe_load(second.read_text())
+    doc["current-context"] = later
+    second.write_text(yaml.safe_dump(doc))
+    point_kubeconfig_at(monkeypatch, f"{first}{os.pathsep}{second}")
+    assert ClusterTarget.resolve(None).context == "A"
+
+
+def test_resolve_refuses_a_current_context_that_is_not_defined(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A}, current="A")
+    doc = yaml.safe_load(path.read_text())
+    doc["current-context"] = "gone"
+    path.write_text(yaml.safe_dump(doc))
+    point_kubeconfig_at(monkeypatch, path)
+    with pytest.raises(ConfigException, match="'gone' is not defined"):
+        ClusterTarget.resolve(None)
 
 
 def test_cli_args_refuses_a_second_context(kubeconfig) -> None:
@@ -440,3 +609,57 @@ def test_observability_lookup_reuses_the_active_target(kubeconfig, hosts) -> Non
         kubectl.return_value = MagicMock(returncode=1, stdout="", stderr="")
         observability._find_helm_service("obs", "grafana", context=None)
     assert hosts == [SERVER_A]
+
+
+def test_info_uses_config_context(kubeconfig, hosts, tmp_path) -> None:
+    from lakebench.cli import app
+
+    res = CliRunner().invoke(app, ["info", str(_config_file(tmp_path))])
+    assert hosts and set(hosts) == {SERVER_A}, res.output
+
+
+def test_config_recommend_uses_config_context(kubeconfig, hosts, tmp_path) -> None:
+    """recommend sizes against the config's cluster, not the current one."""
+    from lakebench.cli import app
+
+    res = CliRunner().invoke(app, ["config", "recommend", str(_config_file(tmp_path))])
+    assert "Cluster context: A" in res.output, res.output
+    assert hosts and set(hosts) == {SERVER_A}, res.output
+
+
+def test_config_recommend_refuses_a_context_not_in_the_kubeconfig(
+    kubeconfig, hosts, tmp_path
+) -> None:
+    from lakebench.cli import app
+
+    res = CliRunner().invoke(app, ["config", "recommend", str(_config_file(tmp_path, "C"))])
+    assert res.exit_code == 1, res.output
+    assert "not in the kubeconfig" in res.output
+    assert hosts == []
+
+
+@pytest.mark.parametrize("argv", [["admin", "status"], ["status", "--namespace", "x"]])
+def test_configless_commands_stay_pinned_when_current_context_changes_mid_command(
+    kubeconfig, tmp_path, monkeypatch, argv
+) -> None:
+    """The context resolved at the first call holds for the whole command,
+    even when `kubectl config use-context` runs between two API calls."""
+    from lakebench.cli import app
+
+    monkeypatch.chdir(tmp_path)
+    seen: list[str] = []
+
+    def switching_call_api(self, resource_path, method, *args, **kwargs):
+        seen.append(self.configuration.host)
+        if len(seen) == 1:
+            _use_context(kubeconfig, "A")
+        if method == "GET" and resource_path == "/api/v1/namespaces":
+            return V1NamespaceList(items=[])
+        if method == "GET" and resource_path == "/api/v1/namespaces/{name}":
+            return V1Namespace(metadata=V1ObjectMeta(name="x"))
+        raise ApiException(status=404, reason="Not Found")
+
+    with patch("kubernetes.client.api_client.ApiClient.call_api", switching_call_api):
+        res = CliRunner().invoke(app, argv)
+    assert len(seen) >= 2, res.output
+    assert set(seen) == {SERVER_B}, res.output
