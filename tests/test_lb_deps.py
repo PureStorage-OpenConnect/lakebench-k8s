@@ -228,6 +228,17 @@ def env(tmp_path, monkeypatch):
     return Env(tmp_path, monkeypatch)
 
 
+@pytest.fixture(autouse=True)
+def _restore_signal_handlers():
+    """``resolve`` installs a SIGTERM handler for the pod's PID 1; run in this
+    process it would outlive the test and take a later test's signal (SD-22's
+    lease deferral test got lb_deps.Terminated)."""
+    saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    yield
+    for s, handler in saved.items():
+        signal.signal(s, handler)
+
+
 def _last_error(out: str) -> str:
     lines = [ln for ln in out.splitlines() if ln.startswith("LB_DEPS_ERROR")]
     assert len(lines) == 1, out
