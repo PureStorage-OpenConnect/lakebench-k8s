@@ -434,15 +434,17 @@ def _slow_job_runs(event: str, ref: str, base_ref: str = "") -> bool:
     return bool(_eval_expr(cond, ctx))
 
 
-def test_aml_slow_job_runs_on_integrate_main_tags_and_prs_to_integrate():
+def test_aml_slow_job_runs_on_integrate_main_tags_and_prs_to_integrate_and_main():
     assert _slow_job_runs("push", "refs/heads/integrate/v1.5.0")
     assert _slow_job_runs("push", "refs/heads/main")
     assert _slow_job_runs("push", "refs/heads/train/1003-am")
     # release.yml calls ci.yml; inside the call event_name is the caller's push.
     assert _slow_job_runs("push", "refs/tags/v1.7.0")
     assert _slow_job_runs("pull_request", "refs/pull/9/merge", "integrate/v1.5.0")
+    # A skipped job satisfies a required check, so the PR to main runs it too.
+    assert _slow_job_runs("pull_request", "refs/pull/9/merge", "main")
     assert not _slow_job_runs("push", "refs/heads/lane/v17-x")
-    assert not _slow_job_runs("pull_request", "refs/pull/9/merge", "main")
+    assert not _slow_job_runs("pull_request", "refs/pull/9/merge", "lane/v17-x")
 
 
 def test_aml_slow_job_selects_slow_tests_on_pinned_libraries():
@@ -499,12 +501,11 @@ def test_secrets_history_job_scans_full_history_and_requires_gitleaks():
     job = jobs["secrets-history"]
     assert job["steps"][0]["with"]["fetch-depth"] == 0
     scan = next(str(s["run"]) for s in job["steps"] if s.get("name") == "Scan history")
-    assert 'gitleaks git "$repo"' in scan and "--exit-code 1" in scan
-    # The whole history, merge commits' own changes included, and no inline allow.
-    assert '--log-opts="--remerge-diff HEAD"' in scan
-    assert "--ignore-gitleaks-allow" in scan
-    # The baseline is a trusted ref's copy, not the scanned tree's.
-    assert '--gitleaks-ignore-path "$ignore"' in scan
+    # The shared scanner (history with --remerge-diff, messages, no inline
+    # allow, fails on an empty scan) with a trusted ref's baseline.
+    assert 'scan="$PWD/scripts/gitleaks_history.py"' in scan
+    assert 'python "$scan" --repo . --config "$config" --ignore "$ignore"' in scan
+    assert 'git show "$cfg_ref:.gitleaks.toml"' in scan
     tests = next(s for s in job["steps"] if "test_pre_push_hook.py" in str(s.get("run", "")))
     # Without this the gitleaks-backed tests would skip and the step pass.
     assert tests["env"]["LB_REQUIRE_GITLEAKS"] == "1"

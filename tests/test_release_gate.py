@@ -276,6 +276,8 @@ def _repo(tmp_path, text: str):
 
 
 def test_gitleaks_history_check(tmp_path, monkeypatch):
+    import subprocess
+
     _gitleaks_or_skip()
     monkeypatch.setattr(rg, "ROOT", tmp_path)
     # Built at run time so this file never matches the FlashBlade rule itself.
@@ -291,6 +293,26 @@ def test_gitleaks_history_check(tmp_path, monkeypatch):
     )
     res = rg.check_gitleaks_history()
     assert res.status == rg.PASS, res.detail
+    # A key in a commit message, which `gitleaks git` alone does not read.
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "note " + "PSFB" + "Z" * 38,
+        ],
+        check=True,
+    )
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
 
 
 def test_gitleaks_history_check_refuses_a_shallow_clone(monkeypatch, tmp_path):
@@ -363,3 +385,10 @@ def test_pre_push_hook_check(tmp_path, monkeypatch):
     installed.write_text("#!/bin/sh\nexit 1\n")
     res = rg.check_pre_push_hook()
     assert res.status == rg.FAIL and "differs" in res.detail
+    # With core.hooksPath set, git runs that directory's hook, so that is the one checked.
+    other = tmp_path / "hooks2"
+    other.mkdir()
+    subprocess.run(["git", "-C", str(tmp_path), "config", "core.hooksPath", str(other)], check=True)
+    assert rg.check_pre_push_hook().status == rg.SKIP
+    (other / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+    assert rg.check_pre_push_hook().status == rg.PASS
