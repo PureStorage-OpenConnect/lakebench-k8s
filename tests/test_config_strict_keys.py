@@ -69,7 +69,7 @@ def test_unknown_key_is_rejected_and_named(tmp_path, data, bad_loc):
     with pytest.raises(ConfigValidationError) as exc:
         load_config(_write(tmp_path, data))
     assert bad_loc in str(exc.value)
-    assert "Extra inputs are not permitted" in str(exc.value)
+    assert "unknown key" in str(exc.value)
 
 
 def test_every_schema_model_forbids_extras():

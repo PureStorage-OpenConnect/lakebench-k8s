@@ -77,7 +77,7 @@ def test_v14_user_config_reaches_destroy_confirmation(monkeypatch, tmp_path):
     monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
     monkeypatch.chdir(tmp_path)  # journal output lands here, not in the repo
     result = runner.invoke(app, ["destroy", str(FIXTURE)])
-    assert "Extra inputs" not in result.output
+    assert "unknown key" not in result.output
     assert "validation failed" not in result.output.lower()
     assert "Refusing to destroy" in result.output
 
@@ -86,7 +86,7 @@ def test_v14_user_config_reaches_status(monkeypatch, tmp_path):
     monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
     monkeypatch.chdir(tmp_path)  # journal output lands here, not in the repo
     result = runner.invoke(app, ["status", str(FIXTURE)])
-    assert "Extra inputs" not in result.output
+    assert "unknown key" not in result.output
     assert "validation failed" not in result.output.lower()
 
 

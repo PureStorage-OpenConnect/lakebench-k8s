@@ -1,0 +1,5 @@
+name: t
+architecture:
+  catalog:
+    polaris:
+      port: 70000

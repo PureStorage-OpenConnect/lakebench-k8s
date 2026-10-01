@@ -1,0 +1,4 @@
+name: t
+workload:
+  schema: customer360
+  w1_max_vertices: 1000

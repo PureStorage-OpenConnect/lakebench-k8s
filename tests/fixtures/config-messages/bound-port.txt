@@ -1,0 +1,1 @@
+  - architecture.catalog.polaris.port: Input should be less than or equal to 65535

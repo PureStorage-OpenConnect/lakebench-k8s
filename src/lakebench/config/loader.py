@@ -17,6 +17,7 @@ from ._load_context import (
     LoadNotes,
     LoadPurpose,
     collecting_notes,
+    emit_note,
 )
 from .deploy_state import NameResolution, other_nameless_configs, resolve_name, suggested_name
 from .schema import LakebenchConfig
@@ -71,16 +72,15 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, ...]] = {
 def _apply_flat_fields(data: dict[str, Any]) -> dict[str, Any]:
     """Promote flat top-level fields to their nested locations.
 
-    If both flat and nested are present, flat wins and a warning is logged.
+    Each promoted key adds a deprecation note naming the nested key to write
+    instead. If both flat and nested are present, flat wins, as in v1.6, and
+    the note says so.
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
-
     for flat_key, nested_path in _FLAT_FIELD_MAP.items():
         if flat_key not in data:
             continue
         value = data.pop(flat_key)
+        emit_note(f"flat '{flat_key}' is deprecated; write {'.'.join(nested_path)}")
 
         # A config still using the deprecated 'architecture.workload' block
         # (and no top-level one) gets flat 'scale' there, so the two blocks
@@ -123,10 +123,9 @@ def _apply_flat_fields(data: dict[str, Any]) -> dict[str, Any]:
 
         final_key = nested_path[-1]
         if final_key in target:
-            logger.warning(
-                "Both flat '%s' and nested '%s' are set -- flat value takes precedence",
-                flat_key,
-                ".".join(nested_path),
+            emit_note(
+                f"both flat '{flat_key}' and nested '{'.'.join(nested_path)}' are set; "
+                "the flat value is used"
             )
         target[final_key] = value
 
@@ -319,6 +318,22 @@ def load_config(
     skip_name_length = allow_long_names or purpose in SKIPS_NAME_LENGTH
 
     path = Path(path)
+    with collecting_notes() as notes:
+        cfg, resolution = _load_and_validate(path, purpose, name_override, skip_name_length)
+    cfg._load_notes = notes
+    cfg._name_resolution = resolution
+    if print_notes:
+        _print_load_notes(path, notes)
+    _print_load_advisories(cfg)
+    return cfg
+
+
+def _load_and_validate(
+    path: Path,
+    purpose: LoadPurpose,
+    name_override: str | None,
+    skip_name_length: bool,
+) -> tuple[LakebenchConfig, NameResolution]:
     data = load_yaml(path)
     data = _apply_flat_fields(data)
 
@@ -354,10 +369,11 @@ def load_config(
 
     context = {"purpose": purpose, "allow_long_names": skip_name_length}
     try:
-        with collecting_notes() as notes:
-            cfg = LakebenchConfig.model_validate(data, context=context)
+        cfg = LakebenchConfig.model_validate(data, context=context)
     except ValidationError as e:
-        errors = e.errors()
+        # Messages are rewritten against the model's own locations, before
+        # the locations are re-rooted to where the user wrote each key.
+        errors = [_explain_error(dict(err)) for err in e.errors()]
         if _top_level_workload:
             errors = [
                 {**err, "loc": tuple(err["loc"][1:])}
@@ -383,14 +399,28 @@ def load_config(
 
         raise ConfigValidationError(  # noqa: B904
             "Configuration validation failed:\n" + "\n".join(error_messages),
-            errors=[dict(e) for e in errors],  # type: ignore[call-overload]
+            errors=errors,
         )
-    cfg._load_notes = notes
-    cfg._name_resolution = resolution
-    if print_notes:
-        _print_load_notes(path, notes)
-    _print_load_advisories(cfg)
-    return cfg
+    return cfg, resolution
+
+
+def _explain_error(err: dict[str, Any]) -> dict[str, Any]:
+    """Name the nearest valid key or recipe in an error (CFG-4)."""
+    from ._hints import unknown_key_hint
+
+    if err.get("type") == "extra_forbidden":
+        loc = tuple(err["loc"])
+        # The same place in the spellings a user writes, for the tie-break.
+        user_loc = loc
+        if loc[:2] == ("architecture", "workload"):
+            user_loc = ("workload", *loc[2:])
+        elif loc[:3] == ("architecture", "pipeline", "sustained"):
+            user_loc = ("architecture", "pipeline", "continuous", *loc[3:])
+        hint = unknown_key_hint(loc, user_loc)
+        err["msg"] = f"unknown key; {hint}" if hint else "unknown key"
+    elif err.get("type") == "unknown_recipe":
+        err["loc"] = ("recipe",)
+    return err
 
 
 def load_notes(cfg: LakebenchConfig) -> LoadNotes:

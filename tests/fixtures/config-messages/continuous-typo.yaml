@@ -1,0 +1,5 @@
+name: t
+architecture:
+  pipeline:
+    continuous:
+      run_duraton: 600
