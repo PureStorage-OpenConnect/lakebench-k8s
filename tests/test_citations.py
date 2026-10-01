@@ -205,3 +205,17 @@ def test_counts_fixture_is_well_formed():
     counts = data["counts"]
     assert all(isinstance(n, int) and n > 0 for n in counts.values())
     assert list(counts) == sorted(counts)
+
+
+def regenerate(root: Path = ROOT) -> dict[str, int]:
+    """Retake the fixture from *root*'s tree; for the commit that lands the
+    ratchet on a merge-train tree, never to make room for a new citation."""
+    data = json.loads(COUNTS.read_text())
+    data["counts"] = dict(sorted(citation_counts(root).items()))
+    COUNTS.write_text(json.dumps(data, indent=2) + "\n")
+    return data["counts"]
+
+
+if __name__ == "__main__":
+    counts = regenerate()
+    print(f"{sum(counts.values())} citations in {len(counts)} files -> {COUNTS}")
