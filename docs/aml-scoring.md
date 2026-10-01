@@ -341,9 +341,14 @@ rule thresholds and the reference features were tuned against. Recall
 and precision numbers from a seed-43 run are in-sample: they say what
 the pipeline does on the corpus it was developed on, not what it does
 on a corpus it has never seen. The held-out evaluation and robustness
-seeds are pre-registered in `aml_preregistration.json` and are refused
-at config load unless `workload.datagen.corpus_role` declares the
-matching role, so accidentally scoring against them is not possible.
+seeds are registered as salted hashes in `heldout_hashes.json`, next to
+`aml_preregistration.json`, and are refused at config load unless
+`workload.datagen.corpus_role` declares the matching role, so
+accidentally scoring against them is not possible. The reference job
+also recovers the corpus seed from every manifest row's instance seed
+and refuses a corpus that comes, wholly or partly, from a spent or
+held-out seed it was not declared for, whatever seed the deployment
+claims.
 Numbers you publish for comparison with other stacks should cite the
 seed the run used and, when it is 43, say so.
 

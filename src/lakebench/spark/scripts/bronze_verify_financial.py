@@ -39,7 +39,7 @@ BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 #     {root}/bronze/party.parquet            (reference table)
 #     {root}/bronze/account.parquet          (reference table)
 #     {root}/manifest/manifest*.parquet      (typology ground truth; one file per cycle)
-# LB-165: prior to PR-F this script assumed the flat datagen_py layout
+# Prior to PR-F this script assumed the flat datagen_py layout
 # where the ROOT prefix directly held the pacs.008 files, and Spark
 # listing the ROOT hit the three subdirs and failed with
 # UNABLE_TO_INFER_SCHEMA. PACS_PATH is derived from the root plus the
@@ -54,7 +54,7 @@ PACS_PREFIX = env(
 # rule_precision, rule_recall, rule_pattern_span, and aggregate_typology_coverage
 # all read `{catalog}.bronze.manifest`; without a registration here the
 # whole scoring stack fails at Trino with 'Table does not exist'.
-# LB-165 round 1 fixed only the pacs.008 read; round 2 (this) adds the
+# The first fix covered only the pacs.008 read; this one adds the
 # manifest registration so an AML benchmark actually produces recall.
 MANIFEST_PATH = env(
     "LB_FINANCIAL_MANIFEST_PATH",
@@ -144,7 +144,7 @@ def _with_location(writer):
 
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
-# add_files preflight thresholds (LB-110). At scale 100+ the pacs008/
+# add_files preflight thresholds. At scale 100+ the pacs008/
 # tree can be 700 GB and 700k+ files; add_files manifest generation
 # scans every file and holds per-file state on the driver, which OOMs
 # the default 4Gi bronze-verify executor. When either threshold is
@@ -302,7 +302,7 @@ def _continuous_reset(spark, df):
 def _drop_owned_table(spark, table):
     """DROP a table whose files only it owns; PURGE only when that is proven.
 
-    LB-188: PURGE deletes every file the table metadata references, wherever it
+    PURGE deletes every file the table metadata references, wherever it
     sits, so it runs only for a table whose location is its own directory
     (named after the table, or Iceberg's ``name-<suffix>`` unique-location form)
     and disjoint from the raw datagen landing zone. A table whose location is
@@ -320,7 +320,7 @@ def _drop_owned_table(spark, table):
     common.owned_table_dir does, because this script does not know the catalog
     warehouse root (Hive vs Polaris differ) and the tables are catalog-managed;
     a bucket-root check keyed on the warehouse is tracked for when it can be
-    verified live (BUGS LB-188 note). Not a live hazard today: with no LOCATION
+    verified live. Not a live hazard today: with no LOCATION
     and no add_files these tables cannot resolve to a foreign bucket.
 
     Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which the
@@ -454,7 +454,7 @@ def main() -> None:
         # 2. CTAS fallback: if add_files isn't supported by the catalog
         #    (e.g. Nessie REST prior to a certain version) OR the source
         #    parquet exceeds ADD_FILES_MAX_BYTES / ADD_FILES_MAX_FILES
-        #    (LB-110: add_files manifest generation OOMs a 4Gi executor
+        #    (add_files manifest generation OOMs a 4Gi executor
         #    at scale 100+), rewrite the data into the Iceberg table.
         #    Doubles S3 usage; operators can bump the thresholds or the
         #    executor sizing to keep zero-copy.
@@ -574,7 +574,7 @@ def main() -> None:
             """)
             log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")
 
-        # Manifest registration (LB-165 round 2). One file, small; CTAS
+        # Manifest registration. One file, small; CTAS
         # unconditionally. Failure of the pacs.008 registration above
         # would have already raised, so if we're here the catalog and
         # the SparkSession are known good. Manifest failure is however
