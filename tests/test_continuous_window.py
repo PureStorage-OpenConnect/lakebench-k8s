@@ -762,10 +762,13 @@ def test_an_error_after_the_window_fails_the_run_and_stops_streams(monkeypatch, 
     monkeypatch.setattr(_sustained, "_stop_streams", lambda k, ns, sub: stopped.append(len(sub)))
 
     def boom(*a, **kw):
-        raise KeyboardInterrupt
+        raise RuntimeError("boom")
 
     monkeypatch.setattr("lakebench.metrics.continuous_window.window_gate_problems", boom)
-    with pytest.raises(KeyboardInterrupt):
+    # An error that is not an interrupt still propagates and still stops
+    # the streams (by name, in the finally). An interrupt is sealed and its
+    # streams stopped by uid instead: tests/test_run_interrupt.py.
+    with pytest.raises(RuntimeError, match="boom"):
         _drive(monkeypatch, tmp_path, logs)
     assert stopped == [3]
 

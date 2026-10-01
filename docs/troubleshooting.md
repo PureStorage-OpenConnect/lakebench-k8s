@@ -173,6 +173,14 @@ a `pending-upgrade` revision blocks every deployment's watch-list change,
 so roll it back with `helm rollback spark-operator <last deployed
 revision> -n spark-operator`, then run `lakebench admin repair-operator`.
 
+**An interrupted `run` left a job running.** `run` deletes the jobs it
+created when it is interrupted, but leaves any it cannot show to be its own
+(another invocation recreated it, or the interrupt landed while it was
+being created) or could not reach within its 60 s cleanup budget. The run
+prints a `kubectl delete` line for each, and the record's
+`interrupted.left` lists them with the reason. A later `run` that submits
+the same stage, or deploys datagen, deletes the left object by name first.
+
 Do not edit `spark.jobNamespaces` with `helm upgrade --reuse-values` by hand.
 That skips the lease, and a list copied from an earlier read silently drops
 any namespace another deployment added in the meantime.

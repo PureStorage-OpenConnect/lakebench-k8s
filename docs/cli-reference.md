@@ -307,6 +307,23 @@ continuous output inside the window, then lets the corpus settle and
 fingerprints the query set over the settled tables. See
 [Running Pipelines](running-pipelines.md#continuous-mode).
 
+**Interrupting a run.** Ctrl-C (SIGINT) or SIGTERM stops `run` and exits
+130. The run first deletes the SparkApplications and the datagen Job it
+created and has not seen finish (a stage that completed keeps its
+application, so its driver logs stay readable). Each delete carries the uid
+of the object this run created, so an object of the same name that another
+invocation created since is left alone. The record is still saved: its
+verdict is INTERRUPTED (FAILED when something had already failed before
+the interrupt, never PASSED), and its `interrupted` block names the signal,
+the stage, and the objects stopped, left and skipped. Press Ctrl-C again to
+skip the rest of the cleanup; the record is still written. A third press
+stops at once and may lose the record. For anything left, the run prints
+the `kubectl delete` that stops it. While the run holds the cluster lease
+(the Spark Operator watch-list heal at the start), the interrupt waits for
+that shared change to finish, as for any command (see
+[Troubleshooting](troubleshooting.md)). The HTML report shows an
+interrupted run as failed, with the interrupt as its reason.
+
 A recipe without a query engine (`*-none`) skips the benchmark and exits 0
 with no QpH. `run` refuses an unsupported workload x recipe x mode
 combination before anything is deployed; `--local` refuses AML configs and

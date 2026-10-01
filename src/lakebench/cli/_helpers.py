@@ -33,6 +33,11 @@ EXIT_DECLINED = 3
 # not treat it as namespace-still-terminating.
 EXIT_DATAGEN_TIMEOUT = 5
 
+# Exit code when ``run`` was stopped by SIGINT or SIGTERM: the record is
+# sealed INTERRUPTED and this run's jobs were stopped (cli/_interrupt.py).
+# 128 + SIGINT, as a shell reports a Ctrl-C, for SIGTERM too.
+EXIT_INTERRUPTED = 130
+
 # ANSI escape code stripper for log output
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 

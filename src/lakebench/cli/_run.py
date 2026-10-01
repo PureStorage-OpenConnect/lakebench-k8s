@@ -15,6 +15,7 @@ from rich.panel import Panel
 from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
     EXIT_DATAGEN_TIMEOUT,
+    EXIT_INTERRUPTED,
     _journal_safe,
     console,
     enforce_bronze_regenerate,
@@ -1236,7 +1237,7 @@ def _behavioural_subset() -> set[str]:
     return set(data.get("behavioural_subset", []))
 
 
-def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
+def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout, interrupt=None):
     """Fold ``financial score`` into a batch run (LB-123).
 
     After gold-finalize, score recall/precision against the datagen manifest
@@ -1274,10 +1275,14 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
         console.print("[bold]Stage: financial score[/bold]")
         print_info("Scoring recall/precision against the datagen manifest...")
 
+        if interrupt is not None:
+            interrupt.creating("SparkApplication", app_name)
         status = job_manager.submit_job(
             JobType.SCORE_FINANCIAL,
             arguments=["--manifest", manifest_uri, "--output", output_uri],
         )
+        if interrupt is not None:
+            interrupt.submitted(status)
         if status.state == JobState.FAILED:
             print_warning(f"Could not submit score job: {status.message}")
             return None
@@ -1286,6 +1291,8 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
             timeout_seconds=timeout,
             poll_interval=15,
         )
+        if interrupt is not None and result.success:
+            interrupt.finished("SparkApplication", app_name)
         if not result.success:
             print_warning(f"Financial scoring did not complete: {result.message}")
             # Surface the score driver's own error -- scoring is best-effort so
@@ -1955,6 +1962,18 @@ def run(
     # Set when this run's TM layer ran (verdict pass or fail); the benchmark
     # includes the investigator queries only then.
     _tm_run_id: str | None = None
+    # Ctrl-C and SIGTERM seal the record INTERRUPTED and stop the objects
+    # this run created (cli/_interrupt.py). Installed before the operator
+    # check, whose watch-list heal can take the cluster lease: the lease
+    # holds the signal back and hands it to these handlers after release.
+    from lakebench.cli._interrupt import RunInterrupt
+
+    _interrupt = RunInterrupt(cfg.get_namespace(), run_id)
+    _interrupt.install()
+    _stage = "operator-check"
+    # The stage whose SparkApplication is running: (stage name, start).
+    _inflight: tuple[str, Any] | None = None
+    _interrupted: dict | None = None
 
     try:
         # Check Spark operator
@@ -1997,6 +2016,7 @@ def run(
         monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
 
         # Deploy scripts ConfigMap -- must succeed or pipeline jobs will fail
+        _stage = "scripts"
         print_info("Deploying Spark scripts...")
         from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
 
@@ -2016,6 +2036,7 @@ def run(
         console.print()
         console.print("[bold dim]Phase 3/7: Generate[/bold dim]")
         if include_datagen and not skip_generate:
+            _stage = "datagen"
             console.print("[bold]Stage: datagen (ingest)[/bold]")
             print_info("Generating data for pipeline benchmark...")
             datagen_start = datetime.now()
@@ -2040,7 +2061,9 @@ def run(
 
                 dg_engine = DeploymentEngine(cfg)
                 datagen_deployer = DatagenDeployer(dg_engine)
+                _interrupt.creating("Job", "lakebench-datagen")
                 datagen_deployer.deploy()
+                _interrupt.datagen_created()
 
                 # Progress bar (same as standalone generate command)
                 _dg_start = _time.time()
@@ -2223,9 +2246,13 @@ def run(
                         DeploymentStatus,
                     )
 
+                    _stage = "datagen"
                     _cycle_engine = DeploymentEngine(cfg)
                     _cycle_datagen = DatagenDeployer(_cycle_engine)
+                    _interrupt.creating("Job", "lakebench-datagen")
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
+                    if datagen_result.status == DeploymentStatus.SUCCESS:
+                        _interrupt.datagen_created()
                     if datagen_result.status != DeploymentStatus.SUCCESS:
                         # Fatal: continuing would rebuild this cycle from the
                         # previous cycle's bronze, and incremental silver would
@@ -2293,7 +2320,10 @@ def run(
                     stage_env["LB_FORCE_REBUILD"] = "1"
 
                 # Submit job
+                _stage = stage_name
+                _interrupt.creating("SparkApplication", f"lakebench-{stage_name}")
                 job_status = job_manager.submit_job(job_type, cycle_env=stage_env)
+                _interrupt.submitted(job_status)
                 if job_status.state == JobState.FAILED:
                     print_error(f"Failed to submit job: {job_status.message}")
                     collector.record_job(
@@ -2315,6 +2345,7 @@ def run(
                 # The stage starts when the SparkApplication exists: the
                 # same point the monitor's elapsed counted from.
                 job_submitted = utc_now()
+                _inflight = (stage_name, job_start)
 
                 # Wait for completion -- capture max executor count seen
                 _max_executors = 0
@@ -2342,6 +2373,11 @@ def run(
                     progress_callback=on_progress,
                     on_submission_failure=_submission_failure_reporter(stage_name, j),
                 )
+                # The application ended: an interrupt from here on is not
+                # inside it, and a completed one keeps its driver logs.
+                _inflight = None
+                if result.success:
+                    _interrupt.finished("SparkApplication", f"lakebench-{stage_name}")
                 # The poll that saw the end, less the driver-log fetch the
                 # monitor did after it.
                 job_observed_end = job_submitted + timedelta(seconds=result.elapsed_seconds)
@@ -2524,6 +2560,7 @@ def run(
                     collector.current_run.cycles.append(_cm)
 
         # Summary
+        _stage = "pipeline"
         console.print()
         total_time = sum(r[2] for r in results)
 
@@ -2551,7 +2588,11 @@ def run(
             and not stage
             and pipeline_success
         ):
-            _financial_scoring = _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout)
+            _stage = "score-financial"
+            _financial_scoring = _run_financial_scoring(
+                cfg, run_id, job_manager, monitor, timeout, interrupt=_interrupt
+            )
+            _stage = "pipeline"
 
         # AML batch honesty gate (LB-044 class), after scoring so a single
         # crashed rule does not also throw away the other rules' recall.
@@ -2614,6 +2655,7 @@ def run(
                 pipeline_success = False
 
         # -- Phase 5/7: Maintenance ------------------------------------------------
+        _stage = "maintenance"
         console.print()
         console.print("[bold dim]Phase 5/7: Maintenance[/bold dim]")
         # Flow: [pre-compaction benchmark] -> maintenance -> [post-compaction benchmark]
@@ -2885,6 +2927,7 @@ def run(
                     )
 
         # -- Phase 6/7: Benchmark --------------------------------------------------
+        _stage = "benchmark"
         console.print()
         console.print("[bold dim]Phase 6/7: Benchmark[/bold dim]")
         # Run post-compaction benchmark (or the only benchmark if maintenance skipped)
@@ -3079,44 +3122,76 @@ def run(
         pipeline_success = False
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
+    except KeyboardInterrupt as e:
+        # SIGINT or SIGTERM (LeaseAbort included). Sealed first, so a second
+        # signal cannot leave the record without its interrupt block; then
+        # this run's unfinished objects are deleted, by uid. Not re-raised:
+        # the finally writes the record and exits 130.
+        _interrupted = _interrupt.seal(at_stage=_stage, prior_failure=not pipeline_success, exc=e)
+        pipeline_success = False
+        _pipeline_exit_code = EXIT_INTERRUPTED
+        if _inflight is not None:
+            _end = utc_now()
+            collector.record_job(
+                JobMetrics(
+                    job_name=f"lakebench-{_inflight[0]}",
+                    job_type=_inflight[0],
+                    start_time=_inflight[1],
+                    end_time=_end,
+                    elapsed_seconds=(_end - _inflight[1]).total_seconds(),
+                    timing_source="interrupted",
+                    success=False,
+                    error_message="interrupted",
+                )
+            )
+        console.print()
+        print_warning(f"Interrupted by {_interrupted['signal']} during {_stage}")
+        _interrupt.stop_owned(_interrupted, console)
     finally:
         # -- Phase 7/7: Results ----------------------------------------------------
         console.print()
         console.print("[bold dim]Phase 7/7: Results[/bold dim]")
-        # Measure actual S3 bucket sizes before saving metrics
-        try:
-            from lakebench.s3 import S3Client
+        # Measure actual S3 bucket sizes before saving metrics. Not after an
+        # interrupt: the data is partial, and a listing at scale would hold
+        # the record back from a user who has just pressed Ctrl-C.
+        if _interrupted is not None:
+            print_info("S3 sizes not measured: the run was interrupted")
+        else:
+            try:
+                from lakebench.s3 import S3Client
 
-            s3_cfg = cfg.platform.storage.s3
-            s3_client = S3Client(
-                endpoint=s3_cfg.endpoint,
-                access_key=s3_cfg.access_key,
-                secret_key=s3_cfg.secret_key,
-                region=s3_cfg.region,
-                path_style=s3_cfg.path_style,
-                ca_cert=s3_cfg.ca_cert,
-                verify_ssl=s3_cfg.verify_ssl,
-            )
-            print_info("Measuring actual S3 bucket sizes...")
-            collector.record_actual_sizes(
-                s3_client,
-                s3_cfg.buckets.bronze,
-                s3_cfg.buckets.silver,
-                s3_cfg.buckets.gold,
-            )
-        except Exception as e:
-            console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
+                s3_cfg = cfg.platform.storage.s3
+                s3_client = S3Client(
+                    endpoint=s3_cfg.endpoint,
+                    access_key=s3_cfg.access_key,
+                    secret_key=s3_cfg.secret_key,
+                    region=s3_cfg.region,
+                    path_style=s3_cfg.path_style,
+                    ca_cert=s3_cfg.ca_cert,
+                    verify_ssl=s3_cfg.verify_ssl,
+                )
+                print_info("Measuring actual S3 bucket sizes...")
+                collector.record_actual_sizes(
+                    s3_client,
+                    s3_cfg.buckets.bronze,
+                    s3_cfg.buckets.silver,
+                    s3_cfg.buckets.gold,
+                )
+            except Exception as e:
+                console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
 
         # Always save metrics, even on failure
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
+            run_metrics.interrupted = _interrupted
             # LB-123: attach folded-in financial recall scoring (if any) so it
             # persists into metrics.json and renders in the scorecard.
             if _financial_scoring is not None:
                 run_metrics.financial_scoring = _financial_scoring
 
             # Collect platform metrics from Prometheus (best-effort)
-            _collect_platform_metrics(cfg, run_metrics)
+            if _interrupted is None:
+                _collect_platform_metrics(cfg, run_metrics)
 
             # Build pipeline benchmark (stage-matrix view)
             try:
@@ -3208,7 +3283,16 @@ def run(
                 details={"run_id": run_id, "metrics_path": str(metrics_path)},
             )
 
-        _journal_safe(j.end_command, success=pipeline_success)
+        _journal_safe(
+            j.end_command,
+            success=pipeline_success,
+            message=(
+                f"interrupted ({_interrupted['signal']} during {_interrupted['at_stage']})"
+                if _interrupted is not None
+                else ""
+            ),
+        )
+        _interrupt.restore()
         if not pipeline_success:
             # Metrics are saved above for diagnosis; the exit code must still
             # say the run did not succeed. A4 (v1.6): honour a specific code

@@ -10,7 +10,8 @@
   "differs_from_record": "As continuous_c360's differs_from_record (settle 870.0 s vs 874.1, total_s3_objects 300 vs 12320, constant gold event age, throughput over exactly 1800.0 s, round and skip times, window start .500). In addition the record deployed datagen itself (no --skip-generate) and cleared the raw prefix; this scenario does neither and replays the record's fleet as if a finished datagen Job wrote it.",
   "unsure": "Nothing material. The only judgement is that a 'finished' datagen Job makes run() pass datagen_runs=False to the prerequisites, which the code states directly (cli/_run.py:1844).",
   "calls_count": "236 calls (continuous_c360: 238)",
-  "rerecord_sd8": "SD-8 (integrate 2f28d4e, merged before this golden) moved one call and nothing else: _run_sustained now only builds the scripts maps (build_script_configmaps, pure, reads the packaged scripts, cli/_sustained.py:2828) where it used to deploy them, and deploys them (JobManager.deploy_scripts_configmap, cli/_sustained.py:2875) after _stop_leftover_streams and _reset_continuous_state (:2868-2869), so a changed map is not replaced while a leftover stream still mounts it. In calls the deploy_scripts_configmap entry moves from after Benchmark init to after the last reset delete_prefix, before the reset preflight's bronze-verify submit (no Datagen deploy under --skip-generate). Call count unchanged (236); every other section is unchanged. Moved by hand from the SD-8 diff, then checked against the harness on b587651. Line citations in the other _derivation keys are against the tree named in 'tree' (pre-SD-8): on b587651 cli/_sustained.py lines from about 2823 to 2867 sit 6 lower and lines after 2867 sit 21 lower (DatagenDeployer.deploy is now 2891-2892, the reset preflight about 2979-2986), and cli/_run.py lines after 1999 sit 8 lower. The early build_script_configmaps call is real code in the harness, not a seam, so it is not in calls; removing it would not move this golden."
+  "rerecord_sd8": "SD-8 (integrate 2f28d4e, merged before this golden) moved one call and nothing else: _run_sustained now only builds the scripts maps (build_script_configmaps, pure, reads the packaged scripts, cli/_sustained.py:2828) where it used to deploy them, and deploys them (JobManager.deploy_scripts_configmap, cli/_sustained.py:2875) after _stop_leftover_streams and _reset_continuous_state (:2868-2869), so a changed map is not replaced while a leftover stream still mounts it. In calls the deploy_scripts_configmap entry moves from after Benchmark init to after the last reset delete_prefix, before the reset preflight's bronze-verify submit (no Datagen deploy under --skip-generate). Call count unchanged (236); every other section is unchanged. Moved by hand from the SD-8 diff, then checked against the harness on b587651. Line citations in the other _derivation keys are against the tree named in 'tree' (pre-SD-8): on b587651 cli/_sustained.py lines from about 2823 to 2867 sit 6 lower and lines after 2867 sit 21 lower (DatagenDeployer.deploy is now 2891-2892, the reset preflight about 2979-2986), and cli/_run.py lines after 1999 sit 8 lower. The early build_script_configmaps call is real code in the harness, not a seam, so it is not in calls; removing it would not move this golden.",
+  "rerecord_cd16": "CD-16 with LB-233 (lane/v17-run-cd16): journal_events[2] generate.start removed, by hand from the code. With --skip-generate no datagen is deployed, and the GENERATE_START 'Datagen started for continuous pipeline' record now sits inside the branch that deploys it (cli/_sustained.py, after RunInterrupt.datagen_created). calls do not move: the skip branch makes no datagen deploy and so no uid read."
  },
  "exit_code": 0,
  "unscripted": [],
@@ -1466,11 +1467,6 @@
   ],
   [
    "command.start",
-   null,
-   null
-  ],
-  [
-   "generate.start",
    null,
    null
   ],

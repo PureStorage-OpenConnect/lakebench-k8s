@@ -190,6 +190,35 @@ def passed(record: Mapping[str, Any] | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: ``JobMetrics.error_message`` of the stage a SIGINT or SIGTERM stopped
+#: (cli/_interrupt.py). That job did not fail; it is left out of the
+#: ``pipeline`` gate and the badge's failed jobs.
+INTERRUPTED_JOB_MESSAGE = "interrupted"
+
+
+def _interrupt_record(metrics: PipelineMetrics) -> Mapping[str, Any] | None:
+    """The run's ``interrupted`` block, or None when it was not interrupted."""
+    rec = getattr(metrics, "interrupted", None)
+    return rec if isinstance(rec, Mapping) else None
+
+
+def _stopped_by_interrupt(job: Any, interrupted: Mapping[str, Any] | None) -> bool:
+    """The job of the stage the interrupt landed in (not a failed job)."""
+    return (
+        interrupted is not None
+        and getattr(job, "error_message", None) == INTERRUPTED_JOB_MESSAGE
+        and getattr(job, "job_type", None) == interrupted.get("at_stage")
+    )
+
+
+def interrupt_reason(interrupted: Mapping[str, Any]) -> str:
+    """One line for a verdict or badge: which signal, during which stage."""
+    return (
+        f"Run interrupted ({interrupted.get('signal') or 'signal'} during "
+        f"{interrupted.get('at_stage') or 'an unknown stage'})"
+    )
+
+
 def _is_sustained(metrics: PipelineMetrics) -> bool:
     """True when the run used the sustained/continuous pipeline."""
     pb = metrics.pipeline_benchmark
@@ -209,10 +238,15 @@ def compute_badge_status(
     reasons: list[str] = []
     warnings: list[str] = []
 
+    interrupted = _interrupt_record(metrics)
     if metrics.benchmark_error:
         reasons.append(f"Benchmark did not complete ({metrics.benchmark_error}); no QpH")
     elif not metrics.success:
-        reasons.append("Pipeline crashed or was interrupted")
+        reasons.append(
+            interrupt_reason(interrupted)
+            if interrupted is not None
+            else "Pipeline crashed or was interrupted"
+        )
 
     pb = metrics.pipeline_benchmark
     is_sustained = _is_sustained(metrics)
@@ -278,7 +312,11 @@ def compute_badge_status(
         if failed_streams:
             reasons.append(f"Streaming jobs failed: {', '.join(failed_streams)}")
     elif metrics.jobs:
-        failed_jobs = [j.job_name for j in metrics.jobs if not j.success]
+        failed_jobs = [
+            j.job_name
+            for j in metrics.jobs
+            if not j.success and not _stopped_by_interrupt(j, interrupted)
+        ]
         if failed_jobs:
             reasons.append(f"Batch jobs failed: {', '.join(failed_jobs)}")
 
@@ -307,8 +345,10 @@ def _pipeline_gate_outcome(metrics: PipelineMetrics) -> str | None:
         if any(not s.success for s in metrics.streaming):
             return "FAIL"
         return "PASS"
-    if metrics.jobs:
-        if any(not j.success for j in metrics.jobs):
+    interrupted = _interrupt_record(metrics)
+    jobs = [j for j in metrics.jobs if not _stopped_by_interrupt(j, interrupted)]
+    if jobs:
+        if any(not j.success for j in jobs):
             return "FAIL"
         return "PASS"
     return None
@@ -366,6 +406,12 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     ``gate_outcomes`` covers, at minimum, ``pipeline`` and ``benchmark``,
     and adds ``c360`` when the run recorded a c360 correctness verdict of
     "fail".
+
+    An interrupted run (``metrics.interrupted``) adds ``interrupt =
+    "INTERRUPTED"``. Its status is INTERRUPTED when ``prior_failure`` is
+    false and no other gate failed (the stage the interrupt stopped is not a
+    failure), and FAILED otherwise. It is never PASSED, and ``success`` stays
+    False.
     """
     exit_ok = bool(metrics.success)
     badge_ok, badge_reasons, _warnings = compute_badge_status(metrics)
@@ -383,11 +429,24 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         gate_outcomes["c360"] = c360_outcome
 
     reasons: list[str] = []
-    if not exit_ok:
-        reasons.append("Process exit intent was not OK")
-    for r in badge_reasons:
-        if r not in reasons:
-            reasons.append(r)
+    interrupted = _interrupt_record(metrics)
+    if interrupted is not None:
+        gate_outcomes["interrupt"] = "INTERRUPTED"
+    if interrupted is not None and interrupted.get("prior_failure") is False:
+        # The interrupt is why success is False, and the badge's other
+        # reasons (an ingest ratio over a cut window, say) describe partial
+        # data. The verdict is INTERRUPTED unless a gate failed; never PASSED.
+        exit_ok = badge_ok = success_flag = True
+        reasons.append(interrupt_reason(interrupted))
+    else:
+        # Not interrupted, or something had already failed (or the record
+        # does not say): today's inputs stand, so an interrupt after a
+        # failure reads FAILED.
+        if not exit_ok:
+            reasons.append("Process exit intent was not OK")
+        for r in badge_reasons:
+            if r not in reasons:
+                reasons.append(r)
     if c360_reason and c360_reason not in reasons:
         reasons.append(c360_reason)
     for name, outcome in gate_outcomes.items():
