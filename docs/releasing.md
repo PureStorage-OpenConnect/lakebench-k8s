@@ -67,7 +67,11 @@ a finding it was meant to cover fails CI, until it is on `main`. Until then
 the baseline comes from `origin/integrate/v1.5.0`, so a baseline change
 merged to integrate takes effect at that merge; the train review and the
 list pinned in `tests/test_gitleaks_baseline.py` are the control in that
-window. Main's required checks should include "Secret scan (history)" and
+window. The history scan's `.gitleaks.toml` always comes from `origin/main`
+(or `origin/integrate/v1.5.0` if `main` has none), so a config change on any
+other branch, integrate included, applies to the trusted pass only once it is
+on `main`; the second pass uses the branch's own config, so a new rule
+applies at once. Main's required checks should include "Secret scan (history)" and
 "AML statistics (slow)".
 
 The version lives only in `src/lakebench/__init__.py`; `pyproject.toml`
