@@ -23,6 +23,7 @@ from lakebench.cli._helpers import (
 )
 from lakebench.config import (
     ConfigError,
+    LoadPurpose,
     load_config,
 )
 from lakebench.journal import CommandName, EventType
@@ -134,7 +135,7 @@ def _run_query_repl(
 
     config_file = resolve_config_path(config_file)
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -374,7 +375,7 @@ def query(
 
     # Load config
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -656,7 +657,7 @@ def benchmark(
     config_file = resolve_config_path(config_file, file_option)
 
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904

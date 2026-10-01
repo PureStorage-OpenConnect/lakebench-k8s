@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from lakebench.cli import app
 from lakebench.config import load_config
-from lakebench.config.loader import ConfigValidationError
+from lakebench.config.loader import ConfigValidationError, LoadPurpose
 from lakebench.config.schema import LakebenchConfig
 
 FIXTURE = Path(__file__).parent / "fixtures" / "v14user.yaml"
@@ -51,13 +51,24 @@ def test_removed_key_warns_and_is_dropped(where, key, value):
 
 
 def test_v14_user_config_loads():
+    # Loads for the read and teardown commands (removed keys dropped with a
+    # note), so an old deployment can still be inspected and destroyed.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        cfg = load_config(FIXTURE)
+        cfg = load_config(FIXTURE, purpose=LoadPurpose.TEARDOWN)
     assert cfg.name == "v14user"
     messages = " ".join(str(w.message) for w in caught)
     for key in ("pull_secrets", "create_storage_class", "channels", "quality_distribution"):
         assert key in messages
+
+
+def test_v14_user_config_refused_for_commands_that_change_data():
+    # CFG-1: deploy and run refuse the removed keys, each with its fix text.
+    with pytest.raises(ConfigValidationError) as e:
+        load_config(FIXTURE, purpose=LoadPurpose.MUTATE)
+    msg = str(e.value)
+    for key in ("pull_secrets", "create_storage_class", "channels", "quality_distribution"):
+        assert f"'{key}' was removed" in msg
 
 
 def test_v14_user_config_reaches_destroy_confirmation(monkeypatch, tmp_path):

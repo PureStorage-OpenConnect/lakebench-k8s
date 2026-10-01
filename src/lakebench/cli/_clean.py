@@ -26,6 +26,7 @@ from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
+    LoadPurpose,
     load_config,
 )
 from lakebench.journal import DEFAULT_JOURNAL_DIR, CommandName, EventType, Journal
@@ -122,7 +123,9 @@ def clean(
 
     # Load configuration
     try:
-        cfg = load_config(config_file, allow_long_names=True)  # LB-153: cleanup path
+        cfg = load_config(
+            config_file, purpose=LoadPurpose.MUTATE, allow_long_names=True
+        )  # LB-153: cleanup path
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904

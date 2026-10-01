@@ -4,6 +4,28 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Breaking changes
+- **A config needs a `name:` to change data.** `deploy`, `generate`,
+  `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
+  `financial`, `config upgrade` and `validate` refuse a nameless config and
+  offer a name to add. A nameless config no longer gets a name written to
+  `.lakebench/state.json`; that file is only read, so `destroy`, `stop`,
+  `status`, `logs`, `report` and `info` still reach a deployment v1.6 made
+  from the directory. Without that file, `destroy`, `stop` and `admin`
+  refuse a nameless config.
+- **Removed config keys are refused by the commands that change data**
+  (the list above, except `config upgrade`), with what to do instead.
+  `destroy`, `stop`, `status`, `logs`, `report`, `info`, `config show`,
+  `config upgrade` and `admin` still load such a config and list the
+  dropped keys in one "Upgrade notes" block on stderr. An old
+  `datagen.file_size` is treated the same way.
+
+### Changed
+- Read-only commands create no files: `validate` no longer opens a journal,
+  and `report` and `results` no longer create `lakebench-output/runs/`.
+
 ## [1.6.0] - 2026-09-30
 
 Lakebench 1.6 makes the workload a first-class part of an experiment and

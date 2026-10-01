@@ -151,11 +151,16 @@ def test_processing_key(tmp_path):
 
 
 def test_scratch_create_storage_class_is_dropped_with_warning(tmp_path):
-    cfg = _load_warns(
-        tmp_path,
-        {"name": "t", "platform": {"storage": {"scratch": {"create_storage_class": False}}}},
-    )
+    # Dropped with a warning for the read and teardown commands; refused by
+    # the commands that change data (CFG-1, LoadPurpose).
+    from lakebench.config.loader import LoadPurpose
+
+    data = {"name": "t", "platform": {"storage": {"scratch": {"create_storage_class": False}}}}
+    with pytest.warns(DeprecationWarning):
+        cfg = load_config(_write(tmp_path, data), purpose=LoadPurpose.TEARDOWN)
     assert not hasattr(cfg.platform.storage.scratch, "create_storage_class")
+    with pytest.raises(ConfigValidationError, match="'create_storage_class' was removed"):
+        load_config(_write(tmp_path, data))
 
 
 def test_flat_top_level_fields_still_promote(tmp_path):

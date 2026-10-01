@@ -37,6 +37,7 @@ from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
+    LoadPurpose,
     load_config,
 )
 from lakebench.modules.pipeline_engines.spark.operator_scratch import (
@@ -90,7 +91,7 @@ def _load_cfg(config_file: Path | None, file_option: Path | None):
     """
     path = resolve_config_path(config_file, file_option)
     try:
-        return load_config(path, allow_long_names=True)
+        return load_config(path, purpose=LoadPurpose.TEARDOWN)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1) from e

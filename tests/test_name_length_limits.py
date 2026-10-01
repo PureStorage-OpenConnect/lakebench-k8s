@@ -9,7 +9,7 @@ import yaml
 from pydantic import ValidationError
 
 from lakebench.config import load_config
-from lakebench.config.loader import ConfigValidationError
+from lakebench.config.loader import ConfigValidationError, LoadPurpose
 from lakebench.config.schema import (
     LakebenchConfig,
     derived_name_violations,
@@ -149,7 +149,13 @@ class TestLoader:
         cfg_path = self._write(tmp_path, "ov-perf-c360-continuous-s10")
         CliRunner().invoke(app, [*argv, str(cfg_path)])
         assert seen, f"{argv} never loaded the config"
-        assert seen[0].get("allow_long_names") is True
+        # TEARDOWN and READ skip the check; clean and stop keep MUTATE and
+        # pass allow_long_names (config/loader.py load_config).
+        kwargs = seen[0]
+        assert kwargs.get("allow_long_names") is True or kwargs.get("purpose") in (
+            LoadPurpose.TEARDOWN,
+            LoadPurpose.READ,
+        )
 
     @pytest.mark.parametrize(
         ("module", "argv"),
@@ -177,6 +183,7 @@ class TestLoader:
         monkeypatch.setattr(importlib.import_module(module), "load_config", spy)
         CliRunner().invoke(app, [*argv, str(self._write(tmp_path, "x"))])
         assert seen and not seen[0].get("allow_long_names")
+        assert seen[0].get("purpose") in (LoadPurpose.MUTATE, LoadPurpose.RUN)
 
 
 _PINNED = sorted(

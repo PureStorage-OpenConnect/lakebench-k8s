@@ -237,11 +237,16 @@ platform:
             load_config(config_path)
 
     def test_load_minimal_config_auto_names(self, tmp_path):
-        """Config with only version gets auto-generated name (v1.3)."""
+        """A nameless config loads for read-only use under a suggested name,
+        and the commands that change data refuse it (SAF-2)."""
+        from lakebench.config.loader import ConfigNameRequired, LoadPurpose
+
         config_path = tmp_path / "config.yaml"
         config_path.write_text("version: 1")
-        cfg = load_config(config_path)
+        cfg = load_config(config_path, purpose=LoadPurpose.READ)
         assert cfg.name.startswith("lb-")
+        with pytest.raises(ConfigNameRequired):
+            load_config(config_path)
 
     def test_save_and_load_roundtrip(self, tmp_path):
         """Test that saving and loading preserves config."""

@@ -16,18 +16,42 @@ lakebench run my-config.yaml
 
 ## Minimum Viable Config (v1.3)
 
-The smallest working config is 4 lines:
+The smallest working config is 5 lines:
 
 ```yaml
+name: my-lakehouse
 endpoint: http://your-s3-endpoint:80
 access_key: YOUR_KEY
 secret_key: YOUR_SECRET
 scale: 10
 ```
 
-Name is auto-generated (`lb-YYYYMMDD-HHMMSS`) and persisted to
-`.lakebench/state.json` for stability across runs. Recipe defaults to
-`hive-iceberg-spark-trino`.
+Recipe defaults to `hive-iceberg-spark-trino`.
+
+The name is required by every command that changes data: `deploy`,
+`generate`, `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
+`financial`, `config upgrade` and `validate` refuse a config without one,
+and the error offers a name to add. Before v1.7 a nameless config got a
+time-based name (`lb-YYYYMMDD-HHMMSS`) written to `.lakebench/state.json`
+in the config's directory, which every nameless config in that directory
+shared. That file is now only read: `destroy`, `stop`, `status`, `logs`,
+`report`, `info` and `config show` load a nameless config under the name it records,
+so a deployment made by v1.6 can still be inspected and torn down. Without
+the file, `destroy`, `stop` and `admin` refuse a nameless config, because no
+deployment can be its own, and the read-only commands use a suggested name,
+`lb-<user>-<6 hex>`, which the error for the other commands also offers. No
+command writes `.lakebench/state.json` any more, and the read-only commands
+create no files.
+
+### Removed keys
+
+A key that an earlier release accepted and that now does nothing (for
+example `images.pull_secrets` or `platform.storage.scratch.create_storage_class`)
+is refused by the commands that change data (the list above, except
+`config upgrade`), with what to do instead. `destroy`, `stop`, `status`,
+`logs`, `report`, `info`, `config show`, `config upgrade` and `admin` drop
+it and print an "Upgrade notes" block on stderr, so an old config can still
+be inspected, stopped, torn down and converted.
 
 ### Flat Fields
 
@@ -41,7 +65,7 @@ are easier to write and read than the full nested structure:
 | `secret_key` | `platform.storage.s3.secret_key` | (required) |
 | `secret_ref` | `platform.storage.s3.secret_ref` | (none) |
 | `scale` | `workload.datagen.scale` | 10 |
-| `name` | root `name` | auto-generated |
+| `name` | root `name` | (required to change data) |
 | `recipe` | root `recipe` | default (hive-iceberg-spark-trino) |
 | `namespace` | `platform.kubernetes.namespace` | same as name |
 | `mode` | `architecture.pipeline.mode` | batch |
@@ -56,6 +80,7 @@ precedence and a warning is printed.
 Use `${VAR}` or `${VAR:-default}` in any YAML value:
 
 ```yaml
+name: my-lakehouse
 endpoint: ${S3_ENDPOINT}
 access_key: ${S3_ACCESS_KEY}
 secret_key: ${S3_SECRET_KEY}
