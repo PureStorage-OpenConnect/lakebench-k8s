@@ -445,16 +445,23 @@ def test_category1_failure_is_reported(ns_goes, status):
         assert ("lakebench.deployment/state-schema" in anns) is ns_goes
 
 
-def test_category1_skips_observability_entries_when_off():
-    """No PodMonitor or Pushgateway call for a deployment that never had them (no 403)."""
+def test_category1_observability_entries_tolerate_403_when_off():
+    """Observability off now: still tried (it may have been on at deploy), a 403 is no failure."""
     from lakebench.deploy.destroy import _category1_step
 
     with recording(NS) as rec:
         rec.add_namespace(NS)
+        rec.add("podmonitors", {"metadata": {"name": "lakebench-spark-driver"}}, namespace=NS)
+        rec.fail(verb="delete", kind="podmonitors", status=403)
         result = _category1_step(NS, NS, ns_goes=False)
-        assert result.status.value == "success"
-        kinds = {c.kind for c in rec.calls if c.verb == "delete"}
-        assert kinds == {"serviceaccounts"}
+        assert result.status.value == "success", result.message
+        rec.assert_recorded(
+            verb="delete", kind="persistentvolumeclaims", name="lakebench-pushgateway"
+        )
+        # With observability on, the same 403 is a real failure.
+        result = _category1_step(NS, NS, ns_goes=False, conditions=frozenset({"observability"}))
+        assert result.status.value == "failed"
+        assert "podmonitors/lakebench-spark-driver" in result.message
 
 
 def test_category1_annotation_patch_is_conditional():

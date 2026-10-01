@@ -217,9 +217,11 @@ The destroy engine follows a specific sequence to ensure clean removal:
     namespace until they are removed.
 13. **Namespace** -- Removes the namespace from the Spark Operator watch list,
     then, still inside the cluster lease, waits up to 120 s until no running
-    operator pod lists it, deletes it (only when `create_namespace` is true),
-    and waits until it is NotFound before reporting it deleted. If an
-    operator pod still lists it, the namespace is kept and destroy exits 1.
+    operator pod and no operator Deployment template lists it (a stale pod
+    that nothing is replacing gets one more restart of the shared operator),
+    deletes it (only when `create_namespace` is true), and waits until it is
+    NotFound before reporting it deleted. If something still lists it, the
+    namespace is kept and destroy exits 1.
 
 Destroy never deletes the scratch StorageClass. It is shared, cluster-scoped
 infrastructure that other deployments on the same cluster use.
