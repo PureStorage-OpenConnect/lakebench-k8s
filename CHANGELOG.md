@@ -211,6 +211,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Removed
 - `lbrun.py`, the run-from-a-checkout wrapper. Use
   `PYTHONPATH=src python -m lakebench` instead.
+- **Exit codes follow one table (CLI-1, in progress).** `lakebench` now has a
+  single exit-code enum, `lakebench.exit_codes.ExitCode`, importable without
+  loading the CLI, and the table in `docs/exit-codes.md` is generated from it.
+  A top-level handler maps errors to the table: a confirmation prompt with no
+  answer (`deploy` and `generate` off a terminal without `--yes`, end of
+  input, or a declined `abort` prompt) now exits 5 instead of 1; an error
+  Lakebench does not classify prints one `ERROR` line instead of a traceback
+  and exits 1 (`LAKEBENCH_DEBUG=1` prints the traceback). Commands that still
+  exit 3 for a declined prompt, 4 for a namespace still terminating and 5 for
+  a datagen timeout keep those codes until they are converted; the table
+  lists them.
 
 ## [1.6.0] - 2026-09-30
 
