@@ -199,12 +199,28 @@ class ScrubError(ValueError):
         super().__init__(_redact_seeds(message))
 
 
-def _redact_seeds(text: str) -> str:
-    """*text* with every digit run equal to a held-out seed replaced."""
+def _protected_role(n: int) -> str | None:
+    """The live held-out role of *n* (``evaluation`` or ``robustness``), or
+    None. Checked against the salted hashes (``datagen_seed.heldout_role``),
+    never a plaintext list; a spent seed is retired and public. Raises when
+    the held-out record cannot be read, so callers fail closed."""
     from lakebench.config import datagen_seed
 
-    protected = datagen_seed.protected_seeds()
-    return _DIGITS.sub(lambda m: "<seed>" if int(m.group(0)) in protected else m.group(0), text)
+    role = datagen_seed.heldout_role(n)
+    if role is None or datagen_seed.is_spent(n):
+        return None
+    return role
+
+
+def _redact_seeds(text: str) -> str:
+    """*text* with every digit run equal to a held-out seed replaced. When
+    the held-out record cannot be read, every digit run is replaced."""
+    try:
+        return _DIGITS.sub(
+            lambda m: "<seed>" if _protected_role(int(m.group(0))) else m.group(0), text
+        )
+    except Exception:  # noqa: BLE001 -- fail closed: no number survives
+        return _DIGITS.sub("<n>", text)
 
 
 def norm_key(key: str | None) -> str:
@@ -667,14 +683,17 @@ def _numbers(obj: Any, path: str = "") -> Iterator[tuple[str, int]]:
 
 def _seed_problems(record: Any) -> list[str]:
     """Paths holding a seed the AML protocol protects. Never the value."""
-    from lakebench.config import datagen_seed
-
     # Only the live held-out roles refuse. Spent seeds are retired, and the
-    # calibration seed is the public development seed 43.
-    protected = datagen_seed.protected_seeds()
-    hits = [
-        f"{path} holds the {protected[n]} seed" for path, n in _numbers(record) if n in protected
-    ]
+    # calibration seed is the public development seed 43. An unreadable
+    # held-out record refuses the whole record (fail closed).
+    hits = []
+    try:
+        for path, n in _numbers(record):
+            role = _protected_role(n)
+            if role:
+                hits.append(f"{path} holds the {role} seed")
+    except Exception:  # noqa: BLE001
+        return ["the held-out seed record cannot be read; refusing every record"]
     return sorted(set(hits))
 
 
