@@ -14,6 +14,7 @@ from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
+    LoadPurpose,
     load_config,
 )
 from lakebench.journal import CommandName, EventType
@@ -104,7 +105,7 @@ def generate(
 
     # Load configuration
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904

@@ -16,6 +16,7 @@ from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
+    LoadPurpose,
     load_config,
 )
 from lakebench.journal import CommandName, EventType
@@ -235,7 +236,7 @@ def destroy(
     try:
         # A namespace too long to finish deploying (LB-153) still has to be
         # destroyable, so the derived-name length check is skipped here.
-        cfg = load_config(config_file, allow_long_names=True)
+        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904

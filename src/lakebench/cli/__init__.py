@@ -41,6 +41,7 @@ from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
+    LoadPurpose,
     generate_example_config_yaml,
     load_config,
     parse_spark_memory,
@@ -371,7 +372,8 @@ def init(
     """Generate a starter configuration file.
 
     Quick mode (default): asks 4 questions -- endpoint, access key, secret
-    key, scale. Produces a minimal flat config. Name is auto-generated.
+    key, scale. Writes the name from --name (default my-lakehouse); every
+    command that changes data needs one.
 
     Advanced mode (--advanced): full 5-step wizard with recipe selection,
     mode, and detailed review.
@@ -678,9 +680,7 @@ def validate(
     config_file = resolve_config_path(config_file, file_option)
     console.print(Panel(f"Validating: [bold]{config_file}[/bold]", expand=False))
 
-    # Journal (opened early so we can record config_loaded)
-    j = journal_open(config_file, config_name="")
-    j.begin_command(CommandName.VALIDATE, {"verbose": verbose})
+    # validate is read-only: it opens no journal and writes no file (SAF-2 e).
 
     # Track validation results
     checks_passed = 0
@@ -725,7 +725,10 @@ def validate(
     # 1. Load and validate config
     _section_start("Configuration")
     try:
-        cfg = load_config(config_file)
+        # validate answers "will deploy and run accept this config", so it
+        # loads as they do (MUTATE): a nameless config or a removed key fails
+        # here, not at deploy. Loading writes nothing either way.
+        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
         _check_ok("Config syntax valid")
         if verbose:
             _check_ok(f"Name: {cfg.name}, Namespace: {cfg.get_namespace()}")
@@ -1142,11 +1145,6 @@ def validate(
     if checks_failed == 0:
         if checks_warned > 0:
             warn_s = "s" if checks_warned > 1 else ""
-            _journal_safe(
-                j.end_command,
-                success=True,
-                message=f"{checks_passed} passed, {checks_warned} warning{warn_s}",
-            )
             console.print(
                 Panel(
                     f"[green]{checks_passed} passed[/green], "
@@ -1157,7 +1155,6 @@ def validate(
                 )
             )
         else:
-            _journal_safe(j.end_command, success=True, message=f"All {checks_passed} checks passed")
             console.print(
                 Panel(
                     f"[green]All {checks_passed} checks passed[/green]\n"
@@ -1167,9 +1164,6 @@ def validate(
                 )
             )
     else:
-        _journal_safe(
-            j.end_command, success=False, message=f"{checks_passed} passed, {checks_failed} failed"
-        )
         console.print(
             Panel(
                 f"[green]{checks_passed} passed[/green], [red]{checks_failed} failed[/red]\n"
@@ -1231,7 +1225,7 @@ def status(
         config_file = resolve_config_path(config_file, file_option)
     if config_file:
         try:
-            cfg = load_config(config_file, allow_long_names=True)  # LB-153
+            cfg = load_config(config_file, purpose=LoadPurpose.READ)  # LB-153
             ns = ns or cfg.get_namespace()
         except ConfigError as e:
             print_error(f"Config error: {e}")
@@ -1384,7 +1378,7 @@ def stop(
 
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file, allow_long_names=True)  # LB-153
+        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)  # LB-153; stops only
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -1536,7 +1530,7 @@ def info(
     """
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.READ)
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -1822,7 +1816,7 @@ def report(
     deployment_name: str | None = None
     if config_file is not None:
         try:
-            deployment_name = load_config(config_file).name
+            deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
         except ConfigError as e:
             print_error(f"Config error: {e}")
             raise typer.Exit(1)  # noqa: B904
@@ -1935,7 +1929,8 @@ def report(
 
     _print_report_summary(metrics)
 
-    delivered = storage.run_dir(metrics.run_id) / "report.html"
+    # Not run_dir(): that creates the directory, and report only reads here.
+    delivered = storage.metrics_dir / f"run-{metrics.run_id}" / "report.html"
     if delivered.exists():
         console.print(f"[dim]Delivered report: {delivered}[/dim]")
         console.print(
@@ -2016,7 +2011,7 @@ def results(
     deployment_name: str | None = None
     if config_file is not None:
         try:
-            deployment_name = load_config(config_file).name
+            deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
         except ConfigError as e:
             print_error(f"Config error: {e}")
             raise typer.Exit(1)  # noqa: B904
@@ -2190,7 +2185,7 @@ def logs(
     config_file = resolve_config_path(config_file, file_option)
 
     try:
-        cfg = load_config(config_file, allow_long_names=True)  # LB-153
+        cfg = load_config(config_file, purpose=LoadPurpose.READ)  # LB-153
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904

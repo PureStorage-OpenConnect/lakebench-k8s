@@ -19,7 +19,7 @@ from rich.table import Table
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
 from lakebench.cli._helpers import EXIT_DECLINED
-from lakebench.config import load_config
+from lakebench.config import LoadPurpose, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -110,10 +110,13 @@ def compare(
         )
         raise typer.Exit(2)
 
-    # Load both configs
+    # Load both configs. compare still deploys, runs and destroys each config,
+    # so it loads them as MUTATE: a nameless config is refused here rather
+    # than reaching the destroy step under a resolved name. LoadPurpose.COMPARE
+    # is for the read-only compare over stored records (EVD-8).
     try:
-        cfg_a = load_config(config_a)
-        cfg_b = load_config(config_b)
+        cfg_a = load_config(config_a, purpose=LoadPurpose.MUTATE)
+        cfg_b = load_config(config_b, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         console.print(f"[red]Config error: {e}[/red]")
         raise typer.Exit(1) from None
@@ -376,11 +379,11 @@ def _run_single(
 
 def _load_latest_metrics(config_path: Path) -> dict[str, Any]:
     """Find and load the most recent metrics.json for a config."""
-    from lakebench.config import load_config
+    from lakebench.config import LoadPurpose, load_config
     from lakebench.metrics.storage import MetricsStorage
 
     try:
-        cfg = load_config(config_path)
+        cfg = load_config(config_path, purpose=LoadPurpose.MUTATE)
         storage = MetricsStorage()
         # list_runs() is already newest-first. Iterating it in reverse would
         # return the config's *first ever* run rather than the one just

@@ -179,8 +179,10 @@ class TestFlatConfigIntegration:
         assert config.architecture.catalog.type.value == "polaris"
         assert config.architecture.query_engine.type.value == "trino"
 
-    def test_auto_generated_name(self, tmp_path):
-        """Config without name field gets auto-generated lb-YYYYMMDD-HHMMSS name."""
+    def test_nameless_config_refused_for_mutating_load(self, tmp_path):
+        """A config without a name cannot change data (SAF-2); v1.6 auto-named it."""
+        from lakebench.config.loader import ConfigNameRequired
+
         cfg_file = tmp_path / "lakebench.yaml"
         cfg_file.write_text(
             textwrap.dedent("""\
@@ -189,14 +191,16 @@ class TestFlatConfigIntegration:
             secret_key: minioadmin
             """)
         )
-        config = load_config(cfg_file)
-        assert config.name.startswith("lb-")
-        assert len(config.name) == 18  # lb-YYYYMMDD-HHMMSS
+        with pytest.raises(ConfigNameRequired, match="cannot change data"):
+            load_config(cfg_file)
+        assert not (tmp_path / ".lakebench").exists()
 
-    def test_auto_name_persists_to_state_json(self, tmp_path):
-        """Auto-generated name is persisted to .lakebench/state.json."""
+    def test_nameless_read_reuses_v16_state_name_without_writing(self, tmp_path):
+        """A read-only load takes the v1.6 state.json name and writes nothing."""
         import json
 
+        from lakebench.config.loader import LoadPurpose
+
         cfg_file = tmp_path / "lakebench.yaml"
         cfg_file.write_text(
             textwrap.dedent("""\
@@ -205,15 +209,14 @@ class TestFlatConfigIntegration:
             secret_key: minioadmin
             """)
         )
-        config1 = load_config(cfg_file)
-        state_file = tmp_path / ".lakebench" / "state.json"
-        assert state_file.exists()
-        state = json.loads(state_file.read_text())
-        assert state["name"] == config1.name
+        config = load_config(cfg_file, purpose=LoadPurpose.READ)
+        assert config.name.startswith("lb-")
+        assert not (tmp_path / ".lakebench").exists()
 
-        # Second load reuses the same name
-        config2 = load_config(cfg_file)
-        assert config2.name == config1.name
+        state_file = tmp_path / ".lakebench" / "state.json"
+        state_file.parent.mkdir()
+        state_file.write_text(json.dumps({"name": "lb-20260101-120000", "created": "x"}))
+        assert load_config(cfg_file, purpose=LoadPurpose.READ).name == "lb-20260101-120000"
 
     def test_explicit_name_overrides_auto(self, tmp_path):
         """Explicit name in config takes precedence over state.json."""
