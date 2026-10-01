@@ -158,13 +158,13 @@ def _check_s3_config(cfg) -> PrereqResult:
             message="S3 endpoint not configured",
             hint="Set 'endpoint' in config or platform.storage.s3.endpoint",
         )
-    has_creds = bool(s3.access_key and s3.secret_key) or bool(getattr(s3, "secret_ref", None))
+    has_creds = bool(s3.access_key and s3.secret_key)
     if not has_creds:
         return PrereqResult(
             name="s3-config",
             passed=False,
             message="S3 credentials not configured",
-            hint="Set access_key/secret_key or secret_ref in config",
+            hint="Set access_key and secret_key in config",
         )
     return PrereqResult(
         name="s3-config",

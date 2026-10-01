@@ -1792,7 +1792,10 @@ class TestStreamingReportGeneration:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Streaming Pipeline" in html
+        # LB-191: the mode is continuous; the section never says streaming.
+        assert "Continuous Pipeline" in html
+        assert "Streaming Pipeline" not in html
+        assert "streaming jobs" not in html
         assert "lakebench-bronze-ingest" in html
         assert "lakebench-silver-stream" in html
         assert "900,000" in html
@@ -1827,7 +1830,7 @@ class TestStreamingReportGeneration:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Streaming Pipeline" not in html
+        assert "Continuous Pipeline" not in html
 
     def test_report_streaming_freshness_column(self, tmp_path):
         """Streaming table should show Freshness column when data exists."""

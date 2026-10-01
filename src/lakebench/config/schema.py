@@ -269,6 +269,31 @@ class ReportFormat(str, Enum):
 # =============================================================================
 
 
+# The Hive the Stackable HiveCluster runs (its spec.image.productVersion).
+# Fixed on purpose: Stackable recommends 3.1.3, and Hive 4 breaks Iceberg
+# (get_table TApplicationException) and Trino ANALYZE. The template renders
+# this constant and the deploy result and run provenance record it, so the
+# evidence names the version that ran. images.hive does not select it (LB-189).
+STACKABLE_HIVE_VERSION = "3.1.3"
+
+
+def _hive_version_of(image: str) -> str:
+    """The Hive version an ``images.hive`` value names.
+
+    Accepts an image reference (``apache/hive:3.1.3``) or a bare
+    productVersion (``3.1.3``). A digest or an untagged image names no
+    version and returns the value unchanged, so it never matches.
+    """
+    if "@" in image:
+        return image
+    last = image.rsplit("/", 1)[-1]
+    if ":" in last:
+        tag = last.rsplit(":", 1)[1]
+        # Stackable's own image tag: <hive version>-stackable<sdp version>.
+        return tag.split("-stackable", 1)[0]
+    return image
+
+
 class ImagesConfig(ConfigModel):
     """Container image configuration for all Lakebench components."""
 
@@ -359,6 +384,23 @@ class ImagesConfig(ConfigModel):
         ),
     }
 
+    @model_validator(mode="after")
+    def _warn_hive_not_deployed(self) -> ImagesConfig:
+        # LB-189: the HiveCluster always runs STACKABLE_HIVE_VERSION. A
+        # different images.hive used to be recorded as the Hive that ran
+        # while 3.1.3 was deployed; now it is ignored, and the user is told.
+        version = _hive_version_of(self.hive)
+        if version == STACKABLE_HIVE_VERSION:
+            return self
+        msg = (
+            f"images.hive '{self.hive}' has no effect: the Stackable HiveCluster always "
+            f"runs Hive {STACKABLE_HIVE_VERSION} (Hive 4 breaks Iceberg and Trino ANALYZE), "
+            f"and run provenance records {STACKABLE_HIVE_VERSION}. Delete images.hive "
+            f"from the config or set it to apache/hive:{STACKABLE_HIVE_VERSION}."
+        )
+        emit_note(msg, kind="dead")
+        return self
+
     @field_validator("spark")
     @classmethod
     def _validate_spark_image(cls, v: str) -> str:
@@ -405,10 +447,13 @@ class S3Config(ConfigModel):
     region: str = "us-east-1"
     path_style: bool = True  # Required for FlashBlade, MinIO
 
-    # Credentials - either inline or reference to existing secret
+    # Credentials. Only the inline keys are used: deploy writes them into the
+    # lakebench-s3-credentials Secret and the CLI's S3 client reads them.
     access_key: str = ""
     secret_key: str = ""
-    secret_ref: str = ""  # Name of existing K8s secret
+    # Not consumed (LB-190): no deployer reads an existing Secret. Refused
+    # without inline keys, which would deploy empty credentials.
+    secret_ref: str = ""
 
     # TLS / HTTPS support
     ca_cert: str = Field(
@@ -425,14 +470,36 @@ class S3Config(ConfigModel):
     buckets: S3BucketsConfig = Field(default_factory=S3BucketsConfig)
     create_buckets: bool = True
 
+    _dead_fields: ClassVar[dict[str, str]] = {
+        "secret_ref": (
+            "Deploy writes the S3 Secret from access_key/secret_key and never reads "
+            "an existing Secret."
+        ),
+    }
+
     @model_validator(mode="after")
-    def validate_credentials(self) -> S3Config:
-        """Ensure either inline credentials or secret_ref is provided."""
+    def validate_credentials(self, info: ValidationInfo) -> S3Config:
+        """Refuse secret_ref without inline keys (LB-190).
+
+        Missing credentials alone are left to deploy's preflight so that
+        ``info`` and ``validate`` still load a config without keys. A
+        secret_ref with no inline keys is refused here: deploy would
+        render the credentials Secret with empty keys. Teardown and
+        inspection commands (destroy, status, clean load with
+        ``allow_long_names``) still load it, so destroy can load a
+        deployment made before this refusal (its S3 steps still have no
+        keys, as before); the dead-field warning still fires.
+        """
         has_inline = bool(self.access_key and self.secret_key)
-        has_ref = bool(self.secret_ref)
-        if not has_inline and not has_ref:
-            # Defer validation - will be checked at runtime
-            pass
+        teardown = bool(info.context and info.context.get("allow_long_names"))
+        if self.secret_ref and not has_inline and not teardown:
+            raise ValueError(
+                f"platform.storage.s3.secret_ref ('{self.secret_ref}') is not supported: "
+                "lakebench never reads an existing Secret, so this config would deploy "
+                "empty S3 credentials. Set access_key and secret_key instead; use "
+                '${VAR} substitution (for example access_key: "${S3_ACCESS_KEY}") '
+                "to keep the keys out of the file."
+            )
         return self
 
 
@@ -585,6 +652,14 @@ class HiveThriftConfig(ConfigModel):
     max_threads: int = Field(default=50, ge=1)
     client_timeout: str = "300s"
 
+    _dead_fields: ClassVar[dict[str, str]] = {
+        "min_threads": ("The HiveCluster template sets hive.metastore.server.min.threads to 10."),
+        "max_threads": ("The HiveCluster template sets hive.metastore.server.max.threads to 50."),
+        "client_timeout": (
+            "The HiveCluster template sets hive.metastore.client.socket.timeout to 300s."
+        ),
+    }
+
 
 class HiveResourcesConfig(ConfigModel):
     """Hive Metastore resource configuration."""
@@ -639,6 +714,10 @@ class PolarisConfig(ConfigModel):
     port: int = Field(default=8181, ge=1, le=65535)
     client_secret: str = ""
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
+
+    _dead_fields: ClassVar[dict[str, str]] = {
+        "version": "The Polaris that runs, and is recorded, is the tag of images.polaris.",
+    }
 
 
 class UnityConfig(ConfigModel):
@@ -2129,6 +2208,10 @@ class ObservabilityConfig(ConfigModel):
             "Every run writes report.html into its run directory under "
             "lakebench-output/runs; 'lakebench report --render' writes a "
             "fresh copy to lakebench-output/reports/ without overwriting."
+        ),
+        "storage_class": (
+            "The Prometheus volume claim is created without a storageClassName, "
+            "so it uses the cluster default StorageClass."
         ),
     }
 

@@ -963,7 +963,7 @@ A table with one row per Spark job (bronze-verify, silver-build,
 gold-finalize). Columns: job name, status, elapsed time, input/output data,
 throughput, executor count, cores, and total CPU seconds.
 
-### Streaming Pipeline (continuous only)
+### Continuous Pipeline (continuous only)
 
 A table with one row per stream job. Columns: job type, status, rows
 processed, throughput (rows/s), freshness, executor count, and compute

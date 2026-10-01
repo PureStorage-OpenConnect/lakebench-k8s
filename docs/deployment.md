@@ -33,7 +33,7 @@ The deployment engine follows this fixed sequence:
    namespace is in `Terminating` state from a previous destroy, the engine waits
    for it to finish before re-creating.
 2. **Secrets** -- Creates S3 credential secrets and PostgreSQL credential secrets
-   from the config values (or references an existing secret via `secret_ref`).
+   from the config's `access_key` and `secret_key` (`secret_ref` is not supported).
    When `s3.ca_cert` is set, also creates a CA certificate secret for HTTPS
    endpoints (used by all components for TLS verification).
 3. **S3 buckets** -- Creates the bronze, silver and gold buckets, or adopts

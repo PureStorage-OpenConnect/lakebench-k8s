@@ -80,7 +80,7 @@ workload.datagen.scale"). Write the nested key in new configs:
 | `endpoint` | `platform.storage.s3.endpoint` | (required) |
 | `access_key` | `platform.storage.s3.access_key` | (required) |
 | `secret_key` | `platform.storage.s3.secret_key` | (required) |
-| `secret_ref` | `platform.storage.s3.secret_ref` | (none) |
+| `secret_ref` | `platform.storage.s3.secret_ref` | (none; not supported, see below) |
 | `scale` | `workload.datagen.scale` | 10 |
 | `name` | root `name` | (required to change data) |
 | `recipe` | root `recipe` | default (hive-iceberg-spark-trino) |
@@ -232,10 +232,9 @@ platform:
       region: us-east-1
       path_style: true                # true for FlashBlade/MinIO, false for AWS
 
-      # Credentials: provide inline OR reference an existing K8s Secret.
+      # Credentials (use ${VAR} substitution to keep them out of the file).
       access_key: ""
       secret_key: ""
-      # secret_ref: "my-existing-secret"
 
       # TLS / HTTPS settings (for HTTPS S3 endpoints).
       # ca_cert: "/path/to/ca-bundle.pem"  # PEM CA cert for self-signed endpoints
@@ -459,7 +458,7 @@ registries or custom builds.
 | `images.datagen` | string | `docker.io/sillidata/lb-datagen:1.6.0` | Data generator image. Pinned by digest `sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a` for provenance. Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`); this build cuts datagen pod memory (LB-204). |
 | `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
-| `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
+| `images.hive` | string | `apache/hive:3.1.3` | Has no effect: the Stackable HiveCluster always runs Hive 3.1.3, and another version warns at load. |
 | `images.polaris` | string | `apache/polaris:1.6.0` | Apache Polaris REST catalog image. |
 | `images.trino` | string | `trinodb/trino:483` | Trino query engine image. |
 | `images.pull_policy` | enum | `Always` | `Always`, `IfNotPresent`, or `Never`. |
@@ -479,9 +478,9 @@ registries or custom builds.
 | `platform.storage.s3.endpoint` | string | **(required)** | S3-compatible endpoint URL (e.g., `http://minio:9000` or `https://s3.example.com:443`). HTTPS endpoints with self-signed CAs require `ca_cert`. |
 | `platform.storage.s3.region` | string | `us-east-1` | AWS region. Used by boto3 for signing. |
 | `platform.storage.s3.path_style` | bool | `true` | Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3). |
-| `platform.storage.s3.access_key` | string | `""` | Inline S3 access key. Provide this OR `secret_ref`. |
-| `platform.storage.s3.secret_key` | string | `""` | Inline S3 secret key. Provide this OR `secret_ref`. |
-| `platform.storage.s3.secret_ref` | string | `""` | Name of an existing K8s Secret containing S3 credentials. Alternative to inline keys. |
+| `platform.storage.s3.access_key` | string | `""` | S3 access key. Required for deploy. |
+| `platform.storage.s3.secret_key` | string | `""` | S3 secret key. Required for deploy. |
+| `platform.storage.s3.secret_ref` | string | `""` | Not supported: refused without inline keys, warns that it has no effect with them. |
 | `platform.storage.s3.buckets.bronze` | string | `<name>-bronze` | Bronze layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.buckets.silver` | string | `<name>-silver` | Silver layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.buckets.gold` | string | `<name>-gold` | Gold layer S3 bucket name. Unset, it is derived from the deployment `name`. |
@@ -538,13 +537,13 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.catalog.hive.operator.install` | bool | `false` | Auto-install Stackable operators via Helm. Requires cluster-admin. |
 | `architecture.catalog.hive.operator.namespace` | string | `stackable` | Namespace for Stackable operators. |
 | `architecture.catalog.hive.operator.version` | string | `25.7.0` | Stackable chart version. |
-| `architecture.catalog.hive.thrift.min_threads` | int | `10` | Hive Metastore thrift server minimum threads. |
-| `architecture.catalog.hive.thrift.max_threads` | int | `50` | Hive Metastore thrift server maximum threads. |
-| `architecture.catalog.hive.thrift.client_timeout` | string | `300s` | Hive Metastore client timeout. |
+| `architecture.catalog.hive.thrift.min_threads` | int | `10` | **No effect** (the template hardcodes 10); a non-default value warns. |
+| `architecture.catalog.hive.thrift.max_threads` | int | `50` | **No effect** (the template hardcodes 50); a non-default value warns. |
+| `architecture.catalog.hive.thrift.client_timeout` | string | `300s` | **No effect** (the template hardcodes 300s); a non-default value warns. |
 | `architecture.catalog.hive.resources.cpu_min` | string | `500m` | Hive Metastore minimum CPU request. |
 | `architecture.catalog.hive.resources.cpu_max` | string | `2` | Hive Metastore CPU limit. |
 | `architecture.catalog.hive.resources.memory` | string | `4Gi` | Hive Metastore memory. |
-| `architecture.catalog.polaris.version` | string | `1.6.0` | Polaris version. Minimum supported 1.3.0-incubating. |
+| `architecture.catalog.polaris.version` | string | `1.6.0` | **No effect**: the Polaris that runs is the tag of `images.polaris`; a non-default value warns. |
 | `architecture.catalog.polaris.port` | int | `8181` | Polaris REST API port. |
 | `architecture.catalog.polaris.resources.cpu` | string | `1` | Polaris CPU request/limit. |
 | `architecture.catalog.polaris.resources.memory` | string | `2Gi` | Polaris memory. |
@@ -675,7 +674,7 @@ added at runtime.
 | `observability.dashboards_enabled` | bool | `true` | Deploy Grafana dashboards. |
 | `observability.retention` | string | `7d` | Prometheus data retention period. |
 | `observability.storage` | string | `10Gi` | Prometheus PVC size. |
-| `observability.storage_class` | string | `""` | Prometheus PVC StorageClass. Empty = cluster default. |
+| `observability.storage_class` | string | `""` | **No effect**: the Prometheus PVC always uses the cluster default StorageClass; a non-default value warns. |
 | `observability.chart_version` | string | `87.19.2` | `kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit -- there is no separate Prometheus/Grafana version field. Pinned as of 2026-07-27; the deploy previously carried no `--version` flag and silently tracked whatever the Helm repo served at install time. |
 
 ### Observability -- Reports
