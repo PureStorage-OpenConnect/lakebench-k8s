@@ -162,11 +162,14 @@ class ConfigNameRequired(ConfigValidationError):
     """A nameless config was loaded by a command that may not use it (SAF-2).
 
     The commands that change data refuse every nameless config. The teardown
-    commands refuse one that has only a suggested name: v1.7 never deploys a
-    nameless config, so a deployment under that name was made by some other
-    config file. They also refuse a v1.6 state name when other nameless
-    configs share the directory (``siblings``; None when it could not be
-    listed), because v1.6 gave all of them that one name.
+    and read commands refuse one that has only a suggested name (v1.7 never
+    deploys a nameless config, so a deployment under that name was made by
+    some other config file) and one whose name comes from the v1.6
+    ``.lakebench/state.json``: v1.6 gave every nameless config in the
+    directory that name, so nothing ties it to this one (SPEC SAF-2: a v1.6
+    directory is refused without ``--name``). ``siblings`` lists the other
+    nameless configs found there, for the message (None when the directory
+    could not be listed).
     """
 
     def __init__(
@@ -186,11 +189,12 @@ class ConfigNameRequired(ConfigValidationError):
         else:
             others = "this directory also holds nameless " + ", ".join(p.name for p in siblings)
         if teardown and resolution.source == "legacy-state":
+            also = f", and {others}" if shared else ""
             msg = (
-                f"config has no name, and {others}; v1.6 gave every nameless config "
-                f"here the name '{name}' (read from {resolution.legacy_state_path}), so "
-                "it cannot tell which one made that deployment. Fix: add "
-                f"'name: {name}' to the one config that deployed it and run this again "
+                f"config has no name; '{name}' (read from {resolution.legacy_state_path}) "
+                f"is the name v1.6 gave every nameless config in this directory{also}, "
+                "so nothing ties that deployment to this config. Fix: add "
+                f"'name: {name}' to the config that deployed it and run this command "
                 "with that config."
             )
         elif teardown:
@@ -328,11 +332,15 @@ def load_config(
             raise ConfigNameRequired(resolution, siblings=siblings, suggestion=suggested_name(path))
         if purpose == LoadPurpose.TEARDOWN and resolution.source == "suggested":
             raise ConfigNameRequired(resolution, teardown=True)
-        if purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ) and siblings != []:
-            # SAF-2 (c) check 1 for the v1.6 name: with several nameless
-            # configs here it belongs to whichever one deployed, and destroy,
-            # stop, admin or status from another would act on, or report,
-            # that deployment.
+        if purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ) and (
+            resolution.source == "legacy-state"
+        ):
+            # SAF-2: a v1.6 directory with no recorded nonce is refused
+            # without --name. v1.6 gave every nameless config here this one
+            # name, so destroy, stop, admin or status from any of them would
+            # act on, or report, whichever deployment it names. Naming the
+            # config that deployed it (or CC-2's --name with the stamp
+            # check) is the way through.
             raise ConfigNameRequired(resolution, teardown=True, siblings=siblings)
         data["name"] = resolution.name
 

@@ -195,11 +195,11 @@ class TestFlatConfigIntegration:
             load_config(cfg_file)
         assert not (tmp_path / ".lakebench").exists()
 
-    def test_nameless_read_reuses_v16_state_name_without_writing(self, tmp_path):
-        """A read-only load takes the v1.6 state.json name and writes nothing."""
+    def test_nameless_read_refuses_v16_state_name_without_writing(self, tmp_path):
+        """A read-only load names the v1.6 state.json name, refuses, writes nothing."""
         import json
 
-        from lakebench.config.loader import LoadPurpose
+        from lakebench.config.loader import ConfigNameRequired, LoadPurpose
 
         cfg_file = tmp_path / "lakebench.yaml"
         cfg_file.write_text(
@@ -216,7 +216,9 @@ class TestFlatConfigIntegration:
         state_file = tmp_path / ".lakebench" / "state.json"
         state_file.parent.mkdir()
         state_file.write_text(json.dumps({"name": "lb-20260101-120000", "created": "x"}))
-        assert load_config(cfg_file, purpose=LoadPurpose.READ).name == "lb-20260101-120000"
+        with pytest.raises(ConfigNameRequired, match="name: lb-20260101-120000"):
+            load_config(cfg_file, purpose=LoadPurpose.READ)
+        assert sorted(p.name for p in (tmp_path / ".lakebench").iterdir()) == ["state.json"]
 
     def test_explicit_name_overrides_auto(self, tmp_path):
         """Explicit name in config takes precedence over state.json."""

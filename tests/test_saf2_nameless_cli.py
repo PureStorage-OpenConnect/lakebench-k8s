@@ -149,3 +149,19 @@ def test_nameless_config_refused_by_stop_clean_and_upgrade(argv, tmp_path, monke
     out = " ".join(result.output.split())
     assert "no name" in out
     assert _listing(tmp_path) == before
+
+
+@pytest.mark.parametrize("argv", [["destroy", "CFG", "--force"], ["status", "CFG"]])
+def test_v16_name_refused_after_the_deploying_config_is_named(argv, tmp_path, monkeypatch):
+    # a.yaml deployed under the v1.6 name and now carries it; b.yaml is the
+    # only nameless config left. b.yaml must still not reach that deployment.
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".lakebench").mkdir()
+    (tmp_path / ".lakebench" / "state.json").write_text('{"name": "lb-20260915-101530"}')
+    _write(tmp_path, {**NAMELESS, "name": "lb-20260915-101530"}, "a.yaml")
+    b = _write(tmp_path, NAMELESS, "b.yaml")
+    result = runner.invoke(app, [str(b) if a == "CFG" else a for a in argv])
+    assert result.exit_code != 0
+    out = " ".join(result.output.split())
+    assert "nothing ties that deployment to this config" in out

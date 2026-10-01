@@ -36,19 +36,15 @@ never carries a name the input did not choose.
 
 Before v1.7 a nameless config got a time-based name (`lb-YYYYMMDD-HHMMSS`)
 written to `.lakebench/state.json` in the config's directory, which every
-nameless config in that directory shared. That file is now only read. The
-teardown commands (`destroy`, `stop`, `admin`) and the read-only commands
-(`status`, `logs`, `report`, `results`, `info`, `config show`, `config
-storage`, `config recommend`) load a nameless config under the name it
-records, so a deployment made by v1.6 can still be inspected and torn down,
-as long as that config is the only nameless one in its directory. When the
-directory holds another, they refuse and name the others: v1.6 gave them
-all the one name, so lakebench cannot tell which one deployed it. Add
-`name:` with that name to the config that did. In a directory that has
-the file, the check reads every `*.yaml` and `*.yml` file beside the config
-(not its subdirectories) and counts each mapping with a top-level config key
-and no name of its own, so an unrelated YAML file with, for example, an
-`images:` key and no `name:` also counts; give it a name or move it.
+nameless config in that directory shared. That file is now only read, and
+nothing ties the name in it to any one config. The teardown commands
+(`destroy`, `stop`, `admin`) and the read-only commands (`status`, `logs`,
+`report`, `results`, `info`, `config show`, `config storage`, `config
+recommend`) therefore refuse a nameless config in a directory that has the
+file. The error gives the v1.6 name and lists the other nameless `*.yaml`
+and `*.yml` configs beside it. To inspect or tear down a deployment v1.6
+made, add `name:` with that name to the config that deployed it and use
+that config.
 
 Without the file, `destroy`, `stop` and `admin` refuse a nameless config,
 because no deployment can be its own, and the read-only commands use a

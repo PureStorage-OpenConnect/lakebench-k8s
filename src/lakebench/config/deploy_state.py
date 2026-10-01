@@ -16,6 +16,7 @@ from __future__ import annotations
 import getpass
 import hashlib
 import json
+import os
 import re
 import socket
 from dataclasses import dataclass
@@ -30,9 +31,8 @@ LEGACY_STATE = Path(".lakebench") / "state.json"
 NameSource = Literal["config", "override", "legacy-state", "suggested"]
 
 #: The design's markers of a lakebench config (SAF-2 part c, check 1). The
-#: scan also counts every other top-level key a config can carry (see
-#: :func:`_config_marker_keys`), because a v1.6 config can be built from
-#: flat keys alone.
+#: scan also counts the flat v2 keys (see :func:`_config_marker_keys`),
+#: because a v1.6 config can be built from flat keys alone.
 CONFIG_MARKER_KEYS = frozenset(
     {"platform", "architecture", "workload", "recipe", "endpoint", "scale"}
 )
@@ -91,29 +91,21 @@ def read_legacy_name(config_path: str | Path) -> str | None:
 
 def _config_marker_keys() -> frozenset[str]:
     from .loader import _FLAT_FIELD_MAP
-    from .schema import LakebenchConfig
 
-    keys = set(CONFIG_MARKER_KEYS) | set(LakebenchConfig.model_fields) | set(_FLAT_FIELD_MAP)
-    return frozenset(keys - {"name", "version", "description"})
+    return frozenset(CONFIG_MARKER_KEYS | set(_FLAT_FIELD_MAP))
 
 
 def _sets_a_name(raw: dict[str, Any]) -> bool:
-    """Whether a raw config mapping resolves to a name of its own.
+    """Whether a raw config mapping sets a name of its own.
 
-    A ``${VAR}`` name counts only when the environment resolves it to a
-    non-empty value, as ``load_config`` would.
+    A name that is a ``${VAR}`` reference does not count: whether it
+    resolved when v1.6 deployed cannot be known now (design check 1 reads
+    the raw text with no env substitution).
     """
     name = raw.get("name")
     if not name:
         return False
-    if isinstance(name, str) and "${" in name:
-        from .loader import ConfigError, _substitute_env_vars
-
-        try:
-            return bool(_substitute_env_vars(name).strip())
-        except ConfigError:
-            return False
-    return True
+    return not (isinstance(name, str) and "${" in name)
 
 
 def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
@@ -128,12 +120,15 @@ def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
     be read or parsed, or is over :data:`SCAN_MAX_BYTES`, is skipped, and the
     config itself is left out however it is linked. Only this directory is
     read, not its subdirectories, and only these two suffixes, as in the
-    design. Returns None when the directory cannot be listed, so a caller
-    can fail closed.
+    design. Returns None when the directory cannot be listed.
+
+    ``load_config`` uses the result only to word its refusals: it refuses
+    every TEARDOWN and READ load of a v1.6 name whatever the scan finds, so
+    a file the scan misses cannot let one config act on another's
+    deployment.
     """
     path = Path(config_path).absolute()
     try:
-        own = path.resolve()
         entries = sorted(path.parent.iterdir())
     except OSError:
         return None
@@ -143,7 +138,8 @@ def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
         if entry.suffix not in (".yaml", ".yml"):
             continue
         try:
-            if not entry.is_file() or entry.resolve() == own:
+            # samefile also catches a symlink or hard link to the config.
+            if not entry.is_file() or os.path.samefile(entry, path):
                 continue
             if entry.stat().st_size > SCAN_MAX_BYTES:
                 continue

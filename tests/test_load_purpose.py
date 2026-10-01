@@ -96,19 +96,24 @@ def test_nameless_teardown_without_state_refused(tmp_path):
 
 
 def test_v16_state_name_read_verbatim(tmp_path):
-    # R7: a v1.6 directory keeps mapping to the namespace v1.6 deployed.
+    # R7: the v1.6 name is read, never written. SPEC SAF-2 refuses a v1.6
+    # directory without --name, so teardown and read loads refuse and name
+    # it; the override (CC-2's --name) and COMPARE load under it.
     (tmp_path / ".lakebench").mkdir()
     shutil.copy(FIXTURES / "v16-state" / "state.json", tmp_path / ".lakebench" / "state.json")
     before = (tmp_path / ".lakebench" / "state.json").read_bytes()
     cfg_path = _write(tmp_path, NAMELESS)
-    for purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.COMPARE):
-        cfg = load_config(cfg_path, purpose=purpose)
-        assert cfg.name == "lb-20260915-101530"
-        res = name_resolution(cfg)
-        assert res is not None and res.source == "legacy-state"
-    with pytest.raises(ConfigNameRequired) as e:
-        load_config(cfg_path, purpose=LoadPurpose.MUTATE)
-    assert "name: lb-20260915-101530" in str(e.value)
+    for purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.MUTATE):
+        with pytest.raises(ConfigNameRequired) as e:
+            load_config(cfg_path, purpose=purpose)
+        assert "name: lb-20260915-101530" in str(e.value)
+        assert e.value.resolution.source == "legacy-state"
+    cfg = load_config(cfg_path, purpose=LoadPurpose.COMPARE)
+    assert cfg.name == "lb-20260915-101530"
+    res = name_resolution(cfg)
+    assert res is not None and res.source == "legacy-state"
+    over = load_config(cfg_path, purpose=LoadPurpose.TEARDOWN, name_override="lb-20260915-101530")
+    assert over.name == "lb-20260915-101530"
     assert (tmp_path / ".lakebench" / "state.json").read_bytes() == before
     assert _listing(tmp_path) == [".lakebench", ".lakebench/state.json", "lakebench.yaml"]
 
@@ -353,7 +358,9 @@ def test_readonly_load_writes_nothing_with_legacy_state(tmp_path):
     (tmp_path / ".lakebench" / "state.json").write_text(json.dumps({"name": "lb-20260101-000000"}))
     cfg_path = _write(tmp_path, NAMELESS)
     before = _listing(tmp_path)
-    assert load_config(cfg_path, purpose=LoadPurpose.READ).name == "lb-20260101-000000"
+    with pytest.raises(ConfigNameRequired):
+        load_config(cfg_path, purpose=LoadPurpose.READ)
+    assert load_config(cfg_path, purpose=LoadPurpose.COMPARE).name == "lb-20260101-000000"
     assert _listing(tmp_path) == before
 
 
@@ -381,12 +388,22 @@ def test_v16_state_teardown_refused_when_siblings_share_the_name(tmp_path):
     # status reads the same way (SPEC SAF-2: status refuses as destroy does).
     with pytest.raises(ConfigNameRequired):
         load_config(a, purpose=LoadPurpose.READ)
-    # Naming the one that deployed it makes it loadable as itself.
+    # Naming the one that deployed it makes it loadable as itself, and the
+    # other, now the only nameless config, still does not reach that
+    # deployment (finding 1 of the CC-1 fix review).
     named = _write(tmp_path, {**NAMELESS, "name": "lb-20260915-101530"}, "a.yaml")
     assert load_config(named, purpose=LoadPurpose.TEARDOWN).name == "lb-20260915-101530"
+    for purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ):
+        with pytest.raises(ConfigNameRequired) as e:
+            load_config(b, purpose=purpose)
+        assert e.value.siblings == []
 
 
-def test_v16_state_teardown_ignores_files_that_are_not_nameless_configs(tmp_path):
+def test_sibling_scan_ignores_files_that_are_not_nameless_configs(tmp_path):
+    import os
+
+    from lakebench.config.deploy_state import other_nameless_configs
+
     a = _v16_dir(tmp_path)
     _write(tmp_path, {**NAMELESS, "name": "other"}, "named.yaml")
     _write(tmp_path, {"apiVersion": "v1", "kind": "ConfigMap"}, "manifest.yaml")
@@ -396,13 +413,13 @@ def test_v16_state_teardown_ignores_files_that_are_not_nameless_configs(tmp_path
     (tmp_path / "huge.yaml").write_text(yaml.safe_dump(NAMELESS) + "#" * (1 << 20))
     (tmp_path / "notes.txt").write_text(yaml.safe_dump(NAMELESS))
     (tmp_path / "alias.yaml").symlink_to(a)
+    os.link(a, tmp_path / "hard.yaml")
     (tmp_path / "sub").mkdir()
     _write(tmp_path / "sub", NAMELESS, "c.yaml")
-    assert load_config(a, purpose=LoadPurpose.TEARDOWN).name == "lb-20260915-101530"
-    # The alias is the same file, not a second config.
-    assert load_config(tmp_path / "alias.yaml", purpose=LoadPurpose.TEARDOWN).name == (
-        "lb-20260915-101530"
-    )
+    assert other_nameless_configs(a) == []
+    # The links are the same file, not a second config.
+    assert other_nameless_configs(tmp_path / "alias.yaml") == []
+    assert other_nameless_configs(tmp_path / "hard.yaml") == []
 
 
 def test_v16_state_mutate_refusal_does_not_offer_a_shared_name(tmp_path):
@@ -425,21 +442,17 @@ def test_v16_state_mutate_refusal_does_not_offer_a_shared_name(tmp_path):
     "sibling",
     [
         {"secret_ref": "s3-creds", "mode": "batch"},  # flat keys only
-        {**NAMELESS, "name": "${LB_TEST_UNSET_NAME:-}"},  # resolves to no name
-        {**NAMELESS, "name": "${LB_TEST_UNSET_NAME}"},  # does not resolve
+        {**NAMELESS, "name": "${LB_TEST_NAME:-}"},
+        {**NAMELESS, "name": "${LB_TEST_NAME}"},
     ],
-    ids=["flat-only", "empty-env-name", "unset-env-name"],
+    ids=["flat-only", "env-name-default", "env-name"],
 )
-def test_v16_state_sibling_scan_counts_every_nameless_form(tmp_path, monkeypatch, sibling):
-    monkeypatch.delenv("LB_TEST_UNSET_NAME", raising=False)
+def test_sibling_scan_counts_every_nameless_form(tmp_path, monkeypatch, sibling):
+    # An env-reference name may have resolved to nothing when v1.6 deployed,
+    # whatever the environment says now, so it counts as nameless.
+    from lakebench.config.deploy_state import other_nameless_configs
+
+    monkeypatch.setenv("LB_TEST_NAME", "other")
     a = _v16_dir(tmp_path)
     _write(tmp_path, sibling, "b.yaml")
-    with pytest.raises(ConfigNameRequired):
-        load_config(a, purpose=LoadPurpose.TEARDOWN)
-
-
-def test_v16_state_sibling_with_env_name_is_named(tmp_path, monkeypatch):
-    monkeypatch.setenv("LB_TEST_SET_NAME", "other")
-    a = _v16_dir(tmp_path)
-    _write(tmp_path, {**NAMELESS, "name": "${LB_TEST_SET_NAME}"}, "b.yaml")
-    assert load_config(a, purpose=LoadPurpose.TEARDOWN).name == "lb-20260915-101530"
+    assert other_nameless_configs(a) == [tmp_path / "b.yaml"]
