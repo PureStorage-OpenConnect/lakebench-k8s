@@ -51,7 +51,17 @@ python scripts/release_gate.py --tag v<version> --require-all
 ```
 
 It needs `cargo` (Rust 1.98.1) and `gitleaks` on `PATH`, or `GITLEAKS`
-pointing at the binary.
+pointing at the binary, and a full clone: the `gitleaks-history` check scans
+every commit reachable from `HEAD` beyond the `.gitleaksignore` baseline and
+fails on a shallow clone. The `pre-push-hook` check needs the hook from
+`scripts/hooks/pre-push` installed in the clone (see `docs/development.md`);
+without it the check is skipped, which `--require-all` fails.
+
+`.gitleaksignore` changes only through a pull request to `main`. CI scans
+every other branch with the baseline from `origin/main` (or, while `main`
+has none, from `origin/integrate/v1.5.0`), so a baseline change made
+elsewhere does not take effect, and a finding it was meant to cover fails
+CI, until it is on `main`.
 
 The version lives only in `src/lakebench/__init__.py`; `pyproject.toml`
 reads it through hatch. Set it to the release version (no `.dev` suffix),

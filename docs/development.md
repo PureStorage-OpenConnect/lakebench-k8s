@@ -164,6 +164,27 @@ registered and run automatically on every `git commit`:
 
 The hooks do not run the tests; run `pytest tests/ -x` yourself.
 
+### Pre-push hook
+
+`scripts/hooks/pre-push` refuses a push whose branch reaches a commit from
+before the 2026-09-30 history rewrite, and scans the pushed commits with
+gitleaks using the `.gitleaks.toml` from `origin/integrate/v1.5.0` rather
+than the branch's own copy. Install it by copying it, not through
+pre-commit (the pre-commit framework would read the pushing branch's config,
+which an old branch may lack):
+
+```bash
+cp scripts/hooks/pre-push "$(git rev-parse --git-common-dir)/hooks/pre-push"
+chmod 0755 "$(git rev-parse --git-common-dir)/hooks/pre-push"
+```
+
+Run this from the root of a checkout whose `scripts/hooks/pre-push` is the
+copy you want: every worktree of a clone shares the installed hook. It needs
+`gitleaks` on `PATH`. Do not bypass it with `git push --no-verify`.
+`tests/test_pre_push_hook.py` exercises it, and the release gate's
+`pre-push-hook` check fails if the installed copy differs from the tracked
+one.
+
 ## What CI Runs
 
 `.github/workflows/ci.yml` runs on every branch push and on pull requests to
@@ -192,7 +213,16 @@ its output hash with, since that guard skips on the `[aml]` pins.
 The Rust job runs `cargo fmt
 --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test
 --release --locked` in `datagen_rs/`. A gitleaks job scans the working tree
-for credentials. The package build runs only after all of these pass.
+for credentials, and a second one scans every commit reachable from the
+pushed or merged head, including what merge commits change, and ignores
+inline `gitleaks:allow` comments. Findings listed in `.gitleaksignore` (the history
+baseline: two fingerprints of the old default Polaris secret that PyPI
+1.0.0 to 1.4.0 published) are not reported. The scan takes the baseline and
+the config from `origin/main` (or `origin/integrate/v1.5.0` while `main` has
+no baseline), not from the branch, so a branch cannot allowlist its own
+finding; it also scans with the branch's own config, so a new rule applies
+at once. `tests/test_gitleaks_baseline.py` pins the list. The package build
+runs only after all of these pass.
 
 Every job runs on a fixed runner image (`ubuntu-24.04`, never
 `ubuntu-latest`), and every action is pinned by commit SHA with its tag as

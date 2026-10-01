@@ -126,6 +126,95 @@ jobs:
       - name: Scan working tree
         run: '"$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner --exit-code 1'
 
+  # History scan: every commit reachable from the pushed or merged HEAD
+  # (about 2 s), with --remerge-diff so what a merge commit itself changed is
+  # scanned (plain `git log -p` shows no diff for merges) and
+  # --ignore-gitleaks-allow so an inline allow comment hides nothing. The
+  # baseline and the config come from a trusted ref, origin/main or, until
+  # main has a baseline, origin/integrate/v1.5.0, never from the scanned
+  # branch: gitleaks reads a source tree's own .gitleaksignore, so the scan
+  # runs on the git dir from a temp directory. A second pass uses the
+  # branch's own config, so a rule a branch adds is enforced at once. A pull
+  # request to main uses its own baseline (the owner reviews it), and with no
+  # baseline on either ref the tree's own is used once, with a warning. This
+  # job runs the branch's own ci.yml, so it catches mistakes; protection on
+  # main and the pre-push hook are what stop a deliberate bypass. The job also
+  # runs the pre-push hook and baseline tests with the real gitleaks.
+  secrets-history:
+    name: Secret scan (history)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan history
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/gitleaks-history"
+          mkdir -p "$work"
+          ignore="$work/gitleaksignore"
+          cfg="$work/gitleaks.toml"
+          trusted=""
+          if [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" = "main" ]; then
+            echo "::warning::pull request to main: its own baseline is used; the owner reviews it"
+          else
+            for ref in origin/main origin/integrate/v1.5.0; do
+              if git cat-file -e "$ref:.gitleaksignore" 2>/dev/null; then
+                trusted="$ref"
+                break
+              fi
+            done
+            [ -n "$trusted" ] || echo "::warning::no trusted ref has a .gitleaksignore yet; using this tree's"
+          fi
+          if [ -n "$trusted" ]; then
+            git show "$trusted:.gitleaksignore" >"$ignore"
+            git show "$trusted:.gitleaks.toml" >"$cfg"
+            echo "baseline and config from $trusted"
+          else
+            cp .gitleaksignore "$ignore" 2>/dev/null || : >"$ignore"
+            cp .gitleaks.toml "$cfg"
+          fi
+          repo=$(git rev-parse --path-format=absolute --git-dir)
+          own="$PWD/.gitleaks.toml"
+          cd "$work"
+          for config in "$cfg" "$own"; do
+            echo "scanning with $config"
+            gitleaks git "$repo" --config "$config" --gitleaks-ignore-path "$ignore" \
+              --redact --no-banner --exit-code 1 --ignore-gitleaks-allow \
+              --log-opts="--remerge-diff HEAD"
+          done
+
+      - name: Pre-push hook and baseline tests
+        env:
+          LB_REQUIRE_GITLEAKS: "1"
+        run: |
+          pip install -e ".[dev]"
+          pytest tests/test_pre_push_hook.py tests/test_gitleaks_baseline.py -rs --tb=short
+          pytest tests/test_release_gate.py -k gitleaks_history -rs --tb=short
+
   rust:
     name: Rust datagen
     runs-on: ubuntu-24.04
@@ -266,7 +355,7 @@ jobs:
   build:
     name: Build Package
     runs-on: ubuntu-24.04
-    needs: [lint, test, secrets, rust, spark-tests]
+    needs: [lint, test, secrets, secrets-history, rust, spark-tests]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
