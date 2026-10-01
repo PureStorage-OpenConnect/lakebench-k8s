@@ -27,7 +27,7 @@ nothing measured under this one):
 
 - ``c360-1``, ``aml-1``: first stamped versions (2026-09-26).
 
-Identity versions (ch03 section 0.1, EVD-7). A block is stamped ``exp2``
+Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
 present: corpus id v2 (from the generator's markers), the run-start
 ``identity_version`` and an observed system identity. Otherwise it is
@@ -41,6 +41,7 @@ Which keys say what (workload, corpus, architecture, system, conditions) is
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections.abc import Mapping
@@ -853,6 +854,13 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         **({"identity_version": IDENTITY_VERSION} if exp2 else {}),
         **({"v2_unavailable": missing} if v17 and missing else {}),
         **({"system_identity": sysid} if sysid is not None else {}),
+        # Allocatable and co-tenant load at run start and end (K31):
+        # Observational, never compared.
+        **(
+            {"observed": copy.deepcopy(dict(inputs["observed"]))}
+            if isinstance(inputs.get("observed"), Mapping)
+            else {}
+        ),
     }
     return {
         **block,
@@ -987,7 +995,7 @@ def _identity_v1(exp: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _identity_v2(exp: Mapping[str, Any]) -> dict[str, Any]:
-    """The v2 identity (OD-2): the v1 keys without the generator image tag
+    """The v2 identity: the v1 keys without the generator image tag
     and the ``cluster``/``local`` string, with corpus id v2, the query set
     id, the system fingerprint, the access paths and the dependency pinset,
     plus each ``OPTIONAL_IDENTITY_KEYS`` key whose value is not its
@@ -1028,7 +1036,7 @@ def _identity_v2(exp: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-#: Identity keys that are execution conditions (the OD-2 Conditions
+#: Identity keys that are execution conditions (the Conditions
 #: group): a difference makes a pair comparable but not like-for-like.
 #: ``system`` and ``query access path`` moved out in v1.7 (System and
 #: Architecture groups); ``compaction operation`` is a read-time key
@@ -1119,7 +1127,7 @@ def identity_differences(
     record_a: Mapping[str, Any] | None = None,
     record_b: Mapping[str, Any] | None = None,
 ) -> list[str]:
-    """Experiment-identity differences: the OD-2 Workload and Corpus groups
+    """Experiment-identity differences: the Workload and Corpus groups
     (metrics/comparability.py). Architecture, System and Conditions
     differences are not identity differences. Blocks of different identity
     versions differ as a whole. *record_a* and *record_b* are the blocks'
@@ -1138,7 +1146,7 @@ def condition_differences(
     record_a: Mapping[str, Any] | None = None,
     record_b: Mapping[str, Any] | None = None,
 ) -> list[str]:
-    """Execution-condition differences (the OD-2 Conditions group, with the
+    """Execution-condition differences (the Conditions group, with the
     compaction operation): comparable, not like-for-like."""
     from lakebench.metrics import comparability as cmp
 
@@ -1207,7 +1215,12 @@ def refusals(
     if prov:
         return prov, [], []
     assert ea is not None and eb is not None
-    prov = identity_differences(ea, eb, record_a, record_b)
+    from lakebench.metrics import comparability as cmp
+
+    # Ladder step 0 (identity versions, required keys, a withheld seed).
+    step0 = cmp.pair_verdict([record_a or {}], [record_b or {}], label_a, label_b)
+    prov = list(step0.reasons) if step0.step == "0" else []
+    prov += identity_differences(ea, eb, record_a, record_b)
     for label, exp in ((label_a, ea), (label_b, eb)):
         prov.extend(f"{label}: {p}" for p in corpus_problems(exp))
     notes: list[str] = []
@@ -1227,15 +1240,25 @@ def refusals(
 def like_for_like(
     record_a: Mapping[str, Any] | None, record_b: Mapping[str, Any] | None
 ) -> list[str]:
-    """Execution conditions that differ between two metrics.json dicts
-    (effective maintenance, the compaction operation). A comparable pair
-    with any is comparable but not like-for-like (DESIGN 6.5). Empty when
-    either has no experiment block (that pair is refused before this
-    matters)."""
+    """Why two metrics.json dicts are not like-for-like: the execution
+    conditions that differ (effective maintenance, the compaction
+    operation and the rest of the Conditions group), preceded by the
+    ladder's confounded line (architecture and system both differ) or its
+    step 7a line (only the dependency set differs). Empty when either has
+    no experiment block (that pair is refused before this matters)."""
     ea, eb = experiment_of(record_a), experiment_of(record_b)
     if ea is None or eb is None:
         return []
-    return condition_differences(ea, eb, record_a, record_b)
+    from lakebench.metrics import comparability as cmp
+
+    out = condition_differences(ea, eb, record_a, record_b)
+    verdict = cmp.pair_verdict([record_a or {}], [record_b or {}])
+    if verdict.verdict == cmp.CONFOUNDED or verdict.step == "7a":
+        # Not conditions, but just as fatal to like-for-like (ladder steps
+        # 6 and 7a): shown with the conditions until compare reads the
+        # ladder itself.
+        out = list(verdict.reasons) + out
+    return out
 
 
 def support_of(record: Mapping[str, Any] | None) -> str:

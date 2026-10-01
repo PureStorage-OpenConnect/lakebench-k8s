@@ -484,7 +484,7 @@ def test_default_config_has_no_optional_keys(path, monkeypatch):
 def test_optional_key_table_rows_name_a_group_and_owner():
     for name, row in cmp.OPTIONAL_IDENTITY_KEYS.items():
         assert row.group in cmp.GROUPS, name
-        assert row.owner_wi, name
+        assert row.owner, name
 
 
 def test_benchmark_path_refreshes_the_stored_block():
@@ -500,3 +500,262 @@ def test_benchmark_path_refreshes_the_stored_block():
 def test_records_json_drift_list_is_empty():
     assert sr.expected("records")["known_rebuild_drift"]["runs"] == []
     json.dumps(cmp.REQUIRED_KEYS)  # the table is plain data
+
+
+# ---------------------------------------------------------------------------
+# The ladder (ER-10b): constructed pairs, each edit named in the test
+# ---------------------------------------------------------------------------
+
+
+def _rec(run_id="5105a0", new_id=None, **edits):
+    """A pinned record, optionally with a new run id; *edits* are dotted
+    paths into the record (``experiment.system=local``)."""
+    rec = sr.load_record(run_id)
+    if new_id:
+        rec["run_id"] = new_id
+    for path, value in edits.items():
+        node = rec
+        keys = path.split("__")
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = value
+    return rec
+
+
+def _sys(ca="c" * 12, **parts):
+    out = copy.deepcopy(SYSID)
+    out["parts"]["api_server_ca"] = ca
+    out["parts"].update(parts)
+    from lakebench.metrics.system_identity import fingerprint_of
+
+    out["fingerprint"] = fingerprint_of(out["parts"])
+    return out
+
+
+def _verdict(a, b):
+    return cmp.pair_verdict(a if isinstance(a, list) else [a], b if isinstance(b, list) else [b])
+
+
+class TestLadder:
+    def test_a_a_is_a_repeat(self):
+        v = _verdict(_rec(), _rec(new_id="x"))
+        assert (v.verdict, v.step, v.attribution) == (cmp.LIKE_FOR_LIKE, "8", "repeat")
+        assert v.code == 0 and v.comparable
+
+    def test_three_by_three_repeat(self):
+        side_a = [_rec(new_id=f"a{i}") for i in range(3)]
+        side_b = [_rec(new_id=f"b{i}") for i in range(3)]
+        v = _verdict(side_a, side_b)
+        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "repeat")
+
+    def test_confounded_fixture(self):
+        """System fingerprint and recipe both differ: CONFOUNDED (13)."""
+        a = _rec(experiment__system_identity=_sys())
+        b = _rec(
+            new_id="b",
+            experiment__system_identity=_sys(ca="d" * 12),
+        )
+        b["experiment"]["architecture"]["recipe"] = "polaris-iceberg-spark-trino"
+        b["experiment"]["architecture"]["catalog"] = {"type": "polaris", "version": "1.6.0"}
+        v = _verdict(a, b)
+        assert (v.verdict, v.code, v.step) == (cmp.CONFOUNDED, 13, "6")
+        assert v.keys(cmp.ARCHITECTURE) == ["recipe", "catalog"]
+        assert v.system == "different"
+
+    def test_system_only_difference_is_a_system_differential(self):
+        v = _verdict(
+            _rec(experiment__system_identity=_sys()),
+            _rec(new_id="b", experiment__system_identity=_sys(ca="d" * 12)),
+        )
+        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system differential")
+
+    def test_local_vs_cluster_with_the_local_composition_is_confounded(self):
+        b = _rec(new_id="b", experiment__system="local")
+        b["experiment"]["architecture"].update(
+            {"recipe": "none-iceberg-spark-duckdb", "query_access_path": "direct_storage"}
+        )
+        v = _verdict(_rec(), b)
+        assert v.verdict == cmp.CONFOUNDED
+        assert v.keys(cmp.ARCHITECTURE) == ["recipe", "query access path"]
+
+    def test_system_not_established_is_never_a_repeat(self):
+        """ER-8 carry: without the CA on one side the systems are not shown
+        to be one, so the pair is not called a repeat, and with an
+        architecture difference it is confounded."""
+        a = _rec(experiment__system_identity=_sys(ca={"not_observed": "no CA"}))
+        b = _rec(new_id="b", experiment__system_identity=_sys())
+        v = _verdict(a, b)
+        assert (v.verdict, v.attribution, v.system) == (
+            cmp.LIKE_FOR_LIKE,
+            "system not established",
+            "unknown",
+        )
+        b["experiment"]["architecture"]["recipe"] = "other"
+        assert _verdict(a, b).verdict == cmp.CONFOUNDED
+
+    def test_version_bump_is_not_comparable(self):
+        b = _rec(new_id="b")
+        b["experiment"]["workload"]["version"] = "c360-2"
+        v = _verdict(_rec(), b)
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "3")
+        assert v.keys(cmp.WORKLOAD) == ["workload version"]
+
+    def test_within_side_mismatch(self):
+        odd = _rec(new_id="a2")
+        odd["experiment"]["corpus"]["scale"] = 2.0
+        v = _verdict([_rec(new_id="a1"), odd], [_rec(new_id="b")])
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
+        assert v.reasons[0].startswith("side A is not one experiment (a1 vs a2)")
+        assert "scale differs (1.0 vs 2.0)" in v.reasons[1:] or any(
+            r.startswith("scale differs") for r in v.reasons
+        )
+
+    def test_within_side_result_mismatch(self):
+        odd = _rec(new_id="a2")
+        fps = odd["experiment"]["results"]["fingerprints"]
+        name = sorted(fps)[0]
+        fps[name] = {**fps[name], "rows": (fps[name].get("rows") or 0) + 1, "exact": "0" * 16}
+        v = _verdict([_rec(new_id="a1"), odd], [_rec(new_id="b")])
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
+        assert any(name in r for r in v.reasons)
+
+    def test_outcome_condition_within_a_side_is_a_note(self):
+        a1 = _rec("204941-1d17f4", new_id="a1")
+        a2 = _rec("204941-1d17f4", new_id="a2")
+        a2["experiment"]["limits"]["benchmark_rounds"] = 5
+        v = _verdict([a1, a2], [_rec("204941-1d17f4", new_id="b")])
+        assert v.step != "2"
+        assert "side A members differ in benchmark rounds (an outcome condition)" in v.notes
+
+    def test_cotenant_load_is_observational(self):
+        """The constructed co-tenant-load pair: load differs, nothing else;
+        the verdict is a repeat (the winner rule that reads load is v1.8)."""
+        low = {"cotenant_requested": {"start": {"cpu": 10.0}, "end": {"cpu": 12.0}}}
+        high = {"cotenant_requested": {"start": {"cpu": 300.0}, "end": {"cpu": 280.0}}}
+        v = _verdict(_rec(experiment__observed=low), _rec(new_id="b", experiment__observed=high))
+        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "repeat")
+
+    def test_none_required_key_refused(self):
+        """S1, the failing case: two v2 records with corpus id v2 None on
+        both sides; with step 0 removed they read LIKE-FOR-LIKE."""
+        a = _fresh().to_dict()
+        b = _fresh().to_dict()
+        b["run_id"] = "b"
+        for rec in (a, b):
+            rec["experiment"]["corpus"]["id_v2"] = None
+            rec["success"] = True
+        v = _verdict(a, b)
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "0")
+        assert v.reasons[0].startswith("identity incomplete: corpus id v2 not recorded on")
+
+    def test_none_on_one_side_refused(self):
+        b = _rec(new_id="b")
+        b["experiment"]["workload"]["version"] = None
+        v = _verdict(_rec(), b)
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "0")
+        assert v.reasons == ["identity incomplete: workload version not recorded on b"]
+
+    def test_withheld_seed_refused(self):
+        b = _rec(new_id="b")
+        b["experiment"]["corpus"]["seed"] = {"seed_ref": None, "role": "unknown", "withheld": "x"}
+        v = _verdict(_rec(), b)
+        assert v.step == "0" and v.reasons == ["identity incomplete: seed withheld on b"]
+
+    def test_generations_differ(self):
+        v2 = _fresh().to_dict()
+        v = _verdict(_rec(), v2)
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "0")
+        assert v.reasons == ["A was recorded with identity v1 and B with v2"]
+
+    def test_undeclared_role_against_exp2_role(self):
+        """An exp2 record with role development against an exp1 record with
+        None is refused at step 0 (the versions differ)."""
+        v2 = _fresh().to_dict()
+        v2["experiment"]["corpus"]["corpus_role"] = "development"
+        assert _verdict(_rec(), v2).step == "0"
+
+    def test_failed_member_refused(self):
+        bad = _rec(new_id="a2", verdict={"status": "FAILED", "reasons": ["gold has 0 rows"]})
+        v = _verdict([_rec(new_id="a1"), bad], [_rec(new_id="b")])
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "1")
+        assert v.reasons == ["A run a2 did not pass (gold has 0 rows); fix it and re-run"]
+
+    def test_empty_side_refused(self):
+        assert _verdict([], [_rec()]).reasons == ["side A has no run"]
+
+    def test_results_not_established(self):
+        b = _rec(new_id="b")
+        b["experiment"]["results"] = {"query_set_id": None, "fingerprints": {}, "not_checked": "x"}
+        v = _verdict(_rec(), b)
+        assert (v.verdict, v.code, v.step) == (cmp.NOT_ESTABLISHED, 11, "4")
+
+    def test_different_results(self):
+        b = _rec(new_id="b")
+        fps = b["experiment"]["results"]["fingerprints"]
+        name = sorted(fps)[0]
+        fps[name] = {**fps[name], "rows": (fps[name].get("rows") or 0) + 1, "exact": "0" * 16}
+        v = _verdict(_rec(), b)
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "5")
+
+    def _v17(self, pinset, new_id=None):
+        rec = _rec(new_id=new_id)
+        rec["experiment"]["lakebench"]["lakebench_version"] = "1.7.0"
+        rec["provenance"]["deps"] = {"pinset_sha256": pinset}
+        return rec
+
+    def test_pinset_only_difference_is_not_like_for_like(self):
+        """S8, the owner's rule: same composition, different jars (7a)."""
+        v = _verdict(self._v17("a" * 64), self._v17("b" * 64, "b"))
+        assert (v.verdict, v.step) == (cmp.NOT_LIKE_FOR_LIKE, "7a")
+        assert v.reasons == [
+            "same composition, different dependency sets (dependency pinset differs)"
+        ]
+
+    def test_pinset_with_other_arch_difference_is_differential(self):
+        b = self._v17("b" * 64, "b")
+        b["experiment"]["architecture"]["catalog"] = {"type": "polaris", "version": "1.6.0"}
+        v = _verdict(self._v17("a" * 64), b)
+        assert (v.verdict, v.step, v.attribution) == (
+            cmp.LIKE_FOR_LIKE,
+            "8",
+            "architecture differential",
+        )
+
+    def test_pinset_v16_pair_notes_not_recorded(self):
+        v = _verdict(_rec(), _rec(new_id="b"))
+        assert "dependency set not recorded" in v.notes
+
+    def test_sessions_run_is_an_outcome_condition(self):
+        """S9: sessions run [8] against [3] is not like-for-like in compare
+        and not a refusal for the perf gate and reproduce."""
+        a = _rec(experiment__investigators={"requested": 8, "run": [8]})
+        b = _rec(new_id="b", experiment__investigators={"requested": 8, "run": [3]})
+        v = _verdict(a, b)
+        assert (v.verdict, v.keys(cmp.CONDITIONS)) == (
+            cmp.NOT_LIKE_FOR_LIKE,
+            ["investigator sessions"],
+        )
+        assert "investigator sessions" in ex.OUTCOME_CONDITION_KEYS
+
+    def test_to_dict_is_json(self):
+        json.dumps(_verdict(_rec(), _rec(new_id="b")).to_dict())
+
+
+class TestWrappers:
+    def test_like_for_like_lists_the_confounded_line(self):
+        a = _rec(experiment__system_identity=_sys())
+        b = _rec(new_id="b", experiment__system_identity=_sys(ca="d" * 12))
+        b["experiment"]["architecture"]["recipe"] = "other"
+        lines = ex.like_for_like(a, b)
+        assert lines and lines[0].startswith("architecture and system both differ")
+
+    def test_like_for_like_lists_the_pinset_line(self):
+        t = TestLadder()
+        lines = ex.like_for_like(t._v17("a" * 64), t._v17("b" * 64, "b"))
+        assert lines == ["same composition, different dependency sets (dependency pinset differs)"]
+
+    def test_refusals_carry_step_0(self):
+        b = _rec(new_id="b")
+        b["experiment"]["workload"]["version"] = None
+        prov, _, _ = ex.refusals(_rec(), b)
+        assert prov[0] == "identity incomplete: workload version not recorded on b"

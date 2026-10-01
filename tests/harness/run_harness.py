@@ -275,10 +275,60 @@ class RecordingK8s:
             raise self._rec.refuse(f"unscripted exec in {name}: {command}")
         return self._trino.answer(command[-1])
 
+    # The raw API handles metrics/system_identity reads through (the system
+    # identity and load samples at run start and end, ER-8 and ER-10b).
+    @property
+    def _core_v1(self) -> FakeCoreV1Api:
+        return FakeCoreV1Api(self._rec)
+
+    @property
+    def _custom(self) -> FakeCustomObjectsApi:
+        return FakeCustomObjectsApi(self._rec)
+
     def __getattr__(self, attr: str):
         if attr.startswith("_"):
             raise AttributeError(attr)
         raise self._rec.refuse(f"unscripted K8sClient.{attr}")
+
+
+#: The CA bundle the fake API client verifies with: the system identity
+#: hashes it (metrics/system_identity._api_server_ca).
+HARNESS_CA = FIXTURES / "harness-ca.pem"
+
+#: The fake cluster: two workers of one class, one cordoned worker and a
+#: control-plane node (system identity counts all four by class; load sums
+#: allocatable over the two schedulable workers).
+_NODES = (
+    ("worker-0", False, False),
+    ("worker-1", False, False),
+    ("worker-2", False, True),
+    ("master-0", True, False),
+)
+
+
+def _fake_node(name: str, control_plane: bool, cordoned: bool):
+    labels = {"node.kubernetes.io/instance-type": "vsphere-vm.cpu-32.mem-256gb.os-linux"}
+    if control_plane:
+        labels["node-role.kubernetes.io/control-plane"] = ""
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name, labels=labels),
+        spec=SimpleNamespace(unschedulable=cordoned),
+        status=SimpleNamespace(
+            capacity={"cpu": "32", "memory": "263882936Ki"},
+            allocatable={"cpu": "31500m", "memory": "256Gi"},
+            node_info=SimpleNamespace(architecture="amd64"),
+        ),
+    )
+
+
+def _fake_pod(namespace: str, node: str, cpu: str, memory: str):
+    container = SimpleNamespace(resources=SimpleNamespace(requests={"cpu": cpu, "memory": memory}))
+    return SimpleNamespace(
+        metadata=SimpleNamespace(namespace=namespace),
+        spec=SimpleNamespace(
+            node_name=node, containers=[container], init_containers=None, overhead=None
+        ),
+    )
 
 
 def _api_exception(status: int):
@@ -300,6 +350,26 @@ class _FakeApi:
 
 
 class FakeCoreV1Api(_FakeApi):
+    api_client = SimpleNamespace(
+        configuration=SimpleNamespace(ssl_ca_cert=str(HARNESS_CA), verify_ssl=True)
+    )
+
+    def list_node(self, **kw):
+        self._rec.add("CoreV1Api", "list_node", kw.get("_request_timeout"))
+        return SimpleNamespace(items=[_fake_node(*n) for n in _NODES])
+
+    def list_pod_for_all_namespaces(self, field_selector="", **kw):
+        self._rec.add(
+            "CoreV1Api", "list_pod_for_all_namespaces", field_selector, kw.get("_request_timeout")
+        )
+        return SimpleNamespace(
+            items=[
+                _fake_pod(self._rec.namespace, "worker-0", "8", "64Gi"),  # this deployment
+                _fake_pod("other-tenant", "worker-1", "4500m", "16Gi"),  # co-tenant
+                _fake_pod("openshift-dns", "master-0", "1", "1Gi"),  # control plane
+            ]
+        )
+
     def list_namespaced_pod(self, namespace, label_selector="", **kw):
         self._rec.add("CoreV1Api", "list_namespaced_pod", namespace, label_selector)
         if label_selector == _TRINO_SELECTOR:
@@ -324,6 +394,11 @@ class FakeAppsV1Api(_FakeApi):
 
 
 class FakeCustomObjectsApi(_FakeApi):
+    def get_cluster_custom_object(self, group, version, plural, name, **kw):
+        self._rec.add("CustomObjectsApi", "get_cluster", plural, name)
+        # Vanilla Kubernetes: no ClusterVersion.
+        raise _api_exception(404)
+
     def get_namespaced_custom_object(self, group, version, namespace, plural, name, **kw):
         self._rec.add("CustomObjectsApi", "get", plural, name, namespace)
         # No SparkApplication is left over from an earlier run.
@@ -335,6 +410,10 @@ class FakeBatchV1Api(_FakeApi):
 
 
 class FakeVersionApi(_FakeApi):
+    def get_code(self, **kw):
+        self._rec.add("VersionApi", "get_code_version", kw.get("_request_timeout"))
+        return SimpleNamespace(git_version="v1.31.6")
+
     def get_code_with_http_info(self, **kw):
         """The API server's HTTP Date header: the cluster clock is the host's."""
         self._rec.add("VersionApi", "get_code")
@@ -564,10 +643,23 @@ class FakeS3:
             name=bucket_name, exists=True, object_count=100, size_bytes=self.SIZES[layer]
         )
 
+    @property
+    def raw_client(self) -> FakeRawS3:
+        return FakeRawS3(self._rec)
+
     def __getattr__(self, attr: str):
         if attr.startswith("_"):
             raise AttributeError(attr)
         raise self._rec.refuse(f"unscripted S3Client.{attr}")
+
+
+class FakeRawS3(_FakeApi):
+    """The boto3 client behind ``S3Client.raw_client``: only the HEAD the
+    system identity sends on the bronze bucket (its Server header)."""
+
+    def head_bucket(self, Bucket):  # noqa: N803 -- boto3's keyword
+        self._rec.add("S3", "head_bucket", Bucket)
+        return {"ResponseMetadata": {"HTTPHeaders": {"server": "FakeS3"}}}
 
 
 #: Row counts per Customer 360 query, from run-20260927-084902-fc1eb5.

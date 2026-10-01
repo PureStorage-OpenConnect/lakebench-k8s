@@ -16,7 +16,8 @@
   "c360_correctness": "None: the record is never set.",
   "verdict": "metrics/verdict.py:359-417. exit_ok False -> 'Process exit intent was not OK' first; badge reasons in order: benchmark_error None so 'Pipeline crashed or was interrupted' (verdict.py:214-215), scale_ratio 0.9917 not < 0.95, then 'Batch jobs failed: lakebench-silver-build' (job_name); no benchmark so no query reason. Gates: pipeline FAIL, benchmark None (benchmark absent), c360 none -> 'Gate 'pipeline' FAILED' last. Status FAILED.",
   "unsure": "The order of the four verdict reasons is the only place I would double-check; it follows the code literally. Also assumed: write_run_report succeeds or only warns on a failed run (it catches everything, cli/_helpers.py:288-298), so the trace is unaffected either way.",
-  "er10a": "v2_unavailable joins the experiment block keys: experiment_inputs writes identity_version 2 at run start and batch run() records no corpus observation, so build_experiment stamps exp1 with v2_unavailable (metrics/experiment.py build_experiment). Derived by the independent second agent of the ER-10 goldens from the code, harness not run."
+  "er10a": "v2_unavailable joins the experiment block keys: experiment_inputs writes identity_version 2 at run start and batch run() records no corpus observation, so build_experiment stamps exp1 with v2_unavailable (metrics/experiment.py build_experiment). Derived by the independent second agent of the ER-10 goldens from the code, harness not run.",
+  "er10": "independent second agent (ER-10b golden), derived by reading code only; harness, test, run() and CLI not run. Tree: lane/v17-identity-er10b working tree on 30cffe6 (uncommitted ER-10b diff on top). calls: 31 -> 42. Start sample: 8 entries inserted at index 11, between _run_preflight_infra_check's last read (read_namespaced_stateful_set lakebench-trino-worker) and SparkOperator init, because cli/_run.py:1937 start_run then 1941 sample_run_start run before the try that builds SparkOperatorManager; journal_open, MetricsCollector and build_config_snapshot record nothing. Inside sample_run_start (metrics/system_identity.py:563): _inputs finds config_snapshot['experiment_inputs'] (metrics/collector.py:2276), _clients (system_identity.py:533-560): get_k8s_client(context, namespace=cfg.get_namespace()) through the patched lakebench.k8s -> RecordingK8s records [k8s, get_k8s_client, runchar] (run_harness.py:257); S3Client(...) through the patched lakebench.s3 -> FakeS3 records the same S3 init as the finally block (run_harness.py:620; endpoint 10.0.1.50:80, env keys, us-east-1, path_style, verify_ssl). observe_system (system_identity.py:366) readers in order: api_server_ca reads FakeCoreV1Api.api_client.configuration.ssl_ca_cert (harness-ca.pem, a file, no record; system_identity.py:202); kubernetes: client.VersionApi(...).get_code(_request_timeout=_REQUEST_TIMEOUT=(5, 15)) -> [VersionApi, get_code_version, [5, 15]] (system_identity.py:225, 126; run_harness.py:413); openshift: k8s._custom.get_cluster_custom_object -> [CustomObjectsApi, get_cluster, clusterversions, version], 404 -> None (system_identity.py:235; run_harness.py:397); nodes: list_node(_request_timeout=(5, 15)) -> [CoreV1Api, list_node, [5, 15]] (system_identity.py:289; run_harness.py:357); storage_endpoint, storage_backend (detect_backend is a string test, s3/conformance.py:627) and scratch read config only; storage_server: raw_client.head_bucket(Bucket=buckets.bronze) -> [S3, head_bucket, runchar-bronze] (system_identity.py:340; run_harness.py:647, 660). Then observe_load (system_identity.py:456): list_node (5, 15) (line 478), two schedulable workers so the pod list runs: list_pod_for_all_namespaces(field_selector='status.phase!=Succeeded,status.phase!=Failed', _request_timeout=_POD_LIST_TIMEOUT=(5, 60)) (lines 416, 505; run_harness.py:361). Tuples render as JSON lists. End sample: 3 entries appended at index 39, after the finally block's S3 init and three get_bucket_size calls, because cli/_run.py:3201 sample_run_end runs right before save_run (3202), after end_run, _collect_platform_metrics, _load_latest_datagen_fleet and build_pipeline_benchmark, which record nothing in the existing golden. sample_run_end (system_identity.py:578) builds only the k8s client (s3_too=False): [k8s, get_k8s_client, runchar], then observe_load's list_node and list_pod_for_all_namespaces as at start. metrics_keys.experiment gains observed, system_identity and v2_unavailable (metrics/experiment.py:832-863): experiment_inputs writes identity_version 2 (experiment.py:305, committed in 30cffe6), batch run() writes no corpus_observation, so corpus_v2_fields returns None (corpus_identity.py:725) and missing = ['corpus id v2']; exp2 False, so no identity_version key and schema stays exp1; system_identity has parts, observed is a Mapping. No other section changes: the verdict (metrics/verdict.py) does not read the experiment block, the new data sit inside config_snapshot and experiment, so metrics_keys.top is unchanged, and every new fake call is scripted, so unscripted stays []. Surprise noted: the v2_unavailable key already follows from 30cffe6 alone, so this golden was stale at 30cffe6 before ER-10b."
  },
  "exit_code": 1,
  "unscripted": [],
@@ -83,6 +84,65 @@
    "read_namespaced_stateful_set",
    "lakebench-trino-worker",
    "runchar"
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "VersionApi",
+   "get_code_version",
+   [
+    5,
+    15
+   ]
+  ],
+  [
+   "CustomObjectsApi",
+   "get_cluster",
+   "clusterversions",
+   "version"
+  ],
+  [
+   "CoreV1Api",
+   "list_node",
+   [
+    5,
+    15
+   ]
+  ],
+  [
+   "S3",
+   "head_bucket",
+   "runchar-bronze"
+  ],
+  [
+   "CoreV1Api",
+   "list_node",
+   [
+    5,
+    15
+   ]
+  ],
+  [
+   "CoreV1Api",
+   "list_pod_for_all_namespaces",
+   "status.phase!=Succeeded,status.phase!=Failed",
+   [
+    5,
+    60
+   ]
   ],
   [
    "SparkOperator",
@@ -206,6 +266,28 @@
    "get_bucket_size",
    "runchar-gold",
    ""
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "CoreV1Api",
+   "list_node",
+   [
+    5,
+    15
+   ]
+  ],
+  [
+   "CoreV1Api",
+   "list_pod_for_all_namespaces",
+   "status.phase!=Succeeded,status.phase!=Failed",
+   [
+    5,
+    60
+   ]
   ]
  ],
  "submits": [
@@ -352,6 +434,7 @@
    "maintenance_policy_id",
    "maintenance_settings",
    "mode",
+   "observed",
    "repetitions",
    "results",
    "rules",
@@ -359,6 +442,7 @@
    "stages",
    "support",
    "system",
+   "system_identity",
    "v2_unavailable",
    "workload"
   ]

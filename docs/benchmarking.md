@@ -1015,13 +1015,29 @@ shows any delta. It gives one of three verdicts:
 | comparability not established | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | Withheld; raw numbers shown | 0 |
 
 A comparable pair is also like-for-like when the execution conditions
-match: effective maintenance and maintenance settings, query access path,
-system, benchmark iterations and mode, in-stream rounds (continuous), and
-the Lakebench limits that bound. Otherwise the table is titled "comparable,
-not like-for-like" and lists the differences, because a delta may come from
-those conditions rather than the architecture. A config pair that already
-differs in experiment identity or conditions is flagged before either run
-starts.
+match: effective maintenance and the compaction operation it ran (Trino
+`optimize` at 128MB and Spark Thrift Iceberg `rewrite_data_files` are
+different operations), maintenance settings, benchmark iterations and mode,
+in-stream rounds (continuous), and the Lakebench limits that bound.
+Otherwise the table is titled "comparable, not like-for-like" and lists the
+differences, because a delta may come from those conditions rather than the
+architecture. A config pair that already differs in experiment identity or
+conditions is flagged before either run starts.
+
+The architecture (the recipe, its components and versions, the query access
+path, the dependency set) and the system (the cluster and object store,
+recorded as `experiment.system_identity`) are not conditions; they are what
+a comparison varies. A pair that differs in the architecture alone is an
+architecture differential, and one that differs in the system alone is a
+system differential. A pair that differs in both is **confounded**: no
+difference can be put down to either, and the table lists "architecture
+and system both differ" with the not like-for-like reasons. Two runs whose
+only architecture difference is the dependency set (same composition,
+different jars) are not like-for-like. Records written before 1.7 carry no
+system identity; two of them are assumed to share a system, and the
+comparison says so. Each run also records the allocatable CPU and memory of
+the schedulable workers and the CPU and memory other namespaces requested,
+at run start and end (`experiment.observed`), as evidence only.
 
 For ad hoc analysis the metrics JSON can also be diffed directly. Key
 fields:

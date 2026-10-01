@@ -5,7 +5,8 @@
     "identity_differences and condition_differences are identity() key names; refusals are 'A_no_provenance', 'B_failed' and the like; result_refusals counts per-query result mismatches.",
     "design_before quotes section 0.3. Where it names fewer keys than the records differ in, the extra keys are listed in note.",
     "EVD-7 work (ER-10a, ER-10b, ER-11) adds the After column here, with the WI id in the commit message and a second-agent review (SPEC section 6 rule 4).",
-    "compare_after (ER-10a): what `_build_comparison` returns once the compaction operation (LB-212, derived from the query engine and table format of a record whose effective-maintenance id says compaction=ran) is a condition and the system and query access path are not; only the fields that differ from before are listed. Hand-derived from each record's recipe and effective-maintenance id."
+    "compare_after (ER-10a): what `_build_comparison` returns once the compaction operation (LB-212, derived from the query engine and table format of a record whose effective-maintenance id says compaction=ran) is a condition and the system and query access path are not; only the fields that differ from before are listed. Hand-derived from each record's recipe and effective-maintenance id.",
+    "after (ER-10b, EVD-7): what comparability.pair_verdict returns for the pair: verdict, code, ladder step, LIKE-FOR-LIKE attribution, the differing keys per OD-2 group (comparability.classify key names), the System relation and notes. Hand-derived from each pair's raw records (architecture fields, effective-maintenance ids, verdict status) and the ch03 section 0.3 After column; verdict-level only (metric rendering, hints and not_assessed are ER-11)."
   ],
   "pairs": {
     "P1": {
@@ -19,6 +20,24 @@
         "refusals": [],
         "condition_differences": [],
         "result_refusals": 0
+      },
+      "after": {
+        "verdict": "LIKE-FOR-LIKE",
+        "code": 0,
+        "step": "8",
+        "attribution": "architecture differential",
+        "workload": [],
+        "corpus": [],
+        "architecture": [
+          "recipe",
+          "catalog"
+        ],
+        "conditions": [],
+        "system": "same",
+        "notes": [
+          "system identity not recorded; assumed the same",
+          "dependency set not recorded"
+        ]
       }
     },
     "P2": {
@@ -32,6 +51,24 @@
         "refusals": [],
         "condition_differences": [],
         "result_refusals": 0
+      },
+      "after": {
+        "verdict": "LIKE-FOR-LIKE",
+        "code": 0,
+        "step": "8",
+        "attribution": "architecture differential",
+        "workload": [],
+        "corpus": [],
+        "architecture": [
+          "recipe",
+          "query engine"
+        ],
+        "conditions": [],
+        "system": "same",
+        "notes": [
+          "system identity not recorded; assumed the same",
+          "dependency set not recorded"
+        ]
       }
     },
     "P3": {
@@ -45,6 +82,24 @@
         "refusals": [],
         "condition_differences": [],
         "result_refusals": 0
+      },
+      "after": {
+        "verdict": "LIKE-FOR-LIKE",
+        "code": 0,
+        "step": "8",
+        "attribution": "architecture differential",
+        "workload": [],
+        "corpus": [],
+        "architecture": [
+          "recipe",
+          "catalog"
+        ],
+        "conditions": [],
+        "system": "same",
+        "notes": [
+          "system identity not recorded; assumed the same",
+          "dependency set not recorded"
+        ]
       }
     },
     "P4": {
@@ -63,6 +118,28 @@
           "benchmark rounds"
         ],
         "result_refusals": 0
+      },
+      "after": {
+        "verdict": "NOT LIKE-FOR-LIKE",
+        "code": 12,
+        "step": "7",
+        "attribution": null,
+        "workload": [],
+        "corpus": [],
+        "architecture": [
+          "recipe",
+          "table format"
+        ],
+        "conditions": [
+          "effective maintenance",
+          "maintenance settings",
+          "benchmark rounds"
+        ],
+        "system": "same",
+        "notes": [
+          "system identity not recorded; assumed the same",
+          "dependency set not recorded"
+        ]
       }
     },
     "P5": {
@@ -81,6 +158,27 @@
         "like_for_like": false,
         "condition_differences": [
           "compaction operation"
+        ]
+      },
+      "after": {
+        "verdict": "NOT LIKE-FOR-LIKE",
+        "code": 12,
+        "step": "7",
+        "attribution": null,
+        "workload": [],
+        "corpus": [],
+        "architecture": [
+          "recipe",
+          "catalog",
+          "query engine"
+        ],
+        "conditions": [
+          "compaction operation"
+        ],
+        "system": "same",
+        "notes": [
+          "system identity not recorded; assumed the same",
+          "dependency set not recorded"
         ]
       }
     },
@@ -103,6 +201,28 @@
           "effective maintenance",
           "compaction operation"
         ]
+      },
+      "after": {
+        "verdict": "NOT LIKE-FOR-LIKE",
+        "code": 12,
+        "step": "7",
+        "attribution": null,
+        "workload": [],
+        "corpus": [],
+        "architecture": [
+          "recipe",
+          "table format",
+          "query engine"
+        ],
+        "conditions": [
+          "effective maintenance",
+          "compaction operation"
+        ],
+        "system": "same",
+        "notes": [
+          "system identity not recorded; assumed the same",
+          "dependency set not recorded"
+        ]
       }
     },
     "P7": {
@@ -120,6 +240,22 @@
         "refusals": [],
         "condition_differences": [],
         "result_refusals": 12
+      },
+      "after": {
+        "verdict": "NOT COMPARABLE",
+        "code": 10,
+        "step": "3",
+        "attribution": null,
+        "workload": [],
+        "corpus": [
+          "corpus id",
+          "generator image",
+          "seed"
+        ],
+        "architecture": [],
+        "conditions": [],
+        "system": null,
+        "notes": []
       }
     },
     "P8": {
@@ -149,6 +285,21 @@
           "maintenance settings",
           "benchmark rounds"
         ]
+      },
+      "after": {
+        "verdict": "NOT COMPARABLE",
+        "code": 10,
+        "step": "3",
+        "attribution": null,
+        "workload": [],
+        "corpus": [
+          "corpus id",
+          "generator image"
+        ],
+        "architecture": [],
+        "conditions": [],
+        "system": null,
+        "notes": []
       }
     },
     "P9": {
@@ -174,6 +325,19 @@
           "compaction operation",
           "benchmark mode"
         ]
+      },
+      "after": {
+        "verdict": "NOT COMPARABLE",
+        "code": 10,
+        "step": "1",
+        "attribution": null,
+        "workload": [],
+        "corpus": [],
+        "architecture": [],
+        "conditions": [],
+        "system": null,
+        "notes": [],
+        "reason_kind": "B_failed"
       }
     },
     "P10": {
@@ -198,6 +362,21 @@
           "effective maintenance",
           "compaction operation"
         ]
+      },
+      "after": {
+        "verdict": "NOT COMPARABLE",
+        "code": 10,
+        "step": "3",
+        "attribution": null,
+        "workload": [],
+        "corpus": [
+          "corpus id",
+          "generator image"
+        ],
+        "architecture": [],
+        "conditions": [],
+        "system": null,
+        "notes": []
       }
     },
     "P11": {
@@ -226,6 +405,22 @@
           "maintenance settings",
           "benchmark rounds"
         ]
+      },
+      "after": {
+        "verdict": "NOT COMPARABLE",
+        "code": 10,
+        "step": "3",
+        "attribution": null,
+        "workload": [],
+        "corpus": [
+          "corpus id",
+          "generator image",
+          "seed"
+        ],
+        "architecture": [],
+        "conditions": [],
+        "system": null,
+        "notes": []
       }
     },
     "P12": {
@@ -241,6 +436,19 @@
         ],
         "condition_differences": [],
         "result_refusals": 0
+      },
+      "after": {
+        "verdict": "NOT COMPARABLE",
+        "code": 10,
+        "step": "1",
+        "attribution": null,
+        "workload": [],
+        "corpus": [],
+        "architecture": [],
+        "conditions": [],
+        "system": null,
+        "notes": [],
+        "reason_kind": "A_legacy"
       }
     }
   }
