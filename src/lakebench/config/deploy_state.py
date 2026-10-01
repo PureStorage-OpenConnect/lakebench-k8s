@@ -8,7 +8,7 @@ change data refuse it, and the read and teardown commands load it under the
 name :func:`resolve_name` resolves.
 
 Everything here only reads. Nothing in this module creates a file or a
-directory.
+directory (CC-2 adds the state writer here).
 """
 
 from __future__ import annotations
@@ -29,11 +29,17 @@ LEGACY_STATE = Path(".lakebench") / "state.json"
 
 NameSource = Literal["config", "override", "legacy-state", "suggested"]
 
-#: A YAML mapping with any of these top-level keys is taken for a lakebench
-#: config when counting the nameless configs in a directory.
+#: The design's markers of a lakebench config (SAF-2 part c, check 1). The
+#: scan also counts every other top-level key a config can carry (see
+#: :func:`_config_marker_keys`), because a v1.6 config can be built from
+#: flat keys alone.
 CONFIG_MARKER_KEYS = frozenset(
     {"platform", "architecture", "workload", "recipe", "endpoint", "scale"}
 )
+
+#: Files larger than this are not read by the scan: no config is this big,
+#: and a large YAML dump beside a config must not slow every command.
+SCAN_MAX_BYTES = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,33 @@ def read_legacy_name(config_path: str | Path) -> str | None:
     return None
 
 
+def _config_marker_keys() -> frozenset[str]:
+    from .loader import _FLAT_FIELD_MAP
+    from .schema import LakebenchConfig
+
+    keys = set(CONFIG_MARKER_KEYS) | set(LakebenchConfig.model_fields) | set(_FLAT_FIELD_MAP)
+    return frozenset(keys - {"name", "version", "description"})
+
+
+def _sets_a_name(raw: dict[str, Any]) -> bool:
+    """Whether a raw config mapping resolves to a name of its own.
+
+    A ``${VAR}`` name counts only when the environment resolves it to a
+    non-empty value, as ``load_config`` would.
+    """
+    name = raw.get("name")
+    if not name:
+        return False
+    if isinstance(name, str) and "${" in name:
+        from .loader import ConfigError, _substitute_env_vars
+
+        try:
+            return bool(_substitute_env_vars(name).strip())
+        except ConfigError:
+            return False
+    return True
+
+
 def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
     """The other nameless lakebench configs in this config's directory.
 
@@ -90,11 +123,13 @@ def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
     ``.lakebench/state.json``, so when there is more than one, that name
     cannot be tied to any one of them (SAF-2 part c, check 1). Each
     ``*.yaml`` and ``*.yml`` file beside the config is parsed with
-    ``yaml.safe_load`` on its raw text (no env substitution); a file that
-    does not parse is skipped, and the config itself is left out, however
-    it is linked. Only this directory is read, not its subdirectories.
-    Returns None when the directory cannot be listed, so a caller can fail
-    closed.
+    ``yaml.safe_load`` on its raw text, and counted when it is a mapping
+    with a top-level config key and no name of its own. A file that cannot
+    be read or parsed, or is over :data:`SCAN_MAX_BYTES`, is skipped, and the
+    config itself is left out however it is linked. Only this directory is
+    read, not its subdirectories, and only these two suffixes, as in the
+    design. Returns None when the directory cannot be listed, so a caller
+    can fail closed.
     """
     path = Path(config_path).absolute()
     try:
@@ -102,6 +137,7 @@ def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
         entries = sorted(path.parent.iterdir())
     except OSError:
         return None
+    markers = _config_marker_keys()
     others: list[Path] = []
     for entry in entries:
         if entry.suffix not in (".yaml", ".yml"):
@@ -109,10 +145,14 @@ def other_nameless_configs(config_path: str | Path) -> list[Path] | None:
         try:
             if not entry.is_file() or entry.resolve() == own:
                 continue
+            if entry.stat().st_size > SCAN_MAX_BYTES:
+                continue
             raw = yaml.safe_load(entry.read_text())
-        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        except Exception:  # noqa: BLE001 -- any unreadable file is not a config
+            # yaml.safe_load raises plain ValueError on a date such as
+            # 2026-02-30, not only YAMLError.
             continue
-        if isinstance(raw, dict) and not raw.get("name") and CONFIG_MARKER_KEYS & raw.keys():
+        if isinstance(raw, dict) and markers & raw.keys() and not _sets_a_name(raw):
             others.append(entry)
     return others
 

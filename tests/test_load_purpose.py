@@ -378,8 +378,9 @@ def test_v16_state_teardown_refused_when_siblings_share_the_name(tmp_path):
         assert f"nameless {other}" in msg
         assert "name: lb-20260915-101530" in msg
         assert e.value.siblings == [tmp_path / other]
-    # READ still loads; CC-2's check_nameless_target guards the cluster reads.
-    assert load_config(a, purpose=LoadPurpose.READ).name == "lb-20260915-101530"
+    # status reads the same way (SPEC SAF-2: status refuses as destroy does).
+    with pytest.raises(ConfigNameRequired):
+        load_config(a, purpose=LoadPurpose.READ)
     # Naming the one that deployed it makes it loadable as itself.
     named = _write(tmp_path, {**NAMELESS, "name": "lb-20260915-101530"}, "a.yaml")
     assert load_config(named, purpose=LoadPurpose.TEARDOWN).name == "lb-20260915-101530"
@@ -390,6 +391,9 @@ def test_v16_state_teardown_ignores_files_that_are_not_nameless_configs(tmp_path
     _write(tmp_path, {**NAMELESS, "name": "other"}, "named.yaml")
     _write(tmp_path, {"apiVersion": "v1", "kind": "ConfigMap"}, "manifest.yaml")
     (tmp_path / "broken.yml").write_text("{not: [yaml")
+    # yaml.safe_load raises a plain ValueError on an impossible date.
+    (tmp_path / "dated.yaml").write_text("release: 2026-02-30\n")
+    (tmp_path / "huge.yaml").write_text(yaml.safe_dump(NAMELESS) + "#" * (1 << 20))
     (tmp_path / "notes.txt").write_text(yaml.safe_dump(NAMELESS))
     (tmp_path / "alias.yaml").symlink_to(a)
     (tmp_path / "sub").mkdir()
@@ -415,3 +419,27 @@ def test_v16_state_mutate_refusal_does_not_offer_a_shared_name(tmp_path):
     assert "nameless b.yaml" in msg
     assert "new unique name, for example 'name: lb-" in msg
     assert "only to the one config that deployed" in msg
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        {"secret_ref": "s3-creds", "mode": "batch"},  # flat keys only
+        {**NAMELESS, "name": "${LB_TEST_UNSET_NAME:-}"},  # resolves to no name
+        {**NAMELESS, "name": "${LB_TEST_UNSET_NAME}"},  # does not resolve
+    ],
+    ids=["flat-only", "empty-env-name", "unset-env-name"],
+)
+def test_v16_state_sibling_scan_counts_every_nameless_form(tmp_path, monkeypatch, sibling):
+    monkeypatch.delenv("LB_TEST_UNSET_NAME", raising=False)
+    a = _v16_dir(tmp_path)
+    _write(tmp_path, sibling, "b.yaml")
+    with pytest.raises(ConfigNameRequired):
+        load_config(a, purpose=LoadPurpose.TEARDOWN)
+
+
+def test_v16_state_sibling_with_env_name_is_named(tmp_path, monkeypatch):
+    monkeypatch.setenv("LB_TEST_SET_NAME", "other")
+    a = _v16_dir(tmp_path)
+    _write(tmp_path, {**NAMELESS, "name": "${LB_TEST_SET_NAME}"}, "b.yaml")
+    assert load_config(a, purpose=LoadPurpose.TEARDOWN).name == "lb-20260915-101530"

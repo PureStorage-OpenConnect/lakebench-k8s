@@ -1,9 +1,10 @@
 """SAF-2 (a, e) and CFG-1 through the CLI (CC-1).
 
-These tests use only names that existed before LoadPurpose, so each one runs,
-and fails, against the v1.6 loader: a nameless run went ahead under a
-time-based name written to .lakebench/state.json, validate opened a journal,
-report created lakebench-output/runs, and deploy dropped removed keys.
+These tests use only names that existed before LoadPurpose, so each one runs
+against the v1.6 loader, and all but the named read-only guards fail there: a
+nameless run went ahead under a time-based name written to
+.lakebench/state.json, validate opened a journal, report created
+lakebench-output/runs, and deploy dropped removed keys.
 """
 
 from __future__ import annotations
@@ -126,3 +127,25 @@ def test_destroy_refuses_a_v16_name_two_nameless_configs_share(tmp_path, monkeyp
     out = " ".join(result.output.split())
     assert "nameless a.yaml" in out
     assert "name: lb-20260915-101530" in out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["stop", "CFG"], ["clean", "bronze", "CFG", "--force"], ["config", "upgrade", "CFG"]],
+    ids=["stop", "clean", "config-upgrade"],
+)
+def test_nameless_config_refused_by_stop_clean_and_upgrade(argv, tmp_path, monkeypatch):
+    # stop is a teardown (no v1.6 state here, so no deployment is this
+    # config's), clean changes data, and config upgrade must not bake a
+    # name the input never chose into its output. Each refuses and writes
+    # nothing.
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    monkeypatch.chdir(tmp_path)
+    cfg_path = _write(tmp_path, NAMELESS)
+    before = _listing(tmp_path)
+    result = runner.invoke(app, [str(cfg_path) if a == "CFG" else a for a in argv])
+    assert "Usage:" not in result.output
+    assert result.exit_code != 0
+    out = " ".join(result.output.split())
+    assert "no name" in out
+    assert _listing(tmp_path) == before

@@ -9,14 +9,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Breaking changes
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
-  `financial`, `config upgrade` and `validate` refuse a nameless config and
-  offer a name to add. A nameless config no longer gets a name written to
-  `.lakebench/state.json`; that file is only read, so `destroy`, `stop`,
-  `status`, `logs`, `report` and `info` still reach a deployment v1.6 made
-  from the directory. Without that file, `destroy`, `stop` and `admin`
-  refuse a nameless config, and they refuse it too when the directory holds
-  another nameless config, because v1.6 gave all of them the one name; add
-  that name to the config that deployed it.
+  `financial` and `validate` refuse a nameless config and offer a name to
+  add; `config upgrade` refuses one too. A nameless config no longer gets a
+  name written to `.lakebench/state.json`; that file is only read, so
+  `destroy`, `stop`, `status`, `logs`, `report` and `info` load a nameless
+  config under the name a v1.6 load recorded there, when it is the only
+  nameless config in its directory. With another nameless config beside
+  it, they refuse, because v1.6 gave all of them the one name: add that
+  name to the config that deployed it. Without that file, `destroy`, `stop`
+  and `admin` refuse a nameless config.
 - **Removed config keys are refused by the commands that change data**
   (the list above, except `config upgrade`), with what to do instead.
   `destroy`, `stop`, `status`, `logs`, `report`, `info`, `config show`,

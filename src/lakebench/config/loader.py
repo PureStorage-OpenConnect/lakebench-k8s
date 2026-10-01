@@ -328,10 +328,11 @@ def load_config(
             raise ConfigNameRequired(resolution, siblings=siblings, suggestion=suggested_name(path))
         if purpose == LoadPurpose.TEARDOWN and resolution.source == "suggested":
             raise ConfigNameRequired(resolution, teardown=True)
-        if purpose == LoadPurpose.TEARDOWN and siblings != []:
+        if purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ) and siblings != []:
             # SAF-2 (c) check 1 for the v1.6 name: with several nameless
             # configs here it belongs to whichever one deployed, and destroy,
-            # stop or admin from another would act on that deployment.
+            # stop, admin or status from another would act on, or report,
+            # that deployment.
             raise ConfigNameRequired(resolution, teardown=True, siblings=siblings)
         data["name"] = resolution.name
 
