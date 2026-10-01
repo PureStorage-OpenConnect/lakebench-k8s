@@ -107,6 +107,16 @@ jobs:
         if: matrix.python-version == '3.13'
         run: python scripts/check_coverage.py --suite unit coverage-unit.json
 
+      # The per-file report, kept so a floor can be raised from a measured run.
+      - name: Upload coverage report
+        if: always() && matrix.python-version == '3.13'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: coverage-unit
+          path: coverage-unit.json
+          retention-days: 30
+          if-no-files-found: error
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-24.04
