@@ -183,9 +183,10 @@ jobs:
           mkdir -p "$work"
           ignore="$work/gitleaksignore"
           cfg="$work/gitleaks.toml"
-          # The config always comes from a trusted ref when one has it, so no
-          # branch (a pull request to main included) can allowlist its own key
-          # through .gitleaks.toml.
+          # The config always comes from a trusted ref when one has it, so an
+          # allowlist a branch (a pull request to main included) adds to its own
+          # .gitleaks.toml cannot hide a finding unnoticed. A branch can still
+          # edit this workflow; review of the pull request is that control.
           cfg_ref=""
           for ref in origin/main origin/integrate/v1.5.0; do
             if git cat-file -e "$ref:.gitleaks.toml" 2>/dev/null; then

@@ -89,7 +89,7 @@ def test_clean_history_passes(repo, ignore):
     _gitleaks()
     res = _run(repo, ignore)
     assert res.returncode == 0, res.stdout + res.stderr
-    assert "1 commits and their messages scanned" in res.stdout
+    assert "1 commits and 1 commit and tag messages scanned" in res.stdout
 
 
 def test_key_in_a_commit_message_fails(repo, ignore):
@@ -165,3 +165,51 @@ def test_an_empty_or_failed_scan_fails(repo, ignore, tmp_path, output):
 def test_missing_inputs_fail(repo, tmp_path):
     res = _run(repo, tmp_path / "absent", "--gitleaks", sys.executable)
     assert res.returncode == 2
+
+
+def test_a_message_finding_names_its_commit_and_can_be_baselined(repo, ignore):
+    _gitleaks()
+    _git(repo, "commit", "-q", "--allow-empty", "-m", f"rotate\n\nnew key {_key('Q')}")
+    sha = _git(repo, "rev-parse", "HEAD")
+    res = _run(repo, ignore)
+    assert res.returncode == 1 and f"msgs/commits/{sha}.txt" in res.stdout, res.stdout
+    # The fingerprint stays put when later commits land.
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "later")
+    ignore.write_text(f"# planted\nmsgs/commits/{sha}.txt:pure-flashblade-s3-access-key:3\n")
+    res = _run(repo, ignore)
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_an_octopus_merge_fails_closed(repo, ignore):
+    _gitleaks()
+    for b in ("b1", "b2"):
+        _git(repo, "checkout", "-q", "-b", b, "main")
+        (repo / f"{b}.txt").write_text(b + "\n")
+        _git(repo, "add", f"{b}.txt")
+        _git(repo, "commit", "-q", "-m", b)
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "octopus", "b1", "b2")
+    res = _run(repo, ignore)
+    assert res.returncode == 2 and "three or more parents" in res.stdout, res.stdout
+
+
+def test_a_shallow_clone_fails_closed(repo, ignore, tmp_path):
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "second")
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{repo}", str(shallow)],
+        check=True,
+        capture_output=True,
+        env=_env(),
+    )
+    res = _run(shallow, ignore, "--gitleaks", sys.executable)
+    assert res.returncode == 2 and "shallow" in res.stdout
+
+
+def test_a_message_that_is_not_utf8_is_scanned(repo, ignore, tmp_path):
+    _gitleaks()
+    msg = tmp_path / "msg"
+    msg.write_bytes(b"caf\xe9 latin-1\n")
+    _git(repo, "commit", "-q", "--allow-empty", "-F", str(msg))  # stored as raw bytes
+    res = _run(repo, ignore)
+    assert res.returncode == 0, res.stdout + res.stderr

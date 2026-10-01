@@ -5,26 +5,35 @@ Used by the ``secrets-history`` CI job and the release gate's
 ``gitleaks-history`` check, so both apply the same rules:
 
 1. every commit reachable from ``--rev`` (default ``HEAD``), with
-   ``--remerge-diff`` so a change made in a merge commit itself is seen, and
-   ``--ignore-gitleaks-allow`` so an inline allow comment hides nothing;
+   ``--remerge-diff`` so a change made in a two-parent merge commit itself is
+   seen, and ``--ignore-gitleaks-allow`` so an inline allow comment hides
+   nothing;
 2. every commit message reachable from ``--rev`` and every tag's message,
-   which ``gitleaks git`` does not read.
+   which ``gitleaks git`` does not read. Each is written to its own file,
+   ``msgs/commits/<sha>.txt`` or ``msgs/tags/<name>.txt``, and scanned with
+   ``gitleaks dir``, so a finding names its commit or tag and has a stable
+   fingerprint (``msgs/commits/<sha>.txt:<rule>:<line>``) for the baseline.
 
 gitleaks is run from a temporary directory against the git directory, so it
 reads only the baseline passed with ``--ignore`` and never a
 ``.gitleaksignore`` in the scanned tree.
 
-``gitleaks git`` exits 0 when its ``git log`` fails (it reports "0 commits
-scanned"), so this script also fails when git cannot run ``--remerge-diff``
-(git older than 2.36), when gitleaks logs an error, or when it scanned no
-commit.
+It fails closed (exit 2) where a scan would silently miss something:
+
+- ``gitleaks git`` exits 0 when its ``git log`` fails (it reports "0 commits
+  scanned"), so the script fails when git cannot run ``--remerge-diff`` (git
+  older than 2.36) or the rev is missing, when gitleaks logs an error, and
+  when it scanned no commit;
+- ``--remerge-diff`` shows nothing for a merge with three or more parents, so
+  an octopus merge reachable from the rev fails the scan;
+- a shallow clone holds only part of the history.
 
 Usage:
     python scripts/gitleaks_history.py --repo . --config .gitleaks.toml \\
         --ignore .gitleaksignore [--rev HEAD] [--gitleaks PATH]
 
 Exit 0 when nothing is found beyond the baseline, 1 on a finding, 2 when the
-scan could not run or scanned nothing.
+scan could not run, scanned nothing, or would miss part of the history.
 """
 
 from __future__ import annotations
@@ -51,21 +60,42 @@ def _clean_env() -> dict[str, str]:
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    # errors="replace": a message that is not UTF-8 must not crash the scan.
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=_clean_env(),
     )
 
 
-def _messages(repo: Path, rev: str) -> str | None:
-    """Every commit message reachable from *rev*, then every tag message."""
-    log = _git(repo, "log", "--format=commit %H%n%B", rev)
-    tags = _git(repo, "for-each-ref", "refs/tags", "--format=tag %(refname)%0a%(contents)")
+def _safe_name(ref: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", ref)
+
+
+def write_messages(repo: Path, rev: str, dest: Path) -> int | None:
+    """Write every commit message reachable from *rev* to
+    ``dest/commits/<sha>.txt`` and every tag message to ``dest/tags/<name>.txt``.
+    Returns the number of files, or None if git failed."""
+    log = _git(repo, "log", "--format=%x00%H%x00%B", rev)
+    tags = _git(repo, "for-each-ref", "refs/tags", "--format=%00%(refname:strip=2)%00%(contents)")
     if log.returncode or tags.returncode:
         return None
-    return log.stdout + tags.stdout
+    n = 0
+    for sub, raw in (("commits", log.stdout), ("tags", tags.stdout)):
+        (dest / sub).mkdir(parents=True, exist_ok=True)
+        fields = raw.split("\0")[1:]
+        for name, body in zip(fields[0::2], fields[1::2], strict=True):
+            out = dest / sub / f"{_safe_name(name)}.txt"
+            k = 1
+            while out.exists():  # two tag names that differ only in / and _
+                out = dest / sub / f"{_safe_name(name)}.{k}.txt"
+                k += 1
+            out.write_text(body, encoding="utf-8")
+            n += 1
+    return n
 
 
 def _report(out: str) -> str:
@@ -74,16 +104,28 @@ def _report(out: str) -> str:
     return text
 
 
+def _fail(msg: str) -> int:
+    print(f"::error::{msg}")
+    return 2
+
+
 def scan(
     repo: Path, config: Path, ignore: Path, rev: str = "HEAD", gitleaks: str = "gitleaks"
 ) -> int:
+    if _git(repo, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        return _fail("shallow clone: only part of the history would be scanned")
     probe = _git(repo, "log", "--remerge-diff", "-1", "--format=%H", rev)
     if probe.returncode != 0:
-        print(
-            f"::error::git log --remerge-diff {rev} failed (git 2.36 or later is needed, "
+        return _fail(
+            f"git log --remerge-diff {rev} failed (git 2.36 or later is needed, "
             f"and {rev} must exist): {probe.stderr.strip()}"
         )
-        return 2
+    octopus = _git(repo, "rev-list", "--min-parents=3", rev).stdout.split()
+    if octopus:
+        return _fail(
+            f"{len(octopus)} merge(s) with three or more parents (first {octopus[0]}); "
+            "--remerge-diff cannot show what they change, so the history is not fully scanned"
+        )
     gitdir = _git(repo, "rev-parse", "--path-format=absolute", "--git-dir").stdout.strip()
     common = [
         "--config",
@@ -93,6 +135,7 @@ def scan(
         "--redact",
         "--no-banner",
         "--no-color",
+        "--verbose",
         "--exit-code",
         "1",
         "--ignore-gitleaks-allow",
@@ -103,6 +146,7 @@ def scan(
             cwd=cwd,
             capture_output=True,
             text=True,
+            errors="replace",
             env=_clean_env(),
         )
         text = _report(hist.stdout + hist.stderr)
@@ -110,31 +154,27 @@ def scan(
             return hist.returncode
         m = _SCANNED.search(text)
         if _ERR.search(text) or m is None or int(m.group(1)) == 0:
-            print(
-                "::error::gitleaks scanned no commit or logged an error; the history is unscanned"
-            )
-            return 2
-        msgs = _messages(repo, rev)
-        if msgs is None:
-            print("::error::could not read the commit and tag messages")
-            return 2
+            return _fail("gitleaks scanned no commit or logged an error; the history is unscanned")
+        commits = int(m.group(1))
+        count = write_messages(repo, rev, Path(cwd) / "msgs")
+        if count is None:
+            return _fail("could not read the commit and tag messages")
         res = subprocess.run(
-            [gitleaks, "stdin", *common],
+            [gitleaks, "dir", "msgs", *common],
             cwd=cwd,
-            input=msgs,
             capture_output=True,
             text=True,
+            errors="replace",
             env=_clean_env(),
         )
         text = _report(res.stdout + res.stderr)
         if res.returncode != 0:
             return res.returncode
         if _ERR.search(text):
-            print("::error::gitleaks logged an error scanning the commit and tag messages")
-            return 2
+            return _fail("gitleaks logged an error scanning the commit and tag messages")
     print(
-        f"gitleaks-history: {m.group(1)} commits and their messages scanned, "
-        "nothing beyond the baseline"
+        f"gitleaks-history: {commits} commits and {count} commit and tag messages "
+        "scanned, nothing beyond the baseline"
     )
     return 0
 

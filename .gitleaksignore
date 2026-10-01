@@ -1,9 +1,11 @@
 # gitleaks baseline: findings in published history that are not live
 # credentials. Each entry is a fingerprint <commit>:<path>:<rule>:<line>;
-# none holds a secret value. gitleaks reads this file from the scanned tree,
-# so CI's history scan uses origin/main's copy instead of a branch's: a
-# change takes effect once it is merged to main. tests/test_gitleaks_baseline.py
-# pins the list.
+# none holds a secret value; a commit or tag message finding is
+# msgs/commits/<sha>.txt:<rule>:<line> or msgs/tags/<name>.txt:<rule>:<line>.
+# scripts/gitleaks_history.py passes this file to gitleaks explicitly. CI's
+# history scan uses origin/main's copy (origin/integrate/v1.5.0's while main
+# has none) instead of a branch's; see docs/releasing.md.
+# tests/test_gitleaks_baseline.py pins the list.
 
 # The old default Polaris client secret, public on PyPI in 1.0.0 to 1.4.0. It
 # is not a credential for any live deployment; the current code has no
