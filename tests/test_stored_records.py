@@ -91,7 +91,9 @@ def test_fixture_is_clean(path: Path) -> None:
 
 def test_manifest_pins_each_fixture() -> None:
     """A hand-edited fixture (a doctored row count) no longer matches the
-    sha256 the import recorded."""
+    sha256 the import recorded. A commit that edits the fixture and the
+    MANIFEST together passes this; only the lineage test below, run where
+    the sources exist, catches that."""
     for run_id, entry in sr.manifest()["records"].items():
         assert scrub.sha256_of(sr.record_path(run_id)) == entry["fixture_sha256"], run_id
 
@@ -247,8 +249,113 @@ def test_bucket_named_like_a_stage_is_refused_not_rewritten() -> None:
     experiment.stages.executed: refuse rather than edit the stages run."""
     rec = sr.load_record("5105a0")
     rec["config_snapshot"]["s3"]["buckets"]["silver"] = "silver"
-    with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*stages\.executed"):
+    with pytest.raises(scrub.ScrubError, match="silver"):
         scrub.scrub_record(rec)
+
+
+def test_legacy_bucket_named_like_a_stage_is_refused() -> None:
+    """A legacy record has no experiment block for the identity guard to
+    compare: a bucket named silver would rename stage_matrix.silver and
+    rewrite stages[].stage_name without a refusal (review SC1)."""
+    rec = sr.load_record("978622")
+    assert experiment_of(rec) is None
+    rec["config_snapshot"]["s3"]["buckets"]["silver"] = "silver"
+    with pytest.raises(scrub.ScrubError, match="also a key in the record"):
+        scrub.scrub_record(rec)
+
+
+def test_stage_name_is_evidence() -> None:
+    rec = sr.load_record("978622")
+    rec["config_snapshot"]["s3"]["buckets"]["bronze"] = "dep-x-bronze"
+    rec["pipeline_benchmark"]["stages"][0]["stage_name"] = "dep-x-bronze"
+    with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*stage_name"):
+        scrub.scrub_record(rec)
+
+
+def test_credential_named_key_inside_experiment_refused() -> None:
+    """A cap such as experiment.limits.max_token reads as a credential key;
+    inside the experiment block it is evidence, never a placeholder (SC2)."""
+    rec = sr.load_record("5105a0")
+    rec["experiment"]["limits"]["max_token"] = "4096"
+    with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*max_token"):
+        scrub.scrub_record(rec)
+
+
+def test_address_before_a_full_stop_is_found() -> None:
+    assert scrub.scrub_text("ok 10.99.7.5, 10.99.7.6.") == "ok 10.0.1.50, 10.0.1.50."
+    rec = sr.load_record("5105a0")
+    rec["jobs"][0]["error_message"] = "Connection refused by 10.99.7.5."
+    assert any("private address" in p for p in scrub.check_clean(rec))
+    # Still not part of a longer dotted run.
+    assert scrub.scrub_text("jdk 1.10.99.7.5 and 10.99.7.5.1") == "jdk 1.10.99.7.5 and 10.99.7.5.1"
+
+
+def test_leading_zero_address_is_private() -> None:
+    assert scrub.scrub_text("via 010.099.007.005") == "via 10.0.1.50"
+
+
+@pytest.mark.parametrize("shape", ["conf_argv", "key_value_env", "yaml_text"])
+def test_credential_assigned_in_text(shape: str) -> None:
+    """.gitleaks.toml's s3-secret-key-assignment and k8s-inline-env shapes,
+    and the dotted Spark form gitleaks itself misses (review M1)."""
+    fake = "Ab1x" * 10  # 40 chars, not a key
+    rec = sr.load_record("5105a0")
+    extra = rec["config_snapshot"].setdefault("extra", {})
+    if shape == "conf_argv":
+        extra["args"] = ["--conf", f"spark.hadoop.fs.s3a.secret.key={fake}"]
+    elif shape == "key_value_env":
+        extra["env"] = [{"key": "AWS_SECRET_ACCESS_KEY", "value": fake}]
+    else:
+        rec["jobs"][0]["error_message"] = f"bad config: secretKey: {fake}"
+    assert scrub.check_clean(rec) != []
+    out, _ = scrub.scrub_record(rec)
+    text = json.dumps(out)
+    assert fake not in text
+    assert "${LAKEBENCH_S3_SECRET_KEY}" in text
+    assert scrub.check_clean(out) == []
+    # A value: line in pasted YAML refuses rather than rewrites.
+    with pytest.raises(scrub.ScrubError, match="credential format"):
+        scrub.scrub_text(f"env:\n- name: X\n  value: {fake}\n")
+
+
+def test_subdomain_of_an_endpoint_host_rewritten() -> None:
+    rec = sr.load_record("5105a0")
+    rec["config_snapshot"]["s3"]["endpoint"] = "http://fb.lab.corp:80"
+    rec["jobs"][0]["error_message"] = "GET https://mybkt.fb.lab.corp/k via ns1.fb.lab.corp"
+    out, _ = scrub.scrub_record(rec)
+    assert out["jobs"][0]["error_message"] == "GET https://10.0.1.50/k via 10.0.1.50"
+
+
+def test_s3_url_and_endpoints_keys_are_endpoints() -> None:
+    rec = sr.load_record("5105a0")
+    extra = rec["config_snapshot"].setdefault("extra", {})
+    extra["s3_url"] = "http://fb.lab.corp:80"
+    extra["endpoints"] = "fb2.lab.corp:80"
+    out, _ = scrub.scrub_record(rec)
+    assert out["config_snapshot"]["extra"] == {
+        "s3_url": "http://10.0.1.50:80",
+        "endpoints": "10.0.1.50:80",
+    }
+
+
+def test_real_protected_seeds_refused_unstubbed() -> None:
+    """The seed tests stub protected_seeds; this one uses the real roles, so
+    a regression to an empty map fails here (review L1). The value is never
+    put in an assertion, so a failure cannot print it."""
+    from lakebench.config import datagen_seed
+
+    protected = datagen_seed.protected_seeds()
+    assert sorted(protected.values()) == ["evaluation", "robustness"]
+    for seed in protected:
+        rec = sr.load_record("5105a0")
+        rec["jobs"][0]["error_message"] = f"generated with seed {seed}"
+        try:
+            scrub.scrub_record(rec)
+            refused, leaked = False, False
+        except scrub.ScrubError as exc:
+            refused, leaked = True, str(seed) in str(exc)
+        assert refused, "a real held-out seed was not refused"
+        assert not leaked, "the refusal names the seed value"
 
 
 def test_bucket_name_in_a_job_name_is_refused() -> None:
@@ -319,7 +426,22 @@ def test_non_addresses_left_alone() -> None:
     assert not [p for p in changed if ".extra." in p]
 
 
-@pytest.mark.parametrize("shape", ["string", "argv", "camel", "list"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "string",
+        "argv",
+        "camel",
+        "list",
+        "second_number",
+        "seeds_list_text",
+        "hyphen_word",
+        "underscore_word",
+        "dict_key",
+        "nested",
+        "float",
+    ],
+)
 def test_protected_seed_in_other_shapes_refused(monkeypatch, shape: str) -> None:
     from lakebench.config import datagen_seed
 
@@ -332,8 +454,23 @@ def test_protected_seed_in_other_shapes_refused(monkeypatch, shape: str) -> None
         extra["args"] = "generate --seed 987654 --scale 1"
     elif shape == "camel":
         extra["randomSeed"] = 987654
-    else:
+    elif shape == "list":
         extra["instance_seeds"] = [1, 987654]
+    elif shape == "second_number":
+        # datagen_seed.aml_seed_error's own message shape.
+        extra["error"] = "the corpus was generated with seed 777, not the claimed 987654"
+    elif shape == "seeds_list_text":
+        extra["note"] = "seeds 777, 987654"
+    elif shape == "hyphen_word":
+        extra["note"] = "aml-seed-987654"
+    elif shape == "underscore_word":
+        extra["note"] = "aml_seed_987654"
+    elif shape == "dict_key":
+        extra["by_seed"] = {"987654": "x"}
+    elif shape == "nested":
+        extra["seed"] = {"evaluation": 987654}
+    else:
+        extra["seed"] = 987654.0
     with pytest.raises(scrub.ScrubError, match="robustness seed") as exc:
         scrub.scrub_record(rec)
     assert "987654" not in str(exc.value)

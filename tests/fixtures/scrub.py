@@ -20,7 +20,9 @@ logs and other text go through ``scrub_text``. What it rewrites:
   key, password, token, api key, credentials; snake, kebab, dotted or camel
   case), under any key inside a credential-named mapping, or the ``value`` of
   a ``{name: <credential-named>, value: ...}`` entry (a Kubernetes env list)
-  becomes a ``${LAKEBENCH_...}`` placeholder. Dict keys are scrubbed for
+  becomes a ``${LAKEBENCH_...}`` placeholder, and so does the value of a
+  credential assignment inside a string (``fs.s3a.secret.key=...``,
+  ``secretKey: ...``, ``aws_secret_access_key = ...``). Dict keys are scrubbed for
   addresses, hosts and buckets as values are; a key rename that would merge
   two keys, or that falls inside ``experiment`` or ``verdict``, is refused.
   An endpoint host without a dot (``minio``) is rewritten only in the
@@ -30,23 +32,28 @@ It refuses, rather than rewrites:
 
 * a value or key that still looks like a credential or a lab address after
   the rewrite (``check_clean``);
-* a seed that is a live held-out seed (the evaluation or robustness role in
-  the AML pre-registration), whether held as an int, a digit string, a list
-  under ``seeds``, or ``--seed N`` inside a string. Spent seeds are retired,
-  and the calibration seed is the public development seed 43. The seed is
-  identity, so it cannot be scrubbed; the message names the path and role,
-  never the value;
-* a rewrite inside the ``experiment`` or ``verdict`` blocks, or of a
-  ``job_type``, ``job_name``, ``name``, ``status``, ``digest`` or
-  ``query_set_id`` value, other than at an endpoint, bucket or credential
-  key;
+* a live held-out seed (the evaluation or robustness role in the AML
+  pre-registration) anywhere: as an int or integral float value, or as a
+  whole digit run in any string or dict key, whatever word surrounds it.
+  A count that happens to equal one refuses too, which fails closed. Spent seeds are retired, and the calibration seed is the public
+  development seed 43. The seed is identity, so it cannot be scrubbed; the
+  message names the path and role, never the value;
+* a bucket name that is also a dict key somewhere in the record (a bucket
+  named ``silver`` would rename ``stage_matrix.silver``);
+* a rewrite inside the ``experiment`` or ``verdict`` blocks other than at an
+  endpoint or bucket key (a credential-named key there is refused too, since
+  ``max_token`` would read as one), or of a ``job_type``, ``job_name``,
+  ``name``, ``status``, ``digest``, ``query_set_id``, ``stage`` or
+  ``stage_name`` value other than at an endpoint, bucket or credential key;
 * a scrub that changes the identity dict (every key, ``generator digest``
   included), corpus id, result fingerprints, query set, stages run or bound
   kinds of the stored block, or the identity of the block
   ``PipelineMetrics.experiment_block()`` rebuilds.
 
-Not covered: IPv6 addresses, and hostnames that are neither in a URL nor an
-endpoint value of the same record. A report.html is not scrubbed; re-render
+Not covered: IPv6 addresses, and hostnames that are neither in a URL, an
+endpoint value of the same record, nor a subdomain of one of its endpoint
+hosts. A ``host`` key is not read as an endpoint (it names Trino, Hive and
+Postgres services too). A report.html is not scrubbed; re-render
 it from the scrubbed record instead.
 
 Usage::
@@ -70,7 +77,7 @@ from pathlib import Path
 from typing import Any
 
 #: Bump when a rule changes; recorded in tests/fixtures/records/MANIFEST.json.
-SCRUBBER_VERSION = 3
+SCRUBBER_VERSION = 4
 
 #: The documented placeholder host for the lab S3 address.
 PLACEHOLDER_HOST = "10.0.1.50"
@@ -82,27 +89,42 @@ _CREDENTIAL_KEY = re.compile(
     r"(?:^|_)(?:access_key(?:_id)?|secret(?:_access)?(?:_key)?|password|passwd|token"
     r"|session_token|api_key|credentials?)$"
 )
-_ENDPOINT_KEY = re.compile(r"(?:^|_)endpoint(?:_url|_override)?(?:_s3)?$")
+_ENDPOINT_KEY = re.compile(r"(?:^|_)(?:endpoints?(?:_url|_override)?(?:_s3)?|s3_url)$")
 _BUCKET_KEY = re.compile(r"(?:^|_)bucket(?:_name)?$")
-_SEED_KEY = re.compile(r"(?:^|_)seeds?$")
-_SEED_ARG = re.compile(r"""(?i)seed["']?\s*[=:]?\s*["']?(\d+)""")
+_DIGITS = re.compile(r"(?<!\d)\d+(?!\d)")
 
 #: Leaf keys whose values are evidence: a rewrite there is refused unless the
 #: key is also an endpoint, bucket or credential key.
-_EVIDENCE_KEYS = frozenset({"job_type", "job_name", "name", "status", "digest", "query_set_id"})
+_EVIDENCE_KEYS = frozenset(
+    {"job_type", "job_name", "name", "status", "digest", "query_set_id", "stage", "stage_name"}
+)
 
-_IPV4 = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
+# Not part of a longer dotted run (a five-part version), but a sentence's
+# full stop after an address does not hide it.
+_IPV4 = re.compile(r"(?<!\d)(?<!\d\.)(\d{1,3}(?:\.\d{1,3}){3})(?!\d|\.\d)")
 _URL = re.compile(
     r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/@\s\"']*@)?"
     r"(?P<host>\[[^\]]*\]|[^/:?#\s\"'@]+)"
 )
 
+#: A credential assigned inside a string: group 1 is the key and the
+#: separator, group 2 the value. Covers .gitleaks.toml's
+#: s3-secret-key-assignment rule and the dotted Spark and Hadoop forms it
+#: misses (``fs.s3a.secret.key=``).
+_CREDENTIAL_ASSIGN = re.compile(
+    r"(?i)((?<![A-Za-z0-9])(?:aws[._-]?)?(?:secret[._-]?(?:access[._-]?)?key"
+    r"|access[._-]?key(?:[._-]?id)?|password|passwd|session[._-]?token)[\"']?\s*[:=]\s*[\"']?)"
+    r"([A-Za-z0-9+/=_.-]{8,})"
+)
+
 #: Value patterns that are credentials wherever they appear (the formats
-#: .gitleaks.toml adds, plus the AWS key id and PEM private keys).
+#: .gitleaks.toml adds, including its k8s-inline-env rule, plus the AWS key
+#: id and PEM private keys). These refuse; they are not rewritten.
 _CREDENTIAL_VALUES = (
     re.compile(r"\bPSFB[A-Z]{38}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"""value:\s*["']?[A-Za-z0-9+/]{40}["']?(?:\s|$)"""),
 )
 
 _CGNAT = ipaddress.IPv4Network("100.64.0.0/10")
@@ -142,9 +164,14 @@ def _is_bucket_key(key: str | None) -> bool:
 
 
 def _children(obj: Mapping[str, Any]) -> Iterator[tuple[str, str, Any]]:
-    """(child key, effective key, value). A ``{name, value}`` entry gives its
-    ``value`` the effective key ``name``."""
-    pair_name = obj.get("name") if isinstance(obj.get("name"), str) and "value" in obj else None
+    """(child key, effective key, value). A ``{name, value}`` or ``{key,
+    value}`` entry gives its ``value`` the effective key ``name`` (``key``)."""
+    pair_name = None
+    if "value" in obj:
+        for field in ("name", "key"):
+            if isinstance(obj.get(field), str):
+                pair_name = obj[field]
+                break
     for k, v in obj.items():
         yield str(k), (pair_name if (k == "value" and pair_name) else str(k)), v
 
@@ -217,11 +244,16 @@ def _rewrite(
 
 
 def _private_ip(text: str) -> bool:
+    if text in ALLOWED_HOSTS:
+        return False
     try:
-        ip = ipaddress.IPv4Address(text)
+        # 010.099.007.005 is still an address to a resolver; ipaddress
+        # rejects leading zeros, so normalise the octets first.
+        octets = [int(o) for o in text.split(".")]
+        ip = ipaddress.IPv4Address(".".join(str(o) for o in octets))
     except ValueError:
         return False  # 999.1.2.3 is not an address
-    return text not in ALLOWED_HOSTS and (
+    return str(ip) not in ALLOWED_HOSTS and (
         ip.is_private or ip.is_reserved or ip.is_link_local or ip in _CGNAT
     )
 
@@ -246,10 +278,11 @@ def _token_re(names: list[str], flags: int = 0) -> re.Pattern[str] | None:
 
 def _credential_placeholder(key: str | None) -> str:
     k = norm_key(key)
-    if "access_key" in k:
-        return "${LAKEBENCH_S3_ACCESS_KEY}"
+    # Secret first: aws_secret_access_key holds "access_key" too.
     if "secret" in k:
         return "${LAKEBENCH_S3_SECRET_KEY}"
+    if "access_key" in k:
+        return "${LAKEBENCH_S3_ACCESS_KEY}"
     return "${LAKEBENCH_CREDENTIAL}"
 
 
@@ -271,6 +304,13 @@ class _Sensitive:
                 host = _host_of(value)
                 if host and host not in ALLOWED_HOSTS:
                     hosts.add(host)
+        keys = {k for _p, k in _keys(record)}
+        for name in self.buckets:
+            if name in keys:
+                raise ScrubError(
+                    f"bucket name {name!r} is also a key in the record; rewriting it "
+                    "would rename structure"
+                )
         taken = {v for v in self.buckets.values() if v}
         n = 0
         for name, placeholder in self.buckets.items():
@@ -285,7 +325,19 @@ class _Sensitive:
         # A dotless name (minio, prometheus) is a service name that also
         # appears as an ordinary word: rewritten in URLs and endpoint values,
         # never as a bare token elsewhere.
-        self._host_re = _token_re([h for h in self.hosts if "." in h], re.IGNORECASE)
+        # A subdomain of an endpoint host (virtual-hosted bucket.fb.lab) is
+        # the same host.
+        dotted = [h for h in self.hosts if "." in h]
+        self._host_re = (
+            re.compile(
+                f"{_TOKEN_BEFORE}(?:[A-Za-z0-9-]+\\.)*(?:"
+                + "|".join(re.escape(h) for h in sorted(dotted, key=len, reverse=True))
+                + f"){_TOKEN_AFTER}",
+                re.IGNORECASE,
+            )
+            if dotted
+            else None
+        )
 
     def _add_bucket(self, name: str, layer: str | None) -> None:
         if name.startswith("scrubbed-") or name in self.buckets:
@@ -294,18 +346,29 @@ class _Sensitive:
             raise ScrubError(f"bucket name {name!r} is shorter than any valid S3 bucket name")
         self.buckets[name] = f"scrubbed-{layer}" if layer else ""
 
+    def _is_endpoint_host(self, host: str) -> bool:
+        return any(host == h or host.endswith("." + h) for h in self.hosts)
+
     def text(self, value: str, endpoint: bool = False) -> str:
         """*value* with addresses, endpoint hosts and buckets rewritten."""
 
         def url(m: re.Match[str]) -> str:
             host = m.group("host").lower()
-            if endpoint or _private_ip(host) or host in self.hosts:
+            if endpoint or _private_ip(host) or self._is_endpoint_host(host):
                 host = PLACEHOLDER_HOST
             else:
                 host = m.group("host")
             return f"{m.group('scheme')}{host}"  # user-info dropped
 
         out = _URL.sub(url, value)
+        out = _CREDENTIAL_ASSIGN.sub(
+            lambda m: (
+                m.group(0)
+                if m.group(2).startswith("$")
+                else m.group(1) + _credential_placeholder(m.group(1).rstrip("\"': ="))
+            ),
+            out,
+        )
         if endpoint and not _URL.match(value.strip()):
             host = _host_of(value)
             if host and host not in ALLOWED_HOSTS:
@@ -323,47 +386,39 @@ class _Sensitive:
         return out
 
 
-def _seed_values(path: str, key: str | None, value: Any) -> Iterator[tuple[str, int]]:
-    if isinstance(value, bool):
-        return
-    if _SEED_KEY.search(norm_key(key)):
-        if isinstance(value, int):
-            yield path, value
-        elif isinstance(value, str) and value.strip().isdigit():
-            yield path, int(value.strip())
-    if isinstance(value, str):
-        for m in _SEED_ARG.finditer(value):
-            yield path, int(m.group(1))
-
-
-def _argv_seeds(obj: Any, path: str = "") -> Iterator[tuple[str, int]]:
-    """``["--seed", "N"]`` (or ``"seed", N``) inside any list."""
+def _numbers(obj: Any, path: str = "") -> Iterator[tuple[str, int]]:
+    """(path, n) for every integer the record holds: int and integral float
+    values, and every whole digit run in a string or a dict key."""
     if isinstance(obj, Mapping):
         for k, v in obj.items():
-            yield from _argv_seeds(v, f"{path}.{k}")
+            for m in _DIGITS.finditer(str(k)):
+                yield f"{path} key", int(m.group(0))
+            yield from _numbers(v, f"{path}.{k}")
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
-            nxt = obj[i + 1] if i + 1 < len(obj) else None
-            if isinstance(v, str) and norm_key(v.lstrip("-")).endswith("seed") and nxt is not None:
-                if isinstance(nxt, int) and not isinstance(nxt, bool):
-                    yield f"{path}[{i + 1}]", nxt
-                elif isinstance(nxt, str) and nxt.strip().isdigit():
-                    yield f"{path}[{i + 1}]", int(nxt.strip())
-            yield from _argv_seeds(v, f"{path}[{i}]")
+            yield from _numbers(v, f"{path}[{i}]")
+    elif isinstance(obj, bool):
+        return
+    elif isinstance(obj, int):
+        yield path, obj
+    elif isinstance(obj, float) and obj.is_integer():
+        yield path, int(obj)
+    elif isinstance(obj, str):
+        for m in _DIGITS.finditer(obj):
+            yield path, int(m.group(0))
 
 
 def _seed_problems(record: Any) -> list[str]:
     """Paths holding a seed the AML protocol protects. Never the value."""
-    seeds = [s for p, k, v, _c in _walk(record) for s in _seed_values(p, k, v)]
-    seeds += list(_argv_seeds(record))
-    if not seeds:
-        return []
     from lakebench.config import datagen_seed
 
     # Only the live held-out roles refuse. Spent seeds are retired, and the
     # calibration seed is the public development seed 43.
     protected = datagen_seed.protected_seeds()
-    return [f"{path} holds the {protected[seed]} seed" for path, seed in seeds if seed in protected]
+    hits = [
+        f"{path} holds the {protected[n]} seed" for path, n in _numbers(record) if n in protected
+    ]
+    return sorted(set(hits))
 
 
 def _text_problems(where: str, value: str) -> list[str]:
@@ -377,6 +432,9 @@ def _text_problems(where: str, value: str) -> list[str]:
     for pattern in _CREDENTIAL_VALUES:
         if pattern.search(value):
             out.append(f"{where}: credential format")
+    for m in _CREDENTIAL_ASSIGN.finditer(value):
+        if not m.group(2).startswith("$"):
+            out.append(f"{where}: credential assigned in text")
     return out
 
 
@@ -446,10 +504,11 @@ def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
 
 def _guarded(path: str, key: str | None) -> bool:
     """A rewrite at *path* would change evidence."""
+    if path.startswith((".experiment.", ".verdict.")):
+        # A credential-looking key there (max_token) is still evidence.
+        return not (_is_endpoint_key(key) or _is_bucket_key(key))
     if _is_endpoint_key(key) or _is_bucket_key(key) or _is_cred_key(key):
         return False
-    if path.startswith((".experiment.", ".verdict.")):
-        return True
     return norm_key(key) in _EVIDENCE_KEYS
 
 
@@ -465,12 +524,7 @@ def scrub_text(text: str, record: Mapping[str, Any] | None = None) -> str:
     sensitive = _Sensitive(record or {})
     out = sensitive.text(text)
     problems = _text_problems("text", out)
-    seeds = [s for _p, s in _seed_values("text", None, out)]
-    if seeds:
-        from lakebench.config import datagen_seed
-
-        protected = datagen_seed.protected_seeds()
-        problems.extend(f"text holds the {protected[s]} seed" for s in seeds if s in protected)
+    problems.extend(_seed_problems(out))
     if problems:
         raise ScrubError("text is not clean after scrubbing: " + "; ".join(problems))
     return out
