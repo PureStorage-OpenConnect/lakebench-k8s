@@ -279,6 +279,20 @@ actually got (`experiment.effective_maintenance`), one label per operation
 Two runs whose effective maintenance differs are comparable at best, not
 like-for-like.
 
+Compaction is counted per table: a table counts as compacted only when
+every statement for it succeeded. On Trino, a Customer 360 silver table
+(partitioned by `interaction_date`) with more than 90 partitions is
+compacted in chunks of at most 90 partitions, one `optimize ... WHERE
+interaction_date ...` per chunk, in batch and continuous mode alike: Trino
+refuses an `optimize` that rewrites files in more than 100 partitions, and
+continuous silver has small files in every partition. A table whose chunks
+partly succeeded is partial: it keeps `compaction=ran` in the id (which reads
+`failed` only when no statement succeeded) and reads `compaction=partial` in
+`detail_id`. `reasons` names each failed table as "compaction failed on
+<table>: <error>", and `detail.compaction_failures` and
+`detail.compaction_statements` list the failed tables and the statements
+attempted.
+
 `experiment.limits` records the Lakebench-imposed caps a run executed
 under, and `limits.bound` lists the ones that bound it. They include the
 continuous trickle (`max_files_per_trigger`, auto-capped at 50 files per

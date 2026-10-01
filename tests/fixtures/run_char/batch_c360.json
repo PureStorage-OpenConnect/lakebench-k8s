@@ -1,0 +1,887 @@
+{
+ "_derivation": {
+  "author": "independent second agent (SD-19 golden), derived by reading 189fa3d and the harness diff on top of the 46cc3f4 golden; harness, test, run() and CLI not run",
+  "tree": "lane/v17-run-sd19 at 189fa3d (SD-19, LB-210) plus the uncommitted FakeTrino partition answer in tests/harness/run_harness.py",
+  "exported_run_id": "cli/_run.py:1923 os.environ['LB_RUN_ID'] = run_id; CliRunner.isolation restores only the env keys passed to it, so it survives the invoke. Normalised to <run_id>.",
+  "submits": "cli/_run.py:2249 cycle_env LB_RUN_ID=f'{run_id}-c1', cycles=1, no force rebuild; normalised <run_id>-c1.",
+  "calls_args": "wait_for_completion timeout 3600 (= max(3600, 1*120), cli/_run.py:1776) and poll 5 (_STAGE_POLL_S cli/_run.py:548). application_end returns an end, so cli/_run.py:661-667 reads the cluster offset once: getattr(monitor,'_lb_clock_offset') hits FakeMonitor's '_' AttributeError -> None -> cluster_clock_offset_seconds (cli/_sustained.py:2318) -> VersionApi get_code; the float is then stored on the monitor and later stages skip it. S3 init from config: endpoint, env-expanded keys, region us-east-1, path_style True, verify_ssl True (cli/_run.py:2434-2442, 3079-3087); one init per stage measurement and one in finally. Health probes use query_sql, which passes no timeout (exec_in_pod default 30, modules/table_formats/iceberg/maintenance.py:342). Maintenance and compaction statements: budget.statement_timeout(1800) = min(1800, int(~1800)+30) = 1800 (cli/_sustained.py:796, cli/_run.py:43-47). Trino readiness execute_query timeout=15 (cli/_sustained.py:1468).",
+  "jobs": "timing_source: monitor.stage_timing (modules/pipeline_engines/spark/monitor.py:129-174): end = driver end (+55 s) + 0.5 - offset (|offset| <= ~0.5) lies inside [submitted-2, submitted+62], so TIMING_DRIVER 'driver_container'. executor_count 4 from the RUNNING progress callback (cli/_run.py:2316); cores and memory from _JOB_PROFILES c360 (bronze 2c 4g+2g, silver 4c 48g+12g, gold 4c 32g+8g), memory_gb_requested = 4*(mem+overhead) (cli/_run.py:2391-2406). Rows and input_size_gb from the fixture JOB METRICS blocks; gold input 0.000 falls back to silver output_size_gb (cli/_run.py:2409-2421); output_size_gb from FakeS3 bytes / 1024^3 (cli/_run.py:2443-2445).",
+  "values": "maintenance_policy_id MAINTENANCE_POLICY_ID (metrics/maintenance_policy.py:44; no --skip-maintenance). effective maintenance from metrics/maintenance_policy.py effective_maintenance via metrics/experiment.py:758-767. bucket_gb from record_actual_sizes (metrics/collector.py:2545). scores: PipelineBenchmark._scores_dict batch branch (metrics/collector.py:1588-1659); total_data_processed_gb sums stage input_size_gb incl. the query stage (input = run.gold_size_gb) (collector.py:1046, 2033-2043); scale_ratio = 9.917/10.0 (collector.py:1084-1091).",
+  "exit_code": "as v1: pipeline_success never set False.",
+  "calls": "as the 46cc3f4 golden, except compaction: after find_maintenance_engine's list_namespaced_pod, the plan comprehension (cli/_sustained.py:1423) calls build_sql per table in order silver, gold. Silver is on _COMPACTION_PARTITION_COLUMN (iceberg/maintenance.py:234), so _compaction_partitions runs query_sql with build_partition_values_sql (maintenance.py:265-268), no container, timeout budget.statement_timeout(120) = min(120, int(~1800)+30) = 120 (cli/_sustained.py:1474, 1505-1507). FakeTrino answers the 366 dates of 2024; parse_partition_values keeps them sorted; 366 > 90 so build_compaction_plan (maintenance.py:325-346) emits 5 chunks: <= 2024-03-30 (index 89), (03-30, 06-28], (06-28, 09-26], (09-26, 12-25], > 2024-12-25 (last run 6 values); no NULL partition, so no IS NULL statement. Gold is off the map: no read, one unchunked statement. Every statement exec timeout 1800 as before (cli/_sustained.py:972). Worker readiness and post probes unchanged. 74 calls (69 + 1 read + 4 extra chunks).",
+  "maintenance_outcomes": "compaction now counts tables (_table_outcome, cli/_sustained.py:1435): total 2, succeeded 2, others 0, so the trace row is unchanged; the new keys unit, engine, statements_total (6), statements_succeeded (6), statements_attempted (6), failures [], statements are not in _OUTCOME_KEYS (tests/harness/run_harness.py:941), and note is absent because the partition read succeeded. Files row unchanged: 367 -> 367 no-op.",
+  "values_success": "unchanged. effective_maintenance: compaction total/ok 2/2 tables, stmt 6/6 (maintenance_policy.py:324), so ran/on; compaction_detail adds detail keys only, not id or detail_id (maintenance_policy.py:364-390). Settle trigger now counts 10 statements (4 expire + 6 compaction, cli/_run.py:899-922, 2835) but the trigger is a string only; settle still runs, same probes. maintenance_value_reason unchanged (367 -> 367).",
+  "c360_correctness": "unchanged from v1: pass.",
+  "verdict": "PASSED, reasons [].",
+  "unsure": "Nothing material. The 120 s read and 1800 s statement timeouts assume under 30 s pass between MaintenanceBudget creation and each call, which holds with instant fakes."
+ },
+ "exit_code": 0,
+ "unscripted": [],
+ "runs_saved": 1,
+ "exported_run_id": "<run_id>",
+ "calls": [
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "get_cluster_capacity"
+  ],
+  [
+   "prerequisites",
+   "run",
+   {
+    "sustained": false,
+    "datagen_runs": true
+   }
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "namespace_exists",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "namespace_exists",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-postgres",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-hive-metastore-default",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_deployment",
+   "lakebench-trino-coordinator",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-trino-worker",
+   "runchar"
+  ],
+  [
+   "SparkOperator",
+   "init",
+   "spark-operator",
+   null,
+   "runchar"
+  ],
+  [
+   "SparkOperator",
+   "check_status"
+  ],
+  [
+   "SparkOperator",
+   "ensure_namespace_watched",
+   true
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "JobManager",
+   "deploy_scripts_configmap"
+  ],
+  [
+   "JobManager",
+   "submit_job",
+   "bronze-verify"
+  ],
+  [
+   "SparkJobMonitor",
+   "wait_for_completion",
+   "lakebench-bronze-verify",
+   3600,
+   5
+  ],
+  [
+   "SparkJobMonitor",
+   "application_end",
+   "lakebench-bronze-verify"
+  ],
+  [
+   "VersionApi",
+   "get_code"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "JobManager",
+   "submit_job",
+   "silver-build"
+  ],
+  [
+   "SparkJobMonitor",
+   "wait_for_completion",
+   "lakebench-silver-build",
+   3600,
+   5
+  ],
+  [
+   "SparkJobMonitor",
+   "application_end",
+   "lakebench-silver-build"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "JobManager",
+   "submit_job",
+   "gold-finalize"
+  ],
+  [
+   "SparkJobMonitor",
+   "wait_for_completion",
+   "lakebench-gold-finalize",
+   3600,
+   5
+  ],
+  [
+   "SparkJobMonitor",
+   "application_end",
+   "lakebench-gold-finalize"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-gold",
+   ""
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$snapshots\""
+  ],
+  [
+   "Benchmark",
+   "init",
+   false
+  ],
+  [
+   "Benchmark",
+   "run_power",
+   "hot",
+   1,
+   300,
+   false
+  ],
+  [
+   "Benchmark",
+   "run_power",
+   "hot",
+   3,
+   300,
+   false
+  ],
+  [
+   "CustomObjectsApi",
+   "get",
+   "sparkapplications",
+   "lakebench-bronze-ingest",
+   "runchar"
+  ],
+  [
+   "CustomObjectsApi",
+   "get",
+   "sparkapplications",
+   "lakebench-silver-stream",
+   "runchar"
+  ],
+  [
+   "CustomObjectsApi",
+   "get",
+   "sparkapplications",
+   "lakebench-gold-refresh",
+   "runchar"
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "SET SESSION lakehouse.expire_snapshots_min_retention = '0s'; ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE expire_snapshots(retention_threshold => '0s')"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "SET SESSION lakehouse.remove_orphan_files_min_retention = '1450m'; ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE remove_orphan_files(retention_threshold => '1450m')"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "SET SESSION lakehouse.expire_snapshots_min_retention = '0s'; ALTER TABLE lakehouse.gold.customer_executive_dashboard EXECUTE expire_snapshots(retention_threshold => '0s')"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "SET SESSION lakehouse.remove_orphan_files_min_retention = '1450m'; ALTER TABLE lakehouse.gold.customer_executive_dashboard EXECUTE remove_orphan_files(retention_threshold => '1450m')"
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT DISTINCT partition.interaction_date FROM lakehouse.silver.\"customer_interactions_enriched$partitions\" ORDER BY 1"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date <= DATE '2024-03-30'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date > DATE '2024-03-30' AND interaction_date <= DATE '2024-06-28'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date > DATE '2024-06-28' AND interaction_date <= DATE '2024-09-26'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date > DATE '2024-09-26' AND interaction_date <= DATE '2024-12-25'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date > DATE '2024-12-25'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.gold.customer_executive_dashboard EXECUTE optimize(file_size_threshold => '128MB')"
+  ],
+  [
+   "subprocess",
+   "kubectl",
+   "get",
+   "statefulset",
+   "lakebench-trino-worker",
+   "-n",
+   "runchar",
+   "-o",
+   "jsonpath={.spec.replicas}"
+  ],
+  [
+   "Executor",
+   "execute_query",
+   "SELECT COUNT(*) FROM system.runtime.nodes WHERE state = 'active' AND coordinator = false",
+   15
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$snapshots\""
+  ],
+  [
+   "Benchmark",
+   "init",
+   false
+  ],
+  [
+   "Benchmark",
+   "probe_query",
+   null
+  ],
+  [
+   "Benchmark",
+   "time_query",
+   "Q1_full_aggregation_scan",
+   1
+  ],
+  [
+   "Benchmark",
+   "time_query",
+   "Q1_full_aggregation_scan",
+   1
+  ],
+  [
+   "Benchmark",
+   "init",
+   false
+  ],
+  [
+   "Benchmark",
+   "run_power",
+   "hot",
+   1,
+   300,
+   false
+  ],
+  [
+   "Benchmark",
+   "run_power",
+   "hot",
+   3,
+   300,
+   true
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-gold",
+   ""
+  ]
+ ],
+ "submits": [
+  [
+   "bronze-verify",
+   [
+    "LB_RUN_ID"
+   ],
+   {
+    "LB_RUN_ID": "<run_id>-c1",
+    "LB_BRONZE_CYCLE": null,
+    "LB_SILVER_INCREMENTAL": null,
+    "LB_GOLD_INCREMENTAL": null,
+    "LB_FORCE_REBUILD": null
+   }
+  ],
+  [
+   "silver-build",
+   [
+    "LB_RUN_ID"
+   ],
+   {
+    "LB_RUN_ID": "<run_id>-c1",
+    "LB_BRONZE_CYCLE": null,
+    "LB_SILVER_INCREMENTAL": null,
+    "LB_GOLD_INCREMENTAL": null,
+    "LB_FORCE_REBUILD": null
+   }
+  ],
+  [
+   "gold-finalize",
+   [
+    "LB_RUN_ID"
+   ],
+   {
+    "LB_RUN_ID": "<run_id>-c1",
+    "LB_BRONZE_CYCLE": null,
+    "LB_SILVER_INCREMENTAL": null,
+    "LB_GOLD_INCREMENTAL": null,
+    "LB_FORCE_REBUILD": null
+   }
+  ]
+ ],
+ "journal_events": [
+  [
+   "session.start",
+   null,
+   null
+  ],
+  [
+   "command.start",
+   null,
+   null
+  ],
+  [
+   "pipeline.stage",
+   true,
+   "bronze-verify"
+  ],
+  [
+   "pipeline.stage",
+   true,
+   "silver-build"
+  ],
+  [
+   "pipeline.stage",
+   true,
+   "gold-finalize"
+  ],
+  [
+   "pipeline.complete",
+   true,
+   null
+  ],
+  [
+   "streaming.health",
+   null,
+   null
+  ],
+  [
+   "streaming.health",
+   null,
+   null
+  ],
+  [
+   "benchmark.start",
+   null,
+   null
+  ],
+  [
+   "benchmark.complete",
+   true,
+   null
+  ],
+  [
+   "metrics.saved",
+   null,
+   null
+  ],
+  [
+   "command.end",
+   true,
+   null
+  ]
+ ],
+ "metrics_keys": {
+  "top": [
+   "autosize_cuts",
+   "benchmark",
+   "bronze_size_gb",
+   "c360_correctness",
+   "config_snapshot",
+   "deployment_name",
+   "end_time",
+   "experiment",
+   "gold_size_gb",
+   "jobs",
+   "maintenance_outcomes",
+   "maintenance_policy_id",
+   "pipeline_benchmark",
+   "provenance",
+   "queries",
+   "run_id",
+   "silver_size_gb",
+   "start_time",
+   "streaming",
+   "success",
+   "total_elapsed_seconds",
+   "verdict"
+  ],
+  "pipeline_benchmark": [
+   "advanced_metrics",
+   "bucket_sizes",
+   "config_snapshot",
+   "deployment_name",
+   "end_time",
+   "maintenance_settle",
+   "pipeline_mode",
+   "pre_compaction_benchmark",
+   "query_benchmark",
+   "run_id",
+   "scale_factor",
+   "scale_ratio",
+   "score_descriptions",
+   "scorecard",
+   "scores",
+   "stage_matrix",
+   "stages",
+   "start_time",
+   "success"
+  ],
+  "jobs[0]": [
+   "alerts_by_rule",
+   "c360_bronze",
+   "c360_check",
+   "cpu_seconds_requested",
+   "elapsed_seconds",
+   "end_time",
+   "error_message",
+   "executor_cores",
+   "executor_count",
+   "executor_memory_gb",
+   "extra_metrics",
+   "input_rows",
+   "input_size_gb",
+   "job_name",
+   "job_type",
+   "memory_gb_requested",
+   "output_rows",
+   "output_size_gb",
+   "rule_errors",
+   "rules_skipped",
+   "silver_tables",
+   "start_time",
+   "submission_failures",
+   "submission_retry_seconds",
+   "success",
+   "throughput_gb_per_second",
+   "throughput_rows_per_second",
+   "timing_resolution_seconds",
+   "timing_source",
+   "tm_invariants",
+   "tm_ops",
+   "tm_status"
+  ],
+  "experiment": [
+   "architecture",
+   "corpus",
+   "effective_maintenance",
+   "lakebench",
+   "limits",
+   "maintenance_policy_id",
+   "maintenance_settings",
+   "mode",
+   "repetitions",
+   "results",
+   "rules",
+   "schema",
+   "stages",
+   "support",
+   "system",
+   "workload"
+  ]
+ },
+ "jobs": [
+  {
+   "job_type": "bronze-verify",
+   "success": true,
+   "error_message": null,
+   "timing_source": "driver_container",
+   "executor_count": 4,
+   "executor_cores": 2,
+   "executor_memory_gb": 4.0,
+   "memory_gb_requested": 24.0,
+   "input_rows": 2478560,
+   "output_rows": 2478560,
+   "input_size_gb": 9.917,
+   "output_size_gb": 9.917505
+  },
+  {
+   "job_type": "silver-build",
+   "success": true,
+   "error_message": null,
+   "timing_source": "driver_container",
+   "executor_count": 4,
+   "executor_cores": 4,
+   "executor_memory_gb": 48.0,
+   "memory_gb_requested": 240.0,
+   "input_rows": 2478560,
+   "output_rows": 2428561,
+   "input_size_gb": 9.917,
+   "output_size_gb": 9.762412
+  },
+  {
+   "job_type": "gold-finalize",
+   "success": true,
+   "error_message": null,
+   "timing_source": "driver_container",
+   "executor_count": 4,
+   "executor_cores": 4,
+   "executor_memory_gb": 32.0,
+   "memory_gb_requested": 160.0,
+   "input_rows": 2428561,
+   "output_rows": 366,
+   "input_size_gb": 9.762412,
+   "output_size_gb": 6.5e-05
+  }
+ ],
+ "maintenance_outcomes": [
+  {
+   "failed": 0,
+   "kind": "expire",
+   "not_attempted": 0,
+   "succeeded": 4,
+   "timed_out": 0,
+   "total": 4
+  },
+  {
+   "failed": 0,
+   "kind": "compaction",
+   "not_attempted": 0,
+   "succeeded": 2,
+   "timed_out": 0,
+   "total": 2
+  },
+  {
+   "files_after": 367,
+   "files_before": 367,
+   "kind": "compaction",
+   "note": "no-op: data files 367 -> 367"
+  }
+ ],
+ "values": {
+  "maintenance_policy_id": "m2-2026-09-26",
+  "effective_maintenance_id": "m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran",
+  "effective_maintenance_detail_id": "m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on",
+  "bucket_gb": [
+   9.917505,
+   9.762412,
+   6.5e-05
+  ],
+  "benchmark_qph": 1800.0,
+  "benchmark_queries": [
+   [
+    "Q1_full_aggregation_scan",
+    1,
+    true
+   ],
+   [
+    "Q2_filtered_aggregation",
+    455,
+    true
+   ],
+   [
+    "Q4_churn_risk_analysis",
+    6,
+    true
+   ],
+   [
+    "Q3_customer_segmentation",
+    12,
+    true
+   ],
+   [
+    "Q7_channel_conversion_funnel",
+    5,
+    true
+   ],
+   [
+    "Q5_revenue_trend_ma7",
+    90,
+    true
+   ],
+   [
+    "Q6_customer_rfm",
+    6,
+    true
+   ],
+   [
+    "Q9_executive_dashboard",
+    30,
+    true
+   ]
+  ],
+  "scores": {
+   "composite_qph": 1800.0,
+   "scale_ratio": 0.992,
+   "total_data_processed_gb": 29.596,
+   "benchmark_samples_per_query": 3,
+   "qph_spread": {
+    "low": 1800.0,
+    "high": 1800.0,
+    "relative_range": 0.0
+   },
+   "pre_compaction_file_count": 367,
+   "post_compaction_file_count": 367,
+   "compaction_ratio": 1.0,
+   "pre_compaction_qph": 1800.0,
+   "post_compaction_qph": 1800.0,
+   "maintenance_value_pct": null,
+   "maintenance_paired_queries": 0,
+   "maintenance_value_reason": "compaction changed no files (367 -> 367)",
+   "maintenance_settled": true,
+   "maintenance_settle_capped": false,
+   "maintenance_settle_verified": true
+  }
+ },
+ "c360_correctness": "pass",
+ "success": true,
+ "verdict": "PASSED",
+ "verdict_reasons": []
+}

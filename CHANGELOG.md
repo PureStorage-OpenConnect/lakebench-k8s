@@ -49,6 +49,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   workload does not read it.
 - Read-only commands create no files: `validate` no longer opens a journal,
   and `report` and `results` no longer create `lakebench-output/runs/`.
+### Fixed
+
+- Trino compaction of the Customer 360 silver table no longer fails with
+  "Exceeded limit of 100 open writers for partitions" when it rewrites files
+  in more than 100 `interaction_date` partitions, as the silver of the one
+  recorded continuous Customer 360 run did (LB-210, n=1). A silver table with more than 90 partitions is now
+  compacted in chunks of at most 90, after a read of its partition values.
+  This also applies to batch runs, whose single statement happened to
+  succeed (batch silver holds a few large files per partition): the
+  pre-benchmark maintenance of a batch Customer 360 run on Trino now runs
+  one partition read and several `optimize` statements where it ran one,
+  which can change the recorded maintenance time. Compaction outcomes count
+  tables, not statements, and `experiment.effective_maintenance` names each
+  table whose compaction failed in `reasons` and
+  `detail.compaction_failures`. The maintenance policy id and the effective
+  maintenance `id` are unchanged.
 
 ## [1.6.0] - 2026-09-30
 
