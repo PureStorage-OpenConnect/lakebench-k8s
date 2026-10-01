@@ -1,0 +1,3176 @@
+{
+  "run_id": "20260927-011355-7ad7ad",
+  "deployment_name": "lb16-pol-aml",
+  "start_time": "2026-09-27T01:13:55.915013",
+  "end_time": "2026-09-27T01:40:23.216492",
+  "total_elapsed_seconds": 1587.301479,
+  "success": true,
+  "bronze_size_gb": 8.395779414102435,
+  "silver_size_gb": 9.130155467428267,
+  "gold_size_gb": 0.6576913082972169,
+  "jobs": [
+    {
+      "job_name": "lakebench-bronze-verify",
+      "job_type": "bronze-verify",
+      "start_time": "2026-09-27T01:13:58.257575",
+      "end_time": "2026-09-27T01:15:28.509128",
+      "elapsed_seconds": 90.09133529663086,
+      "success": true,
+      "error_message": null,
+      "input_size_gb": 8.38,
+      "output_size_gb": 8.395779414102435,
+      "input_rows": 26666640,
+      "output_rows": 26666640,
+      "executor_count": 4,
+      "executor_cores": 2,
+      "executor_memory_gb": 8.0,
+      "cpu_seconds_requested": 720.7306823730469,
+      "memory_gb_requested": 80.0,
+      "throughput_gb_per_second": 0.22710027100271005,
+      "throughput_rows_per_second": 722673.1707317074,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null
+    },
+    {
+      "job_name": "lakebench-silver-build",
+      "job_type": "silver-build",
+      "start_time": "2026-09-27T01:15:28.564214",
+      "end_time": "2026-09-27T01:18:29.014477",
+      "elapsed_seconds": 180.17911648750305,
+      "success": true,
+      "error_message": null,
+      "input_size_gb": 8.38,
+      "output_size_gb": 8.09730878379196,
+      "input_rows": 26666640,
+      "output_rows": 26666640,
+      "executor_count": 8,
+      "executor_cores": 4,
+      "executor_memory_gb": 48.0,
+      "cpu_seconds_requested": 5765.731727600098,
+      "memory_gb_requested": 480.0,
+      "throughput_gb_per_second": 0.0695435684647303,
+      "throughput_rows_per_second": 221299.91701244813,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null
+    },
+    {
+      "job_name": "lakebench-gold-finalize",
+      "job_type": "gold-finalize",
+      "start_time": "2026-09-27T01:18:29.084674",
+      "end_time": "2026-09-27T01:26:15.328314",
+      "elapsed_seconds": 465.4390227794647,
+      "success": true,
+      "error_message": null,
+      "input_size_gb": 3.296,
+      "output_size_gb": 0.33283041417598724,
+      "input_rows": 26666640,
+      "output_rows": 722374,
+      "executor_count": 4,
+      "executor_cores": 4,
+      "executor_memory_gb": 32.0,
+      "cpu_seconds_requested": 7447.024364471436,
+      "memory_gb_requested": 160.0,
+      "throughput_gb_per_second": 0.00801556420233463,
+      "throughput_rows_per_second": 64850.77821011673,
+      "alerts_by_rule": {
+        "W2_structuring": 2838,
+        "W3_round_tripping": 1572,
+        "W17_layering_chain": 46022,
+        "W4_risk_propagation": 98506,
+        "W7_cross_border_high_risk": 508840,
+        "W8_dormant_reactivation": 64596
+      },
+      "rule_errors": {},
+      "rules_skipped": {
+        "W5_sanctions_match": "no-watchlist",
+        "W6_pep_counterparty": "no-watchlist",
+        "W1_connected_components": "giant-component"
+      },
+      "tm_invariants": {
+        "1": {
+          "monitored_population": {
+            "status": "pass",
+            "detail": "55733 customers of the reporting FI, 20023509 monitored payments"
+          },
+          "reconciliation": {
+            "status": "pass",
+            "detail": "monitored 20023509 + excluded 6643131 = 26666640 vs source 26666640"
+          },
+          "every_alert_dispositioned": {
+            "status": "pass",
+            "detail": "alerts 722374, disposition rows for them 722374"
+          },
+          "one_row_per_alert_identity": {
+            "status": "pass",
+            "detail": "722374 disposition rows, 722374 distinct alert identities"
+          },
+          "no_null_disposition": {
+            "status": "pass",
+            "detail": "0 disposition rows with no disposition"
+          },
+          "noncustomer_alerts_declared": {
+            "status": "pass",
+            "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72185 non-customer alerts in all)"
+          },
+          "escalated_le_alerts": {
+            "status": "pass",
+            "detail": "escalated 61587 <= customer alerts 650189"
+          },
+          "cases_le_escalated": {
+            "status": "pass",
+            "detail": "alert-driven cases 61587 <= escalated 61587"
+          },
+          "sars_le_cases": {
+            "status": "pass",
+            "detail": "SARs 8752 <= cases 69274"
+          },
+          "one_open_case_per_customer": {
+            "status": "pass",
+            "detail": "most open cases on one customer: 1"
+          },
+          "funnel_monotone": {
+            "status": "pass",
+            "detail": "payments 26666640 >= monitored 20023509 >= alerts 650189 >= escalated 61587 >= cases 61587 >= sars 8185"
+          },
+          "continuing_review_fires": {
+            "status": "pass",
+            "detail": "0 SARs past their 90-day review date with no review (8104 due, 0 deferred behind a case waiting to file)"
+          },
+          "review_not_folded_into_determined": {
+            "status": "pass",
+            "detail": "0 reviews credited to a case already determined before the review was due"
+          }
+        }
+      },
+      "tm_ops": {
+        "alert_aging_open": {
+          "0-30": 11656,
+          "31-60": 572,
+          "61-90": 10,
+          "90+": 0
+        },
+        "alert_sla_breaches": 5914,
+        "alerts_by_disposition": {
+          "attached": 79160,
+          "closed_nfa": 500565,
+          "escalated": 61587,
+          "out_of_scope": 72185,
+          "pending_l1": 8877
+        },
+        "alerts_by_priority": {
+          "critical": 202589,
+          "high": 255866,
+          "low": 26037,
+          "medium": 165697
+        },
+        "alerts_noncustomer_undeclared": 0,
+        "alerts_out_of_scope": 72185,
+        "alerts_over_capacity": 0,
+        "alerts_total": 722374,
+        "alerts_withdrawn_carried": 0,
+        "as_of_date": "2026-01-01",
+        "cases_by_status": {
+          "closed": 67369,
+          "open": 1838,
+          "pending_filing": 67
+        },
+        "cases_by_type": {
+          "alert_escalation": 61587,
+          "continuing_activity": 7687
+        },
+        "continuing_reviews_deferred": 0,
+        "continuing_reviews_due": 8104,
+        "continuing_reviews_folded": 356,
+        "continuing_reviews_opened": 7687,
+        "continuing_reviews_superseded": 61,
+        "continuing_sars_over_120_days": 13,
+        "cycle": 1,
+        "elapsed_seconds": 42.4,
+        "filed_late": 250,
+        "filed_over_30_days_pct": 0.04901736745886655,
+        "filing_days_median": 15,
+        "filing_days_p95": 30,
+        "funnel": {
+          "alerts": 650189,
+          "cases": 61587,
+          "escalated": 61587,
+          "monitored": 20023509,
+          "payments": 26666640,
+          "sars": 8185
+        },
+        "invariants": {
+          "cases_le_escalated": {
+            "detail": "alert-driven cases 61587 <= escalated 61587",
+            "status": "pass"
+          },
+          "continuing_review_fires": {
+            "detail": "0 SARs past their 90-day review date with no review (8104 due, 0 deferred behind a case waiting to file)",
+            "status": "pass"
+          },
+          "escalated_le_alerts": {
+            "detail": "escalated 61587 <= customer alerts 650189",
+            "status": "pass"
+          },
+          "every_alert_dispositioned": {
+            "detail": "alerts 722374, disposition rows for them 722374",
+            "status": "pass"
+          },
+          "funnel_monotone": {
+            "detail": "payments 26666640 >= monitored 20023509 >= alerts 650189 >= escalated 61587 >= cases 61587 >= sars 8185",
+            "status": "pass"
+          },
+          "monitored_population": {
+            "detail": "55733 customers of the reporting FI, 20023509 monitored payments",
+            "status": "pass"
+          },
+          "no_null_disposition": {
+            "detail": "0 disposition rows with no disposition",
+            "status": "pass"
+          },
+          "noncustomer_alerts_declared": {
+            "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72185 non-customer alerts in all)",
+            "status": "pass"
+          },
+          "one_open_case_per_customer": {
+            "detail": "most open cases on one customer: 1",
+            "status": "pass"
+          },
+          "one_row_per_alert_identity": {
+            "detail": "722374 disposition rows, 722374 distinct alert identities",
+            "status": "pass"
+          },
+          "reconciliation": {
+            "detail": "monitored 20023509 + excluded 6643131 = 26666640 vs source 26666640",
+            "status": "pass"
+          },
+          "review_not_folded_into_determined": {
+            "detail": "0 reviews credited to a case already determined before the review was due",
+            "status": "pass"
+          },
+          "sars_le_cases": {
+            "detail": "SARs 8752 <= cases 69274",
+            "status": "pass"
+          }
+        },
+        "l1_decided": 562152,
+        "l1_escalation_rate": 0.10955577850830381,
+        "open_cases": 1905,
+        "open_cases_over_60_days": 20,
+        "qa_disagreement_rate": 0.1422898273233344,
+        "qa_sample": 28203,
+        "reconciliation": {
+          "completeness.bronze": 26666640,
+          "completeness.customers": 55733,
+          "completeness.excluded": 6643131,
+          "completeness.monitored": 20023509,
+          "completeness.silver": 26666640,
+          "completeness.source": 26666640,
+          "dq.dq_missing_agent_bic": 0,
+          "dq.dq_nonpositive_amount": 0,
+          "dq.dq_self_transfer": 0,
+          "dq.dq_unconvertible_currency": 0,
+          "exclusion.dq_unconvertible_currency": 0,
+          "exclusion.no_customer_party": 6643131,
+          "funnel.alerts": 650189,
+          "funnel.alerts_noncustomer_undeclared": 0,
+          "funnel.alerts_out_of_scope": 72185,
+          "funnel.cases": 61587,
+          "funnel.continuing_review_cases": 7687,
+          "funnel.continuing_sars": 567,
+          "funnel.escalated": 61587,
+          "funnel.sars": 8185
+        },
+        "sars_by_limit": {
+          "120_day_continuing": {
+            "filed": 567,
+            "late": 13
+          },
+          "30_day": {
+            "filed": 7766,
+            "late": 226
+          },
+          "60_day_no_suspect": {
+            "filed": 419,
+            "late": 11
+          }
+        },
+        "sars_filed": 8752,
+        "sars_no_suspect": 419,
+        "scenarios": {
+          "W17_layering_chain": {
+            "alerts": 23336,
+            "escalated": 2547,
+            "productive_rate": 0.12608376827847992,
+            "sar_conversion": 0.050651354130956464
+          },
+          "W2_structuring": {
+            "alerts": 2838,
+            "escalated": 383,
+            "productive_rate": 0.18651925820256776,
+            "sar_conversion": 0.12684989429175475
+          },
+          "W3_round_tripping": {
+            "alerts": 1152,
+            "escalated": 516,
+            "productive_rate": 0.6701479547432551,
+            "sar_conversion": 0.6215277777777778
+          },
+          "W4_risk_propagation": {
+            "alerts": 49427,
+            "escalated": 5604,
+            "productive_rate": 0.1257797247750107,
+            "sar_conversion": 0.03920933902522913
+          },
+          "W7_cross_border_high_risk": {
+            "alerts": 508840,
+            "escalated": 45447,
+            "productive_rate": 0.10052876522427963,
+            "sar_conversion": 0.020045593899850642
+          },
+          "W8_dormant_reactivation": {
+            "alerts": 64596,
+            "escalated": 7090,
+            "productive_rate": 0.11214631320169738,
+            "sar_conversion": 0.021255186079633413
+          }
+        },
+        "simulation": {
+          "alert_sla_days": 60,
+          "analyst_accuracy": 0.9,
+          "continuous_interval_seconds": 1800,
+          "counterparty_scenarios": [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain"
+          ],
+          "enabled": true,
+          "investigator_accuracy": 0.95,
+          "late_filing_rate": 0.03,
+          "lookback_months": 12,
+          "max_alerts_per_customer": 50000,
+          "no_suspect_rate": 0.05,
+          "note": "dispositions simulated from datagen ground truth",
+          "qa_sample_rate": 0.05,
+          "seed": 20260924
+        }
+      },
+      "tm_status": {
+        "1": {
+          "status": "ran",
+          "reason": "ok"
+        }
+      },
+      "c360_check": null,
+      "c360_bronze": null
+    }
+  ],
+  "queries": [],
+  "streaming": [],
+  "config_snapshot": {
+    "name": "lb16-pol-aml",
+    "scale": 1.0,
+    "approx_bronze_gb": 8.4,
+    "processing_pattern": "medallion",
+    "s3": {
+      "endpoint": "http://10.0.1.50:80",
+      "buckets": {
+        "bronze": "scrubbed-bronze",
+        "silver": "scrubbed-silver",
+        "gold": "scrubbed-gold"
+      }
+    },
+    "scratch": {
+      "enabled": true,
+      "storage_class": "px-csi-scratch",
+      "size": "200Gi"
+    },
+    "spark": {
+      "driver": {
+        "cores": 2,
+        "memory": "2g"
+      },
+      "executor": {
+        "instances": 2,
+        "cores": 2,
+        "memory": "4g",
+        "memory_overhead": "1g"
+      },
+      "executor_overrides": {
+        "bronze": null,
+        "silver": null,
+        "gold": null,
+        "bronze_ingest": null,
+        "silver_stream": null,
+        "gold_refresh": null
+      }
+    },
+    "catalog": "polaris",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "trino",
+    "workload_schema": "financial",
+    "sustained": {
+      "bronze_trigger_interval": "30 seconds",
+      "silver_trigger_interval": "60 seconds",
+      "gold_refresh_interval": "5 minutes",
+      "run_duration": 1800,
+      "max_files_per_trigger": 1,
+      "bronze_target_file_size_mb": 512,
+      "silver_target_file_size_mb": 512,
+      "gold_target_file_size_mb": 128,
+      "benchmark_interval": 300,
+      "benchmark_warmup": 300
+    },
+    "datagen": {
+      "scale": 1.0,
+      "mode": "auto",
+      "parallelism": 2,
+      "file_size": "64mb"
+    },
+    "images": {
+      "datagen": "docker.io/sillidata/lb-datagen:14c4eee",
+      "spark": "apache/spark:4.0.2-python3",
+      "trino": "trinodb/trino:483"
+    },
+    "trino": {
+      "coordinator": {
+        "cpu": "2",
+        "memory": "8Gi"
+      },
+      "worker": {
+        "replicas": 2,
+        "cpu": "4",
+        "memory": "16Gi"
+      }
+    },
+    "benchmark": {
+      "mode": "power",
+      "streams": 4,
+      "cache": "hot",
+      "iterations": 3
+    },
+    "maintenance": {
+      "pre_benchmark_maintenance": true,
+      "retention_interval": 1800,
+      "retention_threshold": "30m",
+      "compaction_enabled": true,
+      "compaction_interval": 3600
+    },
+    "experiment_inputs": {
+      "workload": {
+        "name": "financial",
+        "version": "aml-1",
+        "generator_model_version": "datagen-v2-rs-0.3",
+        "parameters_id": "7f987bedd2c609d4",
+        "parameters": {
+          "tm_operations": {
+            "enabled": true,
+            "seed": 20260924,
+            "analyst_accuracy": 0.9,
+            "investigator_accuracy": 0.95,
+            "qa_sample_rate": 0.05,
+            "alert_sla_days": 60,
+            "case_lookback_months": 12,
+            "late_filing_rate": 0.03,
+            "no_suspect_rate": 0.05,
+            "max_alerts_per_customer": 50000,
+            "continuous_interval_seconds": 1800,
+            "counterparty_scenarios": [
+              "W1_connected_components",
+              "W3_round_tripping",
+              "W4_risk_propagation",
+              "W17_layering_chain"
+            ]
+          },
+          "w1_max_vertices": 8000000,
+          "retention_workload": true,
+          "retention_months": 60
+        }
+      },
+      "corpus": {
+        "schema": "financial",
+        "generator_image": "docker.io/sillidata/lb-datagen:14c4eee",
+        "seed": 43,
+        "corpus_role": null,
+        "robustness_perturbation": false,
+        "scale": 1.0,
+        "timestamp_start": "2024-01-01",
+        "timestamp_end": "2025-01-01",
+        "dirty_data_ratio": 0.08,
+        "unique_customers": null,
+        "date_range_days": null,
+        "id": "b735070457b3e834"
+      },
+      "architecture": {
+        "recipe": "polaris-iceberg-spark-trino",
+        "catalog": {
+          "type": "polaris",
+          "version": "apache/polaris:1.6.0"
+        },
+        "table_format": {
+          "type": "iceberg",
+          "version": "1.11.0"
+        },
+        "pipeline_engine": {
+          "type": "spark",
+          "image": "apache/spark:4.0.2-python3"
+        },
+        "query_engine": {
+          "type": "trino",
+          "version": "trinodb/trino:483"
+        },
+        "query_access_path": "catalog"
+      },
+      "maintenance_config": {
+        "pre_benchmark_maintenance": true,
+        "compaction_enabled": true,
+        "settings": {
+          "retention_threshold": "2013d",
+          "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+        }
+      },
+      "mode": "batch",
+      "config_limits": {
+        "max_files_per_trigger": 1,
+        "benchmark_iterations": 3,
+        "w1_max_vertices": 8000000,
+        "tm_max_alerts_per_customer": 50000
+      }
+    }
+  },
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.6.0.dev0",
+    "git_sha": "3d304d1533c3ce9a06d22479dd83e511a18d3b1f",
+    "git_dirty": false
+  },
+  "autosize_cuts": [],
+  "maintenance_outcomes": [
+    {
+      "kind": "expire",
+      "retention": "2013d",
+      "engine": "trino",
+      "total": 34,
+      "succeeded": 34,
+      "failed": 0,
+      "timed_out": 0,
+      "not_attempted": 0
+    },
+    {
+      "kind": "compaction",
+      "engine": "trino",
+      "total": 15,
+      "succeeded": 15,
+      "failed": 0,
+      "timed_out": 0,
+      "not_attempted": 0
+    },
+    {
+      "kind": "compaction",
+      "files_before": 66,
+      "files_after": 61
+    }
+  ],
+  "experiment": {
+    "schema": "exp1",
+    "system": "cluster",
+    "support": {
+      "state": "unverified",
+      "basis": "not in this release's validation list (metrics.experiment.RELEASE_VALIDATED)"
+    },
+    "repetitions": {
+      "runs": 1,
+      "benchmark_samples_per_query": 3,
+      "benchmark_rounds": null
+    },
+    "workload": {
+      "name": "financial",
+      "version": "aml-1",
+      "generator_model_version": "datagen-v2-rs-0.3",
+      "parameters_id": "7f987bedd2c609d4",
+      "parameters": {
+        "tm_operations": {
+          "enabled": true,
+          "seed": 20260924,
+          "analyst_accuracy": 0.9,
+          "investigator_accuracy": 0.95,
+          "qa_sample_rate": 0.05,
+          "alert_sla_days": 60,
+          "case_lookback_months": 12,
+          "late_filing_rate": 0.03,
+          "no_suspect_rate": 0.05,
+          "max_alerts_per_customer": 50000,
+          "continuous_interval_seconds": 1800,
+          "counterparty_scenarios": [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain"
+          ]
+        },
+        "w1_max_vertices": 8000000,
+        "retention_workload": true,
+        "retention_months": 60
+      }
+    },
+    "corpus": {
+      "schema": "financial",
+      "generator_image": "docker.io/sillidata/lb-datagen:14c4eee",
+      "seed": 43,
+      "corpus_role": null,
+      "robustness_perturbation": false,
+      "scale": 1.0,
+      "timestamp_start": "2024-01-01",
+      "timestamp_end": "2025-01-01",
+      "dirty_data_ratio": 0.08,
+      "unique_customers": null,
+      "date_range_days": null,
+      "id": "b735070457b3e834",
+      "observed": true,
+      "datagen": {
+        "configured_image": "docker.io/sillidata/lb-datagen:14c4eee",
+        "pod_image": "docker.io/sillidata/lb-datagen:14c4eee",
+        "digest": "sha256:c291dba5a4457ebeaa4e618358ca89dea3bd1a3b128cf4320a20054f4c930d18",
+        "observed": true,
+        "seed": 43,
+        "scale": 1.0,
+        "data_quality": "complete",
+        "mixed_params": []
+      }
+    },
+    "architecture": {
+      "recipe": "polaris-iceberg-spark-trino",
+      "catalog": {
+        "type": "polaris",
+        "version": "apache/polaris:1.6.0"
+      },
+      "table_format": {
+        "type": "iceberg",
+        "version": "1.11.0"
+      },
+      "pipeline_engine": {
+        "type": "spark",
+        "image": "apache/spark:4.0.2-python3"
+      },
+      "query_engine": {
+        "type": "trino",
+        "version": "trinodb/trino:483"
+      },
+      "query_access_path": "catalog"
+    },
+    "maintenance_settings": {
+      "retention_threshold": "2013d",
+      "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+    },
+    "mode": "batch",
+    "maintenance_policy_id": "m2-2026-09-26",
+    "effective_maintenance": {
+      "id": "m2-2026-09-26:expire=ran,compaction=ran",
+      "detail_id": "m2-2026-09-26:expire=on,compaction=on",
+      "expire": "ran",
+      "compaction": "ran",
+      "detail": {
+        "expire": "on",
+        "compaction": "on",
+        "applied_retention": [
+          "2013d"
+        ]
+      },
+      "basis": "recorded outcomes",
+      "reasons": []
+    },
+    "stages": {
+      "executed": [
+        "datagen",
+        "bronze",
+        "silver",
+        "gold",
+        "query"
+      ],
+      "skipped": []
+    },
+    "rules": {
+      "executed": [
+        "W17_layering_chain",
+        "W2_structuring",
+        "W3_round_tripping",
+        "W4_risk_propagation",
+        "W7_cross_border_high_risk",
+        "W8_dormant_reactivation"
+      ],
+      "skipped": {
+        "W1_connected_components": "giant-component",
+        "W5_sanctions_match": "no-watchlist",
+        "W6_pep_counterparty": "no-watchlist"
+      },
+      "errored": {}
+    },
+    "limits": {
+      "benchmark_iterations": 3,
+      "w1_max_vertices": 8000000,
+      "tm_max_alerts_per_customer": 50000,
+      "executors": [
+        {
+          "job_type": "bronze-verify",
+          "scale_derived": 4,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        },
+        {
+          "job_type": "silver-build",
+          "scale_derived": 8,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 8
+        },
+        {
+          "job_type": "gold-finalize",
+          "scale_derived": 4,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        }
+      ],
+      "autosize_cuts": [],
+      "maintenance_stopped": false,
+      "bound": [],
+      "bound_kinds": [],
+      "benchmark_mode": "power"
+    },
+    "results": {
+      "query_set_id": "qs12-4bd2d9416abb",
+      "fingerprints": {
+        "FQ1_txn_full_scan": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 5,
+          "exact": "6b2cc312b35d5266",
+          "approx": {
+            "4": 13411.8
+          },
+          "approx_w": {
+            "4": 19026.673728127702
+          },
+          "quanta": {
+            "4": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "9fd686cd1a33421f"
+        },
+        "FQ2_top_corridors_window": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "fe9f540c0bf64487",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "107a484633719eed"
+        },
+        "FQ6_structuring_scan": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 6,
+          "exact": "d22ed3af7b487d2d",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "2ccdecb01e28d59f"
+        },
+        "FQ3_entity_edge_risk": {
+          "spec": "rf2",
+          "rows": 200,
+          "cols": 5,
+          "exact": "f7664d8222d2db2e",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "28f44470df5baaa1"
+        },
+        "FQ7_cross_border_concentration": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "bd585cc0fe0efd64",
+          "approx": {
+            "4": 33.981
+          },
+          "approx_w": {
+            "4": 52.90454441548231
+          },
+          "quanta": {
+            "4": 0.001
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "4f37c61bf83df0c9"
+        },
+        "FQ4_running_balance_window": {
+          "spec": "rf2",
+          "rows": 877940,
+          "cols": 6,
+          "exact": "baa333ef000bc02a",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "d9f87e6c24db7193"
+        },
+        "FQ5_alert_triage": {
+          "spec": "rf2",
+          "rows": 14,
+          "cols": 6,
+          "exact": "186398adda68e825",
+          "approx": {
+            "5": 10.33
+          },
+          "approx_w": {
+            "5": 14.967812409211222
+          },
+          "quanta": {
+            "5": 0.001
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "84117932f136dd8e"
+        },
+        "FQ8_alert_to_entity_join": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "a007d6fe66b1aa25",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "volatile": [
+            0
+          ],
+          "engine": "trino",
+          "adapted_sql_sha": "b3144e32312bc677"
+        },
+        "IQ1_customer_360": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 18,
+          "exact": "78755f9c32515f67",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "d15ab573ceb41954"
+        },
+        "IQ2_case_activity_12m": {
+          "spec": "rf2",
+          "rows": 12,
+          "cols": 6,
+          "exact": "99320bf63d7dfc26",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "49a13c446c4fb9cc"
+        },
+        "IQ3_counterparty_two_hop": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 8,
+          "exact": "1f562015023c7459",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "3d512bc28faa2b4d"
+        },
+        "IQ4_open_cases_over_60_days": {
+          "spec": "rf2",
+          "rows": 20,
+          "cols": 10,
+          "exact": "cd408d4cd753870d",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "397f475fb023eec0"
+        }
+      }
+    },
+    "lakebench": {
+      "lakebench_version": "1.6.0.dev0",
+      "git_sha": "3d304d1533c3ce9a06d22479dd83e511a18d3b1f",
+      "git_dirty": false
+    }
+  },
+  "benchmark": {
+    "benchmark_type": "trino_query",
+    "query_set_id": "qs12-4bd2d9416abb",
+    "mode": "power",
+    "cache": "hot",
+    "scale": 1.0,
+    "qph": 948.9,
+    "total_seconds": 45.53,
+    "iterations": 3,
+    "streams": 1,
+    "queries": [
+      {
+        "name": "FQ1_txn_full_scan",
+        "display_name": "Silver transactions full aggregation",
+        "class": "scan",
+        "elapsed_seconds": 4.939,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 5,
+          "exact": "6b2cc312b35d5266",
+          "approx": {
+            "4": 13411.8
+          },
+          "approx_w": {
+            "4": 19026.673728127702
+          },
+          "quanta": {
+            "4": 0.01
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "9fd686cd1a33421f"
+        },
+        "samples": [
+          5.132,
+          4.929,
+          4.939
+        ],
+        "min_seconds": 4.929,
+        "max_seconds": 5.132,
+        "relative_range": 0.0411
+      },
+      {
+        "name": "FQ2_top_corridors_window",
+        "display_name": "Top payment corridors by volume (last 30 days)",
+        "class": "filter_prune",
+        "elapsed_seconds": 2.68,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "fe9f540c0bf64487",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "107a484633719eed"
+        },
+        "samples": [
+          2.709,
+          2.68,
+          2.629
+        ],
+        "min_seconds": 2.629,
+        "max_seconds": 2.709,
+        "relative_range": 0.03
+      },
+      {
+        "name": "FQ6_structuring_scan",
+        "display_name": "Structuring-band transaction detection (W2 shape)",
+        "class": "filter_prune",
+        "elapsed_seconds": 2.867,
+        "rows_returned": 500,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 6,
+          "exact": "d22ed3af7b487d2d",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "2ccdecb01e28d59f"
+        },
+        "samples": [
+          2.867,
+          2.901,
+          2.801
+        ],
+        "min_seconds": 2.801,
+        "max_seconds": 2.901,
+        "relative_range": 0.0346
+      },
+      {
+        "name": "FQ3_entity_edge_risk",
+        "display_name": "Entity out-degree + volume via edges",
+        "class": "aggregation",
+        "elapsed_seconds": 4.404,
+        "rows_returned": 200,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 200,
+          "cols": 5,
+          "exact": "f7664d8222d2db2e",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "28f44470df5baaa1"
+        },
+        "samples": [
+          5.081,
+          4.404,
+          4.31
+        ],
+        "min_seconds": 4.31,
+        "max_seconds": 5.081,
+        "relative_range": 0.1751
+      },
+      {
+        "name": "FQ7_cross_border_concentration",
+        "display_name": "Cross-border corridor concentration",
+        "class": "aggregation",
+        "elapsed_seconds": 3.856,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "bd585cc0fe0efd64",
+          "approx": {
+            "4": 33.981
+          },
+          "approx_w": {
+            "4": 52.90454441548231
+          },
+          "quanta": {
+            "4": 0.001
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "4f37c61bf83df0c9"
+        },
+        "samples": [
+          3.856,
+          3.821,
+          3.868
+        ],
+        "min_seconds": 3.821,
+        "max_seconds": 3.868,
+        "relative_range": 0.0121
+      },
+      {
+        "name": "FQ4_running_balance_window",
+        "display_name": "Running balance for high-activity accounts",
+        "class": "analytics",
+        "elapsed_seconds": 12.643,
+        "rows_returned": 877940,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 877940,
+          "cols": 6,
+          "exact": "baa333ef000bc02a",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "d9f87e6c24db7193"
+        },
+        "samples": [
+          12.643,
+          12.66,
+          12.262
+        ],
+        "min_seconds": 12.262,
+        "max_seconds": 12.66,
+        "relative_range": 0.0315
+      },
+      {
+        "name": "FQ5_alert_triage",
+        "display_name": "Alert triage by priority + rule",
+        "class": "operational",
+        "elapsed_seconds": 2.041,
+        "rows_returned": 14,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 14,
+          "cols": 6,
+          "exact": "186398adda68e825",
+          "approx": {
+            "5": 10.33
+          },
+          "approx_w": {
+            "5": 14.967812409211222
+          },
+          "quanta": {
+            "5": 0.001
+          },
+          "engine": "trino",
+          "adapted_sql_sha": "84117932f136dd8e"
+        },
+        "samples": [
+          2.03,
+          2.041,
+          2.172
+        ],
+        "min_seconds": 2.03,
+        "max_seconds": 2.172,
+        "relative_range": 0.0698
+      },
+      {
+        "name": "FQ8_alert_to_entity_join",
+        "display_name": "Case investigation: alert -> entity -> recent txns",
+        "class": "operational",
+        "elapsed_seconds": 2.421,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 100,
+          "cols": 5,
+          "exact": "a007d6fe66b1aa25",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "volatile": [
+            0
+          ],
+          "engine": "trino",
+          "adapted_sql_sha": "b3144e32312bc677"
+        },
+        "samples": [
+          2.408,
+          2.421,
+          2.455
+        ],
+        "min_seconds": 2.408,
+        "max_seconds": 2.455,
+        "relative_range": 0.0195
+      },
+      {
+        "name": "IQ1_customer_360",
+        "display_name": "Investigator: customer 360 for the top open case",
+        "class": "investigator",
+        "elapsed_seconds": 2.591,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 1,
+          "cols": 18,
+          "exact": "78755f9c32515f67",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "d15ab573ceb41954"
+        },
+        "samples": [
+          2.699,
+          2.591,
+          2.512
+        ],
+        "min_seconds": 2.512,
+        "max_seconds": 2.699,
+        "relative_range": 0.0721
+      },
+      {
+        "name": "IQ2_case_activity_12m",
+        "display_name": "Investigator: 12-month activity review for the newest case",
+        "class": "investigator",
+        "elapsed_seconds": 2.34,
+        "rows_returned": 12,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 12,
+          "cols": 6,
+          "exact": "99320bf63d7dfc26",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "49a13c446c4fb9cc"
+        },
+        "samples": [
+          2.277,
+          2.34,
+          2.528
+        ],
+        "min_seconds": 2.277,
+        "max_seconds": 2.528,
+        "relative_range": 0.1075
+      },
+      {
+        "name": "IQ3_counterparty_two_hop",
+        "display_name": "Investigator: counterparties and two-hop network of the oldest open case",
+        "class": "investigator",
+        "elapsed_seconds": 2.618,
+        "rows_returned": 500,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 500,
+          "cols": 8,
+          "exact": "1f562015023c7459",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "3d512bc28faa2b4d"
+        },
+        "samples": [
+          2.688,
+          2.588,
+          2.618
+        ],
+        "min_seconds": 2.588,
+        "max_seconds": 2.688,
+        "relative_range": 0.0382
+      },
+      {
+        "name": "IQ4_open_cases_over_60_days",
+        "display_name": "Investigator: open cases older than 60 days",
+        "class": "investigator",
+        "elapsed_seconds": 2.129,
+        "rows_returned": 20,
+        "success": true,
+        "error_message": "",
+        "result_fingerprint": {
+          "spec": "rf2",
+          "rows": 20,
+          "cols": 10,
+          "exact": "cd408d4cd753870d",
+          "approx": {},
+          "approx_w": {},
+          "quanta": {},
+          "engine": "trino",
+          "adapted_sql_sha": "397f475fb023eec0"
+        },
+        "samples": [
+          2.123,
+          2.129,
+          2.168
+        ],
+        "min_seconds": 2.123,
+        "max_seconds": 2.168,
+        "relative_range": 0.0214
+      }
+    ],
+    "spread": {
+      "samples_per_query": 3,
+      "qph_low": 918.0,
+      "qph_high": 966.7,
+      "relative_range": 0.0521
+    }
+  },
+  "pipeline_benchmark": {
+    "run_id": "20260927-011355-7ad7ad",
+    "deployment_name": "lb16-pol-aml",
+    "pipeline_mode": "batch",
+    "scale_factor": 1.0,
+    "start_time": "2026-09-27T01:13:55.915013",
+    "end_time": "2026-09-27T01:40:23.216492",
+    "success": true,
+    "scorecard": {
+      "time_to_value_seconds": 737.07,
+      "total_elapsed_seconds": 800.11,
+      "total_data_processed_gb": 20.714,
+      "pipeline_throughput_gb_per_second": 0.0281,
+      "total_core_hours": 3.87,
+      "compute_efficiency_gb_per_core_hour": 5.3518,
+      "composite_qph": 948.9,
+      "scale_ratio": 0.998,
+      "benchmark_samples_per_query": 3,
+      "qph_spread": {
+        "low": 918.0,
+        "high": 966.7,
+        "relative_range": 0.0521
+      },
+      "maintenance_elapsed_seconds": 119.68,
+      "maintenance_pct_of_pipeline": 14.96,
+      "pre_compaction_file_count": 66,
+      "post_compaction_file_count": 61,
+      "compaction_ratio": 1.08,
+      "pre_compaction_qph": 740.6,
+      "post_compaction_qph": 948.9,
+      "maintenance_value_pct": null,
+      "maintenance_paired_queries": 8,
+      "maintenance_value_reason": "within noise: +8.5% is under the 11% drift between rounds of the same run",
+      "maintenance_settle_seconds": 132.5,
+      "maintenance_settled": true,
+      "maintenance_settle_capped": false,
+      "maintenance_settle_verified": true
+    },
+    "scores": {
+      "time_to_value_seconds": 737.07,
+      "total_elapsed_seconds": 800.11,
+      "total_data_processed_gb": 20.714,
+      "pipeline_throughput_gb_per_second": 0.0281,
+      "total_core_hours": 3.87,
+      "compute_efficiency_gb_per_core_hour": 5.3518,
+      "composite_qph": 948.9,
+      "scale_ratio": 0.998,
+      "benchmark_samples_per_query": 3,
+      "qph_spread": {
+        "low": 918.0,
+        "high": 966.7,
+        "relative_range": 0.0521
+      },
+      "maintenance_elapsed_seconds": 119.68,
+      "maintenance_pct_of_pipeline": 14.96,
+      "pre_compaction_file_count": 66,
+      "post_compaction_file_count": 61,
+      "compaction_ratio": 1.08,
+      "pre_compaction_qph": 740.6,
+      "post_compaction_qph": 948.9,
+      "maintenance_value_pct": null,
+      "maintenance_paired_queries": 8,
+      "maintenance_value_reason": "within noise: +8.5% is under the 11% drift between rounds of the same run",
+      "maintenance_settle_seconds": 132.5,
+      "maintenance_settled": true,
+      "maintenance_settle_capped": false,
+      "maintenance_settle_verified": true
+    },
+    "stages": [
+      {
+        "stage_name": "datagen",
+        "stage_type": "datagen",
+        "engine": "datagen",
+        "elapsed_seconds": 18.874,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 0.0,
+        "output_size_gb": 9.013924073,
+        "input_rows": 0,
+        "output_rows": 26666640,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 2,
+        "executor_cores": 8,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "bronze",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-27T01:13:58.257575",
+        "end_time": "2026-09-27T01:15:28.509128",
+        "elapsed_seconds": 90.09133529663086,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 8.38,
+        "output_size_gb": 8.395779414102435,
+        "input_rows": 26666640,
+        "output_rows": 26666640,
+        "throughput_gb_per_second": 0.22710027100271005,
+        "throughput_rows_per_second": 722673.1707317074,
+        "executor_count": 4,
+        "executor_cores": 2,
+        "executor_memory_gb": 8.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-27T01:15:28.564214",
+        "end_time": "2026-09-27T01:18:29.014477",
+        "elapsed_seconds": 180.17911648750305,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 8.38,
+        "output_size_gb": 8.09730878379196,
+        "input_rows": 26666640,
+        "output_rows": 26666640,
+        "throughput_gb_per_second": 0.0695435684647303,
+        "throughput_rows_per_second": 221299.91701244813,
+        "executor_count": 8,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "gold",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-27T01:18:29.084674",
+        "end_time": "2026-09-27T01:26:15.328314",
+        "elapsed_seconds": 465.4390227794647,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 3.296,
+        "output_size_gb": 0.33283041417598724,
+        "input_rows": 26666640,
+        "output_rows": 722374,
+        "throughput_gb_per_second": 0.00801556420233463,
+        "throughput_rows_per_second": 64850.77821011673,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "query",
+        "stage_type": "query",
+        "engine": "trino",
+        "elapsed_seconds": 45.528541955995024,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 0.6576913082972169,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 12,
+        "queries_per_hour": 948.8553365437082
+      }
+    ],
+    "stage_matrix": {
+      "datagen": {
+        "engine": "datagen",
+        "elapsed_seconds": 18.87,
+        "input_size_gb": 0.0,
+        "output_size_gb": 9.014,
+        "input_rows": 0,
+        "output_rows": 26666640,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 2,
+        "executor_cores": 8,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "bronze": {
+        "engine": "spark",
+        "elapsed_seconds": 90.09,
+        "input_size_gb": 8.38,
+        "output_size_gb": 8.396,
+        "input_rows": 26666640,
+        "output_rows": 26666640,
+        "throughput_gb_per_second": 0.2271,
+        "throughput_rows_per_second": 722673.2,
+        "executor_count": 4,
+        "executor_cores": 2,
+        "executor_memory_gb": 8.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "silver": {
+        "engine": "spark",
+        "elapsed_seconds": 180.18,
+        "input_size_gb": 8.38,
+        "output_size_gb": 8.097,
+        "input_rows": 26666640,
+        "output_rows": 26666640,
+        "throughput_gb_per_second": 0.0695,
+        "throughput_rows_per_second": 221299.9,
+        "executor_count": 8,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "gold": {
+        "engine": "spark",
+        "elapsed_seconds": 465.44,
+        "input_size_gb": 3.296,
+        "output_size_gb": 0.333,
+        "input_rows": 26666640,
+        "output_rows": 722374,
+        "throughput_gb_per_second": 0.008,
+        "throughput_rows_per_second": 64850.8,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "query": {
+        "engine": "trino",
+        "elapsed_seconds": 45.53,
+        "input_size_gb": 0.658,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 948.9,
+        "success": true
+      }
+    },
+    "bucket_sizes": {
+      "bronze_gb": 8.38,
+      "silver_gb": 8.097,
+      "gold_gb": 0.333
+    },
+    "config_snapshot": {
+      "name": "lb16-pol-aml",
+      "scale": 1.0,
+      "approx_bronze_gb": 8.4,
+      "processing_pattern": "medallion",
+      "s3": {
+        "endpoint": "http://10.0.1.50:80",
+        "buckets": {
+          "bronze": "scrubbed-bronze",
+          "silver": "scrubbed-silver",
+          "gold": "scrubbed-gold"
+        }
+      },
+      "scratch": {
+        "enabled": true,
+        "storage_class": "px-csi-scratch",
+        "size": "200Gi"
+      },
+      "spark": {
+        "driver": {
+          "cores": 2,
+          "memory": "2g"
+        },
+        "executor": {
+          "instances": 2,
+          "cores": 2,
+          "memory": "4g",
+          "memory_overhead": "1g"
+        },
+        "executor_overrides": {
+          "bronze": null,
+          "silver": null,
+          "gold": null,
+          "bronze_ingest": null,
+          "silver_stream": null,
+          "gold_refresh": null
+        }
+      },
+      "catalog": "polaris",
+      "table_format": "iceberg",
+      "pipeline_engine": "spark",
+      "query_engine": "trino",
+      "workload_schema": "financial",
+      "sustained": {
+        "bronze_trigger_interval": "30 seconds",
+        "silver_trigger_interval": "60 seconds",
+        "gold_refresh_interval": "5 minutes",
+        "run_duration": 1800,
+        "max_files_per_trigger": 1,
+        "bronze_target_file_size_mb": 512,
+        "silver_target_file_size_mb": 512,
+        "gold_target_file_size_mb": 128,
+        "benchmark_interval": 300,
+        "benchmark_warmup": 300
+      },
+      "datagen": {
+        "scale": 1.0,
+        "mode": "auto",
+        "parallelism": 2,
+        "file_size": "64mb"
+      },
+      "images": {
+        "datagen": "docker.io/sillidata/lb-datagen:14c4eee",
+        "spark": "apache/spark:4.0.2-python3",
+        "trino": "trinodb/trino:483"
+      },
+      "trino": {
+        "coordinator": {
+          "cpu": "2",
+          "memory": "8Gi"
+        },
+        "worker": {
+          "replicas": 2,
+          "cpu": "4",
+          "memory": "16Gi"
+        }
+      },
+      "benchmark": {
+        "mode": "power",
+        "streams": 4,
+        "cache": "hot",
+        "iterations": 3
+      },
+      "maintenance": {
+        "pre_benchmark_maintenance": true,
+        "retention_interval": 1800,
+        "retention_threshold": "30m",
+        "compaction_enabled": true,
+        "compaction_interval": 3600
+      },
+      "experiment_inputs": {
+        "workload": {
+          "name": "financial",
+          "version": "aml-1",
+          "generator_model_version": "datagen-v2-rs-0.3",
+          "parameters_id": "7f987bedd2c609d4",
+          "parameters": {
+            "tm_operations": {
+              "enabled": true,
+              "seed": 20260924,
+              "analyst_accuracy": 0.9,
+              "investigator_accuracy": 0.95,
+              "qa_sample_rate": 0.05,
+              "alert_sla_days": 60,
+              "case_lookback_months": 12,
+              "late_filing_rate": 0.03,
+              "no_suspect_rate": 0.05,
+              "max_alerts_per_customer": 50000,
+              "continuous_interval_seconds": 1800,
+              "counterparty_scenarios": [
+                "W1_connected_components",
+                "W3_round_tripping",
+                "W4_risk_propagation",
+                "W17_layering_chain"
+              ]
+            },
+            "w1_max_vertices": 8000000,
+            "retention_workload": true,
+            "retention_months": 60
+          }
+        },
+        "corpus": {
+          "schema": "financial",
+          "generator_image": "docker.io/sillidata/lb-datagen:14c4eee",
+          "seed": 43,
+          "corpus_role": null,
+          "robustness_perturbation": false,
+          "scale": 1.0,
+          "timestamp_start": "2024-01-01",
+          "timestamp_end": "2025-01-01",
+          "dirty_data_ratio": 0.08,
+          "unique_customers": null,
+          "date_range_days": null,
+          "id": "b735070457b3e834"
+        },
+        "architecture": {
+          "recipe": "polaris-iceberg-spark-trino",
+          "catalog": {
+            "type": "polaris",
+            "version": "apache/polaris:1.6.0"
+          },
+          "table_format": {
+            "type": "iceberg",
+            "version": "1.11.0"
+          },
+          "pipeline_engine": {
+            "type": "spark",
+            "image": "apache/spark:4.0.2-python3"
+          },
+          "query_engine": {
+            "type": "trino",
+            "version": "trinodb/trino:483"
+          },
+          "query_access_path": "catalog"
+        },
+        "maintenance_config": {
+          "pre_benchmark_maintenance": true,
+          "compaction_enabled": true,
+          "settings": {
+            "retention_threshold": "2013d",
+            "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+          }
+        },
+        "mode": "batch",
+        "config_limits": {
+          "max_files_per_trigger": 1,
+          "benchmark_iterations": 3,
+          "w1_max_vertices": 8000000,
+          "tm_max_alerts_per_customer": 50000
+        }
+      }
+    },
+    "scale_ratio": 0.998,
+    "query_benchmark": {
+      "benchmark_type": "trino_query",
+      "query_set_id": "qs12-4bd2d9416abb",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 948.9,
+      "total_seconds": 45.53,
+      "iterations": 3,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 4.939,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 1,
+            "cols": 5,
+            "exact": "6b2cc312b35d5266",
+            "approx": {
+              "4": 13411.8
+            },
+            "approx_w": {
+              "4": 19026.673728127702
+            },
+            "quanta": {
+              "4": 0.01
+            },
+            "engine": "trino",
+            "adapted_sql_sha": "9fd686cd1a33421f"
+          },
+          "samples": [
+            5.132,
+            4.929,
+            4.939
+          ],
+          "min_seconds": 4.929,
+          "max_seconds": 5.132,
+          "relative_range": 0.0411
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 2.68,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "fe9f540c0bf64487",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "107a484633719eed"
+          },
+          "samples": [
+            2.709,
+            2.68,
+            2.629
+          ],
+          "min_seconds": 2.629,
+          "max_seconds": 2.709,
+          "relative_range": 0.03
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 2.867,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 500,
+            "cols": 6,
+            "exact": "d22ed3af7b487d2d",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "2ccdecb01e28d59f"
+          },
+          "samples": [
+            2.867,
+            2.901,
+            2.801
+          ],
+          "min_seconds": 2.801,
+          "max_seconds": 2.901,
+          "relative_range": 0.0346
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 4.404,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 200,
+            "cols": 5,
+            "exact": "f7664d8222d2db2e",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "28f44470df5baaa1"
+          },
+          "samples": [
+            5.081,
+            4.404,
+            4.31
+          ],
+          "min_seconds": 4.31,
+          "max_seconds": 5.081,
+          "relative_range": 0.1751
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 3.856,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "bd585cc0fe0efd64",
+            "approx": {
+              "4": 33.981
+            },
+            "approx_w": {
+              "4": 52.90454441548231
+            },
+            "quanta": {
+              "4": 0.001
+            },
+            "engine": "trino",
+            "adapted_sql_sha": "4f37c61bf83df0c9"
+          },
+          "samples": [
+            3.856,
+            3.821,
+            3.868
+          ],
+          "min_seconds": 3.821,
+          "max_seconds": 3.868,
+          "relative_range": 0.0121
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 12.643,
+          "rows_returned": 877940,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 877940,
+            "cols": 6,
+            "exact": "baa333ef000bc02a",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "d9f87e6c24db7193"
+          },
+          "samples": [
+            12.643,
+            12.66,
+            12.262
+          ],
+          "min_seconds": 12.262,
+          "max_seconds": 12.66,
+          "relative_range": 0.0315
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 2.041,
+          "rows_returned": 14,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 14,
+            "cols": 6,
+            "exact": "186398adda68e825",
+            "approx": {
+              "5": 10.33
+            },
+            "approx_w": {
+              "5": 14.967812409211222
+            },
+            "quanta": {
+              "5": 0.001
+            },
+            "engine": "trino",
+            "adapted_sql_sha": "84117932f136dd8e"
+          },
+          "samples": [
+            2.03,
+            2.041,
+            2.172
+          ],
+          "min_seconds": 2.03,
+          "max_seconds": 2.172,
+          "relative_range": 0.0698
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 2.421,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 100,
+            "cols": 5,
+            "exact": "a007d6fe66b1aa25",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "volatile": [
+              0
+            ],
+            "engine": "trino",
+            "adapted_sql_sha": "b3144e32312bc677"
+          },
+          "samples": [
+            2.408,
+            2.421,
+            2.455
+          ],
+          "min_seconds": 2.408,
+          "max_seconds": 2.455,
+          "relative_range": 0.0195
+        },
+        {
+          "name": "IQ1_customer_360",
+          "display_name": "Investigator: customer 360 for the top open case",
+          "class": "investigator",
+          "elapsed_seconds": 2.591,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 1,
+            "cols": 18,
+            "exact": "78755f9c32515f67",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "d15ab573ceb41954"
+          },
+          "samples": [
+            2.699,
+            2.591,
+            2.512
+          ],
+          "min_seconds": 2.512,
+          "max_seconds": 2.699,
+          "relative_range": 0.0721
+        },
+        {
+          "name": "IQ2_case_activity_12m",
+          "display_name": "Investigator: 12-month activity review for the newest case",
+          "class": "investigator",
+          "elapsed_seconds": 2.34,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 12,
+            "cols": 6,
+            "exact": "99320bf63d7dfc26",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "49a13c446c4fb9cc"
+          },
+          "samples": [
+            2.277,
+            2.34,
+            2.528
+          ],
+          "min_seconds": 2.277,
+          "max_seconds": 2.528,
+          "relative_range": 0.1075
+        },
+        {
+          "name": "IQ3_counterparty_two_hop",
+          "display_name": "Investigator: counterparties and two-hop network of the oldest open case",
+          "class": "investigator",
+          "elapsed_seconds": 2.618,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 500,
+            "cols": 8,
+            "exact": "1f562015023c7459",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "3d512bc28faa2b4d"
+          },
+          "samples": [
+            2.688,
+            2.588,
+            2.618
+          ],
+          "min_seconds": 2.588,
+          "max_seconds": 2.688,
+          "relative_range": 0.0382
+        },
+        {
+          "name": "IQ4_open_cases_over_60_days",
+          "display_name": "Investigator: open cases older than 60 days",
+          "class": "investigator",
+          "elapsed_seconds": 2.129,
+          "rows_returned": 20,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": {
+            "spec": "rf2",
+            "rows": 20,
+            "cols": 10,
+            "exact": "cd408d4cd753870d",
+            "approx": {},
+            "approx_w": {},
+            "quanta": {},
+            "engine": "trino",
+            "adapted_sql_sha": "397f475fb023eec0"
+          },
+          "samples": [
+            2.123,
+            2.129,
+            2.168
+          ],
+          "min_seconds": 2.123,
+          "max_seconds": 2.168,
+          "relative_range": 0.0214
+        }
+      ],
+      "spread": {
+        "samples_per_query": 3,
+        "qph_low": 918.0,
+        "qph_high": 966.7,
+        "relative_range": 0.0521
+      }
+    },
+    "pre_compaction_benchmark": {
+      "benchmark_type": "trino_query",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 740.6,
+      "category_qph": {
+        "aggregation": 779.8,
+        "analytics": 286.2,
+        "filter_prune": 1195.7,
+        "operational": 1336.4,
+        "scan": 635.0
+      },
+      "total_seconds": 38.89,
+      "iterations": 3,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 5.669,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            6.889,
+            5.669,
+            5.481
+          ],
+          "min_seconds": 5.481,
+          "max_seconds": 6.889,
+          "relative_range": 0.2484
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 2.832,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            2.972,
+            2.696,
+            2.832
+          ],
+          "min_seconds": 2.696,
+          "max_seconds": 2.972,
+          "relative_range": 0.0976
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 3.189,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            3.959,
+            3.081,
+            3.189
+          ],
+          "min_seconds": 3.081,
+          "max_seconds": 3.959,
+          "relative_range": 0.2752
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 5.001,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            6.515,
+            4.711,
+            5.001
+          ],
+          "min_seconds": 4.711,
+          "max_seconds": 6.515,
+          "relative_range": 0.3607
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 4.231,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            4.949,
+            4.042,
+            4.231
+          ],
+          "min_seconds": 4.042,
+          "max_seconds": 4.949,
+          "relative_range": 0.2144
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 12.578,
+          "rows_returned": 877940,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            15.498,
+            12.265,
+            12.578
+          ],
+          "min_seconds": 12.265,
+          "max_seconds": 15.498,
+          "relative_range": 0.257
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 2.477,
+          "rows_returned": 14,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            3.803,
+            2.477,
+            2.408
+          ],
+          "min_seconds": 2.408,
+          "max_seconds": 3.803,
+          "relative_range": 0.5633
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 2.911,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "result_fingerprint": null,
+          "samples": [
+            3.202,
+            2.911,
+            2.721
+          ],
+          "min_seconds": 2.721,
+          "max_seconds": 3.202,
+          "relative_range": 0.1654
+        }
+      ],
+      "spread": {
+        "samples_per_query": 3,
+        "qph_low": 602.7,
+        "qph_high": 770.0,
+        "relative_range": 0.267
+      }
+    },
+    "maintenance_settle": {
+      "probe_query": "FQ1_txn_full_scan",
+      "settled": true,
+      "settle_seconds": 132.5,
+      "capped": false,
+      "max_seconds": 2700.0,
+      "tolerance_pct": 10.0,
+      "reference_seconds": 5.669,
+      "probes": [
+        {
+          "offset_seconds": 7.3,
+          "seconds": 6.167
+        },
+        {
+          "offset_seconds": 67.3,
+          "seconds": 4.856
+        },
+        {
+          "offset_seconds": 127.3,
+          "seconds": 5.187
+        }
+      ],
+      "reason": "",
+      "verified": true
+    },
+    "score_descriptions": {
+      "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+      "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+      "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+      "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+      "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+      "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+      "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
+      "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
+      "maintenance_elapsed_seconds": "Total seconds spent on expire_snapshots + remove_orphan_files + compaction",
+      "maintenance_pct_of_pipeline": "Maintenance time as percentage of total pipeline time",
+      "pre_compaction_file_count": "Iceberg data files before rewrite_data_files / OPTIMIZE",
+      "post_compaction_file_count": "Iceberg data files after rewrite_data_files / OPTIMIZE",
+      "compaction_ratio": "pre/post file count ratio (higher = more compaction benefit)",
+      "pre_compaction_qph": "QpH measured before maintenance (on uncompacted data)",
+      "post_compaction_qph": "QpH measured after maintenance (on compacted data) -- the primary QpH score",
+      "maintenance_value_pct": "QpH change from maintenance over the queries that succeeded in both runs: (post - pre) / pre * 100; null when not measurable or within the within-round spread",
+      "maintenance_value_reason": "Why maintenance_value_pct is null: not measurable, one sample per query, or within noise",
+      "benchmark_samples_per_query": "Timed samples per query in the scored benchmark round (QpH uses the per-query median; 1 means no measured spread)",
+      "qph_spread": "QpH of the slowest and fastest round the per-query samples allow, and their relative range",
+      "maintenance_paired_queries": "Queries that succeeded before and after maintenance (the base of maintenance_value_pct)",
+      "maintenance_settle_seconds": "Seconds from maintenance end until a storage-bound probe query was stable, before the post-maintenance round; not counted in time_to_value",
+      "maintenance_settled": "True when the probe settled within the cap; false means the post round ran on unsettled storage and maintenance_value_pct is null",
+      "maintenance_settle_capped": "True when the settle wait reached benchmark.maintenance_settle.max_seconds",
+      "maintenance_settle_verified": "False when there was no pre-maintenance probe time (scale >= 50): the probes agreed with each other, which a slow plateau also does"
+    },
+    "advanced_metrics": null
+  },
+  "datagen_fleet": {
+    "image": "docker.io/sillidata/lb-datagen:14c4eee",
+    "image_ids": [
+      "docker.io/sillidata/lb-datagen@sha256:c291dba5a4457ebeaa4e618358ca89dea3bd1a3b128cf4320a20054f4c930d18"
+    ],
+    "seed": 43,
+    "scale": 1.0,
+    "schema": "financial",
+    "pods_expected": 2,
+    "pods_reported": 2,
+    "pods_missing": 0,
+    "data_quality": "complete",
+    "total_bytes_written": 9013924073,
+    "total_files_written": 140,
+    "total_rows_written": 26666640,
+    "aggregate_mbps": 477.582,
+    "wall_elapsed_max_s": 18.874,
+    "wall_elapsed_min_s": 18.142,
+    "cores_total": 16.0,
+    "cpu_seconds_total": 296.13,
+    "cpu_hr_per_tb": 9.126,
+    "phase_pct": {
+      "build_batch": 34.53,
+      "encode_parquet": 65.47,
+      "s3_put": 35.63
+    },
+    "phase_p50_s": {
+      "build_batch": 33.397,
+      "encode_parquet": 63.324,
+      "s3_put": 34.457
+    },
+    "phase_p95_s": {
+      "build_batch": 33.862,
+      "encode_parquet": 63.682,
+      "s3_put": 34.724
+    },
+    "worst_pod_elapsed_s": 18.874,
+    "best_pod_elapsed_s": 18.142,
+    "customer_id_max": null,
+    "mixed_params": [],
+    "per_pod": [
+      {
+        "node_id": 0,
+        "node_count": 2,
+        "schema": "financial",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "pacs008",
+        "file_size_mb": 64,
+        "rows_per_file": 194452,
+        "total_files": 137,
+        "files_written": 72,
+        "bytes_written": 4548749138,
+        "rows_written": 13430612,
+        "elapsed_s": 18.874101,
+        "setup_s": 0.0,
+        "gen_s": 17.793172,
+        "build_batch_s": 32.93177,
+        "encode_parquet_s": 62.965583,
+        "s3_put_s": 34.723984,
+        "throughput_mbps": 241.004814,
+        "cpu_seconds": 150.992806,
+        "cpu_hr_per_tb": 9.220655,
+        "cpu_request_millicores": 8000,
+        "world_s": 0.07032,
+        "typology_s": 0.030379,
+        "reference_s": 0.980176,
+        "scale": 1.0,
+        "corpus_months": 60,
+        "population": 111111,
+        "total_txns": 26666640,
+        "typology_instances": 8379,
+        "target_tb": null,
+        "customer_id_max": null,
+        "dirty_ratio": null,
+        "pod_name": "lakebench-datagen-0-bsxgp"
+      },
+      {
+        "node_id": 1,
+        "node_count": 2,
+        "schema": "financial",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "pacs008",
+        "file_size_mb": 64,
+        "rows_per_file": 194452,
+        "total_files": 137,
+        "files_written": 68,
+        "bytes_written": 4465174935,
+        "rows_written": 13236028,
+        "elapsed_s": 18.142199,
+        "setup_s": 0.0,
+        "gen_s": 18.072083,
+        "build_batch_s": 33.862353,
+        "encode_parquet_s": 63.681512,
+        "s3_put_s": 34.190673,
+        "throughput_mbps": 246.12093,
+        "cpu_seconds": 145.137594,
+        "cpu_hr_per_tb": 9.028985,
+        "cpu_request_millicores": 8000,
+        "world_s": 0.038398,
+        "typology_s": 0.031667,
+        "reference_s": 0.0,
+        "scale": 1.0,
+        "corpus_months": 60,
+        "population": 111111,
+        "total_txns": 26666640,
+        "typology_instances": 8379,
+        "target_tb": null,
+        "customer_id_max": null,
+        "dirty_ratio": null,
+        "pod_name": "lakebench-datagen-1-b72pg"
+      }
+    ],
+    "namespace": "lb16-pol-aml",
+    "written_at": "2026-09-27T07:13:53.720649+00:00"
+  },
+  "financial_scoring": {
+    "typology_counts": {
+      "scored": 6,
+      "partial": 0,
+      "no_rule": 8,
+      "rule_skipped": 1,
+      "rule_error": 0
+    },
+    "rules": [
+      {
+        "rule_id": "W17_layering_chain",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "stack",
+        "alert_count": 46022
+      },
+      {
+        "rule_id": "W1_connected_components",
+        "status": "skipped",
+        "reason": "giant-component",
+        "target_typology": "gather_scatter",
+        "alert_count": null
+      },
+      {
+        "rule_id": "W2_structuring",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "micro_structuring",
+        "alert_count": 2838
+      },
+      {
+        "rule_id": "W3_round_tripping",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "cycle",
+        "alert_count": 1572
+      },
+      {
+        "rule_id": "W4_risk_propagation",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "rapid_layering",
+        "alert_count": 98506
+      },
+      {
+        "rule_id": "W5_sanctions_match",
+        "status": "skipped",
+        "reason": "no-watchlist",
+        "target_typology": "sanctions_match",
+        "alert_count": null
+      },
+      {
+        "rule_id": "W6_pep_counterparty",
+        "status": "skipped",
+        "reason": "no-watchlist",
+        "target_typology": "pep_match",
+        "alert_count": null
+      },
+      {
+        "rule_id": "W7_cross_border_high_risk",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "corridor_high_risk",
+        "alert_count": 508840
+      },
+      {
+        "rule_id": "W8_dormant_reactivation",
+        "status": "ran",
+        "reason": null,
+        "target_typology": "dormant_reactivation",
+        "alert_count": 64596
+      }
+    ],
+    "total_alerts": 722374,
+    "fp_alerts": 712133,
+    "fp_rate": 0.9858231331692447,
+    "fp_rate_by_rule": {
+      "W3_round_tripping": 0.7181933842239185,
+      "W17_layering_chain": 0.9896788492460128,
+      "W8_dormant_reactivation": 0.9976314322868289,
+      "W7_cross_border_high_risk": 0.9972191651599717,
+      "W2_structuring": 0.8883016208597604,
+      "W4_risk_propagation": 0.9934521755019998
+    },
+    "txn_precision_by_rule": {
+      "W3_round_tripping": 0.2893061224489796,
+      "W17_layering_chain": 0.012891047143197991,
+      "W8_dormant_reactivation": 0.002368567713171094,
+      "W7_cross_border_high_risk": 0.0027808348400282998,
+      "W2_structuring": 0.16521390642220218,
+      "W4_risk_propagation": 0.0004334704568565433
+    },
+    "chance_by_rule": {
+      "W17_layering_chain": 0.0011248593925759281,
+      "W8_dormant_reactivation": 0.0984251968503937,
+      "W7_cross_border_high_risk": 0.0421822272215973,
+      "W4_risk_propagation": 0.078177727784027
+    },
+    "random_control_floor": 0.20416197975253092,
+    "run_id": "20260927-011355-7ad7ad-c1",
+    "subject_customer_check": {
+      "status": "ok",
+      "subjects": 8379,
+      "unmapped": 0,
+      "not_customer": 0,
+      "failing_typologies": [],
+      "unresolved_typologies": [],
+      "by_typology": {
+        "gather_scatter": {
+          "subjects": 222,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "fan_out": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "random": {
+          "subjects": 1778,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "scatter_gather": {
+          "subjects": 178,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "stack": {
+          "subjects": 444,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "synthetic_identity": {
+          "subjects": 593,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "corridor_high_risk": {
+          "subjects": 1778,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "cross_border_cycle": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "rapid_layering": {
+          "subjects": 889,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "tbml_repeated_invoice": {
+          "subjects": 296,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "bipartite": {
+          "subjects": 111,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "cycle": {
+          "subjects": 444,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "fan_in": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "dormant_reactivation": {
+          "subjects": 356,
+          "unmapped": 0,
+          "not_customer": 0
+        },
+        "micro_structuring": {
+          "subjects": 222,
+          "unmapped": 0,
+          "not_customer": 0
+        }
+      }
+    },
+    "typologies": [
+      {
+        "typology_type": "bipartite",
+        "workload_category": "W1_synthetic_id",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.7837837837837838,
+        "instance_count": 111,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "corridor_high_risk",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W7_cross_border_high_risk",
+        "recall": 0.7958380202474691,
+        "incidental_recall": 0.8262092238470191,
+        "instance_count": 1778,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "cross_border_cycle",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 1.0,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "cycle",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W3_round_tripping",
+        "recall": 0.9977477477477478,
+        "incidental_recall": 1.0,
+        "instance_count": 444,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "dormant_reactivation",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W8_dormant_reactivation",
+        "recall": 0.40168539325842695,
+        "incidental_recall": 0.5421348314606742,
+        "instance_count": 356,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "fan_in",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.4044943820224719,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "fan_out",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.4241573033707865,
+        "instance_count": 356,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "gather_scatter",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W1_connected_components",
+        "recall": null,
+        "incidental_recall": 0.6801801801801802,
+        "instance_count": 222,
+        "detection_status": "rule_skipped",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "micro_structuring",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W2_structuring",
+        "recall": 1.0,
+        "incidental_recall": 1.0,
+        "instance_count": 222,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "random",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.20416197975253092,
+        "instance_count": 1778,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "rapid_layering",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": "W4_risk_propagation",
+        "recall": 0.6850393700787402,
+        "incidental_recall": 0.7446569178852643,
+        "instance_count": 889,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "scatter_gather",
+        "workload_category": "W3_round_tripping",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.7191011235955056,
+        "instance_count": 178,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "stack",
+        "workload_category": "W2_structuring",
+        "designated_rules": "W17_layering_chain",
+        "recall": 0.9977477477477478,
+        "incidental_recall": 0.9977477477477478,
+        "instance_count": 444,
+        "detection_status": "scored",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "synthetic_identity",
+        "workload_category": "W1_synthetic_id",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.3591905564924115,
+        "instance_count": 593,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      },
+      {
+        "typology_type": "tbml_repeated_invoice",
+        "workload_category": "W2_structuring",
+        "designated_rules": null,
+        "recall": null,
+        "incidental_recall": 0.3581081081081081,
+        "instance_count": 296,
+        "detection_status": "no_rule",
+        "subjects_not_customer": 0
+      }
+    ],
+    "computed_by": "lb-score-financial"
+  },
+  "tm_operations": {
+    "status": "pass",
+    "reason": "",
+    "problems": [],
+    "cycles_ran": [
+      1
+    ],
+    "cycles_not_run": [],
+    "invariants": {
+      "1": {
+        "monitored_population": {
+          "status": "pass",
+          "detail": "55733 customers of the reporting FI, 20023509 monitored payments"
+        },
+        "reconciliation": {
+          "status": "pass",
+          "detail": "monitored 20023509 + excluded 6643131 = 26666640 vs source 26666640"
+        },
+        "every_alert_dispositioned": {
+          "status": "pass",
+          "detail": "alerts 722374, disposition rows for them 722374"
+        },
+        "one_row_per_alert_identity": {
+          "status": "pass",
+          "detail": "722374 disposition rows, 722374 distinct alert identities"
+        },
+        "no_null_disposition": {
+          "status": "pass",
+          "detail": "0 disposition rows with no disposition"
+        },
+        "noncustomer_alerts_declared": {
+          "status": "pass",
+          "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72185 non-customer alerts in all)"
+        },
+        "escalated_le_alerts": {
+          "status": "pass",
+          "detail": "escalated 61587 <= customer alerts 650189"
+        },
+        "cases_le_escalated": {
+          "status": "pass",
+          "detail": "alert-driven cases 61587 <= escalated 61587"
+        },
+        "sars_le_cases": {
+          "status": "pass",
+          "detail": "SARs 8752 <= cases 69274"
+        },
+        "one_open_case_per_customer": {
+          "status": "pass",
+          "detail": "most open cases on one customer: 1"
+        },
+        "funnel_monotone": {
+          "status": "pass",
+          "detail": "payments 26666640 >= monitored 20023509 >= alerts 650189 >= escalated 61587 >= cases 61587 >= sars 8185"
+        },
+        "continuing_review_fires": {
+          "status": "pass",
+          "detail": "0 SARs past their 90-day review date with no review (8104 due, 0 deferred behind a case waiting to file)"
+        },
+        "review_not_folded_into_determined": {
+          "status": "pass",
+          "detail": "0 reviews credited to a case already determined before the review was due"
+        }
+      }
+    },
+    "ops": {
+      "alert_aging_open": {
+        "0-30": 11656,
+        "31-60": 572,
+        "61-90": 10,
+        "90+": 0
+      },
+      "alert_sla_breaches": 5914,
+      "alerts_by_disposition": {
+        "attached": 79160,
+        "closed_nfa": 500565,
+        "escalated": 61587,
+        "out_of_scope": 72185,
+        "pending_l1": 8877
+      },
+      "alerts_by_priority": {
+        "critical": 202589,
+        "high": 255866,
+        "low": 26037,
+        "medium": 165697
+      },
+      "alerts_noncustomer_undeclared": 0,
+      "alerts_out_of_scope": 72185,
+      "alerts_over_capacity": 0,
+      "alerts_total": 722374,
+      "alerts_withdrawn_carried": 0,
+      "as_of_date": "2026-01-01",
+      "cases_by_status": {
+        "closed": 67369,
+        "open": 1838,
+        "pending_filing": 67
+      },
+      "cases_by_type": {
+        "alert_escalation": 61587,
+        "continuing_activity": 7687
+      },
+      "continuing_reviews_deferred": 0,
+      "continuing_reviews_due": 8104,
+      "continuing_reviews_folded": 356,
+      "continuing_reviews_opened": 7687,
+      "continuing_reviews_superseded": 61,
+      "continuing_sars_over_120_days": 13,
+      "cycle": 1,
+      "elapsed_seconds": 42.4,
+      "filed_late": 250,
+      "filed_over_30_days_pct": 0.04901736745886655,
+      "filing_days_median": 15,
+      "filing_days_p95": 30,
+      "funnel": {
+        "alerts": 650189,
+        "cases": 61587,
+        "escalated": 61587,
+        "monitored": 20023509,
+        "payments": 26666640,
+        "sars": 8185
+      },
+      "invariants": {
+        "cases_le_escalated": {
+          "detail": "alert-driven cases 61587 <= escalated 61587",
+          "status": "pass"
+        },
+        "continuing_review_fires": {
+          "detail": "0 SARs past their 90-day review date with no review (8104 due, 0 deferred behind a case waiting to file)",
+          "status": "pass"
+        },
+        "escalated_le_alerts": {
+          "detail": "escalated 61587 <= customer alerts 650189",
+          "status": "pass"
+        },
+        "every_alert_dispositioned": {
+          "detail": "alerts 722374, disposition rows for them 722374",
+          "status": "pass"
+        },
+        "funnel_monotone": {
+          "detail": "payments 26666640 >= monitored 20023509 >= alerts 650189 >= escalated 61587 >= cases 61587 >= sars 8185",
+          "status": "pass"
+        },
+        "monitored_population": {
+          "detail": "55733 customers of the reporting FI, 20023509 monitored payments",
+          "status": "pass"
+        },
+        "no_null_disposition": {
+          "detail": "0 disposition rows with no disposition",
+          "status": "pass"
+        },
+        "noncustomer_alerts_declared": {
+          "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (72185 non-customer alerts in all)",
+          "status": "pass"
+        },
+        "one_open_case_per_customer": {
+          "detail": "most open cases on one customer: 1",
+          "status": "pass"
+        },
+        "one_row_per_alert_identity": {
+          "detail": "722374 disposition rows, 722374 distinct alert identities",
+          "status": "pass"
+        },
+        "reconciliation": {
+          "detail": "monitored 20023509 + excluded 6643131 = 26666640 vs source 26666640",
+          "status": "pass"
+        },
+        "review_not_folded_into_determined": {
+          "detail": "0 reviews credited to a case already determined before the review was due",
+          "status": "pass"
+        },
+        "sars_le_cases": {
+          "detail": "SARs 8752 <= cases 69274",
+          "status": "pass"
+        }
+      },
+      "l1_decided": 562152,
+      "l1_escalation_rate": 0.10955577850830381,
+      "open_cases": 1905,
+      "open_cases_over_60_days": 20,
+      "qa_disagreement_rate": 0.1422898273233344,
+      "qa_sample": 28203,
+      "reconciliation": {
+        "completeness.bronze": 26666640,
+        "completeness.customers": 55733,
+        "completeness.excluded": 6643131,
+        "completeness.monitored": 20023509,
+        "completeness.silver": 26666640,
+        "completeness.source": 26666640,
+        "dq.dq_missing_agent_bic": 0,
+        "dq.dq_nonpositive_amount": 0,
+        "dq.dq_self_transfer": 0,
+        "dq.dq_unconvertible_currency": 0,
+        "exclusion.dq_unconvertible_currency": 0,
+        "exclusion.no_customer_party": 6643131,
+        "funnel.alerts": 650189,
+        "funnel.alerts_noncustomer_undeclared": 0,
+        "funnel.alerts_out_of_scope": 72185,
+        "funnel.cases": 61587,
+        "funnel.continuing_review_cases": 7687,
+        "funnel.continuing_sars": 567,
+        "funnel.escalated": 61587,
+        "funnel.sars": 8185
+      },
+      "sars_by_limit": {
+        "120_day_continuing": {
+          "filed": 567,
+          "late": 13
+        },
+        "30_day": {
+          "filed": 7766,
+          "late": 226
+        },
+        "60_day_no_suspect": {
+          "filed": 419,
+          "late": 11
+        }
+      },
+      "sars_filed": 8752,
+      "sars_no_suspect": 419,
+      "scenarios": {
+        "W17_layering_chain": {
+          "alerts": 23336,
+          "escalated": 2547,
+          "productive_rate": 0.12608376827847992,
+          "sar_conversion": 0.050651354130956464
+        },
+        "W2_structuring": {
+          "alerts": 2838,
+          "escalated": 383,
+          "productive_rate": 0.18651925820256776,
+          "sar_conversion": 0.12684989429175475
+        },
+        "W3_round_tripping": {
+          "alerts": 1152,
+          "escalated": 516,
+          "productive_rate": 0.6701479547432551,
+          "sar_conversion": 0.6215277777777778
+        },
+        "W4_risk_propagation": {
+          "alerts": 49427,
+          "escalated": 5604,
+          "productive_rate": 0.1257797247750107,
+          "sar_conversion": 0.03920933902522913
+        },
+        "W7_cross_border_high_risk": {
+          "alerts": 508840,
+          "escalated": 45447,
+          "productive_rate": 0.10052876522427963,
+          "sar_conversion": 0.020045593899850642
+        },
+        "W8_dormant_reactivation": {
+          "alerts": 64596,
+          "escalated": 7090,
+          "productive_rate": 0.11214631320169738,
+          "sar_conversion": 0.021255186079633413
+        }
+      },
+      "simulation": {
+        "alert_sla_days": 60,
+        "analyst_accuracy": 0.9,
+        "continuous_interval_seconds": 1800,
+        "counterparty_scenarios": [
+          "W1_connected_components",
+          "W3_round_tripping",
+          "W4_risk_propagation",
+          "W17_layering_chain"
+        ],
+        "enabled": true,
+        "investigator_accuracy": 0.95,
+        "late_filing_rate": 0.03,
+        "lookback_months": 12,
+        "max_alerts_per_customer": 50000,
+        "no_suspect_rate": 0.05,
+        "note": "dispositions simulated from datagen ground truth",
+        "qa_sample_rate": 0.05,
+        "seed": 20260924
+      }
+    },
+    "mode": "batch"
+  }
+}

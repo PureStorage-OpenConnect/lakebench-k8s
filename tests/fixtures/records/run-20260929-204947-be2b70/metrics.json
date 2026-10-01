@@ -1,0 +1,984 @@
+{
+  "run_id": "20260929-204947-be2b70",
+  "deployment_name": "pipe-aml-b10",
+  "start_time": "2026-09-30T02:49:47.127784+00:00",
+  "end_time": "2026-09-30T03:38:02.379567+00:00",
+  "total_elapsed_seconds": 2895.251783,
+  "success": false,
+  "verdict": {
+    "status": "FAILED",
+    "reasons": [
+      "Process exit intent was not OK",
+      "Pipeline crashed or was interrupted",
+      "Batch jobs failed: lakebench-gold-finalize",
+      "Gate 'pipeline' FAILED"
+    ],
+    "gates": {
+      "pipeline": "FAIL"
+    },
+    "qualifiers": {
+      "pipeline_mode": "batch",
+      "n_batch_jobs": 3
+    }
+  },
+  "bronze_size_gb": 93.73943553771824,
+  "silver_size_gb": 86.28751662839204,
+  "gold_size_gb": 39.61395152006298,
+  "jobs": [
+    {
+      "job_name": "lakebench-bronze-verify",
+      "job_type": "bronze-verify",
+      "start_time": "2026-09-30T02:51:50.260388+00:00",
+      "end_time": "2026-09-30T02:54:18.105389+00:00",
+      "elapsed_seconds": 147.801901,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 93.596,
+      "output_size_gb": 93.73943553771824,
+      "input_rows": 266718594,
+      "output_rows": 266718594,
+      "executor_count": 4,
+      "executor_cores": 2,
+      "executor_memory_gb": 8.0,
+      "cpu_seconds_requested": 1182.415208,
+      "memory_gb_requested": 80.0,
+      "throughput_gb_per_second": 0.8888509021842356,
+      "throughput_rows_per_second": 2532940.113960114,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {},
+      "extra_metrics": {}
+    },
+    {
+      "job_name": "lakebench-silver-build",
+      "job_type": "silver-build",
+      "start_time": "2026-09-30T02:54:21.315123+00:00",
+      "end_time": "2026-09-30T03:07:53.105389+00:00",
+      "elapsed_seconds": 811.683278,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 93.596,
+      "output_size_gb": 86.28751662839204,
+      "input_rows": 266718594,
+      "output_rows": 266718594,
+      "executor_count": 8,
+      "executor_cores": 4,
+      "executor_memory_gb": 48.0,
+      "cpu_seconds_requested": 25973.864896,
+      "memory_gb_requested": 480.0,
+      "throughput_gb_per_second": 0.12122263955446186,
+      "throughput_rows_per_second": 345445.6598886155,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {
+        "silver_transactions_rows": 266718594,
+        "silver_entities_rows": 1137292,
+        "silver_accounts_rows": 1137292,
+        "silver_statements_rows": 533437188,
+        "silver_edges_rows": 49005465,
+        "silver_profiles_rows": 1137292
+      },
+      "extra_metrics": {
+        "data_clock_source": "fallback_default"
+      }
+    },
+    {
+      "job_name": "lakebench-gold-finalize",
+      "job_type": "gold-finalize",
+      "start_time": "2026-09-30T03:08:00.091156+00:00",
+      "end_time": "2026-09-30T03:38:01.208901+00:00",
+      "elapsed_seconds": 1801.051908,
+      "success": false,
+      "error_message": "Job timed out after 1800s (last observed state: 'RUNNING')",
+      "timing_source": "poll",
+      "timing_resolution_seconds": 5.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 86.28751662839204,
+      "output_size_gb": 39.54227850213647,
+      "input_rows": 0,
+      "output_rows": 0,
+      "executor_count": 4,
+      "executor_cores": 4,
+      "executor_memory_gb": 32.0,
+      "cpu_seconds_requested": 28816.830528,
+      "memory_gb_requested": 160.0,
+      "throughput_gb_per_second": 0.04790951123902424,
+      "throughput_rows_per_second": 0.0,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {},
+      "extra_metrics": {}
+    }
+  ],
+  "queries": [],
+  "streaming": [],
+  "config_snapshot": {
+    "name": "pipe-aml-b10",
+    "scale": 10.0,
+    "approx_bronze_gb": 84.0,
+    "processing_pattern": "medallion",
+    "s3": {
+      "endpoint": "http://10.0.1.50:80",
+      "buckets": {
+        "bronze": "scrubbed-bronze",
+        "silver": "scrubbed-silver",
+        "gold": "scrubbed-gold"
+      }
+    },
+    "scratch": {
+      "enabled": true,
+      "storage_class": "px-csi-scratch",
+      "size": "200Gi"
+    },
+    "spark": {
+      "driver": {
+        "cores": 4,
+        "memory": "8g"
+      },
+      "executor": {
+        "instances": 4,
+        "cores": 4,
+        "memory": "16g",
+        "memory_overhead": "4g"
+      },
+      "executor_overrides": {
+        "bronze": null,
+        "silver": null,
+        "gold": null,
+        "bronze_ingest": null,
+        "silver_stream": null,
+        "gold_refresh": null
+      }
+    },
+    "catalog": "hive",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "trino",
+    "workload_schema": "financial",
+    "sustained": {
+      "bronze_trigger_interval": "30 seconds",
+      "silver_trigger_interval": "60 seconds",
+      "gold_refresh_interval": "5 minutes",
+      "run_duration": 1800,
+      "max_files_per_trigger": 18,
+      "bronze_target_file_size_mb": 512,
+      "silver_target_file_size_mb": 512,
+      "gold_target_file_size_mb": 128,
+      "benchmark_interval": 300,
+      "benchmark_warmup": 300
+    },
+    "datagen": {
+      "scale": 10.0,
+      "mode": "batch",
+      "parallelism": 4,
+      "file_size": "64mb"
+    },
+    "images": {
+      "datagen": "docker.io/sillidata/lb-datagen:034f998",
+      "spark": "apache/spark:4.0.2-python3",
+      "trino": "trinodb/trino:483"
+    },
+    "trino": {
+      "coordinator": {
+        "cpu": "2",
+        "memory": "8Gi"
+      },
+      "worker": {
+        "replicas": 2,
+        "cpu": "4",
+        "memory": "16Gi"
+      }
+    },
+    "benchmark": {
+      "mode": "power",
+      "streams": 4,
+      "cache": "hot",
+      "iterations": 3
+    },
+    "maintenance": {
+      "pre_benchmark_maintenance": true,
+      "retention_interval": null,
+      "retention_threshold": "30m",
+      "compaction_enabled": true,
+      "compaction_interval": null
+    },
+    "experiment_inputs": {
+      "workload": {
+        "name": "financial",
+        "version": "aml-1",
+        "generator_model_version": "datagen-v2-rs-0.3",
+        "parameters_id": "7f987bedd2c609d4",
+        "parameters": {
+          "tm_operations": {
+            "enabled": true,
+            "seed": 20260924,
+            "analyst_accuracy": 0.9,
+            "investigator_accuracy": 0.95,
+            "qa_sample_rate": 0.05,
+            "alert_sla_days": 60,
+            "case_lookback_months": 12,
+            "late_filing_rate": 0.03,
+            "no_suspect_rate": 0.05,
+            "max_alerts_per_customer": 50000,
+            "continuous_interval_seconds": 1800,
+            "counterparty_scenarios": [
+              "W1_connected_components",
+              "W3_round_tripping",
+              "W4_risk_propagation",
+              "W17_layering_chain"
+            ]
+          },
+          "w1_max_vertices": 8000000,
+          "retention_workload": true,
+          "retention_months": 60
+        }
+      },
+      "corpus": {
+        "schema": "financial",
+        "generator_image": "docker.io/sillidata/lb-datagen:034f998",
+        "seed": 777001,
+        "corpus_role": null,
+        "robustness_perturbation": false,
+        "scale": 10.0,
+        "timestamp_start": null,
+        "timestamp_end": null,
+        "dirty_data_ratio": 0.08,
+        "id": "a80d75bfa8f37268"
+      },
+      "architecture": {
+        "recipe": "hive-iceberg-spark-trino",
+        "catalog": {
+          "type": "hive",
+          "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+        },
+        "table_format": {
+          "type": "iceberg",
+          "version": "1.11.0"
+        },
+        "pipeline_engine": {
+          "type": "spark",
+          "image": "apache/spark:4.0.2-python3"
+        },
+        "query_engine": {
+          "type": "trino",
+          "version": "trinodb/trino:483"
+        },
+        "query_access_path": "catalog"
+      },
+      "maintenance_config": {
+        "pre_benchmark_maintenance": true,
+        "compaction_enabled": true,
+        "settings": {
+          "retention_threshold": "2013d",
+          "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+        }
+      },
+      "mode": "batch",
+      "run_mode": "batch",
+      "support": {
+        "workload": "financial",
+        "mode": "batch",
+        "recipe": "hive-iceberg-spark-trino",
+        "state": "unverified",
+        "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+      },
+      "config_limits": {
+        "max_files_per_trigger": 18,
+        "benchmark_iterations": 3,
+        "w1_max_vertices": 8000000,
+        "tm_max_alerts_per_customer": 50000
+      }
+    }
+  },
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.6.0.dev0",
+    "git_sha": "e6927ce3ed3fe60b609192e23a2fa9eda2d4644a",
+    "git_dirty": false
+  },
+  "autosize_cuts": [],
+  "maintenance_outcomes": [],
+  "experiment": {
+    "schema": "exp1",
+    "system": "cluster",
+    "support": {
+      "workload": "financial",
+      "mode": "batch",
+      "recipe": "hive-iceberg-spark-trino",
+      "state": "unverified",
+      "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+    },
+    "repetitions": {
+      "runs": 1,
+      "benchmark_samples_per_query": null,
+      "benchmark_rounds": null
+    },
+    "workload": {
+      "name": "financial",
+      "version": "aml-1",
+      "generator_model_version": "datagen-v2-rs-0.3",
+      "parameters_id": "7f987bedd2c609d4",
+      "parameters": {
+        "tm_operations": {
+          "enabled": true,
+          "seed": 20260924,
+          "analyst_accuracy": 0.9,
+          "investigator_accuracy": 0.95,
+          "qa_sample_rate": 0.05,
+          "alert_sla_days": 60,
+          "case_lookback_months": 12,
+          "late_filing_rate": 0.03,
+          "no_suspect_rate": 0.05,
+          "max_alerts_per_customer": 50000,
+          "continuous_interval_seconds": 1800,
+          "counterparty_scenarios": [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain"
+          ]
+        },
+        "w1_max_vertices": 8000000,
+        "retention_workload": true,
+        "retention_months": 60
+      }
+    },
+    "corpus": {
+      "schema": "financial",
+      "generator_image": "docker.io/sillidata/lb-datagen:034f998",
+      "seed": 777001,
+      "corpus_role": null,
+      "robustness_perturbation": false,
+      "scale": 10.0,
+      "timestamp_start": null,
+      "timestamp_end": null,
+      "dirty_data_ratio": 0.08,
+      "id": "a80d75bfa8f37268",
+      "observed": false,
+      "observed_note": "declared by the config, not observed from the datagen pods",
+      "datagen": {
+        "configured_image": "docker.io/sillidata/lb-datagen:034f998",
+        "pod_image": null,
+        "digest": null,
+        "digest_reason": "no datagen fleet record for this run (data generated elsewhere or earlier)",
+        "observed": false,
+        "seed": null,
+        "scale": null,
+        "data_quality": null,
+        "mixed_params": []
+      }
+    },
+    "architecture": {
+      "recipe": "hive-iceberg-spark-trino",
+      "catalog": {
+        "type": "hive",
+        "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+      },
+      "table_format": {
+        "type": "iceberg",
+        "version": "1.11.0"
+      },
+      "pipeline_engine": {
+        "type": "spark",
+        "image": "apache/spark:4.0.2-python3"
+      },
+      "query_engine": {
+        "type": "trino",
+        "version": "trinodb/trino:483"
+      },
+      "query_access_path": "catalog"
+    },
+    "maintenance_settings": {
+      "retention_threshold": "2013d",
+      "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+    },
+    "mode": "batch",
+    "maintenance_policy_id": "m2-2026-09-26",
+    "effective_maintenance": {
+      "id": "m2-2026-09-26:expire_snapshots=not_run,remove_orphan_files=not_run,compaction=not_run",
+      "detail_id": "m2-2026-09-26:expire_snapshots=off,remove_orphan_files=off,compaction=off",
+      "operations": {
+        "expire_snapshots": "not_run",
+        "remove_orphan_files": "not_run",
+        "compaction": "not_run"
+      },
+      "expire": "not_run",
+      "compaction": "not_run",
+      "detail": {
+        "expire_snapshots": "off",
+        "remove_orphan_files": "off",
+        "compaction": "off"
+      },
+      "basis": "recorded outcomes",
+      "reasons": [
+        "expire_snapshots: never reached (the run ended before maintenance)",
+        "remove_orphan_files: never reached (the run ended before maintenance)",
+        "compaction: never reached (the run ended before maintenance)"
+      ],
+      "known_limitations": []
+    },
+    "stages": {
+      "executed": [
+        "datagen",
+        "bronze",
+        "silver"
+      ],
+      "skipped": [
+        "gold (failed)",
+        "benchmark (not run)"
+      ]
+    },
+    "rules": {},
+    "limits": {
+      "benchmark_iterations": 3,
+      "w1_max_vertices": 8000000,
+      "tm_max_alerts_per_customer": 50000,
+      "executors": [
+        {
+          "job_type": "bronze-verify",
+          "scale_derived": 4,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        },
+        {
+          "job_type": "silver-build",
+          "scale_derived": 8,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 8
+        },
+        {
+          "job_type": "gold-finalize",
+          "scale_derived": 4,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 4
+        }
+      ],
+      "autosize_cuts": [],
+      "maintenance_stopped": false,
+      "bound": [],
+      "bound_kinds": []
+    },
+    "results": {
+      "query_set_id": null,
+      "fingerprints": {},
+      "not_checked": "no benchmark ran"
+    },
+    "lakebench": {
+      "lakebench_version": "1.6.0.dev0",
+      "git_sha": "e6927ce3ed3fe60b609192e23a2fa9eda2d4644a",
+      "git_dirty": false
+    }
+  },
+  "pipeline_benchmark": {
+    "run_id": "20260929-204947-be2b70",
+    "deployment_name": "pipe-aml-b10",
+    "pipeline_mode": "batch",
+    "scale_factor": 10.0,
+    "start_time": "2026-09-30T02:49:47.127784+00:00",
+    "end_time": "2026-09-30T03:38:02.379567+00:00",
+    "success": false,
+    "scorecard": {
+      "time_to_value_seconds": 2770.95,
+      "total_elapsed_seconds": 2881.12,
+      "total_data_processed_gb": 273.48,
+      "pipeline_throughput_gb_per_second": 0.0987,
+      "total_core_hours": 15.55,
+      "compute_efficiency_gb_per_core_hour": 17.5893,
+      "scale_ratio": 1.114
+    },
+    "scores": {
+      "time_to_value_seconds": 2770.95,
+      "total_elapsed_seconds": 2881.12,
+      "total_data_processed_gb": 273.48,
+      "pipeline_throughput_gb_per_second": 0.0987,
+      "total_core_hours": 15.55,
+      "compute_efficiency_gb_per_core_hour": 17.5893,
+      "scale_ratio": 1.114
+    },
+    "stages": [
+      {
+        "stage_name": "datagen",
+        "stage_type": "datagen",
+        "engine": "datagen",
+        "elapsed_seconds": 120.587104,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0.0,
+        "input_size_gb": 0.0,
+        "output_size_gb": 93.7389581874013,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "bronze",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-30T02:51:50.260388+00:00",
+        "end_time": "2026-09-30T02:54:18.105389+00:00",
+        "elapsed_seconds": 147.801901,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 93.596,
+        "output_size_gb": 93.73943553771824,
+        "input_rows": 266718594,
+        "output_rows": 266718594,
+        "throughput_gb_per_second": 0.8888509021842356,
+        "throughput_rows_per_second": 2532940.113960114,
+        "executor_count": 4,
+        "executor_cores": 2,
+        "executor_memory_gb": 8.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-30T02:54:21.315123+00:00",
+        "end_time": "2026-09-30T03:07:53.105389+00:00",
+        "elapsed_seconds": 811.683278,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 93.596,
+        "output_size_gb": 86.28751662839204,
+        "input_rows": 266718594,
+        "output_rows": 266718594,
+        "throughput_gb_per_second": 0.12122263955446186,
+        "throughput_rows_per_second": 345445.6598886155,
+        "executor_count": 8,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "gold",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-09-30T03:08:00.091156+00:00",
+        "end_time": "2026-09-30T03:38:01.208901+00:00",
+        "elapsed_seconds": 1801.051908,
+        "success": false,
+        "error_message": "Job timed out after 1800s (last observed state: 'RUNNING')",
+        "timing_source": "poll",
+        "timing_resolution_seconds": 5.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 86.28751662839204,
+        "output_size_gb": 39.54227850213647,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.04790951123902424,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      }
+    ],
+    "stage_matrix": {
+      "datagen": {
+        "engine": "datagen",
+        "elapsed_seconds": 120.59,
+        "input_size_gb": 0.0,
+        "output_size_gb": 93.739,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "bronze": {
+        "engine": "spark",
+        "elapsed_seconds": 147.8,
+        "input_size_gb": 93.596,
+        "output_size_gb": 93.739,
+        "input_rows": 266718594,
+        "output_rows": 266718594,
+        "throughput_gb_per_second": 0.8889,
+        "throughput_rows_per_second": 2532940.1,
+        "executor_count": 4,
+        "executor_cores": 2,
+        "executor_memory_gb": 8.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "silver": {
+        "engine": "spark",
+        "elapsed_seconds": 811.68,
+        "input_size_gb": 93.596,
+        "output_size_gb": 86.288,
+        "input_rows": 266718594,
+        "output_rows": 266718594,
+        "throughput_gb_per_second": 0.1212,
+        "throughput_rows_per_second": 345445.7,
+        "executor_count": 8,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "gold": {
+        "engine": "spark",
+        "elapsed_seconds": 1801.05,
+        "input_size_gb": 86.288,
+        "output_size_gb": 39.542,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0479,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": false
+      }
+    },
+    "bucket_sizes": {
+      "bronze_gb": 93.596,
+      "silver_gb": 86.288,
+      "gold_gb": 39.542
+    },
+    "config_snapshot": {
+      "name": "pipe-aml-b10",
+      "scale": 10.0,
+      "approx_bronze_gb": 84.0,
+      "processing_pattern": "medallion",
+      "s3": {
+        "endpoint": "http://10.0.1.50:80",
+        "buckets": {
+          "bronze": "scrubbed-bronze",
+          "silver": "scrubbed-silver",
+          "gold": "scrubbed-gold"
+        }
+      },
+      "scratch": {
+        "enabled": true,
+        "storage_class": "px-csi-scratch",
+        "size": "200Gi"
+      },
+      "spark": {
+        "driver": {
+          "cores": 4,
+          "memory": "8g"
+        },
+        "executor": {
+          "instances": 4,
+          "cores": 4,
+          "memory": "16g",
+          "memory_overhead": "4g"
+        },
+        "executor_overrides": {
+          "bronze": null,
+          "silver": null,
+          "gold": null,
+          "bronze_ingest": null,
+          "silver_stream": null,
+          "gold_refresh": null
+        }
+      },
+      "catalog": "hive",
+      "table_format": "iceberg",
+      "pipeline_engine": "spark",
+      "query_engine": "trino",
+      "workload_schema": "financial",
+      "sustained": {
+        "bronze_trigger_interval": "30 seconds",
+        "silver_trigger_interval": "60 seconds",
+        "gold_refresh_interval": "5 minutes",
+        "run_duration": 1800,
+        "max_files_per_trigger": 18,
+        "bronze_target_file_size_mb": 512,
+        "silver_target_file_size_mb": 512,
+        "gold_target_file_size_mb": 128,
+        "benchmark_interval": 300,
+        "benchmark_warmup": 300
+      },
+      "datagen": {
+        "scale": 10.0,
+        "mode": "batch",
+        "parallelism": 4,
+        "file_size": "64mb"
+      },
+      "images": {
+        "datagen": "docker.io/sillidata/lb-datagen:034f998",
+        "spark": "apache/spark:4.0.2-python3",
+        "trino": "trinodb/trino:483"
+      },
+      "trino": {
+        "coordinator": {
+          "cpu": "2",
+          "memory": "8Gi"
+        },
+        "worker": {
+          "replicas": 2,
+          "cpu": "4",
+          "memory": "16Gi"
+        }
+      },
+      "benchmark": {
+        "mode": "power",
+        "streams": 4,
+        "cache": "hot",
+        "iterations": 3
+      },
+      "maintenance": {
+        "pre_benchmark_maintenance": true,
+        "retention_interval": null,
+        "retention_threshold": "30m",
+        "compaction_enabled": true,
+        "compaction_interval": null
+      },
+      "experiment_inputs": {
+        "workload": {
+          "name": "financial",
+          "version": "aml-1",
+          "generator_model_version": "datagen-v2-rs-0.3",
+          "parameters_id": "7f987bedd2c609d4",
+          "parameters": {
+            "tm_operations": {
+              "enabled": true,
+              "seed": 20260924,
+              "analyst_accuracy": 0.9,
+              "investigator_accuracy": 0.95,
+              "qa_sample_rate": 0.05,
+              "alert_sla_days": 60,
+              "case_lookback_months": 12,
+              "late_filing_rate": 0.03,
+              "no_suspect_rate": 0.05,
+              "max_alerts_per_customer": 50000,
+              "continuous_interval_seconds": 1800,
+              "counterparty_scenarios": [
+                "W1_connected_components",
+                "W3_round_tripping",
+                "W4_risk_propagation",
+                "W17_layering_chain"
+              ]
+            },
+            "w1_max_vertices": 8000000,
+            "retention_workload": true,
+            "retention_months": 60
+          }
+        },
+        "corpus": {
+          "schema": "financial",
+          "generator_image": "docker.io/sillidata/lb-datagen:034f998",
+          "seed": 777001,
+          "corpus_role": null,
+          "robustness_perturbation": false,
+          "scale": 10.0,
+          "timestamp_start": null,
+          "timestamp_end": null,
+          "dirty_data_ratio": 0.08,
+          "id": "a80d75bfa8f37268"
+        },
+        "architecture": {
+          "recipe": "hive-iceberg-spark-trino",
+          "catalog": {
+            "type": "hive",
+            "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+          },
+          "table_format": {
+            "type": "iceberg",
+            "version": "1.11.0"
+          },
+          "pipeline_engine": {
+            "type": "spark",
+            "image": "apache/spark:4.0.2-python3"
+          },
+          "query_engine": {
+            "type": "trino",
+            "version": "trinodb/trino:483"
+          },
+          "query_access_path": "catalog"
+        },
+        "maintenance_config": {
+          "pre_benchmark_maintenance": true,
+          "compaction_enabled": true,
+          "settings": {
+            "retention_threshold": "2013d",
+            "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+          }
+        },
+        "mode": "batch",
+        "run_mode": "batch",
+        "support": {
+          "workload": "financial",
+          "mode": "batch",
+          "recipe": "hive-iceberg-spark-trino",
+          "state": "unverified",
+          "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+        },
+        "config_limits": {
+          "max_files_per_trigger": 18,
+          "benchmark_iterations": 3,
+          "w1_max_vertices": 8000000,
+          "tm_max_alerts_per_customer": 50000
+        }
+      }
+    },
+    "scale_ratio": 1.114,
+    "score_descriptions": {
+      "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+      "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+      "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+      "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+      "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+      "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
+      "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)"
+    },
+    "advanced_metrics": null
+  }
+}

@@ -69,11 +69,11 @@
     "approx_bronze_gb": 84.0,
     "processing_pattern": "medallion",
     "s3": {
-      "endpoint": "http://10.21.227.93:80",
+      "endpoint": "http://10.0.1.50:80",
       "buckets": {
-        "bronze": "ov-aml-c10-bronze",
-        "silver": "ov-aml-c10-silver",
-        "gold": "ov-aml-c10-gold"
+        "bronze": "scrubbed-bronze",
+        "silver": "scrubbed-silver",
+        "gold": "scrubbed-gold"
       }
     },
     "scratch": {
@@ -1141,11 +1141,11 @@
       "approx_bronze_gb": 84.0,
       "processing_pattern": "medallion",
       "s3": {
-        "endpoint": "http://10.21.227.93:80",
+        "endpoint": "http://10.0.1.50:80",
         "buckets": {
-          "bronze": "ov-aml-c10-bronze",
-          "silver": "ov-aml-c10-silver",
-          "gold": "ov-aml-c10-gold"
+          "bronze": "scrubbed-bronze",
+          "silver": "scrubbed-silver",
+          "gold": "scrubbed-gold"
         }
       },
       "scratch": {
