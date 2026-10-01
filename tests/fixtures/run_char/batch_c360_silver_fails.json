@@ -1,0 +1,434 @@
+{
+ "_derivation": {
+  "author": "independent second agent (CD-1 / QA-9), v2 harness; derived from code and the 09-27 record; harness, test, run() and CLI not run; no .harness_trace* or probe_test.py read",
+  "tree": "src at 3a4da07 (no src change since 46cc3f4); harness uncommitted diff on top",
+  "exported_run_id": "cli/_run.py:1923 os.environ['LB_RUN_ID'] = run_id; CliRunner.isolation restores only the env keys passed to it, so it survives the invoke. Normalised to <run_id>.",
+  "submits": "bronze-verify and silver-build only.",
+  "calls_args": "wait_for_completion timeout 3600 (= max(3600, 1*120), cli/_run.py:1776) and poll 5 (_STAGE_POLL_S cli/_run.py:548). application_end returns an end, so cli/_run.py:661-667 reads the cluster offset once: getattr(monitor,'_lb_clock_offset') hits FakeMonitor's '_' AttributeError -> None -> cluster_clock_offset_seconds (cli/_sustained.py:2318) -> VersionApi get_code; the float is then stored on the monitor and later stages skip it. S3 init from config: endpoint, env-expanded keys, region us-east-1, path_style True, verify_ssl True (cli/_run.py:2434-2442, 3079-3087); one init per stage measurement and one in finally. Health probes use query_sql, which passes no timeout (exec_in_pod default 30, modules/table_formats/iceberg/maintenance.py:342). Maintenance and compaction statements: budget.statement_timeout(1800) = min(1800, int(~1800)+30) = 1800 (cli/_sustained.py:796, cli/_run.py:43-47). Trino readiness execute_query timeout=15 (cli/_sustained.py:1468).",
+  "jobs": "silver error_message is result.message 'driver exited with code 1' (cli/_run.py:2353); timing and sizes as on success.",
+  "values": "maintenance_policy_id MAINTENANCE_POLICY_ID (metrics/maintenance_policy.py:44; no --skip-maintenance). effective maintenance from metrics/maintenance_policy.py effective_maintenance via metrics/experiment.py:758-767. bucket_gb from record_actual_sizes (metrics/collector.py:2545). scores: PipelineBenchmark._scores_dict batch branch (metrics/collector.py:1588-1659); total_data_processed_gb sums stage input_size_gb incl. the query stage (input = run.gold_size_gb) (collector.py:1046, 2033-2043); scale_ratio = 9.917/10.0 (collector.py:1084-1091).",
+  "exit_code": "silver result.success False -> cli/_run.py:2474-2492: error printed, journal pipeline.stage success False, pipeline_success False, raise typer.Exit(1). Not K8sConnectionError, so only finally runs (cli/_run.py:3070-3206): S3 sizes, end_run(False), pb built, no scorecard, save_run, report, metrics.saved, end_command(False), then raise typer.Exit(_pipeline_exit_code=1) replaces the in-flight Exit(1). Exit 1.",
+  "calls": "head identical to the success scenario; bronze stage (with VersionApi), silver stage (offset cached, so no second VersionApi; the S3 measurement runs before the success check at 2429-2449), then finally's S3 init and three sizes. No gold, no maintenance, no benchmark. 31 calls.",
+  "journal_events": "session.start, command.start, pipeline.stage bronze True, pipeline.stage silver False (details stage silver-build, cli/_run.py:2480-2490), metrics.saved, command.end False (journal/journal.py:189-203). No pipeline.complete: the raise precedes 2520.",
+  "metrics_keys": "top: no benchmark (never recorded) and no c360_correctness (evaluated after the stage loop, never reached); maintenance_outcomes [] is present (set at 1932). pipeline_benchmark: no query_benchmark, pre_compaction_benchmark or maintenance_settle. jobs[0] and experiment unchanged.",
+  "maintenance_outcomes": "[]: maintenance never reached.",
+  "values_fail": "effective maintenance with outcomes [] (not None): every operation has no outcome of its kind -> NOT_RUN, detail off (maintenance_policy.py, 'never reached' branch). benchmark absent -> qph None, queries []. scores: composite_qph deleted when query_benchmark is None (collector.py:1600-1603); total_data_processed_gb = 9.917 + 9.917 = 19.834; scale_ratio 0.992; every maintenance score absent.",
+  "c360_correctness": "None: the record is never set.",
+  "verdict": "metrics/verdict.py:359-417. exit_ok False -> 'Process exit intent was not OK' first; badge reasons in order: benchmark_error None so 'Pipeline crashed or was interrupted' (verdict.py:214-215), scale_ratio 0.9917 not < 0.95, then 'Batch jobs failed: lakebench-silver-build' (job_name); no benchmark so no query reason. Gates: pipeline FAIL, benchmark None (benchmark absent), c360 none -> 'Gate 'pipeline' FAILED' last. Status FAILED.",
+  "unsure": "The order of the four verdict reasons is the only place I would double-check; it follows the code literally. Also assumed: write_run_report succeeds or only warns on a failed run (it catches everything, cli/_helpers.py:288-298), so the trace is unaffected either way."
+ },
+ "exit_code": 1,
+ "unscripted": [],
+ "runs_saved": 1,
+ "exported_run_id": "<run_id>",
+ "calls": [
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "get_cluster_capacity"
+  ],
+  [
+   "prerequisites",
+   "run",
+   {
+    "sustained": false,
+    "datagen_runs": true
+   }
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "namespace_exists",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "namespace_exists",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-postgres",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-hive-metastore-default",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_deployment",
+   "lakebench-trino-coordinator",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-trino-worker",
+   "runchar"
+  ],
+  [
+   "SparkOperator",
+   "init",
+   "spark-operator",
+   null,
+   "runchar"
+  ],
+  [
+   "SparkOperator",
+   "check_status"
+  ],
+  [
+   "SparkOperator",
+   "ensure_namespace_watched",
+   true
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "JobManager",
+   "deploy_scripts_configmap"
+  ],
+  [
+   "JobManager",
+   "submit_job",
+   "bronze-verify"
+  ],
+  [
+   "SparkJobMonitor",
+   "wait_for_completion",
+   "lakebench-bronze-verify",
+   3600,
+   5
+  ],
+  [
+   "SparkJobMonitor",
+   "application_end",
+   "lakebench-bronze-verify"
+  ],
+  [
+   "VersionApi",
+   "get_code"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "JobManager",
+   "submit_job",
+   "silver-build"
+  ],
+  [
+   "SparkJobMonitor",
+   "wait_for_completion",
+   "lakebench-silver-build",
+   3600,
+   5
+  ],
+  [
+   "SparkJobMonitor",
+   "application_end",
+   "lakebench-silver-build"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-gold",
+   ""
+  ]
+ ],
+ "submits": [
+  [
+   "bronze-verify",
+   [
+    "LB_RUN_ID"
+   ],
+   {
+    "LB_RUN_ID": "<run_id>-c1",
+    "LB_BRONZE_CYCLE": null,
+    "LB_SILVER_INCREMENTAL": null,
+    "LB_GOLD_INCREMENTAL": null,
+    "LB_FORCE_REBUILD": null
+   }
+  ],
+  [
+   "silver-build",
+   [
+    "LB_RUN_ID"
+   ],
+   {
+    "LB_RUN_ID": "<run_id>-c1",
+    "LB_BRONZE_CYCLE": null,
+    "LB_SILVER_INCREMENTAL": null,
+    "LB_GOLD_INCREMENTAL": null,
+    "LB_FORCE_REBUILD": null
+   }
+  ]
+ ],
+ "journal_events": [
+  [
+   "session.start",
+   null,
+   null
+  ],
+  [
+   "command.start",
+   null,
+   null
+  ],
+  [
+   "pipeline.stage",
+   true,
+   "bronze-verify"
+  ],
+  [
+   "pipeline.stage",
+   false,
+   "silver-build"
+  ],
+  [
+   "metrics.saved",
+   null,
+   null
+  ],
+  [
+   "command.end",
+   false,
+   null
+  ]
+ ],
+ "metrics_keys": {
+  "top": [
+   "autosize_cuts",
+   "bronze_size_gb",
+   "config_snapshot",
+   "deployment_name",
+   "end_time",
+   "experiment",
+   "gold_size_gb",
+   "jobs",
+   "maintenance_outcomes",
+   "maintenance_policy_id",
+   "pipeline_benchmark",
+   "provenance",
+   "queries",
+   "run_id",
+   "silver_size_gb",
+   "start_time",
+   "streaming",
+   "success",
+   "total_elapsed_seconds",
+   "verdict"
+  ],
+  "pipeline_benchmark": [
+   "advanced_metrics",
+   "bucket_sizes",
+   "config_snapshot",
+   "deployment_name",
+   "end_time",
+   "pipeline_mode",
+   "run_id",
+   "scale_factor",
+   "scale_ratio",
+   "score_descriptions",
+   "scorecard",
+   "scores",
+   "stage_matrix",
+   "stages",
+   "start_time",
+   "success"
+  ],
+  "jobs[0]": [
+   "alerts_by_rule",
+   "c360_bronze",
+   "c360_check",
+   "cpu_seconds_requested",
+   "elapsed_seconds",
+   "end_time",
+   "error_message",
+   "executor_cores",
+   "executor_count",
+   "executor_memory_gb",
+   "extra_metrics",
+   "input_rows",
+   "input_size_gb",
+   "job_name",
+   "job_type",
+   "memory_gb_requested",
+   "output_rows",
+   "output_size_gb",
+   "rule_errors",
+   "rules_skipped",
+   "silver_tables",
+   "start_time",
+   "submission_failures",
+   "submission_retry_seconds",
+   "success",
+   "throughput_gb_per_second",
+   "throughput_rows_per_second",
+   "timing_resolution_seconds",
+   "timing_source",
+   "tm_invariants",
+   "tm_ops",
+   "tm_status"
+  ],
+  "experiment": [
+   "architecture",
+   "corpus",
+   "effective_maintenance",
+   "lakebench",
+   "limits",
+   "maintenance_policy_id",
+   "maintenance_settings",
+   "mode",
+   "repetitions",
+   "results",
+   "rules",
+   "schema",
+   "stages",
+   "support",
+   "system",
+   "workload"
+  ]
+ },
+ "jobs": [
+  {
+   "job_type": "bronze-verify",
+   "success": true,
+   "error_message": null,
+   "timing_source": "driver_container",
+   "executor_count": 4,
+   "executor_cores": 2,
+   "executor_memory_gb": 4.0,
+   "memory_gb_requested": 24.0,
+   "input_rows": 2478560,
+   "output_rows": 2478560,
+   "input_size_gb": 9.917,
+   "output_size_gb": 9.917505
+  },
+  {
+   "job_type": "silver-build",
+   "success": false,
+   "error_message": "driver exited with code 1",
+   "timing_source": "driver_container",
+   "executor_count": 4,
+   "executor_cores": 4,
+   "executor_memory_gb": 48.0,
+   "memory_gb_requested": 240.0,
+   "input_rows": 2478560,
+   "output_rows": 2428561,
+   "input_size_gb": 9.917,
+   "output_size_gb": 9.762412
+  }
+ ],
+ "maintenance_outcomes": [],
+ "values": {
+  "maintenance_policy_id": "m2-2026-09-26",
+  "effective_maintenance_id": "m2-2026-09-26:expire_snapshots=not_run,remove_orphan_files=not_run,compaction=not_run",
+  "effective_maintenance_detail_id": "m2-2026-09-26:expire_snapshots=off,remove_orphan_files=off,compaction=off",
+  "bucket_gb": [
+   9.917505,
+   9.762412,
+   6.5e-05
+  ],
+  "benchmark_qph": null,
+  "benchmark_queries": [],
+  "scores": {
+   "composite_qph": null,
+   "scale_ratio": 0.992,
+   "total_data_processed_gb": 19.834,
+   "benchmark_samples_per_query": null,
+   "qph_spread": null,
+   "pre_compaction_file_count": null,
+   "post_compaction_file_count": null,
+   "compaction_ratio": null,
+   "pre_compaction_qph": null,
+   "post_compaction_qph": null,
+   "maintenance_value_pct": null,
+   "maintenance_paired_queries": null,
+   "maintenance_value_reason": null,
+   "maintenance_settled": null,
+   "maintenance_settle_capped": null,
+   "maintenance_settle_verified": null
+  }
+ },
+ "c360_correctness": null,
+ "success": false,
+ "verdict": "FAILED",
+ "verdict_reasons": [
+  "Process exit intent was not OK",
+  "Pipeline crashed or was interrupted",
+  "Batch jobs failed: lakebench-silver-build",
+  "Gate 'pipeline' FAILED"
+ ]
+}
