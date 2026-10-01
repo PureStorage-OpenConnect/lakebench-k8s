@@ -219,7 +219,13 @@ PATHS: tuple[ExitPath, ...] = (
         "`stop` could not list or delete a job; it still tried every other deletion",
         v16_code=0,
     ),
-    ExitPath("logs.no_pod", _C.FAILED, "`logs` found no pod for the component", v16_code=0),
+    ExitPath(
+        "logs.no_pod",
+        _C.FAILED,
+        "`logs` found no pod for the component, or none with a log to read yet (a "
+        "container still starting, no previous container for `--previous`)",
+        v16_code=0,
+    ),
     ExitPath(
         "financial.reproduce.mismatch",
         _C.FAILED,
@@ -396,7 +402,7 @@ PATHS: tuple[ExitPath, ...] = (
         "k8s.api_error",
         _C.PREREQUISITE,
         "`logs` or `status` got an API error reading the deployment (a permission gap, "
-        "a server error), or `logs --previous` found no previous container; nothing changed",
+        "a server error); nothing changed",
         v16_code=0,
     ),
     ExitPath(

@@ -7,6 +7,7 @@ selectors, deletions and exit codes the commands produce.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,8 +73,10 @@ class FakeCore:
         self.read_errors = read_errors or {}
         self.selectors: list[str] = []
         self.reads: list[tuple[str, dict]] = []
+        self.responses: list[_Resp] = []
 
-    def list_namespaced_pod(self, namespace, label_selector=""):
+    def list_namespaced_pod(self, namespace, label_selector="", _request_timeout=None):
+        assert _request_timeout == ops.API_TIMEOUT
         self.selectors.append(label_selector)
         if self.list_error is not None:
             raise self.list_error
@@ -83,7 +86,9 @@ class FakeCore:
         self.reads.append((name, kwargs))
         if name in self.read_errors:
             raise self.read_errors[name]
-        return _Resp(self.logs.get(name, b""))
+        resp = _Resp(self.logs.get(name, b""))
+        self.responses.append(resp)
+        return resp
 
 
 class FakeApps:
@@ -102,49 +107,69 @@ class FakeApps:
             spec=SimpleNamespace(replicas=desired),
         )
 
-    def read_namespaced_stateful_set(self, name, namespace):
+    def read_namespaced_stateful_set(self, name, namespace, _request_timeout=None):
+        assert _request_timeout == ops.API_TIMEOUT
         return self._read(name)
 
-    def read_namespaced_deployment(self, name, namespace):
+    def read_namespaced_deployment(self, name, namespace, _request_timeout=None):
+        assert _request_timeout == ops.API_TIMEOUT
         return self._read(name)
 
 
 class FakeBatch:
-    def __init__(self, job=False, read_error=None, delete_error=None):
+    def __init__(self, job=False, read_error=None, delete_error=None, finished=""):
         self.job = job
         self.read_error = read_error
         self.delete_error = delete_error
+        self.finished = finished  # "", "Complete" or "Failed"
         self.deleted: list[tuple[str, Any]] = []
 
-    def read_namespaced_job(self, name, namespace):
+    def read_namespaced_job(self, name, namespace, _request_timeout=None):
+        assert _request_timeout == ops.API_TIMEOUT
         if self.read_error is not None:
             raise self.read_error
         if not self.job:
             raise ApiException(status=404, reason="Not Found")
+        conditions = [SimpleNamespace(type=self.finished, status="True")] if self.finished else []
         return SimpleNamespace(
-            status=SimpleNamespace(active=0, succeeded=1), spec=SimpleNamespace(completions=1)
+            status=SimpleNamespace(active=1, succeeded=0, conditions=conditions),
+            spec=SimpleNamespace(completions=1),
         )
 
-    def delete_namespaced_job(self, name, namespace, body=None):
+    def delete_namespaced_job(self, name, namespace, body=None, _request_timeout=None):
+        assert _request_timeout == ops.API_TIMEOUT
         if self.delete_error is not None:
             raise self.delete_error
         self.deleted.append((name, body))
 
 
 class FakeCustom:
-    def __init__(self, apps=(), list_error=None, delete_errors=None):
+    def __init__(self, apps=(), list_error=None, delete_errors=None, states=None):
         self.apps = list(apps)
         self.list_error = list_error
         self.delete_errors = delete_errors or {}
+        self.states = states or {}  # name -> applicationState.state
         self.deleted: list[str] = []
 
-    def list_namespaced_custom_object(self, group, version, namespace, plural):
+    def list_namespaced_custom_object(
+        self, group, version, namespace, plural, _request_timeout=None
+    ):
         assert (group, version, plural) == ("sparkoperator.k8s.io", "v1beta2", "sparkapplications")
+        assert _request_timeout == ops.API_TIMEOUT
         if self.list_error is not None:
             raise self.list_error
-        return {"items": [{"metadata": {"name": n}} for n in self.apps]}
+        items = []
+        for n in self.apps:
+            item: dict = {"metadata": {"name": n}}
+            if n in self.states:
+                item["status"] = {"applicationState": {"state": self.states[n]}}
+            items.append(item)
+        return {"items": items}
 
-    def delete_namespaced_custom_object(self, group, version, namespace, plural, name):
+    def delete_namespaced_custom_object(
+        self, group, version, namespace, plural, name, _request_timeout=None
+    ):
+        assert _request_timeout == ops.API_TIMEOUT
         if name in self.delete_errors:
             raise self.delete_errors[name]
         self.deleted.append(name)
@@ -254,14 +279,59 @@ def test_logs_unreachable_exit4(cluster):
     assert "Traceback" not in r.output
 
 
-def test_logs_read_error_on_one_pod_still_reads_the_rest(cluster):
+def _api_error(status, reason, message):
+    e = ApiException(status=status, reason=reason)
+    e.body = json.dumps({"kind": "Status", "message": message})
+    return e
+
+
+def test_logs_forbidden_on_one_pod_still_reads_the_rest_and_exits_4(cluster):
     cluster.core.pods = [_pod("a", 1), _pod("b", 2)]
     cluster.core.logs = {"b": b"from b\n"}
-    cluster.core.read_errors = {"a": ApiException(status=400, reason="Bad Request")}
+    cluster.core.read_errors = {"a": _api_error(403, "Forbidden", "pods/log is forbidden")}
     r = _invoke("logs", cluster.config, "trino-worker")
     assert r.exit_code == ExitCode.PREREQUISITE, r.output
     assert "from b" in _stdout(r)
-    assert "pod a: 400 Bad Request" in _stderr(r)
+    assert "pod a: 403 Forbidden: pods/log is forbidden" in _stderr(r)
+
+
+def test_logs_a_pod_still_starting_is_not_an_error(cluster):
+    """One datagen pod in ContainerCreating must not turn the read into a 4."""
+    cluster.core.pods = [_pod("a", 1), _pod("b", 2)]
+    cluster.core.logs = {"b": b"from b\n"}
+    msg = 'container "datagen" in pod "a" is waiting to start: ContainerCreating'
+    cluster.core.read_errors = {"a": _api_error(400, "Bad Request", msg)}
+    r = _invoke("logs", cluster.config, "datagen")
+    assert r.exit_code == 0, r.output
+    assert "from b" in _stdout(r)
+    assert "waiting to start: ContainerCreating" in _stderr(r)
+
+
+def test_logs_previous_with_no_previous_container_anywhere_exits_1(cluster):
+    cluster.core.pods = [_pod("a", 1)]
+    msg = 'previous terminated container "main" in pod "a" not found'
+    cluster.core.read_errors = {"a": _api_error(400, "Bad Request", msg)}
+    r = _invoke("logs", cluster.config, "trino", "--previous")
+    assert r.exit_code == ExitCode.FAILED, r.output
+    err = _stderr(r)
+    assert "previous terminated container" in err
+    assert "no pod of trino has a log to read from a previous container" in err
+
+
+def test_logs_releases_each_connection(cluster):
+    cluster.core.pods = [_pod("a", 1), _pod("b", 2)]
+    r = _invoke("logs", cluster.config, "trino-worker")
+    assert r.exit_code == 0, r.output
+    assert len(cluster.core.responses) == 2
+    assert all(resp.released for resp in cluster.core.responses)
+
+
+def test_logs_follow_has_no_read_timeout(cluster):
+    cluster.core.pods = [_pod("a", 1)]
+    _invoke("logs", cluster.config, "trino", "--follow")
+    assert cluster.core.reads[0][1]["_request_timeout"] == (ops.API_TIMEOUT, None)
+    _invoke("logs", cluster.config, "trino")
+    assert cluster.core.reads[1][1]["_request_timeout"] == ops.API_TIMEOUT
 
 
 def test_logs_unknown_component_exits_2_with_the_list(cluster):
@@ -333,6 +403,74 @@ def test_logs_container_from_the_default_annotation():
     pod.metadata.annotations = {"kubectl.kubernetes.io/default-container": "hive"}
     assert ops.pod_container(pod, None) == "hive"
     assert ops.pod_container(_pod("q", 1, containers=("a", "b")), None) == "a"
+    # The registry's container wins over the annotation.
+    assert ops.pod_container(pod, "vector") == "vector"
+    # A registry container the pod lacks falls back to the annotation.
+    assert ops.pod_container(pod, "spark-kubernetes-driver") == "hive"
+
+
+@pytest.mark.parametrize(
+    ("component", "selector"),
+    [
+        ("datagen", "job-name=lakebench-datagen"),
+        ("trino", "app.kubernetes.io/component=trino-coordinator"),
+        ("trino-worker", "app.kubernetes.io/component=trino-worker"),
+        ("thrift", "app.kubernetes.io/component=spark-thrift-server"),
+        ("duckdb", "app.kubernetes.io/component=duckdb"),
+        ("hive", "app.kubernetes.io/component=metastore"),
+        ("polaris", "app.kubernetes.io/component=polaris"),
+        ("postgres", "app.kubernetes.io/component=postgres"),
+        ("spark-driver", "spark-role=driver"),
+        (
+            "score-financial",
+            "spark-role=driver,sparkoperator.k8s.io/app-name=lakebench-score-financial",
+        ),
+    ],
+)
+def test_logs_selector_per_component(component, selector):
+    assert ops.LOG_COMPONENTS[component].selector == selector
+
+
+# The pod-template labels each selector must match, read from the templates
+# lakebench renders (the Stackable metastore label is the operator's role
+# name; hive/service.yaml.j2 selects on it the same way).
+_TEMPLATE_LABELS = {
+    "trino": ("trino/coordinator.yaml.j2", "app.kubernetes.io/component: trino-coordinator"),
+    "trino-worker": ("trino/worker.yaml.j2", "app.kubernetes.io/component: trino-worker"),
+    "thrift": (
+        "spark-thrift/sparkapplication.yaml.j2",
+        "app.kubernetes.io/component: spark-thrift-server",
+    ),
+    "duckdb": ("duckdb/deployment.yaml.j2", "app.kubernetes.io/component: duckdb"),
+    "hive": ("hive/service.yaml.j2", "app.kubernetes.io/component: metastore"),
+    "polaris": ("polaris/deployment.yaml.j2", "app.kubernetes.io/component: polaris"),
+    "postgres": ("postgres/statefulset.yaml.j2", "app.kubernetes.io/component: postgres"),
+}
+
+
+@pytest.mark.parametrize("component", sorted(_TEMPLATE_LABELS))
+def test_logs_selector_matches_the_template_label(component):
+    import lakebench
+
+    template, line = _TEMPLATE_LABELS[component]
+    text = (Path(lakebench.__file__).parent / "templates" / template).read_text()
+    assert line in text
+    key, value = line.split(": ")
+    assert ops.LOG_COMPONENTS[component].selector == f"{key}={value}"
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ("c.yaml", "trino", ("trino", "c.yaml", False)),
+        ("trino", "c.yaml", ("trino", "c.yaml", True)),
+        ("silverbuild", "c.yaml", ("silverbuild", "c.yaml", True)),  # a typo in 1.6 order
+        ("c.yaml", "silverbuild", ("silverbuild", "c.yaml", False)),
+        ("trino", None, ("trino", None, False)),
+    ],
+)
+def test_logs_argument_resolution(first, second, expected):
+    assert ops.resolve_logs_args(first, second, False) == expected
 
 
 def test_logs_uses_no_kubectl(cluster, monkeypatch):
@@ -404,6 +542,64 @@ def test_stop_without_the_spark_crd_is_not_an_error(cluster):
     r = _invoke("stop", cluster.config)
     assert r.exit_code == 0, r.output
     assert "Nothing was running" in _stderr(r)
+
+
+def test_stop_leaves_finished_jobs_and_their_logs(cluster):
+    """A finished stage's driver pod holds its failure logs; stop keeps it."""
+    cluster.custom.apps = ["lakebench-silver-build", "lakebench-gold-refresh"]
+    cluster.custom.states = {
+        "lakebench-silver-build": "FAILED",
+        "lakebench-gold-refresh": "RUNNING",
+    }
+    cluster.batch.job = True
+    cluster.batch.finished = "Complete"
+    r = _invoke("stop", cluster.config)
+    assert r.exit_code == 0, r.output
+    assert cluster.custom.deleted == ["lakebench-gold-refresh"]
+    assert cluster.batch.deleted == []
+    err = _stderr(r)
+    assert "left in place: SparkApplication/lakebench-silver-build (FAILED)" in err
+    assert "left in place: Job/lakebench-datagen (Complete)" in err
+
+
+def test_stop_dry_run_with_a_list_failure_exits_1(cluster):
+    cluster.custom.list_error = ApiException(status=403, reason="Forbidden")
+    r = _invoke("stop", cluster.config, "--dry-run")
+    assert r.exit_code == ExitCode.FAILED, r.output
+
+
+def test_stop_unreachable_at_delete_exits_1(cluster):
+    cluster.custom.apps = ["lakebench-bronze-ingest", "lakebench-silver-stream"]
+    cluster.custom.delete_errors = {
+        "lakebench-bronze-ingest": MaxRetryError(None, "/apis", "connection reset")
+    }
+    r = _invoke("stop", cluster.config)
+    assert r.exit_code == ExitCode.FAILED, r.output
+    assert cluster.custom.deleted == ["lakebench-silver-stream"]
+
+
+def test_stop_journal_records_failure(cluster, monkeypatch):
+    import lakebench.cli as cli
+
+    ends = []
+
+    class _J:
+        def begin_command(self, *a, **k):
+            pass
+
+        def record(self, *a, **k):
+            pass
+
+        def end_command(self, success, message=""):
+            ends.append(success)
+
+    monkeypatch.setattr(cli, "journal_open", lambda *a, **k: _J())
+    cluster.custom.apps = ["lakebench-gold-refresh"]
+    cluster.custom.delete_errors = {"lakebench-gold-refresh": ApiException(status=500, reason="x")}
+    _invoke("stop", cluster.config)
+    cluster.custom.delete_errors = {}
+    _invoke("stop", cluster.config)
+    assert ends == [False, True]
 
 
 def test_stop_dry_run_deletes_nothing(cluster, monkeypatch):
@@ -479,6 +675,12 @@ def test_status_unready_exit1(cluster):
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.FAILED, r.output
     assert "Drift: lakebench-trino-worker" in _stderr(r)
+    # The hint names a component `logs` accepts, not the object name.
+    assert f"Next: lakebench logs {cluster.config} trino-worker" in " ".join(_stderr(r).split())
+
+
+def test_status_drift_hint_components_are_log_components():
+    assert set(ops.STATUS_LOG_COMPONENT.values()) <= set(ops.LOG_COMPONENTS)
 
 
 def test_status_missing_component_exit1(cluster):

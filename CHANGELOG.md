@@ -107,13 +107,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     rest), `trino-worker`, `thrift` and `duckdb` as well as the five 1.6
     components. `--previous` reads a restarted container. With several
     matching pods it prints each one under a header on stderr; `--follow`
-    follows the newest. It exits 1 when no pod matches (was 0) and 4 on an
-    API error (was 0).
-  - `stop` deletes every `lakebench-*` SparkApplication in the namespace,
-    batch stages included, and the datagen Job (1.6 deleted only the three
-    continuous streams). `--dry-run` lists without deleting. A deletion that
-    fails is reported and the rest still run; the exit is then 1 (1.6
-    reported every error as "not running" and exited 0).
+    follows the newest. It exits 1 when no pod matches or none has a log to
+    read yet (was 0) and 4 on an API error (was 0).
+  - `stop` deletes every `lakebench-*` SparkApplication in the namespace
+    that has not finished, batch stages included, and the datagen Job while
+    it runs (1.6 deleted only the three continuous streams). Finished ones
+    are left in place, so a failed stage's logs survive. `--dry-run` lists
+    without deleting. A deletion that fails is reported and the rest still
+    run; the exit is then 1 (1.6 reported every error as "not running" and
+    exited 0).
   - `status` exits 1 when the namespace does not exist or a component is not
     ready, scaled to zero or missing, and 4 when the cluster cannot be read
     (all were 0).

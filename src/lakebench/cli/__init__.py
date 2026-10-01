@@ -1237,6 +1237,10 @@ def status(
         print_error(f"Kubernetes connection failed: {detail}")
         return typer.Exit(ExitCode.PREREQUISITE)
 
+    def _unreadable(detail: object) -> typer.Exit:
+        print_error(f"Kubernetes API error: {detail}")
+        return typer.Exit(ExitCode.PREREQUISITE)
+
     try:
         # The config's context, or (status --namespace with no config) the
         # kubeconfig's current context resolved by name and printed (SAF-7).
@@ -1255,7 +1259,7 @@ def status(
     try:
         exists = k8s.namespace_exists(ns)
     except Exception as e:  # noqa: BLE001 -- K8sResourceError (403, 5xx) or transport
-        raise _unreachable(f"cannot read namespace {ns}: {e}")  # noqa: B904
+        raise _unreadable(f"cannot read namespace {ns}: {e}")  # noqa: B904
     if not exists:
         raise LakebenchError(
             f"namespace {ns} does not exist",
@@ -1324,7 +1328,9 @@ def status(
     # Datagen job progress, while it runs (informational, never drift)
     try:
         batch_v1 = k8s_client.BatchV1Api()
-        job = batch_v1.read_namespaced_job("lakebench-datagen", ns)
+        job = batch_v1.read_namespaced_job(
+            "lakebench-datagen", ns, _request_timeout=ops.API_TIMEOUT
+        )
         active = job.status.active or 0
         succeeded = job.status.succeeded or 0
         completions = job.spec.completions or 1
@@ -1343,10 +1349,15 @@ def status(
     verdict, names = ops.status_exit(rows, config_known=cfg is not None)
     if verdict == "drift":
         print_error(f"Drift: {', '.join(names)} not ready or not found")
-        print_info(f"Next: lakebench logs CONFIG COMPONENT, or {deploy_hint}")
+        log_names = [ops.STATUS_LOG_COMPONENT[n] for n in names if n in ops.STATUS_LOG_COMPONENT]
+        cfg_arg = str(config_file) if config_file else "CONFIG"
+        if log_names:
+            print_info(f"Next: lakebench logs {cfg_arg} {log_names[0]}, or {deploy_hint}")
+        else:
+            print_info(f"Next: {deploy_hint}")
         raise typer.Exit(ExitCode.FAILED)
     if verdict == "unverified":
-        raise _unreachable(f"could not read {', '.join(names)}")
+        raise _unreadable(f"could not read {', '.join(names)}")
     print_success(
         "Every listed component is ready" if cfg is not None else "Every component found is ready"
     )
@@ -1378,9 +1389,10 @@ def stop(
 ) -> None:
     """Stop every job Lakebench started in the deployment.
 
-    Deletes every SparkApplication named lakebench-* in the namespace (the
-    continuous streams and any batch stage left running) and the datagen
-    Job. Exits 1 when anything could not be deleted.
+    Deletes every SparkApplication named lakebench-* in the namespace that
+    has not finished (the continuous streams and any batch stage left
+    running) and the datagen Job while it runs. Finished ones stay, with
+    their logs. Exits 1 when anything could not be deleted.
     """
     from kubernetes import client as k8s_client
 
@@ -1424,6 +1436,8 @@ def stop(
         print_error(f"Kubernetes connection failed: {e}")
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
 
+    for ref in out.finished:
+        print_info(f"Already finished, left in place: {ref}")
     if dry_run:
         for ref in out.found:
             print_info(f"Would delete {ref}")
@@ -1461,6 +1475,7 @@ def stop(
         details={
             "stopped": len(out.deleted),
             "deleted": out.deleted,
+            "finished": out.finished,
             "failures": out.failures,
         },
     )
@@ -2315,10 +2330,20 @@ def logs(
 
     for name in outcome.empty:
         print_warning(f"No log output from pod {name}")
+    for line in outcome.unavailable:
+        print_warning(f"No log: {line}")
     for error in outcome.errors:
         print_error(f"Kubernetes API error: {error}")
     if outcome.errors:
         raise typer.Exit(ExitCode.PREREQUISITE)
+    if not outcome.pods:
+        raise LakebenchError(
+            f"no pod of {component} has a log to read"
+            + (" from a previous container" if previous else ""),
+            next=f"lakebench status {config_file}",
+            path="logs.no_pod",
+            code=ExitCode.FAILED,
+        )
 
 
 @app.command()

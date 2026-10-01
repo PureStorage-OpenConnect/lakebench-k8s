@@ -16,8 +16,10 @@ component 2. ``stop`` that could not delete something is 1
 from __future__ import annotations
 
 import codecs
+import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from kubernetes.client.rest import ApiException
@@ -83,18 +85,45 @@ LOG_COMPONENTS: dict[str, LogSource] = {
 }
 
 
+# Seconds for one API request, so a server that accepts the connection and
+# never answers cannot hang `logs`, `stop` or `status`. A followed log gets
+# the connect half only: it is meant to stay open.
+API_TIMEOUT = 30
+FOLLOW_TIMEOUT = (API_TIMEOUT, None)
+
+
 class ClusterReadError(Exception):
-    """An API error or an unreachable cluster on a read (exit 4)."""
-
-
-def is_unreachable(exc: BaseException) -> bool:
-    """True for a transport failure: the API server did not answer.
+    """An API error or an unreachable cluster on a read (exit 4).
 
     The kubernetes client raises urllib3's errors (``MaxRetryError``,
-    ``ProtocolError``, ``NewConnectionError``) when it cannot connect, not an
-    ``ApiException``.
+    ``ProtocolError``) when it cannot connect, not an ``ApiException``; both
+    end up here.
     """
-    return isinstance(exc, Urllib3HTTPError)
+
+
+def api_message(e: ApiException) -> str:
+    """``"<status> <reason>: <message>"`` from an ApiException.
+
+    The API server's own message is in the JSON body (for example "container
+    ... is waiting to start: ContainerCreating"); the reason alone ("Bad
+    Request") does not say what to do.
+    """
+    head = f"{e.status} {e.reason}".strip()
+    body = getattr(e, "body", None)
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    message = ""
+    if isinstance(body, str) and body:
+        try:
+            parsed = json.loads(body)
+            message = str(parsed.get("message") or "") if isinstance(parsed, dict) else ""
+        except ValueError:
+            message = body.strip().splitlines()[0] if body.strip() else ""
+    return f"{head}: {message}" if message else head
+
+
+def _looks_like_config(arg: str) -> bool:
+    return arg.endswith((".yaml", ".yml")) or Path(arg).is_file()
 
 
 def resolve_logs_args(
@@ -115,7 +144,12 @@ def resolve_logs_args(
         return first, None, False
     if second is None:
         return first, None, False
-    if first in names and second not in names:
+    if second in names:
+        return second, first, False
+    if first in names or (
+        first is not None and not _looks_like_config(first) and _looks_like_config(second)
+    ):
+        # The 1.6 order; a mistyped component then reads as the component.
         return first, second, True
     return second, first, False
 
@@ -128,9 +162,14 @@ def _created(pod: Any) -> Any:
 def list_pods(core: Any, namespace: str, selector: str) -> list[Any]:
     """Pods matching *selector*, oldest first. Raises ClusterReadError."""
     try:
-        items = core.list_namespaced_pod(namespace, label_selector=selector).items or []
+        items = (
+            core.list_namespaced_pod(
+                namespace, label_selector=selector, _request_timeout=API_TIMEOUT
+            ).items
+            or []
+        )
     except ApiException as e:
-        raise ClusterReadError(f"listing pods ({selector}): {e.status} {e.reason}") from e
+        raise ClusterReadError(f"listing pods ({selector}): {api_message(e)}") from e
     except Urllib3HTTPError as e:
         raise ClusterReadError(f"cluster unreachable: {e}") from e
     return sorted(items, key=_created)
@@ -141,7 +180,8 @@ def pod_container(pod: Any, preferred: str | None) -> str | None:
     ``kubectl.kubernetes.io/default-container`` annotation, else the first.
 
     Naming the container always avoids the API's 400 for a pod with more
-    than one (a Stackable metastore runs a log sidecar).
+    than one; lakebench's own pods run one container today, so this guards a
+    sidecar added later (a Spark pod template, a Stackable logging agent).
     """
     containers = [c.name for c in (getattr(pod.spec, "containers", None) or [])]
     if preferred and preferred in containers:
@@ -169,10 +209,16 @@ def _decoded_lines(chunks: Iterable[bytes]) -> Iterable[str]:
 
 @dataclass
 class LogsOutcome:
-    """What a `logs` read did: pods read, pods with no output, read errors."""
+    """What a `logs` read did.
+
+    ``unavailable``: pods the API had no log for (400: a container still
+    waiting to start, or no previous container for ``--previous``), each with
+    the API's message. ``errors``: any other API error (403, 5xx), exit 4.
+    """
 
     pods: list[str] = field(default_factory=list)
     empty: list[str] = field(default_factory=list)
+    unavailable: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -204,6 +250,7 @@ def read_logs(
             "tail_lines": lines,
             "previous": previous,
             "_preload_content": False,
+            "_request_timeout": FOLLOW_TIMEOUT if follow else API_TIMEOUT,
         }
         if container:
             kwargs["container"] = container
@@ -212,7 +259,8 @@ def read_logs(
         try:
             resp = core.read_namespaced_pod_log(name, namespace, **kwargs)
         except ApiException as e:
-            out.errors.append(f"pod {name}: {e.status} {e.reason}")
+            bucket = out.unavailable if e.status == 400 else out.errors
+            bucket.append(f"pod {name}: {api_message(e)}")
             continue
         except Urllib3HTTPError as e:
             raise ClusterReadError(f"cluster unreachable: {e}") from e
@@ -239,43 +287,77 @@ def read_logs(
 
 @dataclass
 class StopOutcome:
-    """What `stop` found and did."""
+    """What `stop` found and did.
 
-    found: list[str] = field(default_factory=list)  # "SparkApplication/x", "Job/y"
+    ``found`` holds what is to be deleted ("SparkApplication/x", "Job/y").
+    ``finished`` holds what had already finished and is left in place, with
+    its state: deleting a finished SparkApplication or Job also deletes its
+    driver or worker pods, and with them the logs of a failed stage.
+    """
+
+    found: list[str] = field(default_factory=list)
+    finished: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     not_running: list[str] = field(default_factory=list)  # vanished before the delete (404)
     failures: list[str] = field(default_factory=list)
 
 
-def _reason(e: ApiException) -> str:
-    return f"{e.status} {e.reason}".strip()
+# Spark Operator applicationState values after which nothing runs again
+# (lakebench submits with restartPolicy Never).
+FINISHED_APP_STATES = frozenset({"COMPLETED", "FAILED", "SUBMISSION_FAILED"})
+
+
+def _app_state(item: dict[str, Any]) -> str:
+    status = item.get("status") or {}
+    return str((status.get("applicationState") or {}).get("state") or "")
+
+
+def _job_finished(job: Any) -> str:
+    """ "Complete" or "Failed" when the Job has finished, else ""."""
+    for cond in getattr(job.status, "conditions", None) or []:
+        if cond.type in ("Complete", "Failed") and str(cond.status) == "True":
+            return str(cond.type)
+    return ""
 
 
 def stop_targets(custom: Any, batch: Any, namespace: str, out: StopOutcome) -> None:
-    """Fill ``out.found`` with every ``lakebench-*`` SparkApplication and the
-    datagen Job in *namespace*. A list that fails goes into
-    ``out.failures``; a transport failure raises ClusterReadError.
+    """Sort every ``lakebench-*`` SparkApplication and the datagen Job in
+    *namespace* into ``out.found`` (still running or not started) and
+    ``out.finished``. A list that fails goes into ``out.failures``; a
+    transport failure raises ClusterReadError.
     """
     try:
         listing = custom.list_namespaced_custom_object(
-            SPARK_GROUP, SPARK_VERSION, namespace, SPARK_PLURAL
+            SPARK_GROUP, SPARK_VERSION, namespace, SPARK_PLURAL, _request_timeout=API_TIMEOUT
         )
-        names = sorted(
-            str((item.get("metadata") or {}).get("name") or "")
-            for item in (listing or {}).get("items") or []
+        items = sorted(
+            (item for item in (listing or {}).get("items") or []),
+            key=lambda item: str((item.get("metadata") or {}).get("name") or ""),
         )
-        out.found += [f"SparkApplication/{n}" for n in names if n.startswith(APP_PREFIX)]
+        for item in items:
+            name = str((item.get("metadata") or {}).get("name") or "")
+            if not name.startswith(APP_PREFIX):
+                continue
+            state = _app_state(item)
+            if state in FINISHED_APP_STATES:
+                out.finished.append(f"SparkApplication/{name} ({state})")
+            else:
+                out.found.append(f"SparkApplication/{name}")
     except ApiException as e:
         if e.status != 404:  # 404: the SparkApplication CRD is not installed
-            out.failures.append(f"listing SparkApplications: {_reason(e)}")
+            out.failures.append(f"listing SparkApplications: {api_message(e)}")
     except Urllib3HTTPError as e:
         raise ClusterReadError(f"cluster unreachable: {e}") from e
     try:
-        batch.read_namespaced_job(DATAGEN_JOB, namespace)
-        out.found.append(f"Job/{DATAGEN_JOB}")
+        job = batch.read_namespaced_job(DATAGEN_JOB, namespace, _request_timeout=API_TIMEOUT)
+        done = _job_finished(job)
+        if done:
+            out.finished.append(f"Job/{DATAGEN_JOB} ({done})")
+        else:
+            out.found.append(f"Job/{DATAGEN_JOB}")
     except ApiException as e:
         if e.status != 404:
-            out.failures.append(f"reading Job {DATAGEN_JOB}: {_reason(e)}")
+            out.failures.append(f"reading Job {DATAGEN_JOB}: {api_message(e)}")
     except Urllib3HTTPError as e:
         raise ClusterReadError(f"cluster unreachable: {e}") from e
 
@@ -294,17 +376,23 @@ def stop_delete(custom: Any, batch: Any, namespace: str, out: StopOutcome) -> No
                     name,
                     namespace,
                     body=k8s_client.V1DeleteOptions(propagation_policy="Foreground"),
+                    _request_timeout=API_TIMEOUT,
                 )
             else:
                 custom.delete_namespaced_custom_object(
-                    SPARK_GROUP, SPARK_VERSION, namespace, SPARK_PLURAL, name
+                    SPARK_GROUP,
+                    SPARK_VERSION,
+                    namespace,
+                    SPARK_PLURAL,
+                    name,
+                    _request_timeout=API_TIMEOUT,
                 )
             out.deleted.append(ref)
         except ApiException as e:
             if e.status == 404:
                 out.not_running.append(ref)
             else:
-                out.failures.append(f"deleting {ref}: {_reason(e)}")
+                out.failures.append(f"deleting {ref}: {api_message(e)}")
         except Urllib3HTTPError as e:
             out.failures.append(f"deleting {ref}: cluster unreachable: {e}")
 
@@ -323,6 +411,17 @@ def pre_stop(cfg: Any, k8s: Any) -> None:
 
 # -- status --------------------------------------------------------------------
 
+# The `logs` component for each object `status` reads, for its drift hint.
+STATUS_LOG_COMPONENT: dict[str, str] = {
+    "lakebench-postgres": "postgres",
+    "lakebench-hive-metastore-default": "hive",
+    "lakebench-polaris": "polaris",
+    "lakebench-trino-coordinator": "trino",
+    "lakebench-trino-worker": "trino-worker",
+    "lakebench-spark-thrift": "thrift",
+    "lakebench-duckdb": "duckdb",
+}
+
 
 @dataclass(frozen=True)
 class ComponentState:
@@ -340,13 +439,13 @@ def read_component(apps: Any, namespace: str, name: str, kind: str) -> Component
     """
     try:
         if kind == "StatefulSet":
-            obj = apps.read_namespaced_stateful_set(name, namespace)
+            obj = apps.read_namespaced_stateful_set(name, namespace, _request_timeout=API_TIMEOUT)
         else:
-            obj = apps.read_namespaced_deployment(name, namespace)
+            obj = apps.read_namespaced_deployment(name, namespace, _request_timeout=API_TIMEOUT)
     except ApiException as e:
         if e.status == 404:
             return ComponentState(name, kind, "missing", "Not found")
-        return ComponentState(name, kind, "error", f"Error: {_reason(e)}")
+        return ComponentState(name, kind, "error", f"Error: {api_message(e)}")
     except Urllib3HTTPError as e:
         raise ClusterReadError(f"cluster unreachable: {e}") from e
     ready = (obj.status.ready_replicas if obj.status else None) or 0

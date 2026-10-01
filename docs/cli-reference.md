@@ -324,8 +324,11 @@ lakebench stop [CONFIG_FILE] [OPTIONS]
 | `--dry-run` | | `false` | List what would be stopped without deleting anything |
 
 Deletes every SparkApplication named `lakebench-*` in the deployment's
-namespace (the continuous streams and any batch stage left running by a CLI
-that died) and the datagen Job `lakebench-datagen`, with its pods. A job
+namespace that has not finished (the continuous streams and any batch stage
+left running by a CLI that died) and the datagen Job `lakebench-datagen`,
+with its pods, while it runs. A SparkApplication that has `COMPLETED` or
+`FAILED`, and a datagen Job that has finished, are left in place and listed,
+so the logs of a failed stage stay readable with `lakebench logs`. A job
 already gone is reported as not running. When a deletion fails, `stop` still
 tries every other one, prints one line per failure and exits 1. A missing
 namespace means nothing to stop (exit 0).
@@ -617,9 +620,11 @@ driver); `trino` (coordinator), `trino-worker`, `thrift`, `duckdb`, `hive`,
 stdout unformatted; when several pods match, each pod's lines follow a
 header on stderr. `lakebench logs COMPONENT` alone uses `./lakebench.yaml`,
 and the 1.6 order `lakebench logs COMPONENT CONFIG_FILE` still works with a
-one-line warning. Exit codes: 1 when no pod matches, 2 for an unknown
-component, 4 for an API error or an unreachable cluster (including
-`--previous` on a pod that has no previous container).
+one-line warning. A pod the API has no log for yet (a container still
+starting, or no previous container with `--previous`) gets a warning with
+the API's message and the other pods are still read. Exit codes: 1 when no
+pod matches or none has a log to read, 2 for an unknown component, 4 for an
+API error (a refused read, a server error) or an unreachable cluster.
 
 ### journal
 

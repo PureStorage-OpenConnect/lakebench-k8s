@@ -37,7 +37,7 @@ the CLI down every path listed here and checks the code.
 | `run.pass` | 0 | `run` finished and its verdict passed |
 | `status.ok` | 0 | `status` finds every listed component ready |
 | `version.ok` | 0 | `lakebench version` prints the version |
-| `logs.no_pod` | 1 | `logs` found no pod for the component |
+| `logs.no_pod` | 1 | `logs` found no pod for the component, or none with a log to read yet (a container still starting, no previous container for `--previous`) |
 | `run.datagen_timeout` | 1 | datagen did not finish in time; the record says "datagen timed out" in verdict.reasons |
 | `run.verdict_failed` | 1 | `run` finished with a failing verdict |
 | `status.drift` | 1 | `status` finds a component of the config not ready or not found (with only `--namespace`: one not ready, or none found) |
@@ -55,7 +55,7 @@ the CLI down every path listed here and checks the code.
 | `lease.held` | 3 | another command holds the cluster lock lease |
 | `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix without --regenerate |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
-| `k8s.api_error` | 4 | `logs` or `status` got an API error reading the deployment (a permission gap, a server error), or `logs --previous` found no previous container; nothing changed |
+| `k8s.api_error` | 4 | `logs` or `status` got an API error reading the deployment (a permission gap, a server error); nothing changed |
 | `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
 | `run.prereq_failed` | 4 | a `run` preflight check failed |
 | `s3.unreachable` | 4 | `generate` or `run --generate` cannot read the bronze bucket to check it is empty |
