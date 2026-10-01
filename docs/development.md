@@ -216,7 +216,9 @@ a merge-train tree (`python tests/test_citations.py` retakes it there). The test
 supported versions. It runs to the end rather than stopping at the first
 failure, prints every skip reason, and a failure on one Python version does
 not cancel the other (`fail-fast: false`). On 3.13 it checks per-file
-coverage floors with `scripts/check_coverage.py --suite unit`. A Spark job runs `pytest tests/spark`
+coverage floors with `scripts/check_coverage.py --suite unit` and keeps the
+per-file report as the `coverage-unit` artifact for 30 days; floors are
+raised from that report, never lowered. A Spark job runs `pytest tests/spark`
 with `pyspark==4.0.1` on Java 17 and checks its own floors with
 `scripts/check_coverage.py --suite spark`. The "AML statistics (slow)" job runs
 the tests marked `slow` (the heavy fidelity-gate fits, the scale invariance
