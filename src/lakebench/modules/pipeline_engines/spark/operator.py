@@ -42,7 +42,8 @@ _WATCH_LIST_LOCK_TIMEOUT_S = 600
 # restarted). They are bounded by their own timeout, never cut by the deploy
 # deadline (DEP-6): stopping half way would release the lease with the shared
 # operator mid-restart and its watch list unverified, which every other
-# deployment then works against. SD-12's lease hold budget bounds them.
+# deployment then works against. Today only these bounds and the lease TTL
+# hold them; SD-12 adds a lease hold budget.
 _POST_UPGRADE_ROLLOUT_S = 180
 _POST_UPGRADE_RESTART_S = 120
 _POST_UPGRADE_READY_S = 120
@@ -1833,6 +1834,9 @@ class SparkOperatorManager:
         if is_openshift:
             logger.info("OpenShift detected -- will assign anyuid SCC after install")
 
+        # A fresh install or upgrade of the shared operator does not start
+        # after the deploy deadline (DEP-6).
+        deploy_deadline.check("helm install of the Spark Operator")
         try:
             # Add Helm repo
             self._run(
@@ -1898,7 +1902,9 @@ class SparkOperatorManager:
                 for key, value in values.items():
                     cmd.extend(["--set", f"{key}={value}"])
 
-            # Run install
+            # Run install; not after the deadline, which the repo update above
+            # may have used up.
+            deploy_deadline.check("helm install of the Spark Operator")
             result = self._run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
@@ -1922,7 +1928,7 @@ class SparkOperatorManager:
             # upgrade; wait for the new ReplicaSets.
             if exists and not self._rollout_status_after_upgrade():
                 return False
-            if not self._wait_for_ready(timeout=_POST_UPGRADE_READY_S):
+            if not self._wait_for_ready(timeout=_POST_UPGRADE_READY_S, cut_by_deadline=False):
                 return False
             return self._verify_tmp_size(tmp_size)
 
@@ -1930,7 +1936,7 @@ class SparkOperatorManager:
             logger.error(f"Failed to install Spark Operator: {e}")
             return False
 
-    def _wait_for_ready(self, timeout: float = 120) -> bool:
+    def _wait_for_ready(self, timeout: float = 120, cut_by_deadline: bool = True) -> bool:
         """Wait for Spark Operator to become ready.
 
         Args:
@@ -1950,7 +1956,8 @@ class SparkOperatorManager:
             last = status.message
             time.sleep(5)
 
-        deploy_deadline.check("Spark Operator ready", last)
+        if cut_by_deadline:  # not after a committed install
+            deploy_deadline.check("Spark Operator ready", last)
         logger.error(f"Spark Operator not ready after {timeout}s")
         return False
 

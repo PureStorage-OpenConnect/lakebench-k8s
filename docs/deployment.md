@@ -89,7 +89,7 @@ deploying.
 | `--file` | `-f` | Config file (alternative to the positional argument) |
 | `--dry-run` | | Show what would be deployed without making changes |
 | `--yes` | `-y` | Skip the confirmation prompt |
-| `--timeout` | `-t` | Global deployment timeout in seconds (default 3600, `0` = no timeout). Every wait inside a step, including the wait for the cluster lease, is bounded by it; when it runs out, the step fails naming the component and what it was waiting for. No shared change (Spark Operator watch-list upgrade, Stackable or observability install) starts after it, and one already started is completed with its rollout and verify. Helm calls already running finish first |
+| `--timeout` | `-t` | Global deployment timeout in seconds (default 3600, `0` = no timeout). Every wait inside a step, including the wait for the cluster lease, is bounded by it; when it runs out, the step fails naming the component and what it was waiting for. No shared change (Spark Operator install or watch-list upgrade, Stackable or observability install) starts after it; one already started is completed with its rollout and verify, which can run several minutes past it while holding the cluster lease. Helm calls already running finish first |
 | `--local` | | Deploy locally with podman or docker instead of Kubernetes |
 | `--workdir` | | Host directory for local mode state (default `~/.lakebench/local/<name>`) |
 | `--force-legacy` | | Claim ownership of a pre-1.5 namespace or untagged bucket without tag proof. Use only for resources you have confirmed are yours |
