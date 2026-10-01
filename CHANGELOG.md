@@ -1402,8 +1402,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (which may only be appended to) and a compiled copy of the current
   hashes; the Python guards no longer read the plaintext seeds. A registered
   `evaluation` or `robustness` look must set `workload.datagen.seed`;
-  `corpus_role` alone no longer fills it in. Refusal messages name the role,
-  never the seed, and `scripts/aml_gate.py` records an unspent held-out
+  `corpus_role` alone no longer fills it in. The guard's refusal messages
+  name the role, never the seed, and `scripts/aml_gate.py` records an unspent held-out
   seed in its report by its salted hash. A missing or malformed hash file
   refuses every Spark scripts deploy, Customer 360 included.
 - **The AML reference job checks every manifest row.** The corpus seed is
@@ -1411,11 +1411,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sample), so a held-out seed behind any one manifest file is found, and a
   manifest the seed cannot be recovered from is refused rather than
   scored. The report's `corpus_seed_verified` pass uses the same all-rows
-  check. `scripts/aml_gate.py` does the same.
+  check, and a report without it reads as not verified. `scripts/aml_gate.py`
+  does the same.
 - **The Spark scripts ConfigMap is scanned for held-out seeds before it is
-  applied.** Every integer token is hashed and compared with the held-out
-  hashes. Until the pre-registration drops its plaintext seeds the scan
-  only logs (`absence_check: report`); after that it refuses the deploy.
+  applied.** Every integer token, every 6 to 19 digit window of a longer
+  digit run and every comma- or space-grouped number is hashed and compared
+  with the held-out hashes. Until the pre-registration drops its plaintext
+  seeds the scan logs a warning (`absence_check: report`); after that it
+  refuses the deploy.
 
 ## [1.6.0] - 2026-09-30
 
