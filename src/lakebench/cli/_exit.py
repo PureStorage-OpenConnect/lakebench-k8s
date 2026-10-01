@@ -35,9 +35,11 @@ import typer
 from typer.core import TyperGroup
 
 from lakebench.exit_codes import (
+    FOLLOWS_REFUSAL_DETAIL,
     MEANINGS,
     PATHS,
     PATHS_BY_NAME,
+    REFUSAL_DETAIL,
     ExitCode,
     ExitPath,
     Incomplete,
@@ -66,7 +68,6 @@ __all__ = [
     "exit_code_for",
     "path_code",
     "quiet_urllib3",
-    "refused_path",
     "refused_result_code",
 ]
 
@@ -99,61 +100,24 @@ def _is_abort(exc: BaseException) -> bool:
     )
 
 
-# Deploy and destroy report a safety refusal as a FAILED step result, not an
-# exception. These are the texts those results start with, or contain; a
-# command whose failed steps are refusals exits 3 instead of 1. The texts are
-# kept verbatim because the parallel-safety scenarios grep them (CLI-2), and
-# tests/test_exit_codes.py pins each against its producer.
-REFUSAL_PREFIXES: dict[str, str] = {
-    # deploy/destroy.py: the namespace is now a newer deployment
-    "Destroy NOT completed": "destroy.redeployed",
-    # modules/pipeline_engines/spark/operator.py: another process holds the lease
-    "another lakebench process holds the cluster lock": "lease.held",
-    # deploy/engine.py: the namespace belongs to another deployment
-    "Namespace ownership refused": "deploy.identity_foreign",
-}
-REFUSAL_FRAGMENTS: dict[str, str] = {
-    # deploy/engine.py (deploy) and deploy/destroy.py (destroy, inside the
-    # bucket step's notes): a bucket belongs to another deployment or carries
-    # no lakebench tag, so it is not claimed or emptied
-    "Bucket ownership refused": "deploy.identity_foreign",
-    # deploy/engine.py: an untagged namespace or bucket is not claimed
-    "exists without lakebench identity annotations": "deploy.identity_foreign",
-    "exists without a lakebench ownership tag": "deploy.identity_foreign",
-}
-# Failed steps that follow from a refused one rather than failing on their
-# own: destroy keeps the namespace, the ownership record of a bucket it did
-# not empty (deploy/destroy.py).
-CONSEQUENCE_FRAGMENTS: tuple[str, ...] = ("NOT deleted because emptying the S3 buckets failed",)
-
-
-def refused_path(message: str) -> str | None:
-    """The ``PATHS`` name of the refusal a step result's *message* reports."""
-    for prefix, name in REFUSAL_PREFIXES.items():
-        if message.startswith(prefix):
-            return name
-    for fragment, name in REFUSAL_FRAGMENTS.items():
-        if fragment in message:
-            return name
-    return None
-
-
 def refused_result_code(results: Any) -> ExitCode | None:
     """``REFUSED`` when the failed deploy or destroy steps were safety refusals.
 
-    *results* are ``DeploymentResult``s. Every failed step must be a refusal
-    or a consequence of one; a failure of any other kind keeps the caller's
-    code (1), so a refusal never hides a real failure. None when no failed
-    step is a refusal.
+    *results* are ``DeploymentResult``s. A producer marks a refusal with
+    ``details[REFUSAL_DETAIL]`` (``destroy.redeployed``, ``lease.held``,
+    ``deploy.identity_foreign``) and a step that failed only because of one
+    with ``details[FOLLOWS_REFUSAL_DETAIL]``. Every failed step must be one of
+    the two: any other failure keeps the caller's code (1), so a refusal never
+    hides a failure a re-run could fix. None when no failed step is a refusal.
     """
     refused = False
     for r in results:
         if getattr(getattr(r, "status", None), "value", None) != "failed":
             continue
-        message = getattr(r, "message", "") or ""
-        if refused_path(message):
+        details = getattr(r, "details", None) or {}
+        if details.get(REFUSAL_DETAIL):
             refused = True
-        elif not any(f in message for f in CONSEQUENCE_FRAGMENTS):
+        elif not details.get(FOLLOWS_REFUSAL_DETAIL):
             return None
     return ExitCode.REFUSED if refused else None
 

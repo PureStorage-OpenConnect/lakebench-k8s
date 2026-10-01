@@ -908,6 +908,7 @@ class TestOwnershipHooksFire:
         result = engine._deploy_namespace()
         assert result.status == DeploymentStatus.FAILED
         assert "ownership refused" in result.message
+        assert result.details["refusal"] == "deploy.identity_foreign"  # exit 3 (CLI-1)
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")

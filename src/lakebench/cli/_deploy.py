@@ -364,6 +364,9 @@ def deploy(
 
     # Deploy
     deploy_start = time.time()
+    # CLI-1: 4 (prerequisite, nothing ran) only before deploy_all starts; a
+    # lost connection after that may leave a partial deployment (1).
+    started = False
     try:
         engine = DeploymentEngine(cfg, dry_run=dry_run)
 
@@ -393,6 +396,7 @@ def deploy(
                 elapsed = time.time() - _step_start.pop(component, time.time())
                 console.print(_fmt_deploy_line("x", "red", elapsed))
 
+        started = True
         results = engine.deploy_all(
             progress_callback=on_progress,
             timeout=timeout,
@@ -415,7 +419,7 @@ def deploy(
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED if started else ExitCode.PREREQUISITE)  # noqa: B904
 
     # Summary
     console.print()

@@ -15,6 +15,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+from lakebench.exit_codes import FOLLOWS_REFUSAL_DETAIL, REFUSAL_DETAIL
 
 if TYPE_CHECKING:
     from lakebench.deploy.engine import DeploymentEngine
@@ -418,6 +419,7 @@ def _delete_namespace_and_wait(
                     f"Destroy NOT completed: namespace {namespace} is now a newer "
                     "deployment with the same name (a redeploy); it was left alone"
                 ),
+                details={REFUSAL_DETAIL: "destroy.redeployed"},
             )
         except NamespaceTerminatingError:
             report(
@@ -1569,6 +1571,7 @@ def destroy_all(
                     component="ownership-check",
                     status=DeploymentStatus.FAILED,
                     message=f"Namespace ownership refused: {v.hint}",
+                    details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                 )
             )
             report(
@@ -1592,6 +1595,7 @@ def destroy_all(
                         component="ownership-check",
                         status=DeploymentStatus.FAILED,
                         message=hint,
+                        details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                     )
                 )
                 report("ownership-check", DeploymentStatus.FAILED, hint)
@@ -1657,6 +1661,9 @@ def destroy_all(
     # buckets are not provably ours, so keeping the namespace gains nothing
     # and would block destroy forever.
     bucket_transient_failure = False
+    # Set when the bucket step's only problem was an ownership refusal; the
+    # namespace kept as those buckets' record then follows that refusal.
+    bucket_refused_only = False
     stop_after_buckets = False
     replaced_msg: str | None = None
     # The namespace was present at start and vanished while this destroy ran.
@@ -1692,6 +1699,7 @@ def destroy_all(
                     component="namespace",
                     status=DeploymentStatus.FAILED,
                     message=keep_msg,
+                    details={FOLLOWS_REFUSAL_DETAIL: True} if bucket_refused_only else {},
                 )
             )
             report("namespace", DeploymentStatus.FAILED, keep_msg)
@@ -1726,7 +1734,10 @@ def destroy_all(
                 logger.warning(msg)
                 results.append(
                     DeploymentResult(
-                        component="namespace", status=DeploymentStatus.FAILED, message=msg
+                        component="namespace",
+                        status=DeploymentStatus.FAILED,
+                        message=msg,
+                        details={REFUSAL_DETAIL: "destroy.redeployed"},
                     )
                 )
                 report("namespace", DeploymentStatus.FAILED, msg)
@@ -1982,7 +1993,10 @@ def destroy_all(
                 logger.warning(msg)
                 results.append(
                     DeploymentResult(
-                        component="namespace", status=DeploymentStatus.FAILED, message=msg
+                        component="namespace",
+                        status=DeploymentStatus.FAILED,
+                        message=msg,
+                        details={REFUSAL_DETAIL: "destroy.redeployed"},
                     )
                 )
                 report("namespace", DeploymentStatus.FAILED, msg)
@@ -2011,11 +2025,20 @@ def destroy_all(
                 # in place until `lakebench admin repair-operator` succeeds.
                 watch_list_ok = False
                 logger.error("Spark Operator watch-list mutation failed: %s", e)
+                from lakebench.deploy.cluster_lock import ClusterLockHeld
+
                 results.append(
                     DeploymentResult(
                         component="spark-operator-watch",
                         status=DeploymentStatus.FAILED,
                         message=str(e),
+                        # Another process holds the lease: a refusal, not a
+                        # broken watch list (the list was not touched).
+                        details=(
+                            {REFUSAL_DETAIL: "lease.held"}
+                            if isinstance(e.__cause__, ClusterLockHeld)
+                            else {}
+                        ),
                     )
                 )
                 report(
@@ -2126,13 +2149,17 @@ def destroy_all(
                 return _namespace_step()
             msg = f"Destroy NOT completed: stopped before {before}: {e}; it was left alone"
             status = DeploymentStatus.FAILED
+            details: dict[str, object] = {REFUSAL_DETAIL: "destroy.redeployed"}
         except _NamespaceUnverifiable as e:
             msg = f"Stopped before {before}: {e}. Re-run destroy when the API server is reachable."
             status = DeploymentStatus.FAILED
+            details = {}
         else:
             return None
         logger.warning(msg)
-        results.append(DeploymentResult(component="namespace", status=status, message=msg))
+        results.append(
+            DeploymentResult(component="namespace", status=status, message=msg, details=details)
+        )
         report("namespace", status, msg)
         return results
 
@@ -2895,6 +2922,11 @@ def destroy_all(
                         "AND without name-prefix match: " + ", ".join(unsupported_forced)
                     )
                 notes.extend(bucket_notes)
+                # The step is a refusal only when nothing else in it failed and
+                # nothing was transient: a retry can fix those, so they exit 1.
+                bucket_refused_only = bool(refusal_msg) and not (
+                    delete_failed or bucket_transient_failure
+                )
                 if refusal_msg:
                     notes.append(refusal_msg)
                     notes.extend(
@@ -2936,6 +2968,11 @@ def destroy_all(
                     DeploymentResult(
                         component="s3-buckets",
                         status=bucket_status,
+                        details=(
+                            {REFUSAL_DETAIL: "deploy.identity_foreign"}
+                            if bucket_refused_only
+                            else {}
+                        ),
                         message=(
                             f"Emptied {len(buckets)} S3 buckets "
                             f"({total_deleted} objects)" + summary_note
@@ -2975,6 +3012,7 @@ def destroy_all(
                             f"Destroy NOT completed: stopped before touching buckets "
                             f"further: {e}; a redeploy owns them now"
                         ),
+                        details={REFUSAL_DETAIL: "destroy.redeployed"},
                     )
                 )
                 report("s3-buckets", DeploymentStatus.FAILED, f"Stopped: {e}")
@@ -3021,7 +3059,14 @@ def destroy_all(
             )
             status = DeploymentStatus.FAILED
         logger.warning(msg)
-        results.append(DeploymentResult(component="namespace", status=status, message=msg))
+        results.append(
+            DeploymentResult(
+                component="namespace",
+                status=status,
+                message=msg,
+                details={REFUSAL_DETAIL: "destroy.redeployed"} if replaced_msg else {},
+            )
+        )
         report("namespace", status, msg)
         return results
 

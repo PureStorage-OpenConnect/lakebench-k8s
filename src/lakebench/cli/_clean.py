@@ -189,6 +189,9 @@ def clean(
 
     total_deleted = 0
     errors = []
+    # How many of ``errors`` are ownership refusals: when all are, clean
+    # exits 3 (refused), not 1 (CLI-1).
+    refusals = 0
 
     # Check for writers still active before cleaning S3 buckets. The prompt
     # sits outside the try: typer.confirm(abort=True) raises click.Abort,
@@ -256,6 +259,8 @@ def clean(
         if not decision.allowed:
             print_error(decision.hint)
             errors.append(decision.hint)
+            if core_v1 is not None:  # unreachable: could not verify, not refused
+                refusals += 1
             bucket_targets = {}
         elif decision.hint:
             print_warning(decision.hint)
@@ -360,6 +365,7 @@ def clean(
                     v = verify_bucket_ownership(s3.raw_client, bucket, cfg.name)
                     if v.verdict is IdentityVerdict.MISMATCH:
                         errors.append(f"{layer}: {v.hint}")
+                        refusals += 1
                         print_error(
                             f"Refusing to clean {layer}: bucket "
                             f"{bucket!r} is owned by another lakebench "
@@ -368,6 +374,7 @@ def clean(
                         continue
                     if v.verdict is IdentityVerdict.ABSENT and not force_legacy:
                         errors.append(f"{layer}: legacy untagged bucket, --force-legacy required")
+                        refusals += 1
                         print_error(
                             f"Refusing to clean {layer}: bucket "
                             f"{bucket!r} has no lakebench ownership tag. "
@@ -407,6 +414,7 @@ def clean(
                                 recorded = False
                             if not recorded:
                                 errors.append(f"{layer}: not recorded as created or adopted empty")
+                                refusals += 1
                                 print_error(
                                     f"Refusing to clean {layer}: bucket {bucket!r} is on a "
                                     "backend without bucket tagging and this deployment's "
@@ -423,6 +431,10 @@ def clean(
                                 "or another deployment has a longer-prefix claim"
                             )
                             errors.append(f"{layer}: ownership unverifiable ({reason})")
+                            # A sibling list that could not be read is a
+                            # permission gap, not a refusal.
+                            if other_deployments is not None:
+                                refusals += 1
                             print_error(
                                 f"Refusing to clean {layer}: bucket {bucket!r} is on a "
                                 f"backend without bucket tagging and {reason}. Pass "
@@ -509,4 +521,4 @@ def clean(
                 expand=False,
             )
         )
-        raise typer.Exit(ExitCode.FAILED)
+        raise typer.Exit(ExitCode.REFUSED if refusals == len(errors) else ExitCode.FAILED)

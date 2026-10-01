@@ -417,8 +417,8 @@ def init(
         from lakebench.init_wizard import _build_config_yaml, run_wizard
 
         result = run_wizard(console, advanced=advanced)
-        if result is None:
-            raise typer.Exit(0)
+        if result is None:  # Ctrl-C or end of input: nothing was written
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
         # Apply any CLI flag overrides onto wizard state. Rebuild the YAML
         # after applying overrides so flags actually reach the written file
@@ -1868,7 +1868,8 @@ def report(
         except ValueError as e:
             print_error(str(e))
             print_info("Use 'lakebench report --list' to see available runs")
-            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+            # An unknown run id is a bad argument; no runs at all is a failed lookup.
+            raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)  # noqa: B904
 
         # Also print the summary when asked; keep the default quiet so
         # scripts that watch stdout for the path have a clean output.

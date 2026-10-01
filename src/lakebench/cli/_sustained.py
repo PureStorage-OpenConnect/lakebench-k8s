@@ -288,10 +288,12 @@ def _stop_leftover_streams(job_manager, namespace: str, timeout_s: int = 120) ->
 
 def _require_reset_ownership(cfg) -> None:
     """typer.Exit unless this run provably owns the namespace and buckets."""
+    unverifiable = False
     try:
         problem = _reset_ownership_problem(cfg)
     except Exception as e:  # noqa: BLE001
         problem = f"ownership could not be verified: {e}"
+        unverifiable = True
     if problem:
         print_error(f"Refusing to reset continuous state: {problem}")
         print_info(
@@ -300,7 +302,8 @@ def _require_reset_ownership(cfg) -> None:
             "`lakebench deploy`, or on backends without bucket tagging, bucket "
             "names prefixed with the deployment name."
         )
-        raise typer.Exit(ExitCode.REFUSED)
+        # Checked and refused is 3; could not check (S3 or the API) is 4.
+        raise typer.Exit(ExitCode.PREREQUISITE if unverifiable else ExitCode.REFUSED)
 
 
 def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
@@ -3820,10 +3823,12 @@ def _run_sustained(
             raise typer.Exit(ExitCode.FAILED)
 
     except K8sConnectionError as e:
+        # Streams or datagen may be running by now: a failed run (1), not a
+        # prerequisite that stopped it before anything ran (4).
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
     except typer.Exit:
         raise
     except BaseException:

@@ -549,6 +549,10 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
 _STAGE_POLL_S = 5
 
 
+# The batch pipeline stages `run --stage` accepts, in order.
+BATCH_STAGE_NAMES = ("bronze-verify", "silver-build", "gold-finalize")
+
+
 # The verdict reason a datagen wait-budget timeout records (CLI-1: the code
 # is 1, formerly 5; the record keeps the distinction).
 DATAGEN_TIMED_OUT = "datagen timed out"
@@ -1805,6 +1809,12 @@ def run(
     if deploy_only and generate_only:
         print_error("--deploy-only and --generate-only are mutually exclusive")
         raise typer.Exit(ExitCode.USAGE)
+    # A batch stage name is checked here, before any deploy, datagen or job
+    # submission, so a typo exits 2 with nothing run (CLI-1).
+    if stage and _run_mode == "batch" and stage not in BATCH_STAGE_NAMES:
+        print_error(f"Unknown stage: {stage}")
+        print_info(f"Valid stages: {', '.join(BATCH_STAGE_NAMES)}")
+        raise typer.Exit(ExitCode.USAGE)
 
     # deploy_only: deploy infrastructure and exit
     if deploy_only:
@@ -2164,7 +2174,7 @@ def run(
             stages = [(jt, name, desc) for jt, name, desc in all_stages if name == stage]
             if not stages:
                 print_error(f"Unknown stage: {stage}")
-                print_info("Valid stages: bronze-verify, silver-build, gold-finalize")
+                print_info(f"Valid stages: {', '.join(BATCH_STAGE_NAMES)}")
                 raise typer.Exit(ExitCode.USAGE)
         else:
             stages = all_stages
@@ -3083,11 +3093,22 @@ def run(
         # Summary panel is printed in the finally block (after pipeline
         # benchmark scores are computed) so it can include the full scorecard.
 
+    except typer.Exit as e:
+        # CLI-1: the finally block re-raises _pipeline_exit_code, so carry the
+        # specific code of any exit raised above (3 refused, 4 operator not
+        # ready, 2 usage) and record the run as failed.
+        if e.exit_code:
+            pipeline_success = False
+            _pipeline_exit_code = e.exit_code
+        raise
     except K8sConnectionError as e:
+        # The run has started work by now, so this is a failed run (1), not
+        # a prerequisite that stopped it before anything ran (4).
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
+        _pipeline_exit_code = ExitCode.FAILED
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
     finally:
         # -- Phase 7/7: Results ----------------------------------------------------
         console.print()

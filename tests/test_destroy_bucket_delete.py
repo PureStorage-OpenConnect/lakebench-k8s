@@ -393,6 +393,7 @@ class TestDestroyAllBuckets:
         assert boto.buckets == {"a-silver": ["theirs"]}, "only the refused bucket survives"
         assert "a-silver" not in boto.delete_bucket_calls
         assert "Bucket ownership refused" in r.message
+        assert r.details["refusal"] == "deploy.identity_foreign"  # exit 3 (CLI-1)
         # a-silver was on the record (the harness default) but another
         # deployment's tag proves it is not ours now: it leaves the record and
         # the namespace can go.
@@ -543,6 +544,7 @@ class TestDestroyAllBuckets:
         assert boto.delete_bucket_calls == []
         assert "newer deployment" in r.message
         assert "newer deployment" in self._results[-1].message
+        assert r.details["refusal"] == "destroy.redeployed"
 
     def test_redeploy_between_buckets_stops_mid_step(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["r/new"], "a-gold": ["r/new"]})

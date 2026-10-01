@@ -111,7 +111,7 @@ class TestMigrateDeployment:
             patch("kubernetes.client.CustomObjectsApi", return_value=custom),
         ):
             r = runner.invoke(admin_app, ["migrate-deployment", "gone"])
-        assert r.exit_code == 2  # the namespace argument names nothing
+        assert r.exit_code == 1  # the namespace is not on the cluster (cluster state, as status)
         assert "does not exist" in r.output
 
     def test_noop_when_already_migrated(self):

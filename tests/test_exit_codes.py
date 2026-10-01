@@ -151,29 +151,57 @@ def test_legacy_codes_are_gone():
 
 
 def _is_exit_call(func) -> bool:
-    """``typer.Exit``/``_typer.Exit``, ``SystemExit`` or ``sys.exit``."""
+    """An exit call: ``*.Exit``/``Exit``/``SystemExit``, ``*.exit``/``exit``.
+
+    Covers ``typer.Exit``, ``from typer import Exit``, ``click.exceptions.Exit``,
+    ``sys.exit``, ``ctx.exit`` and the bare builtin.
+    """
     import ast
 
-    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-        if func.attr == "Exit" and func.value.id in ("typer", "_typer"):
-            return True
-        if func.attr == "exit" and func.value.id == "sys":
-            return True
-    return isinstance(func, ast.Name) and func.id == "SystemExit"
+    if isinstance(func, ast.Attribute):
+        return func.attr in ("Exit", "exit")
+    return isinstance(func, ast.Name) and func.id in ("Exit", "SystemExit", "exit")
+
+
+def _is_literal_code(node) -> bool:
+    """A code written as a literal other than 0: ``1``, ``-1``, ``int(2)``,
+    ``1 if x else 2``, or a message string (Click exits 1 with it)."""
+    import ast
+
+    if isinstance(node, ast.Constant):
+        return node.value not in (0, None, False)
+    if isinstance(node, ast.UnaryOp):
+        return _is_literal_code(node.operand)
+    if isinstance(node, ast.IfExp):
+        return _is_literal_code(node.body) or _is_literal_code(node.orelse)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "int":
+        return any(_is_literal_code(a) for a in node.args)
+    return False
+
+
+_CODE_NAME = re.compile(r"(^|_)(exit|exit_code|code|rc)$")
 
 
 def literal_exit_sites(root: Path) -> list[str]:
-    """Exit calls under *root* given a literal other than 0 (CLI-1)."""
+    """Exit codes under *root* written as a literal (CLI-1).
+
+    An exit call given a literal, or a name such as ``exit_code`` assigned a
+    non-zero literal (the value then reaches an exit through the variable).
+    """
     import ast
 
     sites = []
     for path in sorted(root.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not (isinstance(node, ast.Call) and _is_exit_call(node.func)):
-                continue
-            args = list(node.args) + [kw.value for kw in node.keywords if kw.arg == "code"]
-            if args and isinstance(args[0], ast.Constant) and args[0].value not in (0, None):
-                sites.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
+            if isinstance(node, ast.Call) and _is_exit_call(node.func):
+                args = list(node.args) + [kw.value for kw in node.keywords if kw.arg == "code"]
+                if args and _is_literal_code(args[0]):
+                    sites.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                named = [t for t in targets if isinstance(t, ast.Name) and _CODE_NAME.search(t.id)]
+                if named and _is_literal_code(node.value):
+                    sites.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
     return sites
 
 
@@ -183,91 +211,72 @@ def test_no_literal_exit_codes():
     assert not sites, "use ExitCode.<NAME> or a typed error:\n  " + "\n  ".join(sites)
 
 
-def test_literal_exit_lint_sees_each_spelling(tmp_path):
-    (tmp_path / "m.py").write_text(
-        "import sys, typer\n"
-        "typer.Exit(1)\ntyper.Exit(code=2)\nSystemExit(3)\nsys.exit(4)\n"
-        "typer.Exit(0)\ntyper.Exit()\ntyper.Exit(ExitCode.USAGE)\n"
-    )
-    assert len(literal_exit_sites(tmp_path)) == 4
+_LINT_CASES = [
+    ("typer.Exit(1)", True),
+    ("typer.Exit(code=2)", True),
+    ("SystemExit(3)", True),
+    ("sys.exit(4)", True),
+    ("Exit(1)", True),  # from typer import Exit
+    ("click.exceptions.Exit(1)", True),
+    ("ctx.exit(1)", True),
+    ("exit(1)", True),
+    ("typer.Exit(-1)", True),
+    ("typer.Exit(int(1))", True),
+    ("typer.Exit(1 if x else 2)", True),
+    ('typer.Exit("failed")', True),
+    ("exit_code = 2", True),
+    ("_pipeline_exit_code: int = 1", True),
+    ("typer.Exit(0)", False),
+    ("typer.Exit()", False),
+    ("typer.Exit(ExitCode.USAGE)", False),
+    ("typer.Exit(ExitCode.USAGE if x else ExitCode.FAILED)", False),
+    ("exit_code = ExitCode.FAILED", False),
+    ("outcome = 2", False),
+]
+
+
+@pytest.mark.parametrize(("source", "flagged"), _LINT_CASES)
+def test_literal_exit_lint_sees_each_spelling(tmp_path, source, flagged):
+    (tmp_path / "m.py").write_text(source + "\n")
+    assert bool(literal_exit_sites(tmp_path)) is flagged
 
 
 # -- refusals reported as failed step results ---------------------------------
-
-# Each refusal text and the file that produces it. A reworded producer must
-# fail here, not silently turn a refusal (3) back into a failure (1).
-_REFUSAL_PRODUCERS = {
-    "Destroy NOT completed": "deploy/destroy.py",
-    "another lakebench process holds the cluster lock": "modules/pipeline_engines/spark/operator.py",
-    "Namespace ownership refused": "deploy/engine.py",
-    "Bucket ownership refused": "deploy/engine.py",
-    "exists without lakebench identity annotations": "deploy/engine.py",
-    "exists without a lakebench ownership tag": "deploy/engine.py",
-}
+# The producers' own tests (test_destroy_namespace_wait, test_destroy_bucket_delete,
+# test_destroy_legacy_refuse, test_destroy_unwatches_namespace, test_deploy) check
+# that each real refusal carries the flag; these check the rule.
 
 
-_CONSEQUENCE_PRODUCERS = {
-    "NOT deleted because emptying the S3 buckets failed": "deploy/destroy.py",
-}
-
-
-def test_refusal_texts_match_their_producers():
-    texts = {**cli_exit.REFUSAL_PREFIXES, **cli_exit.REFUSAL_FRAGMENTS}
-    assert set(texts) == set(_REFUSAL_PRODUCERS)
-    assert set(cli_exit.CONSEQUENCE_FRAGMENTS) == set(_CONSEQUENCE_PRODUCERS)
-    producers = {**_REFUSAL_PRODUCERS, **_CONSEQUENCE_PRODUCERS}
-    for text, rel in producers.items():
-        source = (SRC / "lakebench" / rel).read_text(encoding="utf-8")
-        # The producers build the text from adjacent literals and f-strings.
-        flat = re.sub(r'"\s*\n\s*f?"', "", source)
-        assert text in flat, f"{rel} no longer produces {text!r}"
-
-
-def _result(component: str, status: str, message: str):
+def _result(component: str, status: str, message: str = "", **details):
     from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
-    return DeploymentResult(component, DeploymentStatus(status), message)
+    return DeploymentResult(component, DeploymentStatus(status), message, details=details)
 
 
-@pytest.mark.parametrize(
-    ("message", "path"),
-    [
-        ("Destroy NOT completed: namespace x is now a newer deployment", "destroy.redeployed"),
-        ("another lakebench process holds the cluster lock (h@u@s); wait", "lease.held"),
-        ("Namespace ownership refused: owned by deployment 'b'", "deploy.identity_foreign"),
-        ("Bucket ownership refused: tag-mismatch", "deploy.identity_foreign"),
-        ("Namespace 'x' exists without lakebench identity annotations.", "deploy.identity_foreign"),
-        (
-            "Bucket 'b' exists without a lakebench ownership tag. Refusing",
-            "deploy.identity_foreign",
-        ),
-    ],
-)
-def test_refusal_results_exit_refused(message, path):
-    assert cli_exit.refused_path(message) == path
-    results = [_result("postgres", "success", "ok"), _result("namespace", "failed", message)]
+_REFUSED = {exit_codes.REFUSAL_DETAIL: "deploy.identity_foreign"}
+_FOLLOWS = {exit_codes.FOLLOWS_REFUSAL_DETAIL: True}
+
+
+def test_refusal_results_exit_refused():
+    results = [_result("postgres", "success"), _result("s3-buckets", "failed", **_REFUSED)]
     assert cli_exit.refused_result_code(results) == ExitCode.REFUSED
 
 
 def test_a_real_failure_is_never_hidden_by_a_refusal():
-    refused = _result("s3-buckets", "failed", "Emptied 2 S3 buckets (Bucket ownership refused; x)")
-    kept = _result(
-        "namespace",
-        "failed",
-        "Namespace 'x' NOT deleted because emptying the S3 buckets failed; the namespace is",
-    )
+    refused = _result("s3-buckets", "failed", **_REFUSED)
+    kept = _result("namespace", "failed", **_FOLLOWS)
     broken = _result("trino", "failed", "helm uninstall failed")
     assert cli_exit.refused_result_code([refused, kept]) == ExitCode.REFUSED
     assert cli_exit.refused_result_code([refused, broken]) is None
     assert cli_exit.refused_result_code([kept]) is None  # a consequence alone is a failure
 
 
-def test_other_failures_and_successes_are_not_refusals():
-    assert cli_exit.refused_result_code([_result("trino", "failed", "timed out")]) is None
-    # A refusal text on a step that did not fail is not a refusal.
-    ok = _result("namespace", "success", "Destroy NOT completed earlier; retried")
+def test_refusal_text_without_the_flag_is_a_failure():
+    """Classification reads the flag, never the wording (CLI-2 rewrites text)."""
+    text_only = _result("namespace", "failed", "Destroy NOT completed: a redeploy")
+    assert cli_exit.refused_result_code([text_only]) is None
+    ok = _result("namespace", "success", **_REFUSED)  # a flag on a step that did not fail
     assert cli_exit.refused_result_code([ok]) is None
-    assert cli_exit.refused_path("ERROR: Destroy NOT completed") is None  # prefix only
 
 
 def test_cluster_lock_held_maps_to_refused():
@@ -586,7 +595,8 @@ def _scenario_destroy_redeployed(monkeypatch, tmp_path):
         "Destroy NOT completed: namespace v14user is now a newer deployment with "
         "the same name (a redeploy); it was left alone"
     )
-    return _destroy_with(monkeypatch, [_result("namespace", "failed", msg)])
+    flag = {exit_codes.REFUSAL_DETAIL: "destroy.redeployed"}
+    return _destroy_with(monkeypatch, [_result("namespace", "failed", msg, **flag)])
 
 
 def _scenario_lease_held(monkeypatch, tmp_path):
@@ -594,7 +604,8 @@ def _scenario_lease_held(monkeypatch, tmp_path):
         "another lakebench process holds the cluster lock (h@u@sha); wait for it, or "
         "run `lakebench admin release-lock` once its lease has expired."
     )
-    return _destroy_with(monkeypatch, [_result("spark-operator-watch", "failed", msg)])
+    flag = {exit_codes.REFUSAL_DETAIL: "lease.held"}
+    return _destroy_with(monkeypatch, [_result("spark-operator-watch", "failed", msg, **flag)])
 
 
 def _scenario_destroy_namespace_terminating(monkeypatch, tmp_path):
@@ -623,6 +634,7 @@ def _scenario_deploy_identity_foreign(monkeypatch, tmp_path):
             "namespace",
             "failed",
             "Namespace ownership refused: namespace 'x' is owned by another lakebench deployment",
+            **_REFUSED,
         )
     ]
     monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda *a, **k: engine)
@@ -731,6 +743,42 @@ def _scenario_confirm_declined(monkeypatch, tmp_path):
     return _runner().invoke(app, ["compare", str(a), str(b)], input="n\n")
 
 
+def _reproduce_package(tmp_path, commit_sha: str) -> Path:
+    import yaml
+
+    from tests import test_reproduce as rp
+
+    (tmp_path / "cfg.yaml").write_text(rp._ONE_SAMPLE_CFG)
+    pkg = rp._build_package(rp._metrics(), config_reference="cfg.yaml", commit_sha=commit_sha)
+    path = tmp_path / "pkg.yaml"
+    path.write_text(yaml.safe_dump(pkg))
+    return path
+
+
+def _scenario_reproduce_commit_drift(monkeypatch, tmp_path):
+    import lakebench.cli._reproduce as rep
+
+    pkg = _reproduce_package(tmp_path, "AAA1111")
+    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "BBB2222")
+    return _runner().invoke(app, ["reproduce", str(pkg), "--dry-run"])
+
+
+def _scenario_reproduce_drift(monkeypatch, tmp_path):
+    import lakebench.cli._reproduce as rep
+
+    pkg = _reproduce_package(tmp_path, "abc")
+    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
+    monkeypatch.setattr(rep, "_run_pipeline", lambda *a, **k: object())
+    for check in ("_sample_mismatch", "_policy_refusal", "_experiment_refusal"):
+        monkeypatch.setattr(rep, check, lambda *a, **k: None)
+    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 1)
+    monkeypatch.setattr(rep, "_run_maintenance_policy", lambda m: None)
+    monkeypatch.setattr(rep, "_run_query_set", lambda m: None)
+    # The run reproduced nothing: every expected number measured as zero.
+    monkeypatch.setattr(rep, "_measure_actual_numbers", lambda m: {"scale_ratio": 0.0})
+    return _runner().invoke(app, ["reproduce", str(pkg)])
+
+
 def _config_name(path: Path) -> str:
     for line in path.read_text().splitlines():
         if line.startswith("name:"):
@@ -762,6 +810,8 @@ SCENARIOS = {
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
     "confirm.declined": _scenario_confirm_declined,
+    "reproduce.commit_drift": _scenario_reproduce_commit_drift,
+    "reproduce.drift": _scenario_reproduce_drift,
 }
 
 # The line each path must print on stderr, where it prints one.
@@ -797,6 +847,8 @@ EXPECTED_OUTPUT = {
     "run.pass": "Local mode is sized",
     "run.verdict_failed": "Local mode is sized",
     "config.validation": "Config error",
+    "reproduce.commit_drift": "Commit drift",
+    "reproduce.drift": "scale_ratio",
 }
 # Text that must not appear: a declined prompt is not an unanswered one.
 UNEXPECTED_OUTPUT = {"confirm.declined": "Not confirmed", "run.verdict_failed": "ERROR"}
@@ -871,3 +923,48 @@ def test_any_click_abort_is_not_confirmed(module):
 def test_non_click_runtime_error_is_failed():
     exc = _foreign_class("somelib.errors", "UsageError", RuntimeError)("x")
     assert cli_exit.exit_code_for(exc) == ExitCode.FAILED
+
+
+# -- batch `run` on a cluster: a specific code survives the finally block ----
+
+
+def _cluster_run(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+    dg = _fake_s3(monkeypatch)  # the finally block measures bucket sizes
+    stubs = dg._stub_full_run(monkeypatch)
+    return stubs, dg._write_cfg(tmp_path)
+
+
+def test_batch_run_operator_not_ready_exits_prerequisite(monkeypatch, tmp_path):
+    """The finally block re-raises the run's code; it must keep 4, not 1."""
+    from unittest.mock import MagicMock
+
+    stubs, cfg = _cluster_run(monkeypatch, tmp_path)
+    stubs["op"].check_status.return_value = MagicMock(
+        ready=False, installed=True, version="2.5.1", message="controller down"
+    )
+    flags = ["--skip-preflight", "--skip-generate", "--skip-benchmark", "--yes"]
+    result = _runner().invoke(app, ["run", str(cfg), *flags])
+    assert result.exit_code == ExitCode.PREREQUISITE, result.output
+    assert "Spark Operator not ready" in result.output
+
+
+def test_batch_run_failed_step_exits_failed(monkeypatch, tmp_path):
+    stubs, cfg = _cluster_run(monkeypatch, tmp_path)
+    stubs["job_manager"].deploy_scripts_configmap.return_value = False
+    flags = ["--skip-preflight", "--skip-generate", "--skip-benchmark", "--yes"]
+    result = _runner().invoke(app, ["run", str(cfg), *flags])
+    assert result.exit_code == ExitCode.FAILED, result.output
+    assert "Failed to deploy Spark scripts ConfigMap" in result.output
+
+
+def test_unknown_stage_is_refused_before_any_work(monkeypatch, tmp_path):
+    """A typo in --stage exits 2 before the operator, datagen or a record."""
+    stubs, cfg = _cluster_run(monkeypatch, tmp_path)
+    flags = ["--skip-preflight", "--skip-generate", "--skip-benchmark", "--yes"]
+    result = _runner().invoke(app, ["run", str(cfg), *flags, "--stage", "bogus"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "Unknown stage: bogus" in result.output
+    stubs["op"].check_status.assert_not_called()
+    assert not list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))

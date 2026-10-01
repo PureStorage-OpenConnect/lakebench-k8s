@@ -408,36 +408,94 @@ def test_declined_confirm_exits_five_via_clirunner() -> None:
     assert result.exit_code == 5, f"expected 5, got {result.exit_code}: {result.output!r}"
 
 
+def _confirm_call(node) -> bool:
+    """``typer.confirm(...)`` / ``_typer.confirm(...)`` without ``abort=True``."""
+    import ast
+
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return False
+    if node.func.attr != "confirm":
+        return False
+    abort = any(
+        kw.arg == "abort" and isinstance(kw.value, ast.Constant) and kw.value.value
+        for kw in node.keywords
+    )
+    return not abort
+
+
+def declined_branch_offenders(source: str, name: str) -> list[str]:
+    """Declined-prompt branches that do not exit ``NOT_CONFIRMED``.
+
+    A declined branch is the body of ``if not typer.confirm(...)`` or of
+    ``if not <name>`` where ``<name> = typer.confirm(...)``. It must raise
+    ``typer.Exit(ExitCode.NOT_CONFIRMED)`` or ``NotConfirmed(...)``, wherever
+    in the branch the raise is (a ``confirm(abort=True)`` raises Abort, which
+    the handler maps to 5).
+    """
+    import ast
+
+    tree = ast.parse(source)
+    confirm_names = {
+        t.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and _confirm_call(n.value)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.If) and isinstance(node.test, ast.UnaryOp)):
+            continue
+        if not isinstance(node.test.op, ast.Not):
+            continue
+        operand = node.test.operand
+        declined = _confirm_call(operand) or (
+            isinstance(operand, ast.Name) and operand.id in confirm_names
+        )
+        if not declined:
+            continue
+        raises = [r for stmt in node.body for r in ast.walk(stmt) if isinstance(r, ast.Raise)]
+        good = [
+            r
+            for r in raises
+            if "NOT_CONFIRMED" in ast.unparse(r) or "NotConfirmed(" in ast.unparse(r)
+        ]
+        if not raises or len(good) != len(raises):
+            offenders.append(f"{name}:{node.lineno}: declined branch does not exit NOT_CONFIRMED")
+    return offenders
+
+
 def test_cli_confirm_sites_use_not_confirmed() -> None:
-    """Every ``typer.confirm(...)`` in ``src/lakebench/cli/`` whose ``False``
-    branch exits must exit ``ExitCode.NOT_CONFIRMED`` (5), by
-    ``typer.Exit(ExitCode.NOT_CONFIRMED)`` or ``raise NotConfirmed(...)``.
+    """Every declined ``typer.confirm(...)`` branch in ``src/lakebench/cli/``
+    exits ``ExitCode.NOT_CONFIRMED`` (5), by ``typer.Exit(ExitCode.NOT_CONFIRMED)``
+    or ``raise NotConfirmed(...)``.
 
     Missed sites are the whole point of standardising this exit code:
     scripts that check for 5 to distinguish cancellation would silently
     treat one that still exits 0 or 1 as something else.
     """
-    cli_dir = SRC_ROOT / "cli"
     offenders: list[str] = []
-    for path in sorted(cli_dir.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        lines = text.split("\n")
-        for m in re.finditer(r"typer\.confirm\s*\(", text):
-            # A confirm with abort=True raises click.Abort, which the
-            # top-level handler maps to 5.
-            head_end_of_call = text.find(")", m.end())
-            call_args = text[m.end() : head_end_of_call] if head_end_of_call != -1 else ""
-            if "abort=True" in call_args:
-                continue
-            line_no = text.count("\n", 0, m.end()) + 1
-            # The declined branch is the 3 lines after the confirm: an
-            # ``if not typer.confirm(): raise ...`` two-liner, or a
-            # three-liner with an intervening ``print_info``.
-            snippet = "\n".join(lines[line_no - 1 : line_no + 3])
-            exits = re.search(r"typer\.Exit\(|raise \w+\(", snippet)
-            if exits and not re.search(r"ExitCode\.NOT_CONFIRMED|NotConfirmed\(", snippet):
-                offenders.append(
-                    f"{path.relative_to(SRC_ROOT)}:{line_no}: typer.confirm() declined "
-                    "branch does not exit ExitCode.NOT_CONFIRMED."
-                )
+    for path in sorted((SRC_ROOT / "cli").rglob("*.py")):
+        offenders += declined_branch_offenders(
+            path.read_text(encoding="utf-8"), str(path.relative_to(SRC_ROOT))
+        )
     assert not offenders, "declined-prompt exit not standardised:\n  " + "\n  ".join(offenders)
+
+
+def test_declined_branch_rule_sees_a_wrong_exit_anywhere_in_the_branch() -> None:
+    wrong = (
+        "def f():\n"
+        "    confirm = typer.confirm('x')\n"
+        "    if not confirm:\n"
+        "        print_info('a')\n"
+        "        print_info('b')\n"
+        "        print_info('c')\n"
+        "        raise typer.Exit(ExitCode.FAILED)\n"
+    )
+    assert declined_branch_offenders(wrong, "w")
+    silent = "if not typer.confirm('x'):\n    print_info('cancelled')\n"
+    assert declined_branch_offenders(silent, "s")
+    right = "if not typer.confirm('x'):\n    raise typer.Exit(ExitCode.NOT_CONFIRMED)\n"
+    assert not declined_branch_offenders(right, "r")
+    aborting = "typer.confirm('x', abort=True)\n"
+    assert not declined_branch_offenders(aborting, "a")

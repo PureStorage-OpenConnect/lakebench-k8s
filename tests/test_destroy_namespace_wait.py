@@ -154,6 +154,7 @@ class TestPreconditionRefusal:
         # Not completed: the old incarnation's delete never happened here.
         assert result.status is DeploymentStatus.FAILED
         assert "newer" in result.message
+        assert result.details["refusal"] == "destroy.redeployed"  # exit 3 (CLI-1)
         cluster.delete_namespace.assert_called_once_with("ns-a", uid="uid-1")
 
 
@@ -306,6 +307,10 @@ class TestDestroyAllWiring:
         assert not apps.delete_namespaced_deployment.called, "new components must survive"
         ns = [r for r in results if r.component == "namespace"]
         assert "newer deployment" in ns[-1].message
+        from lakebench.cli._exit import refused_result_code
+        from lakebench.exit_codes import ExitCode
+
+        assert refused_result_code(results) == ExitCode.REFUSED  # destroy.redeployed
 
     def test_recreated_during_infra_teardown_is_not_deleted(self):
         """The guard at the namespace step still catches a late redeploy."""

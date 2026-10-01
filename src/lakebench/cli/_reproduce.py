@@ -14,10 +14,13 @@ modes documented there:
   package references, then compares actual vs. expected under the recorded
   tolerance bands.
 
-Exit codes:
-  0 -- pass (within tolerance)
-  1 -- performance drift exceeded
-  2 -- correctness violation (missing stages, scale_ratio mismatch, ...)
+Exit codes (CLI-1, TUD 4.3; see docs/exit-codes.md):
+  0  -- pass (within tolerance)
+  14 -- requirement unmet: correctness violation (missing stages,
+        scale_ratio mismatch, ...), performance drift outside its band, or
+        commit drift without --allow-commit-drift (2 and 1 in 1.6)
+  2  -- usage: a package or config that cannot be read or does not match
+  1  -- the reproduction could not run or its run could not be found
 """
 
 from __future__ import annotations
@@ -640,10 +643,11 @@ def _compare(
     tolerances: dict[str, float],
     query_sets: tuple[str | None, str | None] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Compare expected vs actual and return (rows, exit_code).
+    """Compare expected vs actual and return (rows, outcome).
 
     Rows are dicts with keys metric, expected, actual, drift_pct, band,
-    tolerance_pct, status. Exit code is 0/1/2 per the CLI contract.
+    tolerance_pct, status. ``outcome`` is 0 (pass), 1 (performance drift) or
+    2 (correctness violation); the command exits 14 for either drift.
     ``query_sets`` is (package, actual) query-set ids; QpH over different or
     unrecorded sets is refused (status ``incomparable``, a performance
     failure) rather than compared.
@@ -727,15 +731,15 @@ def _compare(
                 performance_failed = True
 
     if correctness_failed:
-        exit_code = 2
+        outcome = 2
     elif performance_failed:
-        exit_code = 1
+        outcome = 1
     else:
-        exit_code = 0
-    return rows, exit_code
+        outcome = 0
+    return rows, outcome
 
 
-def _print_comparison(rows: list[dict[str, Any]], exit_code: int) -> None:
+def _print_comparison(rows: list[dict[str, Any]], outcome: int) -> None:
     """Render the comparison table + verdict panel."""
     table = Table(show_header=True, header_style="bold", expand=False)
     table.add_column("Metric", style="cyan")
@@ -773,9 +777,9 @@ def _print_comparison(rows: list[dict[str, Any]], exit_code: int) -> None:
                 "Re-record the package on the current query set.[/yellow]"
             )
 
-    if exit_code == 0:
+    if outcome == 0:
         verdict = "[green]PASS -- every metric within tolerance[/green]"
-    elif exit_code == 1:
+    elif outcome == 1:
         verdict = "[yellow]FAIL -- performance drift over tolerance[/yellow]"
     else:
         verdict = "[red]FAIL -- correctness violation[/red]"
@@ -914,7 +918,7 @@ def _verify(
     dry_run: bool,
     allow_commit_drift: bool,
 ) -> None:
-    """Load a package, run the pipeline, compare, exit with 0/1/2."""
+    """Load a package, run the pipeline, compare; exit 0, or 14 outside tolerance."""
     try:
         package = _load_package(package_path)
     except ReproduceError as e:
@@ -958,7 +962,7 @@ def _verify(
                 "The measured code path is not the one this package claims. "
                 f"Check out {recorded_sha} or pass --allow-commit-drift."
             )
-            raise typer.Exit(ExitCode.USAGE)
+            raise typer.Exit(ExitCode.REQUIREMENT_UNMET)  # reproduce.commit_drift
 
     try:
         config_file = _resolve_config_path(package, config_override, package_path)
@@ -1007,8 +1011,9 @@ def _verify(
     try:
         metrics = _run_pipeline(config_file, timeout, keep)
     except ReproduceError as e:
+        # The pipeline did not run cleanly, or its run could not be found.
         print_error(str(e))
-        raise typer.Exit(ExitCode.USAGE) from None
+        raise typer.Exit(ExitCode.FAILED) from None
 
     _mismatch = (
         _sample_mismatch(meta, _benchmark_samples(metrics))
@@ -1016,17 +1021,20 @@ def _verify(
         or _experiment_refusal(meta, metrics)
     )
     if _mismatch:
+        # The run that just finished does not match the package's protocol.
         print_error(_mismatch)
-        raise typer.Exit(ExitCode.USAGE)
+        raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
 
     actual = _measure_actual_numbers(metrics)
-    rows, exit_code = _compare(
+    rows, outcome = _compare(
         expected, actual, tolerances, (meta.get("query_set_id"), _run_query_set(metrics))
     )
-    _print_comparison(rows, exit_code)
+    _print_comparison(rows, outcome)
 
-    if exit_code != 0:
-        raise typer.Exit(exit_code)
+    if outcome != 0:
+        # _compare's verdict is 2 (correctness) or 1 (performance); both are
+        # a reproduction outside its tolerance, 14 in the CLI-1 table.
+        raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
 
 
 # ---------------------------------------------------------------------------

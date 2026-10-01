@@ -664,7 +664,7 @@ def migrate_deployment(
             print_error(f"namespace {namespace!r} does not exist")
         else:
             print_error(f"cannot read namespace {namespace!r}: {e}")
-        raise typer.Exit(ExitCode.USAGE if e.status == 404 else ExitCode.FAILED) from e
+        raise typer.Exit(ExitCode.FAILED) from e
 
     # Already migrated?
     anns = ns_obj.metadata.annotations or {}
@@ -691,7 +691,7 @@ def migrate_deployment(
             "cannot determine api-server fingerprint (kubeconfig missing?). "
             "Pass --api-server-fingerprint explicitly."
         )
-        raise typer.Exit(ExitCode.USAGE)
+        raise typer.Exit(ExitCode.PREREQUISITE)
 
     custom_api = k8s_client.CustomObjectsApi()
 

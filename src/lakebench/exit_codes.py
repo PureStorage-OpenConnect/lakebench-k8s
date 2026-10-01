@@ -68,8 +68,8 @@ MEANINGS: dict[ExitCode, str] = {
     ExitCode.COMPARE_NOT_LIKE_FOR_LIKE: "compare: comparable, not like-for-like.",
     ExitCode.COMPARE_CONFOUNDED: "compare: comparable, confounded.",
     ExitCode.REQUIREMENT_UNMET: (
-        "Requirement unmet: a reproduction drifted outside its tolerance or could "
-        "only be verified out of band."
+        "Requirement unmet: a reproduction drifted outside its tolerance, was asked "
+        "to verify at another commit, or could only be verified out of band."
     ),
     ExitCode.INTERRUPTED: "Interrupted (SIGINT, Ctrl-C).",
 }
@@ -314,7 +314,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "deploy.identity_foreign",
         _C.REFUSED,
-        "the namespace or a bucket is owned by another deployment",
+        "the namespace or a bucket is owned by another deployment, or has no lakebench "
+        "ownership proof (`deploy`, `destroy`, `clean`)",
         v16_code=1,
     ),
     ExitPath(
@@ -362,7 +363,12 @@ PATHS: tuple[ExitPath, ...] = (
         "`plan` finds the scratch StorageClass missing",
         "CC-23",
     ),
-    ExitPath("k8s.unreachable", _C.PREREQUISITE, "the Kubernetes API is unreachable", v16_code=1),
+    ExitPath(
+        "k8s.unreachable",
+        _C.PREREQUISITE,
+        "the Kubernetes API is unreachable before the command changes anything",
+        v16_code=1,
+    ),
     ExitPath(
         "s3.unreachable",
         _C.PREREQUISITE,
@@ -421,6 +427,20 @@ PATHS: tuple[ExitPath, ...] = (
     ),
     ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict", "ER-11"),
     ExitPath(
+        "reproduce.drift",
+        _C.REQUIREMENT_UNMET,
+        "`reproduce` ran and a metric drifted outside its tolerance band (correctness, "
+        "or performance), or the run did not follow the package's protocol",
+        v16_code=2,
+    ),
+    ExitPath(
+        "reproduce.commit_drift",
+        _C.REQUIREMENT_UNMET,
+        "`reproduce` was asked to verify a package recorded at another commit, "
+        "without --allow-commit-drift",
+        v16_code=2,
+    ),
+    ExitPath(
         "reproduce.verify_out_of_band",
         _C.REQUIREMENT_UNMET,
         "`reproduce` could not verify the result in band",
@@ -446,6 +466,16 @@ PATHS_BY_NAME: dict[str, ExitPath] = {p.name: p for p in PATHS}
 # there. CC-9 converted every command, so this is empty; ``render_markdown``
 # prints a transition section only while it has entries.
 LEGACY_CODES: dict[int, str] = {}
+
+
+# Deploy and destroy report a safety refusal as a FAILED step result, not an
+# exception. The producer marks it with ``details[REFUSAL_DETAIL] = <path
+# name>``, and a step that failed only because a refused step came first (the
+# namespace destroy keeps as the record of a bucket it refused to empty)
+# carries ``details[FOLLOWS_REFUSAL_DETAIL] = True``. The CLI exits 3 when
+# every failed step is one of these, and 1 when any other step failed.
+REFUSAL_DETAIL = "refusal"
+FOLLOWS_REFUSAL_DETAIL = "follows_refusal"
 
 
 def path_code(name: str) -> ExitCode:

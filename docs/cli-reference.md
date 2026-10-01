@@ -173,7 +173,7 @@ lakebench config storage [CONFIG_FILE] [OPTIONS]
 | `--full` / `--no-full` | `--full` | Create a temporary bucket for write and multipart checks. Use `--no-full` when the account cannot create buckets; write checks are then reported as skipped, not failed. |
 
 Exit code 0 means no required check failed. Exit code 1 means a required check
-failed or the config could not be loaded.
+failed; 2 means the config could not be loaded or names no S3 endpoint.
 
 Checks are graded. **Required** failures (connectivity, bucket enumeration,
 object operations, multipart abort) mean lakebench cannot run against the store.
@@ -628,12 +628,15 @@ lakebench reproduce PACKAGE.yaml [OPTIONS]
 | `--config` | `-c` | package's config | Verify mode: config to run instead of the package's `config_reference` |
 | `--timeout` | `-t` | auto | Verify mode: per-job timeout in seconds |
 | `--keep` | | `false` | Verify mode: keep the deployment after the run (reproduce always destroys before the run) |
-| `--allow-commit-drift` | | `false` | Verify mode: run even when HEAD differs from the recorded commit (refused with exit 2 otherwise) |
+| `--allow-commit-drift` | | `false` | Verify mode: run even when HEAD differs from the recorded commit (refused with exit 14 otherwise) |
 | `--dry-run` | | `false` | Verify mode: parse the package and exit |
 
-Exit codes: `0` pass, `1` performance drift, `2` correctness drift or a
-refusal (different experiment identity, maintenance policy or result
-fingerprints).
+Exit codes: `0` pass; `14` (requirement unmet) for performance or
+correctness drift, commit drift without `--allow-commit-drift`, or a run that
+did not follow the package (different samples, maintenance policy, experiment
+or benchmark results); `2` for a package or config refused before running;
+`1` when the pipeline could not run. 1.6 used `1` for performance drift and
+`2` for correctness drift.
 
 ### financial
 

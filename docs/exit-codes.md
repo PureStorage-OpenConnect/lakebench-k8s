@@ -24,7 +24,7 @@ path yet says so.
 | 11 | `COMPARE_NOT_ESTABLISHED` | compare: COMPARABILITY NOT ESTABLISHED. | no command yet |
 | 12 | `COMPARE_NOT_LIKE_FOR_LIKE` | compare: comparable, not like-for-like. | no command yet |
 | 13 | `COMPARE_CONFOUNDED` | compare: comparable, confounded. | no command yet |
-| 14 | `REQUIREMENT_UNMET` | Requirement unmet: a reproduction drifted outside its tolerance or could only be verified out of band. | no command yet |
+| 14 | `REQUIREMENT_UNMET` | Requirement unmet: a reproduction drifted outside its tolerance, was asked to verify at another commit, or could only be verified out of band. | `reproduce.drift`, `reproduce.commit_drift` |
 | 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C). | `sigint` |
 
 ## Named paths
@@ -44,18 +44,20 @@ the CLI down every path listed here and checks the code.
 | `config.unsupported` | 2 | the workload, recipe and mode combination is unsupported, or the scale is above the workload's datagen ceiling |
 | `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
 | `config.validation` | 2 | the config fails to load or validate |
-| `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment |
+| `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`) |
 | `destroy.redeployed` | 3 | "Destroy NOT completed": the namespace now belongs to a newer deployment |
 | `lease.held` | 3 | another command holds the cluster lock lease |
 | `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix without --regenerate |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
-| `k8s.unreachable` | 4 | the Kubernetes API is unreachable |
+| `k8s.unreachable` | 4 | the Kubernetes API is unreachable before the command changes anything |
 | `run.prereq_failed` | 4 | a `run` preflight check failed |
 | `s3.unreachable` | 4 | `generate` or `run --generate` cannot read the bronze bucket to check it is empty |
 | `confirm.declined` | 5 | a confirmation prompt was answered no |
 | `confirm.non_tty` | 5 | a confirmation prompt got no answer (no terminal, end of input) or was declined |
 | `run.namespace_missing_no_yes` | 5 | `run` would create a missing namespace and was not given --yes |
 | `destroy.namespace_terminating` | 6 | `destroy` finished its steps but the namespace is still terminating |
+| `reproduce.commit_drift` | 14 | `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift |
+| `reproduce.drift` | 14 | `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol |
 | `sigint` | 130 | a command interrupted with Ctrl-C outside a prompt (Ctrl-C at a prompt is 5) |
 
 ## Errors and output
