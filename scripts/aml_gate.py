@@ -199,7 +199,13 @@ def seed_ever_recorded(seed: int) -> str | None:
         raise OSError(f"git log over {rec.name} failed (exit {hits.returncode})")
     hits = hits.stdout.strip()
     if hits:
-        return f"seed {seed} was recorded in {rec.name} by commit {hits.splitlines()[0]}"
+        # git log --all also sees stashes and unpushed branches, where a
+        # held-out seed can sit before its look: name it by role then.
+        from lakebench.config.datagen_seed import heldout_role
+
+        role = heldout_role(seed)
+        label = f"the registered {role} seed" if role else f"seed {seed}"
+        return f"{label} was recorded in {rec.name} by commit {hits.splitlines()[0]}"
     return None
 
 

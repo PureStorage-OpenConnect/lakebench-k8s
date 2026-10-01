@@ -344,9 +344,18 @@ seeds are registered as salted hashes in `heldout_hashes.json`, next to
 `workload.datagen.corpus_role` declares the matching role, so
 accidentally scoring against them is not possible. The reference job
 also recovers the corpus seed from every manifest row's instance seed
-and refuses a corpus that comes, wholly or partly, from a spent or
-held-out seed it was not declared for, whatever seed the deployment
-claims.
+and refuses a corpus whose manifest comes, wholly or partly, from a spent
+or held-out seed it was not declared for, whatever seed the deployment
+claims. The check reads the manifest only: it does not tie the
+transactions under the bronze prefix to it, so transaction files from
+another generator run left in the same prefix are not detected. Generate
+each corpus into its own prefix.
+
+The salt in `heldout_hashes.json` is public, so a hash hides a seed only
+when the seed is drawn uniformly from 63 bits. The current 8-digit seeds
+are recovered from their hashes in seconds (they are already public, so
+the hash records their role rather than hiding them). A held-out seed
+added later must be a uniform 63-bit draw for its hash to hide it.
 Numbers you publish for comparison with other stacks should cite the
 seed the run used and, when it is 43, say so.
 
