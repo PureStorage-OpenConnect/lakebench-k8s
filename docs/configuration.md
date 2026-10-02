@@ -659,12 +659,18 @@ driver memory, overhead, cores, off-heap, PySpark memory). The full set is in
 reaches the pipeline's Spark jobs only, not the Spark Thrift server or
 `--local` runs. The run record keeps it as `architecture.spark_conf_user`:
 every key is named, but only tuning keys (SQL execution, shuffle, memory,
-speculation and the like) keep their values. Any other value is recorded
-as `<redacted sha256:...>`, because a key can hold a secret or a location
-under any name; a key whose name marks a secret, credential, endpoint or
-bucket is recorded as `<redacted>` with no digest. The recorded map is the
-`spark conf` key of the experiment identity, so two runs whose
-`spark.conf` differs are not like-for-like.
+speculation and the like) keep their values. A key that names a
+credential, a secret or an environment variable (`spark.executorEnv.*`), or
+whose value names a location (a URI, an IP address, an endpoint), is
+recorded as `<redacted>`. Any other value is recorded as
+`<redacted sha256:...>`, a digest of the value, which a short value does
+not protect: put secrets under a secret-named key or an environment
+variable. A per-bucket S3A key records its bucket as `<bucket-N>`. The
+recorded map is the `spark conf` key of the experiment identity, so two
+runs whose recorded maps differ are not like-for-like, while two
+deployments that differ only in buckets and endpoints are. A difference
+in a value recorded as `<redacted>` (an environment variable's value, for
+example) is not seen by compare.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

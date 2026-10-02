@@ -19,10 +19,6 @@ it without a cycle.
 
 from __future__ import annotations
 
-import hashlib
-import re
-from collections.abc import Callable
-
 # Proven defaults that are not owned: a job starts from these, and a user
 # value replaces them. Before v1.7 they sat in the schema default of
 # spark.conf, so setting any key there dropped all of them.
@@ -285,14 +281,10 @@ def user_spark_overrides(conf: dict[str, str]) -> dict[str, str]:
     }
 
 
-# Keys whose values the run record may carry in the clear. A spark.conf key
-# can hold a secret or a location under any name (a REST catalog header, an
-# executorEnv variable, a defaultFS URI), so every other value is recorded
-# by digest: "<redacted sha256:...>", which keeps two runs that differ in it
-# apart in the experiment identity. A key that names a secret, a credential
-# or a location is recorded as "<redacted>" with no digest (a short secret's
-# digest could be guessed offline), as the perf-gate digest leaves it out.
-_RECORDABLE_PREFIXES: tuple[str, ...] = (
+# Keys whose values the run record carries in the clear (the tuning keys).
+# metrics/fingerprint_inputs.record_spark_conf decides how every other value
+# is recorded.
+RECORDABLE_SPARK_PREFIXES: tuple[str, ...] = (
     "spark.sql.adaptive.",
     "spark.sql.shuffle.",
     "spark.sql.files.",
@@ -322,25 +314,4 @@ _RECORDABLE_PREFIXES: tuple[str, ...] = (
     "spark.reducer.",
     "spark.dynamicAllocation.",
 )
-_RECORDABLE_KEYS: frozenset[str] = frozenset(SPARK_CONF_DEFAULTS) | USER_OVERRIDABLE_SPARK_KEYS
-
-
-_SECRET_NAME = re.compile(r"(pass|pwd|token|secret|auth|credential|cookie|key$)", re.IGNORECASE)
-
-
-def recordable_spark_conf(
-    conf: dict[str, str], unhashable: Callable[[str], bool] = lambda _k: False
-) -> dict[str, str]:
-    """*conf* for the run record: recordable keys keep their value; keys that
-    name a secret (or that *unhashable* rejects) read "<redacted>"; every
-    other value is replaced by a sha256 digest prefix."""
-    out: dict[str, str] = {}
-    for k, v in conf.items():
-        if k in _RECORDABLE_KEYS or k.startswith(_RECORDABLE_PREFIXES):
-            out[k] = v
-        elif unhashable(k) or _SECRET_NAME.search(k.rsplit(".", 1)[-1]):
-            out[k] = "<redacted>"
-        else:
-            digest = hashlib.sha256(str(v).encode()).hexdigest()[:16]
-            out[k] = f"<redacted sha256:{digest}>"
-    return out
+RECORDABLE_SPARK_KEYS: frozenset[str] = frozenset(SPARK_CONF_DEFAULTS) | USER_OVERRIDABLE_SPARK_KEYS

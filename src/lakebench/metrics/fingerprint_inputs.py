@@ -86,6 +86,67 @@ def is_credential_key(key: str) -> bool:
     return _CREDENTIAL_KEY.search(key) is not None
 
 
+# The last segment of a key that names a secret, as a whole word: DB_PASS,
+# header.Authorization, api_key; not partitionKey, bypass or authenticate.
+_SECRET_SEGMENT = re.compile(
+    r"(?:^|[_-])(?:pass|passwd|password|pwd|token|secret|credentials?|cookie|"
+    r"authorization|apikey|api_key)(?:[_-]|$)|(?:password|secret|token)$",
+    re.IGNORECASE,
+)
+# Environment variables are where secrets usually go.
+_ENV_PREFIXES = ("spark.executorEnv.", "spark.yarn.appMasterEnv.")
+_PER_BUCKET = re.compile(r"^(spark\.hadoop\.fs\.s3a\.bucket\.)([^.]+)\.(.+)$")
+_IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+
+
+def record_spark_conf(conf: dict[str, str]) -> dict[str, str]:
+    """The user's spark.conf as the run record (and the "spark conf" identity
+    key) carries it, keys sorted.
+
+    - Tuning keys (``conf_keys.RECORDABLE_SPARK_KEYS`` and prefixes) keep
+      their value.
+    - A key that names a credential, a secret or an environment variable, or
+      whose value names a location (a URI, an IPv4 address, an endpoint or
+      location key), reads "<redacted>": no digest, because a short secret's
+      digest can be guessed offline and a location differs per deployment,
+      not per workload.
+    - Every other value reads "<redacted sha256:16 hex>", so two runs that
+      differ in it differ in identity.
+
+    A per-bucket S3A key names its bucket, which differs per deployment, so
+    the bucket segment is recorded as ``<bucket-N>`` (N by sorted bucket
+    name)."""
+    from lakebench.modules.pipeline_engines.spark.conf_keys import (
+        RECORDABLE_SPARK_KEYS,
+        RECORDABLE_SPARK_PREFIXES,
+    )
+
+    buckets = sorted({m.group(2) for k in conf if (m := _PER_BUCKET.match(k))})
+    out: dict[str, str] = {}
+    for key, value in sorted(conf.items()):
+        v = str(value)
+        name = key
+        m = _PER_BUCKET.match(key)
+        if m:
+            name = f"{m.group(1)}<bucket-{buckets.index(m.group(2)) + 1}>.{m.group(3)}"
+        last = key.rsplit(".", 1)[-1]
+        if key in RECORDABLE_SPARK_KEYS or key.startswith(RECORDABLE_SPARK_PREFIXES):
+            out[name] = v
+        elif (
+            is_credential_key(key)
+            or is_location_key(key)
+            or key.startswith(_ENV_PREFIXES)
+            or _SECRET_SEGMENT.search(last)
+            or "endpoint" in last.lower()
+            or "://" in v
+            or _IPV4.search(v)
+        ):
+            out[name] = "<redacted>"
+        else:
+            out[name] = f"<redacted sha256:{hashlib.sha256(v.encode()).hexdigest()[:16]}>"
+    return out
+
+
 def owned_conf(spark_conf: dict[str, Any], user: dict[str, str] | None = None) -> dict[str, str]:
     """*spark_conf* without location and credential keys, values as strings.
 

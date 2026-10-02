@@ -241,8 +241,9 @@ def test_default_identity_unchanged():
 
 def test_spark_conf_enters_the_identity():
     """A user spark.conf is the "spark conf" identity key (Architecture);
-    two runs that differ only in a value the record redacts by digest still
-    differ in identity, and the default identity carries no such key."""
+    two runs that differ only in a value the record keeps as a digest still
+    differ in identity, two deployments that differ only in where they live
+    do not, and the default identity carries no such key."""
     from lakebench.metrics.comparability import EXP2, optional_keys
     from lakebench.metrics.experiment import experiment_inputs, identity
 
@@ -255,36 +256,68 @@ def test_spark_conf_enters_the_identity():
         assert exp["identity_version"] == 2
         return identity(exp), optional_keys(exp)
 
+    def conf(bucket, committer):
+        return {
+            f"spark.hadoop.fs.s3a.bucket.{bucket}.committer.name": committer,
+            "spark.eventLog.dir": f"s3a://{bucket}/events",
+        }
+
     base_id, base_opt = ident({})
     assert "spark conf" not in base_id and "spark conf" not in base_opt
-    one_id, one_opt = ident({"spark.executorEnv.TUNE": "1"})
-    two_id, two_opt = ident({"spark.executorEnv.TUNE": "2"})
-    assert one_opt["spark conf"] != two_opt["spark conf"]
-    assert one_opt["spark conf"]["spark.executorEnv.TUNE"].startswith("<redacted sha256:")
-    assert one_id["spark conf"] == one_opt["spark conf"]
-    assert one_id != two_id and one_id != base_id
+    magic_id, magic_opt = ident(conf("lb-ns1", "magic"))
+    other_ns_id, _ = ident(conf("lb-ns2", "magic"))
+    directory_id, directory_opt = ident(conf("lb-ns1", "directory"))
+    assert magic_id == other_ns_id  # where it lives is not what it runs
+    assert magic_id != directory_id and magic_id != base_id
+    assert magic_id["spark conf"] == magic_opt["spark conf"]
+    key = "spark.hadoop.fs.s3a.bucket.<bucket-1>.committer.name"
+    assert magic_opt["spark conf"][key].startswith("<redacted sha256:")
+    assert magic_opt["spark conf"]["spark.eventLog.dir"] == "<redacted>"
+    assert directory_opt["spark conf"][key] != magic_opt["spark conf"][key]
 
 
-def test_secret_named_keys_carry_no_digest():
-    from lakebench.modules.pipeline_engines.spark.conf_keys import recordable_spark_conf
+def test_record_redaction_rules():
+    from lakebench.metrics.fingerprint_inputs import record_spark_conf
 
-    rec = recordable_spark_conf(
+    rec = record_spark_conf(
         {
+            # secret-named, environment, credential: no digest
             "spark.executorEnv.DB_PASS": "hunter2",
+            "spark.executorEnv.OMP_NUM_THREADS": "4",
             "spark.sql.catalog.x.header.Authorization": "Bearer t",
-            "spark.sql.catalog.x.token": "t",
+            "spark.hadoop.fs.s3a.bucket.b.access.key": "AK",
+            # a location by value or by name: no digest
             "spark.hadoop.fs.defaultFS": "s3a://b",
+            "spark.hadoop.javax.jdo.option.ConnectionURL": "jdbc:postgresql://u:pw@h/db",
+            "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://10.1.2.3",
+            "spark.hadoop.some.host": "10.1.2.3",
+            # not secrets, though the old pattern matched them: digested
+            "spark.sql.catalog.x.write.partitionKey": "id",
+            "spark.authenticate": "false",
+            "spark.hadoop.fs.s3a.bypass.cache": "true",
+            # tuning: clear
             "spark.speculation": "true",
-        },
-        unhashable=lambda k: k.endswith("defaultFS"),
+        }
     )
-    assert rec == {
-        "spark.executorEnv.DB_PASS": "<redacted>",
-        "spark.sql.catalog.x.header.Authorization": "<redacted>",
-        "spark.sql.catalog.x.token": "<redacted>",
-        "spark.hadoop.fs.defaultFS": "<redacted>",
-        "spark.speculation": "true",
+    redacted = {k for k, v in rec.items() if v == "<redacted>"}
+    digested = {k for k, v in rec.items() if v.startswith("<redacted sha256:")}
+    assert redacted == {
+        "spark.executorEnv.DB_PASS",
+        "spark.executorEnv.OMP_NUM_THREADS",
+        "spark.sql.catalog.x.header.Authorization",
+        "spark.hadoop.fs.s3a.bucket.<bucket-1>.access.key",
+        "spark.hadoop.fs.defaultFS",
+        "spark.hadoop.javax.jdo.option.ConnectionURL",
+        "spark.hadoop.fs.s3a.bucket.<bucket-1>.endpoint",
+        "spark.hadoop.some.host",
     }
+    assert digested == {
+        "spark.sql.catalog.x.write.partitionKey",
+        "spark.authenticate",
+        "spark.hadoop.fs.s3a.bypass.cache",
+    }
+    assert rec["spark.speculation"] == "true"
+    assert list(rec) == sorted(rec)
 
 
 # -- drift: the owned set is exactly what the manifest writes ------------------
