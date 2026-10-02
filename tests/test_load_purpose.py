@@ -152,7 +152,11 @@ def test_named_config_loads_for_every_purpose(tmp_path):
 
 # -- CFG-1 (purpose): removed keys -------------------------------------------
 
-REMOVED_KEY = {"name": "rk", "images": {"pull_secrets": ["regcred"]}}
+REMOVED_KEY = {
+    "name": "rk",
+    "recipe": "hive-iceberg-spark-trino",
+    "images": {"pull_secrets": ["regcred"]},
+}
 
 
 @pytest.mark.parametrize("purpose", [LoadPurpose.MUTATE, LoadPurpose.RUN])

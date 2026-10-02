@@ -25,14 +25,19 @@ from .schema import LakebenchConfig
 # -- Env var substitution ----------------------------------------------------
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+# What a YAML plain scalar trims: spaces, tabs and the YAML line breaks.
+_YAML_SPACE = " \t\r\n\x85\u2028\u2029"
+_CUT_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:-[^}]*$")
 
 
-def _substitute_env_vars(text: str) -> str:
-    """Replace ``${VAR}`` and ``${VAR:-default}`` with environment values.
+def _substitute_env_vars(text: str, unresolved: list[str] | None = None) -> str:
+    """Replace ``${VAR}`` and ``${VAR:-default}`` in one string.
 
-    Unresolved variables without defaults raise ``ConfigError``.
+    Unresolved variables without defaults raise ``ConfigError``, or are
+    appended to *unresolved* when a list is given (``load_yaml`` names them
+    all at once).
     """
-    unresolved: list[str] = []
+    missing: list[str] = [] if unresolved is None else unresolved
 
     def _replace(m: re.Match) -> str:
         var_name = m.group(1)
@@ -41,14 +46,14 @@ def _substitute_env_vars(text: str) -> str:
         if value is not None:
             return value
         if default is not None:
-            return default
-        unresolved.append(var_name)
-        return m.group(0)
+            return str(default)
+        missing.append(var_name)
+        return str(m.group(0))
 
     result = _ENV_PATTERN.sub(_replace, text)
-    if unresolved:
+    if unresolved is None and missing:
         raise ConfigError(
-            f"Unresolved environment variables: {', '.join(unresolved)}. "
+            f"Unresolved environment variables: {', '.join(missing)}. "
             f"Set them or provide defaults with ${{VAR:-default}} syntax."
         )
     return result
@@ -239,8 +244,9 @@ class ConfigNameRequired(ConfigValidationError):
 def load_yaml(path: Path) -> dict[str, Any]:
     """Load YAML file and return as dictionary.
 
-    Performs ``${VAR}`` / ``${VAR:-default}`` env-var substitution on
-    the raw YAML text before parsing.
+    Performs ``${VAR}`` / ``${VAR:-default}`` env-var substitution scalar by
+    scalar while the file is composed (``_EnvLoader``), never on the raw
+    text: a plain scalar resolves as v1.6 did, a quoted one arrives verbatim.
 
     Args:
         path: Path to YAML file
@@ -256,13 +262,26 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ConfigFileNotFoundError(f"Configuration file not found: {path}")
 
+    with open(path) as f:
+        raw = f.read()
+    loader = _EnvLoader(raw)
     try:
-        with open(path) as f:
-            raw = f.read()
-        text = _substitute_env_vars(raw)
-        content = yaml.safe_load(text)
+        content = loader.get_single_data()
     except yaml.YAMLError as e:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
+    finally:
+        loader.dispose()
+    if loader.malformed:
+        raise ConfigError(
+            "Unclosed ${VAR:-default} (a default cut short by a ' #' comment?) at "
+            + ", ".join(loader.malformed)
+        )
+    if loader.unresolved:
+        names = ", ".join(dict.fromkeys(loader.unresolved))
+        raise ConfigError(
+            f"Unresolved environment variables: {names}. "
+            f"Set them or provide defaults with ${{VAR:-default}} syntax."
+        )
     if not content:
         return {}
     if not isinstance(content, dict):
@@ -271,6 +290,49 @@ def load_yaml(path: Path) -> dict[str, Any]:
             "not a mapping of keys such as `name:` and `architecture:`"
         )
     return content
+
+
+class _EnvLoader(yaml.SafeLoader):
+    """SafeLoader that substitutes ``${VAR}`` in each scalar as it is composed.
+
+    A plain scalar keeps v1.6's typing: v1.6 substituted the raw text and
+    then parsed it, so the substituted text is trimmed and, when untagged,
+    typed with YAML 1.1's implicit resolvers (``0042`` is octal 34, an empty
+    value or ``~`` is null, ``true`` is a bool); an explicit tag such as
+    ``!!str`` is kept. The value itself is never parsed as YAML, so an env
+    value holding `` #``, quotes, ``[..]`` or ``a: b`` stays that text
+    instead of being cut or turned into structure. A quoted or block scalar
+    arrives verbatim as a string (``init`` writes the credential references
+    quoted). Keys are substituted as v1.6 did; comments are not.
+    """
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self.unresolved: list[str] = []
+        self.malformed: list[str] = []
+
+    def compose_scalar_node(self, anchor: Any) -> Any:
+        # PyYAML's Composer.compose_scalar_node, with the substitution added
+        # between reading the event and resolving its tag.
+        event = self.get_event()
+        tag, value = event.tag, event.value
+        if "${" in value:
+            if _CUT_DEFAULT.search(_ENV_PATTERN.sub("", value)):
+                self.malformed.append(f"line {event.start_mark.line + 1}")
+            else:
+                value = _substitute_env_vars(value, self.unresolved)
+                if event.style is None:
+                    # Plain: v1.6 parsed the substituted text, which trimmed
+                    # YAML whitespace (not every Unicode space).
+                    value = value.strip(_YAML_SPACE)
+        if tag is None or tag == "!":
+            # Untagged plain text is typed from the substituted value, as in
+            # v1.6; a quoted or block scalar resolves to str either way.
+            tag = self.resolve(yaml.ScalarNode, value, event.implicit)
+        node = yaml.ScalarNode(tag, value, event.start_mark, event.end_mark, style=event.style)
+        if anchor is not None:
+            self.anchors[anchor] = node
+        return node
 
 
 def load_config(
@@ -377,6 +439,9 @@ def _load_and_validate(
         isinstance(_arch, dict) and "workload" in _arch
     )
 
+    # Read before validation: the recipe expansion fills the dict in place.
+    default_recipe_note = _default_recipe_note(data)
+
     context = {"purpose": purpose, "allow_long_names": skip_name_length}
     try:
         cfg = LakebenchConfig.model_validate(data, context=context)
@@ -408,14 +473,60 @@ def _load_and_validate(
         for err in errors:
             loc = ".".join(str(x) for x in err["loc"])
             msg = err["msg"]
-            error_messages.append(f"  - {loc}: {msg}")
+            # A model-level error (unknown recipe, recipe conflict) has no
+            # location; its message names the keys itself.
+            error_messages.append(f"  - {loc}: {msg}" if loc else f"  - {msg}")
 
         # from None: the chained ValidationError still holds the input.
         raise ConfigValidationError(
             "Configuration validation failed:\n" + "\n".join(error_messages),
             errors=errors,
         ) from None
+    if default_recipe_note:
+        emit_note(default_recipe_note)
     return cfg, resolution
+
+
+#: What a config with no recipe, or ``recipe: default``, resolves to when it
+#: sets no component.
+DEFAULT_RECIPE_RESOLUTION = "hive-iceberg-spark-trino"
+
+
+def _default_recipe_note(data: dict[str, Any]) -> str | None:
+    """The deprecation note for a config with no recipe, or None.
+
+    A config with no ``recipe``, or ``recipe: default``, resolves to
+    ``hive-iceberg-spark-trino`` in v1.7 when it sets no component. One that
+    sets components resolves to them (a v1.6 ``init`` wrote
+    ``catalog.type`` with no recipe), so the note names the recipe they
+    resolve to rather than claiming Hive.
+    """
+    from .recipes import RECIPE_OWNED_KEYS, _raw_value, recipe_components
+    from .support import recipe_for
+
+    recipe = data.get("recipe")
+    if recipe not in (None, "", "default"):
+        return None
+    resolved = recipe_components(DEFAULT_RECIPE_RESOLUTION)
+    written = False
+    for dotted in RECIPE_OWNED_KEYS:
+        value = _raw_value(data, dotted)
+        if isinstance(value, (str, int, float)) and str(value):
+            resolved[dotted] = str(getattr(value, "value", value))
+            written = True
+    parts = [resolved[k].lower() for k in RECIPE_OWNED_KEYS]
+    name = recipe_for(*parts)
+    if name is None:
+        # No recipe has these components; the schema's combination check
+        # names the problem, so only the components are reported.
+        name = "-".join([*parts[:3], "thrift" if parts[3] == "spark-thrift" else parts[3]])
+    said = "recipe 'default'" if recipe == "default" else "no recipe"
+    if not written:
+        return f"{said}: resolves to {name}; write `recipe: {name}` explicitly (required in v1.8)"
+    return (
+        f"{said}: the components written resolve to {name}; write `recipe: {name}` "
+        "explicitly (required in v1.8)"
+    )
 
 
 def _explain_error(err: dict[str, Any]) -> dict[str, Any]:
@@ -432,7 +543,7 @@ def _explain_error(err: dict[str, Any]) -> dict[str, Any]:
             user_loc = ("architecture", "pipeline", "continuous", *loc[3:])
         hint = unknown_key_hint(loc, user_loc)
         err["msg"] = f"unknown key; {hint}" if hint else "unknown key"
-    elif err.get("type") == "unknown_recipe":
+    elif err.get("type") in ("unknown_recipe", "recipe_conflict"):
         err["loc"] = ("recipe",)
     return err
 
@@ -569,6 +680,20 @@ def save_config(config: LakebenchConfig, path: str | Path) -> None:
     pipeline = arch.get("pipeline") or {}
     if "sustained" in pipeline:
         pipeline["continuous"] = pipeline.pop("sustained")
+    # Every component is written, so name the recipe they make (a
+    # config with no recipe, or 'default', loads with a deprecation note).
+    if data.get("recipe") in (None, "", "default"):
+        from .support import recipe_for
+
+        parts = [
+            str((arch.get("catalog") or {}).get("type")),
+            str((arch.get("table_format") or {}).get("type")),
+            str(arch.get("pipeline_engine") or "spark"),
+            str((arch.get("query_engine") or {}).get("type")),
+        ]
+        recipe = recipe_for(*parts)
+        if recipe:
+            data["recipe"] = recipe
 
     with open(path, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
@@ -583,7 +708,8 @@ def generate_default_config(
 ) -> LakebenchConfig:
     """Generate a default configuration with common values pre-filled.
 
-    This is used by `lakebench init` to create a starter configuration.
+    A programmatic helper; `lakebench init` writes its file from
+    `cli/_init.first_day_config` instead.
 
     Args:
         name: Deployment name (required)
@@ -617,295 +743,3 @@ def generate_default_config(
         config_dict["platform"] = platform
 
     return LakebenchConfig.model_validate(config_dict)
-
-
-def generate_example_config_yaml() -> str:
-    """Generate example configuration YAML with comments.
-
-    This produces a well-documented configuration file that users can
-    customize for their environment. Only fields the user MUST fill in
-    are uncommented; all other options are shown commented-out with
-    their defaults so users can discover and enable them.
-
-    Returns:
-        String containing commented YAML configuration
-    """
-    return """# Lakebench Configuration
-# ========================
-# This file defines your lakehouse deployment configuration.
-#
-# LEGEND:
-#   Uncommented fields  = REQUIRED or explicitly set values
-#   # field: value      = Available option with its DEFAULT value.
-#                         When commented out, this default is still ACTIVE.
-#   ## Section Header   = Section label (not a config field)
-#
-# Key behavior: commenting out an optional section does NOT disable it --
-# Pydantic fills in defaults. To truly disable something, set its 'enabled'
-# field to false explicitly.
-#
-# Full reference: docs/configuration.md
-# Recipe guide:   docs/recipes.md
-#
-# MINIMUM VIABLE CONFIG (3 fields):
-#   name: my-lakehouse
-#   platform.storage.s3.endpoint: http://your-s3:80
-#   platform.storage.s3.access_key / secret_key: your-credentials
-# Everything else has sensible defaults.
-
-# REQUIRED: Unique name for this deployment (also used as K8s namespace)
-name: my-lakehouse
-
-# Recipe shorthand -- sets catalog + table_format + engine + query_engine in one line.
-# Valid recipes: default, hive-iceberg-spark-trino, hive-iceberg-spark-thrift,
-#   hive-iceberg-spark-duckdb, hive-iceberg-spark-none,
-#   polaris-iceberg-spark-trino, polaris-iceberg-spark-thrift,
-#   polaris-iceberg-spark-duckdb, polaris-iceberg-spark-none
-# See docs/recipes.md for details.
-# recipe: hive-iceberg-spark-trino
-
-# ============================================================================
-# IMAGES
-# ============================================================================
-# Container images for all components. Override for private registries.
-# See docs/datagen-custom-images.md for building custom datagen images.
-# images:
-#   datagen: docker.io/sillidata/lb-datagen:1.6.0 # Customizable (see docs/datagen-custom-images.md)
-#   spark: apache/spark:4.0.2-python3
-#   postgres: postgres:17
-#   trino: trinodb/trino:483
-#   polaris: apache/polaris:1.6.0
-#   duckdb: python:3.11-slim
-#   jmx_exporter: bitnami/jmx-exporter:latest
-#   pull_policy: Always               # Always | IfNotPresent | Never
-
-# ============================================================================
-# LAYER 1: PLATFORM
-# ============================================================================
-platform:
-  kubernetes:
-    # context: ""                    # Empty = use current kubectl context
-    namespace: ""                    # Empty = use deployment name
-    # create_namespace: true
-
-  storage:
-    s3:
-      # REQUIRED: S3-compatible endpoint URL
-      # Examples:
-      #   FlashBlade: http://your-s3-endpoint:80
-      #   MinIO: http://minio:9000
-      #   AWS S3: https://s3.us-east-1.amazonaws.com
-      endpoint: ""
-
-      # REQUIRED: S3 credentials (env-var substitution keeps them out of the file)
-      access_key: ""
-      secret_key: ""
-
-      # region: us-east-1
-      # path_style: true             # true for FlashBlade/MinIO, false for AWS S3
-      # buckets:                     # default: <name>-bronze, <name>-silver, <name>-gold
-      #   bronze: <name>-bronze        # bucket names are global on most stores; keep them unique
-      #   silver: <name>-silver
-      #   gold: <name>-gold
-      # create_buckets: true
-
-    ## Scratch storage for Spark shuffle PVCs
-    ## When enabled, Spark shuffle data uses PVCs instead of emptyDir.
-    ## Any StorageClass that provides RWO volumes works (Portworx, local-path, EBS, etc.).
-    # scratch:
-    #   enabled: false
-    #   storage_class: px-csi-scratch    # Name of the StorageClass to use. Must exist
-    #                                    # before `deploy` runs -- a cluster admin
-    #                                    # installs it once with
-    #                                    # `lakebench admin install-scratch-storage-class`.
-    #                                    # Each executor's PVC size comes from its job
-    #                                    # profile (silver-build 300Gi).
-    #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Consumed by
-    #                                    # `admin install-scratch-storage-class`. Examples:
-    #                                    #   pxd.portworx.com (Portworx)
-    #                                    #   rancher.io/local-path (local-path)
-    #                                    #   ebs.csi.aws.com (AWS EBS)
-    #   parameters:                      # Provider-specific StorageClass parameters
-    #     repl: "1"
-    #     io_profile: auto
-    #     priority_io: high
-
-  # compute:
-  #   spark:
-  #     operator:                  # Shared; a cluster admin installs it once with
-  #                                  # `lakebench admin install-spark-operator`.
-  #       namespace: spark-operator
-  #       version: "2.5.1"           # v2.x uses webhook for volume injection
-  #
-  #     ## Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed
-  #     ## in the job profiles, proven at 1 TB+ scale.
-  #     ## Per-job executor count overrides (null = auto from scale factor).
-  #     ## Per-executor sizing (cores, memory, PVC) stays fixed from proven profiles.
-  #     # bronze_executors: null
-  #     # silver_executors: null
-  #     # gold_executors: null
-  #     ## Streaming job executor overrides (continuous mode)
-  #     # bronze_ingest_executors: null
-  #     # silver_stream_executors: null
-  #     # gold_refresh_executors: null
-  #     ## Global driver resource overrides
-  #     # driver_memory: "8g"
-  #     # driver_cores: 4
-  #
-  #   postgres:
-  #     storage: 10Gi
-  #     # storage_class: ""           # Empty = cluster default
-
-# ============================================================================
-# LAYER 2: DATA ARCHITECTURE
-# ============================================================================
-# See docs/recipes.md for supported (catalog, table_format, engine, query_engine)
-# combinations and guidance on choosing a recipe.
-architecture:
-  # pipeline_engine: spark           # Pipeline engine (spark only today)
-  catalog:
-    type: hive                     # hive | polaris | none
-    ## Hive Metastore tuning (uncomment to override defaults)
-    # hive:
-    #   operator:                    # Shared; a cluster admin installs the Stackable
-    #                                # operators once (docs/component-hive.md).
-    #     namespace: stackable
-    #     version: "25.7.0"
-    #   resources:
-    #     cpu_min: 500m
-    #     cpu_max: "2"
-    #     memory: 4Gi
-    ## Polaris REST catalog settings (used when type: polaris)
-    # polaris:
-    #   port: 8181
-    #   resources:
-    #     cpu: "1"
-    #     memory: 2Gi
-
-  # table_format:
-  #   type: iceberg                  # iceberg (only fully supported format)
-  #   iceberg:
-  #     version: "1.11.0"
-
-  # query_engine:
-  #   type: trino                    # trino | spark-thrift | duckdb | none
-  #   trino:
-  #     coordinator:
-  #       cpu: "2"
-  #       memory: 8Gi
-  #     worker:
-  #       replicas: 2
-  #       cpu: "4"
-  #       memory: 16Gi
-  #       spill_enabled: true
-  #       spill_max_per_node: 40Gi
-  #       storage: 50Gi
-  #       storage_class: ""          # Empty = emptyDir (ephemeral). Set a class name for PVC-backed storage.
-  #     catalog_name: lakehouse      # Trino catalog name for Iceberg
-  #   # spark_thrift:                 # Spark Thrift Server (alternative to Trino)
-  #   #   cores: 2
-  #   #   memory: 4g
-  #   # duckdb:                        # DuckDB (lightweight in-process engine)
-  #   #   cores: 2
-  #   #   memory: 4g
-  #   #   catalog_name: lakehouse
-
-  pipeline:
-    mode: batch                    # batch | continuous
-  #   ## Continuous pipeline settings (used when mode: continuous)
-  #   continuous:
-  #     bronze_trigger_interval: "30 seconds"
-  #     silver_trigger_interval: "60 seconds"
-  #     gold_refresh_interval: "5 minutes"
-  #     run_duration: 1800           # Streaming run duration in seconds
-  #     checkpoint_base: checkpoints # S3 prefix for checkpoint data
-  #     ## Throughput tuning
-  #     max_files_per_trigger: 10    # Files per micro-batch; unset = auto (data arrives all window)
-  #     bronze_target_file_size_mb: 512
-  #     silver_target_file_size_mb: 512
-  #     gold_target_file_size_mb: 128
-  #     ## In-stream benchmark rounds (runs Trino queries while streaming)
-  #     benchmark_interval: 300      # Seconds between rounds (300-3600)
-  #     benchmark_warmup: 300        # Seconds before first round (300-1800)
-
-  ## Benchmark configuration
-  ## Runs analytical SQL queries against silver/gold tables via the configured
-  ## query engine (Trino, Spark Thrift, or DuckDB). See docs/benchmarking.md.
-  # benchmark:
-  #   mode: power                    # power: single sequential stream (per-query latency)
-  #                                  # throughput: N concurrent streams (aggregate QpH)
-  #                                  # composite: geometric mean of power + throughput
-  #                                  # `lakebench run` measures power only and refuses
-  #                                  # throughput, composite, cache: cold and streams
-  #                                  # above 1; `lakebench benchmark` runs them all.
-  #   streams: 4                     # Concurrent streams (lakebench benchmark only)
-  #   cache: hot                     # hot: caches stay populated between queries
-  #                                  # cold: metadata cache flushed before each run
-  #   iterations: 3                  # Runs per query. 1 = raw timing, 3+ = median
-
-  ## Table name overrides (namespace.table format)
-  # tables:
-  #   bronze: default.bronze_raw
-  #   silver: silver.customer_interactions_enriched
-  #   gold: gold.customer_executive_dashboard
-
-# ============================================================================
-# WORKLOAD
-# ============================================================================
-# What runs through the architecture: the generated corpus and its scale.
-workload:
-  # schema: customer360            # customer360 | financial
-  datagen:
-    # Image: configured via images.datagen (see docs/datagen-custom-images.md)
-    ## Scale is per-schema:
-    ##   customer360: ~10 GB bronze / unit (~100,000 customers)
-    ##   financial:   ~8.4 GB bronze / unit (~111,111 entities and their
-    ##                accounts + 60 months of pacs.008 transactions)
-    scale: 10                    # Interpreted per-schema; see above
-    # mode: auto                    # S3 delivery pattern: auto | batch | continuous
-    ##   batch:      one PUT per Parquet file (bursty upload, higher peak RSS)
-    ##   continuous: S3 multipart upload as row-groups close
-    ##   auto:       continuous at every scale (owner D18, 2026-09-28)
-    ## Row content is byte-identical across modes at fixed seed. CPU/memory
-    ## are sized by scale via the autosizer independently of mode, and any
-    ## cpu/memory you set are honoured.
-    # parallelism: 8                # Number of datagen pods. Left commented so
-                                    # the autosizer picks a value from cluster
-                                    # capacity (scale > 50 scales up beyond the
-                                    # default; small scales cap down). Set an
-                                    # explicit integer to pin it.
-    # file_size: 64mb
-    # dirty_data_ratio: 0.08         # customer360 only; financial ignores it
-    # generators: 0                # Per-pod generator threads (0 = auto: follow pod CPU)
-    # timestamp_start: "2024-01-01"
-    # timestamp_end: "2025-01-01"    # exclusive
-  ## Customer360 workload overrides
-  # customer360:
-  #   unique_customers: null       # Override: derived from scale if null
-
-# ============================================================================
-# LAYER 3: OBSERVABILITY
-# ============================================================================
-# Flat schema -- use top-level keys directly under observability:
-# observability:
-#   enabled: false                   # Deploy kube-prometheus-stack (Prometheus + Grafana)
-#   dashboards_enabled: true         # Grafana dashboards
-#   retention: 7d                    # Prometheus data retention
-#   storage: 10Gi                    # Prometheus PVC size
-
-# ============================================================================
-# SPARK CONFIGURATION OVERRIDES
-# ============================================================================
-# Your own Spark keys, merged over the job defaults (each a key=value under
-# conf). Keys Lakebench sets for every job (shuffle partitions, the S3A
-# connection pool, catalog, jars, UI) are refused. The job defaults:
-# spark:
-#   conf:
-#     spark.hadoop.fs.s3a.multipart.size: "268435456"
-#     spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
-#     spark.hadoop.fs.s3a.attempts.maximum: "20"
-#     spark.hadoop.fs.s3a.retry.limit: "10"
-#     spark.hadoop.fs.s3a.retry.interval: "500ms"
-#     spark.memory.fraction: "0.8"
-#     spark.memory.storageFraction: "0.3"
-"""

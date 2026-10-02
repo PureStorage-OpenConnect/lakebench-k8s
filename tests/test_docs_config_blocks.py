@@ -80,5 +80,11 @@ def test_docs_config_block_loads(data, env, tmp_path, monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         # As `lakebench run` loads it: a documented config must also pass the
-        # run-only refusals (benchmark mode, cache, streams).
+        # run-only refusals (benchmark mode, cache, streams). Most blocks are
+        # fragments that show one section, so a missing recipe (the
+        # default-recipe note) is allowed; a block that names a recipe must
+        # still agree with it, or the load fails.
+        warnings.filterwarnings(
+            "ignore", message=r"(no recipe|recipe 'default'): ", category=DeprecationWarning
+        )
         load_config(path, purpose=LoadPurpose.RUN)

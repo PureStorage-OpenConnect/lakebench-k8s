@@ -75,6 +75,9 @@ class TestValidationErrorMessage:
                 Path(__file__).resolve().parents[1] / "examples" / "hive-iceberg-spark-duckdb.yaml"
             ).read_text()
         )
+        # The components alone pick the combination; under the recipe a
+        # different format is refused as a recipe conflict first (CFG-5).
+        cfg.pop("recipe")
         cfg["architecture"]["table_format"] = {"type": table_format}
         cfg["architecture"]["query_engine"]["type"] = query_engine
         path = tmp_path / "bad.yaml"

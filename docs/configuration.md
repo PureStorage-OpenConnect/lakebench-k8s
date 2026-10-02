@@ -204,14 +204,25 @@ platform:
   storage:
     s3:
       endpoint: ${S3_ENDPOINT}
-      access_key: ${S3_ACCESS_KEY}
-      secret_key: ${S3_SECRET_KEY}
+      access_key: "${S3_ACCESS_KEY}"
+      secret_key: "${S3_SECRET_KEY}"
 workload:
   datagen:
     scale: ${LAKEBENCH_SCALE:-10}
 ```
 
-Unresolved variables without defaults produce a clear error.
+Unresolved variables without defaults produce one error naming all of them.
+Substitution runs value by value, not on the file text. An unquoted value
+is trimmed and, unless it carries a tag such as `!!str`, typed as YAML types
+it (`0042` is octal 34, `true` a bool, an empty value null), as in v1.6. The
+environment value itself is never parsed as YAML: ` #`, quotes or `a: b`
+inside it stay text, and its line breaks are not folded. A quoted value
+(`"${S3_SECRET}"`) arrives verbatim as a string unless it carries a tag
+such as `!!int`, so quote every credential reference. A block scalar keeps the
+substituted text inside its own line breaks. A `${VAR}` in a comment is not
+read. An unclosed `${VAR:-default` (a default cut short by ` #`) is an
+error, and inside flow syntax (`[${A}, ${B}]`) each reference must be
+quoted.
 
 ### Nested Config (v1.2 Compatible)
 
@@ -1088,11 +1099,35 @@ pulls the latest version.
 
 ## Generating a Starter Config
 
-Use `lakebench init` to generate a starter configuration file interactively:
+Use `lakebench init` to write a starter configuration file:
 
 ```bash
 lakebench init --output my-config.yaml
 ```
 
-This creates a well-commented YAML file with all defaults that you can
-customize for your environment.
+It writes 12 lines of settings: a unique name (`lb-<user>-<4 hex>` unless
+`--name` is given), `recipe:` once (`polaris-iceberg-spark-trino` unless
+`--recipe` is given), the workload and scale (1), the S3 endpoint and the
+two credentials as `${LAKEBENCH_S3_ACCESS_KEY}` and
+`${LAKEBENCH_S3_SECRET_KEY}` (`--credentials-env PREFIX` renames them).
+Every other key keeps its default and is described on this page. See
+[cli-reference.md](cli-reference.md#init) for the flags.
+
+### Recipes and components
+
+A recipe sets `architecture.catalog.type`, `architecture.table_format.type`,
+`architecture.pipeline_engine` and `architecture.query_engine.type`. A
+config may leave them out or write the value the recipe sets; any other
+value is refused at load with both keys named, for example
+`architecture.catalog.type is 'hive' but recipe 'polaris-iceberg-spark-trino'
+sets 'polaris'; delete one of them`. The message also names the recipe a
+v1.6 deployment from that file used (v1.6 let the written value win), so a
+deployment made from it can be kept by writing that recipe. `deploy`, `run`
+and the other commands that change data refuse such a config; `destroy`,
+`status`, `report` and the inspect commands load it as v1.6 did, with a
+note. Images and engine resources stay overridable under a recipe.
+
+A config with no `recipe:`, or `recipe: default`, resolves as in v1.6: to
+`hive-iceberg-spark-trino` when it sets no component, otherwise to the
+components it sets. It loads with a deprecation note naming the recipe to
+write; v1.8 requires `recipe:`.

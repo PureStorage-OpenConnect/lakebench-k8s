@@ -122,6 +122,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   continuous pair Trino against Spark Thrift (runs 011043-e338c5 and
   073533-9de9c9, 5 rounds against 4), which 1.6 and earlier 1.7 builds called
   like-for-like, now reads not like-for-like; no identity digest moves.
+- **`init` writes a first-day config, and the wizard is removed.** The file
+  has 12 lines of settings: a unique name (`lb-<user>-<4 hex>`, new on every
+  `init`, where `my-lakehouse` was shared), `recipe:` once
+  (`polaris-iceberg-spark-trino` unless `--recipe` is given), the workload,
+  scale 1 (was 10), the endpoint, and the two S3 credentials as
+  `${LAKEBENCH_S3_ACCESS_KEY}` and `${LAKEBENCH_S3_SECRET_KEY}`
+  (`--credentials-env PREFIX` renames them). The recipe's components are
+  written as a commented block, so `init --recipe polaris-*` no longer
+  writes `catalog.type: hive` and resolves to Hive. No Polaris client
+  secret is written: deploy generates one per deployment. `init` prints its choices on stderr, with or without a
+  terminal, and refuses (exit 2, nothing written) a combination that would
+  not load. `--access-key` and `--secret-key` are refused with exit 2 and
+  the values are never echoed; `--interactive`, `-i` and `--advanced` print
+  one line and write the default. `--overwrite` is the new spelling of
+  `--force`. Overwriting a config keeps its `name:` unless `--name` is
+  given, and refuses (exit 3) when the new file would keep that name but
+  move the deployment: another namespace, bucket, S3 endpoint (filling in
+  an empty one is fine) or recipe. The replaced file is read as `destroy`
+  reads it; when where it deploys depends on a variable this shell has not
+  set, the overwrite is refused until it is set. The 330-line commented template (`generate_example_config_yaml`)
+  is removed; docs/configuration.md is the key reference.
+- **A component that contradicts its recipe is refused at load.**
+  `architecture.catalog.type`, `table_format.type`, `pipeline_engine` and
+  `query_engine.type` may be left out under a recipe or written with the
+  recipe's value; another value fails `deploy`, `run` and the other
+  commands that change data, naming both keys and the recipe a v1.6
+  deployment from that file actually used. v1.6 let the written value win
+  silently. `destroy`, `status`, `report` and the inspect commands still
+  load such a config as v1.6 did, with a note. Images and engine resources
+  stay overridable.
+- **`${VAR}` is substituted per value, not in the file text.** An unquoted
+  value (`seed: ${LB_SEED}`) is typed as before: the substituted text is
+  trimmed of YAML whitespace and, when untagged, typed by YAML 1.1, so
+  `0042` is still 34, `0x1F` 31, `true` a bool and an empty value null; an
+  explicit tag such as `!!str` still wins. What changed is that the
+  environment value is no longer parsed as YAML: a value holding ` #`,
+  quotes, `[..]`, `{..}` or `a: b` stays that text, where v1.6 cut it at the
+  comment, dropped the quotes or built a list or mapping, and its line
+  breaks and repeated spaces are kept rather than folded. A quoted value
+  (`secret_key: "${S3_SECRET}"`) arrives verbatim as a string (unless it
+  carries a tag such as `!!int`), so a secret
+  with a backslash, quotes or only digits is no longer retyped or echoed in
+  a parse error; `init` writes the credential references quoted. A block
+  scalar (`|`, `>`) keeps the substituted text inside its own line breaks.
+  Two things fail where they loaded before: an unclosed `${VAR:-default`
+  (a default cut short by ` #`), and a reference inside flow syntax
+  (`[${A}, ${B}]`), which must be quoted. A `${VAR}` in a comment is no
+  longer read, and every unset variable is named in one error.
+- **A config with no `recipe:`, or `recipe: default`, is deprecated.** It
+  still resolves as before (to `hive-iceberg-spark-trino` when it sets no
+  component, otherwise to the components it sets) and loads with a note
+  naming the recipe to write. v1.8 requires `recipe:`.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to

@@ -60,7 +60,7 @@ pip install lakebench-k8s
 
 ```bash
 pip install lakebench-k8s
-lakebench init                                 # quick setup (4 questions), writes lakebench.yaml
+lakebench init                                 # writes lakebench.yaml; export the two S3 key variables it names
 lakebench run lakebench.yaml --generate --yes  # deploy + generate + pipeline + benchmark
 lakebench results lakebench.yaml               # view scorecard
 lakebench destroy lakebench.yaml               # tear down what this deployment owns
@@ -75,24 +75,29 @@ installs it once with `lakebench admin install-spark-operator` (see
 Minimum config:
 
 ```yaml
-# lakebench.yaml
-name: my-lakehouse                 # names the namespace and the buckets
+# lakebench.yaml, as `lakebench init` writes it
+name: lb-alice-7f3c                # names the namespace and the buckets
+recipe: polaris-iceberg-spark-trino
+workload:
+  schema: customer360
+  datagen:
+    scale: 1                       # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
 platform:
   storage:
     s3:
       endpoint: http://s3.example.com:80
-      access_key: YOUR_KEY
-      secret_key: YOUR_SECRET
-workload:
-  datagen:
-    scale: 10                      # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
+      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
+      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
 ```
 
 The name is required by every command that changes data (`deploy`,
 `generate`, `run` and the rest); a config without one is refused with the
 name to add. Buckets default to `<name>-bronze`, `<name>-silver`
 and `<name>-gold`, so they are unique on stores where bucket names are
-global (FlashBlade, AWS S3). Recipe defaults to `hive-iceberg-spark-trino`.
+global (FlashBlade, AWS S3). A config with no `recipe:` (or `recipe: default`)
+still resolves to `hive-iceberg-spark-trino` with a deprecation note; v1.8
+requires the recipe. A component written against the recipe (say
+`catalog.type: hive` under a Polaris recipe) is refused at load.
 Override anything in the nested YAML:
 
 ```yaml
@@ -105,8 +110,8 @@ platform:
   storage:
     s3:
       endpoint: http://10.0.1.50:80
-      access_key: ${S3_ACCESS_KEY}   # env var substitution
-      secret_key: ${S3_SECRET_KEY}
+      access_key: "${S3_ACCESS_KEY}"   # env var substitution; quote it
+      secret_key: "${S3_SECRET_KEY}"
 architecture:
   pipeline:
     mode: batch
@@ -147,7 +152,7 @@ Every run records its state in `metrics.json`. As computed by this release:
 | `polaris-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
 | `polaris-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
 
-- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Set architecture.table_format.type to iceberg (for example recipe: polaris-iceberg-spark-trino).
+- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino), or with no recipe set architecture.table_format.type to iceberg.
 - Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
 - AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
 
@@ -166,8 +171,8 @@ or destroys anything. It reports the verdict as its exit code and names the
 one condition a pair that is not like-for-like is missing, with the command
 that supplies it where one exists.
 
-For all recipes, see [`examples/`](https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/examples) or run `lakebench init --advanced`
-for the full interactive wizard.
+For all recipes, see [`examples/`](https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/examples), `lakebench config recipes`,
+or `lakebench init --recipe <name>`.
 
 ## What You Get
 

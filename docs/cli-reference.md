@@ -24,7 +24,7 @@ Exit codes are listed in [Exit Codes](exit-codes.md).
 
 ### init
 
-Generate a starter configuration file.
+Write a starter configuration file.
 
 ```
 lakebench init [OPTIONS]
@@ -33,32 +33,37 @@ lakebench init [OPTIONS]
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--output` | `-o` | `lakebench.yaml` | Output file path |
-| `--name` | `-n` | `my-lakehouse` | Deployment name |
-| `--scale` | `-s` | `10` | Scale factor (1 = ~10 GB, 100 = ~1 TB) |
+| `--name` | `-n` | `lb-<user>-<4 hex>` | Deployment name; the default is new on every `init` |
+| `--scale` | `-s` | `1` (`0.1` with `--local`) | Scale factor (1 = ~10 GB, 100 = ~1 TB) |
 | `--endpoint` | | `""` | S3 endpoint URL |
-| `--access-key` | | `""` | S3 access key |
-| `--secret-key` | | `""` | S3 secret key |
-| `--namespace` | | `""` | Kubernetes namespace |
-| `--recipe` | `-r` | `""` | Architecture recipe |
+| `--credentials-env` | | `LAKEBENCH_S3` | Prefix of the two credential variables: the file references `${PREFIX_ACCESS_KEY}` and `${PREFIX_SECRET_KEY}` |
+| `--namespace` | | `""` | Kubernetes namespace (default: the name) |
+| `--recipe` | `-r` | `polaris-iceberg-spark-trino` | Architecture recipe (`lakebench config recipes`) |
 | `--workload` | `-w` | `customer360` | Workload schema: `customer360` or `financial` |
-| `--interactive/--no-interactive` | `-i` | `true` | Guided setup with prompts |
-| `--advanced` | | `false` | Full 5-step wizard (recipe, mode, scale) |
-| `--force` | | `false` | Overwrite existing file (`-f` is deprecated here) |
+| `--overwrite` | | `false` | Overwrite an existing file; keeps its name, and refuses (exit 3) a change of namespace, buckets, endpoint or recipe under that name |
+| `--force` | | `false` | Old spelling of `--overwrite` (`-f` is deprecated here) |
 | `--local` | | `false` | Generate a config for local mode (podman/docker, no Kubernetes) |
 
-Quick mode (default) asks 4 questions: endpoint, access key, secret key, scale.
-Advanced mode (`--advanced`) runs the full 5-step wizard with recipe selection,
-pipeline mode, and detailed review.
+The file has 12 lines of settings: the name, the recipe once, the workload
+and scale, the endpoint and the two S3 credentials as `${VAR}` references.
+The components the recipe sets are written as a commented block; written
+out, they must agree with the recipe or the config is refused at load. No
+plaintext secret is written, and no Polaris client secret: deploy creates
+one for a new Polaris. `init` prints what it chose on stderr, with or
+without a terminal, and refuses (exit 2, nothing written) a combination
+that would not load, such as `--workload financial` with a Delta recipe.
+
+The wizard is removed. `--interactive`, `-i` and `--advanced` print one line
+saying so and write the default config. `--access-key` and `--secret-key`
+are refused with exit 2; export the variables instead.
 
 ```bash
-# Quick setup (4 questions)
+# Default: Polaris, customer360, scale 1
 lakebench init
+export LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
 
-# Full wizard with recipe selection
-lakebench init --advanced
-
-# Non-interactive with flags
-lakebench init --no-interactive --endpoint http://my-s3:80 --access-key AAA --secret-key BBB
+# Another recipe and endpoint, credentials from MY_LAB_ACCESS_KEY / MY_LAB_SECRET_KEY
+lakebench init -r hive-iceberg-spark-trino --endpoint http://my-s3:80 --credentials-env MY_LAB
 ```
 
 ### compare
@@ -833,7 +838,7 @@ No flags. Prints the installed lakebench version.
 ### Typical Workflow
 
 ```bash
-lakebench init --interactive          # create config
+lakebench init                        # create config
 lakebench config validate             # check connectivity
 lakebench deploy --yes                # deploy infrastructure
 lakebench generate --timeout 14400    # generate data (large scales need hours)

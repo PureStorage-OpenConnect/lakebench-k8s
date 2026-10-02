@@ -14,7 +14,7 @@ recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query
 Polaris recipes need no `client_secret`: `deploy` generates one per
 deployment and stores it in the namespace.
 
-Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
+Recipe defaults are merged without overwriting: images, versions and engine resources you set always take precedence. The four components a recipe sets (`architecture.catalog.type`, `architecture.table_format.type`, `architecture.pipeline_engine`, `architecture.query_engine.type`) may be left out or written with the recipe's value; a different value is refused at load, naming both keys. A config with no `recipe:`, or `recipe: default`, still resolves to `hive-iceberg-spark-trino` (or to the components it sets) with a deprecation note; v1.8 requires `recipe:`. Available recipe names: `hive-iceberg-spark-trino` (`default` is a deprecated alias), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
 
 ## Quick Reference
 
@@ -279,7 +279,7 @@ This table is generated from the code:
 | `polaris-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
 | `polaris-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
 
-- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Set architecture.table_format.type to iceberg (for example recipe: polaris-iceberg-spark-trino).
+- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino), or with no recipe set architecture.table_format.type to iceberg.
 - Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
 - AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
 
@@ -332,7 +332,7 @@ observability:
   enabled: true                        # deploy Prometheus + Grafana
 ```
 
-Recipe defaults are merged via `_deep_setdefault` -- your explicit values always take precedence. See the [Configuration Reference](configuration.md) for the full YAML schema.
+Recipe defaults are merged via `_deep_setdefault`: your explicit values take precedence, except the four recipe-owned components, which must agree with the recipe. See the [Configuration Reference](configuration.md) for the full YAML schema.
 
 ## Cross-References
 
