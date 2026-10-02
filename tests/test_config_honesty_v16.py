@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
-from pydantic import ValidationError
 
 from lakebench.config import LakebenchConfig
 from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
@@ -96,13 +95,28 @@ def test_run_provenance_records_the_rendered_hive_not_images_hive():
     assert "4.0.1" not in recorded
 
 
+def _load(tmp_path, data: dict, purpose):
+    from lakebench.config import load_config
+
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(data))
+    return load_config(path, purpose=purpose, print_notes=False)
+
+
+# Superseded by CFG-9 (CC-17): images.hive never selected the Hive that runs.
+# A value naming another Hive is refused by the commands that change data
+# with fix text; one naming 3.1.3 changed nothing and loads with a note.
 @pytest.mark.parametrize("value", ["apache/hive:4.0.1", "4.0.1", "apache/hive@sha256:abc"])
-def test_images_hive_naming_another_version_warns_it_has_no_effect(value):
-    with pytest.warns(DeprecationWarning) as rec:
-        make_config(images={"hive": value})
-    hits = _hive_warnings(rec)
-    assert hits, [str(w.message) for w in rec]
-    assert "has no effect" in hits[0] and STACKABLE_HIVE_VERSION in hits[0]
+def test_images_hive_naming_another_version_is_refused(tmp_path, value):
+    from lakebench.config import LoadPurpose
+    from lakebench.config.loader import ConfigValidationError, load_notes
+
+    data = {"name": "t", "images": {"hive": value}, "platform": _s3(access_key="a", secret_key="b")}
+    with pytest.raises(ConfigValidationError) as e:
+        _load(tmp_path, data, LoadPurpose.MUTATE)
+    assert "'hive' was removed" in str(e.value) and STACKABLE_HIVE_VERSION in str(e.value)
+    cfg = _load(tmp_path, data, LoadPurpose.TEARDOWN)
+    assert any("'hive' (ImagesConfig)" in t for t in load_notes(cfg).texts())
 
 
 @pytest.mark.parametrize(
@@ -114,11 +128,14 @@ def test_images_hive_naming_another_version_warns_it_has_no_effect(value):
         "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0",
     ],
 )
-def test_images_hive_naming_3_1_3_does_not_warn(value):
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter("always")
-        make_config(images={"hive": value})
-    assert not _hive_warnings(rec)
+def test_images_hive_naming_3_1_3_loads_with_a_note(tmp_path, value):
+    from lakebench.config import LoadPurpose
+    from lakebench.config.loader import load_notes
+
+    data = {"name": "t", "images": {"hive": value}, "platform": _s3(access_key="a", secret_key="b")}
+    cfg = _load(tmp_path, data, LoadPurpose.RUN)
+    notes = load_notes(cfg).texts()
+    assert any("'hive' (ImagesConfig)" in t and "old default" in t for t in notes), notes
 
 
 # -- LB-190: secret_ref and fields read by nothing ----------------------------
@@ -128,30 +145,45 @@ def _s3(**extra):
     return {"storage": {"s3": {"endpoint": "http://minio:9000", **extra}}}
 
 
-def test_secret_ref_without_inline_keys_is_refused_at_load():
-    with pytest.raises(ValidationError, match="secret_ref .* is not supported"):
-        LakebenchConfig(name="t", platform=_s3(secret_ref="my-secret"))
+# Superseded by CFG-9 (CC-17): secret_ref is removed. Refused with fix text by
+# the commands that change data, with or without inline keys; destroy still
+# loads an old secret_ref-only deployment.
+@pytest.mark.parametrize("keys", [{}, {"access_key": "a", "secret_key": "b"}])
+def test_secret_ref_is_refused_with_fix_text(tmp_path, keys):
+    from lakebench.config import LoadPurpose
+    from lakebench.config.loader import ConfigValidationError
+
+    data = {"name": "t", "platform": _s3(secret_ref="my-secret", **keys)}
+    with pytest.raises(ConfigValidationError) as e:
+        _load(tmp_path, data, LoadPurpose.MUTATE)
+    assert "'secret_ref' was removed" in str(e.value)
+    assert "access_key and secret_key" in str(e.value)
 
 
-def test_secret_ref_only_config_still_loads_for_teardown():
-    # destroy/status/clean load with allow_long_names; an old secret_ref-only
-    # deployment must stay destroyable through lakebench destroy.
+def test_secret_ref_only_config_still_loads_for_teardown(tmp_path):
+    from lakebench.config import LoadPurpose
+    from lakebench.config.loader import load_notes
+
     data = {"name": "t", "platform": _s3(secret_ref="my-secret")}
-    with pytest.raises(ValidationError):
-        LakebenchConfig.model_validate(data)
-    with pytest.warns(DeprecationWarning, match="secret_ref"):
-        cfg = LakebenchConfig.model_validate(data, context={"allow_long_names": True})
-    assert cfg.has_s3_secret_ref()
+    cfg = _load(tmp_path, data, LoadPurpose.TEARDOWN)
+    assert not hasattr(cfg.platform.storage.s3, "secret_ref")
+    assert any("'secret_ref' (S3Config)" in t for t in load_notes(cfg).texts())
 
 
-def test_secret_ref_with_inline_keys_loads_and_warns_no_effect():
-    with pytest.warns(DeprecationWarning) as rec:
-        cfg = LakebenchConfig(
-            name="t", platform=_s3(access_key="a", secret_key="b", secret_ref="my-secret")
-        )
-    hits = [str(w.message) for w in rec if "'secret_ref' (S3Config)" in str(w.message)]
-    assert hits and "has no effect" in hits[0]
-    assert cfg.has_inline_s3_credentials()
+def test_secret_ref_with_inline_keys_is_refused_with_fix_text(tmp_path):
+    # Superseded: this used to load with a warning that it had no effect.
+    from lakebench.config import LoadPurpose
+    from lakebench.config.loader import ConfigValidationError
+
+    data = {"name": "t", "platform": _s3(access_key="a", secret_key="b", secret_ref="s")}
+    with pytest.raises(ConfigValidationError, match="'secret_ref' was removed"):
+        _load(tmp_path, data, LoadPurpose.RUN)
+    # Its v1.6 default (empty) changed nothing and loads anywhere.
+    _load(
+        tmp_path,
+        {"name": "t", "platform": _s3(access_key="a", secret_key="b", secret_ref="")},
+        LoadPurpose.RUN,
+    )
 
 
 def test_config_without_any_credentials_still_loads():
@@ -160,40 +192,53 @@ def test_config_without_any_credentials_still_loads():
     assert not cfg.has_inline_s3_credentials()
 
 
+# Superseded by CFG-9 (CC-17): the fields nothing read are removed. A
+# non-default value is refused with fix text by the commands that change
+# data and dropped with a note by teardown.
 @pytest.mark.parametrize(
-    ("overrides", "field"),
+    ("overrides", "key", "fix"),
     [
         (
             {"architecture": {"catalog": {"polaris": {"version": "1.5.0"}}}},
-            "'version' (PolarisConfig)",
+            "'version' was removed",
+            "tag of images.polaris",
         ),
-        ({"observability": {"storage_class": "fast"}}, "'storage_class' (ObservabilityConfig)"),
+        (
+            {"observability": {"storage_class": "fast"}},
+            "'storage_class' was removed",
+            "cluster default StorageClass",
+        ),
         (
             {"architecture": {"catalog": {"hive": {"thrift": {"min_threads": 20}}}}},
-            "'min_threads' (HiveThriftConfig)",
+            "'thrift' was removed",
+            "min.threads 10",
         ),
         (
             {"architecture": {"catalog": {"hive": {"thrift": {"max_threads": 99}}}}},
-            "'max_threads' (HiveThriftConfig)",
+            "'thrift' was removed",
+            "max.threads 50",
         ),
         (
             {"architecture": {"catalog": {"hive": {"thrift": {"client_timeout": "60s"}}}}},
-            "'client_timeout' (HiveThriftConfig)",
+            "'thrift' was removed",
+            "socket.timeout 300s",
         ),
     ],
 )
-def test_unread_field_set_warns_it_has_no_effect(overrides, field):
-    with pytest.warns(DeprecationWarning) as rec:
-        make_config(**overrides)
-    hits = [str(w.message) for w in rec if field in str(w.message)]
-    assert hits, [str(w.message) for w in rec]
-    assert "has no effect" in hits[0]
+def test_unread_field_set_is_refused_with_fix_text(tmp_path, overrides, key, fix):
+    from lakebench.config import LoadPurpose
+    from lakebench.config.loader import ConfigValidationError
+
+    data = {"name": "t", "platform": _s3(access_key="a", secret_key="b"), **overrides}
+    with pytest.raises(ConfigValidationError) as e:
+        _load(tmp_path, data, LoadPurpose.MUTATE)
+    assert key in str(e.value) and fix in str(e.value)
+    assert _load(tmp_path, data, LoadPurpose.TEARDOWN).name == "t"
 
 
-# The five fields above are CFG-9 removals (CC-17 turns their warning into a
-# refusal). The unread Spark sizing blocks and scratch.size were superseded by
-# CFG-1 (CC-11): a command that changes data refuses them with fix text, and
-# the read and teardown commands drop them with a note.
+# The unread Spark sizing blocks and scratch.size were superseded by CFG-1
+# (CC-11): a command that changes data refuses them with fix text, and the
+# read and teardown commands drop them with a note.
 @pytest.mark.parametrize(
     ("overrides", "key", "fix"),
     [

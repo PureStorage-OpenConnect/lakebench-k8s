@@ -26,6 +26,30 @@ from ._load_context import CHANGES_DATA, LoadPurpose, emit_note, purpose_from_co
 logger = logging.getLogger(__name__)
 
 
+def _matches_old_default(value: object, default: object) -> bool:
+    """Whether *value* (as written in YAML) is the old *default*.
+
+    A mapping matches when every key it sets matches the default's (keys it
+    leaves out keep the default); a list matches element by element; a
+    callable default is a predicate on the value.
+    """
+    if callable(default):
+        return bool(default(value))
+    if isinstance(default, dict):
+        return isinstance(value, dict) and all(
+            k in default and _matches_old_default(v, default[k]) for k, v in value.items()
+        )
+    if isinstance(default, list):
+        return (
+            isinstance(value, list)
+            and len(value) == len(default)
+            and all(_matches_old_default(v, d) for v, d in zip(value, default, strict=True))
+        )
+    if isinstance(default, bool) or isinstance(value, bool):
+        return value is default
+    return bool(value == default)
+
+
 class ConfigModel(BaseModel):
     """Base for every user-facing config model: unknown keys are errors.
 
@@ -50,6 +74,12 @@ class ConfigModel(BaseModel):
     # DeprecationWarning, as before v1.7.
     _removed_keys: ClassVar[dict[str, str]] = {}
 
+    # Removed keys whose old default changed nothing, mapped to that default
+    # (or a predicate on the value). v1.6 wrote every field (save_config, the
+    # generated defaults), so a key still at that value is dropped with a
+    # note under every purpose; any other value takes the _removed_keys path.
+    _removed_defaults: ClassVar[dict[str, Any]] = {}
+
     @model_validator(mode="before")
     @classmethod
     def _drop_removed_keys(cls, data: object, info: ValidationInfo) -> object:
@@ -58,6 +88,24 @@ class ConfigModel(BaseModel):
         present = [k for k in cls._removed_keys if k in data]
         if not present:
             return data
+        at_default = [
+            k
+            for k in present
+            if k in cls._removed_defaults
+            and _matches_old_default(data[k], cls._removed_defaults[k])
+        ]
+        if at_default:
+            data = dict(data)
+            for key in at_default:
+                data.pop(key)
+                emit_note(
+                    f"'{key}' ({cls.__name__}) is no longer used and is ignored (it carried "
+                    f"its old default): {cls._removed_keys[key]} Delete it from the config.",
+                    kind="removed",
+                )
+            present = [k for k in present if k not in at_default]
+            if not present:
+                return data
         if purpose_from_context(info.context) in CHANGES_DATA:
             raise ValueError(
                 "; ".join(
@@ -70,7 +118,7 @@ class ConfigModel(BaseModel):
         for key in present:
             data.pop(key)
             emit_note(
-                f"'{key}' ({cls.__name__}) is no longer used and is ignored. "
+                f"'{key}' ({cls.__name__}) is no longer used and is ignored: "
                 f"{cls._removed_keys[key]} Commands that change data refuse the config "
                 "until it is deleted.",
                 kind="removed",
@@ -305,6 +353,25 @@ class ImagesConfig(ConfigModel):
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "pull_secrets": "No deployer ever applied it; removed in v1.5.",
+        "hive": (
+            f"the Stackable HiveCluster always runs Hive {STACKABLE_HIVE_VERSION} "
+            "(Hive 4 breaks Iceberg and Trino ANALYZE), whatever images.hive named, and run "
+            f"provenance records {STACKABLE_HIVE_VERSION}."
+        ),
+        "prometheus": (
+            "Prometheus deploys from the kube-prometheus-stack chart; pin it with "
+            "observability.chart_version."
+        ),
+        "grafana": (
+            "Grafana deploys from the kube-prometheus-stack chart; pin it with "
+            "observability.chart_version."
+        ),
+    }
+    _removed_defaults: ClassVar[dict[str, Any]] = {
+        # Any value naming the Hive that runs changed nothing.
+        "hive": lambda v: isinstance(v, str) and _hive_version_of(v) == STACKABLE_HIVE_VERSION,
+        "prometheus": "prom/prometheus:v2.48.0",
+        "grafana": "grafana/grafana:10.2.0",
     }
 
     # Immutable tag = the datagen_rs commit it was built from. Bump it with
@@ -365,7 +432,6 @@ class ImagesConfig(ConfigModel):
     datagen: str = "docker.io/sillidata/lb-datagen:1.6.0"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
-    hive: str = "apache/hive:3.1.3"
     polaris: str = "apache/polaris:1.6.0"
     polaris_admin_tool: str = "apache/polaris-admin-tool:1.6.0"
     unity: str = (
@@ -373,39 +439,9 @@ class ImagesConfig(ConfigModel):
     )
     trino: str = "trinodb/trino:483"
     duckdb: str = "python:3.11-slim"
-    prometheus: str = "prom/prometheus:v2.48.0"
-    grafana: str = "grafana/grafana:10.2.0"
     jmx_exporter: str = "bitnami/jmx-exporter:latest"
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
-
-    _dead_fields: ClassVar[dict[str, str]] = {
-        "prometheus": (
-            "Prometheus deploys from the kube-prometheus-stack chart; pin it with "
-            "observability.chart_version."
-        ),
-        "grafana": (
-            "Grafana deploys from the kube-prometheus-stack chart; pin it with "
-            "observability.chart_version."
-        ),
-    }
-
-    @model_validator(mode="after")
-    def _warn_hive_not_deployed(self) -> ImagesConfig:
-        # The HiveCluster always runs STACKABLE_HIVE_VERSION. A
-        # different images.hive used to be recorded as the Hive that ran
-        # while 3.1.3 was deployed; now it is ignored, and the user is told.
-        version = _hive_version_of(self.hive)
-        if version == STACKABLE_HIVE_VERSION:
-            return self
-        msg = (
-            f"images.hive '{self.hive}' has no effect: the Stackable HiveCluster always "
-            f"runs Hive {STACKABLE_HIVE_VERSION} (Hive 4 breaks Iceberg and Trino ANALYZE), "
-            f"and run provenance records {STACKABLE_HIVE_VERSION}. Delete images.hive "
-            f"from the config or set it to apache/hive:{STACKABLE_HIVE_VERSION}."
-        )
-        emit_note(msg, kind="dead")
-        return self
 
     @field_validator("spark")
     @classmethod
@@ -457,9 +493,6 @@ class S3Config(ConfigModel):
     # lakebench-s3-credentials Secret and the CLI's S3 client reads them.
     access_key: str = ""
     secret_key: str = ""
-    # Not consumed: no deployer reads an existing Secret. Refused
-    # without inline keys, which would deploy empty credentials.
-    secret_ref: str = ""
 
     # TLS / HTTPS support
     ca_cert: str = Field(
@@ -476,37 +509,14 @@ class S3Config(ConfigModel):
     buckets: S3BucketsConfig = Field(default_factory=S3BucketsConfig)
     create_buckets: bool = True
 
-    _dead_fields: ClassVar[dict[str, str]] = {
+    _removed_keys: ClassVar[dict[str, str]] = {
         "secret_ref": (
-            "Deploy writes the S3 Secret from access_key/secret_key and never reads "
-            "an existing Secret."
+            "lakebench never reads an existing Secret: deploy writes the S3 Secret from "
+            "access_key and secret_key. Set those instead (use ${VAR} substitution, for "
+            'example access_key: "${S3_ACCESS_KEY}", to keep the keys out of the file).'
         ),
     }
-
-    @model_validator(mode="after")
-    def validate_credentials(self, info: ValidationInfo) -> S3Config:
-        """Refuse secret_ref without inline keys, which would deploy empty credentials.
-
-        Missing credentials alone are left to deploy's preflight so that
-        ``info`` and ``validate`` still load a config without keys. A
-        secret_ref with no inline keys is refused here: deploy would
-        render the credentials Secret with empty keys. Teardown and
-        inspection commands (destroy, status, clean load with
-        ``allow_long_names``) still load it, so destroy can load a
-        deployment made before this refusal (its S3 steps still have no
-        keys, as before); the dead-field warning still fires.
-        """
-        has_inline = bool(self.access_key and self.secret_key)
-        teardown = bool(info.context and info.context.get("allow_long_names"))
-        if self.secret_ref and not has_inline and not teardown:
-            raise ValueError(
-                f"platform.storage.s3.secret_ref ('{self.secret_ref}') is not supported: "
-                "lakebench never reads an existing Secret, so this config would deploy "
-                "empty S3 credentials. Set access_key and secret_key instead; use "
-                '${VAR} substitution (for example access_key: "${S3_ACCESS_KEY}") '
-                "to keep the keys out of the file."
-            )
-        return self
+    _removed_defaults: ClassVar[dict[str, Any]] = {"secret_ref": ""}
 
 
 class ScratchStorageConfig(ConfigModel):
@@ -529,6 +539,7 @@ class ScratchStorageConfig(ConfigModel):
         # job profile's scratch_size (modules/pipeline_engines/spark/job.py).
         "size": "per-job scratch comes from the job profiles (silver-build 300Gi).",
     }
+    _removed_defaults: ClassVar[dict[str, Any]] = {"size": "100Gi"}
 
     enabled: bool = False
     storage_class: str = "px-csi-scratch"
@@ -616,6 +627,11 @@ class SparkComputeConfig(ConfigModel):
             "driver_memory/driver_cores for the driver."
         ),
     }
+    # The v1.6 defaults, which v1.6 save_config wrote into every config.
+    _removed_defaults: ClassVar[dict[str, Any]] = {
+        "driver": {"cores": 4, "memory": "8g"},
+        "executor": {"instances": 8, "cores": 4, "memory": "48g", "memory_overhead": "12g"},
+    }
 
     operator: SparkOperatorConfig = Field(default_factory=SparkOperatorConfig)
 
@@ -696,22 +712,6 @@ class PlatformConfig(ConfigModel):
 # =============================================================================
 
 
-class HiveThriftConfig(ConfigModel):
-    """Hive Metastore thrift server configuration."""
-
-    min_threads: int = Field(default=10, ge=1)
-    max_threads: int = Field(default=50, ge=1)
-    client_timeout: str = "300s"
-
-    _dead_fields: ClassVar[dict[str, str]] = {
-        "min_threads": ("The HiveCluster template sets hive.metastore.server.min.threads to 10."),
-        "max_threads": ("The HiveCluster template sets hive.metastore.server.max.threads to 50."),
-        "client_timeout": (
-            "The HiveCluster template sets hive.metastore.client.socket.timeout to 300s."
-        ),
-    }
-
-
 class HiveResourcesConfig(ConfigModel):
     """Hive Metastore resource configuration."""
 
@@ -741,8 +741,17 @@ class StackableOperatorConfig(ConfigModel):
 class HiveConfig(ConfigModel):
     """Hive Metastore configuration."""
 
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "thrift": (
+            "the HiveCluster template sets hive.metastore.server.min.threads 10, "
+            "max.threads 50 and hive.metastore.client.socket.timeout 300s."
+        ),
+    }
+    _removed_defaults: ClassVar[dict[str, Any]] = {
+        "thrift": {"min_threads": 10, "max_threads": 50, "client_timeout": "300s"},
+    }
+
     operator: StackableOperatorConfig = Field(default_factory=StackableOperatorConfig)
-    thrift: HiveThriftConfig = Field(default_factory=HiveThriftConfig)
     resources: HiveResourcesConfig = Field(default_factory=HiveResourcesConfig)
 
 
@@ -771,14 +780,14 @@ class PolarisConfig(ConfigModel):
     value with a message that includes a generator command.
     """
 
-    version: str = "1.6.0"
     port: int = Field(default=8181, ge=1, le=65535)
     client_secret: str = ""
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
-    _dead_fields: ClassVar[dict[str, str]] = {
-        "version": "The Polaris that runs, and is recorded, is the tag of images.polaris.",
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "version": "the Polaris that runs, and is recorded, is the tag of images.polaris.",
     }
+    _removed_defaults: ClassVar[dict[str, Any]] = {"version": "1.6.0"}
 
 
 class UnityConfig(ConfigModel):
@@ -788,10 +797,14 @@ class UnityConfig(ConfigModel):
     Uses PostgreSQL for persistence, similar to Polaris.
     """
 
-    version: str = "0.4.0"
     spark_connector_version: str = "0.4.0"
     port: int = Field(default=8080, ge=1, le=65535)
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "version": "the Unity Catalog that runs is the tag of images.unity.",
+    }
+    _removed_defaults: ClassVar[dict[str, Any]] = {"version": "0.4.0"}
 
 
 class CatalogConfig(ConfigModel):
@@ -844,24 +857,23 @@ class IcebergConfig(ConfigModel):
     # this version; validate_iceberg_java_runtime() refuses the combination
     # rather than letting it fail inside the driver.
     version: str = "1.11.0"
-    file_format: FileFormatType = FileFormatType.PARQUET
-    properties: dict[str, Any] = Field(default_factory=dict)
 
-    _dead_fields: ClassVar[dict[str, str]] = {
-        "file_format": "Tables are always written as Parquet.",
-        "properties": "No table property is applied from the config.",
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "file_format": "Iceberg tables are always written as Parquet.",
+        "properties": "no table property is applied from the config.",
     }
+    _removed_defaults: ClassVar[dict[str, Any]] = {"file_format": "parquet", "properties": {}}
 
 
 class DeltaConfig(ConfigModel):
     """Delta Lake table format configuration."""
 
     version: str = "auto"
-    properties: dict[str, Any] = Field(default_factory=dict)
 
-    _dead_fields: ClassVar[dict[str, str]] = {
-        "properties": "No table property is applied from the config.",
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "properties": "no table property is applied from the config.",
     }
+    _removed_defaults: ClassVar[dict[str, Any]] = {"properties": {}}
 
 
 class TableFormatConfig(ConfigModel):
@@ -983,68 +995,40 @@ class QueryEngineConfig(ConfigModel):
     duckdb: DuckDBConfig = Field(default_factory=DuckDBConfig)
 
 
-class BronzeLayerConfig(ConfigModel):
-    """Bronze layer configuration."""
-
-    format: str = "parquet"
-    path_template: str = "customer/interactions"
-
-
-class SilverLayerConfig(ConfigModel):
-    """Silver layer configuration."""
-
-    _removed_keys: ClassVar[dict[str, str]] = {
-        "strategy": "The silver build never read it; removed in v1.5.",
-    }
-
-    format: str = "iceberg"
-    table_name: str = "customer_interactions_enriched"
-    partition_by: list[str] = Field(default_factory=lambda: ["date"])
-    transforms: list[str] = Field(
-        default_factory=lambda: [
+# The v1.6 medallion block, at its defaults. Nothing read it except
+# bronze.path_template, which the Spark stages ignored (they read a fixed
+# layout); datagen wrote under it. Kept to recognise a config that carries
+# it unchanged (see ArchitectureConfig._drop_default_medallion).
+_MEDALLION_V16_DEFAULT: dict[str, Any] = {
+    "bronze": {"format": "parquet", "path_template": "customer/interactions"},
+    "silver": {
+        "format": "iceberg",
+        "table_name": "customer_interactions_enriched",
+        "partition_by": ["date"],
+        "transforms": [
             "normalize_email",
             "normalize_phone",
             "geo_enrichment",
             "customer_segmentation",
             "quality_flags",
-        ]
-    )
-
-
-class GoldTableConfig(ConfigModel):
-    """Gold layer table configuration."""
-
-    name: str
-    partition_by: list[str] = Field(default_factory=list)
-    aggregations: list[str] = Field(default_factory=list)
-
-
-class GoldLayerConfig(ConfigModel):
-    """Gold layer configuration."""
-
-    format: str = "iceberg"
-    tables: list[GoldTableConfig] = Field(
-        default_factory=lambda: [
-            GoldTableConfig(
-                name="customer_executive_dashboard",
-                partition_by=["date"],
-                aggregations=[
+        ],
+    },
+    "gold": {
+        "format": "iceberg",
+        "tables": [
+            {
+                "name": "customer_executive_dashboard",
+                "partition_by": ["date"],
+                "aggregations": [
                     "daily_revenue",
                     "daily_engagement",
                     "churn_indicators",
                     "channel_performance",
                 ],
-            ),
-        ]
-    )
-
-
-class MedallionConfig(ConfigModel):
-    """Medallion processing pattern configuration."""
-
-    bronze: BronzeLayerConfig = Field(default_factory=BronzeLayerConfig)
-    silver: SilverLayerConfig = Field(default_factory=SilverLayerConfig)
-    gold: GoldLayerConfig = Field(default_factory=GoldLayerConfig)
+            }
+        ],
+    },
+}
 
 
 class SustainedConfig(ConfigModel):
@@ -1260,8 +1244,15 @@ class ProcessingConfig(ConfigModel):
         default=True,
         description="Run Iceberg compaction + expire_snapshots before benchmark for clean QpH",
     )
-    medallion: MedallionConfig = Field(default_factory=MedallionConfig)
     sustained: SustainedConfig = Field(default_factory=SustainedConfig)
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "medallion": (
+            "nothing read the medallion block except bronze.path_template, and the Spark "
+            "stages read a fixed bronze layout (customer/interactions/, pacs008/ for the "
+            "financial workload): a custom bronze layout is not supported."
+        ),
+    }
 
     @model_validator(mode="before")
     @classmethod
@@ -1477,17 +1468,17 @@ class Customer360Config(ConfigModel):
         "channels": "The customer360 generator never read it; removed in v1.5.",
         "event_types": "The customer360 generator never read it; removed in v1.5.",
         "quality_distribution": "The customer360 generator never read it; removed in v1.5.",
+        "date_range_days": (
+            "the customer360 generator never read it: the event window is "
+            "datagen.timestamp_start and datagen.timestamp_end."
+        ),
     }
+    _removed_defaults: ClassVar[dict[str, Any]] = {"date_range_days": None}
 
     unique_customers: int | None = Field(
         default=None,
         ge=1,
         description="Override: unique customer count. If None, derived from scale.",
-    )
-    date_range_days: int | None = Field(
-        default=None,
-        ge=1,
-        description="Override: date range in days. If None, defaults to 365.",
     )
 
 
@@ -2121,6 +2112,44 @@ class BenchmarkConfig(ConfigModel):
         return self
 
 
+def _drop_default_medallion(data: dict) -> dict:
+    """Drop a v1.6 ``pipeline.medallion`` block that changed nothing.
+
+    It changed nothing when every key it sets is at its v1.6 default and
+    ``bronze.path_template`` names the layout the workload uses (the C360
+    default, or ``pacs008`` for financial, which v1.6 datagen wrote either
+    way). Any other block is left for ``ProcessingConfig._removed_keys``.
+    """
+    pipeline = data.get("pipeline")
+    if not isinstance(pipeline, dict) or "medallion" not in pipeline:
+        return data
+    workload = data.get("workload")
+    schema = None
+    if isinstance(workload, dict):
+        schema = workload.get("schema", workload.get("schema_type"))
+    schema = getattr(schema, "value", schema) or "customer360"
+    allowed = {"customer/interactions"} | ({"pacs008"} if schema == "financial" else set())
+
+    def template_ok(v: object) -> bool:
+        return isinstance(v, str) and v.strip("/") in allowed
+
+    default = {
+        **_MEDALLION_V16_DEFAULT,
+        "bronze": {**_MEDALLION_V16_DEFAULT["bronze"], "path_template": template_ok},
+    }
+    if not _matches_old_default(pipeline["medallion"], default):
+        return data
+    data = dict(data)
+    data["pipeline"] = {k: v for k, v in pipeline.items() if k != "medallion"}
+    emit_note(
+        "'medallion' (ProcessingConfig) is no longer used and is ignored (it carried "
+        f"its old default): {ProcessingConfig._removed_keys['medallion']} Delete it "
+        "from the config.",
+        kind="removed",
+    )
+    return data
+
+
 class ArchitectureConfig(ConfigModel):
     """Layer 2: Data architecture configuration."""
 
@@ -2148,7 +2177,7 @@ class ArchitectureConfig(ConfigModel):
                 )
             data = dict(data)
             data["pipeline"] = data.pop("processing")
-        return data
+        return _drop_default_medallion(data)
 
     @model_validator(mode="after")
     def financial_table_defaults(self) -> ArchitectureConfig:
@@ -2233,52 +2262,18 @@ class ArchitectureConfig(ConfigModel):
 # =============================================================================
 
 
-class ReportIncludeConfig(ConfigModel):
-    """Report content configuration."""
-
-    summary: bool = True
-    stage_breakdown: bool = True
-    storage_metrics: bool = True
-    resource_utilization: bool = True
-    recommendations: bool = True
-    platform_metrics: bool = True
-
-
-class ReportsConfig(ConfigModel):
-    """Reports configuration.
-
-    Reports are written into per-run directories under the metrics output_dir.
-    The output_dir field is kept for backward compatibility but is no longer
-    the primary output location.
-    """
-
-    enabled: bool = True
-    output_dir: str = "./lakebench-output/runs"
-    format: ReportFormat = ReportFormat.HTML
-    include: ReportIncludeConfig = Field(default_factory=ReportIncludeConfig)
-
-
 class ObservabilityConfig(ConfigModel):
     """Layer 3: Observability configuration.
 
-    Flat model -- use top-level keys (enabled, prometheus_stack_enabled, etc.).
+    Flat model -- use top-level keys (enabled, dashboards_enabled, etc.).
     Deeply nested YAML (metrics.prometheus.enabled) is rejected to prevent
     silent data loss (see BUG-029).
     """
 
     enabled: bool = False
-    prometheus_stack_enabled: bool = True
-    # DEPRECATED: no consumer wires these to PodMonitor deployment.
-    # Default is None (not True) so a dump/load roundtrip does not carry
-    # a value that trips the deprecation warning below -- the warning
-    # is intended to fire only when a user explicitly writes the field
-    # in their YAML.
-    s3_metrics_enabled: bool | None = None
-    spark_metrics_enabled: bool | None = None
     dashboards_enabled: bool = True
     retention: str = "7d"
     storage: str = "10Gi"
-    storage_class: str = ""
     # kube-prometheus-stack chart version (bundles Prometheus + Grafana +
     # node-exporter + kube-state-metrics as one unit). Pinned as of 2026-07-27
     # -- the deploy previously carried no --version flag at all, so it
@@ -2294,33 +2289,43 @@ class ObservabilityConfig(ConfigModel):
     pushgateway_image: str = "prom/pushgateway:v1.11.1"
     pushgateway_storage: str = "1Gi"
     pushgateway_storage_class: str = "px-csi-scratch"
-    reports: ReportsConfig = Field(default_factory=ReportsConfig)
 
-    _dead_fields: ClassVar[dict[str, str]] = {
+    _removed_keys: ClassVar[dict[str, str]] = {
         "reports": (
-            "Every run writes report.html into its run directory under "
-            "lakebench-output/runs; 'lakebench report --render' writes a "
-            "fresh copy to lakebench-output/reports/ without overwriting."
+            "every run writes report.html into its run directory under "
+            "lakebench-output/runs; 'lakebench report --render' writes a fresh copy to "
+            "lakebench-output/reports/ without overwriting."
         ),
         "storage_class": (
-            "The Prometheus volume claim is created without a storageClassName, "
-            "so it uses the cluster default StorageClass."
+            "the Prometheus volume claim is created without a storageClassName, so it "
+            "uses the cluster default StorageClass."
         ),
+        "prometheus_stack_enabled": (
+            "observability.enabled always installs or reuses the full stack, Prometheus included."
+        ),
+        "s3_metrics_enabled": "PodMonitor deployment is not gated on it.",
+        "spark_metrics_enabled": "PodMonitor deployment is not gated on it.",
     }
-
-    @model_validator(mode="after")
-    def _warn_dead_metric_flags(self) -> ObservabilityConfig:
-        # Only warn when the user gave the field a real value. None is the
-        # sentinel default; a dump/load roundtrip that carries None back
-        # in must not re-trigger the warning.
-        for field in ("s3_metrics_enabled", "spark_metrics_enabled"):
-            if getattr(self, field) is not None:
-                emit_note(
-                    f"observability.{field} is unwired -- setting it has no effect. "
-                    "PodMonitor deployment is not gated on this flag today.",
-                    kind="dead",
-                )
-        return self
+    _removed_defaults: ClassVar[dict[str, Any]] = {
+        "reports": {
+            "enabled": True,
+            "output_dir": "./lakebench-output/runs",
+            "format": "html",
+            "include": {
+                "summary": True,
+                "stage_breakdown": True,
+                "storage_metrics": True,
+                "resource_utilization": True,
+                "recommendations": True,
+                "platform_metrics": True,
+            },
+        },
+        "storage_class": "",
+        "prometheus_stack_enabled": True,
+        # Defaulted to true before v1.6; neither value was ever wired.
+        "s3_metrics_enabled": lambda v: v is None or v is True,
+        "spark_metrics_enabled": lambda v: v is None or v is True,
+    }
 
 
 # =============================================================================
@@ -2574,9 +2579,20 @@ class LakebenchConfig(ConfigModel):
         description="Unique name for this deployment (REQUIRED)",
         max_length=63,  # matches K8s namespace + S3 bucket-tag safe length
     )
-    description: str = ""
-    version: int = 1  # Config schema version
     recipe: str | None = None
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "version": (
+            "there is one config schema and nothing read the number; a removed key is "
+            "named in the upgrade notes instead."
+        ),
+        "description": "nothing read it; keep notes in a YAML comment.",
+    }
+    _removed_defaults: ClassVar[dict[str, Any]] = {
+        "version": 1,
+        # Free text never changed what ran, whatever it said.
+        "description": lambda v: v is None or isinstance(v, str),
+    }
 
     # Container images
     images: ImagesConfig = Field(default_factory=ImagesConfig)
@@ -2797,10 +2813,6 @@ class LakebenchConfig(ConfigModel):
         s3 = self.platform.storage.s3
         return bool(s3.access_key and s3.secret_key)
 
-    def has_s3_secret_ref(self) -> bool:
-        """Check if S3 credentials reference an existing secret."""
-        return bool(self.platform.storage.s3.secret_ref)
-
     def get_scale_dimensions(self):
         """Get the resolved scale dimensions for the current workload.
 
@@ -2813,16 +2825,15 @@ class LakebenchConfig(ConfigModel):
         scale = workload.datagen.get_effective_scale()
         dims = get_dimensions(workload.schema_type.value, scale)
 
-        # Apply overrides from Customer360Config if present
+        # Apply the customer count override from Customer360Config if present
         c360 = workload.customer360
-        if c360.unique_customers is not None or c360.date_range_days is not None:
-            customers = c360.unique_customers or dims.customers
-            date_range = c360.date_range_days or dims.date_range_days
+        if c360.unique_customers is not None:
+            customers = c360.unique_customers
             dims = ScaleDimensions(
                 scale=dims.scale,
                 customers=customers,
                 events_per_customer=dims.events_per_customer,
-                date_range_days=date_range,
+                date_range_days=dims.date_range_days,
                 approx_rows=customers * dims.events_per_customer,
                 approx_bronze_gb=dims.approx_bronze_gb,
             )

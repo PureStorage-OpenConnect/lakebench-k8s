@@ -47,6 +47,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "caps" on them, so a run whose only cuts were those no longer carries the
   "auto-sizing cuts" limit in its experiment identity; `validate` no longer
   grades executor counts and memory.
+- **Config fields nothing read are removed.** `images.hive`,
+  `images.prometheus`, `images.grafana`, `platform.storage.s3.secret_ref`,
+  `architecture.catalog.hive.thrift`, `architecture.catalog.polaris.version`,
+  `architecture.catalog.unity.version`, `architecture.table_format.iceberg.file_format`
+  and `.properties`, `architecture.table_format.delta.properties`,
+  `architecture.pipeline.medallion` (with `bronze.path_template`),
+  `workload.customer360.date_range_days`, `observability.reports`,
+  `observability.storage_class`, `observability.prometheus_stack_enabled`,
+  `observability.s3_metrics_enabled`, `observability.spark_metrics_enabled`
+  and the top-level `version` and `description`. A key still at its v1.6
+  default (v1.6 wrote every field into a saved config) loads under every
+  command with a note; any other value is refused by the commands that
+  change data, with the fix, and dropped with a note by the others. The
+  same holds for `platform.compute.spark.driver`/`.executor` and
+  `scratch.size` at their v1.6 defaults. The bronze layout is fixed:
+  `customer/interactions/` for Customer 360 and `pacs008/` for financial; a
+  financial config that named another layout with `path_template` (which
+  v1.6 passed to the financial stages) is refused. Corpus and workload ids
+  do not move. A schema walk test fails when a config field has no reader.
 - **`operator.install: true` is refused.** The Spark Operator
   (`platform.compute.spark.operator.install`) and the Stackable operators
   (`architecture.catalog.hive.operator.install`) are shared cluster
@@ -107,20 +126,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   workload does not read it.
 - Read-only commands create no files: `validate` no longer opens a journal,
   and `report` and `results` no longer create `lakebench-output/runs/`.
-- `platform.storage.s3.secret_ref` without `access_key` and `secret_key` is
-  refused at load: nothing reads an existing Secret, so such a config
-  deployed empty S3 credentials. `destroy`, `status` and `clean`
-  still load it, so an old deployment stays destroyable. Set alongside
-  inline keys, it loads with a warning that it has no effect. `config
-  validate` and the deploy preflight now ask for the inline keys only.
+- `platform.storage.s3.secret_ref` is refused by the commands that change
+  data: nothing reads an existing Secret, so a secret_ref-only config
+  deployed empty S3 credentials, and the key is removed.
+  `destroy`, `status` and `clean` still load it, so an old deployment stays
+  destroyable. `config validate` and the deploy preflight ask for the
+  inline keys only.
 - Run provenance and the Hive deploy result record Hive 3.1.3, the version
   the Stackable HiveCluster template renders, instead of the tag of
-  `images.hive`. An `images.hive` naming another version warns at load that
-  it has no effect.
-- Setting `architecture.catalog.hive.thrift.*`,
-  `architecture.catalog.polaris.version` or `observability.storage_class`
-  to a non-default value warns that it has no effect; nothing reads them.
-  The generated config template no longer carries them or `secret_ref`.
+  `images.hive`. An `images.hive` naming another version is refused by the
+  commands that change data, since the key is removed.
+- The generated config template no longer carries
+  `architecture.catalog.hive.thrift.*`, `architecture.catalog.polaris.version`,
+  `observability.storage_class` or `secret_ref`, which nothing reads (removed;
+  see Breaking changes).
 - Deploy step labels say "Verifying scratch StorageClass" and "Checking
   Spark Operator and watch list", and the deploy summary lists the operator
   step whether or not `operator.install` is set. The HTML report's

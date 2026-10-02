@@ -17,7 +17,7 @@ from pathlib import Path
 import yaml
 
 from lakebench.config import load_config
-from lakebench.config.schema import ImagesConfig, PolarisConfig
+from lakebench.config.schema import ImagesConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOT_YAML = ROOT / "lakebench.yaml"
@@ -54,27 +54,31 @@ def test_datagen_image_matches_schema_default() -> None:
     )
 
 
-def test_polaris_version_matches_schema_default() -> None:
-    """The Polaris version in the yaml must match PolarisConfig.version."""
-    default = PolarisConfig().version
+def test_polaris_image_matches_schema_default() -> None:
+    """The commented images.polaris tag must match ImagesConfig.polaris.
+
+    The Polaris that runs is that tag; v1.7 removed the unread
+    catalog.polaris.version, so the file must not carry it either.
+    """
+    default = ImagesConfig().polaris
     text = _yaml_text()
-    # Match `version:` under the polaris block (commented or not).
+    found = False
     for line in text.splitlines():
         stripped = line.lstrip("# ").strip()
         if stripped.startswith("polaris: apache/polaris:"):
-            # images.polaris line: check the tag matches too. Drop any
-            # trailing inline comment before comparing.
-            after = stripped.split(":", 2)[2]
-            tag = after.split("#", 1)[0].strip()
-            assert tag == default, (
-                f"images.polaris tag {tag!r} does not match "
-                f"PolarisConfig.version default {default!r}"
-            )
-    # `version: 1.6.0` under architecture.catalog.polaris
-    assert re.search(rf"^\s*#?\s*version:\s*{re.escape(default)}\b", text, re.MULTILINE), (
-        f"root lakebench.yaml does not mention polaris.version={default!r} "
-        f"(schema default). A 1.3.0-incubating pin is stale."
-    )
+            image = stripped.split(":", 1)[1].split("#", 1)[0].strip()
+            assert image == default, f"images.polaris {image!r}, schema default {default!r}"
+            found = True
+    assert found, "no images.polaris line in root lakebench.yaml"
+    in_polaris = False
+    for line in text.splitlines():
+        stripped = line.lstrip("# ").rstrip()
+        if stripped.strip() == "polaris:":
+            in_polaris = True
+        elif in_polaris and stripped.strip().startswith("version:"):
+            raise AssertionError("root lakebench.yaml still sets catalog.polaris.version")
+        elif in_polaris and stripped and not stripped.startswith(" "):
+            in_polaris = False
     assert "1.3.0-incubating" not in text, (
         "root lakebench.yaml still references the deprecated 1.3.0-incubating Polaris tag"
     )

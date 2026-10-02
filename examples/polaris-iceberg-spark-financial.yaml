@@ -61,10 +61,6 @@ architecture:
 
   pipeline:
     mode: batch
-    medallion:
-      bronze:
-        format: parquet
-        path_template: pacs008     # <-- datagen + bronze_verify both read here
 
   tables:
     bronze: default.pacs008_raw

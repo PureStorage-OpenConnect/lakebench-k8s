@@ -219,7 +219,14 @@ def experiment_inputs(
         # before the resolved values were stamped stay comparable; what they
         # resolve to is a function of scale and the timestamp window, both
         # already corpus identity.
-        declared = {"customer360": workload.customer360.model_dump(mode="json")}
+        # date_range_days is no longer a config key (nothing read it); the
+        # null it always hashed to stays, so ids recorded before stay put.
+        declared = {
+            "customer360": {
+                **workload.customer360.model_dump(mode="json"),
+                "date_range_days": None,
+            }
+        }
         params_id = _short_hash(declared)
         params = {"customer360": _c360_resolved(cfg)}
 
@@ -234,7 +241,8 @@ def experiment_inputs(
         "timestamp_end": dg.timestamp_end,
         "dirty_data_ratio": dg.dirty_data_ratio,
         "unique_customers": workload.customer360.unique_customers,
-        "date_range_days": workload.customer360.date_range_days,
+        # Constant: no longer a config key; see the parameters id above.
+        "date_range_days": None,
     }
     corpus["id"] = _short_hash(corpus)
     # The id keeps hashing the declared overrides (null when unset), so ids

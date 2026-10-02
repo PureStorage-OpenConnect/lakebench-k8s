@@ -83,9 +83,13 @@ with `parallelism` set from the config (default: 4). Each pod in the Job:
    total data to generate.
 2. Generates synthetic Parquet files using the configured workload schema
    (Customer360 by default).
-3. Writes files directly to S3 at the path
-   `s3://<bronze-bucket>/<path_template>/` (default path template:
-   `customer/interactions`; the financial schema writes under `pacs008`).
+3. Writes files directly to S3 under a fixed prefix the Spark stages read:
+   `s3://<bronze-bucket>/customer/interactions/` for Customer 360 and
+   `s3://<bronze-bucket>/pacs008/` for the financial schema. v1.7 removed
+   the `medallion.bronze.path_template` key: the Customer 360 Spark stages
+   always read `customer/interactions/` whatever it said, so a custom bronze
+   layout is not supported. A config that still names the fixed layout
+   loads with a note; another layout is refused.
 4. Reports completion status back to Kubernetes.
 
 The datagen mode (`auto`, `batch`, or `continuous`) is the S3 delivery

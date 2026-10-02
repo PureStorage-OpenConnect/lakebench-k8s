@@ -140,30 +140,20 @@ class TestObservabilityConfig:
         cfg = _make_config()
         obs = cfg.observability
         assert obs.enabled is False
-        assert obs.prometheus_stack_enabled is True
-        # s3_metrics_enabled and spark_metrics_enabled default to None
-        # (sentinel for "user did not set") since both fields are dead --
-        # nothing wires them to actual PodMonitor deployment. Setting them
-        # emits a DeprecationWarning.
-        assert obs.s3_metrics_enabled is None
-        assert obs.spark_metrics_enabled is None
+        # Removed in v1.7: nothing read them.
+        for gone in ("prometheus_stack_enabled", "s3_metrics_enabled", "spark_metrics_enabled"):
+            assert not hasattr(obs, gone)
         assert obs.dashboards_enabled is True
 
-    def test_observability_reports_preserved(self):
-        """ReportsConfig is preserved in the flat model."""
+    def test_observability_reports_removed(self):
+        """observability.reports was never read; removed in v1.7."""
         cfg = _make_config()
-        assert cfg.observability.reports.enabled is True
-        assert cfg.observability.reports.format.value == "html"
+        assert not hasattr(cfg.observability, "reports")
 
     def test_observability_enabled_override(self):
         cfg = _make_config(observability={"enabled": True, "retention": "14d"})
         assert cfg.observability.enabled is True
         assert cfg.observability.retention == "14d"
-
-    def test_observability_report_include_platform_metrics(self):
-        """ReportIncludeConfig has platform_metrics field."""
-        cfg = _make_config()
-        assert cfg.observability.reports.include.platform_metrics is True
 
 
 # ===========================================================================

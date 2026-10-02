@@ -166,10 +166,9 @@ these limits:
 - An explicit Iceberg or Delta version must be in the compatibility list for
   the Spark minor, or config load fails. Iceberg 1.11+ needs a Java 17 Spark
   image.
-- `images.hive` does not change the Hive that runs: the Stackable HiveCluster
-  runs Hive 3.1.3 (see [Hive Reference](component-hive.md)).
-- The Polaris version that runs is the tag of `images.polaris`, not
-  `architecture.catalog.polaris.version`.
+- The Hive that runs is not configurable: the Stackable HiveCluster runs
+  Hive 3.1.3 (see [Hive Reference](component-hive.md)).
+- The Polaris version that runs is the tag of `images.polaris`.
 
 For example:
 
@@ -177,7 +176,6 @@ For example:
 images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
-  hive: apache/hive:3.1.3
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
   duckdb: python:3.11-slim

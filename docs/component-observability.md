@@ -11,11 +11,9 @@ All observability settings live under the `observability` key as a flat model:
 ```yaml
 observability:
   enabled: false                     # Master switch for the observability stack
-  prometheus_stack_enabled: true     # Shown in status output only (see below)
   dashboards_enabled: true           # Enable Grafana dashboards
   retention: "7d"                    # Prometheus data retention period
-  storage: "10Gi"                    # Prometheus PVC size
-  storage_class: ""                  # Not applied (see below)
+  storage: "10Gi"                    # Prometheus PVC size (cluster default StorageClass)
   chart_version: "87.19.2"           # kube-prometheus-stack chart version (pins Prometheus + Grafana)
   pushgateway_enabled: true          # Per-deployment Pushgateway for live datagen and pipeline metrics
   pushgateway_image: "prom/pushgateway:v1.11.1"
@@ -34,16 +32,17 @@ continuous stages do not push yet, so their stage panels stay empty. The push is
 run, and `metrics.json` stays the source of record. Set
 `pushgateway_enabled: false` to skip it.
 
-`observability.reports` has no effect and is removed in v1.7: every run writes
-`report.html` into its run directory once, and `lakebench report --render`
-writes a fresh copy to `lakebench-output/reports/` without overwriting the
-delivered file.
+v1.7 removed `observability.reports`, `observability.storage_class`,
+`prometheus_stack_enabled`, `s3_metrics_enabled` and `spark_metrics_enabled`,
+which nothing read. Every
+run writes `report.html` into its run directory once, and `lakebench report
+--render` writes a fresh copy to `lakebench-output/reports/` without
+overwriting the delivered file; the Prometheus volume claim uses the cluster
+default StorageClass. A config that carries these keys at their old defaults
+loads with a note; any other value is refused by the commands that change
+data.
 
-`s3_metrics_enabled` and `spark_metrics_enabled` exist in the schema but nothing reads
-them; setting either prints a warning. The Spark and Trino PodMonitors are applied
-whenever the stack is enabled.
-
-`prometheus_stack_enabled` and `storage_class` are not read by the deployer either:
+The Spark and Trino PodMonitors are applied whenever the stack is enabled.
 `observability.enabled: true` always installs (or reuses) the full stack, and the
 Prometheus PVC uses the chart's default StorageClass. `dashboards_enabled` sets the
 chart's `grafana.enabled`, and `retention` and `storage` set the Prometheus retention
@@ -117,7 +116,7 @@ kubectl port-forward svc/lakebench-observability-grafana 3000:80 -n lakebench-ob
 - `lakebench_s3_requests_total` -- total request count by operation
 - `lakebench_s3_errors_total` -- error count by operation
 
-No code path instantiates the wrapper today, and `s3_metrics_enabled` has no effect, so these series are not emitted. They would cover CLI operations (list, head, delete), not Spark/Trino data-path I/O.
+No code path instantiates the wrapper today, so these series are not emitted. They would cover CLI operations (list, head, delete), not Spark/Trino data-path I/O.
 
 ## Platform Metrics Collection
 

@@ -37,7 +37,6 @@ platform:
 | `path_style` | bool | `true` | Use path-style bucket addressing (`http://endpoint/bucket`) instead of virtual-hosted style (`http://bucket.endpoint`). Must be `true` for FlashBlade and MinIO. |
 | `access_key` | string | `""` | S3 access key provided inline. |
 | `secret_key` | string | `""` | S3 secret key provided inline. |
-| `secret_ref` | string | `""` | Not supported. Refused at load without inline keys; with them it warns that it has no effect. See [Credential Management](#credential-management). |
 | `buckets.bronze` | string | `<name>-bronze` | Bucket name for the bronze (raw) data layer. When unset, derived from the deployment `name`. |
 | `buckets.silver` | string | `<name>-silver` | Bucket name for the silver (enriched) data layer. When unset, derived from the deployment `name`. |
 | `buckets.gold` | string | `<name>-gold` | Bucket name for the gold (aggregated) data layer. When unset, derived from the deployment `name`. |
@@ -49,7 +48,7 @@ platform:
 
 Lakebench reads S3 credentials only from `access_key` and `secret_key`. `deploy` renders the `lakebench-s3-credentials` Secret from them and the CLI's S3 client uses the same fields. To keep keys out of the file, use `${VAR}` environment substitution in the YAML (for example `access_key: "${S3_ACCESS_KEY}"`).
 
-`secret_ref` (the name of an existing Kubernetes Secret) is not supported: nothing reads an existing Secret. A config that sets `secret_ref` without inline keys is refused at load, because it would deploy empty credentials. Set alongside inline keys, it loads with a warning that it has no effect.
+`secret_ref` (the name of an existing Kubernetes Secret) was removed in v1.7: nothing ever read an existing Secret. The commands that change data refuse a config that sets it; `destroy`, `status` and the read-only commands load it and drop the key with a note.
 
 If no credentials are provided, the config still loads, and `lakebench deploy` refuses to start.
 

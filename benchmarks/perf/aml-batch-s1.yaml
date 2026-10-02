@@ -68,10 +68,6 @@ architecture:
     mode: batch
     # Maintenance settings are part of the gate fingerprint; pinned here.
     pre_benchmark_maintenance: true
-    medallion:
-      bronze:
-        format: parquet
-        path_template: pacs008
 
   workload:
     schema: financial
