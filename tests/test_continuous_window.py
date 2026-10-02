@@ -524,7 +524,7 @@ def _drive(
     from lakebench.deploy import DeploymentStatus
 
     dg.deploy.return_value = MagicMock(status=DeploymentStatus.SUCCESS)
-    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e: dg)
+    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
     monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
     monkeypatch.setattr(_sustained, "_stop_leftover_streams", lambda *a: None)
     monkeypatch.setattr(_sustained, "_reset_continuous_state", lambda c, clear_raw: None)
