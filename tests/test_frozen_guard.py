@@ -16,23 +16,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import exec_repo_script
+
 REPO = Path(__file__).resolve().parents[1]
 
 
 def _load_guard(name: str):
-    """scripts/frozen_guard.py as a fresh module (registered while it
-    executes, as its dataclasses need, and removed afterwards)."""
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(name, REPO / "scripts" / "frozen_guard.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        sys.modules.pop(name, None)
-    return mod
+    return exec_repo_script(REPO / "scripts" / "frozen_guard.py", name)
 
 
 pytestmark = pytest.mark.skipif(

@@ -210,10 +210,18 @@ def exec_repo_script(path: Path, name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
+    # Registered while it executes (dataclasses look their module up by
+    # name), and removed afterwards so nothing later imports it by name.
+    previous = sys.modules.get(name)
+    sys.modules[name] = mod
     try:
         spec.loader.exec_module(mod)
     finally:
         sys.path[:] = saved
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
     return mod
 
 
