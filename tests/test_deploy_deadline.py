@@ -227,7 +227,8 @@ def test_post_upgrade_rollout_is_not_cut_by_the_deadline(clock):
         clock.sleep(10)
         assert m._rollout_status_after_upgrade()
     args = [c.args[0] for c in m._run.call_args_list]
-    assert len(args) == 2 and all(f"--timeout={op._POST_UPGRADE_ROLLOUT_S}s" in a for a in args)
+    # Bounded by its phase (and the lease hold), never by the deploy deadline.
+    assert len(args) == 2 and all(f"--timeout={op.WATCH_ROLLOUT_PHASE_S}s" in a for a in args)
 
 
 # --- the shared watch list: gate before the mutation, never after ------------------
@@ -468,7 +469,9 @@ def test_operator_scc_check_is_not_cut_after_a_shared_change(clock, monkeypatch)
 # --- static guard -------------------------------------------------------------------
 
 _TIMEOUT_KW = {"timeout", "timeout_s", "timeout_seconds"}
-_CLAMPS = {"clamp", "lease_clamp", "clamp_whole_seconds"}
+# wait_s: a _Phase wait in operator.py, bounded by the lease's hold budget and,
+# like the post-upgrade waits, never by the deploy deadline.
+_CLAMPS = {"clamp", "lease_clamp", "clamp_whole_seconds", "wait_s"}
 _CHECKS = _CLAMPS | {"check"}
 # Waits after a committed shared mutation: bounded by their own timeout,
 # never by the deploy deadline (operator.py _POST_UPGRADE_*).

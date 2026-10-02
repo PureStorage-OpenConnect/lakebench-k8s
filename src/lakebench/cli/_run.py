@@ -2087,7 +2087,7 @@ def run(
 
         if not status.ready:
             hint = ""
-            if not status.installed:
+            if status.installed is False:
                 hint = (
                     " -- a cluster admin installs it once with 'lakebench admin install "
                     "--component spark-operator <config>'"
@@ -2098,7 +2098,7 @@ def run(
 
         # Ensure operator watches the target namespace (always try to heal)
         ns_status = operator.ensure_namespace_watched(can_heal=True)
-        if ns_status.watching_namespace is False:
+        if ns_status.watching_namespace is False or not ns_status.ready:
             print_error(ns_status.message)
             pipeline_success = False
             raise typer.Exit(ExitCode.PREREQUISITE)

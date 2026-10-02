@@ -1004,8 +1004,8 @@ def test_doctor_without_a_config_does_not_gate_on_optional_components():
 
 
 def test_deploy_step_says_could_not_check_rather_than_not_installed():
-    """check_status maps a read error to installed=False; the step must not
-    then tell the user to install an operator that may be running."""
+    """check_status maps a read error to installed=None (unknown); the step
+    must not then tell the user to install an operator that may be running."""
     from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
     from lakebench.modules.pipeline_engines.spark.operator import (
         OperatorStatus,
@@ -1016,7 +1016,7 @@ def test_deploy_step_says_could_not_check_rather_than_not_installed():
     engine.config = make_config(name=NS)
     engine.dry_run = False
     broken = OperatorStatus(
-        installed=False,
+        installed=None,
         version=None,
         namespace=None,
         ready=False,
