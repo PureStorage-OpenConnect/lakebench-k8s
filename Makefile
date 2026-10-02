@@ -9,7 +9,7 @@ help:
 	@echo "  dev              Install with dev deps + pre-commit hooks"
 	@echo ""
 	@echo "Testing:"
-	@echo "  check-fast       Lint, format check, mypy and the unit tests in parallel (CI's first job)"
+	@echo "  check-fast       Lint, format check, mypy and the unit tests in parallel (XDIST_WORKERS=N caps workers)"
 	@echo "  test             The unit tests of check-fast, without the lint and type checks"
 	@echo "  test-unit        Run unit tests only, serially (slow AML statistics tests included)"
 	@echo "  test-integration Run integration tests (requires K8s/S3)"
@@ -35,11 +35,16 @@ dev:
 	@echo "Dev environment ready. Pre-commit hooks installed."
 	@echo "Run 'make test' to verify setup."
 
-# The unit tier as CI's check-fast job runs it: in parallel, one file per
-# worker (--dist loadfile), without the AML statistics tests marked slow
-# (CI runs those in the "AML statistics (slow)" job) and without the Spark
-# tier. A -m here replaces pyproject.toml's, so it repeats e2e and integration.
-UNIT_PYTEST = pytest tests/ -q -n auto --dist loadfile -p no:cacheprovider \
+# The unit tier as CI's Lint job runs it: in parallel, one file per worker
+# (--dist loadfile), without the AML statistics tests marked slow (CI runs
+# those in the "AML statistics (slow)" job) and without the Spark tier. A -m
+# here replaces pyproject.toml's, so it repeats e2e and integration.
+# PYTHONPATH=src tests this checkout's code even when another checkout is
+# the installed one; XDIST_WORKERS=8 caps the workers on a shared host.
+PYTHON ?= python
+XDIST_WORKERS ?= auto
+UNIT_PYTEST = PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} $(PYTHON) -m pytest tests/ -q \
+	-n $(XDIST_WORKERS) --dist loadfile -p no:cacheprovider \
 	-m "not slow and not e2e and not integration" \
 	--ignore=tests/spark --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
 
