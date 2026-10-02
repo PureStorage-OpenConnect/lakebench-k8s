@@ -185,7 +185,10 @@ def test_legacy_delta_continuous_report_does_not_claim_the_new_policy(tmp_path):
 
 
 def test_lakebench_compare_warns_across_policies():
-    from lakebench.cli._compare import _build_comparison
+    from lakebench.metrics.compare import compare_records
+
+    def _build_comparison(_la, a, _lb, b):
+        return compare_records([a], [b])
 
     a = {"run_id": "a", "pipeline_benchmark": {"scores": {}}}
     b = {
@@ -196,7 +199,7 @@ def test_lakebench_compare_warns_across_policies():
     assert any(
         "maintenance policy differs" in w for w in _build_comparison("A", a, "B", b)["warnings"]
     )
-    assert not _build_comparison("A", a, "B", dict(a))["warnings"]
+    assert not _build_comparison("A", a, "B", {**a, "run_id": "a2"})["warnings"]
 
 
 def test_turned_down_maintenance_is_a_fingerprint_difference(env):  # noqa: F811
