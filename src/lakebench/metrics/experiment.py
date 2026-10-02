@@ -512,51 +512,18 @@ def _rules(metrics: Any) -> dict[str, Any]:
 def _caps_bound(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str]:
     """The Lakebench limits that bound this run (invariant 4), one line each.
     A figure measured under one of these is not what the system can do."""
-    out = [
-        f"{x['job_type']}: executor cap {x['cap']} (scale asks for {x['scale_derived']})"
-        for x in limits.get("executors") or []
-        if x.get("cap_hit")
-    ]
-    out += [
-        f"{x['job_type']}: concurrent executor budget granted {x['budget_cap']['granted']} "
-        f"of {x['budget_cap']['requested']}"
-        for x in limits.get("executors") or []
-        if x.get("budget_cap")
-    ]
-    if limits.get("tm_alerts_over_capacity"):
-        out.append(
-            f"TM max_alerts_per_customer ({limits.get('tm_max_alerts_per_customer')}): "
-            f"{limits['tm_alerts_over_capacity']} alerts over capacity"
-        )
-    out += [f"auto-sizing: {c}" for c in limits.get("autosize_cuts") or []]
-    if limits.get("maintenance_stopped"):
-        out.append("pre-benchmark maintenance stopped on its time budget")
-    for rule, why in (rules.get("skipped") or {}).items():
-        if "cap" in str(why):
-            out.append(f"rule {rule} skipped: {why}")
-    return out
+    from lakebench.metrics.bounds import bound_entries
+
+    return [line for _kind, line in bound_entries(limits, rules)]
 
 
 def _bound_kinds(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str]:
     """Which limits bound, without the counts: the like-for-like condition.
     The counts (a concurrent budget granted from live cluster capacity)
     vary between runs of one config and stay in ``bound`` as evidence."""
-    out = {
-        f"{x['job_type']}: executor cap" for x in limits.get("executors") or [] if x.get("cap_hit")
-    }
-    out |= {
-        f"{x['job_type']}: concurrent executor budget"
-        for x in limits.get("executors") or []
-        if x.get("budget_cap")
-    }
-    if limits.get("tm_alerts_over_capacity"):
-        out.add("TM max_alerts_per_customer")
-    if limits.get("autosize_cuts"):
-        out.add("auto-sizing cuts")
-    if limits.get("maintenance_stopped"):
-        out.add("pre-benchmark maintenance budget")
-    out |= {f"rule {r} cap" for r, why in (rules.get("skipped") or {}).items() if "cap" in str(why)}
-    return sorted(out)
+    from lakebench.metrics.bounds import bound_entries
+
+    return sorted({kind for kind, _line in bound_entries(limits, rules)})
 
 
 def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
@@ -810,6 +777,14 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     rules = _rules(metrics)
     limits["bound"] = _caps_bound(limits, rules)
     limits["bound_kinds"] = _bound_kinds(limits, rules)
+    if mode == "sustained":
+        # The trickle is shown with the limits but is not a bound kind:
+        # every continuous run sets one (metrics/bounds.py).
+        from lakebench.metrics.bounds import trickle_bound, trickle_line
+
+        limits["trickle_bound"] = trickle_bound(metrics)
+        if limits["trickle_bound"] is not None:
+            limits["bound"].append(trickle_line(limits["trickle_bound"]))
     bench = metrics.benchmark
     if bench is None and metrics.pipeline_benchmark is not None:
         bench = metrics.pipeline_benchmark.query_benchmark

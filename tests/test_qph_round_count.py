@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from lakebench.cli._compare import _build_comparison
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import (
     BenchmarkMetrics,
@@ -20,6 +19,7 @@ from lakebench.metrics.collector import (
     build_config_snapshot,
     build_pipeline_benchmark,
 )
+from lakebench.metrics.compare import compare_records
 from tests.conftest import make_config, stub_experiment
 
 
@@ -102,15 +102,16 @@ def _record(rounds: int, qph: float) -> dict:
 
 
 def test_compare_shows_the_counts_and_withholds_like_for_like():
-    c = _build_comparison("thrift", _record(4, 456.2), "trino", _record(5, 1239.5))
-    assert c["like_for_like"] is False
-    assert "benchmark rounds differs (4 vs 5)" in c["condition_differences"]
-    assert any("median of 4 in-stream round(s) and for B of 5" in w for w in c["warnings"])
+    c = compare_records([_record(4, 456.2)], [_record(5, 1239.5)])
+    assert c["verdict"] == "NOT LIKE-FOR-LIKE"
+    assert c["groups"]["conditions"] == [{"key": "benchmark rounds", "a": 4, "b": 5}]
+    assert "in-stream rounds differ (4 vs 5)" in c["missing"]["hint"]
     rows = {r["metric"]: r for r in c["metrics"]}
-    assert (rows["composite_qph_rounds"]["config_a"], rows["composite_qph_rounds"]["config_b"]) == (
-        4,
-        5,
-    )
+    assert (
+        rows["composite_qph_rounds"]["a"]["median"],
+        rows["composite_qph_rounds"]["b"]["median"],
+    ) == (4, 5)
+    assert rows["composite_qph"]["winner"] is None
 
 
 def test_report_shows_the_round_count(tmp_path):

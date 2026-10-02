@@ -13,17 +13,17 @@ path yet says so.
 
 | Code | Name | Meaning | Produced by |
 |---|---|---|---|
-| 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass` |
+| 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass`, `compare.like_for_like` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone` |
-| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused` |
+| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `compare.equal_names`, `compare.bad_ref`, `compare.same_runs`, `compare.unreadable_record`, `compare.removed_flag` |
 | 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `reproduce.existing_namespace`, `reproduce.nonce_changed`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `lease.held`, `context.changed` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
-| 10 | `COMPARE_NOT_COMPARABLE` | compare: NOT COMPARABLE. | no command yet |
-| 11 | `COMPARE_NOT_ESTABLISHED` | compare: COMPARABILITY NOT ESTABLISHED. | no command yet |
-| 12 | `COMPARE_NOT_LIKE_FOR_LIKE` | compare: comparable, not like-for-like. | no command yet |
-| 13 | `COMPARE_CONFOUNDED` | compare: comparable, confounded. | no command yet |
+| 10 | `COMPARE_NOT_COMPARABLE` | compare: NOT COMPARABLE. | `compare.not_comparable` |
+| 11 | `COMPARE_NOT_ESTABLISHED` | compare: COMPARABILITY NOT ESTABLISHED. | `compare.not_established` |
+| 12 | `COMPARE_NOT_LIKE_FOR_LIKE` | compare: comparable, not like-for-like. | `compare.not_like_for_like` |
+| 13 | `COMPARE_CONFOUNDED` | compare: comparable, confounded. | `compare.confounded` |
 | 14 | `REQUIREMENT_UNMET` | Requirement unmet: a reproduction drifted outside its tolerance, was asked to verify at another commit, or could only be verified out of band. | `reproduce.drift`, `reproduce.commit_drift` |
 | 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM). | `sigint`, `run.interrupted` |
 
@@ -34,6 +34,7 @@ the CLI down every path listed here and checks the code.
 
 | Path | Code | When |
 |---|---|---|
+| `compare.like_for_like` | 0 | `compare` finds the sides like-for-like |
 | `run.pass` | 0 | `run` finished and its verdict passed |
 | `version.ok` | 0 | `lakebench version` prints the version |
 | `run.datagen_timeout` | 1 | datagen did not finish in time; the record says "datagen timed out" in verdict.reasons |
@@ -42,6 +43,11 @@ the CLI down every path listed here and checks the code.
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `cli.bad_argument` | 2 | a command refuses an argument it checks itself: an unknown recipe, component, stage or example, a missing file, conflicting options |
 | `click.usage` | 2 | an unknown flag, a missing argument or a bad value |
+| `compare.bad_ref` | 2 | a `compare` side names a run, record, series or config that resolves to no record |
+| `compare.equal_names` | 2 | `compare` was given two configs with the same deployment name and different contents |
+| `compare.removed_flag` | 2 | a flag of the `compare` that ran both configs; the message names the replacement |
+| `compare.same_runs` | 2 | the two `compare` sides resolve to the same runs, or share a run |
+| `compare.unreadable_record` | 2 | a `compare` record or series manifest cannot be read, or two files disagree about one run |
 | `config.name_required` | 2 | a command that changes data or tears a deployment down was given a config with no name; a read command (`status`, `logs`, `report`) too, in a directory whose v1.6 state names a deployment |
 | `config.unsupported` | 2 | the workload, recipe and mode combination is unsupported, or the scale is above the workload's datagen ceiling |
 | `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
@@ -77,6 +83,10 @@ the CLI down every path listed here and checks the code.
 | `confirm.non_tty` | 5 | a confirmation prompt got no answer (no terminal, end of input) or was declined |
 | `run.namespace_missing_no_yes` | 5 | `run` would create a missing namespace and was not given --yes |
 | `destroy.namespace_terminating` | 6 | `destroy` finished its steps but the namespace is still terminating |
+| `compare.not_comparable` | 10 | `compare` verdict |
+| `compare.not_established` | 11 | `compare` verdict |
+| `compare.not_like_for_like` | 12 | `compare` verdict |
+| `compare.confounded` | 13 | `compare` verdict |
 | `reproduce.commit_drift` | 14 | `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift |
 | `reproduce.drift` | 14 | `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol |
 | `run.interrupted` | 130 | `run` interrupted by SIGINT or SIGTERM; the record is sealed as interrupted and the run's unfinished jobs are stopped |

@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from lakebench.cli._compare import _build_comparison
 from lakebench.metrics.experiment import experiment_of, identity_hash
 from tests.fixtures import scrub
 from tests.fixtures import stored_records as sr
@@ -516,42 +515,6 @@ def test_cli_check_and_scrub(tmp_path: Path, capsys) -> None:
     assert scrub.main([str(dirty), str(out)]) == 0
     assert scrub.main(["--check", str(out)]) == 0
     assert LAB_ADDR not in capsys.readouterr().out
-
-
-# ---------------------------------------------------------------------------
-# The pinned pairs as v1.6 compare reads them (section 0.3, Before)
-# ---------------------------------------------------------------------------
-
-
-def _refusal_kinds(prov: list[str]) -> tuple[list[str], list[str]]:
-    keys, kinds = [], []
-    for line in prov:
-        if "no provenance" in line:
-            kinds.append(f"{line.split('(')[1][0]}_no_provenance")
-        elif "did not pass its verdict" in line:
-            kinds.append(f"{line.split()[1]}_failed")
-        elif " differs (" in line:
-            keys.append(line.split(" differs (")[0])
-        else:
-            kinds.append(line)
-    return keys, kinds
-
-
-@pytest.mark.parametrize("pair", sorted(PAIRS, key=lambda p: int(p[1:])))
-def test_pinned_pair_compare(pair: str) -> None:
-    """``compare`` (until ER-11 rewrites it) gives the v1.6 Before answer,
-    changed only by the fields each pair's ``compare_after`` lists."""
-    spec = PAIRS[pair]
-    got = _build_comparison("A", sr.load_record(spec["a"]), "B", sr.load_record(spec["b"]))
-    keys, kinds = _refusal_kinds(got["refusals"]["provenance"])
-    want = {**spec["before"], **spec.get("compare_after", {})}
-    assert got["verdict"] == want["verdict"]
-    assert got["like_for_like"] is want["like_for_like"]
-    assert keys == want["identity_differences"]
-    assert kinds == want["refusals"]
-    conditions = [c.split(" differs (")[0] for c in got["condition_differences"]]
-    assert conditions == want["condition_differences"]
-    assert len(got["refusals"]["results"]) == want["result_refusals"]
 
 
 def test_key_rename_that_merges_keys_refused() -> None:

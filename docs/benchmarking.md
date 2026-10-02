@@ -80,13 +80,47 @@ differ, so compare, the perf gate and reproduce refuse them).
 | `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
 | `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of the whole corpus taken by the window's end. About 0.8 on a default run, whose trickle is sized to outlast the window; not a saturation signal. |
 | `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when bronze fell behind the rows the trickle released. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
-| `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up). |
+| `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up: `ingest_ratio >= 0.95`). Whether the trickle held intake is `experiment.limits.trickle_bound`, below. |
 | `corpus_drain_seconds` | `datagen_rows / sustained_throughput_rps` | Set when `intake_limit` is `trickle_rate`: the window that would drain the corpus at the rate held. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage rows taken in inside the window)` (gold: its re-reads of silver) | Total volume processed during the measurement window. |
 | `total_s3_objects` | `sum(bucket_object_count)` | Total S3 objects across bronze/silver/gold at end of run. If this grows faster than retention can clean, metadata ops degrade. |
 | `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
+
+**BOUNDED BY trickle.** A continuous run feeds bronze at most
+`max_files_per_trigger` files per trigger. When that trickle was set and the
+pipeline kept pace, the throughput figures (`sustained_throughput_rps`,
+`pipeline_throughput_gb_per_second` and compute efficiency in a continuous
+run) are the offered load, not what the infrastructure can do. Kept pace
+means ingested rows over offered rows is at least 0.99 and the lag at window
+end (window seconds minus bronze's last write) is at most one trigger
+interval. Offered rows are `released_rows`, so the ratio is the record's
+`ingest_ratio`; when bronze took the whole corpus there was nothing left to
+offer and the lag is not tested. A run whose `intake_limit` is
+`trickle_rate` is labelled too. The experiment block records
+`limits.trickle_bound` (`{kind, value, source, kept_pace, ratio, lag_s,
+trigger_s, offered_rows, ingested_rows}`, with `not_measured` when
+`kept_pace` is null and `lag_note` when the lag was not tested; null when
+the trickle did not hold intake) and adds a line `trickle: max_files_per_trigger N (auto), the
+pipeline kept pace` to `limits.bound`. When an input was not recorded,
+`kept_pace` is null and the line says "the pipeline was not shown to keep
+pace"; the throughput is still not shown as a capacity. The trickle is not one of `limits.bound_kinds`, so it is not
+part of the experiment identity. The report labels the continuous rows/s
+(headline card, Pipeline Stages summary, the bronze stream and stage rows),
+GB/s and efficiency figures "BOUNDED BY: trickle (offered load, not
+capacity)", with "trickle N files per trigger; this is the offered load,
+not infrastructure capacity" as the tooltip, and counts the trickle among
+the run's limits. `compare` marks the rows that depend on the trickle
+(`sustained_throughput_rps`, `pipeline_throughput_gb_per_second`, compute
+efficiency and `corpus_drain_seconds`) `capped`, with `capped_by` naming
+the trickle, and each side's `bound` lists the trickle line. A record written before 1.7 gets the
+same answer, computed when it is read. `released_rows` counts the trigger at
+the window's edge, so a run whose last batch was still in flight can read up
+to one trigger short (0.983 at an 1800 s window and a 30 s trigger); when the
+shortfall is within one trigger's batch and the lag within one trigger, the
+run is labelled with `kept_pace` null ("not shown to keep pace"), not shown
+as a capacity.
 
 ### Per-Stage Metrics
 
@@ -294,12 +328,15 @@ partly succeeded is partial: it keeps `compaction=ran` in the id (which reads
 attempted.
 
 `experiment.limits` records the Lakebench-imposed caps a run executed
-under, and `limits.bound` lists the ones that bound it. They include the
-continuous trickle (`max_files_per_trigger`, auto-capped at 50 files per
-trigger), the per-job executor caps (28 at most) and any concurrent
-executor budget, auto-sizing cuts, the pre-benchmark maintenance budget
-when it stopped maintenance early, and the benchmark iterations and
-in-stream rounds. A number measured under a cap that bound is a property of
+under (among them the continuous trickle, `max_files_per_trigger`,
+auto-capped at 50 files per trigger, the benchmark iterations and the
+in-stream rounds), and `limits.bound` lists the ones that bound it: the
+per-job executor caps (28 at most) and any concurrent executor budget,
+auto-sizing cuts, TM alerts over capacity, AML rules skipped on a cap, the
+pre-benchmark maintenance budget when it stopped maintenance early, and the
+trickle line when the trickle held intake (BOUNDED BY trickle, above).
+`limits.bound_kinds` names the same limits without their counts, the
+trickle excepted. A number measured under a cap that bound is a property of
 the cap, not of the infrastructure.
 
 ---
@@ -1075,25 +1112,30 @@ separately from pipeline pods.
 
 ## Comparing Runs
 
-`lakebench compare <config_a> <config_b>` runs both configurations one
-after the other, then checks the two runs' experiment blocks before it
-shows any delta. It gives one of three verdicts:
+`lakebench compare SIDE_A SIDE_B` compares stored run records: each side is
+run ids, run directories, a `series:<id>` or a config (its latest run, or
+every member of that run's `run --repeat` series). It runs nothing; run each
+side first with `lakebench run`. It checks the runs' experiment blocks and
+results before it shows any number, and the exit code is the verdict:
 
-| Verdict | When | Deltas | Exit |
-|---|---|---|---|
-| comparable | Same experiment, and the benchmark results are shown equivalent | Shown | 0 |
-| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results, a run that failed, or a record without an experiment block | Withheld | 1 |
-| comparability not established | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | Withheld; raw numbers shown | 0 |
+| Verdict | When | Exit |
+|---|---|---|
+| LIKE-FOR-LIKE | Same experiment, equal benchmark results, same execution conditions | 0 |
+| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results, a run that did not pass, a record without an experiment block, or a side whose runs are not one experiment | 10 |
+| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | 11 |
+| NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs | 12 |
+| CONFOUNDED | Comparable, but the architecture and the system both differ | 13 |
 
-A comparable pair is also like-for-like when the execution conditions
-match: effective maintenance and the compaction operation it ran (Trino
-`optimize` at 128MB and Spark Thrift Iceberg `rewrite_data_files` are
-different operations), maintenance settings, benchmark iterations and mode,
-in-stream rounds (continuous), and the Lakebench limits that bound.
-Otherwise the table is titled "comparable, not like-for-like" and lists the
-differences, because a delta may come from those conditions rather than the
-architecture. A config pair that already differs in experiment identity or
-conditions is flagged before either run starts.
+The execution conditions are effective maintenance and the compaction
+operation it ran (Trino `optimize` at 128MB and Spark Thrift Iceberg
+`rewrite_data_files` are different operations), maintenance settings,
+benchmark iterations and mode, in-stream rounds (continuous), and the
+Lakebench limits that bound. A delta between runs whose conditions differ
+may come from those conditions rather than the architecture. Each verdict
+is printed with the one condition the pair is missing and, where one
+exists, the command that supplies it. Medians, ranges and n are shown for every score, with the
+delta of medians where the pair is comparable; no winner is named in this
+release. See the [CLI reference](cli-reference.md#compare).
 
 The architecture (the recipe, its components and versions, the query access
 path, the dependency set) and the system (the cluster and object store,

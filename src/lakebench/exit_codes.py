@@ -177,9 +177,7 @@ PATHS: tuple[ExitPath, ...] = (
     # 0
     ExitPath("version.ok", _C.OK, "`lakebench version` prints the version"),
     ExitPath("run.pass", _C.OK, "`run` finished and its verdict passed"),
-    ExitPath(
-        "compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like", planned=True
-    ),
+    ExitPath("compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like"),
     ExitPath("status.ok", _C.OK, "`status` finds the deployment as configured", planned=True),
     ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity", planned=True),
     # 1
@@ -274,8 +272,27 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "compare.equal_names",
         _C.USAGE,
-        "`compare` was given two sides with the same name",
-        planned=True,
+        "`compare` was given two configs with the same deployment name and different contents",
+    ),
+    ExitPath(
+        "compare.bad_ref",
+        _C.USAGE,
+        "a `compare` side names a run, record, series or config that resolves to no record",
+    ),
+    ExitPath(
+        "compare.same_runs",
+        _C.USAGE,
+        "the two `compare` sides resolve to the same runs, or share a run",
+    ),
+    ExitPath(
+        "compare.unreadable_record",
+        _C.USAGE,
+        "a `compare` record or series manifest cannot be read, or two files disagree about one run",
+    ),
+    ExitPath(
+        "compare.removed_flag",
+        _C.USAGE,
+        "a flag of the `compare` that ran both configs; the message names the replacement",
     ),
     ExitPath(
         "admin.version_change_needs_flag",
@@ -484,16 +501,10 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=4,
     ),
     # 10 to 14
-    ExitPath(
-        "compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict", planned=True
-    ),
-    ExitPath(
-        "compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict", planned=True
-    ),
-    ExitPath(
-        "compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict", planned=True
-    ),
-    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict", planned=True),
+    ExitPath("compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict"),
+    ExitPath("compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict"),
+    ExitPath("compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict"),
+    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict"),
     ExitPath(
         "reproduce.drift",
         _C.REQUIREMENT_UNMET,

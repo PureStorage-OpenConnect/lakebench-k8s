@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
+from lakebench.metrics.bounds import binding_caps as _binding_caps
 from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
 from lakebench.metrics.metric_registry import direction_hint
 
@@ -351,7 +352,6 @@ class ReportGenerator:
         independent samples, how many Lakebench caps were in effect during
         the run, and the record's identity digest for cross-referencing.
         """
-        from lakebench.reports.formatter import caps_bound_from
 
         e = _html_escape
         exp = metrics.experiment_block() or {}
@@ -361,8 +361,11 @@ class ReportGenerator:
         scale = corpus.get("scale")
         corpus_label = f"{corpus_role} (id {corpus_id[:12]}, scale {scale})"
 
-        caps_bound = caps_bound_from(metrics)
-        n_limits = len(caps_bound)
+        from lakebench.metrics.bounds import binding_caps
+
+        # Every limit that bound the run, the trickle once whether or not
+        # the stored block lists it.
+        n_limits = len(binding_caps(metrics))
 
         if passed and not warnings:
             verdict_word = "PASSED"
@@ -1558,6 +1561,7 @@ class ReportGenerator:
             caps_bound_from,
             format_measurement,
             support_state_of,
+            trickle_caps_from,
         )
 
         total_time = metrics.total_elapsed_seconds
@@ -1610,10 +1614,13 @@ class ReportGenerator:
             qph_note = "no benchmark rounds completed"
 
         throughput_raw = f"{throughput:,.0f} rows/s"
+        # The trickle bounds intake: the rows/s, GB/s and efficiency figures
+        # are the offered load, not capacity (metrics/bounds.py).
+        intake_caps = caps_bound + trickle_caps_from(metrics)
         throughput_display = format_measurement(
             throughput_raw,
             "",
-            caps_bound=caps_bound if throughput > 0 else None,
+            caps_bound=intake_caps if throughput > 0 else None,
             n_runs=1 if throughput > 0 else None,
             support_state=support_state if throughput > 0 else None,
         )
@@ -1662,7 +1669,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{efficiency:.2f} GB/core-hr</div>
+                <div class="card-value">{format_measurement(f"{efficiency:.2f} GB/core-hr", "", caps_bound=intake_caps if efficiency > 0 else None)}</div>
                 <div class="card-hint">GB processed per core-hour requested</div>
                 <div class="card-hint2">{efficiency_hint2}</div>
             </div>
@@ -1682,7 +1689,7 @@ class ReportGenerator:
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Duration: {duration_m}m {duration_s}s</span>
             <span>Data Processed: {data_gb:.2f} GB</span>
-            <span>Avg Pipeline Throughput: {avg_throughput:.2f} GB/s</span>
+            <span>Avg Pipeline Throughput: {format_measurement(f"{avg_throughput:.2f} GB/s", "", caps_bound=intake_caps if avg_throughput > 0 else None)}</span>
         </div>
         """
 
@@ -1913,6 +1920,10 @@ class ReportGenerator:
                 stage_map[st.stage_name] = st
 
         caps_bound = caps_bound_from(metrics)
+        from lakebench.reports.formatter import trickle_caps_from
+
+        # The trickle bounds bronze's intake (metrics/bounds.py).
+        trickle_caps = trickle_caps_from(metrics)
 
         rows = []
         total_rows = 0
@@ -1927,6 +1938,8 @@ class ReportGenerator:
             if s.throughput_rps > 0:
                 stage_name = _JOB_TYPE_TO_STAGE.get(s.job_type, "")
                 stage_bound = caps_bound if _stage_matches_cap(stage_name, caps_bound) else []
+                if s.job_type == "bronze-ingest":
+                    stage_bound = [*stage_bound, *trickle_caps]
                 throughput = format_measurement(
                     f"{s.throughput_rps:,.0f} rows/s",
                     "",
@@ -2444,6 +2457,10 @@ class ReportGenerator:
         rows = []
         is_sustained = self._is_sustained(metrics)
         caps_bound = caps_bound_from(metrics)
+        from lakebench.reports.formatter import trickle_caps_from
+
+        # The trickle bounds bronze's intake in a continuous run.
+        trickle_caps = trickle_caps_from(metrics) if is_sustained else []
 
         for stage in pb.stages:
             status_class = "status-success" if stage.success else "status-failed"
@@ -2462,6 +2479,8 @@ class ReportGenerator:
             # stage carries its BOUNDED BY tag next to the throughput cell.
             if stage.throughput_rows_per_second > 0:
                 stage_bound = caps_bound if _stage_matches_cap(stage.stage_name, caps_bound) else []
+                if stage.stage_name == "bronze":
+                    stage_bound = [*stage_bound, *trickle_caps]
                 rows_s = format_measurement(
                     f"{stage.throughput_rows_per_second:,.0f}",
                     "",
@@ -2553,7 +2572,15 @@ class ReportGenerator:
             )
             summary = (
                 f"Freshness: <strong>{freshness_str}</strong> | "
-                f"Throughput: <strong>{pb.sustained_throughput_rps:,.0f} rows/s</strong> | "
+                "Throughput: <strong>"
+                + format_measurement(
+                    f"{pb.sustained_throughput_rps:,.0f} rows/s",
+                    "",
+                    caps_bound=(
+                        [*caps_bound, *trickle_caps] if pb.sustained_throughput_rps > 0 else None
+                    ),
+                )
+                + "</strong> | "
                 f"Data: <strong>{pb.total_data_processed_gb:.1f} GB</strong> | "
                 f"Rows: {pb.total_rows_processed:,}"
             )
@@ -2775,7 +2802,7 @@ class ReportGenerator:
             ("Executor caps hit (Lakebench limit)", ", ".join(caps_hit) or "none"),
             (
                 "Lakebench limits that bound the run",
-                self._bound_with_cap_names(lim.get("bound") or []) or "none",
+                self._bound_with_cap_names(_binding_caps(metrics)) or "none",
             ),
             (
                 "Auto-sizing cuts (Lakebench limit)",

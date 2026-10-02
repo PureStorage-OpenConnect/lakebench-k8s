@@ -205,7 +205,12 @@ def _print_report_summary(metrics) -> None:
         if (pb.data_freshness_seconds or 0) > 0:
             scores.append(f"Freshness:       {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
-            scores.append(f"Throughput:      {pb.sustained_throughput_rps:>8,.0f} rows/s")
+            from lakebench.metrics.bounds import trickle_note
+
+            scores.append(
+                f"Throughput:      {pb.sustained_throughput_rps:>8,.0f} rows/s"
+                f"{trickle_note(metrics)}"
+            )
         if pb.stage_latency_profile:
             lat = "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
             scores.append(f"Latency (b/s/g): {lat}ms")

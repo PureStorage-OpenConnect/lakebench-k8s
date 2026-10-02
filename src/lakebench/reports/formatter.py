@@ -46,6 +46,13 @@ def _cap_short_name(cap_line: str) -> str:
     import re as _re
 
     text = str(cap_line)
+    if text.startswith("trickle"):
+        # The bound line ("trickle: max_files_per_trigger 2 ...") and the
+        # card label ("trickle 2 files per trigger; ...") both name the
+        # trickle; the card keeps its sentence in the tooltip.
+        if "not shown to keep pace" in text:
+            return "trickle (not a capacity)"
+        return "trickle (offered load, not capacity)"
     if "executor cap" in text:
         m = _re.search(r"executor cap\s+(\d+)", text)
         cap = m.group(1) if m else "?"
@@ -173,8 +180,12 @@ def confidence_chip_html(n_runs: int | None, spread: float | None = None) -> str
     )
 
 
-def caps_bound_from(metrics: object) -> list[str]:
-    """Extract ``limits.bound`` from a ``PipelineMetrics`` if present."""
+def caps_bound_from(metrics: object, *, include_trickle: bool = False) -> list[str]:
+    """Extract ``limits.bound`` from a ``PipelineMetrics`` if present.
+
+    The trickle line is left out unless *include_trickle*: the trickle bounds
+    intake only (the throughput and efficiency cards add it with
+    ``trickle_caps_from``), not every number of the run."""
     exp_block = getattr(metrics, "experiment_block", None)
     if not callable(exp_block):
         return []
@@ -186,7 +197,26 @@ def caps_bound_from(metrics: object) -> list[str]:
         return []
     limits = exp.get("limits") or {}
     bound = limits.get("bound") or []
-    return [str(x) for x in bound if x]
+    from lakebench.metrics.bounds import TRICKLE_LINE_PREFIX
+
+    return [
+        str(x)
+        for x in bound
+        if x and (include_trickle or not str(x).startswith(TRICKLE_LINE_PREFIX))
+    ]
+
+
+def trickle_caps_from(metrics: object) -> list[str]:
+    """The card label for the trickle when it bounded the run's intake
+    (``bounds.record_trickle_bound``: the stored ``limits.trickle_bound``,
+    or computed for a record from before it); [] otherwise."""
+    from lakebench.metrics.bounds import record_trickle_bound, trickle_label
+
+    try:
+        bound = record_trickle_bound(metrics)
+    except Exception:  # noqa: BLE001 -- formatting must not raise on a bad record
+        return []
+    return [trickle_label(bound)] if bound else []
 
 
 def n_runs_of(metrics: object) -> int | None:

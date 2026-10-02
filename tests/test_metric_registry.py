@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import ast
 import inspect
-import io
 import json
 import textwrap
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -547,47 +545,34 @@ def test_report_card_hints_match_the_registry():
 # --- compare: stored pair P2 -------------------------------------------------
 
 
-def _render(a: dict, b: dict) -> str:
-    from rich.console import Console
+def _rows(a: dict, b: dict) -> dict[str, dict]:
+    from lakebench.metrics.compare import compare_records
 
-    from lakebench.cli import _compare
-
-    buf = io.StringIO()
-    with mock.patch.object(_compare, "console", Console(file=buf, width=250)):
-        _compare._print_comparison_table(_compare._build_comparison("A", a, "B", b))
-    return buf.getvalue()
-
-
-def _row(text: str, metric: str) -> str:
-    return next(line for line in text.splitlines() if metric in line)
+    return {r["metric"]: r for r in compare_records([a], [b])["metrics"]}
 
 
 def test_p2_degraded_side_not_winner():
     """P2 (C360 continuous, Trino vs Thrift): qph_degradation_pct -7.85 on A
     and 26.97 on B. B degraded; its larger number was rendered as a B win
-    when the direction came from the "qph" name token."""
-    from lakebench.reports.formatter import DELTA_TOKEN_B_FASTER
-
+    when the direction came from the "qph" name token. The direction is
+    the registry's, and compare names no winner on any row."""
     a, b = sr.load_record("011043-e338c5"), sr.load_record("073533-9de9c9")
     scores_a = a["pipeline_benchmark"]["scores"]
     scores_b = b["pipeline_benchmark"]["scores"]
     assert scores_a["qph_degradation_pct"] < scores_b["qph_degradation_pct"]
     assert reg.lookup("qph_degradation_pct", _mode(a)).direction == "lower"
-    text = _render(a, b)
-    row = _row(text, "qph_degradation_pct")
-    assert DELTA_TOKEN_B_FASTER not in row
-    assert "A_faster" in row  # coloured, for A: it degraded less
+    rows = _rows(a, b)
+    assert rows["qph_degradation_pct"]["direction"] == "lower"
+    assert all(r["winner"] is None for r in rows.values())
     # Continuous total elapsed and core-hours have no better side.
     for metric in ("total_elapsed_seconds", "total_core_hours"):
         assert metric in scores_a
-        r = _row(text, metric)
-        assert "A_faster" not in r and DELTA_TOKEN_B_FASTER not in r, r
+        assert rows[metric]["assessment"] == "not_directional", metric
 
 
-def test_compare_does_not_colour_diagnostic_scores():
+def test_compare_does_not_assess_diagnostic_scores():
     a, b = sr.load_record("011043-e338c5"), sr.load_record("073533-9de9c9")
-    text = _render(a, b)
+    rows = _rows(a, b)
     for metric in ("total_rows_processed", "bronze_busy_fraction"):
         assert metric in a["pipeline_benchmark"]["scores"]
-        row = _row(text, metric)
-        assert "a_faster" not in row.lower() and "b_faster" not in row.lower(), row
+        assert rows[metric]["assessment"] == "not_directional", metric

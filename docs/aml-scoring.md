@@ -369,9 +369,11 @@ the shipped AML example is batch mode.
   arrived; it is not the share of the corpus taken, which is
   `corpus_ingest_ratio` (bronze rows over datagen rows produced) and
   sits below 1 on a default run, whose trickle is sized to outlast the
-  window. The trickle rate is a Lakebench-imposed cap, so a run whose
-  `intake_limit` is `trickle_rate` measured the configured offered load,
-  not the pipeline's capacity.
+  window. The trickle rate is a Lakebench-imposed cap, so a run the trickle
+  held (`experiment.limits.trickle_bound`, see
+  [Scoring and Benchmarking](benchmarking.md#continuous-mode)) measured the
+  configured offered load, not the pipeline's capacity, whatever its
+  `intake_limit` reads.
 - **`qph_degradation_pct`** (continuous mode only) wants at least four
   rounds to read as a trend. Typical continuous runs produce five.
   Interpret values from a five-round run as a signal, not a conclusion.

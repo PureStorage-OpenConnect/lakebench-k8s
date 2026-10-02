@@ -460,19 +460,18 @@ lakebench report --list
 
 ```bash
 lakebench deploy lakebench-polaris.yaml --yes
-lakebench generate lakebench-polaris.yaml
+lakebench run lakebench-polaris.yaml
 lakebench compare lakebench.yaml lakebench-polaris.yaml
 ```
 
-`compare` runs each config through the pipeline and benchmark in turn and
-prints the two results side by side. It destroys each deployment after its
-run unless you pass `--keep`, and it does not deploy a missing stack, so run
-`lakebench deploy` on both configs first. Both configs need bronze data:
-`lakebench.yaml` already has it from step 4, so generate only for the second
-one. Do not pass `--generate` here: generating into a bronze prefix that
-already holds data is refused, and that side of the comparison fails. Give the two configs different
-names and bucket names: the first deployment's destroy empties its buckets
-before the second one runs.
+`compare` reads the stored records of the two configs' latest runs (the
+first from step 4, the second just made) and runs nothing itself. It prints
+how each side resolved, the verdict (LIKE-FOR-LIKE, NOT COMPARABLE, NOT
+ESTABLISHED, NOT LIKE-FOR-LIKE or CONFOUNDED, also its exit code), the one
+condition the pair is missing with the command that supplies it (where
+one exists), and each
+score's median, range and n. Give the two configs different names: a name
+is one deployment.
 
 ### 8. Tear down
 

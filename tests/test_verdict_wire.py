@@ -354,49 +354,48 @@ class TestPerfGateSuccessReaders:
 
 class TestCompareVerdictRefusal:
     def test_verdict_failed_side_refuses_comparison(self) -> None:
-        from lakebench.cli._compare import _build_comparison
+        import copy
 
-        failed = {
-            "run_id": "run-a",
-            "success": True,
-            "verdict": {"status": "FAILED", "reasons": ["ingest saturated"]},
-            "pipeline_benchmark": {"scores": {"composite_qph": 100}},
-        }
-        good = {
-            "run_id": "run-b",
-            "success": True,
-            "verdict": {"status": "PASSED"},
-            "pipeline_benchmark": {"scores": {"composite_qph": 200}},
-        }
-        comparison = _build_comparison("a", failed, "b", good)
-        assert comparison["verdict"] == "not_comparable"
-        provenance = comparison["refusals"]["provenance"]
-        assert any("did not pass its verdict" in r for r in provenance)
-        # The raw scores are still visible; the invariant is that no delta
-        # is drawn from them.
+        from lakebench.metrics.compare import compare_records
+        from tests.fixtures import stored_records as sr
+
+        good = sr.load_record("5105a0")
+        failed = copy.deepcopy(good)
+        failed["run_id"] = "20261001-000000-fa1100"
+        failed["verdict"] = {"status": "FAILED", "reasons": ["ingest saturated"]}
+        comparison = compare_records([failed], [good])
+        assert comparison["verdict"] == "NOT COMPARABLE" and comparison["step"] == "1"
+        assert "did not pass (FAILED: ingest saturated" in comparison["reasons"][0] or (
+            "did not pass" in comparison["reasons"][0]
+        )
+        assert comparison["sides"]["a"]["members"][0]["excluded"] is True
+        # The raw scores are still visible; no delta is drawn from them.
         for row in comparison["metrics"]:
-            assert row.get("not_comparable") is True
+            assert row["assessment"] == "withheld" and row["delta_pct"] is None
 
-    def test_legacy_success_true_still_admitted(self) -> None:
-        """A v1.5 record with success=True and no verdict block is a legacy
-        record; the compare readers must accept it under the fallback."""
-        from lakebench.cli._compare import _build_comparison
+    def test_legacy_success_true_is_refused_as_legacy_not_as_failed(self) -> None:
+        """A v1.5 record with success=True and no verdict block reaches the
+        ladder, which refuses it for predating the experiment block."""
+        from lakebench.metrics.compare import compare_records
 
         a = {"run_id": "run-a", "success": True}
         b = {"run_id": "run-b", "success": True}
-        comparison = _build_comparison("a", a, "b", b)
-        # Nothing here reads success -> FAILED, so no verdict-based refusal.
-        refused = comparison["refusals"]["provenance"]
-        assert not any("did not pass its verdict" in r for r in refused)
+        comparison = compare_records([a], [b])
+        assert comparison["cause"]["kind"] == "legacy"
+        assert not any("did not pass" in r for r in comparison["reasons"])
 
-    def test_success_field_is_never_removed(self) -> None:
+    def test_compare_never_changes_its_inputs(self) -> None:
         """A2b hard requirement: the raw ``success`` field survives on
-        every record it touches (compare is read-only over its inputs)."""
-        from lakebench.cli._compare import _build_comparison
+        every record compare touches (compare is read-only over its inputs)."""
+        import copy
+
+        from lakebench.metrics.compare import compare_records
 
         rec = {"run_id": "run-a", "success": True, "verdict": {"status": "FAILED"}}
-        _build_comparison("a", rec, "b", {})
-        assert "success" in rec  # not popped by the caller
+        other = {"run_id": "run-b", "success": True}
+        before = copy.deepcopy(rec)
+        compare_records([rec], [other])
+        assert rec == before
 
 
 # ---------------------------------------------------------------------------

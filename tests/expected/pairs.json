@@ -5,9 +5,9 @@
     "identity_differences and condition_differences are identity() key names; refusals are 'A_no_provenance', 'B_failed' and the like; result_refusals counts per-query result mismatches.",
     "design_before quotes section 0.3. Where it names fewer keys than the records differ in, the extra keys are listed in note.",
     "EVD-7 work (ER-10a, ER-10b, ER-11) adds the After column here, with the WI id in the commit message and a second-agent review (SPEC section 6 rule 4).",
-    "compare_after (ER-10a): what `_build_comparison` returns once the compaction operation (LB-212, derived from the query engine and table format of a record whose effective-maintenance id says compaction=ran) is a condition and the system and query access path are not; only the fields that differ from before are listed. Hand-derived from each record's recipe and effective-maintenance id.",
     "after (ER-10b, EVD-7): what comparability.pair_verdict returns for the pair: verdict, code, ladder step, LIKE-FOR-LIKE attribution, the differing keys per OD-2 group (comparability.classify key names), the System relation and notes. Hand-derived from each pair's raw records (architecture fields, effective-maintenance ids, verdict status) and the ch03 section 0.3 After column; verdict-level only (metric rendering, hints and not_assessed are ER-11).",
-    "P2 and P4 (owner decision 10-01): limits.benchmark_rounds is derived at read time from the record's pipeline_benchmark rounds with QpH > 0 when the block does not store it; P2 moves to NOT LIKE-FOR-LIKE on benchmark rounds (5 vs 4), P4 loses the benchmark rounds difference (5 vs 5)."
+    "P2 and P4 (owner decision 10-01): limits.benchmark_rounds is derived at read time from the record's pipeline_benchmark rounds with QpH > 0 when the block does not store it; P2 moves to NOT LIKE-FOR-LIKE on benchmark rounds (5 vs 4), P4 loses the benchmark rounds difference (5 vs 5).",
+    "compare (ER-11, EVD-8): what `lakebench compare A B` reports for the pair: the After verdict and its exit code, and the one missing condition, its command (null when no command supplies it) and the hint, from the design's ch03 section 7 hint table applied to each pair's first failed ladder step. Hand-checked by a second agent against that table and the raw records."
   ],
   "pairs": {
     "P1": {
@@ -39,6 +39,13 @@
           "system identity not recorded; assumed the same",
           "dependency set not recorded"
         ]
+      },
+      "compare": {
+        "verdict": "LIKE-FOR-LIKE",
+        "exit_code": 0,
+        "condition": "the winner rule (not in this release)",
+        "command": null,
+        "hint": "like-for-like; no winner is named in this release"
       }
     },
     "P2": {
@@ -73,13 +80,14 @@
           "dependency set not recorded"
         ]
       },
-      "compare_after": {
-        "like_for_like": false,
-        "condition_differences": [
-          "benchmark rounds"
-        ]
-      },
-      "note": "Owner decision 10-01: benchmark rounds are derived at read time for records that do not store limits.benchmark_rounds (A ran 5 in-stream rounds with QpH > 0, B 4), so the QpH medians cover different round counts: not like-for-like."
+      "note": "Owner decision 10-01: benchmark rounds are derived at read time for records that do not store limits.benchmark_rounds (A ran 5 in-stream rounds with QpH > 0, B 4), so the QpH medians cover different round counts: not like-for-like.",
+      "compare": {
+        "verdict": "NOT LIKE-FOR-LIKE",
+        "exit_code": 12,
+        "condition": "equal in-stream rounds",
+        "command": null,
+        "hint": "in-stream rounds differ (5 vs 4), an outcome of speed. Missing: equal in-stream rounds. No setting makes them equal; the figures are medians over different numbers of rounds"
+      }
     },
     "P3": {
       "a": "20260927-011043-e338c5",
@@ -110,6 +118,13 @@
           "system identity not recorded; assumed the same",
           "dependency set not recorded"
         ]
+      },
+      "compare": {
+        "verdict": "LIKE-FOR-LIKE",
+        "exit_code": 0,
+        "condition": "the winner rule (not in this release)",
+        "command": null,
+        "hint": "like-for-like; no winner is named in this release"
       }
     },
     "P4": {
@@ -150,11 +165,12 @@
           "dependency set not recorded"
         ]
       },
-      "compare_after": {
-        "condition_differences": [
-          "effective maintenance",
-          "maintenance settings"
-        ]
+      "compare": {
+        "verdict": "NOT LIKE-FOR-LIKE",
+        "exit_code": 12,
+        "condition": "the same maintenance",
+        "command": null,
+        "hint": "effective maintenance differs (m2-2026-09-26:expire=not_run,compaction=not_run vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported): Iceberg and Delta run different maintenance operations. Missing: the same maintenance. No setting aligns them (with maintenance off the two still record different operations); compare compositions of one table format"
       }
     },
     "P5": {
@@ -168,12 +184,6 @@
         "refusals": [],
         "condition_differences": [],
         "result_refusals": 0
-      },
-      "compare_after": {
-        "like_for_like": false,
-        "condition_differences": [
-          "compaction operation"
-        ]
       },
       "after": {
         "verdict": "NOT LIKE-FOR-LIKE",
@@ -195,6 +205,13 @@
           "system identity not recorded; assumed the same",
           "dependency set not recorded"
         ]
+      },
+      "compare": {
+        "verdict": "NOT LIKE-FOR-LIKE",
+        "exit_code": 12,
+        "condition": "the same maintenance",
+        "command": null,
+        "hint": "compaction differs by engine (iceberg_rewrite_data_files vs trino_optimize:128MB). Missing: the same maintenance. No setting aligns them; compare with maintenance off: `architecture.pipeline.pre_benchmark_maintenance: false` in both configs, then re-run both"
       }
     },
     "P6": {
@@ -210,12 +227,6 @@
           "effective maintenance"
         ],
         "result_refusals": 0
-      },
-      "compare_after": {
-        "condition_differences": [
-          "effective maintenance",
-          "compaction operation"
-        ]
       },
       "after": {
         "verdict": "NOT LIKE-FOR-LIKE",
@@ -238,6 +249,13 @@
           "system identity not recorded; assumed the same",
           "dependency set not recorded"
         ]
+      },
+      "compare": {
+        "verdict": "NOT LIKE-FOR-LIKE",
+        "exit_code": 12,
+        "condition": "the same maintenance",
+        "command": null,
+        "hint": "effective maintenance differs (m2-2026-09-26:expire=ran,compaction=ran vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported): Iceberg and Delta run different maintenance operations. Missing: the same maintenance. No setting aligns them (with maintenance off the two still record different operations); compare compositions of one table format"
       }
     },
     "P7": {
@@ -271,6 +289,13 @@
         "conditions": [],
         "system": null,
         "notes": []
+      },
+      "compare": {
+        "verdict": "NOT COMPARABLE",
+        "exit_code": 10,
+        "condition": "the same corpus",
+        "command": "lakebench run <the config of deployment pipe-pol-aml1> --generate --regenerate",
+        "hint": "corpus seed differs (777001 vs 777021) (also differs: generator image). Missing: the same corpus. Set `architecture.workload.datagen.seed: 777001` in <the config of deployment pipe-pol-aml1>, then `lakebench run <the config of deployment pipe-pol-aml1> --generate --regenerate`"
       }
     },
     "P8": {
@@ -293,14 +318,6 @@
         ],
         "result_refusals": 4
       },
-      "compare_after": {
-        "condition_differences": [
-          "effective maintenance",
-          "compaction operation",
-          "maintenance settings",
-          "benchmark rounds"
-        ]
-      },
       "after": {
         "verdict": "NOT COMPARABLE",
         "code": 10,
@@ -315,6 +332,13 @@
         "conditions": [],
         "system": null,
         "notes": []
+      },
+      "compare": {
+        "verdict": "NOT COMPARABLE",
+        "exit_code": 10,
+        "condition": "one generator",
+        "command": "lakebench run <the config of deployment lb16-cont2> --continuous",
+        "hint": "the corpora came from different generators (docker.io/sillidata/lb-datagen:034f998 vs docker.io/sillidata/lb-datagen:14c4eee). Missing: one generator. Set `images.datagen` in <the config of deployment lb16-cont2> to A's image and run `lakebench run <the config of deployment lb16-cont2> --continuous`, or record the re-pin's neutrality in config/datagen_lineage.yaml"
       }
     },
     "P9": {
@@ -334,13 +358,6 @@
         ],
         "result_refusals": 0
       },
-      "compare_after": {
-        "condition_differences": [
-          "effective maintenance",
-          "compaction operation",
-          "benchmark mode"
-        ]
-      },
       "after": {
         "verdict": "NOT COMPARABLE",
         "code": 10,
@@ -353,6 +370,13 @@
         "system": null,
         "notes": [],
         "reason_kind": "B_failed"
+      },
+      "compare": {
+        "verdict": "NOT COMPARABLE",
+        "exit_code": 10,
+        "condition": "a passed run",
+        "command": "lakebench run <the config of deployment pipe-aml-b10>",
+        "hint": "B: run 20260929-204947-be2b70 did not pass (Process exit intent was not OK). Missing: a passed run. Fix it and re-run: `lakebench run <the config of deployment pipe-aml-b10>`"
       }
     },
     "P10": {
@@ -372,12 +396,6 @@
         ],
         "result_refusals": 0
       },
-      "compare_after": {
-        "condition_differences": [
-          "effective maintenance",
-          "compaction operation"
-        ]
-      },
       "after": {
         "verdict": "NOT COMPARABLE",
         "code": 10,
@@ -392,6 +410,13 @@
         "conditions": [],
         "system": null,
         "notes": []
+      },
+      "compare": {
+        "verdict": "NOT COMPARABLE",
+        "exit_code": 10,
+        "condition": "one generator",
+        "command": "lakebench run <the config of deployment lb16-val-trino> --generate --regenerate",
+        "hint": "the corpora came from different generators (docker.io/sillidata/lb-datagen:b6f2905 vs docker.io/sillidata/lb-datagen:14c4eee). Missing: one generator. Set `images.datagen` in <the config of deployment lb16-val-trino> to A's image and run `lakebench run <the config of deployment lb16-val-trino> --generate --regenerate`, or record the re-pin's neutrality in config/datagen_lineage.yaml"
       }
     },
     "P11": {
@@ -414,13 +439,6 @@
         ],
         "result_refusals": 0
       },
-      "compare_after": {
-        "condition_differences": [
-          "compaction operation",
-          "maintenance settings",
-          "benchmark rounds"
-        ]
-      },
       "after": {
         "verdict": "NOT COMPARABLE",
         "code": 10,
@@ -436,6 +454,13 @@
         "conditions": [],
         "system": null,
         "notes": []
+      },
+      "compare": {
+        "verdict": "NOT COMPARABLE",
+        "exit_code": 10,
+        "condition": "the same corpus",
+        "command": "lakebench run <the config of deployment pipe-aml-c1> --continuous",
+        "hint": "corpus seed differs (43 vs 777001) (also differs: generator image). Missing: the same corpus. Set `architecture.workload.datagen.seed: 43` in <the config of deployment pipe-aml-c1>, then `lakebench run <the config of deployment pipe-aml-c1> --continuous`"
       }
     },
     "P12": {
@@ -464,6 +489,13 @@
         "system": null,
         "notes": [],
         "reason_kind": "A_legacy"
+      },
+      "compare": {
+        "verdict": "NOT COMPARABLE",
+        "exit_code": 10,
+        "condition": "a v1.6+ record",
+        "command": "lakebench run <the config of deployment lb16-base-trino>",
+        "hint": "A: run 20260926-211343-978622 predates the experiment block. Missing: a v1.6+ record. Re-run it: `lakebench run <the config of deployment lb16-base-trino>`"
       }
     }
   }

@@ -107,20 +107,18 @@ _BOTH = frozenset({BATCH, CONTINUOUS})
 _ALL_WL = frozenset({"customer360", "financial"})
 _AML = frozenset({"financial"})
 
-# Bound kinds (``limits.bound_kinds``) as metrics/experiment._bound_kinds
-# writes them; ``*`` matches any job type. BOUND_TRICKLE is never a bound
-# kind (the trickle is read from the record): a reader passes it to
-# ``capped_by`` as ``extra``. BOUND_ML_LOOP_EXECUTOR_CAP names the ML loop's
-# cap for the loop's rows when they are added. The bounds module and the ML
-# loop are to take these names from here.
-BOUND_EXECUTOR_CAP = "*: executor cap"
-BOUND_EXECUTOR_BUDGET = "*: concurrent executor budget"
-BOUND_AUTOSIZE = "auto-sizing cuts"
-BOUND_RULE_CAP = "rule * cap"
-BOUND_TM_ALERTS = "TM max_alerts_per_customer"
-BOUND_MAINTENANCE = "pre-benchmark maintenance budget"
-BOUND_TRICKLE = "trickle"
-BOUND_ML_LOOP_EXECUTOR_CAP = "ML loop executor cap"
+# Bound kinds come from metrics/bounds.py (the one registry of kinds);
+# BOUND_TRICKLE is not a kind, and a reader passes it to ``capped_by`` as
+# ``extra`` when ``bounds.trickle_bound`` holds.
+from lakebench.metrics.bounds import (  # noqa: E402
+    BOUND_AUTOSIZE,
+    BOUND_EXECUTOR_BUDGET,
+    BOUND_EXECUTOR_CAP,
+    BOUND_MAINTENANCE,
+    BOUND_RULE_CAP,
+    BOUND_TM_ALERTS,
+    BOUND_TRICKLE,
+)
 
 #: Caps on batch pipeline times, throughput and compute: executor counts,
 #: auto-sizing, and AML rule and TM caps (a skipped rule makes gold faster).
@@ -408,7 +406,8 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
-        description="What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), trickle_rate (bronze ran a micro-batch on nearly every trigger, each inside the trigger, with corpus left: the configured max_files_per_trigger per trigger bounded intake and the pipeline kept pace), below_bronze_capacity (bronze had idle time without that pattern: a late start or a stall), none (kept up)",
+        description="What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), trickle_rate (bronze ran a micro-batch on nearly every trigger, each inside the trigger, with corpus left: the configured max_files_per_trigger per trigger bounded intake and the pipeline kept pace), below_bronze_capacity (bronze had idle time without that pattern: a late start or a stall), none (kept up: ingest_ratio >= 0.95). Whether the trickle held intake (BOUNDED BY trickle: "
+        "ingested / offered rows >= 0.99 and lag within one trigger) is experiment.limits.trickle_bound",
     ),
     MetricMeta(
         "corpus_drain_seconds",
@@ -417,7 +416,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "diagnostic",
         _CONT,
         _ALL_WL,
-        (),
+        (BOUND_TRICKLE,),
         description="When intake_limit is trickle_rate: seconds the trickle needs to ingest the whole corpus at the rate it held (datagen rows / sustained_throughput_rps); a window this long drains it",
     ),
     MetricMeta(

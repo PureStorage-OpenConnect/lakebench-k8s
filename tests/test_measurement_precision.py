@@ -562,12 +562,10 @@ class TestReviewFixes:
         assert len(calls) == 1
 
     def test_compare_maps_the_old_freshness_key(self):
-        from lakebench.cli._compare import _renamed_scores
+        from lakebench.metrics.compare import _scores
 
-        assert _renamed_scores({"query_time_freshness_seconds": 5.0, "x": 1}) == {
-            "query_time_event_age_seconds": 5.0,
-            "x": 1,
-        }
+        rec = {"pipeline_benchmark": {"scores": {"query_time_freshness_seconds": 5.0, "x": 1}}}
+        assert _scores(rec) == {"query_time_event_age_seconds": 5.0, "x": 1.0}
 
 
 class TestRunOrdering:

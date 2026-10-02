@@ -316,7 +316,7 @@ VERB_PURPOSES = [
     ("lakebench.cli._config", ["config", "recommend"], LoadPurpose.INSPECT, False),
     ("lakebench.cli", ["report"], LoadPurpose.READ, False),
     ("lakebench.cli", ["results"], LoadPurpose.READ, False),
-    ("lakebench.cli._compare", ["compare", "CFG"], LoadPurpose.MUTATE, False),
+    ("lakebench.config", ["compare", "CFG"], LoadPurpose.COMPARE, False),
     (
         "lakebench.cli._financial",
         ["financial", "score", "--manifest", "s3://m", "--output", "s3://o"],
