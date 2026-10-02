@@ -1398,10 +1398,12 @@ class DeploymentIdentity:
 def build_identity_from_config(cfg: Any, context: str | None = None) -> DeploymentIdentity:
     """Assemble a DeploymentIdentity from a loaded LakebenchConfig.
 
-    The committed sha is the commit of the checkout the lakebench package
-    runs from (found from the package's own path, the same reading as the
-    run record's ``provenance.git_sha``), never the working directory's
-    repository; outside a checkout it is None."""
+    The committed sha is the short commit of the checkout the lakebench
+    package runs from (found from the package's own path, the reading the
+    run record's ``provenance.git_sha`` makes in a checkout), never the
+    working directory's repository, with ``-dirty`` when the package has
+    uncommitted changes. It is None when no checkout commit can be read (a
+    wheel, an unknown install, git unavailable)."""
     from lakebench.metrics.provenance import INSTALL_CHECKOUT, sample
 
     committed_sha: str | None = None
@@ -1411,7 +1413,7 @@ def build_identity_from_config(cfg: Any, context: str | None = None) -> Deployme
         code = {}
     sha = code.get("git_sha")
     if code.get("install") == INSTALL_CHECKOUT and isinstance(sha, str) and sha:
-        committed_sha = sha[:7]
+        committed_sha = sha[:7] + ("-dirty" if code.get("git_dirty") else "")
 
     workload_schema: str | None = None
     try:

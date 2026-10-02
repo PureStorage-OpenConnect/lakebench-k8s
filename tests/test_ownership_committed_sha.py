@@ -53,7 +53,9 @@ def test_stamp_is_the_package_checkout_not_the_working_directory(tmp_path, monke
     monkeypatch.chdir(other)
 
     code = provenance.sample()
-    expected = code["git_sha"][:7] if code["install"] == provenance.INSTALL_CHECKOUT else None
+    expected = None
+    if code["install"] == provenance.INSTALL_CHECKOUT:
+        expected = code["git_sha"][:7] + ("-dirty" if code["git_dirty"] else "")
 
     identity = ownership.build_identity_from_config(_cfg())
     assert identity.committed_sha != other_head[:7]
@@ -85,3 +87,13 @@ def test_a_failed_code_read_stamps_nothing(tmp_path, monkeypatch):
     identity = ownership.build_identity_from_config(_cfg())
     assert identity.committed_sha is None
     assert identity.name == "lb-sha"
+
+
+def test_a_modified_checkout_is_marked_dirty(tmp_path, monkeypatch):
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    monkeypatch.chdir(tmp_path)
+    code = {"install": provenance.INSTALL_CHECKOUT, "git_sha": "b" * 40}
+    monkeypatch.setattr(provenance, "sample", lambda: {**code, "git_dirty": True})
+    assert ownership.build_identity_from_config(_cfg()).committed_sha == "bbbbbbb-dirty"
+    monkeypatch.setattr(provenance, "sample", lambda: {**code, "git_dirty": False})
+    assert ownership.build_identity_from_config(_cfg()).committed_sha == "bbbbbbb"
