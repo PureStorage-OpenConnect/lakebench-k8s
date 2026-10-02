@@ -480,112 +480,99 @@ class TestEffectiveMaintenance:
 
 
 class TestCompareCommand:
-    def _comparison(self, a, b):
-        from lakebench.cli._compare import _build_comparison
+    """compare over stored records built by the collector (the stored-pair
+    goldens are tests/test_compare_stored.py)."""
 
-        for m in (a, b):
-            m.setdefault("pipeline_benchmark", {})["scores"] = {"composite_qph": 100.0}
-        return _build_comparison("A", a, "B", b)
+    @staticmethod
+    def _pair(a, b, *, qph=(100.0, 100.0)):
+        a = dict(a)
+        b = dict(b)
+        b["run_id"] = "20260926-120000-bbbbbb"
+        for m, q in ((a, qph[0]), (b, qph[1])):
+            m.setdefault("pipeline_benchmark", {})["scores"] = {"composite_qph": q}
+        return a, b
+
+    def _comparison(self, a, b, **kw):
+        from lakebench.metrics.compare import compare_records
+
+        a, b = self._pair(a, b, **kw)
+        return compare_records([a], [b])
 
     def test_comparable_pair(self):
         c = self._comparison(_metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict())
-        assert c["comparable"] is True and c["like_for_like"] is True
-        assert not any(r.get("not_comparable") for r in c["metrics"])
-        assert c["support"] == {"config_a": "unverified", "config_b": "unverified"}
+        assert c["verdict"] == "LIKE-FOR-LIKE" and c["exit_code"] == 0
+        assert c["attribution"] in ("repeat", "system not established")
+        assert all(r["winner"] is None for r in c["metrics"])
+        assert c["sides"]["a"]["support"] == "unverified"
+        assert c["sides"]["b"]["support"] == "unverified"
 
-    def test_matching_results_under_other_conditions_are_labelled(self, capsys):
-        from lakebench.cli import _compare
-
+    def test_other_query_engine_is_an_architecture_differential(self):
         a = _metrics(_cfg(engine="trino")).to_dict()
         b = _metrics(_cfg(engine="duckdb")).to_dict()
         c = self._comparison(a, b)
-        assert c["comparable"] is True and c["like_for_like"] is False
-        assert c["condition_differences"]
-        import io
-
-        from rich.console import Console
-
-        buf = io.StringIO()
-        with mock.patch.object(_compare, "console", Console(file=buf, width=200)):
-            _compare._print_comparison_table(c)
-        text = buf.getvalue()
-        assert "NOT LIKE-FOR-LIKE" in text and "NOT COMPARABLE" not in text
-        assert "unverified" in text
-
-    def test_a_failed_run_is_not_comparable(self):
-        c = self._comparison(_metrics(_cfg()).to_dict(), {"error": "Run failed with exit code 1"})
-        assert c["comparable"] is False
-        assert "did not complete" in c["refusals"]["provenance"][0]
+        assert c["verdict"] != "NOT COMPARABLE"
+        assert "architecture" in c["groups"]
 
     def test_legacy_records_are_not_comparable_and_do_not_crash(self):
         a = _metrics(_cfg()).to_dict()
         b = dict(a)
         b.pop("experiment")
         c = self._comparison(a, b)
-        assert c["comparable"] is False
-        assert ex.NO_PROVENANCE in c["refusals"]["provenance"][0]
+        assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "1"
+        assert "predates the experiment block" in c["missing"]["hint"]
 
-    def test_non_comparable_pair_keeps_the_numbers_labelled(self):
+    def test_non_comparable_pair_keeps_the_numbers_and_withholds_them(self):
         a = _metrics(_cfg(), {"Q1": _fp(1)}).to_dict()
         b = _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
-        c = self._comparison(a, b)
-        assert c["comparable"] is False
-        assert c["refusals"]["results"]
-        assert c["metrics"] and all(r["not_comparable"] for r in c["metrics"])
+        c = self._comparison(a, b, qph=(100.0, 200.0))
+        assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "5"
+        assert "invariant 2" in c["missing"]["condition"]
+        (row,) = c["metrics"]
+        assert row["a"]["median"] == 100.0 and row["b"]["median"] == 200.0
+        assert row["assessment"] == "withheld" and row["delta_pct"] is None
 
-    def test_table_withholds_deltas(self, capsys):
-        from lakebench.cli import _compare
+    def test_table_withholds_deltas(self, tmp_path):
+        a, b = self._pair(
+            _metrics(_cfg(), {"Q1": _fp(1)}).to_dict(),
+            _metrics(_cfg(), {"Q1": _fp(2)}).to_dict(),
+            qph=(100.0, 200.0),
+        )
+        result = self._invoke(tmp_path, a, b)
+        assert result.exit_code == 10, result.output
+        assert "NOT COMPARABLE" in result.output and "withheld" in result.output
+        assert "+100.00%" not in result.output
 
-        a = _metrics(_cfg(), {"Q1": _fp(1)}).to_dict()
-        b = _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
-        a["pipeline_benchmark"] = {"scores": {"composite_qph": 100.0}}
-        b["pipeline_benchmark"] = {"scores": {"composite_qph": 200.0}}
-        import io
-
-        from rich.console import Console
-
-        buf = io.StringIO()
-        with mock.patch.object(_compare, "console", Console(file=buf, width=200)):
-            _compare._print_comparison_table(_compare._build_comparison("A", a, "B", b))
-        text = buf.getvalue()
-        assert "NOT COMPARABLE" in text and "Q1" in text
-        assert "not comparable" in text
-        assert "+100.0%" not in text
-
-    def _invoke(self, tmp_path, metrics_a, metrics_b, cfg_b=None):
+    @staticmethod
+    def _invoke(tmp_path, a, b):
         from lakebench.cli import app
 
-        cfg_a = _cfg()
-        cfg_b = cfg_b or _cfg()
-        for p in ("a.yaml", "b.yaml"):
-            (tmp_path / p).write_text("name: x\n")
-        with (
-            mock.patch("lakebench.cli._compare.load_config", side_effect=[cfg_a, cfg_b]),
-            mock.patch("lakebench.cli._compare._run_single", side_effect=[metrics_a, metrics_b]),
-            mock.patch("lakebench.cli._compare.DEFAULT_OUTPUT_DIR", str(tmp_path / "out")),
-        ):
-            return CliRunner().invoke(
-                app, ["compare", str(tmp_path / "a.yaml"), str(tmp_path / "b.yaml"), "--yes"]
-            )
+        runs = tmp_path / "runs"
+        for m in (a, b):
+            d = runs / f"run-{m['run_id']}"
+            d.mkdir(parents=True)
+            (d / "metrics.json").write_text(json.dumps(m))
+        return CliRunner().invoke(
+            app, ["compare", a["run_id"], b["run_id"], "--runs-dir", str(runs)]
+        )
 
-    def test_exit_code_is_non_zero_when_not_comparable(self, tmp_path):
-        a = _metrics(_cfg(), {"Q1": _fp(1)}).to_dict()
-        b = _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
+    def test_exit_code_is_10_when_not_comparable(self, tmp_path):
+        a, b = self._pair(
+            _metrics(_cfg(), {"Q1": _fp(1)}).to_dict(), _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
+        )
         result = self._invoke(tmp_path, a, b)
-        assert result.exit_code == 1, result.output
-        saved = next((tmp_path / "out" / "comparisons").glob("*/comparison.json"))
-        assert json.loads(saved.read_text())["comparable"] is False
+        assert result.exit_code == 10, result.output
+        assert not (tmp_path / "lakebench-output").exists()
 
-    def test_exit_code_is_zero_when_comparable(self, tmp_path):
-        a, b = _metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict()
+    def test_exit_code_is_zero_when_like_for_like(self, tmp_path):
+        a, b = self._pair(_metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict())
         result = self._invoke(tmp_path, a, b)
         assert result.exit_code == 0, result.output
 
-    def test_different_configs_are_flagged_before_running(self, tmp_path):
-        a, b = _metrics(_cfg()).to_dict(), _metrics(_cfg(seed=7)).to_dict()
-        result = self._invoke(tmp_path, a, b, cfg_b=_cfg(seed=7))
+    def test_different_seeds_are_not_comparable(self, tmp_path):
+        a, b = self._pair(_metrics(_cfg()).to_dict(), _metrics(_cfg(seed=7)).to_dict())
+        result = self._invoke(tmp_path, a, b)
         assert "NOT COMPARABLE" in result.output
-        assert result.exit_code == 1
+        assert result.exit_code == 10
 
 
 class TestBenchmarkGateEmptyResults:

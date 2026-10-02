@@ -7,6 +7,8 @@ fails here.
 
 from __future__ import annotations
 
+import copy
+import json
 import os
 import re
 import subprocess
@@ -140,12 +142,6 @@ PLANNED_BY = {
     "alias.refused": "CC-28",
     "capacity.shortfall": "CC-24",
     "capacity.unknown": "CC-24",
-    "compare.confounded": "ER-11",
-    "compare.equal_names": "CC-3",
-    "compare.like_for_like": "ER-11",
-    "compare.not_comparable": "ER-11",
-    "compare.not_established": "ER-11",
-    "compare.not_like_for_like": "ER-11",
     "destroy.unverified_cluster": "SD-18a",
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
@@ -821,10 +817,123 @@ def _scenario_run_args(monkeypatch, tmp_path):
 
 
 def _scenario_confirm_declined(monkeypatch, tmp_path):
-    a = _init_config(tmp_path)
-    b = tmp_path / "b.yaml"
-    b.write_text(a.read_text().replace(f"name: {_config_name(a)}", "name: other-side", 1))
-    return _runner().invoke(app, ["compare", str(a), str(b)], input="n\n")
+    cfg = _init_config(tmp_path)
+    return _runner().invoke(app, ["clean", "metrics", str(cfg)], input="n\n")
+
+
+# -- compare over stored records -------------------------------------------------
+
+
+def _compare_runs(tmp_path, *records) -> Path:
+    runs = tmp_path / "runs"
+    for r in records:
+        d = runs / f"run-{r['run_id']}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "metrics.json").write_text(json.dumps(r))
+    return runs
+
+
+def _compare_pair(tmp_path, pair: str):
+    from tests.fixtures import stored_records as sr
+
+    spec = json.loads((ROOT / "tests" / "expected" / "pairs.json").read_text())["pairs"][pair]
+    a, b = sr.load_record(spec["a"]), sr.load_record(spec["b"])
+    runs = _compare_runs(tmp_path, a, b)
+    return _runner().invoke(app, ["compare", a["run_id"], b["run_id"], "--runs-dir", str(runs)])
+
+
+def _scenario_compare_like_for_like(monkeypatch, tmp_path):
+    return _compare_pair(tmp_path, "P1")
+
+
+def _scenario_compare_not_comparable(monkeypatch, tmp_path):
+    return _compare_pair(tmp_path, "P7")
+
+
+def _scenario_compare_not_like_for_like(monkeypatch, tmp_path):
+    return _compare_pair(tmp_path, "P5")
+
+
+def _scenario_compare_not_established(monkeypatch, tmp_path):
+    from tests.fixtures import stored_records as sr
+
+    a = sr.load_record("5105a0")
+    b = copy.deepcopy(a)
+    b["run_id"] = "20261001-000000-0e0001"
+    for r in (a, b):
+        r["experiment"]["results"] = {
+            "query_set_id": None,
+            "fingerprints": {},
+            "not_checked": "no benchmark ran",
+        }
+    runs = _compare_runs(tmp_path, a, b)
+    return _runner().invoke(app, ["compare", a["run_id"], b["run_id"], "--runs-dir", str(runs)])
+
+
+def _scenario_compare_confounded(monkeypatch, tmp_path):
+    from tests.fixtures import stored_records as sr
+    from tests.test_comparability import _sys
+
+    a = sr.load_record("5105a0")
+    a["experiment"]["system_identity"] = _sys()
+    b = copy.deepcopy(a)
+    b["run_id"] = "20261001-000000-cf0001"
+    b["experiment"]["system_identity"] = _sys(ca="d" * 12)
+    b["experiment"]["architecture"]["recipe"] = "polaris-iceberg-spark-trino"
+    b["experiment"]["architecture"]["catalog"] = {"type": "polaris", "version": "1.6.0"}
+    runs = _compare_runs(tmp_path, a, b)
+    return _runner().invoke(app, ["compare", a["run_id"], b["run_id"], "--runs-dir", str(runs)])
+
+
+def _scenario_compare_bad_ref(monkeypatch, tmp_path):
+    return _runner().invoke(
+        app,
+        [
+            "compare",
+            "20260101-000000-abcdef",
+            "20260101-000000-abcde0",
+            "--runs-dir",
+            str(tmp_path),
+        ],
+    )
+
+
+def _scenario_compare_same_runs(monkeypatch, tmp_path):
+    from tests.fixtures import stored_records as sr
+
+    a = sr.load_record("5105a0")
+    runs = _compare_runs(tmp_path, a)
+    return _runner().invoke(app, ["compare", a["run_id"], a["run_id"], "--runs-dir", str(runs)])
+
+
+def _scenario_compare_unreadable_record(monkeypatch, tmp_path):
+    d = tmp_path / "runs" / "run-20260101-000000-abcdef"
+    d.mkdir(parents=True)
+    (d / "metrics.json").write_text("{not json")
+    return _runner().invoke(
+        app,
+        [
+            "compare",
+            "20260101-000000-abcdef",
+            "20260101-000000-abcde0",
+            "--runs-dir",
+            str(tmp_path / "runs"),
+        ],
+    )
+
+
+def _scenario_compare_removed_flag(monkeypatch, tmp_path):
+    return _runner().invoke(app, ["compare", "a.yaml", "b.yaml", "--keep"])
+
+
+def _scenario_compare_equal_names(monkeypatch, tmp_path):
+    from tests.fixtures import stored_records as sr
+
+    a = sr.load_record("5105a0")
+    runs = _compare_runs(tmp_path, a)
+    (tmp_path / "a.yaml").write_text(f"name: {a['deployment_name']}\n")
+    (tmp_path / "b.yaml").write_text(f"name: {a['deployment_name']}\n# edited\n")
+    return _runner().invoke(app, ["compare", "a.yaml", "b.yaml", "--runs-dir", str(runs)])
 
 
 def _reproduce_package(tmp_path, commit_sha: str) -> Path:
@@ -1117,6 +1226,16 @@ SCENARIOS = {
     "run.args": _scenario_run_args,
     "run.namespace_gone": _scenario_run_namespace_gone,
     "confirm.declined": _scenario_confirm_declined,
+    "compare.like_for_like": _scenario_compare_like_for_like,
+    "compare.not_comparable": _scenario_compare_not_comparable,
+    "compare.not_established": _scenario_compare_not_established,
+    "compare.not_like_for_like": _scenario_compare_not_like_for_like,
+    "compare.confounded": _scenario_compare_confounded,
+    "compare.bad_ref": _scenario_compare_bad_ref,
+    "compare.same_runs": _scenario_compare_same_runs,
+    "compare.unreadable_record": _scenario_compare_unreadable_record,
+    "compare.removed_flag": _scenario_compare_removed_flag,
+    "compare.equal_names": _scenario_compare_equal_names,
     "reproduce.commit_drift": _scenario_reproduce_commit_drift,
     "reproduce.drift": _scenario_reproduce_drift,
     "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
@@ -1162,6 +1281,16 @@ EXPECTED_OUTPUT = {
     "config.name_required": "config has no name, so it cannot change data",
     "reproduce.commit_drift": "Commit drift",
     "reproduce.drift": "scale_ratio",
+    "compare.like_for_like": "LIKE-FOR-LIKE",
+    "compare.not_comparable": "Missing: the same corpus",
+    "compare.not_established": "Missing: checked results",
+    "compare.not_like_for_like": "compaction differs by engine",
+    "compare.confounded": "architecture and system both differ",
+    "compare.bad_ref": "no record for 20260101-000000-abcdef",
+    "compare.same_runs": "resolve to the same runs",
+    "compare.unreadable_record": "cannot read",
+    "compare.removed_flag": "no longer runs configs",
+    "compare.equal_names": "a name is one deployment",
 }
 # Text that must not appear: a declined prompt is not an unanswered one.
 UNEXPECTED_OUTPUT = {"confirm.declined": "Not confirmed", "run.verdict_failed": "ERROR"}

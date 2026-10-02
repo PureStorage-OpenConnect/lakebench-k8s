@@ -63,93 +63,114 @@ lakebench init --no-interactive --endpoint http://my-s3:80 --access-key AAA --se
 
 ### compare
 
-Compare two configurations side-by-side.
+Compare two sides of stored run records. `compare` is read-only: it reads
+`metrics.json` files and series manifests, and deploys, runs, generates and
+destroys nothing.
 
 ```
-lakebench compare CONFIG_A CONFIG_B [OPTIONS]
+lakebench compare SIDE_A SIDE_B [--runs-dir DIR]... [--format table|json|csv] [-o PATH]
 ```
 
-On a cluster, `compare` does not deploy: run `lakebench deploy` on both
-configs first. With `--local` it deploys each stack itself before the run.
+A side is one or more comma-separated refs. Each ref is tried in this order:
+
+1. `series:<id>`: the members of a `run --repeat` series, read from its
+   manifest `<output dir>/series/<id>.json`.
+2. A run id (`20260929-212900-5105a0`, with or without `run-`), looked up in
+   every `--runs-dir` (default `lakebench-output/runs`). Two directories
+   holding different files for one run id are refused.
+3. A run directory holding `metrics.json`, or a path to a `metrics.json`.
+4. A config (`.yaml`/`.yml`): the latest run record of its deployment name,
+   by `start_time`. When that record belongs to a series, every member the
+   series manifest names is taken; a series whose manifest is missing is
+   refused (pass the run ids instead).
+
+Side A is the baseline and B the candidate; deltas are B relative to A.
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--keep` | | `false` | Keep deployments after (do not destroy) |
-| `--scale` | | (from config) | Override scale for both configs |
-| `--output` | `-o` | (none) | Write comparison report to file |
-| `--format` | | `table` | Output format: table, json, csv, html |
-| `--skip-benchmark` | | `false` | Skip benchmark phase |
-| `--local` | | `false` | Run both configs on this host with podman/docker |
-| `--generate` | | `false` | Generate data before each run. On a cluster, a side whose bronze prefix already holds data fails when its run reaches datagen (the inner `run` exits 3, refused, and `compare` reports that side as failed); empty it first with `lakebench clean bronze <config>` |
-| `--timeout` | | `7200` | Per-run timeout in seconds |
-| `--yes` | `-y` | `false` | Skip confirmation prompt |
+| `--runs-dir` | | `lakebench-output/runs` | Directory of `run-<id>/` records; repeat it to search several. Series manifests are read from each directory's sibling `series/` |
+| `--format` | | `table` | Output format: table, json, csv |
+| `--output` | `-o` | (none) | Write the comparison to this file (JSON, or CSV with `--format csv`). Nothing is written without it |
 
 ```bash
-lakebench compare hive-config.yaml polaris-config.yaml
-lakebench compare a.yaml b.yaml --format json --output comparison.json
-lakebench compare a.yaml b.yaml --local --generate
+lakebench compare 20260929-212900-5105a0 20260929-214442-825153
+lakebench compare a.yaml b.yaml --format json -o comparison.json
+lakebench compare series:s-20261101-120000-a1b2c3 b.yaml
+lakebench compare r1,r2,r3 r4,r5,r6 --runs-dir lakebench-output/runs
 ```
 
-**Verdicts.** `compare` checks the two runs' workload results before it
-shows any performance difference, and prints one of three verdicts:
+The flags of the earlier `compare`, which ran both configs (`--keep`,
+`--scale`, `--skip-benchmark`, `--timeout`, `--local`, `--generate`,
+`--yes`), are refused with exit 2 and the replacement: run each side first
+with `lakebench run`, then compare.
+
+**Resolution.** Before anything else `compare` prints, on stderr, how each
+side resolved: its refs, deployment, series and every member with its
+verdict, for example `A: a.yaml -> deployment lb-a1, series s-..., 3 runs:
+r1 passed, r2 passed, r3 FAILED: ... (excluded)`. A member whose verdict did
+not pass is excluded and listed; n counts the passed members. A record
+written before the experiment block is not excluded: the pair is refused
+on it. Two sides that resolve to the same runs, or share a run, are
+refused, as are two configs with one deployment name and different
+contents ("a name is one deployment").
+
+**Verdicts.** The pair is decided by the comparability ladder over the
+passed members, and the exit code is the verdict:
 
 | Verdict | Meaning | Exit |
 |---|---|---|
-| comparable | Both runs completed and their benchmark result fingerprints match | 0 |
-| NOT COMPARABLE | Different experiments (workload, corpus, scale, mode), different results, a failed run, or a record without the experiment block. Deltas and winner colouring are withheld | 1 |
-| comparability not established | A side has no checked results (`--skip-benchmark`, a recipe without a query engine, or a continuous run without a settled result check). Raw numbers are shown, no deltas or winner | 0 |
+| LIKE-FOR-LIKE | Same experiment, equal results, same execution conditions. The attribution says what differs: the architecture, the system, or nothing (a repeat) | 0 |
+| NOT COMPARABLE | Different experiments (workload, version, mode, corpus, seed, scale, generator), different results, a run that did not pass, a record without the experiment block, or a side whose runs are not one experiment | 10 |
+| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results (no benchmark, a recipe without a query engine, a continuous run without an end-of-run result check) | 11 |
+| NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs: effective maintenance or its compaction operation, maintenance settings, benchmark iterations or mode, in-stream rounds, the Lakebench limits that bound; or the only architecture difference is the dependency set | 12 |
+| CONFOUNDED | Comparable, but the architecture and the system both differ, so no difference can be put down to either | 13 |
 
-A comparable pair whose execution conditions differ (effective maintenance
-and its compaction operation, maintenance settings, benchmark iterations or
-in-stream rounds, limits that bound) is labelled **not like-for-like** and
-the differences are listed, as is a pair whose architecture and system both
-differ (confounded) or whose only architecture difference is the dependency
-set. A difference in the architecture or the system alone is what the
-comparison measures and does not make a pair not like-for-like. Each side's support state (supported, unverified, unsupported) is
-shown. `comparison.json` records `verdict`, `comparable`, `like_for_like`,
-`condition_differences`, `support` and `refusals`, each row's `capped`
-(a Lakebench limit bound that row on either side: any bound kind caps every
-row; the trickle caps only the rows that depend on it) and each side's
-`trickle_bound_a` / `trickle_bound_b`.
+Usage errors (a ref that resolves to nothing, the same runs on both sides,
+an unreadable record or manifest, a removed flag, an unsupported format)
+exit 2.
 
-The two configs run one after the other, not side by side. Running them
-concurrently on one host would measure the contention between them rather than
-the configs themselves.
+**The missing condition.** Every verdict comes with the one condition the
+pair lacks, for the first ladder step that failed, and the command that
+supplies it, for example "corpus scale differs (1 vs 10). Missing: the same
+corpus. Set `architecture.workload.datagen.scale: 1` in b.yaml, then
+`lakebench run b.yaml --regenerate`". Commands name the side's config from
+its record (`provenance.config_path`), or "the config of deployment
+<name>" for a record that does not carry it. A continuous side cannot be
+repeated with `--repeat`, so its hint says to run it again with
+`--continuous` and pass the run ids. Two continuous runs whose in-stream
+rounds differ are not one experiment when they are on one side, because
+rounds are an outcome of speed: compare single runs, or re-run with a
+longer `--duration`.
 
-With `--local`, the two configs must have different `name:` values. The name
-keys the workdir, the Garage container, and the bucket names, so identical
-names would mean the second config ran against the first one's data.
+**Metrics.** Each score is shown with the median, range and n of each side
+and the delta of the medians. No winner is named and no colour marks a
+better side: the winner rule is not in this release. Each row's
+`assessment` says what may be read from it:
 
-**Reading the delta column** (comparable pairs only). Delta is B relative to A, and it is coloured by
-whether the change is an improvement. Each score's direction comes from the
-metric registry (`metrics/metric_registry.py`), which gives every score a
-unit, a direction (higher, lower, a target value, or none) and a band. Only
-performance scores are coloured: QpH, throughput and efficiency are higher is
-better; time to value, freshness, time to detect, maintenance time, and in a
-batch run stage times, core-hours and total elapsed seconds are lower is better;
-`qph_degradation_pct` is lower is better (positive means the run slowed down).
-Correctness and guard scores (`scale_ratio`, `ingest_ratio`, best at 1.0),
-diagnostics (for example `qph_spread`, `maintenance_value_pct`,
-`compaction_ratio`, `total_rows_processed`, `bronze_busy_fraction`,
-`benchmark_rounds_count`, and in a continuous run `total_elapsed_seconds`),
-scores that follow the config (`window_seconds`, and in a continuous run
-core-hours, which scale with the window, and the bronze, silver and gold stream
-seconds, which equal it), labels and any score the registry
-does not know are never coloured, because a change in them is information
-rather than a win or a loss. The mode a pair is read under is the run's
-`pipeline_benchmark.pipeline_mode`, saved as `pipeline_mode` in the
-comparison; a record without one leaves the mode-dependent scores uncoloured.
+| Assessment | When |
+|---|---|
+| `withheld` | The pair is NOT COMPARABLE or NOT ESTABLISHED; the delta is not computed |
+| `not_directional` | The score has no better side (correctness, guard and diagnostic scores, scores that follow the config, a score the registry does not know, or a mode-dependent score on a record without a mode) |
+| `confounded` | The pair is confounded |
+| `not_assessed` | Every other directional row: on a NOT LIKE-FOR-LIKE pair because the pair is not like-for-like, otherwise because the winner rule is not in this release |
+| `capped` | A Lakebench limit bound the row on a passed member of either side (a bound kind the row depends on, or the trickle of a continuous run): the figure measures that limit, not the system, and the row says BOUNDED BY it |
 
-Differences under 2% are printed without colour. Repeated local benchmarks on
-unchanged data measured 0.9% run-to-run spread (n=5, stdev 1.8 QpH on a mean of
-472.9), so a smaller difference is not something a single pair of runs can
-resolve. The figure is recorded as `noise_floor_pct` in the saved comparison.
+Directions come from the metric registry (`metrics/metric_registry.py`).
 
-One caveat on local timings: `bronze-verify` is the first stage to touch S3 and
-runs about 9s slower on a freshly deployed stack than on a warm one (30.4s vs
-21.4s measured). The heavier stages do not show this -- `silver-build` and
-`gold-finalize` were stable within a second across runs. With `--local`,
-`compare` deploys each config fresh, so both sides pay this cost equally.
+**Output.** `--format json` (and `-o`) writes the `cmp2` document:
+`verdict`, `exit_code`, `step`, `attribution`, `missing` (`condition`,
+`command`, `hint`), `cause`, `reasons`, `notes`, `sides` (per side: `refs`,
+`deployment`, `series`, `members` with `run_id`, `verdict`, `digest`,
+`excluded` and `reason`, `n_attempted`, `n_passed`, the first passed
+member's `experiment` block, `support`, `bound`), `groups` (the differing
+keys per identity group), `warnings` and `metrics` (per row: `metric`,
+`unit`, `direction`, `a` and `b` with `median`, `min`, `max`, `values`, `n`,
+`delta_pct`, `assessment`, `winner` (always null), `missing`, `hint`,
+`capped_by`). `--format csv` writes the header fields as `# key: value`
+lines, then one row per metric with `metric`, the medians and ranges,
+`delta_pct`, `verdict`, `attribution`, `n_a`, `n_b`, `assessment` and
+`bound_by`. A protected or spent AML seed is never printed; it reads
+`<protected seed>`.
 
 ### config
 

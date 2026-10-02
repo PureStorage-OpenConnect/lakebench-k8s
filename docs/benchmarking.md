@@ -113,9 +113,8 @@ capacity)", with "trickle N files per trigger; this is the offered load,
 not infrastructure capacity" as the tooltip, and counts the trickle among
 the run's limits. `compare` marks the rows that depend on the trickle
 (`sustained_throughput_rps`, `pipeline_throughput_gb_per_second`, compute
-efficiency and `corpus_drain_seconds`) `capped` per row, and
-`comparison.json` carries each row's `capped` and each side's
-`trickle_bound_a` / `trickle_bound_b`. A record written before 1.7 gets the
+efficiency and `corpus_drain_seconds`) `capped`, with `capped_by` naming
+the trickle, and each side's `bound` lists the trickle line. A record written before 1.7 gets the
 same answer, computed when it is read. `released_rows` counts the trigger at
 the window's edge, so a run whose last batch was still in flight can read up
 to one trigger short (0.983 at an 1800 s window and a 30 s trigger); when the
@@ -1105,25 +1104,30 @@ separately from pipeline pods.
 
 ## Comparing Runs
 
-`lakebench compare <config_a> <config_b>` runs both configurations one
-after the other, then checks the two runs' experiment blocks before it
-shows any delta. It gives one of three verdicts:
+`lakebench compare SIDE_A SIDE_B` compares stored run records: each side is
+run ids, run directories, a `series:<id>` or a config (its latest run, or
+every member of that run's `run --repeat` series). It runs nothing; run each
+side first with `lakebench run`. It checks the runs' experiment blocks and
+results before it shows any number, and the exit code is the verdict:
 
-| Verdict | When | Deltas | Exit |
-|---|---|---|---|
-| comparable | Same experiment, and the benchmark results are shown equivalent | Shown | 0 |
-| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results, a run that failed, or a record without an experiment block | Withheld | 1 |
-| comparability not established | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | Withheld; raw numbers shown | 0 |
+| Verdict | When | Exit |
+|---|---|---|
+| LIKE-FOR-LIKE | Same experiment, equal benchmark results, same execution conditions | 0 |
+| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results, a run that did not pass, a record without an experiment block, or a side whose runs are not one experiment | 10 |
+| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | 11 |
+| NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs | 12 |
+| CONFOUNDED | Comparable, but the architecture and the system both differ | 13 |
 
-A comparable pair is also like-for-like when the execution conditions
-match: effective maintenance and the compaction operation it ran (Trino
-`optimize` at 128MB and Spark Thrift Iceberg `rewrite_data_files` are
-different operations), maintenance settings, benchmark iterations and mode,
-in-stream rounds (continuous), and the Lakebench limits that bound.
-Otherwise the table is titled "comparable, not like-for-like" and lists the
-differences, because a delta may come from those conditions rather than the
-architecture. A config pair that already differs in experiment identity or
-conditions is flagged before either run starts.
+The execution conditions are effective maintenance and the compaction
+operation it ran (Trino `optimize` at 128MB and Spark Thrift Iceberg
+`rewrite_data_files` are different operations), maintenance settings,
+benchmark iterations and mode, in-stream rounds (continuous), and the
+Lakebench limits that bound. A delta between runs whose conditions differ
+may come from those conditions rather than the architecture. Each verdict
+is printed with the one condition the pair is missing and the command that
+supplies it. Medians, ranges and n are shown for every score, with the
+delta of medians where the pair is comparable; no winner is named in this
+release. See the [CLI reference](cli-reference.md#compare).
 
 The architecture (the recipe, its components and versions, the query access
 path, the dependency set) and the system (the cluster and object store,

@@ -7,6 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **`compare` compares stored records and runs nothing.** `lakebench compare
+  SIDE_A SIDE_B` takes, per side, run ids, run directories, `metrics.json`
+  paths, `series:<id>` or a config (its latest run, or every member of that
+  run's `run --repeat` series), with `--runs-dir`, `--format` and `-o`. It
+  no longer deploys, runs or destroys either config. The flags of the
+  command that did (`--keep`, `--scale`, `--skip-benchmark`, `--timeout`,
+  `--local`, `--generate`, `--yes`) exit 2 and name the replacement: run
+  each side with `lakebench run`, then compare. The exit code is the
+  verdict: 0 LIKE-FOR-LIKE, 10 NOT COMPARABLE (was 1), 11 NOT ESTABLISHED
+  (was 0), 12 NOT LIKE-FOR-LIKE and 13 CONFOUNDED (both were 0); 2 for a ref
+  that resolves to no record, the same runs on both sides, an unreadable
+  record or two configs with one name and different contents. Every
+  verdict prints the one condition the pair is missing and the command
+  that supplies it. Each score shows each side's median, range and n; no
+  winner is named and no delta is coloured (the winner rule is not in this
+  release), so the 2% noise floor and `noise_floor_pct` are gone, and a
+  NOT COMPARABLE or NOT ESTABLISHED pair shows no delta. A member whose
+  verdict did not pass is excluded and listed. The automatic
+  `lakebench-output/comparisons/compare-<ts>/comparison.json` is no longer
+  written; pass `-o`. `--format json` writes the `cmp2` document (`verdict`,
+  `exit_code`, `missing`, `sides`, `groups`, `metrics` with `assessment`
+  and `capped_by`), replacing the old `comparable`, `like_for_like`,
+  `refusals` and `config_a`/`config_b` fields; the CSV gains `# key: value`
+  header lines and `verdict`, `attribution`, `n_a`, `n_b`, `assessment` and
+  `bound_by` columns. Two continuous runs on one side whose in-stream
+  rounds differ are not one experiment (NOT COMPARABLE): compare them
+  singly. Scripts that parsed the old JSON or exit codes need updating.
 - **`run` refuses arguments it used to ignore, before any cluster call.**
   An unknown `--stage` used to be found only after `run` had read the
   cluster's capacity (and, with `--yes`, could auto-deploy first), and
@@ -169,7 +196,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one trigger, records `experiment.limits.trickle_bound` and a `trickle:`
   line in `limits.bound`. The report labels the continuous rows/s, GB/s and
   efficiency figures as the offered load, not capacity, and `compare` marks
-  those rows `capped` (`comparison.json` gains a per-row `capped`); QpH,
+  those rows `capped`, with `capped_by` naming the trickle; QpH,
   freshness and time to detect are not labelled. Stored records get the same
   answer when read. The trickle is not a bound kind, so no experiment
   identity moves. The `intake_limit` description now says `none` means
@@ -236,13 +263,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   context name that is not in the kubeconfig is refused (`admin` commands
   used to fall back to in-cluster credentials), and in-cluster credentials
   are used only when no kubeconfig file exists (before, a command with no
-  configured context tried them first). `compare` still runs each config
-  in its own `lakebench` process, each resolving its own context, until it
-  becomes read-only.
+  configured context tried them first). `compare` reads stored records
+  and opens no cluster context.
 - **One source of metric metadata.** Every score's unit, direction and band
   now come from `metrics/metric_registry.py`, which `compare`, `reproduce`,
-  the perf gate, the HTML report and `score_descriptions` read. `compare`
-  colours a delta only for a performance score, and some colours change:
+  the perf gate, the HTML report and `score_descriptions` read, and some
+  directions change:
   `qph_degradation_pct` is lower is better (a run that slowed down was shown
   as the faster side); `qph_spread`, `maintenance_value_pct`,
   `compaction_ratio`, `window_seconds`, `benchmark_rounds_count`,
@@ -253,8 +279,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   core-hours (they scale with the window) and total elapsed seconds are not
   coloured, and the report's continuous CPU-hours card drops its "lower is
   better" hint. A score with no registry entry is shown uncoloured (it used
-  to read as lower is better). The saved comparison gains `pipeline_mode`,
-  the mode its directions were read under. Score values, their
+  to read as lower is better). Each side of a comparison records the
+  `mode` its directions were read under. Score values, their
   descriptions, and what `reproduce` and the perf gate check are unchanged.
 - typer is capped below 0.28 (`typer>=0.12.0,<0.28`), so a new typer minor
   cannot change the CLI without a tested raise of the cap.

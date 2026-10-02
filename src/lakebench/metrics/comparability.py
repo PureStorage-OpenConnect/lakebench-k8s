@@ -693,6 +693,26 @@ VERDICT_CODES = {
 _EXCLUDED_STATUSES = ("FAILED", "INTERRUPTED", "VOID")
 
 
+@dataclass(frozen=True)
+class Cause:
+    """The first thing that decided a verdict, as data (the hint builder
+    reads this, never the prose ``reasons``). *kind* is one of
+    ``newer_schema``, ``generation``, ``mixed_generation``, ``required_key``,
+    ``seed_withheld``, ``legacy``, ``failed``, ``no_run``, ``side_not_one``,
+    ``identity``, ``corpus_problem``, ``not_established``, ``results``,
+    ``confounded``, ``condition``, ``pinset`` or ``none``."""
+
+    kind: str
+    side: str | None = None
+    run: str | None = None
+    other_run: str | None = None
+    group: str | None = None
+    key: str | None = None
+    a: Any = None
+    b: Any = None
+    detail: str | None = None
+
+
 @dataclass
 class PairVerdict:
     """What ``pair_verdict`` decided, and why."""
@@ -711,6 +731,7 @@ class PairVerdict:
     #: repeat, or "system not established".
     attribution: str | None = None
     notes: list[str] = field(default_factory=list)
+    cause: Cause = field(default_factory=lambda: Cause("none"))
 
     @property
     def code(self) -> int:
@@ -738,6 +759,7 @@ class PairVerdict:
             "system": self.system,
             "attribution": self.attribution,
             "notes": list(self.notes),
+            "cause": {k: v for k, v in self.cause.__dict__.items() if v is not None},
         }
 
 
@@ -831,6 +853,7 @@ def pair_verdict(
     # Step 0: identity versions and required keys, over members with a block.
     gens: dict[str, set[str]] = {label_a: set(), label_b: set()}
     incomplete: list[str] = []
+    first_incomplete: Cause | None = None
     for label, members in sides:
         for rec in members:
             if generation(rec) == LEGACY:
@@ -842,12 +865,21 @@ def pair_verdict(
             checked = results_established(exp) is True
             for key in missing_required(c, results=checked):
                 incomplete.append(f"identity incomplete: {key} not recorded on {_rid(rec)}")
+                first_incomplete = first_incomplete or Cause(
+                    "required_key", side=label, run=_rid(rec), key=key
+                )
             if _seed_withheld(c.keys(CORPUS).get("seed")):
                 incomplete.append(f"identity incomplete: seed withheld on {_rid(rec)}")
+                first_incomplete = first_incomplete or Cause(
+                    "seed_withheld", side=label, run=_rid(rec), key="seed"
+                )
     for label, _members in sides:
         if len(gens[label]) > 1:
             return PairVerdict(
-                NOT_COMPARABLE, "0", [f"side {label} mixes identity v1 and v2 records"]
+                NOT_COMPARABLE,
+                "0",
+                [f"side {label} mixes identity v1 and v2 records"],
+                cause=Cause("mixed_generation", side=label),
             )
     ga, gb = gens[label_a], gens[label_b]
     if ga and gb and ga != gb:
@@ -856,29 +888,42 @@ def pair_verdict(
             NOT_COMPARABLE,
             "0",
             [f"{label_a} was recorded with identity v{va} and {label_b} with v{vb}"],
+            cause=Cause("generation", a=va, b=vb),
         )
     if incomplete:
-        return PairVerdict(NOT_COMPARABLE, "0", incomplete)
+        return PairVerdict(NOT_COMPARABLE, "0", incomplete, cause=first_incomplete or Cause("none"))
 
     # Step 1: every member a passed run with a block.
     failed: list[str] = []
+    first_failed: Cause | None = None
     for label, members in sides:
         if not members:
             failed.append(f"side {label} has no run")
+            first_failed = first_failed or Cause("no_run", side=label)
         for rec in members:
             if generation(rec) == LEGACY:
                 failed.append(f"{label} run {_rid(rec)} predates the experiment block; re-run it")
+                exp_block = rec.get("experiment")
+                schema = exp_block.get("schema") if isinstance(exp_block, Mapping) else None
+                # A block with a schema this release cannot read is newer, not
+                # older: the hint says upgrade, not re-run.
+                first_failed = first_failed or Cause(
+                    "newer_schema" if schema else "legacy",
+                    side=label,
+                    run=_rid(rec),
+                    detail=str(schema) if schema else None,
+                )
                 continue
             ok, status = _member_passed(rec)
             if not ok:
                 why = _first_reason(rec)
-                failed.append(
-                    f"{label} run {_rid(rec)} did not pass"
-                    + (f" ({why})" if why else f" ({status or 'success false'})")
-                    + "; fix it and re-run"
+                detail = why if why else (status or "success false")
+                failed.append(f"{label} run {_rid(rec)} did not pass ({detail}); fix it and re-run")
+                first_failed = first_failed or Cause(
+                    "failed", side=label, run=_rid(rec), detail=detail
                 )
     if failed:
-        return PairVerdict(NOT_COMPARABLE, "1", failed)
+        return PairVerdict(NOT_COMPARABLE, "1", failed, cause=first_failed or Cause("none"))
 
     notes: list[str] = []
     for label, _members in sides:
@@ -903,6 +948,15 @@ def pair_verdict(
                             f"system: {pair_why}",
                         ],
                         notes=notes,
+                        cause=Cause(
+                            "side_not_one",
+                            side=label,
+                            run=_rid(members[i]),
+                            other_run=_rid(rj),
+                            group=SYSTEM,
+                            key="system",
+                            detail=pair_why,
+                        ),
                     )
                 if pair_why and pair_why not in notes:
                     notes.append(pair_why)
@@ -910,11 +964,15 @@ def pair_verdict(
         first, first_rec = classified[label][0], members[0]
         for c, rec in zip(classified[label][1:], members[1:], strict=True):
             within: list[str] = []
+            first_diff: Difference | None = None
             for group in (WORKLOAD, CORPUS, ARCHITECTURE, CONDITIONS):
-                within += [str(d) for d in diff_group(first, c, group)]
-            within += _results_differences(
+                ds = diff_group(first, c, group)
+                first_diff = first_diff or (ds[0] if ds else None)
+                within += [str(d) for d in ds]
+            res = _results_differences(
                 first_rec["experiment"], rec["experiment"], _rid(first_rec), _rid(rec)
             )
+            within += res
             if within:
                 return PairVerdict(
                     NOT_COMPARABLE,
@@ -922,6 +980,17 @@ def pair_verdict(
                     [f"side {label} is not one experiment ({_rid(first_rec)} vs {_rid(rec)}):"]
                     + within,
                     notes=notes,
+                    cause=Cause(
+                        "side_not_one",
+                        side=label,
+                        run=_rid(first_rec),
+                        other_run=_rid(rec),
+                        group=first_diff.group if first_diff else "results",
+                        key=first_diff.key if first_diff else "results",
+                        a=first_diff.a if first_diff else None,
+                        b=first_diff.b if first_diff else None,
+                        detail=None if first_diff else res[0],
+                    ),
                 )
         digests = _digests(classified[label])
         if len(digests) > 1:
@@ -933,6 +1002,7 @@ def pair_verdict(
                     f"generator digest differs ({', '.join(sorted(map(str, digests)))})",
                 ],
                 notes=notes,
+                cause=Cause("side_not_one", side=label, group=CORPUS, key="generator digest"),
             )
 
     ca, cb = classified[label_a][0], classified[label_b][0]
@@ -946,30 +1016,47 @@ def pair_verdict(
         identity_diffs[CORPUS].append(
             Difference(CORPUS, "generator digest", sorted(map(str, da)), sorted(map(str, db)))
         )
-    problems = [
-        f"{label}: {p}"
+    problem_of = [
+        (label, _rid(rec), p)
         for label, members in sides
         for rec in members
         for p in corpus_problems(rec["experiment"])
     ]
+    problems = [f"{label}: {p}" for label, _r, p in problem_of]
     if any(identity_diffs.values()) or problems:
+        first_id = next((ds[0] for ds in identity_diffs.values() if ds), None)
+        if first_id is not None:
+            cause = Cause(
+                "identity", group=first_id.group, key=first_id.key, a=first_id.a, b=first_id.b
+            )
+        else:
+            label, run, problem = problem_of[0]
+            cause = Cause("corpus_problem", side=label, run=run, detail=problem)
         return PairVerdict(
             NOT_COMPARABLE,
             "3",
             [str(d) for ds in identity_diffs.values() for d in ds] + problems,
             differences=identity_diffs,
             notes=notes,
+            cause=cause,
         )
 
     # Step 4: results checked on every member.
-    unestablished = [
-        f"{label} run {_rid(rec)}: {established}"
+    open_items = [
+        (label, _rid(rec), established)
         for label, members in sides
         for rec in members
         if (established := results_established(rec["experiment"])) is not True
     ]
-    if unestablished:
-        return PairVerdict(NOT_ESTABLISHED, "4", unestablished, notes=notes)
+    if open_items:
+        label, run, why_not = open_items[0]
+        return PairVerdict(
+            NOT_ESTABLISHED,
+            "4",
+            [f"{lb} run {r}: {w}" for lb, r, w in open_items],
+            notes=notes,
+            cause=Cause("not_established", side=label, run=run, detail=str(why_not)),
+        )
 
     # Step 5: the same results, every member of B against A's first (step 2
     # already holds each side's members to its own first).
@@ -978,7 +1065,13 @@ def pair_verdict(
         lb = label_b if len(side_b) == 1 else f"{label_b} run {_rid(rec)}"
         different += _results_differences(ea, rec["experiment"], label_a, lb)
     if different:
-        return PairVerdict(NOT_COMPARABLE, "5", different, notes=notes)
+        return PairVerdict(
+            NOT_COMPARABLE,
+            "5",
+            different,
+            notes=notes,
+            cause=Cause("results", detail=different[0]),
+        )
 
     arch = diff_group(ca, cb, ARCHITECTURE)
     cond = diff_group(ca, cb, CONDITIONS)
@@ -1009,9 +1102,22 @@ def pair_verdict(
         notes.append(images_note)
     diffs = {ARCHITECTURE: arch, CONDITIONS: cond}
 
-    def verdict(name: str, step: str, reasons: list[str], attribution: str | None = None):
+    def verdict(
+        name: str,
+        step: str,
+        reasons: list[str],
+        attribution: str | None = None,
+        cause: Cause | None = None,
+    ):
         return PairVerdict(
-            name, step, reasons, diffs, system=rel, attribution=attribution, notes=notes
+            name,
+            step,
+            reasons,
+            diffs,
+            system=rel,
+            attribution=attribution,
+            notes=notes,
+            cause=cause or Cause("none"),
         )
 
     # Step 6: architecture and system both differ.
@@ -1020,10 +1126,23 @@ def pair_verdict(
             CONFOUNDED,
             "6",
             [f"architecture and system both differ ({', '.join(d.key for d in arch)}; {why})"],
+            cause=Cause(
+                "confounded",
+                group=ARCHITECTURE,
+                key=arch[0].key,
+                a=arch[0].a,
+                b=arch[0].b,
+                detail=why,
+            ),
         )
     # Step 7: conditions differ.
     if cond:
-        return verdict(NOT_LIKE_FOR_LIKE, "7", [str(d) for d in cond])
+        return verdict(
+            NOT_LIKE_FOR_LIKE,
+            "7",
+            [str(d) for d in cond],
+            cause=Cause("condition", group=CONDITIONS, key=cond[0].key, a=cond[0].a, b=cond[0].b),
+        )
     # Step 7a: same composition, different dependency sets.
     if [d.key for d in arch] == ["dependency pinset"]:
         unrecorded = [
@@ -1036,7 +1155,12 @@ def pair_verdict(
             if not unrecorded
             else "same composition; the dependency set is not recorded on " + ", ".join(unrecorded)
         )
-        return verdict(NOT_LIKE_FOR_LIKE, "7a", [reason])
+        return verdict(
+            NOT_LIKE_FOR_LIKE,
+            "7a",
+            [reason],
+            cause=Cause("pinset", key="dependency pinset", a=pinsets[0], b=pinsets[1]),
+        )
     # Step 8.
     if arch:
         attribution = "architecture differential"

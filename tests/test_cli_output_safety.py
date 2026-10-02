@@ -398,66 +398,22 @@ def test_failed_query_detail_is_on_the_error_line(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("fmt", ["json", "csv"])
 def test_compare_machine_output_is_only_data(fmt, monkeypatch, tmp_path):
-    from unittest import mock
-
-    from tests.conftest import make_config
+    """The resolution and every notice go to stderr; stdout is the data."""
+    from tests.fixtures import stored_records as sr
 
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "a.yaml").write_text("name: a\n")
-    (tmp_path / "b.yaml").write_text("name: b\n")
-    with (
-        mock.patch(
-            "lakebench.cli._compare.load_config",
-            side_effect=[make_config(name="a"), make_config(name="b")],
-        ),
-        mock.patch(
-            "lakebench.cli._compare._run_single",
-            side_effect=[{"error": "run [a] failed"}, {"error": "run [b] failed"}],
-        ) as run_single,
-    ):
-        result = CliRunner().invoke(app, ["compare", "a.yaml", "b.yaml", "--format", fmt, "--yes"])
+    ids = ("20260927-011123-497f02", "20260927-011355-7ad7ad")
+    for rid in ids:
+        d = tmp_path / "runs" / f"run-{rid}"
+        d.mkdir(parents=True)
+        (d / "metrics.json").write_text(json.dumps(sr.load_record(rid)))
+    result = CliRunner().invoke(
+        app, ["compare", *ids, "--runs-dir", str(tmp_path / "runs"), "--format", fmt]
+    )
     out = _stdout(result)
     if fmt == "json":
-        assert json.loads(out)["config_a"]["error"] == "run [a] failed"
+        assert json.loads(out)["verdict"] == "LIKE-FOR-LIKE"
     else:
-        assert out.splitlines()[0] == "metric,config_a,config_b,comparable,like_for_like"
-    assert "Running configuration A" in _stderr(result)
-    assert isinstance(run_single.call_args.kwargs["child_stdout"], int)
-
-
-def test_compare_child_stdout_fd_without_a_real_stderr(monkeypatch):
-    """subprocess needs a descriptor; an in-memory stderr has no fileno."""
-    import io
-    import subprocess
-
-    from lakebench.cli import _compare
-
-    monkeypatch.setattr("sys.stderr", io.StringIO())
-    fd = _compare._stderr_fd()
-    assert fd == 2
-    assert subprocess.run(["true"], stdout=fd, check=False).returncode == 0
-
-
-def test_compare_child_stdout_discarded_when_stderr_is_closed(monkeypatch):
-    """With ``2>&-`` fd 2 may belong to a file this process opened since."""
-    import subprocess
-
-    from lakebench.cli import _compare
-
-    monkeypatch.setattr("sys.stderr", None)
-    assert _compare._stderr_fd() == subprocess.DEVNULL
-
-
-def test_compare_child_stdout_discarded_when_fd2_is_closed(monkeypatch):
-    """An in-memory stderr over a closed fd 2 must not hand subprocess a bad fd."""
-    import io
-    import subprocess
-
-    from lakebench.cli import _compare
-
-    def closed(fd):
-        raise OSError(9, "Bad file descriptor")
-
-    monkeypatch.setattr("sys.stderr", io.StringIO())
-    monkeypatch.setattr(_compare.os, "fstat", closed)
-    assert _compare._stderr_fd() == subprocess.DEVNULL
+        assert out.splitlines()[0] == "# schema: cmp2"
+    assert f"A: {ids[0]} -> deployment" in _stderr(result)
+    assert "A: " not in out

@@ -156,15 +156,15 @@ Every run records its state in `metrics.json`. As computed by this release:
 Compare two configurations side-by-side:
 
 ```bash
-lakebench deploy config-hive.yaml && lakebench deploy config-polaris.yaml
-lakebench compare config-hive.yaml config-polaris.yaml --generate
+lakebench deploy config-hive.yaml && lakebench run config-hive.yaml
+lakebench deploy config-polaris.yaml && lakebench run config-polaris.yaml
+lakebench compare config-hive.yaml config-polaris.yaml
 ```
 
-`compare` runs each config through the pipeline and benchmark in turn, then
-destroys that deployment unless you pass `--keep`. Deploy both configs
-first; `--generate` fills each bronze bucket before its run. The two configs
-need different names and bucket names, or the first destroy empties the
-second run's data.
+`compare` reads the two configs' latest stored runs; it never deploys, runs
+or destroys anything. It reports the verdict as its exit code and names the
+one condition a pair that is not like-for-like is missing, with the command
+that supplies it.
 
 For all recipes, see [`examples/`](https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/examples) or run `lakebench init --advanced`
 for the full interactive wizard.
@@ -268,7 +268,7 @@ See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blo
 | `status` | Show deployment status |
 | `results` | Show the latest run's scorecard in the terminal |
 | `report` | Generate HTML scorecard report |
-| `compare` | Run two configs in turn; compare performance only when their results match |
+| `compare` | Compare stored runs; show performance only when their results match |
 | `config recommend` | Recommend a scale factor for the connected cluster |
 | `config recipes` | List recipes and their support state per workload and mode |
 | `admin` | Cluster-admin setup and repair: `install-spark-operator`, `install-scratch-storage-class`, `doctor`, `status`, `repair-operator`, `release-lock`, `migrate-deployment`, `reclaim-bucket` |
