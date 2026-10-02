@@ -233,9 +233,9 @@ See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blo
 
 - `kubectl` and `helm` on PATH
 - Kubernetes 1.26+ with capacity for the Spark job profiles. Customer360 or
-  AML batch at scale 1 requests a peak of **36 cores and 524 GB RAM**
+  AML batch at scale 1 requests a peak of **36 cores and 525 GB RAM**
   (driven by `silver-build`), and a single executor pod needs 60 GB on one
-  node. AML continuous at scale 1-10 requests **118 cores and 987 GB**,
+  node. AML continuous at scale 1-10 requests **118 cores and 990 GB**,
   because its three stream jobs run at once; AML batch at scale 100
   peaks at 76 cores for the pipeline, but its data generation ran about
   350 cores (44 pods x 8 cores, measured in run-20260925-104703-c02890).

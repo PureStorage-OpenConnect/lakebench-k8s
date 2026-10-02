@@ -152,7 +152,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     # explode-and-join against gold.alerts (score_financial.py rewrote the
     # old N*M crossjoin to a single explode per side, so it stays linear in
     # the UETR footprint). Deliberately small: without this entry the job
-    # falls back to the silver-build profile (~36 cores / 524 GB at scale 1)
+    # falls back to the silver-build profile (~36 cores / 525 GB at scale 1)
     # just to score a handful of typologies, which under the 4-parallel UAT
     # limit fails to schedule and blocks on the per-job timeout after the
     # pipeline already reported success (adversarial-review finding).
@@ -578,10 +578,10 @@ def _job_requirement(
         job_type=job_type,
         executors=executors,
         cpu_cores=executors * profile["executor_cores"] + profile["driver_cores"],
-        memory_gb=memory_bytes // gib,
+        memory_gb=-(-memory_bytes // gib),
         scratch_gb=scratch_gb,
         max_pod_cpu_cores=max(profile["executor_cores"], profile["driver_cores"]),
-        max_pod_memory_gb=max(exec_total_bytes, driver_mem) // gib,
+        max_pod_memory_gb=-(-max(exec_total_bytes, driver_mem) // gib),
     )
 
 
