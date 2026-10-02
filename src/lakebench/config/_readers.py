@@ -135,7 +135,7 @@ READERS: dict[str, str] = {
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
     "architecture.catalog.unity.spark_connector_version": (
-        "lakebench.deploy.engine:DeploymentEngine._build_spark_thrift_packages"
+        "lakebench.deps.request:jar_coordinates"
     ),
     "architecture.catalog.unity.port": "lakebench.deploy.engine:DeploymentEngine._build_context",
     "architecture.catalog.unity.resources.cpu": (
@@ -146,10 +146,10 @@ READERS: dict[str, str] = {
     ),
     "architecture.table_format.type": "lakebench.deploy.destroy:destroy_all",
     "architecture.table_format.iceberg.version": (
-        "lakebench.deploy.engine:DeploymentEngine._build_spark_thrift_packages"
+        "lakebench.deps.request:jar_coordinates"
     ),
     "architecture.table_format.delta.version": (
-        "lakebench.deploy.engine:DeploymentEngine._build_spark_thrift_packages"
+        "lakebench.deps.request:jar_coordinates"
     ),
     "architecture.pipeline_engine": "lakebench.engine.protocol:get_engine",
     "architecture.query_engine.type": "lakebench.deploy.destroy:destroy_all",
