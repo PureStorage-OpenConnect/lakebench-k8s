@@ -55,6 +55,12 @@ os.environ.pop("FORCE_COLOR", None)
 # Typer forces a terminal when GITHUB_ACTIONS is set (read at import time);
 # this is its documented off switch.
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+# pytest-xdist workers start with COLUMNS=80. Rich reads COLUMNS when a
+# Console is built, so the module-level consoles in lakebench.cli would keep
+# 80 columns and ignore a test's CliRunner env={"COLUMNS": ...}. Unset, they
+# read it per call, as in a serial run.
+os.environ.pop("COLUMNS", None)
+os.environ.pop("LINES", None)
 
 import functools  # noqa: E402
 import importlib  # noqa: E402
