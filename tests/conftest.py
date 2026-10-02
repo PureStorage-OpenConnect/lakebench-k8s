@@ -336,7 +336,7 @@ def _journal_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _signal_handlers_do_not_leak():
+def _signal_handlers_do_not_leak(request):
     """Each test starts with the SIGINT and SIGTERM handlers the process had
     before any test, and gets them back after. A run that installs its
     interrupt handler and skips restore() (on purpose in some tests) would
@@ -346,7 +346,10 @@ def _signal_handlers_do_not_leak():
     import signal
     import threading
 
-    if threading.current_thread() is not threading.main_thread():
+    # The Spark tier keeps pyspark's own SIGINT handler (it cancels the JVM
+    # jobs), which its module-scoped session installs.
+    in_spark_tier = "spark" in Path(str(request.node.path)).parent.parts[-1:]
+    if in_spark_tier or threading.current_thread() is not threading.main_thread():
         yield
         return
 
