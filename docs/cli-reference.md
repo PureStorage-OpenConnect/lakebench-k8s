@@ -118,10 +118,20 @@ keys the workdir, the Garage container, and the bucket names, so identical
 names would mean the second config ran against the first one's data.
 
 **Reading the delta column** (comparable pairs only). Delta is B relative to A, and it is coloured by
-whether the change is an improvement -- higher is better for QpH, throughput,
-and efficiency; lower is better for times and sizes. Descriptive scores
-(`scale_ratio`, `total_data_processed_gb`, `total_s3_objects`) are never
-coloured, because a change in them is information rather than a win or a loss.
+whether the change is an improvement. Each score's direction comes from the
+metric registry (`metrics/metric_registry.py`), which gives every score a
+unit, a direction (higher, lower, a target value, or none) and a band. Only
+performance scores are coloured: QpH, throughput and efficiency are higher is
+better; time to value, freshness, time to detect, stage times and batch
+core-hours are lower is better; `qph_degradation_pct` is lower is better
+(positive means the run slowed down). Correctness and guard scores
+(`scale_ratio`, `ingest_ratio`, best at 1.0), diagnostics (for example
+`qph_spread`, `maintenance_value_pct`, `compaction_ratio`, `total_rows_processed`,
+`bronze_busy_fraction`, `benchmark_rounds_count`), scores fixed by the config
+(`window_seconds`, and in a continuous run core-hours and total elapsed seconds,
+which follow the window length), labels and any score the registry does not
+know are never coloured, because a change in them is information rather than
+a win or a loss.
 
 Differences under 2% are printed without colour. Repeated local benchmarks on
 unchanged data measured 0.9% run-to-run spread (n=5, stdev 1.8 QpH on a mean of

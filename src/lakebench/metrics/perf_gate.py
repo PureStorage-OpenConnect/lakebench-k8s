@@ -23,9 +23,9 @@ Two hashes guard "like for like":
 A baseline also records the dependency pinset of its run
 (``provenance.deps.pinset_sha256``); a run on another set is refused.
 
-Metric classification and direction come from ``lakebench.cli._reproduce``
-(``_METRIC_TABLE`` and ``_classify_direction``); this module adds no second
-table. Only the performance band is compared here: the correctness signals
+Metric classification and direction come from the metric registry
+(``metrics/metric_registry.py``) through ``lakebench.cli._reproduce``
+``_classify_direction``; this module adds no second table. Only the performance band is compared here: the correctness signals
 (``scale_ratio``, ``corpus_drained``) are guards that refuse a run.
 
 Design and workflow: docs/perf-regression-gate.md.
