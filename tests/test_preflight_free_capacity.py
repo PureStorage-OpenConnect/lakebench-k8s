@@ -238,3 +238,132 @@ def test_skip_preflight_recorded(tmp_path, monkeypatch):
     data = json.loads(record.read_text())
     assert data["provenance"]["preflight"] == PREFLIGHT_SKIPPED
     assert data["verdict"]["qualifiers"]["capacity"] == "capacity not checked"
+
+
+# -- review fixes ----------------------------------------------------------------
+
+
+def test_largest_pod_needs_one_node_with_both_free():
+    """A pod fits when one node has its cores and memory free together,
+    whichever node has the most free memory."""
+    nodes = [_node("mem", "40", "402Gi"), _node("cpu", "40", "402Gi")] + [
+        _node(f"n{i}", "40", "402Gi") for i in range(4)
+    ]
+    pods = [
+        _pod("hog-cpu", "mem", "38", "10Gi"),  # "mem": 2 cores, 392 GiB free
+        _pod("hog-mem", "cpu", "1", "300Gi"),  # "cpu": 39 cores, 102 GiB free
+    ] + [_pod(f"h{i}", f"n{i}", "36", "380Gi") for i in range(4)]
+    res = _check(_client(nodes, pods))
+    # The 8-core / 60 GB executor fits "cpu", though "mem" has more memory.
+    assert "Largest pod" not in (res.hint or ""), res.hint
+
+
+def test_largest_pod_refused_when_no_node_has_both():
+    nodes = [_node("a", "40", "402Gi"), _node("b", "40", "402Gi")] + [
+        _node(f"n{i}", "40", "402Gi") for i in range(6)
+    ]
+    pods = [_pod("x", "a", "38", "1Gi"), _pod("y", "b", "1", "390Gi")] + [
+        _pod(f"h{i}", f"n{i}", "36", "380Gi") for i in range(6)
+    ]
+    res = _check(_client(nodes, pods))
+    assert not res.passed
+    assert "on one node; no schedulable node has both free" in res.hint
+
+
+def test_own_namespace_spark_pods_and_running_datagen_are_counted():
+    """Leftover Spark pods in the deployment's namespace hold capacity the
+    plan does not count; its Trino and catalog pods are counted by the plan."""
+
+    def own(name, cpu, mem, labels):
+        p = _pod(name, "a", cpu, mem, ns="pf-t")
+        p.metadata.labels = labels
+        return p
+
+    k = _client(
+        [_node("a")],
+        [
+            own("trino-worker", "8", "48Gi", {"app": "trino"}),
+            own("stream-exec", "4", "40Gi", {"spark-role": "executor"}),
+            own("datagen-0", "8", "4Gi", {"job-name": "lakebench-datagen"}),
+        ],
+    )
+    from lakebench.cli import _prerequisites as pre
+
+    with mock.patch("lakebench.k8s.get_k8s_client", return_value=k):
+        seen = {}
+        real = k.get_free_capacity
+
+        def spy(**kw):
+            got = real(**kw)
+            seen["free_cpu"] = got.free.total_cpu_millicores
+            return got
+
+        k.get_free_capacity = spy
+        pre._check_cluster_capacity(_cfg(), datagen_runs=False)
+        assert seen["free_cpu"] == 64_000 - 4_000 - 8_000  # Trino not subtracted
+        pre._check_cluster_capacity(_cfg(), datagen_runs=True)
+        assert seen["free_cpu"] == 64_000 - 4_000  # datagen counted by the plan instead
+
+
+def test_native_sidecar_counts_with_the_main_containers():
+    from lakebench.k8s.client import _pod_requests
+
+    sidecar = NS(resources=NS(requests={"cpu": "2", "memory": "2Gi"}), restart_policy="Always")
+    plain_init = NS(resources=NS(requests={"cpu": "3", "memory": "1Gi"}), restart_policy=None)
+    main = NS(resources=NS(requests={"cpu": "1", "memory": "1Gi"}))
+    pod = NS(spec=NS(containers=[main], init_containers=[sidecar, plain_init], overhead=None))
+    cpu, mem = _pod_requests(pod)
+    assert cpu == 3.0  # max(1 + 2, 3)
+    assert mem == 3 * GIB  # max(1 + 2, 1) GiB
+
+
+def test_continuous_degraded_caps_against_the_allocatable_base():
+    """Review finding (HIGH): the capped request was computed on free
+    capacity, while the run caps against allocatable, so a busy cluster was
+    admitted as "degraded" at a size the run never deploys."""
+    nodes = [_node(f"n{i}", "40", "402Gi") for i in range(11)]  # 440 cores allocatable
+    # 120 cores free on four nodes: enough for the streams capped to a
+    # 120-core budget, not for the 138 cores the run deploys uncapped.
+    busy = [_pod(f"h{i}", f"n{i}", "40", "300Gi") for i in range(4, 11)]
+    busy += [_pod(f"p{i}", f"n{i}", "10", "100Gi") for i in range(4)]
+    cfg = LakebenchConfig.model_validate(
+        {
+            "name": "pf-t",
+            "recipe": "hive-iceberg-spark-trino",
+            "workload": {"schema": "financial", "datagen": {"scale": 1}},
+            "architecture": {"pipeline": {"mode": "continuous"}},
+        }
+    )
+    res = _check(_client(nodes, busy), cfg)
+    assert not res.passed, res.message
+
+
+def test_checked_record_reaches_the_run_record(tmp_path, monkeypatch):
+    """The record of a passing preflight lands in provenance.preflight."""
+    import json
+
+    from lakebench.cli._prerequisites import PrereqReport, PrereqResult
+    from tests.harness import run_harness as h
+
+    record = {
+        "capacity": "checked",
+        "scratch": "not_measurable",
+        "scratch_reason": "no CSIStorageCapacity published for it",
+        "storage_class": "px-csi-scratch",
+    }
+
+    def passing(rec):
+        def run_prerequisites(cfg, **kw):
+            rec.add("prerequisites", "run", {})
+            return PrereqReport(
+                checks=[PrereqResult("cluster-capacity", True, "ok", record=dict(record))]
+            )
+
+        return run_prerequisites
+
+    monkeypatch.setattr(h, "_passing_prerequisites", passing)
+    h.run_scenario("batch_c360", tmp_path, monkeypatch)
+    (path,) = list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
+    data = json.loads(path.read_text())
+    assert data["provenance"]["preflight"] == record
+    assert data["verdict"]["qualifiers"]["scratch_capacity"] == "scratch capacity not checked"

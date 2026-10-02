@@ -131,8 +131,11 @@ refused with exit 4, "capacity could not be read". With scratch enabled it
 also compares the scratch request with the `CSIStorageCapacity` the
 StorageClass publishes; when none is published the run goes ahead with a
 warning, and the record's `provenance.preflight.scratch` says
-`not_measurable`. `--skip-preflight` skips the check; the record then says
-`capacity: skipped` and the verdict carries "capacity not checked". A batch
+`not_measurable`. Free capacity is summed across nodes, so a cluster whose
+free cores are spread thin can pass and still leave executors `Pending`;
+only the largest pod is checked against one node. `--skip-preflight` skips
+the check; the record then says `capacity: skipped` and the verdict carries
+"capacity not checked". A batch
 `run` counts datagen only when it creates datagen pods: with `--generate`
 (and not `--skip-generate`), or in a multi-cycle run. A plain batch `run`
 over data from an earlier `lakebench generate` checks the Spark peak and the

@@ -706,12 +706,19 @@ def check_capacity(
     # budget and warns naming each capped stage, so an aggregate shortfall
     # is fatal only if even the capped request does not fit. A pod that
     # fits no node stays fatal: capping counts does not shrink a pod.
-    if pod_fits and is_continuous_mode(plan.mode):
+    # The run caps against the capacity it sized with (the allocatable
+    # total), not against what is free now, so the capped request is
+    # computed on that base and then compared with *capacity*. With no
+    # sizing capacity (run could not read the cluster) nothing is capped.
+    from lakebench.k8s.client import ClusterCapacity as _Capacity
+
+    budget_base = size_against if isinstance(size_against, _Capacity) else None
+    if pod_fits and is_continuous_mode(plan.mode) and budget_base is not None:
         from lakebench.modules.pipeline_engines.spark.job import streaming_request_under_budget
 
         try:
             capped = streaming_request_under_budget(
-                resolved, capacity.total_cpu_millicores, datagen_running=datagen_runs
+                resolved, budget_base.total_cpu_millicores, datagen_running=datagen_runs
             )
         except Exception as e:  # fall through to the refusal below
             logging.getLogger(__name__).debug("Capped continuous request unavailable: %s", e)
