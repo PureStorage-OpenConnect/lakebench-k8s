@@ -307,6 +307,9 @@ class Recorder:
     datagen_running: bool = False
     #: Batch applications still running (a stage a timeout left behind).
     running_apps: set[str] = field(default_factory=set)
+    #: A K8sClient was made (the real one pins the process's context and
+    #: loads its kubeconfig; a bare API client before that is unconfigured).
+    k8s_client_made: bool = False
     #: The silver-state ConfigMap's data (rebuild epochs) and its version.
     silver_state: dict[str, str] = field(default_factory=dict)
     silver_state_rv: int = 1
@@ -458,6 +461,7 @@ class RecordingK8s:
         self.namespace = namespace or rec.namespace
         self.context_name = context
         rec.add("k8s", "get_k8s_client", namespace)
+        rec.k8s_client_made = True
 
     def get_cluster_capacity(self, *args, **kwargs):
         _checked(self._rec, self._real.get_cluster_capacity, *args, **kwargs)
@@ -747,6 +751,8 @@ class FakeCustomObjectsApi(_FakeApi):
         """This deployment's SparkApplications: streams run until deleted,
         every other submitted application has finished."""
         self._rec.add("CustomObjectsApi", "list", plural, namespace)
+        if not self._rec.k8s_client_made:
+            raise self._rec.refuse("a CustomObjectsApi list before any K8sClient (no kubeconfig)")
         if plural != "sparkapplications" or namespace != self._rec.namespace:
             raise self._rec.refuse(f"unscripted list {namespace}/{plural}")
         items = [
