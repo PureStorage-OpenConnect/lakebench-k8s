@@ -290,7 +290,10 @@ def drop_logless_entry(spark, silver_tbl):
     an entry holds no rows, so it is dropped and the build starts the table
     afresh. An entry whose location still holds any file is refused instead:
     those files are not a table Lakebench can read, and they are not deleted.
-    Any other error from the check is raised.
+    Any other error from the check is raised. The table is managed, so the
+    metastore deletes its (empty) location on DROP; a writer that added files
+    between the listing and the DROP would lose them, which only another job
+    of this deployment could do.
     """
     try:
         spark.table(silver_tbl).schema  # noqa: B018 -- forces resolution
@@ -307,7 +310,8 @@ def drop_logless_entry(spark, silver_tbl):
     if fs.exists(path) and fs.listFiles(path, True).hasNext():
         raise SilverAbort(
             f"silver-build: {silver_tbl} has no Delta log but {location} still holds files; "
-            "refusing to rebuild over them. Delete that directory if its data may go."
+            "refusing to rebuild over them. Remove those files if their data may go (or "
+            "empty the silver bucket with `lakebench clean silver`)."
         )
     log(
         f"{silver_tbl}: no files left at {location} (the bucket was emptied, for example "

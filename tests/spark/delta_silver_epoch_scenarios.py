@@ -152,6 +152,8 @@ def checkpoints(work):
 def silver_cycles(spark, work, fmt="delta"):
     """Which (run, cycle) pairs silver holds, with the row count of each."""
     path = _table_dir(work, fmt)
+    if not os.path.isdir(path):
+        return {}  # no table at all (a job failed before writing one)
     if fmt == "iceberg":
         rows = spark.read.format("iceberg").load(path).select("id").collect()
     else:
