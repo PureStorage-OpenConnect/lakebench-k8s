@@ -653,13 +653,13 @@ def test_workflow_unit_step_uses_budget():
     assert "--ignore=tests/spark" in run
 
 
-def test_check_fast_job_runs_the_make_target_under_eight_minutes():
+def test_lint_job_runs_make_check_fast_under_eight_minutes():
     steps = {n: (j, st, b) for n, j, st, b in _budgeted_steps()}
-    assert "check-fast" in steps
-    _, step, budget = steps["check-fast"]
+    assert "lint" in steps, "the Lint job does not run make check-fast under the budget"
+    _, step, budget = steps["lint"]
     assert budget <= 480
     assert str(step["run"]).rstrip().endswith("-- make check-fast")
-    assert "check-fast" in _load("ci.yml")["jobs"]["build"]["needs"]
+    assert "lint" in _load("ci.yml")["jobs"]["build"]["needs"]
 
 
 def test_budgeted_jobs_have_a_backstop_above_the_budget():
@@ -673,7 +673,7 @@ def test_budgeted_jobs_have_a_backstop_above_the_budget():
 
 def _make_targets() -> dict[str, str]:
     text = (ROOT / "Makefile").read_text().replace("\\\n", " ")
-    variables = dict(re.findall(r"^([A-Z_]+) = (.*)$", text, re.M))
+    variables = dict(re.findall(r"^([A-Z_]+) \??= (.*)$", text, re.M))
     targets: dict[str, str] = {}
     current = None
     for line in text.splitlines():
@@ -682,7 +682,9 @@ def _make_targets() -> dict[str, str]:
             current = m.group(1)
             targets[current] = ""
         elif line.startswith("\t") and current:
-            body = re.sub(r"\$\(([A-Z_]+)\)", lambda v: variables[v.group(1)], line.strip())
+            body = line.strip()
+            while re.search(r"\$\(([A-Z_]+)\)", body):  # make expands recursively
+                body = re.sub(r"\$\(([A-Z_]+)\)", lambda v: variables[v.group(1)], body)
             targets[current] += " ".join(body.split()) + "\n"
     return targets
 
@@ -696,7 +698,9 @@ def test_make_check_fast_matches_ci():
         "mypy src/lakebench/",
     ):
         assert cmd in fast, cmd
-    assert "pytest tests/" in fast and "-n auto --dist loadfile" in fast
+    assert "-m pytest tests/" in fast and "-n auto --dist loadfile" in fast
+    # This checkout's code, whatever is installed.
+    assert "PYTHONPATH=src" in fast
     assert '-m "not slow and not e2e and not integration"' in fast
     assert "--ignore=tests/spark" in fast
     # make test is the same pytest line, without the lint and type checks.
