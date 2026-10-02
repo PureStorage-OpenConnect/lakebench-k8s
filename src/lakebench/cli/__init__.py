@@ -2144,7 +2144,7 @@ def logs(
         pin_command(cfg)
     except ConfigException as e:
         print_error(f"Kubernetes context: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
 
     console.print(
         f"Fetching logs for [bold]{esc(component)}[/bold] in namespace [bold]{esc(namespace)}[/bold]"
