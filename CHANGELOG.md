@@ -99,6 +99,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   annotations.
 - `pydantic-settings` is no longer a dependency: nothing imported it, so
   every install pulled it in for nothing and the binary bundled it.
+- `botocore`, `pydantic-core` and `urllib3` are declared dependencies:
+  Lakebench imports them directly, and they came only through boto3,
+  pydantic and kubernetes. Their floors are ones the existing floors already
+  imply, so they add no constraint; a fresh install resolves the same
+  versions as before.
 ### Fixed
 
 - Trino compaction of the Customer 360 silver table no longer fails with

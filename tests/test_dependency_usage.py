@@ -1,9 +1,22 @@
-"""Every runtime dependency is imported by the package, so none ships unused.
+"""Runtime dependencies and the package's imports match in both directions.
 
 pydantic-settings was declared from the first release and imported nowhere;
 every install pulled it in and the PyInstaller binary bundled it. A runtime
 dependency now needs an importer under src/lakebench/, or an entry in
 NOT_IMPORTED saying why it is declared anyway.
+
+The other way round, botocore, pydantic_core and urllib3 were imported
+directly but arrived only through boto3, pydantic and kubernetes, so a
+release of those that dropped or replaced them would break lakebench with
+nothing in pyproject.toml saying so. A direct import of a third-party
+package now needs that package declared, as a runtime dependency or in a
+user-facing extra, or an entry in IMPORTED_UNDECLARED with the reason.
+
+Limits: the scan reads import statements, so ``importlib.import_module``
+strings are not seen, and an import under ``if TYPE_CHECKING:`` counts as
+a runtime one. A package declared only in an extra passes here wherever it
+is imported; the CI clean-venv job imports every module from the wheel
+without extras, which fails if such a package is imported at module level.
 """
 
 from __future__ import annotations
@@ -23,7 +36,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "lakebench"
 
 #: Distribution name -> top-level module, where they differ.
-MODULE_OF = {"pyyaml": "yaml", "pydantic-settings": "pydantic_settings"}
+MODULE_OF = {"pyyaml": "yaml", "scikit-learn": "sklearn"}
+
+#: Extras for contributors and builds, not for users: a package that only
+#: they declare must not be imported by the package.
+NON_USER_EXTRAS = {"dev", "build"}
+
+#: Imported directly without being declared, and why.
+IMPORTED_UNDECLARED: dict[str, str] = {}
 
 #: Declared without a direct import, and why.
 NOT_IMPORTED = {
@@ -35,6 +55,17 @@ NOT_IMPORTED = {
 def _runtime_dependencies() -> set[str]:
     data = tomllib.loads((ROOT / "pyproject.toml").read_text())
     return {Requirement(r).name.lower() for r in data["project"]["dependencies"]}
+
+
+def _user_extras() -> set[str]:
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    extras = data["project"].get("optional-dependencies", {})
+    return {
+        Requirement(r).name.lower()
+        for name, reqs in extras.items()
+        if name not in NON_USER_EXTRAS
+        for r in reqs
+    }
 
 
 def _imported_top_levels(root: Path) -> set[str]:
@@ -71,10 +102,6 @@ def test_not_imported_entries_are_still_dependencies():
     assert not stale, f"NOT_IMPORTED names packages that are no longer dependencies: {stale}"
 
 
-#: Packages lakebench.spec names that arrive through a declared dependency.
-SPEC_TRANSITIVE = {"botocore"}  # boto3's
-
-
 def test_pyinstaller_spec_collects_only_declared_packages():
     """lakebench.spec must not collect or hidden-import a package the wheel
     does not depend on."""
@@ -96,7 +123,27 @@ def test_pyinstaller_spec_collects_only_declared_packages():
             and isinstance(node.args[0], ast.Constant)
         ):
             collected.add(str(node.args[0].value).split(".")[0])
-    declared = {_module(d) for d in _runtime_dependencies()} | SPEC_TRANSITIVE
+    declared = {_module(d) for d in _runtime_dependencies()}
     assert collected <= declared, (
         f"lakebench.spec collects undeclared packages: {collected - declared}"
     )
+
+
+def test_every_direct_import_is_declared():
+    third_party = (
+        _imported_top_levels(SRC) - set(sys.stdlib_module_names) - {"lakebench", "__future__"}
+    )
+    declared = {_module(d) for d in _runtime_dependencies() | _user_extras()}
+    undeclared = sorted(third_party - declared - set(IMPORTED_UNDECLARED))
+    assert not undeclared, (
+        f"src/lakebench imports packages pyproject.toml does not declare: {undeclared}; "
+        "add each to [project].dependencies (or a user extra) with a floor no higher than "
+        "what the current dependencies already pull in, or to IMPORTED_UNDECLARED with the reason"
+    )
+
+
+def test_imported_undeclared_entries_are_still_imported_and_undeclared():
+    imported = _imported_top_levels(SRC)
+    declared = {_module(d) for d in _runtime_dependencies() | _user_extras()}
+    stale = sorted(m for m in IMPORTED_UNDECLARED if m not in imported or m in declared)
+    assert not stale, f"IMPORTED_UNDECLARED entries no longer needed: {stale}"
