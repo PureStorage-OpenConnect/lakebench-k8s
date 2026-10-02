@@ -19,6 +19,7 @@ from lakebench.cli._helpers import (
     _journal_safe,
     check_datagen_scale,
     console,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -431,6 +432,18 @@ def deploy(
             ),
         ),
     ] = False,
+    require_new: Annotated[
+        bool,
+        typer.Option(
+            "--require-new",
+            hidden=True,
+            help=(
+                "Refuse (exit 3) instead of adopting a namespace or bucket that "
+                "already exists, including one created while this deploy runs. For "
+                "harnesses that destroy only what they deployed; it only adds a refusal."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Deploy lakehouse infrastructure.
 
@@ -446,6 +459,15 @@ def deploy(
     7. Query Engine (Trino / Spark Thrift / DuckDB)
     8. Observability (if enabled)
     """
+    if require_new and (local or force_legacy):
+        from lakebench.exit_codes import UsageError
+
+        raise UsageError(
+            "--require-new does not combine with "
+            + ("--local: a local stack has no namespace" if local else "--force-legacy")
+            + "; it refuses anything that already exists",
+            path="cli.bad_argument",
+        )
     _deploy_impl(
         resolve_config_path(config_file, file_option),
         dry_run=dry_run,
@@ -454,6 +476,7 @@ def deploy(
         local=local,
         workdir=workdir,
         force_legacy=force_legacy,
+        require_new=require_new,
     )
 
 
@@ -683,7 +706,14 @@ def _deploy_impl(
     else:
         failed_component = next((r for r in results if r.status == DeploymentStatus.FAILED), None)
         guidance = "Check the errors above, then re-run 'lakebench deploy'."
-        if failed_component:
+        if failed_component and require_new:
+            # A re-run would refuse the namespace this deploy may have made.
+            guidance = (
+                f"Failed at: {failed_component.component}\n"
+                "Nothing that existed was adopted. If this deploy created the "
+                f"namespace, `lakebench destroy {esc(config_file)}` removes it; then deploy again."
+            )
+        elif failed_component:
             guidance = (
                 f"Failed at: {failed_component.component}\n"
                 "Fix the issue above, then re-run 'lakebench deploy'.\n"
