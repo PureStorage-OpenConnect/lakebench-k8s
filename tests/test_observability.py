@@ -523,8 +523,30 @@ class TestS3MetricsWrapperDisabled:
             wrapper.get_object(Bucket="b", Key="missing")
 
 
+def _unregister_lakebench_s3_metrics() -> None:
+    try:
+        from prometheus_client import REGISTRY
+    except ImportError:
+        return
+    collectors = {
+        c
+        for name, c in list(REGISTRY._names_to_collectors.items())
+        if name.startswith("lakebench_s3_")
+    }
+    for collector in collectors:
+        REGISTRY.unregister(collector)
+
+
 class TestS3MetricsWrapperEnabled:
     """Tests for S3MetricsWrapper when enabled (mocked prometheus_client)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_registry(self):
+        # S3MetricsWrapper registers its metrics in the global registry, so
+        # each test starts and ends without them, in any order.
+        _unregister_lakebench_s3_metrics()
+        yield
+        _unregister_lakebench_s3_metrics()
 
     def test_enabled_records_metrics(self):
         """When enabled and prometheus_client available, metrics are recorded."""
@@ -538,29 +560,18 @@ class TestS3MetricsWrapperEnabled:
         mock_client = MagicMock()
         mock_client.list_buckets.return_value = ["b1"]
 
-        # Use unique metric names to avoid duplicate registration
         wrapper = S3MetricsWrapper(mock_client, enabled=True)
         result = wrapper.list_buckets()
         assert result == ["b1"]
 
     def test_enabled_records_errors(self):
         """When enabled, errors increment the error counter."""
-        from prometheus_client import REGISTRY
-
         from lakebench.observability.s3_metrics import _prom_available
 
         if not _prom_available:
             pytest.skip("prometheus_client not installed")
 
         from lakebench.observability.s3_metrics import S3MetricsWrapper
-
-        # Unregister metrics from the previous test to avoid duplicate errors
-        collectors_to_unregister = set()
-        for name, collector in list(REGISTRY._names_to_collectors.items()):
-            if name.startswith("lakebench_s3_"):
-                collectors_to_unregister.add(collector)
-        for collector in collectors_to_unregister:
-            REGISTRY.unregister(collector)
 
         mock_client = MagicMock()
         mock_client.get_object.side_effect = Exception("Boom")
