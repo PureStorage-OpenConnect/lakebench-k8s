@@ -1646,6 +1646,7 @@ class DeploymentEngine:
                     status=DeploymentStatus.FAILED,
                     message=f"Bucket ownership refused: {v.hint}",
                     elapsed_seconds=time.time() - start,
+                    details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                 )
             if v.verdict is IdentityVerdict.LEGACY_UNPROVEN:
                 # Ownership row 4: ours by name, claimed by an earlier lakebench

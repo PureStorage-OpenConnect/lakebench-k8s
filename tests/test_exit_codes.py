@@ -713,6 +713,8 @@ def _scenario_run_bronze_nonempty(monkeypatch, tmp_path):
 
     dg = _fake_s3(monkeypatch, info=BucketInfo(name="b", exists=True, object_count=9, size_bytes=9))
     dg._stub_full_run(monkeypatch)
+    # A bucket this deployment cannot prove it owns: the gate's unowned row.
+    monkeypatch.setattr("lakebench.deploy.datagen.deployment_may_empty", lambda *a, **k: False)
     cfg = dg._write_cfg(tmp_path)
     return _runner().invoke(app, ["run", str(cfg), *_RUN_GENERATE, "--yes"])
 

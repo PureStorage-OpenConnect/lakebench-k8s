@@ -72,7 +72,7 @@ the CLI down every path listed here and checks the code.
 | `reproduce.existing_namespace` | 3 | `reproduce` would reuse a namespace or bucket that already exists |
 | `reproduce.held_out` | 3 | `reproduce` would regenerate a held-out corpus (its look has not run, its seed or the look record cannot be read, or the config names one) |
 | `reproduce.nonce_changed` | 3 | the deployment `reproduce` created was replaced before its run or its destroy |
-| `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix without --regenerate |
+| `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns |
 | `run.deps_mismatch` | 3 | the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded |
 | `deploy.state_unrecordable` | 4 | `deploy` could not read the namespace or write the nonce to the directory's state |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |

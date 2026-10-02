@@ -111,7 +111,7 @@ def _s3_client_for(cfg: Any) -> Any:
     )
 
 
-def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None) -> bool:
+def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None, *, strict: bool = False) -> bool:
     """Whether this deployment may delete data in ``bucket``.
 
     ``lakebench.deploy.ownership.deployment_may_empty``: the rule destroy
@@ -121,7 +121,7 @@ def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None) -> bool:
 
     if s3 is None:
         s3 = _s3_client_for(cfg)
-    return _rule(cfg, bucket, s3)
+    return _rule(cfg, bucket, s3, strict=strict)
 
 
 @dataclass
@@ -214,10 +214,18 @@ def bronze_prefix_gate(
         nonempty = s3.has_user_objects(bucket, prefix + "/" if prefix else "")
     except Exception as e:  # noqa: BLE001
         return refuse(f"could not list {shown}: {e}", owned=False, code=ExitCode.PREREQUISITE)
-    owned = deployment_may_empty(cfg, bucket, s3)
     if not nonempty:
         _clear_clock_best_effort(cfg)
-        return BronzeGateResult(True, bucket, prefix, owned)
+        return BronzeGateResult(True, bucket, prefix, deployment_may_empty(cfg, bucket, s3))
+    try:
+        owned = deployment_may_empty(cfg, bucket, s3, strict=True)
+    except Exception as e:  # noqa: BLE001
+        # Not knowing who owns the bucket is not a refusal on ownership.
+        return refuse(
+            f"could not check who owns {bucket} ({e}); refusing to generate over {shown}",
+            owned=False,
+            code=ExitCode.PREREQUISITE,
+        )
     try:
         info = s3.get_bucket_size(bucket, prefix=prefix + "/" if prefix else "")
         n = int(info.object_count or 0)

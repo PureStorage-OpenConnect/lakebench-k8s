@@ -176,6 +176,8 @@ class TestDeploy:
             assert result.status.value == "failed"
             assert "another cluster" in result.message
             assert rec.tags_store[B][TAG_CLUSTER] == OTHER_FP
+            # A refusal (exit 3), not an unclassified failure (exit 1).
+            assert result.details.get("refusal") == "deploy.identity_foreign"
 
     def test_stamps_a_recorded_legacy_bucket(self):
         """Row 3: a bucket this namespace's record lists gets this cluster's stamp."""

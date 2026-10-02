@@ -306,11 +306,12 @@ may take hours. Without `--yes`, the command prompts for confirmation before
 submitting jobs. The Rust generator has no checkpoint-resume; an interrupted
 run is re-run from the start.
 
-**Exit codes**: `0` on success, `1` on generic failure, `2` when the bronze
-datagen prefix is non-empty and neither `--regenerate` (on a bucket this
-deployment owns) nor `--allow-stale-bronze` (on one it does not) applies,
-or `--regenerate` was passed for a bucket it does not own, `5` when datagen exceeds its
-wait budget (`--timeout`); in that case the datagen Job and any leftover
+**Exit codes**: `0` on success, `1` on generic failure and when datagen
+exceeds its wait budget (`--timeout`), `3` (refused) when the bronze datagen
+prefix is non-empty and neither `--regenerate` (on a bucket this deployment
+owns) nor `--allow-stale-bronze` (on one it does not) applies, or
+`--regenerate` was passed for a bucket it does not own, and `4` when bronze
+or its ownership cannot be checked; when datagen exceeds its wait budget the datagen Job and any leftover
 streaming SparkApplication consuming the trickle are stopped before exit.
 Only the initial-pass datagen is guarded by this exit code; per-cycle
 datagen inside a multi-cycle run reports its own timeout independently.
@@ -815,7 +816,7 @@ the cluster-wide `lakebench-cluster-lock` lease.
 | `admin install-spark-operator [CONFIG]` | `--version`, `--operator-namespace`, `--controller-tmp-size` (default 8Gi, floor 4Gi), `-f/--file` | Install or upgrade the shared Spark Operator. An upgrade keeps the tenants' watch lists, the installed chart unless `--version` or the config names one, and a larger `/tmp` already set |
 | `admin repair-operator [CONFIG]` | `--dry-run`, `--controller-tmp-size` (default 8Gi), `-f/--file` | Remove stale watch-list entries and raise a controller `/tmp` smaller than the given size |
 | `admin migrate-deployment NAMESPACE [CONFIG]` | `--api-server-fingerprint`, `-f/--file` | Stamp identity annotations on a legacy pre-ownership namespace |
-| `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment (refused when the bucket holds objects unless `--force-nonempty`) |
+| `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment and this cluster, or on a backend without tagging its owner marker (`.lakebench/owner.json`); refused (exit 3) when the bucket holds objects unless `--force-nonempty`, exit 4 when the cluster fingerprint cannot be computed |
 | `admin release-lock` | `--force` | Release an expired cluster lease; `--force` releases a live one (last resort) |
 
 The Spark Operator runs spark-submit in its controller pod, which caches

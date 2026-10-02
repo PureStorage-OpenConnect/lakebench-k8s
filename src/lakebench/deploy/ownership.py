@@ -1028,12 +1028,13 @@ def bucket_may_be_emptied(
     return False
 
 
-def deployment_may_empty(cfg: Any, bucket: str, s3: Any) -> bool:
+def deployment_may_empty(cfg: Any, bucket: str, s3: Any, *, strict: bool = False) -> bool:
     """``bucket_may_be_emptied`` for a config, on its own cluster context. Fail-safe.
 
     The kube client is loaded for the config's context first, so the
     namespace record, the other deployments and the fingerprint all come
-    from the same cluster. Any error is False.
+    from the same cluster. Any error is False, or raises with ``strict``
+    (a caller that must tell "not ours" from "could not check").
     """
     try:
         from kubernetes import client as k8s_client
@@ -1055,6 +1056,8 @@ def deployment_may_empty(cfg: Any, bucket: str, s3: Any) -> bool:
             other_deployments=list_lakebench_deployment_names(core_v1, exclude=namespace),
         )
     except Exception as e:  # noqa: BLE001
+        if strict:
+            raise
         logger.info("could not prove this deployment may empty %s (%s); it may not", bucket, e)
         return False
 

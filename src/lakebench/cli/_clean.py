@@ -407,6 +407,7 @@ def clean(
                         IdentityVerdict.UNVERIFIED_CLUSTER,
                     ):
                         errors.append(f"{layer}: {v.hint}")
+                        refusals += 1
                         print_error(f"Refusing to clean {layer}: {v.hint}")
                         continue
                     if v.verdict is IdentityVerdict.MISMATCH:

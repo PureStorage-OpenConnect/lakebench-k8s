@@ -226,7 +226,8 @@ cluster's stamp (a tag, or on FlashBlade the `.lakebench/owner.json` marker),
 or this namespace's created-buckets record lists it (a bucket 1.6 created,
 stamped on the next deploy). A multi-cycle run clears an owned prefix before
 cycle 0 without `--regenerate`, as 1.6 did; the continuous run refuses any
-bucket it does not own before it starts (exit 1).
+bucket it does not own before it starts (exit 3, or 4 when ownership cannot
+be checked).
 
 | Bucket | Prefix | Flag | Result |
 |---|---|---|---|

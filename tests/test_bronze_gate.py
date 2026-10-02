@@ -141,6 +141,21 @@ class TestGate:
             got = _gate(cfg)
             assert not got.proceed and "could not list" in got.message
 
+    def test_ownership_that_cannot_be_checked_is_a_prerequisite_not_a_refusal(self):
+        """A transient API error proving ownership exits 4, not 3."""
+
+        def raising(cfg, bucket, s3=None, *, strict=False):
+            if strict:
+                raise RuntimeError("apiserver timed out")
+            return False
+
+        with recording() as rec:
+            cfg = _seed(rec, owned=True, objects=[f"{PREFIX}/part-0"])
+            with patch("lakebench.deploy.datagen.deployment_may_empty", raising):
+                got = _gate(cfg, regenerate=True)
+            assert not got.proceed and "could not check who owns" in got.message
+            assert got.exit_code == ExitCode.PREREQUISITE
+
     def test_cli_exits_refused_on_refusal(self):
         import typer
 

@@ -392,7 +392,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.bronze_nonempty",
         _C.REFUSED,
-        "datagen would write over a non-empty bronze prefix without --regenerate",
+        "datagen would write over a non-empty bronze prefix: without --regenerate, or "
+        "with it on a bucket this deployment cannot prove it owns",
         v16_code=2,
     ),
     ExitPath(

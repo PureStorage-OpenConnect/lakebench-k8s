@@ -1209,7 +1209,7 @@ def reclaim_bucket(
                             f"bucket {bucket!r}: the owner marker did not read back as "
                             f"{cfg.name!r} on this cluster (read {got!r})"
                         )
-                        raise typer.Exit(ExitCode.REFUSED) from None
+                        raise typer.Exit(ExitCode.FAILED) from None
                     print_success(
                         f"bucket {bucket!r} on a backend that does not support tagging: "
                         f"wrote its owner marker ({OWNER_MARKER_KEY}) for deployment "
