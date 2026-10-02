@@ -77,9 +77,10 @@ MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 #   - bronze, empty, with the inferred schema plus ingest_ts. Registering the
 #     files present at preflight time would ingest each of them twice, since
 #     bronze-ingest streams every file under the prefix itself.
-#   - silver.transactions and silver.counterparty_edges, which silver-stream
-#     recreates. Rows left by an earlier batch or continuous run would
-#     otherwise be counted again next to the re-ingested corpus.
+#   - every silver table silver-stream writes (CONTINUOUS_SILVER_TABLES),
+#     which it recreates. Rows left by an earlier batch or continuous run
+#     would otherwise be counted again next to the re-ingested corpus, or
+#     carried into this run's statements and profiles.
 # A pod restart inside a run does not re-run the preflight, so it keeps its
 # checkpoints and tables.
 _REGISTER_MODE = env("LB_REGISTER_TABLE", "1")

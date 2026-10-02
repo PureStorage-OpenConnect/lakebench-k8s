@@ -55,6 +55,9 @@ def _exists(spark, t):
 def test_reset_drops_every_silver_table_the_stream_writes(spark, load_script, monkeypatch):
     monkeypatch.setenv("LB_CATALOG_TYPE", "polaris")  # no explicit bronze location
     bvf = load_script("bronze_verify_financial")
+    # The script's own set, so a table added there is tested too; it must
+    # still name the seven the stream writes today.
+    assert set(STREAM_SILVER) <= set(getattr(bvf, "CONTINUOUS_SILVER_TABLES", STREAM_SILVER))
     _populate(spark, STREAM_SILVER)
     bronze = spark.createDataFrame([("x",)], "msg_id string")
     bvf._continuous_reset(spark, bronze)
