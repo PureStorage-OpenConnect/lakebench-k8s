@@ -2532,9 +2532,11 @@ def _run_once(
                         print_info(f"Datagen: {ts_start} to {ts_end}")
 
                         # Wait for datagen completion
-                        _dg_start = _time.time()
+                        # The module's time: _time is bound only by Phase 3's
+                        # single-shot generate, which a multi-cycle run skips.
+                        _dg_start = time.time()
                         dg_wait = _cycle_datagen.wait_for_completion(timeout_seconds=timeout)
-                        _cycle_dg_elapsed = _time.time() - _dg_start
+                        _cycle_dg_elapsed = time.time() - _dg_start
                         if dg_wait.status != DeploymentStatus.SUCCESS:
                             print_error(f"Datagen did not complete: {dg_wait.message}")
                             pipeline_success = False

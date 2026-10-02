@@ -1120,6 +1120,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with `abort_reason`.
 ### Fixed
 
+- **`run --generate` on a multi-cycle run is refused (exit 2).** It generated
+  the whole corpus before the cycle loop, then cycle 0 again under the same
+  file names. On a bucket the deployment owns, cycle 0 cleared the whole
+  corpus (a wasted generate); on one it did not create, `--allow-stale-bronze`
+  left most of it beside cycle 0's slice and cycle 0's silver read both,
+  about (2 - 1/cycles) times the rows with exit 0; without the flag, cycle 0
+  refused the files the run had just written (exit 1). A multi-cycle `run`
+  generates one slice per cycle without `--generate`.
+- **A multi-cycle `run` no longer fails at cycle 1.** Its datagen wait used
+  a name only the single-shot generate defined, so every multi-cycle run
+  without `--generate` stopped with "cannot access local variable" (exit 1).
 - `run --continuous --skip-generate` no longer journals a "Datagen started"
   event for a datagen it did not start.
 

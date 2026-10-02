@@ -189,6 +189,20 @@ RUN_RULES: tuple[RunRule, ...] = (
         "`--skip-generate` with `--generate`",
     ),
     RunRule(
+        lambda a, c: (
+            a.include_datagen
+            and c.mode == "batch"
+            and c.cycles > 1
+            and not a.local
+            and a.repeat is None  # --repeat's own multi-cycle row names it
+        ),
+        "--generate does not apply to a multi-cycle run: each cycle generates its own "
+        "slice, so a whole corpus generated first would be read again by cycle 0",
+        "drop --generate (a multi-cycle run generates without it), or set "
+        "architecture.pipeline.cycles to 1",
+        "`--generate` on a multi-cycle batch run (`cycles` above 1)",
+    ),
+    RunRule(
         lambda a, c: a.force_reset and c.mode == "batch",
         "--force-reset only applies to a continuous run",
         "drop --force-reset, or add --continuous",

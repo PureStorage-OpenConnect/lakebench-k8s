@@ -57,6 +57,7 @@ CASES = [
     (["--continuous", "--generate", "--regenerate"], "--regenerate does not apply to a local"),
     (["--allow-stale-bronze"], "--allow-stale-bronze only applies when the run generates"),
     (["--generate", "--skip-generate"], "--skip-generate and --generate cannot be combined"),
+    (["--generate", "--cycles"], "--generate does not apply to a multi-cycle run"),
     (["--force-reset"], "--force-reset only applies to a continuous run"),
     (["--continuous", "--force-rebuild"], "--force-rebuild only applies to a batch run"),
     (["--duration", "600"], "--duration only applies to a continuous run"),

@@ -89,7 +89,9 @@ QpH score is `(number_of_queries / total_seconds) * 3600`.
 When `pipeline.cycles` is set to 2 or more, the batch pipeline runs N
 iterations. Each cycle generates new data for its portion of the timestamp
 range, then runs the full bronze-verify -> silver-build -> gold-finalize
-sequence.
+sequence. The run generates without `--generate`, which a multi-cycle run
+refuses (exit 2): a whole corpus generated first would be read again by
+cycle 0.
 
 ```yaml
 architecture:

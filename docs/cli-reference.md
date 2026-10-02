@@ -460,6 +460,7 @@ cluster call, and exits 2 (usage) naming the first refused one:
 - `--regenerate` with `--local`, or with a continuous run other than `--generate-only`;
 - `--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, `--generate-only` or a multi-cycle batch run take it; not `--local`, `--deploy-only` or a continuous run other than `--generate-only`);
 - `--skip-generate` with `--generate`;
+- `--generate` on a multi-cycle batch run (`cycles` above 1);
 - `--force-reset` on a batch run;
 - `--force-rebuild` on a continuous run;
 - `--duration` on a batch run;

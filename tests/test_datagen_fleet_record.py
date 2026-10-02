@@ -232,13 +232,13 @@ def test_generate_refusal_keeps_the_sidecar(tmp_path, monkeypatch):
     assert side.exists()
 
 
-@pytest.mark.parametrize("argv", [["--skip-generate", "--yes"], ["--generate", "--yes"]])
+# run --generate on a multi-cycle run is refused before any of this
+# (tests/test_multicycle_generate_bronze.py).
+@pytest.mark.parametrize("argv", [["--skip-generate", "--yes"], ["--yes"]])
 def test_multi_cycle_run_never_borrows_an_older_sidecar(argv, tmp_path, monkeypatch):
     """pipeline.cycles > 1 regenerates bronze in every cycle (deploy_cycle):
     the sidecar of the corpus it replaces is dropped before the gate and
-    the record carries no fleet rather than that older generate's. With
-    --generate, cycle 0 clears the corpus the first Job wrote, so the fleet
-    read from those pods is not kept either."""
+    the record carries no fleet rather than that older generate's."""
     import tests.harness.run_harness as harness
     from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
@@ -263,8 +263,7 @@ def test_multi_cycle_run_never_borrows_an_older_sidecar(argv, tmp_path, monkeypa
     config = harness.base_config(architecture={"pipeline": {"mode": "batch", "cycles": 2}})
     scenario = dataclasses.replace(SCENARIOS["batch_c360"], argv=argv, config=config)
     trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
-    # --generate passes the gate once, before its Job (the cycles skip it).
-    assert seen == ([True] if "--generate" in argv else [False])
+    assert seen == [False]
     assert ["Datagen", "deploy_cycle"] in trace["calls"]
     assert not _sidecar(tmp_path).exists()
     record = saved_record(tmp_path)
