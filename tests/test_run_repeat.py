@@ -497,6 +497,27 @@ def test_repeat_error_in_a_repetition_is_recorded(tmp_path, monkeypatch):
     assert "RuntimeError" in manifest["stopped_reason"]
 
 
+def test_repeat_refusal_in_a_repetition_keeps_its_code(tmp_path, monkeypatch):
+    """An escaping refusal (kubeconfig changed between repetitions) is
+    recorded with the code the CLI exits with (3), not 1."""
+    import lakebench.cli._run as run_mod
+    from lakebench.k8s.target import ContextConflictError
+
+    real = run_mod._run_once
+    seen = [0]
+
+    def once(*a, **k):
+        seen[0] += 1
+        if seen[0] == 2:
+            raise ContextConflictError("one cluster context per process: A is active")
+        return real(*a, **k)
+
+    monkeypatch.setattr(run_mod, "_run_once", once)
+    result, rec, records, manifest = _series(tmp_path, monkeypatch)
+    assert result.exit_code == 3, result.output
+    assert manifest["attempted"] == 2 and manifest["runs"][1]["exit_code"] == 3
+
+
 def test_repeat_marker_mismatch_stops(tmp_path, monkeypatch):
     """A later repetition whose markers give another corpus id than
     repetition 1's is not a member and stops the series with 3."""
