@@ -639,6 +639,16 @@ class FakeCoreV1Api(_FakeApi):
         self._rec.add("CoreV1Api", "list_namespace")
         return SimpleNamespace(items=[_namespace_object(self._rec.namespace)])
 
+    def read_namespaced_config_map(self, name, namespace, **kw):
+        """lakebench-silver-state of a deployment that has not yet run
+        bronze-verify: no data clock to clear before a fresh generate."""
+        self._rec.add("CoreV1Api", "read_namespaced_config_map", name, namespace)
+        if name != "lakebench-silver-state" or namespace != self._rec.namespace:
+            raise self._rec.refuse(f"unscripted ConfigMap {namespace}/{name}")
+        return SimpleNamespace(
+            data={"bronze_data_clock": ""}, metadata=SimpleNamespace(resource_version="1")
+        )
+
     def read_namespaced_pod(self, name, namespace, **kw):
         # Driver pods of an earlier run's streams: none are left.
         self._rec.add("CoreV1Api", "read_namespaced_pod", name, namespace)
@@ -1284,6 +1294,27 @@ class FakeS3:
     def raw_client(self) -> _FakeBoto:
         self._rec.add("S3", "raw_client")
         return _FakeBoto(self._rec)
+
+    def bucket_exists(self, *args, **kwargs) -> bool:
+        """The bronze gate's first look: the deployment's buckets exist."""
+        _checked(self._rec, self._real.bucket_exists, *args, **kwargs)
+        bound = inspect.signature(self._real.bucket_exists).bind(None, *args, **kwargs)
+        name = bound.arguments["bucket_name"]
+        self._rec.add("S3", "bucket_exists", name)
+        if not name.startswith(f"{NAME}-"):
+            raise self._rec.refuse(f"unscripted bucket {name}")
+        return True
+
+    def has_user_objects(self, *args, **kwargs) -> bool:
+        """Whether a prefix holds data: the datagen prefix of a fresh
+        deployment is empty before it generates, as get_bucket_size says."""
+        _checked(self._rec, self._real.has_user_objects, *args, **kwargs)
+        bound = inspect.signature(self._real.has_user_objects).bind(None, *args, **kwargs)
+        bound.apply_defaults()
+        name, prefix = bound.arguments["bucket_name"], bound.arguments["prefix"]
+        self._rec.add("S3", "has_user_objects", name, prefix)
+        layer = name.rsplit("-", 1)[-1]
+        return not (prefix and self._rec.fresh_bronze and layer == "bronze")
 
     def delete_prefix(self, *args, **kwargs) -> int:
         _checked(self._rec, self._real.delete_prefix, *args, **kwargs)

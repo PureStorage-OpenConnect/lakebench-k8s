@@ -81,10 +81,11 @@ def generate(
             "--regenerate",
             help=(
                 "Clear the datagen prefix in the bronze bucket before "
-                "generating, when this deployment created the bucket. "
+                "generating, when this deployment owns the bucket. "
                 "Without this flag, a non-empty bronze prefix is refused "
                 "(exit 3) so existing datagen output is never overwritten "
-                "silently. Never clears a bucket this deployment did not create."
+                "silently. Never clears a bucket this deployment cannot "
+                "prove it owns."
             ),
         ),
     ] = False,

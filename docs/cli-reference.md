@@ -297,8 +297,8 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 |---|---|---|---|
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting; `0` computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--regenerate` | | `false` | Clear the datagen prefix (not the whole bucket) before generating, when this deployment owns the bronze bucket (its stamp, or a bucket it created). Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused (exit 3) on a bucket this deployment did not create. |
-| `--allow-stale-bronze` | | `false` | Generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; `run` records it in `metrics.json` (`datagen.stale_bronze`) and the report shows "bronze held N objects before generate". |
+| `--regenerate` | | `false` | Clear the datagen prefix (not the whole bucket) before generating, when this deployment owns the bronze bucket (its stamp, or a bucket it created). Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused (exit 3) on a bucket this deployment cannot prove it owns (`lakebench admin reclaim-bucket` claims one). |
+| `--allow-stale-bronze` | | `false` | Generate over objects already in the datagen prefix of a bronze bucket this deployment cannot prove it owns. Rows may be over-counted; `run` records it in `metrics.json` (`datagen.stale_bronze`) and the report shows "bronze held N objects before generate". |
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
@@ -310,8 +310,9 @@ run is re-run from the start.
 exceeds its wait budget (`--timeout`), `3` (refused) when the bronze datagen
 prefix is non-empty and neither `--regenerate` (on a bucket this deployment
 owns) nor `--allow-stale-bronze` (on one it does not) applies, or
-`--regenerate` was passed for a bucket it does not own, and `4` when bronze
-or its ownership cannot be checked; when datagen exceeds its wait budget the datagen Job and any leftover
+`--regenerate` was passed for a bucket it does not own or with an empty
+datagen prefix, and `4` when bronze or its ownership cannot be checked;
+when datagen exceeds its wait budget the datagen Job and any leftover
 streaming SparkApplication consuming the trickle are stopped before exit.
 Only the initial-pass datagen is guarded by this exit code; per-cycle
 datagen inside a multi-cycle run reports its own timeout independently.
