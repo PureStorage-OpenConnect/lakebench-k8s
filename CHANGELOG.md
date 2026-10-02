@@ -97,7 +97,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SHA256SUMS` is refused, and so is a checksum mismatch on any release.
 - The package ships a `py.typed` marker, so type checkers read its
   annotations.
-- **Exit codes follow one table.** `lakebench` has a single
 - **`logs`, `stop` and `status` cover what Lakebench started and exit
   non-zero when something is wrong.** All three use the Kubernetes
   API in the config's context; `logs` no longer runs `kubectl`.
@@ -119,7 +118,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `status` exits 1 when the namespace does not exist or a component is not
     ready, scaled to zero or missing, and 4 when the cluster cannot be read
     (all were 0).
-- **Exit codes follow one table (CLI-1).** `lakebench` has a single
+- **Exit codes follow one table.** `lakebench` has a single
   exit-code enum, `lakebench.exit_codes.ExitCode`, importable without loading
   the CLI, and the table in `docs/exit-codes.md` is generated from it. Every
   command now exits with a code from that table: 1 a failed run or step, 2 a

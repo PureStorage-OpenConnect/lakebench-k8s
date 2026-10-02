@@ -1,7 +1,7 @@
-"""`logs`, `stop` and `status` against the Kubernetes API (CLI-6, CC-27).
+"""`logs`, `stop` and `status` against the Kubernetes API.
 
 The commands in ``lakebench/cli/__init__.py`` load the config, pin the
-cluster context (SAF-7) and build the API objects; the functions here do the
+cluster context (one context per process) and build the API objects; the functions here do the
 reads and deletes, so tests drive them with fakes. Nothing on these paths runs
 ``kubectl``.
 
@@ -425,12 +425,11 @@ def stop_delete(custom: Any, batch: Any, namespace: str, out: StopOutcome) -> No
 
 
 def pre_stop(cfg: Any, k8s: Any) -> None:
-    """Hook that runs before `stop` deletes anything. A no-op until AM-10.
+    """Hook that runs before `stop` deletes anything; a no-op for now.
 
-    AM-10 (ch04 AML-6, reconcile C2-21) calls
-    ``cli._aml_post.request_drain(cfg, k8s, 300)`` here for a financial
-    continuous deployment, so gold-refresh finishes its tick before it is
-    deleted. The caller turns an exception into one warning and still
+    For a financial continuous deployment it is to call
+    ``cli._aml_post.request_drain(cfg, k8s, 300)``, so gold-refresh finishes
+    its tick before it is deleted. The caller turns an exception into one warning and still
     deletes.
     """
     return None

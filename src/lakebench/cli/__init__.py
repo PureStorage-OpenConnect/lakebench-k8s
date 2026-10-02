@@ -58,7 +58,6 @@ from lakebench.k8s import (
     SecurityVerifier,
     get_k8s_client,
 )
-from lakebench.k8s.target import ContextConflictError
 from lakebench.s3 import test_s3_connectivity
 
 if TYPE_CHECKING:
