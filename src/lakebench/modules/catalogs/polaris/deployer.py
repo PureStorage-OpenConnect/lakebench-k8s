@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from lakebench.deploy import deadline as deploy_deadline
 from lakebench.deploy.deployment_secrets import (
     DeploymentSecretError,
     ensure_polaris_client_secret,
@@ -131,7 +132,9 @@ class PolarisDeployer:
                     self.k8s.apply_manifest(doc, namespace=namespace)
 
             # Step 5: Wait for bootstrap job completion
-            bootstrap_result = self._wait_for_bootstrap_job(namespace, timeout_seconds=600)
+            bootstrap_result = self._wait_for_bootstrap_job(
+                namespace, timeout_seconds=deploy_deadline.clamp(600)
+            )
 
             if not bootstrap_result:
                 return DeploymentResult(
@@ -292,7 +295,7 @@ class PolarisDeployer:
         except Exception as e:
             logger.warning(f"Could not delete old bootstrap job: {e}")
 
-    def _wait_for_bootstrap_job(self, namespace: str, timeout_seconds: int = 180) -> bool:
+    def _wait_for_bootstrap_job(self, namespace: str, timeout_seconds: float = 180) -> bool:
         """Wait for the Polaris bootstrap Job to complete.
 
         Args:
@@ -330,9 +333,12 @@ class PolarisDeployer:
 
                 time.sleep(5)
 
+            deploy_deadline.check("Polaris bootstrap job", "not complete")
             logger.error(f"Polaris bootstrap job timed out after {timeout_seconds}s")
             return False
 
+        except deploy_deadline.DeployTimeout:
+            raise
         except Exception as e:
             logger.error(f"Error waiting for bootstrap job: {e}")
             return False

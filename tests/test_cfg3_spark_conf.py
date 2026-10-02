@@ -99,10 +99,12 @@ def test_default_config_conf_is_unchanged_by_the_merge():
     [
         ("spark.jars", "resolved dependency set"),
         ("spark.jars.packages", "resolved dependency set"),
-        ("spark.jars.repositories", "Lakebench writes it"),
-        ("spark.jars.ivy", "Lakebench writes it"),
-        ("spark.jars.ivySettings", "reserved for Lakebench"),
-        ("spark.submit.pyFiles", "reserved for Lakebench"),
+        ("spark.jars.repositories", "resolved dependency set"),
+        ("spark.jars.ivy", "resolved dependency set"),
+        ("spark.jars.ivySettings", "resolved dependency set"),
+        ("spark.submit.pyFiles", "resolved dependency set"),
+        ("spark.driver.userClassPathFirst", "resolved dependency set"),
+        ("spark.kubernetes.driver.podTemplateFile", "reserved for Lakebench"),
         ("spark.sql.shuffle.partitions", "<job>_executors"),
         ("spark.executor.memory", "job profiles"),
         ("spark.executor.memoryOverheadFactor", "capacity check"),
@@ -394,6 +396,8 @@ def _written_keys(catalog_name: str = "lakehouse") -> set[str]:
             spark={"conf": dict.fromkeys(SPARK_CONF_DEFAULTS, _SENTINEL)},
         )
         for jt in JobType:
+            if jt is JobType.SCORE_FINANCIAL_REFERENCE and schema != "financial":
+                continue  # needs the AML set's reference wheels
             conf = _conf(cfg, jt)
             overwritten = [k for k in SPARK_CONF_DEFAULTS if conf.get(k) != _SENTINEL]
             assert not overwritten, (recipe, schema, image, jt, overwritten)

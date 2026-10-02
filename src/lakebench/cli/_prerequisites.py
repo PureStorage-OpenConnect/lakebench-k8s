@@ -77,8 +77,8 @@ def run_prerequisites(
 
     # 5-7. The shared registry (deploy/prereqs.py): scratch
     # StorageClass, Spark Operator, Stackable (Hive), observability, the
-    # OpenShift SCC ClusterRole and S3. docs/prerequisites.md is generated
-    # from the same entries, and `plan` runs them too.
+    # OpenShift SCC ClusterRole and S3; the deploy-phase entries are left to
+    # deploy. docs/prerequisites.md is generated from the same entries.
     report.checks.extend(_registry_checks(cfg))
 
     # 8. Namespace writable
@@ -205,11 +205,11 @@ def _registry_checks(cfg) -> list[PrereqResult]:
             )
         ]
     results: list[PrereqResult] = []
-    for o in run_prereqs(cfg, reader):
+    for o in run_prereqs(cfg, reader, for_run=True):
         status = o.result.status
         if status is PrereqStatus.SKIPPED:
             continue
-        passed = status in (PrereqStatus.OK, PrereqStatus.WARN)
+        passed = status in (PrereqStatus.OK, PrereqStatus.WARN, PrereqStatus.INFO)
         hint = ""
         if status is PrereqStatus.FAIL:
             hint = o.prereq.fix

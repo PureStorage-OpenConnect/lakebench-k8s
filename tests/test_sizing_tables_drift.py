@@ -41,7 +41,7 @@ def test_check_flags_a_hand_edit(tmp_path):
     gen = _script()
     assert gen.drift(tmp_path) == []
     p = tmp_path / "README.md"
-    p.write_text(p.read_text().replace("| 40 cores |", "| 36 cores |", 1))
+    p.write_text(p.read_text().replace("| 41 cores |", "| 36 cores |", 1))
     assert gen.drift(tmp_path) == ["README.md: block 'sizing-minimums' is stale"]
     assert gen.regenerate(tmp_path) == ["README.md"]
     assert gen.drift(tmp_path) == []

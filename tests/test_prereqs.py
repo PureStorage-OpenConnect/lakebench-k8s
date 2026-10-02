@@ -23,7 +23,9 @@ class FakeReader:
             "secretclasses.secrets.stackable.tech",
         }
     )
-    scs: set[str] = field(default_factory=lambda: {"px-csi-scratch"})
+    scs: set[str] = field(default_factory=lambda: {"px-csi-scratch", "px-csi-db"})
+    default_scs: set[str] = field(default_factory=lambda: {"px-csi-db"})
+    pvcs: dict[tuple[str, str], str] = field(default_factory=dict)
     deps: dict[str, list[DeploymentView]] = field(default_factory=dict)
     running: set[str] = field(
         default_factory=lambda: {
@@ -41,6 +43,12 @@ class FakeReader:
 
     def storage_class_names(self):
         return self.scs
+
+    def default_storage_class_names(self):
+        return self.default_scs
+
+    def pvc_storage_class(self, namespace, name):
+        return self.pvcs.get((namespace, name))
 
     def deployments(self, label_selector, namespace=None):
         self.calls.append(f"{namespace}:{label_selector}")
@@ -113,6 +121,8 @@ def test_all_ok_on_a_complete_cluster():
         "stackable": PrereqStatus.OK,
         "observability-stack": PrereqStatus.SKIPPED,
         "openshift-scc-clusterrole": PrereqStatus.OK,
+        "deps-storage-class": PrereqStatus.OK,
+        "egress-hosts": PrereqStatus.INFO,
         "s3-reachable-and-credentials": PrereqStatus.OK,
     }
     assert _result(out, "spark-operator").message.startswith("Spark Operator 2.5.1 ready")
@@ -272,6 +282,179 @@ def test_offline_listing_needs_no_reader():
     assert "spark-operator" in needed and "observability-stack" not in needed
 
 
+def _deps_cfg(**deps) -> LakebenchConfig:
+    return _cfg(
+        platform={
+            "storage": {
+                "s3": {"endpoint": "http://10.0.1.50:80", "access_key": "a", "secret_key": "b"},
+                "scratch": {"enabled": True},
+            },
+            "deps": deps,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "deps,scs,default,pvc,status,text",
+    [
+        ({}, {"px-csi-db"}, {"px-csi-db"}, None, PrereqStatus.OK, "default StorageClass px-csi-db"),
+        ({}, {"px-csi-db"}, set(), None, PrereqStatus.FAIL, "no default StorageClass"),
+        ({}, {"a", "b"}, {"a", "b"}, None, PrereqStatus.WARN, "several default StorageClasses (a, b)"),
+        ({"storage_class": "px-repl3"}, {"px-repl3"}, set(), None, PrereqStatus.OK, "px-repl3 exists"),
+        ({"storage_class": "px-repl3"}, {"px-csi-db"}, {"px-csi-db"}, None, PrereqStatus.FAIL,
+         "px-repl3 not found"),
+        # An existing PVC keeps the set where it is: no default and no class
+        # named, or the named class deleted since, is no failure.
+        ({}, set(), set(), "px-csi-db", PrereqStatus.OK, "exists on StorageClass px-csi-db"),
+        ({"storage_class": "px-csi-db"}, set(), set(), "px-csi-db", PrereqStatus.OK,
+         "exists on StorageClass px-csi-db"),
+        ({"storage_class": "px-repl3"}, {"px-repl3"}, set(), "px-csi-db", PrereqStatus.WARN,
+         "not px-repl3"),
+        ({}, set(), set(), "", PrereqStatus.OK, "exists on StorageClass (none)"),
+    ],
+)  # fmt: skip
+def test_deps_storage_class(deps, scs, default, pvc, status, text):
+    """Before the PVC exists: platform.deps.storage_class, else the cluster
+    default, and a named class is never satisfied by a default one. After:
+    the PVC's own class."""
+    cfg = _deps_cfg(**deps)
+    pvcs = {} if pvc is None else {(cfg.get_namespace(), "lb-deps-data"): pvc}
+    res = _result(
+        pr.run_prereqs(cfg, _reader(scs=scs, default_scs=default, pvcs=pvcs)),
+        "deps-storage-class",
+    )
+    assert res.status is status and text in res.message
+
+
+def _http(status):
+    err = RuntimeError(f"HTTP {status}")
+    err.status = status  # type: ignore[attr-defined]
+    return err
+
+
+@pytest.mark.parametrize(
+    "pvc_status,sc_status,want,text",
+    [
+        # PVC unreadable: the class is still checked.
+        (403, None, PrereqStatus.OK, "default StorageClass px-csi-db"),
+        (403, 403, PrereqStatus.WARN, "cannot read StorageClasses (403)"),
+        (None, 403, PrereqStatus.WARN, "cannot read StorageClasses (403)"),
+        (500, None, PrereqStatus.UNKNOWN, "HTTP 500"),
+        (None, 500, PrereqStatus.UNKNOWN, "HTTP 500"),
+    ],
+)
+def test_deps_storage_class_unreadable(pvc_status, sc_status, want, text):
+    """A refused read is a warning, or falls through to the class check (deploy
+    checks the class itself); any other error is UNKNOWN, as for every check."""
+
+    class Refused(FakeReader):
+        def pvc_storage_class(self, namespace, name):
+            if pvc_status:
+                raise _http(pvc_status)
+            return None
+
+        def default_storage_class_names(self):
+            if sc_status:
+                raise _http(sc_status)
+            return {"px-csi-db"}
+
+    r = Refused()
+    r.deps["app.kubernetes.io/name=spark-operator"] = [_controller()]
+    res = _result(pr.run_prereqs(_cfg(), r), "deps-storage-class")
+    assert res.status is want and text in res.message
+
+
+def test_run_preflight_leaves_deploy_phase_entries_to_deploy(monkeypatch):
+    """A run on a deployed system never fails on what only deploy needs: the
+    entries are not even evaluated."""
+    from unittest.mock import MagicMock
+
+    from lakebench.cli import _prerequisites as cp
+
+    class NoDeployReads(FakeReader):
+        def pvc_storage_class(self, namespace, name):
+            raise AssertionError("the run preflight read the lb-deps PVC")
+
+        def default_storage_class_names(self):
+            raise AssertionError("the run preflight listed default StorageClasses")
+
+    monkeypatch.setattr("lakebench.k8s.get_k8s_client", lambda **k: MagicMock())
+    r = NoDeployReads()
+    r.deps["app.kubernetes.io/name=spark-operator"] = [_controller()]
+    monkeypatch.setattr(pr, "KubeClusterReader", lambda cfg, load_config=True: r)
+    results = {c.name: c for c in cp._registry_checks(_cfg())}
+    assert "deps-storage-class" not in results and "egress-hosts" not in results
+    assert all(c.passed for c in results.values()), results
+    assert {p.id for p in pr.PREREQS if p.phase == "deploy"} == {
+        "deps-storage-class",
+        "egress-hosts",
+    }
+
+
+def test_the_page_marks_deploy_phase_entries():
+    text = pr.render_markdown()
+    for p in pr.PREREQS:
+        line = next(ln for ln in text.splitlines() if ln.startswith(f"Check id `{p.id}`"))
+        assert ("Checked at deploy" in line) is (p.phase == "deploy"), p.id
+
+
+def test_egress_hosts_lists_the_resolve_hosts_and_follows_the_mirror():
+    from lakebench.deps.request import egress_hosts
+
+    public = _result(pr.run_prereqs(_cfg(), _reader()), "egress-hosts")
+    assert public.status is PrereqStatus.INFO and public.message.startswith("not probed")
+    assert "repo1.maven.org" in public.message
+    assert ", ".join(egress_hosts(_cfg())) in public.message
+    mirrored_cfg = _deps_cfg(maven_repository="http://nexus.lab:8081/repository/maven/")
+    mirrored = _result(pr.run_prereqs(mirrored_cfg, _reader()), "egress-hosts")
+    assert "nexus.lab" in mirrored.message and "repo1.maven.org" not in mirrored.message
+
+
+def test_egress_hosts_unlistable_is_info_not_a_failure(monkeypatch):
+    import lakebench.deps.request as req
+
+    def bad(cfg):
+        raise ValueError("not a URL with a host: 'x'")
+
+    monkeypatch.setattr(req, "egress_hosts", bad)
+    res = _result(pr.run_prereqs(_cfg(), _reader()), "egress-hosts")
+    assert res.status is PrereqStatus.INFO and "hosts not listed" in res.message
+
+
+def test_egress_hosts_is_not_a_cluster_read():
+    """The egress entry never touches the reader: reachability is the
+    resolve's to report, and checks create no pod to probe from."""
+
+    class NoReads:
+        def __getattr__(self, name):
+            raise AssertionError(f"egress-hosts read the cluster: {name}")
+
+    check = next(p.check for p in pr.PREREQS if p.id == "egress-hosts")
+    assert check(_cfg(), NoReads()).status is PrereqStatus.INFO
+
+
+def test_kube_reader_default_storage_classes():
+    """Both the GA and the beta default-class annotations count; "false" and
+    no annotation do not."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    def sc(name, ann):
+        return SimpleNamespace(metadata=SimpleNamespace(name=name, annotations=ann))
+
+    items = [
+        sc("ga", {"storageclass.kubernetes.io/is-default-class": "true"}),
+        sc("beta", {"storageclass.beta.kubernetes.io/is-default-class": "true"}),
+        sc("off", {"storageclass.kubernetes.io/is-default-class": "false"}),
+        sc("none", None),
+    ]
+    reader = pr.KubeClusterReader.__new__(pr.KubeClusterReader)
+    client = MagicMock()
+    client.StorageV1Api.return_value.list_storage_class.return_value = SimpleNamespace(items=items)
+    reader._client = client
+    assert reader.default_storage_class_names() == {"ga", "beta"}
+
+
 def test_reader_without_config_is_cluster_unreachable(monkeypatch):
     from kubernetes import config
 
@@ -294,7 +477,11 @@ def test_run_preflight_uses_the_registry(monkeypatch):
     r = _reader(scs=set())
     monkeypatch.setattr(pr, "KubeClusterReader", lambda cfg, load_config=True: r)
     results = {c.name: c for c in cp._registry_checks(_cfg())}
-    applicable = {p.id for p in pr.PREREQS if p.applies(_cfg())} - {"openshift-scc-clusterrole"}
+    # The SCC check is SKIPPED off OpenShift and the deploy-phase entries are
+    # left to deploy; the preflight drops SKIPPED results.
+    applicable = {p.id for p in pr.PREREQS if p.applies(_cfg()) and p.phase == "run"} - {
+        "openshift-scc-clusterrole",
+    }
     assert applicable <= set(results)
     scratch = results["scratch-storage-class"]
     assert scratch.passed is False and "install-scratch-storage-class" in scratch.hint

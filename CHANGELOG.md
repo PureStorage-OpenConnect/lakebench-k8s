@@ -7,6 +7,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **`run` needs a 1.7 deploy.** Spark jobs, Spark Thrift and DuckDB now take
+  every jar and wheel from the deployment's dependency server, so `run`,
+  continuous runs and the `financial` commands check the deployment's set
+  before anything is recorded or submitted. A deployment made by 1.6 exits 4
+  ("this deployment has no dependency server; run `lakebench deploy` once");
+  so does one whose last deploy did not finish its dependency step, whose
+  config changed since deploy (the changed request fields are named, which
+  includes a Lakebench upgrade that changed the resolver), or whose server
+  has no Ready pod. A recorded set that does not check, a replaced server on
+  another set, or a Thrift or DuckDB pod on another set exits 3. New exit
+  paths `run.deps_stale` (4) and `run.deps_mismatch` (3); `run.deps_missing`
+  (4) is live. Redeploy once after upgrading.
+- `spark.conf` may also not set `spark.driver.userClassPathFirst` or
+  `spark.executor.userClassPathFirst`: the jobs take their jars, in a fixed
+  order, from the verified set, and these keys would change which copy of a
+  class wins. Refused at load by the commands that change data (exit 2), as
+  for every key Lakebench owns.
+
+### Added
+- **Each deployment gets a dependency server.** `deploy` runs a new
+  `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
+  and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
+  Spark image. Its init containers resolve the jars (plus the AML reference
+  wheels for the AML workload, and the DuckDB wheel and extensions for
+  DuckDB) once per request; the server re-hashes the set at every start and
+  serves it read-only. Deploy reads the served manifest, recomputes the set
+  hash from its file entries and jar order, checks it (every selected group
+  present, the one table-format runtime the jobs use, no unlisted jar
+  shadowing an image jar), and records it in the `lb-deps-manifest`
+  ConfigMap and the namespace annotation `lakebench.deployment/deps-set`.
+  The step removes the annotation before anything else and writes it last,
+  and removes it again when the step fails, so a failed `deps` step leaves
+  none. A cold resolve adds one to a few
+  minutes to the first deploy; an unchanged redeploy renders the same pod
+  template and does not restart the server. `destroy` removes the server's
+  objects and the annotation, also when `create_namespace: false`.
+- New optional config block `platform.deps`: `maven_repository`,
+  `pypi_index` and `duckdb_extension_repository` point the resolve at
+  mirrors for clusters without public egress, and `storage_class` picks the
+  PVC's StorageClass. Mirror URLs with credentials, a query or another
+  scheme are refused at load.
+- Two new entries on `docs/prerequisites.md`, both checked at deploy and
+  left out of the `run` preflight, so a deployed system never fails a run on
+  them: `deps-storage-class` reports the class of an existing `lb-deps-data`
+  PVC, and before the PVC exists fails when `platform.deps.storage_class`
+  names a missing StorageClass or is empty on a cluster with no default one
+  (the page recommends a replicated class); `egress-hosts` lists the hosts
+  this config's resolve reads (Maven, PyPI, DuckDB extensions, or the
+  configured mirrors) without probing them, and the page describes the
+  mirror keys. Nothing prints these two results yet; the `plan` command will.
+
+### Breaking changes
 - **`run` refuses arguments it used to ignore, before any cluster call.**
   An unknown `--stage` used to be found only after `run` had read the
   cluster's capacity (and, with `--yes`, could auto-deploy first), and
@@ -190,6 +242,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **Nothing resolves from Maven or PyPI at run time.** Spark jobs name the
+  set's jars by URL (`spark.jars`, in the order `--packages` used to load
+  them; `spark.submit.pyFiles` for the Delta jar) and set no
+  `spark.jars.packages`, repositories or Ivy cache; the Spark Operator
+  controller and the drivers resolve nothing. The AML reference job installs
+  its wheels from the set with `--no-index --require-hashes` into the same
+  `/opt/lb-pydeps`. Spark Thrift copies the set from the server and puts it
+  on its driver classpath after the image's jars, in the jobs' jar order
+  (before, the jars were copied into `/opt/spark/jars` in directory order).
+  DuckDB installs its wheel and extensions from the set and runs with
+  extension autoinstall off. Spark Thrift and DuckDB use the Recreate
+  strategy, and deploy waits until their pod runs the deployment's set.
+  Every job, Thrift and DuckDB pod carries `lakebench.io/deps-set`.
+- A run records `provenance.deps` (the set's pinset, request, repositories,
+  files and Python versions) and, at the end, checks the pinset the Spark
+  Thrift or DuckDB pods run (`pods_checked`, `pod_mismatches`; the jobs are
+  all built from the run's one set). A mismatch, or pods that could not be
+  read, fails the run (exit 1, "pods ran different dependency sets").
+  `benchmark` and `query` say before they start, and do not add results to
+  the latest run, when the query engine now runs another set than that run
+  recorded or its set cannot be read.
+- Every Spark driver waits (up to 2 minutes, plus one 5 s probe) in an `lb-deps-ready` init
+  container until the dependency server serves its set, so a server restart
+  delays a job instead of failing it, and a registered look is not lost to
+  one. The Python path of a job changes: with `--packages` every resolved jar
+  was on `sys.path` and the executors' Python path; now only the Delta jar is
+  (through `spark.submit.pyFiles`), the only one that ships Python, so imports
+  are the same and Python workers start with a shorter path.
+- A Spark stage that fails fetching a jar from the dependency server says so
+  (not served, server error, unreachable), and a failed driver init
+  container is named in the stage failure.
+- `destroy` removes the `lakebench.deployment/deps-set` annotation right
+  after its ownership check, before any teardown.
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets
@@ -256,10 +341,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The tables are generated by `scripts/gen_sizing_tables.py` and a drift
   test holds them to the code.
 - **Published minimums moved.** They now include the always-on pods,
-  including the catalog and Postgres memory requests: Customer 360 or AML
-  batch at scale 1 is 40 cores / 542 GB (the Spark peak alone, 36 cores /
-  512 GB, was quoted before), AML continuous at scale 1 is 138 cores /
-  1,021 GB (was 118 / 980). No per-executor sizing changed; the
+  including the catalog and Postgres memory requests and the deployment's
+  dependency server (`lb-deps`, 1 core and 2 GiB): Customer 360 or AML
+  batch at scale 1 is 41 cores / 544 GB (the Spark peak alone, 36 cores /
+  512 GB, was quoted before), AML continuous at scale 1 is 139 cores /
+  1,023 GB (was 118 / 980). No per-executor sizing changed; the
   driver-overhead entry below explains the Spark peak's move to 525 and
   990 GB.
 - **The capacity preflight checks what the run deploys.** It sizes the
@@ -316,6 +402,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   CRD). A check that cannot run (an API error, or no right to list
   cluster-wide) fails the preflight with "could not check";
   `--skip-preflight` bypasses it.
+- The capacity check before `run` and the auto-sizer count the dependency
+  server among the always-on pods, at its pod's reservation of 1 CPU and
+  2 GiB (the resolve init container's request stays reserved for the pod's
+  life). The reported co-resident request therefore rises by 1 core and
+  2 GB. Where the CPU budget is binding, the auto-sized datagen parallelism
+  and Spark executor instances can come out one step (2) lower, which
+  happens at scale 100 and above on clusters of a few hundred cores. The
+  concurrent budget of continuous-mode streams does not count the server
+  yet, so the AML continuous executor split is unchanged.
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.
@@ -466,6 +561,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the "benchmark (not run)" stage entry) and notes it in
   `experiment.benchmark_source`; that moves the record's identity digest,
   since it now describes another benchmark.
+- **`deploy --timeout` now bounds every wait.** It used to be
+  checked only between steps, so a step waiting on Spark Thrift (300 s),
+  DuckDB (900 s), Polaris (600 s plus 600 s) or an operator rollout could
+  run past it. Every wait is now clamped to the time left, including the
+  wait for the cluster lease, and a wait the deadline cuts short fails the
+  step with "deploy timeout (N s) reached after M s while waiting for
+  <component>: <resource> (<last state>)". No shared change (a helm
+  upgrade of the Spark Operator watch list or of the operator itself, a
+  Stackable or observability install) starts after the deadline; one that has started is completed,
+  with its rollout and verify, before the step fails, so the shared
+  operator is never left mid-restart. That completion can take several
+  minutes past the timeout (restart, rollout and verify are bounded by
+  their own timeouts, about 9 minutes in the worst case, while holding the
+  cluster lease). Helm calls already running finish first, and other
+  polling waits can overrun by one poll interval (10 s at most).
+- The deploy failure panel no longer claims that successful steps are
+  skipped on retry: re-running deploy re-applies every step and keeps the
+  existing resources.
 - **Per-deployment secrets.** A new deployment generates its own Hive
   metastore DB password (Secret `lakebench-postgres-secret`), Polaris DB
   password (`lakebench-polaris-db`) and Polaris client secret

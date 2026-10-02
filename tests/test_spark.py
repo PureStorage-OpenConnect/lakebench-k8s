@@ -202,8 +202,8 @@ class TestSparkJobManager:
                     break
         assert found_scratch, "px-csi-scratch storage class not found in manifest"
 
-    def test_manifest_has_iceberg_packages(self):
-        """Spark conf should include Iceberg JARs."""
+    def test_manifest_has_iceberg_jars_from_the_set(self):
+        """spark.jars names the set's Iceberg and Hadoop AWS jars (DEP-2)."""
         config = _make_config()
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
@@ -211,19 +211,14 @@ class TestSparkJobManager:
         manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
         spark_conf = manifest["spec"]["sparkConf"]
 
-        packages = spark_conf["spark.jars.packages"]
-        assert "iceberg-spark-runtime" in packages
-        assert "hadoop-aws" in packages
+        jars = spark_conf["spark.jars"]
+        assert "iceberg-spark-runtime" in jars
+        assert "hadoop-aws" in jars
+        assert "spark.jars.packages" not in spark_conf
 
-    def test_manifest_has_maven_mirror_repositories(self):
-        """Spark conf must set ``spark.jars.repositories`` to a Central
-        mirror so Ivy falls to it when the cluster's egress hits an
-        HTTP 429 rate-limit on repo1.maven.org. Live-verified 2026-09-22
-        on aml-baseline-s1 where a fresh Central 429 blocked
-        bronze-verify; adding this fallback let the same run finish.
-        """
-        from lakebench.spark.job import _MAVEN_MIRROR_REPOS
-
+    def test_manifest_resolves_nothing_at_submit(self):
+        """No Maven repository or Ivy cache in the conf: the controller and
+        the driver resolve nothing; the jars come from lb-deps (DEP-2)."""
         config = _make_config()
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
@@ -231,12 +226,8 @@ class TestSparkJobManager:
         manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
         spark_conf = manifest["spec"]["sparkConf"]
 
-        assert "spark.jars.repositories" in spark_conf, (
-            "spark.jars.repositories missing -- Ivy has no Central mirror "
-            "fallback when repo1.maven.org 429s the cluster's egress IP"
-        )
-        assert spark_conf["spark.jars.repositories"] == _MAVEN_MIRROR_REPOS
-        assert "maven-central.storage-download.googleapis.com" in _MAVEN_MIRROR_REPOS
+        for key in ("spark.jars.repositories", "spark.jars.ivy", "spark.jars.ivySettings"):
+            assert key not in spark_conf
 
     def test_manifest_has_s3_config(self):
         """Spark conf should include S3A endpoint."""
@@ -307,13 +298,18 @@ class TestSparkJobManager:
         driver_vols = [v["name"] for v in driver_tpl["spec"]["volumes"]]
         assert "spark-scripts" in driver_vols
         assert "spark-work-dir" in driver_vols
-        assert "spark-ivy-cache" in driver_vols
+        # The driver downloads the set's jars into /tmp, bounded.
+        assert "lb-deps-dl" in driver_vols
+        assert "spark-ivy-cache" not in driver_vols
 
         executor_tpl = manifest["spec"]["executor"]["template"]
         executor_vols = [v["name"] for v in executor_tpl["spec"]["volumes"]]
         assert "spark-scripts" in executor_vols
         assert "spark-work-dir" in executor_vols
-        assert "spark-ivy-cache" in executor_vols
+        assert "lb-deps-dl" not in executor_vols
+        assert "spark-ivy-cache" not in executor_vols
+        mounts = executor_tpl["spec"]["containers"][0]["volumeMounts"]
+        assert not [m for m in mounts if m["mountPath"] == "/tmp"]
 
     def test_manifest_truststore_when_ca_cert(self):
         """When ca_cert is set, truststore volumes and init container are added."""
@@ -1604,7 +1600,7 @@ class TestPolarisSparkManifest:
         mgr = SparkJobManager(config, k8s)
         manifest = mgr._build_manifest(JobType.SILVER_BUILD)
         spark_conf = manifest["spec"]["sparkConf"]
-        packages = spark_conf["spark.jars.packages"]
+        packages = spark_conf["spark.jars"]
 
         assert "iceberg-spark-runtime-4" in packages
         assert "iceberg-aws-bundle" in packages
@@ -2103,23 +2099,28 @@ class TestReferencePyDeps:
         return SparkJobManager(config, _mock_k8s())
 
     def test_reference_job_installs_pinned_deps_on_driver_only(self):
-        from lakebench.modules.pipeline_engines.spark.job import (
-            REFERENCE_PY_DEPS,
-            REFERENCE_PY_DEPS_DIR,
-        )
+        from lakebench.deps import manifest as dm
+        from lakebench.modules.pipeline_engines.spark.job import REFERENCE_PY_DEPS_DIR
 
-        m = self._mgr()._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
+        mgr = self._mgr()
+        m = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
         drv = m["spec"]["driver"]["template"]["spec"]
         init = {c["name"]: c for c in drv["initContainers"]}
-        assert "install-pydeps" in init
-        cmd = init["install-pydeps"]["command"][-1]
-        for dep in REFERENCE_PY_DEPS:
-            assert "==" in dep and dep in cmd
+        assert "install-pydeps" not in init
+        cmd = init["lb-deps-py-reference"]["command"][-1]
+        # From the deployment's set only, hash-checked against the manifest.
+        for flag in ("--no-index", "--require-hashes", "--only-binary=:all:", "--no-deps"):
+            assert flag in cmd
+        assert f"--find-links {mgr.deps.base_url}/py-reference/" in cmd
+        assert f"-r {dm.MANIFEST_MOUNT}/requirements-py-reference.txt" in cmd
         assert f"--target {REFERENCE_PY_DEPS_DIR}" in cmd
+        assert "pypi.org" not in cmd
         mounts = drv["containers"][0]["volumeMounts"]
         assert any(v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in mounts)
+        vols = {v["name"]: v for v in drv["volumes"]}
+        assert vols["lb-deps-manifest"]["configMap"]["name"] == dm.MANIFEST_CONFIGMAP
         exe = m["spec"]["executor"]["template"]["spec"]
-        assert not any(v["name"] == "lb-pydeps" for v in exe["volumes"])
+        assert not any(v["name"] in ("lb-pydeps", "lb-deps-manifest") for v in exe["volumes"])
         assert not any(
             v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in exe["containers"][0]["volumeMounts"]
         )
@@ -2127,7 +2128,8 @@ class TestReferencePyDeps:
     def test_other_jobs_do_not_install_deps(self):
         m = self._mgr()._build_manifest(JobType.GOLD_FINALIZE)
         drv = m["spec"]["driver"]["template"]["spec"]
-        assert "install-pydeps" not in {c["name"] for c in drv["initContainers"]}
+        names = {c["name"] for c in drv.get("initContainers", [])}
+        assert not names & {"install-pydeps", "lb-deps-py-reference"}
 
 
 class TestSparkDriverPushgatewayEnv:

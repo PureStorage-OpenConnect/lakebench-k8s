@@ -2505,8 +2505,8 @@ class MetricsCollector:
     def __init__(self):
         """Initialize metrics collector."""
         self.current_run: PipelineMetrics | None = None
-        # The run's job manager, read again at run end (provenance.deps may
-        # be recorded after the scripts ConfigMaps are applied).
+        # The run's job manager, read again at run end (the scripts maps are
+        # recorded once applied; provenance.deps only when run recorded none).
         self._job_manager: Any = None
 
     def start_run(
@@ -2562,7 +2562,7 @@ class MetricsCollector:
         if prov is None:
             return
         try:
-            prov.update(_prov.job_manager_fields(job_manager))
+            _prov.merge_job_manager_fields(prov, _prov.job_manager_fields(job_manager))
         except Exception as e:  # noqa: BLE001 -- provenance never fails a run
             logger.warning("Could not record the job manager's provenance: %s", e)
 
@@ -2633,7 +2633,7 @@ class MetricsCollector:
             return
         try:
             if self._job_manager is not None:
-                prov.update(_prov.job_manager_fields(self._job_manager))
+                _prov.merge_job_manager_fields(prov, _prov.job_manager_fields(self._job_manager))
             prov["end_sample"] = _prov.end_sample(prov)
             if not prov.get("images_observed"):
                 prov["images_observed"] = {

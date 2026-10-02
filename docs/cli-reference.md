@@ -231,7 +231,7 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 |---|---|---|---|
 | `--dry-run` | | `false` | Show what would be deployed without making changes |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout) |
+| `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout); bounds the waits inside every step, see [deployment](deployment.md) |
 | `--local` | | `false` | Deploy locally with podman/docker instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--force-legacy` | | `false` | Claim ownership without tag proof: a pre-1.5 annotation-less namespace or untagged bucket, or a bucket on a backend without tagging that does not match the deployment-name prefix. Use only when you have confirmed the resources are yours |
@@ -241,8 +241,10 @@ StorageClass check (it must already exist; `lakebench admin
 install-scratch-storage-class` installs it), PostgreSQL, catalog (Hive or
 Polaris), Spark RBAC, Unity Catalog (only when `catalog.type` is `unity`; no
 recipe uses it), Spark Operator check and watch-list entry for the
-namespace (under the cluster lock), then the query engine (Trino, Spark
-Thrift or DuckDB), and optionally the shared observability stack. The Spark
+namespace (under the cluster lock), the dependency server (`lb-deps`:
+resolves the jars and wheels onto its own PVC and serves them in the
+namespace), then the query engine (Trino, Spark Thrift or DuckDB), and
+optionally the shared observability stack. The Spark
 Operator step always runs: it checks the operator is ready and adds the
 namespace to its watch list. It never installs the shared operator (a cluster
 admin runs `lakebench admin install-spark-operator` once), and a config with

@@ -61,6 +61,8 @@ LAKEBENCH_OWNED_SPARK_KEYS: frozenset[str] = frozenset(
         "spark.files.useFetchCache",
         "spark.driver.extraClassPath",
         "spark.executor.extraClassPath",
+        "spark.driver.userClassPathFirst",
+        "spark.executor.userClassPathFirst",
         "spark.sql.extensions",
         # S3A and filesystem
         "spark.hadoop.fs.s3a.endpoint",
@@ -137,20 +139,43 @@ LAKEBENCH_OWNED_SPARK_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Owned keys no reachable manifest writes: the in-deployment dependency set
-# writes spark.jars (and may write the others), and the Unity catalog path,
-# which no supported combination reaches, writes a token. Owned now, so a
-# user value can never replace the resolved set. The drift test checks
-# written == owned - these.
+# Owned keys no reachable manifest writes. The jobs take their jars from the
+# deployment's dependency set through spark.jars (and spark.submit.pyFiles
+# for Delta); the other jar keys would load jars from elsewhere, resolve
+# again, or change which copy of a class wins, so they stay owned and
+# unwritten. The Unity catalog path, which no supported combination
+# reaches, writes a token. The drift test checks written == owned - these.
 OWNED_AHEAD_OF_WRITER: frozenset[str] = frozenset(
     {
-        "spark.jars",
+        "spark.jars.packages",
+        "spark.jars.repositories",
+        "spark.jars.ivy",
         "spark.jars.ivySettings",
-        "spark.submit.pyFiles",
         "spark.files",
         "spark.driver.extraClassPath",
         "spark.executor.extraClassPath",
+        "spark.driver.userClassPathFirst",
+        "spark.executor.userClassPathFirst",
         "spark.sql.catalog.{catalog}.token",
+    }
+)
+
+# The keys that decide which jars a job loads and in what order. All are
+# owned; _build_manifest refuses them again for a config changed after load.
+DEPENDENCY_SET_SPARK_KEYS: frozenset[str] = frozenset(
+    {
+        "spark.jars",
+        "spark.submit.pyFiles",
+        "spark.jars.packages",
+        "spark.jars.repositories",
+        "spark.jars.ivy",
+        "spark.jars.ivySettings",
+        "spark.driver.extraClassPath",
+        "spark.executor.extraClassPath",
+        "spark.driver.userClassPathFirst",
+        "spark.executor.userClassPathFirst",
+        "spark.kubernetes.driver.podTemplateFile",
+        "spark.kubernetes.executor.podTemplateFile",
     }
 )
 
@@ -242,6 +267,12 @@ def is_owned_spark_key(key: str, catalog: str = "lakehouse") -> bool:
 def owned_key_reason(key: str, catalog: str = "lakehouse") -> str:
     """Why *key* cannot be set in spark.conf, and what to change instead."""
     instead = _INSTEAD.get(key)
+    if (
+        instead is None
+        and key in DEPENDENCY_SET_SPARK_KEYS
+        and not key.startswith("spark.kubernetes.")
+    ):
+        instead = _INSTEAD["spark.jars"]
     written = _expand(catalog) - {k.replace("{catalog}", catalog) for k in OWNED_AHEAD_OF_WRITER}
     if instead is None and (
         key in LAKEBENCH_OWNED_SIZING_KEYS

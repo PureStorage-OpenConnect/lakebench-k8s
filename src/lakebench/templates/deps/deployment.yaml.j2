@@ -1,0 +1,144 @@
+---
+# The dependency server. The init containers resolve
+# the set onto the PVC once per request; the serving container re-hashes
+# every file at start and then serves the set read-only. Every flag that
+# decides what is resolved lives in lb_deps.py, whose sha256 is part of the
+# request: the commands below only name a subcommand, and a test pins them.
+# Nothing here changes per deploy, so an unchanged request does not restart
+# the pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lb-deps
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: deps
+    app.kubernetes.io/managed-by: lakebench
+    app.kubernetes.io/instance: "{{ deployment_name }}"
+    lakebench.io/deployment: "{{ deployment_name }}"
+    lakebench.io/deps-role: server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  # Above the 900 s readiness wait, so a cold resolve never reads as a
+  # stalled rollout.
+  progressDeadlineSeconds: 3600
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lakebench
+      app.kubernetes.io/component: deps
+      lakebench.io/deps-role: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/component: deps
+        app.kubernetes.io/managed-by: lakebench
+        app.kubernetes.io/instance: "{{ deployment_name }}"
+        lakebench.io/deployment: "{{ deployment_name }}"
+        lakebench.io/deps-role: server
+      annotations:
+        lakebench.io/deps-request: "{{ request_sha256 }}"
+    spec:
+      # On OpenShift the anyuid SCC (UID 185) comes only through this
+      # ServiceAccount; the pod needs no API access, so no token is mounted.
+      serviceAccountName: lakebench-spark-runner
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 185
+      initContainers:
+{% for part, image in resolve_parts %}
+        - name: resolve-{{ part }}
+          image: {{ image }}
+          imagePullPolicy: {{ image_pull_policy }}
+          command: ["python3", "{{ tools_mount }}/lb_deps.py", "resolve", "{{ part }}"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: LB_DEPS_REQUEST_SHA256
+              value: "{{ request_sha256 }}"
+          securityContext:
+            runAsUser: 185
+            runAsGroup: 185
+          resources:
+            requests:
+              cpu: "{{ resolve_requests.cpu }}"
+              memory: "{{ resolve_requests.memory }}"
+              # The work emptyDir holds the Ivy cache and the staged set.
+              ephemeral-storage: 4Gi
+            limits:
+              cpu: "{{ resolve_limits.cpu }}"
+              memory: "{{ resolve_limits.memory }}"
+          volumeMounts:
+            - name: tools
+              mountPath: {{ tools_mount }}
+              readOnly: true
+            - name: data
+              mountPath: /deps
+            - name: work
+              mountPath: /work
+{% endfor %}
+      containers:
+        - name: {{ serve_container }}
+          image: {{ spark_image }}
+          imagePullPolicy: {{ image_pull_policy }}
+          command: ["python3", "{{ tools_mount }}/lb_deps.py", "serve", "--port", "{{ port }}"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: LB_DEPS_REQUEST_SHA256
+              value: "{{ request_sha256 }}"
+          ports:
+            - name: http
+              containerPort: {{ port }}
+          securityContext:
+            runAsUser: 185
+            runAsGroup: 185
+          resources:
+            requests:
+              cpu: "{{ serve_requests.cpu }}"
+              memory: "{{ serve_requests.memory }}"
+            limits:
+              cpu: "{{ serve_limits.cpu }}"
+              memory: "{{ serve_limits.memory }}"
+          # The start re-hashes the whole set before it listens (8.4 s for
+          # 2.8 GB in a live run); the startup probe allows 10 minutes for it.
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: {{ port }}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: {{ port }}
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: {{ port }}
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: tools
+              mountPath: {{ tools_mount }}
+              readOnly: true
+            - name: data
+              mountPath: /deps
+              readOnly: true
+      volumes:
+        - name: tools
+          configMap:
+            name: {{ tools_configmap }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ pvc_name }}
+        - name: work
+          emptyDir:
+            sizeLimit: 4Gi

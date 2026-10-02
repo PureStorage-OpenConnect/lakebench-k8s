@@ -18,10 +18,13 @@ from lakebench.cli._helpers import (
     console,
     enforce_bronze_regenerate,
     journal_open,
+    load_deps_handle,
     print_error,
     print_info,
     print_success,
     print_warning,
+    record_deps_pods,
+    record_deps_provenance,
     resolve_config_path,
     write_run_report,
 )
@@ -1963,6 +1966,10 @@ def run(
 
     no_query_engine, skip_benchmark = no_query_engine_skip(cfg, skip_benchmark)
 
+    # Before anything is recorded: the jobs need the deployment's verified
+    # dependency set; a refusal exits 3 or 4 with no run saved.
+    deps_handle = load_deps_handle(cfg, config_file)
+
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
     console.print()
     console.print("[bold dim]Phase 2/7: Infrastructure[/bold dim]")
@@ -1991,6 +1998,7 @@ def run(
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
+    record_deps_provenance(collector.current_run, deps_handle)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
 
@@ -2012,6 +2020,7 @@ def run(
     # block raised (e.g. 3 for the bronze refusal). Any specific code is
     # written here first so the finally can honour it.
     _pipeline_exit_code: int = ExitCode.FAILED
+    _exception_in_flight = False
     _datagen_elapsed = 0.0
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
@@ -2074,6 +2083,7 @@ def run(
         )
 
         job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
+        job_manager.deps = deps_handle
         monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
 
         # Deploy scripts ConfigMap -- must succeed or pipeline jobs will fail
@@ -3275,6 +3285,14 @@ def run(
         console.print()
         print_warning(f"Interrupted by {_interrupted['signal']} during {_stage}")
         _interrupt.stop_owned(_interrupted, console)
+    except BaseException:
+        # Anything else that ends the pipeline (a manifest that cannot be
+        # built, an API error, a SystemExit) records a failed run, never a
+        # pass, and still reaches the CLI's handler with its own code and
+        # message.
+        pipeline_success = False
+        _exception_in_flight = True
+        raise
     finally:
         # A signal from here on does not stop the record being written (a
         # third one still does, cli/_interrupt.py).
@@ -3319,6 +3337,15 @@ def run(
             pipeline_success = False
 
         # Always save metrics, even on failure
+        # Not after an interrupt (the run is no pass anyway, and the pod reads
+        # would hold the record back), nor when a prerequisite stopped it.
+        _pods_skipped = (
+            "interrupted"
+            if _interrupted is not None
+            else ("a prerequisite failed" if _pipeline_exit_code == ExitCode.PREREQUISITE else None)
+        )
+        if record_deps_pods(collector.current_run, cfg, deps_handle, skipped=_pods_skipped):
+            pipeline_success = False
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
             run_metrics.interrupted = _interrupted
@@ -3452,7 +3479,7 @@ def run(
             ),
         )
         _interrupt.restore()
-        if not pipeline_success:
+        if not pipeline_success and not _exception_in_flight:
             # Metrics are saved above for diagnosis; the exit code must still
             # say the run did not succeed. A4 (v1.6): honour a specific code
             # (e.g. 3 for the bronze refusal) that the try block set before

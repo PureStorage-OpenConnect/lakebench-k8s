@@ -51,37 +51,39 @@ def _cap(cores: int, gb: int, node_cores: int = 64, node_gb: int = 512) -> Clust
 # c360 batch s1: silver-build 8 x 4 + 4 = 36 cores, 8 x (48 + 12) + 32 x 1.4 =
 #   524.8 -> 525 GB;
 #   datagen 2 pods x 8 cores, 4 GiB each (2.2 GiB x 1.25 -> the 4 GiB floor);
-#   Trino 1 worker x 2 + coordinator 1 + catalog/Postgres 1 = 4 cores,
-#   8 + 4 + 5 = 17 GB. Floor max(36, one 8-core pod) + 4 = 40 cores,
-#   max(525, 4) + 17 = 542 GB. Scratch 8 x 300 = 2,400.
+#   Trino 1 worker x 2 + coordinator 1 + catalog/Postgres 1 + lb-deps 1 = 5
+#   cores, 8 + 4 + 5 + 2 = 19 GB. Floor max(36, one 8-core pod) + 5 = 41
+#   cores, max(525, 4) + 19 = 544 GB. Scratch 8 x 300 = 2,400.
 # c360 batch s10: Spark as s1 (8 executors at scale <= 10); Trino 2 workers x 4
-#   + coordinator 2 + 1 = 11 cores, 2 x 16 + 8 + 5 = 45 GB. Floor 47 / 570.
+#   + coordinator 2 + 1 + lb-deps 1 = 12 cores, 2 x 16 + 8 + 5 + 2 = 47 GB.
+#   Floor 48 / 572.
 # AML continuous s1: bronze-ingest 5 x 4 + 2 = 22, 5 x 16 + 4 x 1.4 = 85.6 -> 86;
 #   silver-stream 10 x 4 + 4 = 44, 10 x 40 + 8 x 1.4 = 411.2 -> 412; gold-refresh
 #   12 x 4 + 4 = 52, 12 x 40 + 8 x 1.4 = 491.2 -> 492; streams 118 / 990. Always
-#   on: Trino 4 / 17 plus datagen 2 x 8 cores, 7 GiB each (5.36 x 1.25 = 6.7 -> 7)
-#   = 20 / 31. Floor 138 / 1,021.
+#   on: Trino 5 / 19 (with lb-deps) plus datagen 2 x 8 cores, 7 GiB each
+#   (5.36 x 1.25 = 6.7 -> 7) = 21 / 33. Floor 139 / 1,023.
 #   Scratch 5 x 20 + 10 x 100 + 12 x 100 = 2,300.
 # AML batch s100: silver-build 8 + 90 x 12 // 100 = 18 executors, 76 cores,
 #   18 x 60 + 32 x 1.4 = 1,124.8 -> 1,125 GB;
 #   datagen 10 pods (scale // 10) x 8 cores, 8 GiB (6.22 x 1.25 = 7.8 -> 8);
-#   Trino 4 workers x 8 + 4 + 1 = 37 cores, 4 x 48 + 16 + 5 = 213 GB.
-#   Floor max(76, 8) + 37 = 113, max(1,125, 8) + 213 = 1,338; all ten datagen
-#   pods at once: max(76, 80) + 37 = 117 cores, max(1,125, 80) + 213 = 1,338 GB.
+#   Trino 4 workers x 8 + 4 + 1 + lb-deps 1 = 38 cores, 4 x 48 + 16 + 5 + 2 =
+#   215 GB. Floor max(76, 8) + 38 = 114, max(1,125, 8) + 215 = 1,340; all ten
+#   datagen pods at once: max(76, 80) + 38 = 118 cores, max(1,125, 80) + 215 =
+#   1,340 GB.
 #   Scratch: AML bronze-verify
 #   4 + 90 x 8 // 100 = 11 executors x 500 Gi = 5,500.
 # c360 continuous s100: bronze-ingest 5 x 2 + 2 = 12, 5 x 6 + 4 x 1.4 = 35.6 -> 36;
 #   silver-stream 11 x 4 + 4 = 48, 11 x 40 + 8 x 1.4 = 451.2 -> 452; gold-refresh
 #   5 x 4 + 4 = 24, 5 x 40 + 8 x 1.4 = 211.2 -> 212; streams 84 / 700. Always on:
-#   Trino 37 / 213 plus datagen 10 x 8 = 80 cores, 10 x 4 GiB = 40 GB. Floor
-#   201 / 953.
+#   Trino 38 / 215 (with lb-deps) plus datagen 10 x 8 = 80 cores, 10 x 4 GiB =
+#   40 GB. Floor 202 / 955.
 #   Scratch 5 x 20 + 11 x 100 + 5 x 100 = 1,700.
 HAND_DERIVED = {
-    ("customer360", "batch", 1): (40, 542, 2400),
-    ("customer360", "batch", 10): (47, 570, 2400),
-    ("financial", "continuous", 1): (138, 1021, 2300),
-    ("financial", "batch", 100): (113, 1338, 5500),
-    ("customer360", "continuous", 100): (201, 953, 1700),
+    ("customer360", "batch", 1): (41, 544, 2400),
+    ("customer360", "batch", 10): (48, 572, 2400),
+    ("financial", "continuous", 1): (139, 1023, 2300),
+    ("financial", "batch", 100): (114, 1340, 5500),
+    ("customer360", "continuous", 100): (202, 955, 1700),
 }
 
 
@@ -93,7 +95,7 @@ def test_hand_derived_cells(cell):
 
 def test_batch_full_request_counts_every_datagen_pod():
     p = plan_requirements(default_sizing_config("financial", "batch", 100))
-    assert (p.full.cpu_cores, p.full.memory_gb) == (117, 1338)
+    assert (p.full.cpu_cores, p.full.memory_gb) == (118, 1340)
     assert p.datagen is not None and (p.datagen.pods, p.datagen.cpu_cores) == (10, 80)
 
 
@@ -312,7 +314,7 @@ def test_thrift_pod_memory_counts_its_overhead():
         architecture={"query_engine": {"spark_thrift": {"memory": "30g"}}},
     )
     co = co_resident_request(cfg, False)
-    assert co.memory_gb == 30 + 3 + 5  # heap, 10% overhead, Hive + Postgres
+    assert co.memory_gb == 30 + 3 + 5 + 2  # heap, 10% overhead, Hive + Postgres, lb-deps
     pod = plan_requirements(cfg).largest_pod
     assert pod.memory_gb >= 33
     # A heap deploy refuses ("30Gi" is a Kubernetes unit) is sized as
@@ -321,7 +323,7 @@ def test_thrift_pod_memory_counts_its_overhead():
         recipe="hive-iceberg-spark-thrift",
         architecture={"query_engine": {"spark_thrift": {"memory": "30Gi"}}},
     )
-    assert co_resident_request(odd, False).memory_gb == 30 + 5
+    assert co_resident_request(odd, False).memory_gb == 30 + 5 + 2  # lb-deps
 
 
 def test_driver_overrides_are_flagged():
@@ -349,7 +351,7 @@ def test_info_shows_batch_datagen_offline(tmp_path):
         res = CliRunner().invoke(app, ["info", str(path)], env={"COLUMNS": "400"})
     assert res.exit_code == 0, res.output
     out = " ".join(res.output.split())
-    assert "113 cores / 1338 GB memory" in out
+    assert "114 cores / 1340 GB memory" in out
     assert "datagen 10 pods, 80 cores / 80 GB (before cluster scaling" in out
 
 

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
@@ -16,6 +16,11 @@ from lakebench.config import LakebenchConfig
 from lakebench.config.schema import STACKABLE_HIVE_VERSION, QueryEngineType
 from lakebench.exit_codes import REFUSAL_DETAIL
 from lakebench.k8s import K8sClient, K8sResourceError
+
+from . import deadline as deploy_deadline
+
+if TYPE_CHECKING:
+    from lakebench.deps.manifest import DepsHandle
 
 logger = logging.getLogger(__name__)
 
@@ -346,10 +351,11 @@ class DeploymentEngine:
     2. S3 bucket validation/creation
     3. PostgreSQL (StatefulSet + Service)
     4. Catalog Service (Hive Metastore / Polaris / Unity)
-    5. Query Engine (Trino / Spark Thrift Server)
-    6. Spark Operator (if not already installed)
-    7. Spark RBAC (ServiceAccount, Role, RoleBinding)
-    8. Monitoring Stack (if enabled)
+    5. Spark RBAC (ServiceAccount, Role, RoleBinding)
+    6. Spark Operator check and watch-list entry
+    7. Dependency server (lb-deps: resolves and serves the jars and wheels)
+    8. Query Engine (Trino / Spark Thrift Server / DuckDB)
+    9. Monitoring Stack (if enabled)
     """
 
     #: Class default, so an engine built without __init__ (tests) reads False.
@@ -387,6 +393,8 @@ class DeploymentEngine:
         # from "we created it" into "unowned legacy" that then requires
         # the dangerous --force-legacy flag.
         self._namespace_created_this_run: set[str] = set()
+        # The verified, served dependency set; set by the deps step.
+        self.deps: DepsHandle | None = None
 
         if k8s_client:
             self.k8s = k8s_client
@@ -494,53 +502,6 @@ class DeploymentEngine:
         return spark_mem
 
     @staticmethod
-    def _build_spark_thrift_packages(cfg: Any) -> str:
-        """Build ``spark.jars.packages`` CSV for Spark Thrift Server.
-
-        Format-aware: uses Iceberg or Delta packages depending on the
-        configured table format.
-        """
-        from lakebench.modules.pipeline_engines.spark.job import iceberg_runtime_suffix_for
-        from lakebench.spark.job import (
-            _delta_spark_artifact,
-            _parse_spark_major,
-            _parse_spark_major_minor,
-            _spark_compat,
-        )
-
-        table_format = cfg.architecture.table_format.type.value
-        scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
-
-        if table_format == "delta":
-            delta_version = cfg.architecture.table_format.delta.version
-            catalog_type = cfg.architecture.catalog.type.value
-            packages = [
-                _delta_spark_artifact(scala_suffix, delta_version),
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-            if catalog_type == "unity":
-                unity_version = cfg.architecture.catalog.unity.spark_connector_version
-                packages.append(f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}")
-        else:
-            iceberg_version = cfg.architecture.table_format.iceberg.version
-            # The same choice the jobs make (job.py _build_manifest): Iceberg
-            # 1.11+ on Spark 4.1 has a native 4.1 runtime. Reading the
-            # fallback table directly put the 4.0 runtime on Thrift while the
-            # jobs loaded 4.1 (UX D2).
-            key = _parse_spark_major_minor(cfg.images.spark)
-            iceberg_suffix = iceberg_runtime_suffix_for(key, iceberg_version)
-            packages = [
-                f"org.apache.iceberg:iceberg-spark-runtime-{iceberg_suffix}{scala_suffix}:{iceberg_version}",
-                f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-        if _parse_spark_major(cfg.images.spark) < 4:
-            packages.append(
-                f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
-            )
-        return ",".join(packages)
-
-    @staticmethod
     def _read_ca_cert_pem(path: str) -> str:
         """Read PEM certificate file content for embedding in K8s Secret.
 
@@ -566,7 +527,7 @@ class DeploymentEngine:
         # Parse S3 endpoint for Stackable (needs host and port separately)
         from urllib.parse import urlparse
 
-        from lakebench.spark.job import _MAVEN_MIRROR_REPOS, _spark_compat
+        from lakebench.spark.job import _spark_compat
 
         parsed_s3 = urlparse(s3.endpoint)
         s3_host = (
@@ -661,12 +622,6 @@ class DeploymentEngine:
             "spark_thrift_memory_k8s": self._thrift_pod_memory(cfg),
             "spark_thrift_catalog_name": cfg.architecture.query_engine.spark_thrift.catalog_name,
             "query_engine_type": cfg.architecture.query_engine.type.value,
-            # Spark Thrift packages (computed from config versions)
-            "spark_thrift_packages": self._build_spark_thrift_packages(cfg),
-            # Fallback Maven mirror -- Ivy falls to this when Central 429s
-            # on the cluster's egress IP (see _MAVEN_MIRROR_REPOS in
-            # spark/job.py for the rationale).
-            "spark_thrift_repositories": _MAVEN_MIRROR_REPOS,
             "spark_major_minor": self._get_spark_major_minor(cfg),
             "scala_suffix": _spark_compat(cfg.images.spark)[0],
             # DuckDB
@@ -694,7 +649,10 @@ class DeploymentEngine:
             progress_callback: Optional callback for progress updates
                                (component, status, message)
             timeout: Global deployment timeout in seconds (0 = no timeout).
-                     Checked between steps -- does not interrupt a step in progress.
+                     Every wait inside a step is clamped to it; a wait
+                     it cuts short fails the step with a message naming the
+                     component and what it was waiting for. Helm and API
+                     calls are not interrupted.
             force_legacy: Claim ownership of a pre-existing annotation-less
                      namespace and untagged buckets. Use only when
                      migrating a pre-ownership-taxonomy deployment; a
@@ -704,6 +662,7 @@ class DeploymentEngine:
         Returns:
             List of deployment results
         """
+        from .deps import DependencyServerDeployer
         from .duckdb import DuckDBDeployer
         from .hive import HiveDeployer
         from .observability import ObservabilityDeployer
@@ -723,6 +682,7 @@ class DeploymentEngine:
         spark_thrift = SparkThriftDeployer(self)
         duckdb = DuckDBDeployer(self)
         rbac = RBACDeployer(self)
+        deps = DependencyServerDeployer(self)
         observability = ObservabilityDeployer(self)
 
         # Both HiveDeployer and PolarisDeployer have self-skip guards.
@@ -752,23 +712,36 @@ class DeploymentEngine:
                 "Checking Spark Operator and watch list",
                 self._deploy_spark_operator,
             ),
+            # Ready before Thrift and DuckDB render and before any run.
+            ("deps", "Starting dependency server", deps.deploy),
             ("trino", "Deploying Trino", trino.deploy),
             ("spark-thrift", "Deploying Spark Thrift Server", spark_thrift.deploy),
             ("duckdb", "Deploying DuckDB", duckdb.deploy),
             ("observability", "Deploying Observability Stack", observability.deploy),
         ]
 
+        # The deadline bounds every wait inside every step, not only
+        # the gaps between steps.
+        with deploy_deadline.deploy_deadline(timeout):
+            return self._run_steps(steps, progress_callback)
+
+    def _run_steps(
+        self,
+        steps: list[tuple[str, str, Callable[[], DeploymentResult]]],
+        progress_callback: Callable[[str, DeploymentStatus, str], None] | None,
+    ) -> list[DeploymentResult]:
         import time
 
-        deadline = time.monotonic() + timeout if timeout > 0 else float("inf")
-
         for component, description, deploy_fn in steps:
-            # Global timeout check (between steps, never interrupts mid-step)
-            if time.monotonic() > deadline:
+            # Between steps: a deadline that passed during the last step's
+            # non-wait work stops here.
+            try:
+                deploy_deadline.check(description, component_name=component)
+            except deploy_deadline.DeployTimeout as e:
                 result = DeploymentResult(
                     component=component,
                     status=DeploymentStatus.FAILED,
-                    message=f"Global deployment timeout ({timeout}s) exceeded",
+                    message=str(e),
                 )
                 self.results.append(result)
                 if progress_callback:
@@ -781,10 +754,22 @@ class DeploymentEngine:
             result = None  # type: ignore[assignment]
             for attempt in range(2):  # 0 = first try, 1 = retry
                 try:
-                    result = deploy_fn()
+                    with deploy_deadline.component(component):
+                        result = deploy_fn()
+                    break
+                except deploy_deadline.DeployTimeout as e:
+                    result = DeploymentResult(
+                        component=component,
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
                     break
                 except Exception as e:
-                    if attempt == 0 and self._is_transient_error(e):
+                    if (
+                        attempt == 0
+                        and self._is_transient_error(e)
+                        and not deploy_deadline.expired()
+                    ):
                         logger.warning(
                             "Deployment step '%s' hit transient error, retrying in 5s: %s",
                             component,
@@ -953,9 +938,11 @@ class DeploymentEngine:
                 # server, so wait a bounded time and then say what is wrong.
                 try:
                     self.k8s.wait_for_namespace_deleted(
-                        namespace, timeout=_TERMINATING_NAMESPACE_WAIT_SECONDS
+                        namespace,
+                        timeout=deploy_deadline.clamp(_TERMINATING_NAMESPACE_WAIT_SECONDS),
                     )
                 except K8sResourceError:
+                    deploy_deadline.check(f"namespace {namespace} to finish terminating")
                     blockers: list[str] = []
                     try:
                         _, blockers = self.k8s.get_namespace_termination_status(namespace)

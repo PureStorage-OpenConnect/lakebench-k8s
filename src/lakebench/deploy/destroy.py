@@ -1341,6 +1341,41 @@ def _category1_delete(entry: Any, client: Any, namespace: str, name: str) -> Non
             raise
 
 
+def _remove_deps_set_annotation(namespace: str) -> None:
+    """Drop ``lakebench.deployment/deps-set`` from the namespace, under the
+    resourceVersion just read. Best effort: the category1 step removes it
+    again when the namespace survives."""
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.deps.manifest import ANNOTATION_DEPS_SET
+
+    try:
+        core_v1 = _category1_api("core_v1")
+        for attempt in range(3):
+            ns_obj = core_v1.read_namespace(namespace)
+            if ANNOTATION_DEPS_SET not in (ns_obj.metadata.annotations or {}):
+                return
+            try:
+                core_v1.patch_namespace(
+                    namespace,
+                    {
+                        "metadata": {
+                            "annotations": {ANNOTATION_DEPS_SET: None},
+                            "resourceVersion": ns_obj.metadata.resource_version,
+                        }
+                    },
+                )
+                return
+            except ApiException as e:
+                if e.status != 409 or attempt == 2:
+                    raise  # 409: the namespace changed between read and patch; re-read
+    except ApiException as e:
+        if e.status != 404:
+            logger.warning("could not remove %s first: %s", ANNOTATION_DEPS_SET, e.reason)
+    except Exception as e:  # noqa: BLE001 -- the category1 step retries it
+        logger.warning("could not remove %s first: %s", ANNOTATION_DEPS_SET, e)
+
+
 def _category1_step(
     namespace: str,
     deployment: str,
@@ -1680,6 +1715,10 @@ def destroy_all(
         # shared-name check that could not run, must leave a visible record.
         logger.warning(decision.hint)
         report("ownership-check", DeploymentStatus.SUCCESS, decision.hint)
+    if ownership_proven and namespace_present:
+        # Before anything is torn down (also when the data steps are refused):
+        # a `run` that starts during destroy must not see a verified set.
+        _remove_deps_set_annotation(namespace)
 
     # Set when the bucket step failed for a reason a retry can fix (S3
     # unreachable, an error while emptying). The namespace is then kept as

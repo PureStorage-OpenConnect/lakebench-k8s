@@ -220,8 +220,26 @@ watch list and the installed chart version, and rolls the controller once.
 upgrade (`--controller-tmp-size` to choose another). The size is stored in the
 release's values, so later watch-list edits carry it forward.
 
-Baking the jars into the Spark image, so `spark.jars.packages` is empty at
-submit, removes the controller download entirely and is the durable fix.
+Since 1.7 the jobs name their jars as URLs on the deployment's dependency
+server (`spark.jars`) and set no `spark.jars.packages`, so the controller
+downloads nothing for a 1.7 deployment; the larger `/tmp` still protects the
+controller from applications other deployments submit with packages.
+
+---
+
+## A stage fails with "dependency server does not serve this set"
+
+**Symptom:** a Spark stage fails and the message names an
+`http://lb-deps.<namespace>...` URL that was not found, or says the
+dependency server is unreachable.
+
+**Cause:** the deployment's dependency set changed after the run started (a
+redeploy with another image, format version or mirror), or the `lb-deps` pod
+was restarting when the driver started.
+
+**Fix:** let `lakebench deploy <config>` finish, then run again. `run`
+checks the set before it starts and refuses (exit 3 or 4) when it is not
+verified.
 
 ---
 

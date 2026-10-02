@@ -403,6 +403,28 @@ def _c360_gate(metrics: PipelineMetrics) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
+    """A FAIL reason when a pod of the run ran another dependency set than
+    the run recorded (``provenance.deps.pod_mismatches``)."""
+    deps = (getattr(metrics, "provenance", None) or {}).get("deps")
+    if not isinstance(deps, dict):
+        return None
+    if deps.get("job_manager_pinset"):
+        return (
+            f"the jobs were built on dependency set {str(deps['job_manager_pinset'])[:12]}, "
+            f"not the recorded {str(deps.get('pinset_sha256'))[:12]}"
+        )
+    if "pods_checked" in deps and deps["pods_checked"] is None and deps.get("pods_check_error"):
+        return (
+            f"query engine pods not checked for their dependency set ({deps['pods_check_error']})"
+        )
+    mismatches = deps.get("pod_mismatches")
+    if not mismatches:
+        return None
+    pods = ", ".join(f"{p.get('pod')} on {str(p.get('pinset'))[:12]}" for p in mismatches[:5])
+    return f"pods ran different dependency sets ({pods})"
+
+
 def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     """Compute a ``Verdict`` for a completed ``PipelineMetrics`` run.
 
@@ -434,6 +456,9 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     c360_outcome, c360_reason = _c360_gate(metrics)
     if c360_outcome is not None:
         gate_outcomes["c360"] = c360_outcome
+    deps_reason = _deps_pods_reason(metrics)
+    if deps_reason is not None:
+        gate_outcomes["deps"] = "FAIL"
 
     reasons: list[str] = []
     interrupted = _interrupt_record(metrics)
@@ -460,6 +485,8 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
                 reasons.append(r)
     if c360_reason and c360_reason not in reasons:
         reasons.append(c360_reason)
+    if deps_reason is not None:
+        reasons.append(deps_reason)
     for name, outcome in gate_outcomes.items():
         if outcome == "FAIL":
             marker = f"Gate '{name}' FAILED"

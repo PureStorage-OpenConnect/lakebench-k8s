@@ -9,9 +9,8 @@ without a regenerate. ``plan`` runs the same checks through
 :func:`run_prereqs`.
 
 Checks never write. They read through a :class:`ClusterReader`, which tests
-replace with a fake. A WI that adds a prerequisite (for example the
-dependency-server StorageClass and egress hosts) adds its entry here in the
-same change.
+replace with a fake. A change that adds a prerequisite adds its entry here in
+the same change.
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ class PrereqStatus(Enum):
     FAIL = "fail"  # checked and missing or broken: the fix applies
     UNKNOWN = "unknown"  # the check itself could not run (API error, no rights)
     SKIPPED = "skipped"  # not needed for this config, or not this platform
+    INFO = "info"  # needed, listed for the reader, not probed
 
 
 class ClusterUnreachable(Exception):
@@ -61,6 +61,13 @@ class ClusterReader(Protocol):
 
     def storage_class_names(self) -> set[str]: ...
 
+    def default_storage_class_names(self) -> set[str]: ...
+
+    def pvc_storage_class(self, namespace: str, name: str) -> str | None:
+        """The StorageClass of an existing PVC ("" for none), or None when
+        there is no such PVC."""
+        ...
+
     def deployments(
         self, label_selector: str, namespace: str | None = None
     ) -> list[DeploymentView]: ...
@@ -89,6 +96,9 @@ class Prereq:
     fix: str
     doc: str
     component: str | None = None
+    # "deploy": only deploy depends on it, so the run preflight leaves it to
+    # deploy's own step (a run on a deployed system must not fail on it).
+    phase: str = "run"
 
 
 @dataclass(frozen=True)
@@ -122,6 +132,72 @@ def _check_scratch(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
     if name in r.storage_class_names():
         return _ok(f"StorageClass {name} exists")
     return _fail(f"StorageClass {name} not found")
+
+
+# -- dependency server --------------------------------------------------------
+
+_DEFAULT_SC_ANNOTATIONS = (
+    "storageclass.kubernetes.io/is-default-class",
+    "storageclass.beta.kubernetes.io/is-default-class",
+)
+
+
+def _refused(e: Exception) -> bool:
+    return getattr(e, "status", None) == 403
+
+
+def _check_deps_storage_class(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
+    from lakebench.deps.manifest import PVC_NAME
+
+    name = cfg.platform.deps.storage_class
+    try:
+        # The class is read only when the PVC is created: an existing PVC
+        # keeps the set where it is, whatever the cluster's classes are now.
+        have = r.pvc_storage_class(cfg.get_namespace(), PVC_NAME)
+    except Exception as e:  # noqa: BLE001 -- only a refused read is softened
+        if not _refused(e):
+            raise
+        have = None  # unreadable: check the class as if the PVC were new
+    if have is not None:
+        if name and name != have:
+            return _warn(
+                f"PVC {PVC_NAME} exists on StorageClass {have or '(none)'}, not "
+                f"{name}; the set stays there until the PVC is deleted"
+            )
+        return _ok(f"PVC {PVC_NAME} exists on StorageClass {have or '(none)'}")
+    try:
+        if name:
+            if name in r.storage_class_names():
+                return _ok(f"StorageClass {name} exists (platform.deps.storage_class)")
+            return _fail(f"StorageClass {name} not found (platform.deps.storage_class)")
+        defaults = sorted(r.default_storage_class_names())
+    except Exception as e:  # noqa: BLE001 -- only a refused read is softened
+        if not _refused(e):
+            raise
+        return _warn("cannot read StorageClasses (403); deploy checks the class")
+    if not defaults:
+        return _fail(
+            "platform.deps.storage_class is empty and the cluster has no default StorageClass"
+        )
+    if len(defaults) > 1:
+        return _warn(
+            f"several default StorageClasses ({', '.join(defaults)}): Kubernetes 1.26 and "
+            "later give the PVC the newest, older releases refuse it; set "
+            "platform.deps.storage_class"
+        )
+    return _ok(f"cluster default StorageClass {defaults[0]}")
+
+
+def _check_egress_hosts(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
+    # Reachability from the cluster can only be seen from a pod there, and
+    # checks never create one. The resolve itself reports an unreachable host.
+    from lakebench.deps.request import egress_hosts
+
+    try:
+        hosts = ", ".join(egress_hosts(cfg))
+    except ValueError as e:
+        return PrereqResult(PrereqStatus.INFO, f"not probed; hosts not listed: {e}")
+    return PrereqResult(PrereqStatus.INFO, f"not probed; the lb-deps resolve reads {hosts}")
 
 
 # -- Spark Operator ------------------------------------------------------------
@@ -396,6 +472,69 @@ PREREQS: tuple[Prereq, ...] = (
         ),
     ),
     Prereq(
+        id="deps-storage-class",
+        title="Dependency server StorageClass",
+        when="Always",
+        phase="deploy",
+        applies=lambda cfg: True,
+        check=_check_deps_storage_class,
+        fix=(
+            "Set `platform.deps.storage_class` to an existing StorageClass, or have a cluster "
+            "admin mark one as the cluster default. Prefer a replicated one."
+        ),
+        doc=(
+            "Each deployment runs its own dependency server, `lb-deps`, which keeps the "
+            "resolved jars, wheels and DuckDB extensions on a 5Gi ReadWriteOnce PVC, "
+            "`lb-deps-data`, from `platform.deps.storage_class` or, when that is empty, the "
+            "cluster default StorageClass. The volume must be writable by UID 185 through "
+            "`fsGroup`. A replicated StorageClass is recommended: if the volume is lost with "
+            "its node, the server pod stays Pending, every `run` stops until the PVC is "
+            "deleted and `deploy` is re-run, and that `deploy` resolves the set again from "
+            "the public repositories or the configured mirrors. The class is read only when "
+            "the PVC is created; to move an existing set, delete the PVC and re-run `deploy`. "
+            "When the PVC exists the check reports its class and nothing else."
+        ),
+    ),
+    Prereq(
+        id="egress-hosts",
+        title="Egress for the dependency resolve",
+        when="Always",
+        phase="deploy",
+        applies=lambda cfg: True,
+        check=_check_egress_hosts,
+        fix=(
+            "Allow egress from the deployment's namespace to the listed hosts during "
+            "`deploy`, or point `platform.deps.maven_repository`, `platform.deps.pypi_index` "
+            "and `platform.deps.duckdb_extension_repository` at mirrors the cluster can reach."
+        ),
+        doc=(
+            "`deploy` resolves every jar, wheel and DuckDB extension the deployment uses once, "
+            "in the `lb-deps` pod, from Maven Central and its Google mirror, from PyPI "
+            "(pypi.org and files.pythonhosted.org) for the AML reference and DuckDB wheels, "
+            "and from extensions.duckdb.org for DuckDB. After that no pod fetches a dependency "
+            "from outside the deployment: Spark jobs, Spark Thrift and DuckDB read the set "
+            "from `lb-deps`. The resolve runs again when the request changes (a new image, "
+            "version or mirror) and when the set must be rebuilt (a new or lost PVC, a "
+            "damaged set), so egress is needed at those deploys only. The check lists the "
+            "hosts this config's resolve reads and does not probe them. A host the resolve "
+            "cannot connect to fails the `deps` step of `deploy`, naming the repository and "
+            "the mirror keys; a proxy that answers with an error fails it naming the "
+            "artifact and the repository.\n\n"
+            "On a cluster without that egress, set the mirror keys under `platform.deps`. "
+            "`maven_repository` becomes the only Maven repository; `pypi_index` replaces "
+            "pypi.org as a PyPI simple index; `duckdb_extension_repository` replaces "
+            "extensions.duckdb.org. Mirrors are read anonymously, over plain HTTP or over "
+            "HTTPS with a publicly trusted certificate; mirror credentials and a private CA "
+            "are not supported. Changing a mirror re-resolves at the next `deploy`. A mirror "
+            "that serves the same bytes gives the same set hash, so runs before and after "
+            "stay like-for-like; one that serves other bytes gives a different set, and "
+            "those runs are not like-for-like.\n\n"
+            "Image pulls are separate: the nodes pull the images named under `images` (and "
+            "the Stackable Hive image for a Hive catalog) from their registries at every "
+            "pod start."
+        ),
+    ),
+    Prereq(
         id="s3-reachable-and-credentials",
         title="S3 endpoint and credentials",
         when="Always",
@@ -414,9 +553,12 @@ PREREQS: tuple[Prereq, ...] = (
 )
 
 
-def run_prereqs(cfg: LakebenchConfig, reader: ClusterReader | None = None) -> list[PrereqOutcome]:
+def run_prereqs(
+    cfg: LakebenchConfig, reader: ClusterReader | None = None, *, for_run: bool = False
+) -> list[PrereqOutcome]:
     """Run every applicable check, read-only. A check that raises is UNKNOWN
-    ("could not check: ..."); one that does not apply is SKIPPED. Raises
+    ("could not check: ..."); one that does not apply is SKIPPED, and so is a
+    deploy-phase entry when ``for_run`` (the run preflight). Raises
     :class:`ClusterUnreachable` when no reader is given and none can be built."""
     if reader is None:
         reader = KubeClusterReader(cfg)
@@ -424,6 +566,8 @@ def run_prereqs(cfg: LakebenchConfig, reader: ClusterReader | None = None) -> li
     for p in PREREQS:
         if not p.applies(cfg):
             res = PrereqResult(PrereqStatus.SKIPPED, "not needed for this config")
+        elif for_run and p.phase == "deploy":
+            res = PrereqResult(PrereqStatus.SKIPPED, "checked by deploy")
         else:
             try:
                 res = p.check(cfg, reader)
@@ -474,6 +618,29 @@ class KubeClusterReader:
         return {
             sc.metadata.name for sc in api.list_storage_class(_request_timeout=self.TIMEOUT_S).items
         }
+
+    def default_storage_class_names(self) -> set[str]:
+        api = self._client.StorageV1Api()
+        return {
+            sc.metadata.name
+            for sc in api.list_storage_class(_request_timeout=self.TIMEOUT_S).items
+            if any(
+                (sc.metadata.annotations or {}).get(a) == "true" for a in _DEFAULT_SC_ANNOTATIONS
+            )
+        }
+
+    def pvc_storage_class(self, namespace: str, name: str) -> str | None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            pvc = self._client.CoreV1Api().read_namespaced_persistent_volume_claim(
+                name, namespace, _request_timeout=self.TIMEOUT_S
+            )
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+        return str(pvc.spec.storage_class_name or "")
 
     def deployments(
         self, label_selector: str, namespace: str | None = None
@@ -552,8 +719,8 @@ DOC_HEADER = """\
 
 What a cluster needs before `lakebench deploy` can succeed. Each entry is a
 read-only check in `src/lakebench/deploy/prereqs.py`, and the preflight of
-`lakebench run` runs these same checks, so this page and the checks cannot
-disagree. Besides these, `kubectl` and `helm` must be on `PATH`. `oc` is not
+`lakebench run` runs these same checks, except the ones marked as checked at
+deploy, so this page and the checks cannot disagree. Besides these, `kubectl` and `helm` must be on `PATH`. `oc` is not
 needed: Lakebench makes its OpenShift SCC grants through the Kubernetes API.
 """
 
@@ -567,7 +734,8 @@ def render_markdown() -> str:
     lines.append("")
     for p in PREREQS:
         lines.append(f'<a id="{p.id}"></a>\n\n## {p.title}\n')
-        lines.append(f"Check id `{p.id}`. Needed when: {p.when}.\n")
+        at = " Checked at deploy, not by the `run` preflight." if p.phase == "deploy" else ""
+        lines.append(f"Check id `{p.id}`. Needed when: {p.when}.{at}\n")
         lines.append(f"{p.doc}\n")
         lines.append(f"**Fix:** {p.fix}\n")
     return "\n".join(lines).rstrip() + "\n"

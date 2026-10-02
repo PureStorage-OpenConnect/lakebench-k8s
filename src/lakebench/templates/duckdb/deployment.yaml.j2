@@ -13,6 +13,9 @@ metadata:
     app.kubernetes.io/managed-by: lakebench
 spec:
   replicas: 1
+  # One pod at a time, so no query runs on a pod with the old set.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: lakebench
@@ -22,21 +25,58 @@ spec:
       labels:
         app.kubernetes.io/name: lakebench
         app.kubernetes.io/component: duckdb
+      annotations:
+        lakebench.io/deps-set: "{{ deps_pinset }}"
     spec:
-      containers:
-        - name: duckdb
+      # The DuckDB wheel and its extensions come from the deployment's
+      # dependency set, each file checked against the lb-deps-manifest
+      # ConfigMap; nothing is installed from PyPI or extensions.duckdb.org.
+      initContainers:
+        - name: lb-deps-fetch
           image: {{ duckdb_image }}
           imagePullPolicy: {{ image_pull_policy }}
           command:
             - "sh"
             - "-c"
             - |
-              pip install --no-cache-dir --quiet duckdb=={{ duckdb_version | default('1.5.5') }} &&
-              python -c "import duckdb; c=duckdb.connect(); c.execute('INSTALL iceberg'); c.execute('INSTALL httpfs'); print('DuckDB extensions installed')" &&
-              sleep infinity
+              set -e
+              python3 {{ deps_tools_mount }}/lb_deps.py fetch --group duckdb-ext --dest /tmp/.duckdb/extensions --manifest {{ deps_manifest_mount }}/manifest.json --url {{ deps_base_url }}
+              python3 -m pip install --no-index --no-deps --no-cache-dir --only-binary=:all: --trusted-host {{ deps_host }} --find-links {{ deps_base_url }}/duckdb/wheels/ --require-hashes -r {{ deps_manifest_mount }}/requirements-duckdb.txt --target /opt/lb-deps/py
           env:
             - name: HOME
               value: /tmp
+          volumeMounts:
+            - name: lb-deps-py
+              mountPath: /opt/lb-deps/py
+            - name: duckdb-ext
+              mountPath: /tmp/.duckdb/extensions
+            - name: lb-deps-tools
+              mountPath: {{ deps_tools_mount }}
+              readOnly: true
+            - name: lb-deps-manifest
+              mountPath: {{ deps_manifest_mount }}
+              readOnly: true
+      volumes:
+        - name: lb-deps-py
+          emptyDir: {}
+        - name: duckdb-ext
+          emptyDir: {}
+        - name: lb-deps-tools
+          configMap:
+            name: {{ deps_tools_configmap }}
+        - name: lb-deps-manifest
+          configMap:
+            name: {{ deps_manifest_configmap }}
+      containers:
+        - name: duckdb
+          image: {{ duckdb_image }}
+          imagePullPolicy: {{ image_pull_policy }}
+          command: ["sleep", "infinity"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: PYTHONPATH
+              value: /opt/lb-deps/py
             - name: AWS_REGION
               value: "{{ s3_region }}"
             - name: AWS_DEFAULT_REGION
@@ -62,9 +102,15 @@ spec:
             limits:
               cpu: "{{ duckdb_cores }}"
               memory: "{{ duckdb_memory_k8s }}"
+          volumeMounts:
+            - name: lb-deps-py
+              mountPath: /opt/lb-deps/py
+              readOnly: true
+            - name: duckdb-ext
+              mountPath: /tmp/.duckdb/extensions
           startupProbe:
             exec:
-              command: ["python", "-c", "import duckdb; c=duckdb.connect(); c.load_extension('iceberg'); c.load_extension('httpfs'); print('ok')"]
+              command: ["python", "-c", "import duckdb; c=duckdb.connect(); c.execute('SET autoinstall_known_extensions=false'); c.load_extension('iceberg'); c.load_extension('httpfs'); print('ok')"]
             initialDelaySeconds: 10
             periodSeconds: 10
             # The command starts python, imports duckdb and loads two

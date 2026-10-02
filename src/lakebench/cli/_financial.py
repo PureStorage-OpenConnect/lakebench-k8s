@@ -76,9 +76,13 @@ def _get_job_manager(cfg):
         context=cfg.platform.kubernetes.context,
         namespace=cfg.get_namespace(),
     )
+    from lakebench.cli._helpers import load_deps_handle
     from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
 
+    # Before the scripts or any job: the deployment's verified set.
+    deps_handle = load_deps_handle(cfg)
     job_manager = get_engine(cfg, k8s)
+    job_manager.deps = deps_handle  # type: ignore[attr-defined]
     try:
         scripts_ok = job_manager.deploy_scripts_configmap()
     except ScriptsMapError as e:
@@ -269,14 +273,24 @@ def reference_score(
     whose precision/recall diverges sharply from the reference is scoring
     against label knowledge it should not have. The job installs scikit-learn
     and its pinned dependencies for the GBT half in an init container on each
-    run; if that is unavailable the leakage gate still runs and the model
-    verdict is reported as no_sklearn.
+    run, from the deployment's dependency set (each wheel hash-checked); if
+    that install fails after its retries, the driver does not start and the
+    job fails. The dependency set's pinset is printed with the submission.
     """
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
     cfg = _load_config(config)
     console.print("[bold]lakebench financial reference-score[/bold]")
     job_manager = _get_job_manager(cfg)
+    deps = job_manager.deps
+    console.print(
+        f"  dependency set {esc(deps.pinset_sha256)} (request {esc(deps.request_sha256)}); "
+        "reference wheels: "
+        + ", ".join(
+            f"{esc(e['file'])}@{esc(e['sha256'][:12])}"
+            for e in deps.manifest["groups"].get("py-reference", [])
+        )
+    )
     status = job_manager.submit_job(
         JobType.SCORE_FINANCIAL_REFERENCE,
         arguments=[
