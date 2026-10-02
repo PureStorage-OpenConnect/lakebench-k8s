@@ -154,7 +154,7 @@ def test_run_refuses_a_mode_the_workload_does_not_declare(tmp_path, monkeypatch)
         "lakebench.cli._sustained._run_sustained", lambda *a, **k: reached.append(2)
     )
     res = CliRunner().invoke(app, ["run", str(cfg), "--continuous", "--skip-deploy"])
-    assert res.exit_code == 1, res.output
+    assert res.exit_code == 2, res.output  # unsupported combination: usage
     assert "Unsupported combination, refused" in res.output
     assert not reached
 
@@ -241,7 +241,7 @@ def test_run_local_refuses_the_continuous_flag(tmp_path, monkeypatch):
     reached = []
     monkeypatch.setattr("lakebench.cli._run._run_local_mode", lambda *a, **k: reached.append(1))
     res = CliRunner().invoke(app, ["run", str(cfg), "--local", "--continuous"])
-    assert res.exit_code == 1, res.output
+    assert res.exit_code == 2, res.output  # unsupported combination: usage
     assert "batch mode only" in res.output and not reached
 
 

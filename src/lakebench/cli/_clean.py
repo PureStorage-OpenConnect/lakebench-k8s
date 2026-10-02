@@ -11,10 +11,10 @@ from rich.panel import Panel
 from lakebench._constants import DEFAULT_OUTPUT_DIR
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
-    EXIT_DECLINED,
     _journal_safe,
     console,
     deprecated_short_f_force,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -29,6 +29,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import DEFAULT_JOURNAL_DIR, CommandName, EventType, Journal
 from lakebench.k8s.target import ContextConflictError
 
@@ -118,7 +119,7 @@ def clean(
     target = target.lower().strip()
     if target not in CLEAN_TARGETS:
         print_error(f"Invalid target: '{target}'. Must be one of: {', '.join(CLEAN_TARGETS)}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     config_file = resolve_config_path(config_file, file_option)
 
@@ -129,16 +130,16 @@ def clean(
         )  # LB-153: cleanup path
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1)  # noqa: B904
+            console.print(f"  [red]*[/red] {esc(loc)}: {esc(err['msg'])}")
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     s3_cfg = cfg.platform.storage.s3
 
@@ -179,9 +180,9 @@ def clean(
         confirm = typer.confirm("Are you sure you want to proceed?")
         if not confirm:
             print_info("Clean cancelled")
-            raise typer.Exit(EXIT_DECLINED)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
-    console.print(Panel(f"Cleaning: [bold]{target}[/bold]", expand=False))
+    console.print(Panel(f"Cleaning: [bold]{esc(target)}[/bold]", expand=False))
 
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
@@ -189,6 +190,9 @@ def clean(
 
     total_deleted = 0
     errors = []
+    # How many of ``errors`` are ownership refusals: when all are, clean
+    # exits 3 (refused), not 1, as the exit-code table says.
+    refusals = 0
 
     # Check for writers still active before cleaning S3 buckets. The prompt
     # sits outside the try: typer.confirm(abort=True) raises click.Abort,
@@ -235,7 +239,7 @@ def clean(
                 )
                 if v.verdict is IdentityVerdict.MISMATCH:
                     print_error(f"Refusing to clean: {v.hint}")
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.REFUSED)
                 ns_verified = v.verdict is IdentityVerdict.MATCH or (
                     v.verdict is IdentityVerdict.ABSENT and force_legacy
                 )
@@ -256,6 +260,10 @@ def clean(
         if not decision.allowed:
             print_error(decision.hint)
             errors.append(decision.hint)
+            # Could not check (cluster unreachable, namespace list unreadable)
+            # is not a refusal.
+            if core_v1 is not None and not decision.unverifiable:
+                refusals += 1
             bucket_targets = {}
         elif decision.hint:
             print_warning(decision.hint)
@@ -319,10 +327,10 @@ def clean(
             # verify_bucket_ownership call raises AttributeError.
             if s3._init_error:
                 print_error(f"S3 client init failed: {s3._init_error}")
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.PREREQUISITE)
 
             def _clean_progress(bkt: str, count: int) -> None:
-                console.print(f"  Deleting from s3://{bkt}/... ({count:,} objects so far)")
+                console.print(f"  Deleting from s3://{esc(bkt)}/... ({count:,} objects so far)")
 
             # F-1: ownership check per bucket before touching contents.
             # Foreign-tagged buckets always refuse; legacy (untagged)
@@ -362,6 +370,7 @@ def clean(
                     v = verify_bucket_ownership(s3.raw_client, bucket, cfg.name)
                     if v.verdict is IdentityVerdict.MISMATCH:
                         errors.append(f"{layer}: {v.hint}")
+                        refusals += 1
                         print_error(
                             f"Refusing to clean {layer}: bucket "
                             f"{bucket!r} is owned by another lakebench "
@@ -370,6 +379,7 @@ def clean(
                         continue
                     if v.verdict is IdentityVerdict.ABSENT and not force_legacy:
                         errors.append(f"{layer}: legacy untagged bucket, --force-legacy required")
+                        refusals += 1
                         print_error(
                             f"Refusing to clean {layer}: bucket "
                             f"{bucket!r} has no lakebench ownership tag. "
@@ -409,6 +419,7 @@ def clean(
                                 recorded = False
                             if not recorded:
                                 errors.append(f"{layer}: not recorded as created or adopted empty")
+                                refusals += 1
                                 print_error(
                                     f"Refusing to clean {layer}: bucket {bucket!r} is on a "
                                     "backend without bucket tagging and this deployment's "
@@ -425,6 +436,10 @@ def clean(
                                 "or another deployment has a longer-prefix claim"
                             )
                             errors.append(f"{layer}: ownership unverifiable ({reason})")
+                            # A sibling list that could not be read is a
+                            # permission gap, not a refusal.
+                            if other_deployments is not None:
+                                refusals += 1
                             print_error(
                                 f"Refusing to clean {layer}: bucket {bucket!r} is on a "
                                 f"backend without bucket tagging and {reason}. Pass "
@@ -506,9 +521,9 @@ def clean(
         console.print(
             Panel(
                 f"[red]{len(errors)} error(s)[/red] during clean\n\n"
-                + "\n".join(f"  - {e}" for e in errors),
+                + "\n".join(f"  - {esc(e)}" for e in errors),
                 title="Clean Incomplete",
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.REFUSED if refusals == len(errors) else ExitCode.FAILED)

@@ -80,7 +80,7 @@ class TestInitCommand:
         output = tmp_path / "existing.yaml"
         output.write_text("existing config")
         result = runner.invoke(app, ["init", "--output", str(output)])
-        assert result.exit_code == 1
+        assert result.exit_code == 2  # usage: the file exists and --force was not given
         assert "already exists" in result.output
 
     def test_init_force_overwrites(self, tmp_path, monkeypatch):

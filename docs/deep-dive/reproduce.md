@@ -78,7 +78,7 @@ or `ingest_ratio` (continuous).
 1. Loads and validates the package (schema version 1, finite numbers,
    a correctness tolerance of exactly 0).
 2. Compares the current commit (`git rev-parse --short=7 HEAD`) with
-   `commit_sha`. On a mismatch it exits 2 unless
+   `commit_sha`. On a mismatch it exits 14 (requirement unmet) unless
    `--allow-commit-drift` is passed, which turns it into a warning.
 3. Resolves the config: `--config PATH` if given, otherwise
    `config_reference` resolved relative to the package file's
@@ -91,7 +91,7 @@ or `ingest_ratio` (continuous).
    here.
 5. Destroys any existing deployment, then deploys, generates and runs
    the pipeline, and destroys again unless `--keep` is set.
-6. Exits 2 if the run took a different number of samples per query,
+6. Exits 14 if the run took a different number of samples per query,
    ran under a different maintenance policy, or is not the package's
    experiment or returned different benchmark results.
 7. Compares actual against expected per metric. Correctness metrics
@@ -100,9 +100,11 @@ or `ingest_ratio` (continuous).
    metric's bad direction. QpH across different query sets is
    reported as incomparable and counts as performance drift (a
    package recorded before query-set ids is not compared on QpH).
-8. Exits 0 (pass), 1 (performance drift or a missing performance
-   metric) or 2 (correctness violation, a missing correctness metric,
-   or any refusal above).
+8. Exits 0 (pass) or 14 (performance drift, a missing performance
+   metric, a correctness violation or a missing correctness metric).
+   The refusals in steps 1, 3 and 4 exit 2, and a pipeline that could
+   not run, or whose run cannot be found, exits 1. In 1.6 performance
+   drift exited 1 and correctness drift exited 2.
 
 ## What the tolerance is for
 

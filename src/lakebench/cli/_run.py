@@ -14,7 +14,6 @@ from rich.panel import Panel
 
 from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
-    EXIT_DATAGEN_TIMEOUT,
     _journal_safe,
     console,
     enforce_bronze_regenerate,
@@ -35,6 +34,7 @@ from lakebench.config import (
     parse_spark_memory,
 )
 from lakebench.config.schema import is_continuous_mode
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 from lakebench.k8s.target import ContextConflictError
@@ -274,13 +274,13 @@ def _run_preflight_infra_check(cfg) -> None:
     except K8sConnectionError as e:
         print_error(f"Cannot connect to Kubernetes: {e}")
         print_info("Check your kubectl context and cluster connectivity")
-        raise typer.Exit(1) from None
+        raise typer.Exit(ExitCode.PREREQUISITE) from None
 
     # 1. Namespace must exist
     if not k8s.namespace_exists(ns):
         print_error(f"Namespace '{ns}' does not exist")
         print_info("Run 'lakebench deploy' to create the deployment first")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.PREREQUISITE)
 
     # 2. Build config-aware list of required components
     from kubernetes import client as k8s_client
@@ -341,7 +341,7 @@ def _run_preflight_infra_check(cfg) -> None:
             print_info("Wait for components to become ready, or check 'lakebench status'")
         # Show config mismatch hint if catalog/engine might be wrong
         console.print(f"  Config expects: catalog={cat}, query_engine={engine} (namespace: {ns})")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.PREREQUISITE)
 
     print_success("Infrastructure check passed")
 
@@ -550,6 +550,15 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
 _STAGE_POLL_S = 5
 
 
+# The batch pipeline stages `run --stage` accepts, in order.
+BATCH_STAGE_NAMES = ("bronze-verify", "silver-build", "gold-finalize")
+
+
+# The verdict reason a datagen wait-budget timeout records (the exit code is
+# 1, formerly 5; the record keeps the distinction).
+DATAGEN_TIMED_OUT = "datagen timed out"
+
+
 def _handle_datagen_timeout(
     *,
     datagen_deployer,
@@ -567,8 +576,9 @@ def _handle_datagen_timeout(
     pipeline stages would build on a partial bronze (invariant 3). The fix:
     delete the datagen Job so it stops writing, delete each streaming
     SparkApplication that was consuming the trickle so it stops reading,
-    then exit with a distinct code (``EXIT_DATAGEN_TIMEOUT``) so wrapper
-    scripts can tell a timeout apart from other datagen failures.
+    then exit 1. The caller records ``DATAGEN_TIMED_OUT`` in the
+    run's ``failure_reasons``, so the record's ``verdict.reasons`` tells a
+    timeout apart from other datagen failures.
     """
     from lakebench.cli._sustained import _STREAM_APPS
 
@@ -596,7 +606,7 @@ def _handle_datagen_timeout(
         "Deleted any leftover SparkApplication that was consuming the trickle "
         f"(bronze-ingest, silver-stream, gold-refresh) in namespace {namespace}."
     )
-    raise typer.Exit(EXIT_DATAGEN_TIMEOUT)
+    raise typer.Exit(ExitCode.FAILED)
 
 
 def _submission_failure_reporter(stage_name: str, journal):
@@ -1365,11 +1375,11 @@ def _run_local_mode(
         check_local_supported(cfg)
     except LocalModeError as e:
         print_error(str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     if stage and stage not in LOCAL_JOB_ORDER:
         print_error(f"Unknown stage {stage!r}. Expected one of: {', '.join(LOCAL_JOB_ORDER)}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
     stages = (stage,) if stage else LOCAL_JOB_ORDER
 
     advisory = scale_advisory(cfg)
@@ -1412,7 +1422,7 @@ def _run_local_mode(
         print_error(f"Could not reach the local stack: {e}")
         print_info(f"Run 'lakebench deploy {config_file} --local' first")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
 
     datagen_elapsed = 0.0
     if include_datagen and not skip_generate:
@@ -1420,7 +1430,7 @@ def _run_local_mode(
         datagen_start = time.time()
         if not generate_local(cfg, deployment, timeout=timeout or 3600):
             _journal_safe(j.end_command, success=False, message="Datagen failed")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
         datagen_elapsed = time.time() - datagen_start
 
     console.print()
@@ -1493,7 +1503,7 @@ def _run_local_mode(
     _journal_safe(j.end_command, success=result.success)
 
     if not result.success:
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
 
 def run(
@@ -1585,7 +1595,7 @@ def run(
             help=(
                 "With --generate: empty the bronze bucket before generating. "
                 "Without this flag, a non-empty bronze prefix is refused "
-                "(exit 2) so existing datagen output is never overwritten "
+                "(exit 3) so existing datagen output is never overwritten "
                 "silently. No effect without --generate."
             ),
         ),
@@ -1705,16 +1715,16 @@ def run(
         cfg = load_config(config_file, purpose=LoadPurpose.RUN)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
             console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     # DESIGN 6.5: an unsupported workload x architecture x mode is refused
     # before anything runs. Load already checks the config's own mode;
@@ -1729,7 +1739,7 @@ def run(
         _support = support_state_for_config(cfg, _run_mode)
     if _support["state"] == UNSUPPORTED:
         print_error(f"Unsupported combination, refused: {_support['basis']}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
     if _support.get("scale_note"):
         print_warning(f"Unverified scale: {_support['scale_note']}")
 
@@ -1801,7 +1811,13 @@ def run(
     # Flag mutual exclusivity
     if deploy_only and generate_only:
         print_error("--deploy-only and --generate-only are mutually exclusive")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
+    # A batch stage name is checked here, before any deploy, datagen or job
+    # submission, so a typo exits 2 with nothing run.
+    if stage and _run_mode == "batch" and stage not in BATCH_STAGE_NAMES:
+        print_error(f"Unknown stage: {stage}")
+        print_info(f"Valid stages: {', '.join(BATCH_STAGE_NAMES)}")
+        raise typer.Exit(ExitCode.USAGE)
 
     # deploy_only: deploy infrastructure and exit
     if deploy_only:
@@ -1820,7 +1836,6 @@ def run(
         _deploy_cmd(config_file=config_file, yes=yes)
         _generate_cmd(
             config_file=config_file,
-            wait=True,
             timeout=timeout or 14400,
             yes=yes,
             regenerate=regenerate,
@@ -1856,7 +1871,7 @@ def run(
 
         if not prereq_report.all_passed:
             print_error("Prerequisites not met -- cannot proceed")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.PREREQUISITE)
         print_success("All prerequisites passed")
 
         # Also run infrastructure readiness check
@@ -1878,7 +1893,7 @@ def run(
                 else:
                     print_error(f"Namespace '{ns}' does not exist")
                     print_info("Run 'lakebench deploy' first, or use --yes to auto-deploy")
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.NOT_CONFIRMED)
         except K8sConnectionError:
             pass  # preflight will catch this
 
@@ -1946,9 +1961,9 @@ def run(
     pipeline_success = True
     # A4 (v1.6): the finally block below rewrites the exit code to 1 when
     # pipeline_success is False, which clobbers any distinct code the try
-    # block raised (e.g. EXIT_DATAGEN_TIMEOUT). Any specific code is
+    # block raised (e.g. 3 for the bronze refusal). Any specific code is
     # written here first so the finally can honour it.
-    _pipeline_exit_code = 1
+    _pipeline_exit_code: int = ExitCode.FAILED
     _datagen_elapsed = 0.0
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
@@ -1977,14 +1992,14 @@ def run(
                 hint = " -- run 'lakebench deploy' first to install it"
             print_error(f"Spark Operator not ready: {status.message}{hint}")
             pipeline_success = False
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.PREREQUISITE)
 
         # Ensure operator watches the target namespace (always try to heal)
         ns_status = operator.ensure_namespace_watched(can_heal=True)
         if ns_status.watching_namespace is False:
             print_error(ns_status.message)
             pipeline_success = False
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.PREREQUISITE)
 
         print_success(f"Spark Operator ready (version: {status.version or 'unknown'})")
 
@@ -2008,11 +2023,11 @@ def run(
         except ScriptsMapError as e:
             print_error(f"Spark scripts not deployed: {e}")
             _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
-            raise typer.Exit(1) from None
+            raise typer.Exit(ExitCode.FAILED) from None
         if not scripts_ok:
             print_error("Failed to deploy Spark scripts ConfigMap -- pipeline cannot proceed")
             _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
         print_success("Spark scripts deployed")
 
         # -- Phase 3/7: Generate data -----------------------------------------------
@@ -2067,14 +2082,14 @@ def run(
                             if _dg_prog.get("error"):
                                 _dg_bar.stop()
                                 print_error(_dg_prog["error"])
-                                raise typer.Exit(1)
+                                raise typer.Exit(ExitCode.FAILED)
                             _dg_bar.update(_dg_task, completed=_total_pods)
                             _dg_timed_out = False
                             break
                         if _dg_prog.get("oom_pods"):
                             _dg_bar.stop()
                             print_error(f"OOMKilled: {', '.join(_dg_prog['oom_pods'])}")
-                            raise typer.Exit(1)
+                            raise typer.Exit(ExitCode.FAILED)
                         _dg_bar.update(_dg_task, completed=_dg_prog.get("succeeded", 0))
                         _time.sleep(15)
 
@@ -2088,8 +2103,11 @@ def run(
                 # leave orphan compute behind.
                 if _dg_timed_out:
                     _datagen_elapsed = (datetime.now() - datagen_start).total_seconds()
-                    # Preserve the timeout code past the finally block below.
-                    _pipeline_exit_code = EXIT_DATAGEN_TIMEOUT
+                    # A timeout exits 1 like any failed run; the record
+                    # keeps it distinct in verdict.reasons.
+                    if collector.current_run is not None:
+                        collector.current_run.failure_reasons.append(DATAGEN_TIMED_OUT)
+                    _pipeline_exit_code = ExitCode.FAILED
                     pipeline_success = False
                     _handle_datagen_timeout(
                         datagen_deployer=datagen_deployer,
@@ -2130,8 +2148,9 @@ def run(
             except typer.Exit as e:
                 # A4 (v1.6): _handle_datagen_timeout, the OOM / error
                 # branches above and enforce_bronze_regenerate raise their
-                # own typer.Exit with a specific code (2 for the regenerate
-                # refusal, EXIT_DATAGEN_TIMEOUT for a wait-budget timeout).
+                # own typer.Exit with a specific code (3 for the regenerate
+                # refusal, 4 when S3 cannot be read, 1 for a wait-budget
+                # timeout).
                 # Do not swallow it into a generic Exit(1) -- carry the
                 # code through the finally block so wrappers can tell them
                 # apart from other failures.
@@ -2141,7 +2160,7 @@ def run(
             except Exception as e:
                 print_error(f"Datagen failed: {e}")
                 pipeline_success = False
-                raise typer.Exit(1)  # noqa: B904
+                raise typer.Exit(ExitCode.FAILED)  # noqa: B904
         else:
             print_info("Skipped (use --generate to include datagen)")
 
@@ -2158,8 +2177,8 @@ def run(
             stages = [(jt, name, desc) for jt, name, desc in all_stages if name == stage]
             if not stages:
                 print_error(f"Unknown stage: {stage}")
-                print_info("Valid stages: bronze-verify, silver-build, gold-finalize")
-                raise typer.Exit(1)
+                print_info(f"Valid stages: {', '.join(BATCH_STAGE_NAMES)}")
+                raise typer.Exit(ExitCode.USAGE)
         else:
             stages = all_stages
 
@@ -2203,7 +2222,7 @@ def run(
                         "rebuild's cycle 0 as a duplicate of the previous "
                         "epoch, silently writing zero rows (invariant 3)."
                     )
-                    raise typer.Exit(1) from e
+                    raise typer.Exit(ExitCode.FAILED) from e
 
         for cycle_idx in range(total_cycles):
             # Track per-cycle metrics (v1.1.0)
@@ -2312,7 +2331,7 @@ def run(
                         )
                     )
                     pipeline_success = False
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.FAILED)
 
                 print_success(f"Job submitted: lakebench-{stage_name}")
                 # The stage starts when the SparkApplication exists: the
@@ -2504,7 +2523,7 @@ def run(
                         },
                     )
                     pipeline_success = False
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.FAILED)
 
             # Record CycleMetrics after all stages for this cycle (v1.1.0)
             if total_cycles > 1:
@@ -3077,11 +3096,22 @@ def run(
         # Summary panel is printed in the finally block (after pipeline
         # benchmark scores are computed) so it can include the full scorecard.
 
+    except typer.Exit as e:
+        # The finally block re-raises _pipeline_exit_code, so carry the
+        # specific code of any exit raised above (3 refused, 4 operator not
+        # ready, 2 usage) and record the run as failed.
+        if e.exit_code:
+            pipeline_success = False
+            _pipeline_exit_code = e.exit_code
+        raise
     except K8sConnectionError as e:
+        # K8sConnectionError means the kube config did not load
+        # (k8s/client.py), so nothing was submitted: a prerequisite (4).
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
+        _pipeline_exit_code = ExitCode.PREREQUISITE
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     finally:
         # -- Phase 7/7: Results ----------------------------------------------------
         console.print()
@@ -3215,7 +3245,6 @@ def run(
         if not pipeline_success:
             # Metrics are saved above for diagnosis; the exit code must still
             # say the run did not succeed. A4 (v1.6): honour a specific code
-            # (e.g. EXIT_DATAGEN_TIMEOUT) that the try block set before
-            # raising, so wrappers can tell datagen timeout apart from
-            # generic failure.
+            # (e.g. 3 for the bronze refusal) that the try block set before
+            # raising.
             raise typer.Exit(_pipeline_exit_code)

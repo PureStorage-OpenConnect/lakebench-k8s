@@ -874,3 +874,47 @@ class TestCreatedBucketsRecord:
         write_bucket_ownership_tag(s3, "b1", "my-config")
         keys = [t["Key"] for t in s3.put_bucket_tagging.call_args.kwargs["Tagging"]["TagSet"]]
         assert TAG_CREATED_BY_LAKEBENCH not in keys
+
+
+# -- CLI-1: a check that could not run is not a refusal --------------------
+
+
+def test_unlistable_namespaces_without_a_namespace_is_unverifiable():
+    from lakebench.deploy.ownership import check_data_ownership
+
+    d = check_data_ownership(
+        None,
+        namespace="a",
+        deployment_name="a",
+        namespace_present=False,
+        namespace_verified=False,
+        force_legacy=False,
+    )
+    assert not d.allowed and d.unverifiable
+
+
+def test_same_name_live_deployment_is_a_refusal_not_unverifiable():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from lakebench.deploy.ownership import ANNOTATION_DEPLOYMENT_NAME, check_data_ownership
+
+    other = SimpleNamespace(
+        metadata=SimpleNamespace(
+            name="b",
+            deletion_timestamp=None,
+            annotations={ANNOTATION_DEPLOYMENT_NAME: "a"},
+            labels={},
+        )
+    )
+    core = MagicMock()
+    core.list_namespace.return_value = SimpleNamespace(items=[other])
+    d = check_data_ownership(
+        core,
+        namespace="a",
+        deployment_name="a",
+        namespace_present=True,
+        namespace_verified=True,
+        force_legacy=False,
+    )
+    assert not d.allowed and not d.unverifiable

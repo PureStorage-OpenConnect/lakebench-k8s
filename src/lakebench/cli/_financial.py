@@ -25,7 +25,9 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
-from rich.markup import escape
+
+from lakebench.cli._helpers import esc, print_error
+from lakebench.exit_codes import ExitCode, LakebenchError
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +58,8 @@ def _load_config(config_path: Path):
         cfg = load_config(str(config_path), purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         # One line, not a traceback.
-        console.print(f"[red]ERROR[/red] {escape(str(e))}")
-        raise typer.Exit(1) from None
+        print_error(str(e))  # one ERROR line on stderr, like every load error
+        raise typer.Exit(ExitCode.USAGE) from None  # config.validation, config.name_required
     _assert_financial_schema(cfg)
     return cfg
 
@@ -80,10 +82,10 @@ def _get_job_manager(cfg):
     try:
         scripts_ok = job_manager.deploy_scripts_configmap()
     except ScriptsMapError as e:
-        console.print(f"Spark scripts not deployed: {e}", style="red", markup=False)
-        raise typer.Exit(1) from None
+        console.print(f"Spark scripts not deployed: {esc(e)}", style="red")
+        raise typer.Exit(ExitCode.FAILED) from None
     if not scripts_ok:
-        raise typer.Exit("Failed to deploy Spark scripts ConfigMap")
+        raise LakebenchError("Failed to deploy Spark scripts ConfigMap")
     return job_manager
 
 
@@ -94,8 +96,8 @@ def _require_submitted(status) -> None:
     from lakebench.modules.pipeline_engines.spark.job import JobState
 
     if status.state is JobState.FAILED:
-        console.print(f"Not submitted: {status.message}", style="red", markup=False)
-        raise typer.Exit(1)
+        console.print(f"Not submitted: {esc(status.message)}", style="red")
+        raise typer.Exit(ExitCode.FAILED)
 
 
 def _wait_for_sparkapp(namespace: str, name: str, timeout: int = 1800) -> str:
@@ -187,7 +189,7 @@ def replay(
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-replay-financial")
         console.print(f"[bold]replay result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("reproduce")
@@ -213,7 +215,7 @@ def reproduce(
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-reproduce-financial")
         console.print(f"[bold]reproduce result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("score")
@@ -240,7 +242,7 @@ def score(
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial")
         console.print(f"[bold]score result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("reference-score")
@@ -293,4 +295,4 @@ def reference_score(
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial-reference")
         console.print(f"[bold]reference-score result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)

@@ -127,6 +127,10 @@ class TestNamespaceAbsent:
         assert oc_results and oc_results[-1].status.value.lower() == "failed"
         assert "admin migrate-deployment" in oc_results[-1].message
         assert "--force-legacy" in oc_results[-1].message
+        from lakebench.cli._exit import refused_result_code
+        from lakebench.exit_codes import ExitCode
+
+        assert refused_result_code(results) == ExitCode.REFUSED  # exit 3 (CLI-1)
         # Destroy must NOT have proceeded to delete the namespace.
         engine.k8s.delete_namespace.assert_not_called()
         # Only one report emitted -- the FAILED ownership-check.
@@ -174,6 +178,10 @@ class TestNamespaceAbsent:
         )
         oc = [r for r in results if r.component == "ownership-check"]
         assert oc and oc[-1].status.value.lower() == "failed"
+        from lakebench.cli._exit import refused_result_code
+        from lakebench.exit_codes import ExitCode
+
+        assert refused_result_code(results) == ExitCode.REFUSED  # exit 3 (CLI-1)
         engine.k8s.delete_namespace.assert_not_called()
 
 
@@ -234,6 +242,9 @@ class TestBucketAbsent:
         assert s3_res and s3_res[-1].status.value.lower() == "failed"
         assert "no lakebench ownership tag" in s3_res[-1].message
         assert "--force-legacy" in s3_res[-1].message
+        # S-P5 shape: the refusal is flagged on the bucket step (exit 3 when no
+        # other step fails; this harness leaves postgres and rbac unmocked).
+        assert s3_res[-1].details["refusal"] == "deploy.identity_foreign"
         # empty_bucket must not have been called.
         s3.empty_bucket.assert_not_called()
 
@@ -254,6 +265,7 @@ class TestBucketAbsent:
         s3_res = [r for r in results if r.component == "s3-buckets"]
         assert s3_res and s3_res[-1].status.value.lower() == "failed"
         assert "owned by another deployment" in s3_res[-1].message
+        assert s3_res[-1].details["refusal"] == "deploy.identity_foreign"
         s3.empty_bucket.assert_not_called()
 
 

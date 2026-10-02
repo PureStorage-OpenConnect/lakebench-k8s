@@ -174,28 +174,6 @@ def test_every_documented_flag_exists_in_cli(command: str) -> None:
     )
 
 
-def test_generate_has_no_no_wait_flag() -> None:
-    """Regression pin: docs must not add ``--no-wait`` to ``generate``.
-
-    The code registers ``--wait`` explicitly, so Typer does not synthesise
-    the paired ``--no-wait``. Documenting one would mislead operators into
-    trying a flag the CLI rejects. Phase A4 owns adding it to the code;
-    until then the doc says only ``--wait``.
-    """
-
-    generate_flags = DOC_FLAGS.get("generate", set())
-    assert "--no-wait" not in generate_flags, (
-        "docs/cli-reference.md documents --no-wait for generate, but the "
-        "code (src/lakebench/cli/_generate.py) only registers --wait. "
-        "Remove --no-wait from the reference; adding it to the code is "
-        "Phase A4 territory."
-    )
-    actual = _actual_flags("generate")
-    assert "--no-wait" not in actual, (
-        "generate --help now shows --no-wait; update the reference and delete this pin."
-    )
-
-
 def test_query_sql_file_flag_documented_not_file() -> None:
     """Regression pin: reading SQL from a file uses ``--sql-file``.
 

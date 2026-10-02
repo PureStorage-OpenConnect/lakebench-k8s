@@ -1,7 +1,8 @@
 """Config subcommands for Lakebench CLI.
 
-Provides ``lakebench config show``, ``lakebench config validate``,
-``lakebench config recommend``, and ``lakebench config upgrade``.
+Provides ``lakebench config show``, ``lakebench config validate`` and
+``lakebench config recommend``. ``lakebench config upgrade`` is removed and
+refuses: it rewrote configs lossily and wrote secrets in plaintext.
 """
 
 from __future__ import annotations
@@ -15,7 +16,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from lakebench.cli._helpers import esc, print_error
+from lakebench.exit_codes import ExitCode
+
 logger = logging.getLogger(__name__)
+
+
+def _load_failure_code(exc: BaseException) -> ExitCode:
+    """2 for a config that fails to load or validate; 1 for anything else."""
+    from lakebench.config import ConfigError
+
+    return ExitCode.USAGE if isinstance(exc, ConfigError) else ExitCode.FAILED
+
 
 config_app = typer.Typer(
     name="config",
@@ -48,7 +60,7 @@ def config_show(
 
         console.print(
             Panel(
-                f"[bold]Resolved configuration:[/bold] {config_file}",
+                f"[bold]Resolved configuration:[/bold] {esc(config_file)}",
                 border_style="blue",
             )
         )
@@ -153,8 +165,8 @@ def config_show(
         console.print(table)
 
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
+        print_error(e)
+        raise typer.Exit(_load_failure_code(e)) from None
 
 
 @config_app.command("validate")
@@ -192,7 +204,7 @@ def _validate_local(config_file: Path) -> None:
     from lakebench.runtime.container import ContainerRuntimeError, detect_container_cli
 
     console.print()
-    console.print(Panel(f"Validating for local mode:\n{config_file}", expand=False))
+    console.print(Panel(f"Validating for local mode:\n{esc(config_file)}", expand=False))
     console.print()
 
     passed, failed = 0, 0
@@ -203,47 +215,47 @@ def _validate_local(config_file: Path) -> None:
         console.print("  [green]+[/green] Config syntax valid")
         passed += 1
     except Exception as e:
-        console.print(f"  [red]x[/red] Config invalid: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        console.print(f"  [red]x[/red] Config invalid: {esc(e)}")
+        raise typer.Exit(_load_failure_code(e))  # noqa: B904
 
     try:
         check_local_supported(cfg)
         console.print("  [green]+[/green] Table format supported locally (Iceberg)")
         passed += 1
     except LocalModeError as e:
-        console.print(f"  [red]x[/red] {e}")
+        console.print(f"  [red]x[/red] {esc(e)}")
         failed += 1
 
     try:
         cli = detect_container_cli()
-        console.print(f"  [green]+[/green] Container runtime available ({cli})")
+        console.print(f"  [green]+[/green] Container runtime available ({esc(cli)})")
         passed += 1
     except ContainerRuntimeError as e:
-        console.print(f"  [red]x[/red] {e}")
+        console.print(f"  [red]x[/red] {esc(e)}")
         failed += 1
 
     advisory = scale_advisory(cfg)
     if advisory:
-        console.print(f"  [yellow]![/yellow] {advisory}")
+        console.print(f"  [yellow]![/yellow] {esc(advisory)}")
     else:
         scale = cfg.architecture.workload.datagen.scale
-        console.print(f"  [green]+[/green] Scale {scale} is sized for one host")
+        console.print(f"  [green]+[/green] Scale {esc(scale)} is sized for one host")
         passed += 1
 
     console.print()
     if failed:
         console.print(
             Panel(
-                f"[red]{passed} passed, {failed} failed[/red]",
+                f"[red]{esc(passed)} passed, {esc(failed)} failed[/red]",
                 title="Validation Failed",
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
     console.print(
         Panel(
-            f"[green]{passed} passed[/green]\n\nRun: lakebench deploy {config_file} --local",
+            f"[green]{esc(passed)} passed[/green]\n\nRun: lakebench deploy {esc(config_file)} --local",
             title="Ready",
             expand=False,
         )
@@ -280,17 +292,17 @@ def config_storage(
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except Exception as e:
-        console.print(f"[red]Could not load config: {e}[/red]")
-        raise typer.Exit(1) from e
+        print_error(f"Could not load config: {e}")
+        raise typer.Exit(_load_failure_code(e)) from e
 
     s3 = cfg.platform.storage.s3
     if not s3.endpoint:
-        console.print("[red]No S3 endpoint configured.[/red]")
-        raise typer.Exit(1)
+        print_error("No S3 endpoint configured.")
+        raise typer.Exit(ExitCode.USAGE)
 
     console.print(
         Panel(
-            f"[bold]Storage conformance[/bold]\nEndpoint: {s3.endpoint}",
+            f"[bold]Storage conformance[/bold]\nEndpoint: {esc(s3.endpoint)}",
             border_style="blue",
         )
     )
@@ -331,31 +343,31 @@ def config_storage(
     console.print(table)
 
     if report.degraded:
-        console.print(f"\n[yellow]Degraded run:[/yellow] {report.degraded_reason}")
+        console.print(f"\n[yellow]Degraded run:[/yellow] {esc(report.degraded_reason)}")
 
     for check in report.blocking_failures:
         if check.impact:
-            console.print(f"\n[red]Impact:[/red] {check.impact}")
+            console.print(f"\n[red]Impact:[/red] {esc(check.impact)}")
 
     for check in report.checks:
         if check.status is CheckStatus.PASS and check.severity is Severity.ADVISORY:
             if check.impact:
-                console.print(f"\n[yellow]Note:[/yellow] {check.impact}")
+                console.print(f"\n[yellow]Note:[/yellow] {esc(check.impact)}")
 
     known = KNOWN_BACKENDS.get(report.backend)
     if known and known.get("notes"):
-        console.print(f"\n[dim]{known['label']}: {known['notes']}[/dim]")
+        console.print(f"\n[dim]{esc(known['label'])}: {esc(known['notes'])}[/dim]")
 
     console.print()
     if report.passed and not report.degraded:
-        console.print(f"[green]Backend supported.[/green] {report.summary()}")
+        console.print(f"[green]Backend supported.[/green] {esc(report.summary())}")
     elif report.passed and report.degraded:
         console.print(
-            f"[yellow]No blocking failures, but coverage was partial.[/yellow] {report.summary()}"
+            f"[yellow]No blocking failures, but coverage was partial.[/yellow] {esc(report.summary())}"
         )
     else:
-        console.print(f"[red]Backend not usable by lakebench.[/red] {report.summary()}")
-        raise typer.Exit(1)
+        print_error(f"Backend not usable by lakebench. {report.summary()}")
+        raise typer.Exit(ExitCode.FAILED)
 
 
 @config_app.command("recommend")
@@ -431,9 +443,8 @@ def config_recipes(
     if name:
         if name not in RECIPES:
             available = ", ".join(sorted(n for n in RECIPES if n != "default"))
-            console.print(f"[red]Unknown recipe:[/red] {name}")
-            console.print(f"  Available: {available}")
-            raise typer.Exit(1)
+            print_error(f"Unknown recipe: {name}. Available: {available}")
+            raise typer.Exit(ExitCode.USAGE)
         _print_recipe_detail(name)
         return
 
@@ -515,103 +526,49 @@ def _print_recipe_detail(name: str) -> None:
             continue
         label = WORKLOAD_LABELS.get(row["workload"], row["workload"])
         console.print(
-            f"  {label} {row['mode']}: {_state_markup(row['state'])} -- {escape(row['basis'])}"
+            f"  {esc(label)} {esc(row['mode'])}: {_state_markup(row['state'])} -- {escape(row['basis'])}"
         )
 
     if note and note.caveats:
         console.print()
         console.print("[bold]Caveats[/bold]")
         for caveat in note.caveats:
-            console.print(f"  [yellow]*[/yellow] {caveat}")
+            console.print(f"  [yellow]*[/yellow] {esc(caveat)}")
     console.print()
 
 
-@config_app.command("upgrade")
+@config_app.command(
+    "upgrade",
+    hidden=True,
+    # Any old argument or flag reaches the refusal, so Click never echoes one.
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
 def config_upgrade(
     config_file: Annotated[
-        Path,
-        typer.Argument(help="v1 configuration file to upgrade", exists=True),
-    ] = Path("lakebench.yaml"),
+        Path | None,
+        # No exists=True: a missing path must reach the refusal, not a Click
+        # error that echoes the argument.
+        typer.Argument(help="Ignored: the command is removed."),
+    ] = None,
     output: Annotated[
         Path | None,
-        typer.Option("--output", "-o", help="Output path (default: overwrite in place)"),
+        typer.Option("--output", "-o", help="Ignored: the command is removed."),
     ] = None,
 ) -> None:
-    """Upgrade a v1.2 config to v2 flat format."""
-    import yaml
+    """Removed: refuses before opening any file.
 
-    from lakebench.config import LoadPurpose, load_config
-    from lakebench.config.loader import name_resolution
+    It rewrote configs lossily, in place by default, and wrote the S3
+    secret key into the result in plaintext. The arguments stay declared so
+    old invocations get this refusal rather than a usage error; neither is
+    read or printed.
+    """
+    from lakebench.cli._exit import UsageError
 
-    try:
-        # INSPECT, so an old config's removed keys are dropped rather than
-        # refused: converting old configs is what this command is for.
-        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
-    except Exception as e:
-        console.print(f"[red]Error loading config: {e}[/red]")
-        raise typer.Exit(1) from None
-    resolution = name_resolution(cfg)
-    if resolution is None or resolution.nameless:
-        # The output is a config for deploy; it must not carry a name the
-        # input never chose.
-        console.print(
-            "[red]Error: the config has no name; add 'name:' to it before upgrading.[/red]"
-        )
-        raise typer.Exit(1)
-
-    # Build v2 flat config
-    v2: dict = {"name": cfg.name}
-
-    # Extract flat fields from resolved config
-    v2["endpoint"] = cfg.platform.storage.s3.endpoint
-    v2["access_key"] = cfg.platform.storage.s3.access_key
-    v2["secret_key"] = cfg.platform.storage.s3.secret_key
-    v2["scale"] = cfg.architecture.workload.datagen.scale
-
-    # Optional fields (only include if non-default)
-    ns = cfg.get_namespace()
-    if ns != cfg.name:
-        v2["namespace"] = ns
-
-    mode = cfg.architecture.pipeline.mode.value
-    if mode != "batch":
-        v2["mode"] = mode
-
-    cycles = cfg.architecture.pipeline.cycles
-    if cycles != 1:
-        v2["cycles"] = cycles
-
-    # Recipe detection
-    from lakebench.config.recipes import RECIPES
-
-    for recipe_name, recipe_defaults in RECIPES.items():
-        if recipe_name == "default":
-            continue
-        arch = recipe_defaults.get("architecture", {})
-        if (
-            arch.get("catalog", {}).get("type") == cfg.architecture.catalog.type.value
-            and arch.get("table_format", {}).get("type") == cfg.architecture.table_format.type.value
-            and arch.get("query_engine", {}).get("type") == cfg.architecture.query_engine.type.value
-        ):
-            v2["recipe"] = recipe_name
-            break
-
-    # Preserve spark conf overrides from the original config
-    from lakebench.config.loader import load_yaml
-
-    raw = load_yaml(config_file)
-    spark_conf = raw.get("spark", {}).get("conf")
-    if spark_conf:
-        v2["spark"] = {"conf": spark_conf}
-
-    out_path = output or config_file
-    with open(out_path, "w") as f:
-        yaml.safe_dump(v2, f, default_flow_style=False, sort_keys=False)
-
-    console.print(f"[green]Upgraded config written to {out_path}[/green]")
-    console.print()
-    for k, v in v2.items():
-        console.print(f"  [cyan]{k}:[/cyan] {v}")
+    raise UsageError(
+        "`config upgrade` is removed: it rewrote configs lossily and wrote secrets in plaintext.",
+        next="lakebench init --from OLD.yaml -o NEW.yaml",
+        path="config.upgrade_refused",
+    )
 
 
 # -- Helpers -----------------------------------------------------------------

@@ -1074,6 +1074,10 @@ class DataOwnershipDecision:
     #: Why not (or, when allowed, any caveat worth printing). Never empty
     #: when ``allowed`` is False.
     hint: str = ""
+    #: True when ``allowed`` is False because a check could not run (the
+    #: namespace list was unreadable), not because ownership was disproved.
+    #: The CLI exits 1 for these and 3 for a refusal.
+    unverifiable: bool = False
 
 
 def check_data_ownership(
@@ -1146,6 +1150,7 @@ def check_data_ownership(
                     "and buckets were left untouched. Re-run with credentials that "
                     "can list namespaces."
                 ),
+                unverifiable=True,
             )
         caveat = (
             "Could not list namespaces to check for another deployment with the "

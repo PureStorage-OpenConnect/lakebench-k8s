@@ -235,7 +235,7 @@ Per-config overrides go in the store entry:
    export LAKEBENCH_PERF_NAME=perf-c360-batch-s10
    export LAKEBENCH_S3_ENDPOINT=... LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
    lakebench deploy   benchmarks/perf/c360-batch-s10.yaml
-   lakebench generate benchmarks/perf/c360-batch-s10.yaml --wait
+   lakebench generate benchmarks/perf/c360-batch-s10.yaml
    lakebench run      benchmarks/perf/c360-batch-s10.yaml
    lakebench destroy  benchmarks/perf/c360-batch-s10.yaml --force
    ```

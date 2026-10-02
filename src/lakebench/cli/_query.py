@@ -15,7 +15,11 @@ from rich.table import Table
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
+    emit_data,
+    err_console,
+    esc,
     journal_open,
+    markup,
     print_error,
     print_info,
     print_warning,
@@ -26,6 +30,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 
 # =============================================================================
@@ -131,14 +136,14 @@ def _run_query_repl(
 
     if not sys.stdin.isatty():
         print_error("Interactive mode requires a terminal")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     config_file = resolve_config_path(config_file)
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     namespace = cfg.get_namespace()
 
@@ -146,13 +151,13 @@ def _run_query_repl(
         executor = get_executor(cfg, namespace)
     except ValueError as e:
         print_error(str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     console.print(
         Panel(
-            f"Lakebench SQL REPL ({executor.engine_name()})\n"
-            f"Namespace: {namespace}\n"
-            f"Format: {output_format} | Timeout: {timeout}s\n"
+            f"Lakebench SQL REPL ({esc(executor.engine_name())})\n"
+            f"Namespace: {esc(namespace)}\n"
+            f"Format: {esc(output_format)} | Timeout: {esc(timeout)}s\n"
             f"Type 'exit', 'quit', or Ctrl+D to quit",
             expand=False,
         )
@@ -201,7 +206,7 @@ def _run_query_repl(
                 import json
 
                 data = [row.split("\t") for row in rows]
-                console.print(json.dumps({"rows": data, "count": len(data)}, indent=2))
+                emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
             elif output_format == "csv":
                 import csv
                 import io
@@ -210,16 +215,16 @@ def _run_query_repl(
                 writer = csv.writer(buf)
                 for row in rows:
                     writer.writerow(row.split("\t"))
-                console.print(buf.getvalue().strip())
+                emit_data(buf.getvalue())
             else:  # table
                 for line in rows[:50]:
-                    console.print(line)
+                    console.print(line, markup=False, highlight=False)
                 if row_count > 50:
-                    console.print(f"[dim]... ({row_count - 50} more rows)[/dim]")
+                    console.print(f"[dim]... ({esc(row_count - 50)} more rows)[/dim]")
 
-        console.print(f"[green]{row_count} rows in {result.duration_seconds:.2f}s[/green]")
+        err_console.print(f"[green]{esc(row_count)} rows in {result.duration_seconds:.2f}s[/green]")
 
-    console.print(f"\n[dim]Executed {query_count} queries. Goodbye![/dim]")
+    console.print(f"\n[dim]Executed {esc(query_count)} queries. Goodbye![/dim]")
 
 
 def query(
@@ -321,7 +326,7 @@ def query(
     sources = sum(1 for x in [sql, example, sql_file, interactive] if x)
     if sources > 1:
         print_error("Specify only one of: --sql, --example, --sql-file, --interactive")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Handle interactive mode early
     if interactive:
@@ -334,7 +339,7 @@ def query(
         if str(sql_file) == "-":
             if sys.stdin.isatty():
                 print_error("No input from stdin (pipe SQL or use --sql/--example)")
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.USAGE)
             sql = sys.stdin.read().strip()
             query_name = "stdin"
         else:
@@ -343,15 +348,15 @@ def query(
                 query_name = sql_file.stem
             except FileNotFoundError:
                 print_error(f"File not found: {sql_file}")
-                raise typer.Exit(1)  # noqa: B904
+                raise typer.Exit(ExitCode.USAGE)  # noqa: B904
             except Exception as e:
                 print_error(f"Error reading file: {e}")
-                raise typer.Exit(1)  # noqa: B904
+                raise typer.Exit(ExitCode.FAILED)  # noqa: B904
     elif example:
         if example not in EXAMPLE_QUERIES:
             print_error(f"Unknown example: {example}")
             print_info(f"Available: {', '.join(EXAMPLE_QUERIES.keys())}")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.USAGE)
         query_name = example
         _, sql = EXAMPLE_QUERIES[example]
     elif not sql:
@@ -371,14 +376,14 @@ def query(
 
     if not sql:
         print_error("No SQL query provided")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Load config
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     namespace = cfg.get_namespace()
 
@@ -387,8 +392,9 @@ def query(
     j.begin_command(CommandName.QUERY, {"query_name": query_name})
 
     if show_query or example:
-        console.print(f"\n[dim]Query ({query_name}):[/dim]")
-        console.print(f"[dim]{sql}[/dim]\n")
+        # stderr: with --format json|csv, stdout carries only the data.
+        err_console.print(f"\n[dim]Query ({esc(query_name)}):[/dim]")
+        err_console.print(f"[dim]{esc(sql)}[/dim]\n", soft_wrap=True)
 
     # Execute via QueryExecutor
     from lakebench.benchmark.executor import get_executor
@@ -398,26 +404,25 @@ def query(
     except ValueError as e:
         print_error(str(e))
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     try:
         result = executor.execute_query(sql, timeout=query_timeout)
     except FileNotFoundError:
         print_error("kubectl not found on PATH")
         _journal_safe(j.end_command, success=False, message="kubectl not found")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     except RuntimeError as e:
         print_error(str(e))
         print_info("Is the query engine deployed? Run: lakebench status")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
 
     elapsed = result.duration_seconds
 
     if not result.success:
-        print_error(f"Query failed ({elapsed:.2f}s)")
-        if result.error:
-            console.print(f"[red]{result.error}[/red]")
+        detail = f": {result.error}" if result.error else ""
+        print_error(f"Query failed ({elapsed:.2f}s){detail}")
         _journal_safe(
             j.record,
             EventType.QUERY_EXECUTED,
@@ -430,7 +435,7 @@ def query(
             },
         )
         _journal_safe(j.end_command, success=False, message="Query failed")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
     # Parse and display results
     output = result.raw_output
@@ -450,7 +455,7 @@ def query(
                 ]
             else:
                 data = [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
-            console.print(json.dumps({"rows": data, "count": len(data)}, indent=2))
+            emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
         elif output_format == "csv":
             import csv
             import io
@@ -460,15 +465,15 @@ def query(
             for row in rows:
                 if row.strip():
                     writer.writerow([c.strip().strip('"') for c in row.split("\t")])
-            console.print(buf.getvalue().strip())
+            emit_data(buf.getvalue())
         else:  # table (default)
             console.print()
             for line in rows[:50]:
-                console.print(line)
+                console.print(line, markup=False, highlight=False)
             if row_count > 50:
-                console.print(f"[dim]... ({row_count - 50} more rows)[/dim]")
+                console.print(f"[dim]... ({esc(row_count - 50)} more rows)[/dim]")
 
-    console.print(f"\n[green]{row_count} rows in {elapsed:.2f}s[/green]")
+    err_console.print(f"\n[green]{esc(row_count)} rows in {elapsed:.2f}s[/green]")
 
     _journal_safe(
         j.record,
@@ -517,8 +522,8 @@ def _display_power_results(result: Any) -> None:
         status = "[green]PASS[/green]" if qr.success else "[red]FAIL[/red]"
         name_padded = f"{qr.query.name[:4]}  {qr.query.display_name}"
         console.print(
-            f"  {name_padded:<40} {qr.elapsed_seconds:>7.2f}s   "
-            f"{qr.rows_returned:>6} rows   {status}"
+            f"  {esc(name_padded):<40} {qr.elapsed_seconds:>7.2f}s   "
+            f"{esc(qr.rows_returned):>6} rows   {markup(status)}"
         )
 
     console.print(f"\n  Total: {result.total_seconds:.2f}s")
@@ -528,12 +533,12 @@ def _display_power_results(result: Any) -> None:
 def _display_throughput_results(result: Any) -> None:
     """Display throughput benchmark results."""
     console.print()
-    console.print(f"  [bold]Throughput run: {result.streams} streams[/bold]")
+    console.print(f"  [bold]Throughput run: {esc(result.streams)} streams[/bold]")
     for sr in result.stream_results:
         status = "[green]PASS[/green]" if sr.success else "[red]FAIL[/red]"
         console.print(
-            f"    Stream {sr.stream_id}:  {len(sr.queries):>2} queries  "
-            f"{sr.total_seconds:>7.1f}s  {status}"
+            f"    Stream {esc(sr.stream_id)}:  {len(sr.queries):>2} queries  "
+            f"{sr.total_seconds:>7.1f}s  {markup(status)}"
         )
     console.print(f"\n  Wall clock: {result.total_seconds:.1f}s")
     console.print(f"  [bold]Throughput QpH: {result.qph:.1f}[/bold]")
@@ -660,7 +665,7 @@ def benchmark(
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     scale = cfg.architecture.workload.datagen.get_effective_scale()
     cache_mode = "cold" if cold else None  # None = let runner use config default
@@ -675,12 +680,13 @@ def benchmark(
     console.print(
         Panel(
             f"Lakebench Query Benchmark\n"
-            f"{'=' * 25}\n"
-            f"Scale: {scale}\n"
-            f"Mode: {effective_mode}"
-            + (f" ({effective_streams} streams)" if effective_mode != "power" else "")
-            + f" ({iterations} iteration{'s' if iterations > 1 else ''})\n"
-            f"Cache: {effective_cache}" + (f"\nClass: {query_class}" if query_class else ""),
+            f"{esc('=' * 25)}\n"
+            f"Scale: {esc(scale)}\n"
+            f"Mode: {esc(effective_mode)}"
+            + (f" ({esc(effective_streams)} streams)" if effective_mode != "power" else "")
+            + f" ({esc(iterations)} iteration{esc('s' if iterations > 1 else '')})\n"
+            f"Cache: {esc(effective_cache)}"
+            + (f"\nClass: {esc(query_class)}" if query_class else ""),
             expand=False,
         )
     )
@@ -722,7 +728,7 @@ def benchmark(
     except RuntimeError as e:
         print_error(str(e))
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
 
     # Handle composite (returns tuple) vs single result. Track the
     # throughput half separately so the composite qph=0 gate below can
@@ -783,7 +789,7 @@ def benchmark(
             success=False,
             message="benchmark gate failed: " + "; ".join(gate_problems),
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
     # Save to latest metrics if available. Scope by deployment name so a
     # parallel deployment's newer run cannot be rewritten with this

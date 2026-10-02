@@ -140,7 +140,7 @@ The pattern:
 
 ```bash
 lakebench deploy -y my-config.yaml
-lakebench generate -y --wait --timeout 1200 my-config.yaml
+lakebench generate -y --timeout 1200 my-config.yaml
 lakebench run --timeout 1800 my-config.yaml
 lakebench destroy --force my-config.yaml
 ```
