@@ -406,7 +406,12 @@ def test_engine_require_new_refuses_an_existing_bucket(s3_cls, record, write_tag
         "lakebench-gold": True,
     }
     s3_cls.return_value = client
-    with patch("lakebench.k8s.get_k8s_client"), patch("kubernetes.client.CoreV1Api"):
+    with (
+        patch("lakebench.k8s.get_k8s_client"),
+        patch("kubernetes.client.CoreV1Api"),
+        # Deploy stamps buckets with this cluster's fingerprint (SD-18).
+        patch("lakebench.deploy.ownership.api_server_fingerprint", return_value="fp-test"),
+    ):
         result = eng._deploy_buckets()
     assert result.status is DeploymentStatus.FAILED
     assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"

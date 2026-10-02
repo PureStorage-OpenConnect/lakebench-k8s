@@ -62,7 +62,20 @@ def _bucket_owned_factory(cfg: Any):
             client = state["client"]
             if client._init_error:
                 return False
-            report = verify_bucket_ownership(client.raw_client, bucket, cfg.name)
+            if "cluster" not in state:
+                from lakebench.deploy.ownership import api_server_fingerprint
+
+                state["cluster"] = api_server_fingerprint(cfg.platform.kubernetes.context or "")
+            # Only this deployment's and this cluster's stamp is proof (a
+            # name tag alone reads the same on another cluster), so no
+            # created-buckets record is passed: a legacy bucket is not MATCH.
+            report = verify_bucket_ownership(
+                client.raw_client,
+                bucket,
+                cfg.name,
+                expected_cluster=state["cluster"],
+                created_record=(),
+            )
             return report.verdict is IdentityVerdict.MATCH
         except Exception:  # noqa: BLE001 -- unproven is refused, never assumed
             return False
