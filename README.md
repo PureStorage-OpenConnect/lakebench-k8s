@@ -246,18 +246,18 @@ See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blo
 
 | Workload | Mode | Scale | Minimum CPU | Minimum RAM | Scratch PVC (if enabled) | Largest pod |
 |:---|:---|---:|---:|---:|---:|---:|
-| Customer 360 | batch | 1 | 40 cores | 529 GB | 2,400 Gi | 8 cores / 60 GB |
-| Customer 360 | batch | 10 | 47 cores | 557 GB | 2,400 Gi | 8 cores / 60 GB |
-| Customer 360 | batch | 100 | 113 cores | 1,325 GB | 5,400 Gi | 8 cores / 60 GB |
-| Customer 360 | continuous | 1 | 58 cores | 297 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 10 | 81 cores | 333 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 100 | 201 cores | 943 GB | 1,700 Gi | 8 cores / 48 GB |
-| AML | batch | 1 | 40 cores | 529 GB | 2,400 Gi | 8 cores / 60 GB |
-| AML | batch | 10 | 47 cores | 557 GB | 2,400 Gi | 8 cores / 60 GB |
-| AML | batch | 100 | 113 cores | 1,325 GB | 5,500 Gi | 8 cores / 60 GB |
-| AML | continuous | 1 | 138 cores | 1,011 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 10 | 161 cores | 1,053 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 100 | 339 cores | 2,241 GB | 4,660 Gi | 8 cores / 48 GB |
+| Customer 360 | batch | 1 | 40 cores | 542 GB | 2,400 Gi | 8 cores / 60 GB |
+| Customer 360 | batch | 10 | 47 cores | 570 GB | 2,400 Gi | 8 cores / 60 GB |
+| Customer 360 | batch | 100 | 113 cores | 1,338 GB | 5,400 Gi | 8 cores / 60 GB |
+| Customer 360 | continuous | 1 | 58 cores | 307 GB | 640 Gi | 8 cores / 40 GB |
+| Customer 360 | continuous | 10 | 81 cores | 343 GB | 640 Gi | 8 cores / 40 GB |
+| Customer 360 | continuous | 100 | 201 cores | 953 GB | 1,700 Gi | 8 cores / 48 GB |
+| AML | batch | 1 | 40 cores | 542 GB | 2,400 Gi | 8 cores / 60 GB |
+| AML | batch | 10 | 47 cores | 570 GB | 2,400 Gi | 8 cores / 60 GB |
+| AML | batch | 100 | 113 cores | 1,338 GB | 5,500 Gi | 8 cores / 60 GB |
+| AML | continuous | 1 | 138 cores | 1,021 GB | 2,300 Gi | 8 cores / 40 GB |
+| AML | continuous | 10 | 161 cores | 1,063 GB | 2,300 Gi | 8 cores / 40 GB |
+| AML | continuous | 100 | 339 cores | 2,251 GB | 4,660 Gi | 8 cores / 48 GB |
 
 <!-- END GENERATED: sizing-minimums -->
 

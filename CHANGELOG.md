@@ -248,9 +248,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   test holds them to the code.
 - **Published minimums moved.** They now include the always-on pods,
   including the catalog and Postgres memory requests: Customer 360 or AML
-  batch at scale 1 is 40 cores / 529 GB (the Spark peak alone, 36 cores /
-  512 GB, was quoted before), AML continuous at scale 1 is 138 cores /
-  1,011 GB (was 118 / 980). The Spark peak is unchanged; no per-executor
+  batch at scale 1 is 40 cores / 542 GB (the Spark peak alone, 36 cores /
+  525 GB, was quoted before), AML continuous at scale 1 is 138 cores /
+  1,021 GB (was 118 / 990). The Spark peak is unchanged; no per-executor
   sizing changed.
 - **The capacity preflight checks what the run deploys.** It sizes the
   config against the same cluster capacity `run` auto-sized it with (and
