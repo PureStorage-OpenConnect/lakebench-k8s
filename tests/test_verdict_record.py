@@ -143,16 +143,16 @@ def test_only_the_listed_stored_passes_flip() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_c360_non_gating_failure_warns() -> None:
-    """A failed check outside GATING_CHECKS is shown, never a FAIL."""
+def test_c360_non_gating_failure_is_a_qualifier() -> None:
+    """A failed check outside GATING_CHECKS is recorded in the qualifier
+    CD-14 defined, never a FAIL (and not a badge warning: the carry is the
+    qualifier, which the report renders)."""
     rec = sr.load_record(C360_BATCH)
     check = next(c for c in rec["c360_correctness"]["checks"] if c["id"] == "interaction_mix")
     check["status"] = "fail"
     v = V.verdict_from_record(rec)
     assert v.status == "PASSED"
     assert v.qualifiers["c360_failed_not_gating"] == ["interaction_mix"]
-    _ok, _reasons, warnings = V.compute_badge_status(_metrics(rec))
-    assert any("interaction_mix" in w and "reporting only" in w for w in warnings)
 
 
 def test_c360_gated_failure_fails() -> None:
@@ -255,11 +255,51 @@ def test_aml_continuous_gold_is_measured_by_its_alerts() -> None:
     assert v.status == "FAILED" and v.gates["layer_rows"] == "FAIL"
 
 
-def test_continuous_silver_committed_zero_fails() -> None:
+def test_continuous_silver_rows_written_zero_fails() -> None:
+    """Silver's rows after the transforms are what it wrote; rows read and
+    committed do not show a non-empty silver."""
     rec = sr.load_record(C360_CONT)
-    _stream(rec, "silver-stream")["committed_rows"] = 0
+    assert _stream(rec, "silver-stream")["committed_rows"] > 0
+    _stream(rec, "silver-stream")["output_rows"] = 0
     v = V.verdict_from_record(rec)
     assert v.status == "FAILED" and v.gates["layer_rows"] == "FAIL"
+
+
+def test_aml_continuous_silver_falls_back_to_committed_rows() -> None:
+    """The AML silver stream logs no rows after transforms: its committed
+    batches' rows stand for them, and 0 fails."""
+    rec = sr.load_record(AML_CONT)
+    assert _stream(rec, "silver-stream")["output_rows"] is None
+    _stream(rec, "silver-stream")["committed_rows"] = 0
+    assert V.verdict_from_record(rec).gates["layer_rows"] == "FAIL"
+
+
+def test_aml_continuous_zero_alerts_fails() -> None:
+    rec = sr.load_record(AML_CONT)
+    gold = _stream(rec, "gold-refresh")
+    gold["ttd_alerts"], gold["ttd_unmatched"], gold["ttd_by_rule"] = 0, 0, {}
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED"
+    assert v.gates["layer_rows"] == "FAIL" and v.gates["aml_rules"] == "FAIL"
+    assert any("zero alerts" in r for r in v.reasons)
+
+
+def test_aml_continuous_unmatched_alerts_count() -> None:
+    rec = sr.load_record(AML_CONT)
+    gold = _stream(rec, "gold-refresh")
+    gold["ttd_alerts"], gold["ttd_unmatched"] = 0, 12
+    assert V.verdict_from_record(rec).status == "PASSED"
+
+
+def test_aml_continuous_zero_with_an_unmeasured_cycle_is_not_counted() -> None:
+    """No alerts counted while a cycle could not count them proves nothing:
+    gold falls back to its bytes."""
+    rec = sr.load_record(AML_CONT)
+    gold = _stream(rec, "gold-refresh")
+    gold["ttd_alerts"], gold["ttd_unmatched"], gold["ttd_unmeasured_cycles"] = 0, 0, 2
+    v = V.verdict_from_record(rec)
+    assert v.status == "PASSED"
+    assert v.qualifiers[V.LAYER_ROWS_UNMEASURED] == ["gold"]
 
 
 def test_batch_missing_stage_job_fails() -> None:
@@ -429,17 +469,22 @@ def test_save_gate_fails_closed_when_the_record_cannot_be_judged(monkeypatch) ->
 
 @pytest.mark.parametrize("path", ["src/lakebench/cli/_run.py", "src/lakebench/cli/_sustained.py"])
 def test_every_cli_save_follows_the_save_gate(path: str) -> None:
-    """Each save of a run record is preceded by the save gate, with nothing
-    between them that the verdict reads (end samples, corpus observation,
-    series seal)."""
+    """Each save of a run record is preceded by the save gate, after the
+    last late-signal check before it (an interrupt still reads INTERRUPTED),
+    with only writers between them that the verdict does not read: the end
+    samples, the corpus observation and the series seal."""
     src = (ROOT / path).read_text()
     saves = [
         i for i in range(len(src)) if src.startswith("metrics_storage.save_run(run_metrics)", i)
     ]
     assert saves
     for i in saves:
-        window = src[max(0, i - 1500) : i]
-        assert "apply_save_gate(run_metrics" in window
+        gate = src.rfind("apply_save_gate(run_metrics", 0, i)
+        assert gate != -1 and i - gate < 2000, "no save gate before the save"
+        assert src.rfind("late_signal()", 0, i) < gate, "the late-signal check must come first"
+        between = src[gate:i]
+        assert "save_run(" not in between and "late_signal()" not in between
+        assert ".success = True" not in between
 
 
 # ---------------------------------------------------------------------------
@@ -519,3 +564,204 @@ def test_continuous_run_with_empty_gold_exits_non_zero(tmp_path, monkeypatch) ->
     assert saved["success"] is False
     assert saved["verdict"]["status"] == "FAILED"
     assert saved["verdict"]["gates"]["layer_rows"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: single stages, continuous rounds, fallbacks, cycles, rounding
+# ---------------------------------------------------------------------------
+
+
+def test_stage_gold_finalize_judges_the_rules() -> None:
+    """``run --stage gold-finalize`` runs detection: its rules are judged."""
+    rec = sr.load_record(AML_BATCH)
+    rec["jobs"] = [j for j in rec["jobs"] if j["job_type"] == "gold-finalize"]
+    rec["stage_only"] = "gold-finalize"
+    assert V.verdict_from_record(rec).status == "PASSED"
+    _rules_errored(rec)
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED" and v.gates["aml_rules"] == "FAIL"
+
+
+def test_stage_other_than_bronze_has_no_scale_ratio() -> None:
+    """A single later stage divides another layer's input by the expected
+    bronze: not a scale measurement."""
+    rec = sr.load_record(AML_BATCH)
+    rec["jobs"] = [j for j in rec["jobs"] if j["job_type"] == "gold-finalize"]
+    rec["stage_only"] = "gold-finalize"
+    pb = rec["pipeline_benchmark"]
+    pb["scale_ratio"] = pb["scorecard"]["scale_ratio"] = pb["scores"]["scale_ratio"] = 0.393
+    v = V.verdict_from_record(rec)
+    assert "scale_ratio" not in v.gates and v.status == "PASSED"
+    rec["stage_only"] = "bronze-verify"
+    rec["jobs"] = [j for j in sr.load_record(AML_BATCH)["jobs"] if j["job_type"] == "bronze-verify"]
+    assert V.verdict_from_record(rec).gates["scale_ratio"] == "FAIL"
+
+
+def _round_query(rec: dict, idx: int, name: str) -> dict:
+    return next(q for q in rec["benchmark_rounds"][idx]["queries"] if q["name"] == name)
+
+
+def test_continuous_early_round_may_be_empty() -> None:
+    """Only the last in-stream round is held to the empty-answer rule, as
+    the CLI holds it; the aggregate keeps round 1's rows."""
+    rec = sr.load_record(C360_CONT)
+    _round_query(rec, 0, "Q1_full_aggregation_scan")["rows_returned"] = 0
+    rec["benchmark"]["queries"][0]["rows_returned"] = 0
+    assert V.verdict_from_record(rec).status == "PASSED"
+    _round_query(rec, -1, "Q1_full_aggregation_scan")["rows_returned"] = 0
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED" and v.gates["query_answers"] == "FAIL"
+
+
+def test_continuous_q9_failure_is_tolerated_other_failures_are_not() -> None:
+    rec = sr.load_record(C360_CONT)
+    _round_query(rec, 0, "Q9_executive_dashboard")["success"] = False
+    next(q for q in rec["benchmark"]["queries"] if q["name"].startswith("Q9"))["success"] = False
+    v = V.verdict_from_record(rec)
+    assert v.status == "PASSED" and v.gates["benchmark"] == "PASS"
+    _round_query(rec, 2, "Q2_filtered_aggregation")["success"] = False
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED" and v.gates["benchmark"] == "FAIL"
+
+
+def test_zero_alerts_without_scoring_fails_on_the_rule_counts() -> None:
+    rec = sr.load_record(AML_BATCH)
+    del rec["financial_scoring"]
+    assert V.verdict_from_record(rec).gates["aml_rules"] == "PASS"
+    gold = _job(rec, "gold-finalize")
+    gold["alerts_by_rule"] = dict.fromkeys(gold["alerts_by_rule"], 0)
+    v = V.verdict_from_record(rec)
+    assert v.gates["aml_rules"] == "FAIL"
+    assert any("zero alerts (every rule 0)" in r for r in v.reasons)
+
+
+def test_query_benchmark_fallback_is_judged() -> None:
+    """A record whose answers are only in the pipeline benchmark."""
+    rec = sr.load_record(C360_BATCH)
+    del rec["benchmark"]
+    for q in rec["pipeline_benchmark"]["query_benchmark"]["queries"]:
+        q["rows_returned"] = 0
+    v = V.verdict_from_record(rec)
+    assert v.gates["query_answers"] == "FAIL"
+
+
+def test_multi_cycle_reads_the_last_job_of_each_layer() -> None:
+    rec = sr.load_record(C360_BATCH)
+    first = copy.deepcopy(_job(rec, "silver-build"))
+    first["output_rows"] = 0
+    rec["jobs"].insert(1, first)  # an earlier cycle with 0 rows, the last has rows
+    assert V.verdict_from_record(rec).gates["layer_rows"] == "PASS"
+    rec["jobs"][1]["output_rows"], _job(rec, "silver-build")["output_rows"] = 5, 0
+    assert V.verdict_from_record(rec).gates["layer_rows"] == "FAIL"
+
+
+def test_multi_cycle_scale_ratio_reads_the_last_bronze_stage() -> None:
+    """Each cycle's bronze-verify reads every cycle so far; the scale ratio
+    is the last one's (the first read cycle 1 only)."""
+    from lakebench.metrics.collector import JobMetrics, build_pipeline_benchmark
+
+    m = sr.load_metrics(C360_BATCH)
+    full = m.pipeline_benchmark.scale_ratio
+    bronze = [j for j in m.jobs if j.job_type == "bronze-verify"][-1]
+    cycle1 = JobMetrics(**{**bronze.__dict__, "input_size_gb": bronze.input_size_gb / 2})
+    m.jobs.insert(0, cycle1)
+    pb = build_pipeline_benchmark(m)
+    assert pb.scale_ratio == pytest.approx(full, rel=1e-3)
+
+
+def test_stored_verdict_is_the_recomputed_one_at_a_rounding_edge() -> None:
+    """A scale ratio of 0.9496 is stored as 0.95: the stored verdict, the
+    save gate and every reader judge that stored value alike."""
+    m = sr.load_metrics(C360_BATCH)
+    m.pipeline_benchmark.scale_ratio = 0.9496
+    saved = m.to_dict()
+    assert saved["pipeline_benchmark"]["scale_ratio"] == 0.95
+    assert V.verdict_from_record(saved).to_dict() == saved["verdict"]
+    assert (saved["verdict"]["status"] == "PASSED") is (V.save_gate_problems(m) == [])
+    m.pipeline_benchmark.scale_ratio = 0.9494
+    saved = m.to_dict()
+    assert saved["verdict"]["status"] == "FAILED"
+    assert V.save_gate_problems(m)
+
+
+def test_save_gate_reason_comes_first() -> None:
+    """A run the save gate fails reads its own reason first, not a crash."""
+    m = sr.load_metrics(C360_BATCH)
+    [j for j in m.jobs if j.job_type == "gold-finalize"][-1].output_rows = 0
+    V.apply_save_gate(m, True, lambda _line: None)
+    reasons = m.to_dict()["verdict"]["reasons"]
+    assert reasons[0].startswith("gold has 0 rows")
+    assert "Pipeline crashed or was interrupted" not in reasons
+
+
+def test_summary_rows_carry_the_recomputed_pass(tmp_path: Path) -> None:
+    """``report --list`` reads summary rows: a stored success the record no
+    longer shows lists as failed."""
+    from lakebench.metrics.storage import MetricsStorage
+
+    for run in ("497f02", C360_BATCH):
+        rec = sr.load_record(run)
+        d = tmp_path / f"run-{rec['run_id']}"
+        d.mkdir()
+        (d / "metrics.json").write_text(json.dumps(rec))
+    rows = {r["run_id"][-6:]: r for r in MetricsStorage(tmp_path).list_runs()}
+    assert rows["497f02"]["passed"] is False and rows["497f02"]["success"] is True
+    assert rows[C360_BATCH]["passed"] is True
+
+
+def test_local_run_exits_one_when_its_record_fails(tmp_path, monkeypatch) -> None:
+    """``run --local`` through the real save: every stage succeeds, gold
+    wrote no rows, the record reads FAILED and the run exits 1."""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    import lakebench.cli._local as local
+    import lakebench.cli._run as run_mod
+    from lakebench.cli import app
+    from lakebench.metrics import JobMetrics
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "test-access")
+    monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", "test-secret")
+    stages = [
+        ("bronze-verify", True, 1.0),
+        ("silver-build", True, 1.0),
+        ("gold-finalize", True, 1.0),
+    ]
+    monkeypatch.setattr(local, "check_local_supported", lambda *a, **k: None)
+    monkeypatch.setattr(local, "deploy_local", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(
+        local,
+        "run_local",
+        lambda *a, **k: SimpleNamespace(success=True, stages=stages, elapsed_seconds=3.0, logs={}),
+    )
+    monkeypatch.setattr(local, "print_local_summary", lambda *a, **k: None)
+
+    def jobs(collector, cfg, result):
+        for name, _ok, _e in result.stages:
+            rows = 0 if name == "gold-finalize" else 100
+            collector.record_job(
+                JobMetrics(
+                    job_name=f"lakebench-{name}", job_type=name, success=True, output_rows=rows
+                )
+            )
+
+    monkeypatch.setattr(run_mod, "_record_local_jobs", jobs)
+
+    class NoS3:
+        def __init__(self, *a, **k):
+            raise RuntimeError("no local store in this test")
+
+    monkeypatch.setattr("lakebench.s3.S3Client", NoS3)
+    monkeypatch.setattr(run_mod, "_load_latest_datagen_fleet", lambda *a, **k: None)
+    monkeypatch.setattr(run_mod, "write_run_report", lambda *a, **k: None)
+    cfg = tmp_path / "c.yaml"
+    init = CliRunner().invoke(app, ["init", "--output", str(cfg), "--scale", "1"])
+    assert init.exit_code == 0, init.output
+    result = CliRunner().invoke(app, ["run", str(cfg), "--local", "--skip-benchmark", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "Verdict: gold has 0 rows" in result.output
+    saved = _saved_record(tmp_path)
+    assert saved["success"] is False and saved["verdict"]["gates"]["layer_rows"] == "FAIL"

@@ -304,14 +304,14 @@ def _fingerprint_problems(results: Mapping[str, Any], entry: Mapping[str, Any]) 
 #: The verdict qualifier that lists the layers whose rows were not measured
 #: (the layer_rows gate passed on bytes alone). Release evidence must measure
 #: rows, so a non-empty list refuses the record. ``verdict_from_record``
-#: (the verdict recomputed from the record) is to set it with the gate.
+#: (the verdict recomputed from the record) sets it with the gate.
 LAYER_ROWS_UNMEASURED = "layer_rows_unmeasured"
 
 
 def _layer_rows_problem(record: Mapping[str, Any]) -> str | None:
     """Rows per layer > 0, from the verdict's ``layer_rows`` gate computed
-    from the record, with every layer's rows measured. Fails closed until
-    the verdict computes that gate and its ``LAYER_ROWS_UNMEASURED``
+    from the record, with every layer's rows measured. Fails closed when
+    the verdict does not compute that gate or its ``LAYER_ROWS_UNMEASURED``
     qualifier."""
     from lakebench.metrics import verdict as v
 
@@ -476,7 +476,16 @@ def record_problems(
 
     problems: list[str] = []
     if not passed(dict(record)):
+        from lakebench.metrics.verdict import stored_passed, verdict_from_record
+
         reasons = (record.get("verdict") or {}).get("reasons") or record.get("failure_reasons")
+        if stored_passed(dict(record)):
+            # A stored pass the record no longer shows: name the recomputed reasons.
+            try:
+                again = verdict_from_record(dict(record)).reasons
+            except Exception as e:  # noqa: BLE001 -- the refusal stands; say why
+                again = [f"the verdict could not be recomputed ({type(e).__name__}: {e})"]
+            reasons = [r for r in again if not r.startswith("Gate '")]
         problems.append(
             "the run did not pass" + (f": {'; '.join(map(str, reasons))}" if reasons else "")
         )

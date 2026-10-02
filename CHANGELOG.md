@@ -7,20 +7,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
-- **The verdict is decided from the record.** A PASSED verdict now
-  also needs rows in every layer (`layer_rows`), the expected AML rules with
-  no error, an allowed skip only and at least one alert (`aml_rules`), a
-  batch scale ratio of at least 0.95, where 0 now fails (`scale_ratio`), and
-  no successful query with 0 rows unless it may return none
-  (`query_answers`). `run` (batch, continuous and `--local`) exits 1 when
-  the record it saves does not read PASSED, printing `Verdict: <reason>`.
-  `compare`, `report`, the perf gate and the release gate take the strictest
-  of a record's stored verdict and the one recomputed from it, so stored
-  records can read failed: three pinned v1.6 records (AML batch runs on a
-  corpus without a watchlist, which skipped W5 and W6) do, and the stored
-  pair P1 they form is now NOT COMPARABLE. The dependency-set gate is named
-  `dependency_set` (was `deps`); `run --stage` records the stage
-  (`stage_only`) and is judged on that layer only.
+- **The verdict is decided from the record.** A PASSED verdict now also
+  needs rows in every layer (`layer_rows`), the expected AML rules with no
+  error, an allowed skip only and at least one alert (`aml_rules`; a W3 or
+  W17 `path-cap` skip now fails), a batch scale ratio of at least 0.95,
+  where 0 now fails (`scale_ratio`), and no successful query with 0 rows
+  unless it may return none (`query_answers`; continuous runs: the last
+  in-stream round). The stored verdict is computed from the record as
+  serialised. `run` (batch, continuous and `--local`) exits 1 when that
+  verdict is not PASSED, printing `Verdict: <reason>`; this includes
+  conditions that before only turned the report badge red: a continuous
+  ingest ratio below 0.95 that the trickle does not explain, gold stale for
+  more than half the run, and a batch scale ratio between 0 and 0.95.
+  `compare`, the perf gate, the release gate and `report --list` take the
+  strictest of a record's stored verdict and the one recomputed from it,
+  so stored records can read failed: three stored AML batch runs on a
+  corpus without a watchlist (W5 and W6 did not run) do, and the stored
+  Hive-versus-Polaris AML pair they form is now NOT COMPARABLE. The
+  dependency-set gate is named `dependency_set` (was `deps`). `run --stage`
+  records the stage (`stage_only`), is judged on that stage's layer, and is
+  refused as a perf baseline. `lakebench benchmark`'s re-save of a run
+  sets its success from the re-saved verdict.
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6
@@ -1089,6 +1096,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   record's `provenance.git_sha` names), with `-dirty` for uncommitted
   changes, and is left off when no checkout commit can be read (a wheel
   install). It is still written only when the namespace is first stamped.
+- **Multi-cycle scale ratio.** A multi-cycle batch run's `scale_ratio` now
+  reads the last bronze-verify, which reads every cycle; it read the first,
+  so the ratio was about one over the cycle count and the run read failed.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the
