@@ -167,7 +167,7 @@ def egress_note(output: str) -> str:
 
 # --- children and signals --------------------------------------------------------
 
-_CHILD: list[subprocess.Popen] = []
+_CHILD: list[Any] = []  # running subprocess.Popen children
 
 
 def run_child(cmd: list[str], what: str) -> tuple[int, str]:
