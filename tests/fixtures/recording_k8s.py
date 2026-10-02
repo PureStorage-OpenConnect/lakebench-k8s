@@ -647,6 +647,47 @@ def _apply_helm_sets(values: dict[str, Any], sets: list[str]) -> dict[str, Any]:
     return out
 
 
+def _fake_load_kube_config(
+    config_file: str | None = None,
+    context: str | None = None,
+    client_configuration: Any = None,
+    **_: Any,
+) -> None:
+    """Load nothing, but set the host a real load would set.
+
+    The real loader sets ``client_configuration.host`` from the context's
+    cluster entry; ``ClusterTarget.activate`` refuses a load whose host
+    differs from that entry (the kubeconfig changed during the load). This
+    reads the same entry without running any credential plugin, so a context
+    stays consistent under the recorder. With no client configuration (the
+    process default) it does nothing, as before.
+    """
+    if client_configuration is None:
+        return
+    import yaml
+    from kubernetes.config import kube_config
+
+    path = config_file or kube_config.KUBE_CONFIG_DEFAULT_LOCATION
+    docs = []
+    for part in str(path).split(os.pathsep):
+        part = os.path.expanduser(part)
+        if part and os.path.exists(part):
+            with open(part) as fh:
+                docs.append(yaml.safe_load(fh) or {})
+    # kubectl's merge: the first file that sets an entry wins.
+    name = context or next((d["current-context"] for d in docs if d.get("current-context")), None)
+    ctx = next((c for d in docs for c in d.get("contexts") or [] if c.get("name") == name), None)
+    if ctx is None:
+        raise kube_config.ConfigException(f"Invalid kube-config file. No context {name!r}")
+    cluster_name = (ctx.get("context") or {}).get("cluster")
+    cluster = next(
+        (c for d in docs for c in d.get("clusters") or [] if c.get("name") == cluster_name), None
+    )
+    server = str(((cluster or {}).get("cluster") or {}).get("server") or "")
+    if server:
+        client_configuration.host = server.rstrip("/")
+
+
 # ---------------------------------------------------------------------------
 # kubectl / oc / helm argv parsing
 # ---------------------------------------------------------------------------
@@ -2515,7 +2556,7 @@ class K8sRecorder:
                 monkeypatch.setattr(kc, attr, fake)
                 self._fakes[f"kubernetes.client.{attr}"] = fake
         monkeypatch.setattr(kstream, "stream", self._stream)
-        monkeypatch.setattr(kconfig, "load_kube_config", lambda *a, **k: None)
+        monkeypatch.setattr(kconfig, "load_kube_config", _fake_load_kube_config)
         monkeypatch.setattr(kconfig, "load_incluster_config", lambda *a, **k: None)
 
         recorder = self
