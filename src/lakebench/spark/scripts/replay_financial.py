@@ -68,6 +68,16 @@ def resolve_snapshot_id(spark, catalog: str, table: str, depth_months: int) -> i
     return result[0].snapshot_id
 
 
+def read_at_snapshot_id(spark, fq_table: str, snapshot_id: int):
+    """``fq_table`` as of Iceberg snapshot ``snapshot_id``.
+
+    SQL ``VERSION AS OF``: Iceberg 1.11 removed the ``snapshot-id`` read
+    option, so ``spark.read.option("snapshot-id", ...)`` failed before any
+    rule ran on Spark 4.x with the default Iceberg.
+    """
+    return spark.sql(f"SELECT * FROM {fq_table} VERSION AS OF {int(snapshot_id)}")
+
+
 def _empty_alerts_df(spark):
     """Empty gold.alerts-shaped DataFrame. Schema mirrors
     gold_finalize_financial.py DDL_ALERTS exactly so a
@@ -133,7 +143,7 @@ def main() -> None:
     snap = resolve_snapshot_id(spark, CATALOG, SILVER_TXNS, args.depth_months)
     log(f"Resolved snapshot: {snap}")
 
-    historical_raw = spark.read.option("snapshot-id", snap).table(f"{CATALOG}.{SILVER_TXNS}")
+    historical_raw = read_at_snapshot_id(spark, f"{CATALOG}.{SILVER_TXNS}", snap)
     # I10: hide mid-batch crash rows from the historical replay too. A batch
     # whose transactions committed but whose versions row never landed must
     # not surface as a "detectable" window during a later replay. The
