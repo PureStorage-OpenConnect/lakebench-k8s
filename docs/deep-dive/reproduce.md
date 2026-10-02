@@ -67,6 +67,10 @@ reproduction_metadata:
   datagen_fleet_summary: {}       # pods_reported, data_quality
 ```
 
+The package also records the source corpus role (`corpus_role`), and
+leaves out the values that follow the config rather than measure the
+run (a continuous stream stage's seconds are the window length).
+
 Recording refuses a source run with no numbers, one measured under a
 maintenance policy other than the current one, one without an
 experiment block, one whose benchmark results are not established or
@@ -76,7 +80,18 @@ or `ingest_ratio` (continuous).
 `lakebench reproduce <package.yaml>` then:
 
 1. Loads and validates the package (schema version 1, finite numbers,
-   a correctness tolerance of exactly 0).
+   a correctness tolerance of exactly 0). A package from a registered
+   evaluation or robustness look (its role, or for a package without a
+   role a financial seed with a recorded look) is never rerun: with
+   `--report PATH` it compares the report's sha256 with the look record's
+   `report_sha256` and exits 0 on a match, 14 on a mismatch or when the
+   record holds no report sha256, and 2 without `--report`. A held-out
+   package whose seed is not spent is refused (exit 3), and so is any
+   financial package while the look record cannot be read. The role
+   is held out when any of the package, its experiment identity or its
+   run-start inputs says so, and a financial package whose seed is spent
+   or held out is treated as a look whatever role it states. The seed is
+   never printed.
 2. Compares the current commit (`git rev-parse --short=7 HEAD`) with
    `commit_sha`. On a mismatch it exits 14 (requirement unmet) unless
    `--allow-commit-drift` is passed, which turns it into a warning.
@@ -87,8 +102,10 @@ or `ingest_ratio` (continuous).
    `architecture.benchmark.iterations` differs from
    `benchmark_samples_per_query` (batch packages with QpH), if the
    package's maintenance policy differs from the running version's,
-   or if the package has no `experiment_identity`. `--dry-run` stops
-   here.
+   or if the package has no `experiment_identity`, and refuses (exit 3)
+   a config that would generate a held-out corpus (an evaluation or
+   robustness role, or a held-out or spent financial seed), whatever the
+   package says. `--dry-run` stops here.
 5. Refuses (exit 3) when the config's namespace or any of its three
    buckets already exists, and exits 2 when the config sets
    `create_namespace: false` or `create_buckets: false`: reproduce
@@ -109,9 +126,13 @@ or `ingest_ratio` (continuous).
 6. Exits 14 if the run took a different number of samples per query,
    ran under a different maintenance policy, or is not the package's
    experiment or returned different benchmark results.
-7. Compares actual against expected per metric. Correctness metrics
-   (`scale_ratio`, `ingest_ratio`) have zero tolerance in either
-   direction; performance metrics use the performance band in the
+7. Compares actual against expected per metric. `scale_ratio` has zero
+   tolerance in either direction. `ingest_ratio` is a range guard: the
+   run's value must lie in [0.95, 1.05], and the package's value is only
+   a record (honest continuous reruns of one corpus measured 1.0 to
+   1.034). A value that follows the config, which an older package may
+   still carry (continuous stage seconds), is shown as ignored and not
+   gated. Performance metrics use the performance band in the
    metric's bad direction. QpH across different query sets is
    reported as incomparable and counts as performance drift (a
    package recorded before query-set ids is not compared on QpH).
@@ -131,9 +152,10 @@ factor-of-two regression fails.
 
 Correctness has no tolerance because there is no legitimate reason
 for the pipeline to process a different share of the data than the
-recorded run (`scale_ratio` in batch; `ingest_ratio`, bronze rows over
-the rows the trickle had released, in continuous). Any correctness
-drift means the pipeline has a bug or the config is different.
+recorded run (`scale_ratio` in batch). Any correctness drift means the
+pipeline has a bug or the config is different. Continuous `ingest_ratio`
+(bronze rows over the rows the trickle had released) moves a few percent
+between honest runs, so it is checked against a fixed range instead.
 
 ## What breaks reproducibility
 

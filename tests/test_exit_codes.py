@@ -150,6 +150,7 @@ PLANNED_BY = {
     "plan.ok": "CC-23",
     "repeat.no_verified_corpus": "CC-30",
     "reproduce.verify_out_of_band": "ER-13",
+    "run.deps_missing": "SD-5c",
     "run.protected_corpus": "AM-22",
     "series.corpus_changed": "CC-30",
     "status.drift": "CC-27",
@@ -971,6 +972,56 @@ def _scenario_reproduce_drift(monkeypatch, tmp_path):
     return _runner().invoke(app, ["reproduce", str(pkg)])
 
 
+def _look_package(tmp_path, role: str = "evaluation", seed: int = 987654) -> Path:
+    import yaml
+
+    pkg = {
+        "schema_version": 1,
+        "reproduction_metadata": {
+            "commit_sha": "unknown",
+            "pipeline_mode": "batch",
+            "corpus_role": role,
+            "expected_numbers": {"scale_ratio": 1.0},
+            "experiment_identity": {"workload": "financial", "seed": seed},
+        },
+    }
+    path = tmp_path / "look.yaml"
+    path.write_text(yaml.safe_dump(pkg))
+    return path
+
+
+def _stub_look(monkeypatch, report_sha256=None, spent=True, seed=987654):
+    from lakebench.config import datagen_seed
+
+    looks = (
+        [{"role": "evaluation", "seed": seed, "state": "complete", "report_sha256": report_sha256}]
+        if spent
+        else []
+    )
+    monkeypatch.setattr(datagen_seed, "load_looks", lambda path=None: looks)
+    monkeypatch.setattr(datagen_seed, "spent_seeds", lambda: frozenset({seed} if spent else ()))
+    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {seed: "evaluation"})
+
+
+def _scenario_reproduce_verify_out_of_band(monkeypatch, tmp_path):
+    _stub_look(monkeypatch, report_sha256="0" * 64)
+    report = tmp_path / "report.json"
+    report.write_text("{}")
+    return _runner().invoke(
+        app, ["reproduce", str(_look_package(tmp_path)), "--report", str(report)]
+    )
+
+
+def _scenario_reproduce_report_required(monkeypatch, tmp_path):
+    _stub_look(monkeypatch, report_sha256="0" * 64)
+    return _runner().invoke(app, ["reproduce", str(_look_package(tmp_path))])
+
+
+def _scenario_reproduce_held_out(monkeypatch, tmp_path):
+    _stub_look(monkeypatch, spent=False)
+    return _runner().invoke(app, ["reproduce", str(_look_package(tmp_path))])
+
+
 def _scenario_reproduce_existing_namespace(monkeypatch, tmp_path):
     import lakebench.cli._reproduce as rep
 
@@ -1294,6 +1345,9 @@ SCENARIOS = {
     "compare.removed_flag": _scenario_compare_removed_flag,
     "compare.equal_names": _scenario_compare_equal_names,
     "reproduce.commit_drift": _scenario_reproduce_commit_drift,
+    "reproduce.verify_out_of_band": _scenario_reproduce_verify_out_of_band,
+    "reproduce.report_required": _scenario_reproduce_report_required,
+    "reproduce.held_out": _scenario_reproduce_held_out,
     "reproduce.drift": _scenario_reproduce_drift,
     "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
     "reproduce.nonce_changed": _scenario_reproduce_nonce_changed,

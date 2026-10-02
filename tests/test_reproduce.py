@@ -1161,3 +1161,336 @@ class TestExperimentChecks:
         ):
             reproduce(package=pkg_path)
         assert exc.value.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# EVD-11 (ER-13): ingest_ratio is a range guard, config-bound values are not
+# packaged, a registered look is verify-only
+# ---------------------------------------------------------------------------
+
+
+def _stored(run_id):
+    from tests.fixtures import stored_records as sr
+
+    return sr.load_metrics(run_id)
+
+
+def test_continuous_package_leaves_out_stream_stage_seconds():
+    from lakebench.cli._reproduce import _extract_expected_numbers
+
+    numbers = _extract_expected_numbers(_stored("011043-e338c5"))
+    assert "ingest_ratio" in numbers
+    # The stored record's stages each ran for the whole window (1800 s).
+    assert not {"bronze_seconds", "silver_seconds", "gold_seconds"} & set(numbers)
+    assert "query_seconds" in numbers  # a measured stage stays
+
+
+def test_honest_continuous_rerun_passes():
+    """A package from e338c5 (ingest_ratio 1.0167) against 095006's 1.0339:
+    two honest runs of one corpus; it failed as an exact correctness check."""
+    from lakebench.cli._reproduce import _compare, _extract_expected_numbers
+
+    expected = _extract_expected_numbers(_stored("011043-e338c5"))
+    actual = _extract_expected_numbers(_stored("095006-71b4a3"))
+    rows, _outcome = _compare(
+        {"ingest_ratio": expected["ingest_ratio"]},
+        {"ingest_ratio": actual["ingest_ratio"]},
+        {},
+        mode="sustained",
+    )
+    assert rows[0]["band"] == "guard" and rows[0]["status"] == "pass"
+    assert _outcome == 0
+
+
+@pytest.mark.parametrize("value", [1.08, 0.94])
+def test_ratio_outside_range_fails(value):
+    from lakebench.cli._reproduce import _compare
+
+    rows, outcome = _compare({"ingest_ratio": 1.0}, {"ingest_ratio": value}, {}, mode="sustained")
+    assert rows[0]["status"] == "fail" and outcome == 2
+
+
+def test_package_value_is_only_a_record():
+    """The old exact check passed equal values; the guard checks the range."""
+    from lakebench.cli._reproduce import _compare
+
+    rows, outcome = _compare({"ingest_ratio": 1.08}, {"ingest_ratio": 1.08}, {}, mode="sustained")
+    assert rows[0]["status"] == "fail" and outcome == 2
+
+
+def test_missing_ratio_fails():
+    from lakebench.cli._reproduce import _compare
+
+    rows, outcome = _compare({"ingest_ratio": 1.0}, {}, {}, mode="sustained")
+    assert rows[0]["status"] == "missing" and outcome == 2
+
+
+def test_older_package_stage_seconds_are_ignored():
+    from lakebench.cli._reproduce import _compare
+
+    rows, outcome = _compare(
+        {"silver_seconds": 1800.0}, {"silver_seconds": 600.0}, {}, mode="sustained"
+    )
+    assert rows[0]["status"] == "ignored" and outcome == 0
+    # The same key in a batch package is a measurement.
+    rows, outcome = _compare({"silver_seconds": 100.0}, {"silver_seconds": 300.0}, {}, mode="batch")
+    assert rows[0]["status"] == "fail" and outcome == 1
+
+
+def test_package_records_corpus_role():
+    from lakebench.cli._reproduce import _build_package
+
+    pkg = _build_package(_stored("212900-5105a0"), config_reference=None, commit_sha="abc1234")
+    assert "corpus_role" in pkg["reproduction_metadata"]
+
+
+def _look_package(tmp_path, role, seed, workload="financial"):
+    pkg = {
+        "schema_version": 1,
+        "reproduction_metadata": {
+            "commit_sha": "unknown",
+            "pipeline_mode": "batch",
+            "corpus_role": role,
+            "expected_numbers": {"scale_ratio": 1.0},
+            "experiment_identity": {"workload": workload, "seed": seed},
+        },
+    }
+    p = tmp_path / "pkg.yaml"
+    p.write_text(yaml.safe_dump(pkg))
+    return p
+
+
+def _stub_looks(monkeypatch, looks, spent=()):
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(datagen_seed, "load_looks", lambda path=None: list(looks))
+    monkeypatch.setattr(datagen_seed, "spent_seeds", lambda: frozenset(spent))
+
+
+def _no_run(monkeypatch):
+    import lakebench.cli._reproduce as r
+
+    def boom(*a, **k):
+        raise AssertionError("a registered look must never run the pipeline")
+
+    monkeypatch.setattr(r, "_run_pipeline", boom)
+    monkeypatch.setattr(r.subprocess, "run", boom)
+
+
+def test_spent_look_verify_only(tmp_path, monkeypatch, capsys):
+    import hashlib
+
+    from lakebench.cli._reproduce import _verify
+
+    report = tmp_path / "report.json"
+    report.write_text('{"look": "done"}')
+    digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    seed = 987654
+    _stub_looks(
+        monkeypatch,
+        [{"role": "evaluation", "seed": seed, "state": "complete", "report_sha256": digest}],
+        {seed},
+    )
+    _no_run(monkeypatch)
+    pkg = _look_package(tmp_path, "evaluation", seed)
+    _verify(pkg, None, None, False, False, False, report=report)  # exit 0: returns
+    with pytest.raises(typer.Exit) as e:
+        _verify(pkg, None, None, False, False, False, report=None)
+    assert e.value.exit_code == 2
+    other = tmp_path / "other.json"
+    other.write_text("{}")
+    with pytest.raises(typer.Exit) as e:
+        _verify(pkg, None, None, False, False, False, report=other)
+    assert e.value.exit_code == 14
+    out = capsys.readouterr()
+    assert str(seed) not in out.out + out.err
+
+
+def test_unspent_held_out_package_refused(tmp_path, monkeypatch):
+    from lakebench.cli._reproduce import _verify
+
+    _stub_looks(monkeypatch, [], ())
+    _no_run(monkeypatch)
+    with pytest.raises(typer.Exit) as e:
+        _verify(_look_package(tmp_path, "robustness", 555), None, None, False, False, False)
+    assert e.value.exit_code == 3
+
+
+def test_roleless_financial_package_with_a_look_is_verify_only(tmp_path, monkeypatch):
+    from lakebench.cli._reproduce import _verify
+
+    _stub_looks(monkeypatch, [{"role": "evaluation", "seed": 777, "state": "started"}], {777})
+    _no_run(monkeypatch)
+    with pytest.raises(typer.Exit) as e:
+        _verify(_look_package(tmp_path, None, 777), None, None, False, False, False, report=None)
+    assert e.value.exit_code == 2
+
+
+def test_ordinary_package_is_not_a_look(tmp_path, monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+
+    _stub_looks(monkeypatch, [], ())
+    monkeypatch.setattr(
+        "lakebench.config.datagen_seed.protected_seeds", lambda: {999: "evaluation"}
+    )
+    meta = {
+        "corpus_role": "calibration",
+        "experiment_identity": {"workload": "financial", "seed": 43},
+    }
+    assert _spent_look(meta) is None
+    # A roleless financial package on an ordinary seed runs as before.
+    meta = {"corpus_role": None, "experiment_identity": {"workload": "financial", "seed": 43}}
+    assert _spent_look(meta) is None
+    meta = {"corpus_role": None, "experiment_identity": {"workload": "customer360", "seed": 42}}
+    assert _spent_look(meta) is None
+
+
+def test_report_flag_refused_for_an_ordinary_package(tmp_path, monkeypatch):
+    from lakebench.cli._reproduce import _verify
+
+    _stub_looks(monkeypatch, [], ())
+    with pytest.raises(typer.Exit) as e:
+        _verify(
+            _look_package(tmp_path, "calibration", 43),
+            None,
+            None,
+            False,
+            False,
+            False,
+            report=tmp_path / "x",
+        )
+    assert e.value.exit_code == 2
+
+
+def _stub_protected(monkeypatch, protected):
+    monkeypatch.setattr("lakebench.config.datagen_seed.protected_seeds", lambda: dict(protected))
+
+
+def test_roleless_spent_seed_is_verify_only(monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+
+    _stub_looks(monkeypatch, [], {321})
+    _stub_protected(monkeypatch, {})
+    meta = {"experiment_identity": {"workload": "financial", "seed": 321}}
+    assert _spent_look(meta) == ("verify", None)
+
+
+def test_role_read_from_the_identity(monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+
+    _stub_looks(monkeypatch, [], ())
+    _stub_protected(monkeypatch, {})
+    meta = {
+        "experiment_identity": {"workload": "financial", "seed": 5, "corpus role": "evaluation"}
+    }
+    assert _spent_look(meta)[0] == "refuse"
+
+
+def test_roleless_held_out_seed_refused(monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+
+    _stub_looks(monkeypatch, [], ())
+    _stub_protected(monkeypatch, {654: "robustness"})
+    meta = {"experiment_identity": {"workload": "financial", "seed": 654}}
+    kind, why = _spent_look(meta)
+    assert kind == "refuse" and "654" not in why
+
+
+def test_unreadable_look_record_refuses_financial(monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+    from lakebench.config import datagen_seed
+
+    def broken(path=None):
+        raise FileNotFoundError("aml_registered_looks.json")
+
+    monkeypatch.setattr(datagen_seed, "load_looks", broken)
+    meta = {"experiment_identity": {"workload": "financial", "seed": 43}}
+    assert _spent_look(meta)[0] == "refuse"
+    meta = {"experiment_identity": {"workload": "customer360", "seed": 42}}
+    assert _spent_look(meta) is None
+
+
+def test_config_naming_a_held_out_corpus_is_refused(monkeypatch):
+    """The package may be ordinary while --config generates a held-out
+    corpus: the config is checked too."""
+    from lakebench.cli._reproduce import _config_held_out
+
+    _stub_looks(monkeypatch, [], ())
+    _stub_protected(monkeypatch, {777: "evaluation"})
+
+    def cfg(role=None, seed=None, schema="financial"):
+        dg = SimpleNamespace(corpus_role=role, seed=seed)
+        wl = SimpleNamespace(datagen=dg, schema_type=SimpleNamespace(value=schema))
+        return SimpleNamespace(architecture=SimpleNamespace(workload=wl))
+
+    assert _config_held_out(cfg(role="evaluation"))
+    assert _config_held_out(cfg(seed=777))
+    assert not _config_held_out(cfg(seed=43))
+    assert not _config_held_out(cfg(seed=777, schema="customer360"))
+
+
+def test_package_mode_validated(tmp_path):
+    from lakebench.cli._reproduce import ReproduceError, _load_package
+
+    def pkg(mode, ident_mode):
+        p = tmp_path / f"{mode}.yaml"
+        p.write_text(
+            yaml.safe_dump(
+                {
+                    "schema_version": 1,
+                    "reproduction_metadata": {
+                        "pipeline_mode": mode,
+                        "expected_numbers": {"scale_ratio": 1.0},
+                        "experiment_identity": {"mode": ident_mode},
+                    },
+                }
+            )
+        )
+        return p
+
+    with pytest.raises(ReproduceError, match="pipeline_mode must be"):
+        _load_package(pkg("streaming", "batch"))
+    with pytest.raises(ReproduceError, match="disagrees"):
+        _load_package(pkg("sustained", "batch"))
+    _load_package(pkg("continuous", "sustained"))
+
+
+def test_config_error_text_hides_held_out_seeds(monkeypatch):
+    from lakebench.cli._reproduce import _redact_seed_text
+
+    _stub_looks(monkeypatch, [], {321})
+    _stub_protected(monkeypatch, {654: "robustness"})
+    out = _redact_seed_text("seed 654 is held out; seed 321 is listed as spent; scale 10")
+    assert "654" not in out and "321" not in out and "scale 10" in out
+
+
+def test_stated_role_cannot_hide_a_held_out_seed(monkeypatch):
+    """A package whose metadata says calibration while its identity holds a
+    held-out seed (a hand edit) is still refused."""
+    from lakebench.cli._reproduce import _spent_look
+
+    _stub_looks(monkeypatch, [], ())
+    _stub_protected(monkeypatch, {654: "evaluation"})
+    meta = {
+        "corpus_role": "calibration",
+        "experiment_identity": {"workload": "financial", "seed": 654, "corpus role": "calibration"},
+    }
+    assert _spent_look(meta)[0] == "refuse"
+    meta["experiment_identity"]["corpus role"] = "evaluation"
+    meta["experiment_identity"]["seed"] = 1
+    assert _spent_look(meta)[0] == "refuse"
+
+
+def test_unreadable_record_refuses_a_calibration_package(monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+    from lakebench.config import datagen_seed
+
+    def broken(path=None):
+        raise FileNotFoundError("aml_registered_looks.json")
+
+    monkeypatch.setattr(datagen_seed, "load_looks", broken)
+    meta = {
+        "corpus_role": "calibration",
+        "experiment_identity": {"workload": "financial", "seed": 43},
+    }
+    assert _spent_look(meta)[0] == "refuse"
