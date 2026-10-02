@@ -362,6 +362,7 @@ class DeploymentEngine:
         config: LakebenchConfig,
         k8s_client: K8sClient | None = None,
         dry_run: bool = False,
+        deploy_nonce: str | None = None,
     ):
         """Initialize deployment engine.
 
@@ -369,7 +370,10 @@ class DeploymentEngine:
             config: Lakebench configuration
             k8s_client: Kubernetes client (created if not provided)
             dry_run: If True, show what would be deployed without making changes
+            deploy_nonce: The nonce ``deploy`` recorded in the directory's
+                state before deploying; stamped on the namespace.
         """
+        self.deploy_nonce = deploy_nonce
         self.config = config
         self.dry_run = dry_run
         self.results: list[DeploymentResult] = []
@@ -1065,7 +1069,7 @@ class DeploymentEngine:
         from lakebench.deploy.ownership import write_deploy_nonce
 
         try:
-            write_deploy_nonce(core_v1, namespace)
+            write_deploy_nonce(core_v1, namespace, nonce=self.deploy_nonce)
         except Exception as e:  # noqa: BLE001
             return DeploymentResult(
                 component="namespace",
@@ -1863,6 +1867,7 @@ class DeploymentEngine:
         force_legacy: bool = False,
         namespace_wait_timeout: int | None = None,
         delete_buckets: bool = True,
+        expected_incarnation: str | None = None,
     ) -> list[DeploymentResult]:
         """Destroy all deployed components.
 
@@ -1885,4 +1890,5 @@ class DeploymentEngine:
                 else namespace_wait_timeout
             ),
             delete_buckets=delete_buckets,
+            expected_incarnation=expected_incarnation,
         )

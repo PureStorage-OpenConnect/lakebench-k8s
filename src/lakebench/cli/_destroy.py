@@ -36,6 +36,7 @@ from ._helpers import (
     resolve_config_path,
     stdin_is_tty,
 )
+from ._nameless import NAME_OPTION_HELP, guard_nameless
 
 
 def _build_destroy_list(cfg) -> str:
@@ -195,6 +196,10 @@ def destroy(
             ),
         ),
     ] = 600,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
     keep_buckets: Annotated[
         bool,
         typer.Option(
@@ -228,7 +233,7 @@ def destroy(
     try:
         # A namespace too long to finish deploying (LB-153) still has to be
         # destroyable, so the derived-name length check is skipped here.
-        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)
+        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN, name_override=name)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
@@ -247,6 +252,10 @@ def destroy(
         return
 
     namespace = cfg.get_namespace()
+
+    # A nameless config destroys only a deployment it can prove is its own
+    # (its state or stamps); the incarnation it proved is the only one destroy may touch.
+    verified_incarnation = guard_nameless(cfg, config_file, allow_absent=False)
 
     # Confirmation
     if not force:
@@ -364,11 +373,30 @@ def destroy(
             force_legacy=force_legacy,
             namespace_wait_timeout=namespace_timeout,
             delete_buckets=not keep_buckets,
+            expected_incarnation=verified_incarnation,
         )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
+
+    mismatch = next((r for r in results if (r.details or {}).get("incarnation_mismatch")), None)
+    if mismatch is not None:
+        # Nothing was deleted: a refusal (exit 3), not a partial teardown.
+        from lakebench.exit_codes import SafetyRefusal
+
+        _journal_safe(j.end_command, success=False, message=mismatch.message)
+        _journal_safe(j.close_session)
+        raise SafetyRefusal(
+            mismatch.message,
+            why=(
+                "the namespace was redeployed after this command checked it"
+                if (mismatch.details or {}).get("found")
+                else "the namespace is gone (another destroy may have finished it)"
+            ),
+            next="check which deployment the namespace now holds before destroying it",
+            path="destroy.incarnation_mismatch",
+        )
 
     # Summary
     destroy_elapsed = int(time.time() - destroy_start)

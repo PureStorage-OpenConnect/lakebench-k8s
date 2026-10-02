@@ -45,7 +45,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster
   job installs, so a local gate fits the same model as the cluster.
 
+- **A nameless config tears down or reads only a deployment it can prove
+  is its own.** `destroy`, `stop`, `status` and `logs` take `--name` for
+  a config that has no `name:`. With it, or as the only nameless config in
+  its directory, the command goes ahead only when the namespace carries a
+  nonce recorded in `.lakebench/<name>.json` for this directory on this
+  host, or, for a v1.6 directory (only `.lakebench/state.json`), when the
+  namespace's name and created-buckets stamps match `--name`; otherwise it
+  refuses (exit 3) and points at `lakebench init --from`. Without `--name`
+  a v1.6 directory is still refused at load (exit 2). Destroy then touches
+  only the namespace incarnation it checked.
+
 ### Changed
+- **Deploy records its nonce beside the config.** Every `deploy` writes
+  the nonce it stamps on the namespace to `.lakebench/<name>.json` first
+  (last five kept, under a host-local lock), and the namespace gets
+  `lakebench.deployment/state-schema: lb-state/1`. `deploy --dry-run`
+  writes no state; a state that cannot be written or read stops the deploy
+  with exit 4 before any cluster change, and a state copied from another
+  directory or host stops it with exit 3. A destroy that finds the
+  namespace redeployed since its check exits 3 with nothing deleted.
+  `python -m lakebench.config.deploy_state relocate CONFIG NEWDIR [--name
+  NAME]` moves a config with its state; only the directory that wrote the
+  state can move it.
 - **One cluster context per process.** A `lakebench` command
   resolves its cluster context once, at its first cluster call, from
   `platform.kubernetes.context` or, when that is empty, from the
