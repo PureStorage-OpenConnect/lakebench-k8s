@@ -370,6 +370,15 @@ def _check_cluster_capacity(
             f"{plan.floor.memory_gb} GB, driven by {plan.floor_driver} plus "
             f"{plan.co_resident.label}"
         )
+        from lakebench.modules.pipeline_engines.spark.job import executor_override
+
+        overrides = [
+            f"{r.job_type} {executor_override(r.job_type, cfg)}"
+            for r in plan.spark.per_job
+            if executor_override(r.job_type, cfg) is not None
+        ]
+        if overrides:
+            summary += f"; with executor overrides {', '.join(overrides)}"
         hint_lines = "\n".join(f"  {s}" for s in verdict.shortfalls)
 
         if verdict.status == "degraded":
@@ -396,7 +405,12 @@ def _check_cluster_capacity(
                     hint_lines
                     + f"\nCluster: {capacity.node_count} worker node(s), "
                     + f"{avail_cores:.1f} cores / {avail_gb:.1f} GB allocatable."
-                    + "\nReduce 'scale' or use a larger cluster."
+                    + (
+                        "\nLower or unset the executor overrides, reduce 'scale', or use "
+                        "a larger cluster."
+                        if overrides
+                        else "\nReduce 'scale' or use a larger cluster."
+                    )
                     + (
                         "\nA finished datagen Job is not counted: run 'lakebench "
                         "generate' first, then 'lakebench run --skip-generate' within "

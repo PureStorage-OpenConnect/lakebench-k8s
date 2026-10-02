@@ -134,17 +134,27 @@ _OVERRIDE_KEYS_BY_MODE = {
 def _executor_overrides(exp: Mapping[str, Any], record: Mapping[str, Any] | None) -> dict:
     """User-set executor counts the run applied, keyed as in
     ``config_snapshot.spark.executor_overrides``: the block's
-    ``architecture.spark_executor_overrides`` when recorded (v1.7), else
-    the non-null entries of the record's snapshot for the run's mode, else
-    the ``override`` of each ``limits.executors`` entry. One key space and
+    ``architecture.spark_executor_overrides`` (a v1.7 block: absent means
+    none), else, for an exp1 block, the non-null entries of the record's
+    snapshot for the run's mode, else the ``override`` of each
+    ``limits.executors`` entry. One key space and
     one mode filter, so a v1.6 record and a v1.7 record of the same config
     read the same."""
     stored = (exp.get("architecture") or {}).get("spark_executor_overrides")
     if isinstance(stored, Mapping):
         return {str(k): v for k, v in sorted(stored.items()) if v is not None}
+    if block_generation(exp) == EXP2:
+        # A v1.7 block records the overrides the run applied; absent means
+        # none (a local run, or overrides for the other mode).
+        return {}
+    # The block's mode is the mode the run used (experiment_inputs' run_mode).
     mode = "continuous" if exp.get("mode") in ("continuous", "sustained") else "batch"
     keys = _OVERRIDE_KEYS_BY_MODE[mode]
-    snap = ((record or {}).get("config_snapshot") or {}).get("spark") or {}
+    snapshot = (record or {}).get("config_snapshot") or {}
+    if snapshot.get("local"):
+        # A --local run has no executors: no override applied.
+        return {}
+    snap = snapshot.get("spark") or {}
     overrides = snap.get("executor_overrides")
     if isinstance(overrides, Mapping):
         wanted = set(keys.values())
