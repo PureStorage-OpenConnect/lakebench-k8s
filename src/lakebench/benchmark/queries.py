@@ -767,6 +767,10 @@ def qph_comparable(a: str | None, b: str | None) -> tuple[bool, str]:
             f"query set not recorded ({a or 'none'} vs {b or 'none'}); "
             "the run predates query-set ids"
         )
+    if a == "blended" or b == "blended":
+        return False, (
+            f"rounds ran different query sets ({a} vs {b}); a median over them is not one QpH"
+        )
     if a != b:
         return False, f"different query sets ({a} vs {b})"
     return True, ""

@@ -275,6 +275,30 @@ is the median over all rounds and `qph_degradation_pct` compares the first
 and second halves, so settling rounds are included in both. The median
 limits the effect when only a few rounds land in a settling window.
 
+Each in-stream round records `index`, `started_at`, `ended_at`, the queries
+it executed (`executed_queries`, the ones that succeeded),
+`executed_query_set_id` and `investigator_queries` (`included`,
+`absent_no_cases`, `probe_failed`; null until the AML investigator rounds
+set it, and for C360). A round whose query failed executed a smaller set
+than the others, so its QpH is over different queries.
+`scores.composite_qph_basis` says whether the rounds behind the in-stream
+QpH (those with a QpH) executed more than one set (`blended`) and how many
+rounds each set has; `scores.composite_qph_by_set` is the median per set. A
+round recorded before 1.7 gets its set from its queries' success flags,
+and `compare`, the perf gate and `reproduce` all read the basis from the
+rounds, so an older run in which a query failed in some rounds and not
+others reads blended too. When the rounds are blended, the aggregate
+benchmark's `query_set_id` reads `blended` (otherwise it is, as before, the
+set of every query name the rounds ran, even when one query failed in every
+round). `compare` then shows a continuous run's `composite_qph`,
+`in_stream_composite_qph` and `qph_degradation_pct` marked not assessed
+("rounds ran different query sets") and compares no other QpH row, and the
+perf gate and `reproduce` leave the in-stream QpH out. When every round
+missed the same query, `compare` and `reproduce` read the run's query set as
+the smaller set the rounds executed (for a record from before 1.7, its
+pinned legacy id or `unknown`), so its QpH is not compared with a run that
+executed every query.
+
 The value is reported only when the pre and post rounds are distinguishable
 at the samples taken. Over the paired queries, each round's total seconds
 can fall anywhere between the sum of per-query fastest samples and the sum
@@ -312,6 +336,20 @@ actually got (`experiment.effective_maintenance`), one label per operation
 
 Two runs whose effective maintenance differs are comparable at best, not
 like-for-like.
+
+Compaction differs by engine: Trino runs `optimize` with a 128 MB file size
+threshold, Spark Thrift runs Iceberg `rewrite_data_files` with its defaults.
+A run whose compaction ran records the operation and its parameters in
+`effective_maintenance.detail.operations.compaction` (`{"operation":
+"trino_optimize", "params": {"file_size_threshold": "128MB"}}`, or
+`iceberg_rewrite_data_files`; `mixed`, with the list in `operations`, when
+compaction calls fell back to the other engine), taken from the code that
+writes the statements. Delta compaction never runs. An exp2 block also names
+it in the id (`compaction=ran(trino_optimize:128MB)`, or
+`compaction=ran(mixed(iceberg_rewrite_data_files+trino_optimize:128MB))`); for a record from before it,
+`compare` derives the operation from the query engine and table format. The
+compaction operation is an execution condition: a Trino and a Spark Thrift
+run that both compacted are not like-for-like.
 
 Compaction is counted per table: a table counts as compacted only when
 every statement for it succeeded. On Trino, a Customer 360 silver table

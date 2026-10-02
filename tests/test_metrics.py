@@ -4004,12 +4004,12 @@ class TestPipelineMetricsRounds:
 
 
 # ---------------------------------------------------------------------------
-# MetricsCollector record_benchmark_round
+# MetricsCollector record_round
 # ---------------------------------------------------------------------------
 
 
 class TestRecordBenchmarkRound:
-    """Tests for MetricsCollector.record_benchmark_round."""
+    """Tests for MetricsCollector.record_round."""
 
     def test_records_round(self):
         c = MetricsCollector()
@@ -4023,7 +4023,7 @@ class TestRecordBenchmarkRound:
             total_seconds=30.0,
             round_meta=meta,
         )
-        c.record_benchmark_round(rnd)
+        c.record_round(rnd)
         assert len(c.current_run.benchmark_rounds) == 1
         assert c.current_run.benchmark_rounds[0].qph == 200.0
 
@@ -4031,7 +4031,7 @@ class TestRecordBenchmarkRound:
         c = MetricsCollector()
         c.start_run("test-run", "test", {})
         for i in range(3):
-            c.record_benchmark_round(
+            c.record_round(
                 BenchmarkMetrics(
                     mode="power",
                     cache="hot",
@@ -4046,7 +4046,7 @@ class TestRecordBenchmarkRound:
     def test_no_current_run(self):
         c = MetricsCollector()
         # Should not raise even without a current run
-        c.record_benchmark_round(
+        c.record_round(
             BenchmarkMetrics(
                 mode="power",
                 cache="hot",

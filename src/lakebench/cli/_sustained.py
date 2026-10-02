@@ -1459,11 +1459,17 @@ def _run_iceberg_compaction(
     )
     elapsed = _time.monotonic() - started
     per_table = _table_outcome(plan, out)
+    # What the statements do, from the module that builds them (Delta
+    # compaction returned above: OPTIMIZE never runs).
+    from lakebench.modules.table_formats.iceberg.maintenance import compaction_operation
+
+    op = compaction_operation(engine, file_size_threshold)
     _note_outcome(
         outcomes,
         "compaction",
         unit="tables",
         engine=engine,
+        **(op or {}),
         **per_table,
         statements_total=len(plan),
         statements_succeeded=out["succeeded"],
@@ -1861,6 +1867,7 @@ def _run_benchmark_round(
     # time different snapshots. The rounds themselves are the repeats, and
     # the scores take their median (qph_degradation_pct, composite_qph).
     # No result fingerprints: each round reads tables still being written.
+    round_started = utc_now()
     bench_result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=False)
 
     # 4. Check Q9 for contention (gold-table query)
@@ -1921,8 +1928,8 @@ def _run_benchmark_round(
         engine=bench_result.engine,
     )
 
-    # 6. Record the round
-    collector.record_benchmark_round(bench_metrics)
+    # 6. Record the round (the one writer of the round record)
+    collector.record_round(bench_metrics, started_at=round_started, ended_at=utc_now())
 
     # 7. Print inline result
     freshness_str = (

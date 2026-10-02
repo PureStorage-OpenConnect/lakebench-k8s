@@ -158,6 +158,10 @@ class MetricMeta:
     #: gate from elsewhere in the record; ``ml_loop``: in the record's
     #: ``ml_loop`` block.
     source: Literal["scores", "derived", "ml_loop"] = "scores"
+    #: A median over in-stream rounds: when the rounds executed different
+    #: query sets (``scores.composite_qph_basis.blended``) the number blends
+    #: them and is not assessed between runs.
+    blended_by_rounds: bool = False
     description: str = ""
 
     @property
@@ -275,6 +279,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         _AML_CAPS,
+        blended_by_rounds=True,
         description="Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
     ),
     MetricMeta(
@@ -286,6 +291,26 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _ALL_WL,
         (),
         description="Continuous. In-stream benchmark rounds whose median is composite_qph (rounds with a QpH); 0 means composite_qph is the single post-stream benchmark. Runs with different counts are not like-for-like",
+    ),
+    MetricMeta(
+        "composite_qph_basis",
+        "struct",
+        "none",
+        "diagnostic",
+        _CONT,
+        _ALL_WL,
+        (),
+        description="Continuous. Whether composite_qph blends in-stream rounds that executed different query sets (blended), and the rounds per executed query set id (sets); 'not_recorded' for rounds that did not record their executed set",
+    ),
+    MetricMeta(
+        "composite_qph_by_set",
+        "struct",
+        "none",
+        "diagnostic",
+        _CONT,
+        _ALL_WL,
+        (),
+        description="Continuous. Median in-stream QpH per executed query set id",
     ),
     MetricMeta(
         "data_freshness_seconds",
@@ -537,6 +562,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         _AML_CAPS,
+        blended_by_rounds=True,
         description="Median QpH from in-stream benchmark rounds",
     ),
     MetricMeta(
@@ -557,6 +583,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
+        blended_by_rounds=True,
         description="QpH degradation from first-half to second-half of sustained run (positive = slower, negative = faster)",
     ),
     MetricMeta(
