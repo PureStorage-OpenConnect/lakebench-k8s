@@ -619,3 +619,56 @@ jobs:
               assert got == pins[name], f"{name} {got} installed, REFERENCE_PY_DEPS pins {pins[name]}"
               print(f"{name}=={got}")
           PY
+
+  # The quick path of CONTRIBUTING.md, run as written in a clean container
+  # (scripts/contributor_path.py turns its one clone line into a clone of
+  # the commit under test). It includes `make test-spark`, so it is outside
+  # the fast-path budgets and runs only where the path can have changed:
+  # every push to main, integrate/**, train/* and tags, and any other push
+  # or pull request that touches CONTRIBUTING.md, the Makefile,
+  # pyproject.toml or a workflow; otherwise its steps are skipped. The
+  # backstop is the slowest Spark pass plus check-fast and the installs.
+  contributor-path:
+    name: Contributor path
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    container:
+      image: python:3.11-bookworm@sha256:3fd8382c50bae84184460a6e1a8ff4eeac0e3ca6a560691cb56bd84d2b6ec9ca
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Changed inputs
+        id: inputs
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "run=$(python3 scripts/contributor_path.py --should-run)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Java 17 and make
+        if: steps.inputs.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends openjdk-17-jre-headless make git
+
+      - name: Run the quick path
+        if: steps.inputs.outputs.run == 'true'
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/contributor_path.py > "$RUNNER_TEMP/quick-path.sh"
+          cat "$RUNNER_TEMP/quick-path.sh"
+          work="$(mktemp -d)"
+          cd "$work"
+          bash -euo pipefail "$RUNNER_TEMP/quick-path.sh"

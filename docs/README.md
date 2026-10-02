@@ -56,8 +56,8 @@ Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures o
 
 ## Development
 
-- [Development Guide](development.md) -- Dev setup, running tests, project structure
-- [Contributing](contributing.md) -- PR process, code standards, test requirements
+- [Development Guide](development.md) -- architecture map, test and CI wiring, adding a recipe or a workload, the frozen AML scope
+- [Contributing](../CONTRIBUTING.md) -- setup, test tiers, pull requests, review and style
 
 ## Internal Reference
 
