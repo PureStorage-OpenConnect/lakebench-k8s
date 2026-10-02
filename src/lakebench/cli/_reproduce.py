@@ -1301,7 +1301,7 @@ def _verify_spent_look(entry: Any, role: Any, report: Path | None) -> None:
     if digest != recorded:
         print_error(f"--report does not match the {what}'s recorded report (sha256 differs).")
         raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
-    console.print(Panel(f"[green]Report matches the recorded {what}[/green]", expand=False))
+    console.print(Panel(f"[green]Report matches the recorded {esc(what)}[/green]", expand=False))
 
 
 def _verify(
