@@ -982,26 +982,17 @@ class K8sClient:
 
     @staticmethod
     def _parse_cpu_to_millicores(cpu: str) -> int:
-        """Parse K8s CPU string to millicores."""
-        cpu = cpu.strip()
-        if cpu.endswith("m"):
-            return int(cpu[:-1])
-        return int(float(cpu) * 1000)
+        """K8s CPU quantity to millicores (lakebench.quantity)."""
+        from lakebench.quantity import to_millicores
+
+        return to_millicores(cpu)
 
     @staticmethod
     def _parse_memory_to_bytes(mem: str) -> int:
-        """Parse K8s memory string to bytes."""
-        mem = mem.strip()
-        units = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
-        for suffix, multiplier in units.items():
-            if mem.endswith(suffix):
-                return int(mem[: -len(suffix)]) * multiplier
-        # Plain bytes or with 'k', 'M', 'G' (SI units)
-        si_units = {"k": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4}
-        for suffix, multiplier in si_units.items():
-            if mem.endswith(suffix):
-                return int(mem[: -len(suffix)]) * multiplier
-        return int(mem)
+        """K8s memory quantity to bytes (lakebench.quantity)."""
+        from lakebench.quantity import to_bytes
+
+        return to_bytes(mem)
 
     def get_pod_status(self, name: str, namespace: str | None = None) -> ResourceStatus:
         """Get status of a pod.

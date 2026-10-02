@@ -673,6 +673,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   continuous at scale 1-10 38 cores / 282 GB (was 272 GB) and AML
   continuous 118 cores / 990 GB (was 980 GB); the docs tables follow.
   What the pods request is unchanged.
+- **The capacity check reads every Kubernetes quantity, and fails rather
+  than skips when it cannot.** One parser (`lakebench.quantity`) now
+  serves the preflight, the continuous stream budget, the autosizer, node
+  allocatable and the system fingerprint. `1Ti`, `2000000Ki`, `4G` and
+  `1e3` read correctly (`16G` is 16e9 bytes, 14.9 GiB, where the old
+  parser read 16 GiB); `16g` for a pod memory is not a Kubernetes size and
+  is named, and `admin --controller-tmp-size` no longer takes `1K` or
+  `1 Gi`, which Kubernetes rejects too. A config value the check cannot read now fails it (`run` exits
+  4) where it used to pass as "Capacity check skipped"; an unreachable
+  cluster still skips it. DuckDB's Spark-style memory (`4g`) is counted
+  as the pod deploy renders (`4Gi`).
 - **The capacity check, `config show` and `info` count driver overrides.**
   They read the job profiles only, so `platform.compute.spark.driver_memory`
   and `driver_cores` and the 24g Spark 3 silver and gold drivers were never

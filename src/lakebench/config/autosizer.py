@@ -65,18 +65,10 @@ def _set_if_default(model: Any, field: str, value: object) -> bool:
 
 
 def _parse_memory_gi(mem: str) -> float:
-    """Parse a Kubernetes-style memory string to GiB (float)."""
-    mem = mem.strip()
-    if mem.lower().endswith("gi"):
-        return float(mem[:-2])
-    if mem.lower().endswith("mi"):
-        return float(mem[:-2]) / 1024
-    if mem.lower().endswith("g"):
-        return float(mem[:-1])
-    if mem.lower().endswith("m"):
-        return float(mem[:-1]) / 1024
-    # plain bytes
-    return float(mem) / (1024**3)
+    """A Kubernetes memory quantity in GiB (float); QuantityError otherwise."""
+    from lakebench.quantity import to_gib
+
+    return to_gib(mem)
 
 
 def _parse_cpu_millicores(cpu: str | int | float) -> int:
@@ -85,18 +77,14 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
     Accepts:
       - "500m", "1500m"        -> 500, 1500
       - "1", "2", "1.5"        -> 1000, 2000, 1500
-      - int/float (whole cores) -> value * 1000
+      - int/float (cores)       -> value * 1000
+      - any Kubernetes quantity, rounded up to a whole millicore
 
-    Raises ValueError on unparseable input.
+    Raises QuantityError (a ValueError) on unparseable input.
     """
-    if isinstance(cpu, (int, float)):
-        return int(cpu * 1000)
-    s = cpu.strip()
-    if not s:
-        raise ValueError(f"empty CPU value: {cpu!r}")
-    if s.endswith("m"):
-        return int(float(s[:-1]))
-    return int(float(s) * 1000)
+    from lakebench.quantity import to_millicores
+
+    return to_millicores(cpu)
 
 
 # Datagen memory model (LB-204 re-fit, 2026-09-29). Fitted to the cgroup

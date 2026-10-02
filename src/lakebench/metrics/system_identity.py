@@ -453,8 +453,8 @@ def _now() -> str:
 
 def _quantities(requests: Any) -> tuple[float, float]:
     """(cores, bytes) of a ``{cpu, memory}`` request mapping, any canonical
-    Kubernetes quantity (``kubernetes.utils.parse_quantity``)."""
-    from kubernetes.utils import parse_quantity
+    Kubernetes quantity (``lakebench.quantity``)."""
+    from lakebench.quantity import parse as parse_quantity
 
     requests = requests or {}
     cpu, mem = requests.get("cpu"), requests.get("memory")
@@ -554,7 +554,7 @@ def observe_load(k8s: Any, namespace: str, *, local: bool = False) -> dict[str, 
             "cotenant_requested": not_observed(reason),
             "cotenant_pending": not_observed(reason),
         }
-    from kubernetes.utils import parse_quantity
+    from lakebench.quantity import parse as parse_quantity
 
     out: dict[str, Any] = {"at": at}
     workers: set[str] = set()

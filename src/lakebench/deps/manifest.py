@@ -72,12 +72,15 @@ SERVE_LIMITS = {"cpu": "1", "memory": "1Gi"}
 
 
 def _cpu_m(q: str) -> int:
-    return int(q[:-1]) if q.endswith("m") else int(float(q) * 1000)
+    from lakebench.quantity import to_millicores
+
+    return to_millicores(q)
 
 
 def _mem_mi(q: str) -> int:
-    units = {"Mi": 1, "Gi": 1024}
-    return int(q[:-2]) * units[q[-2:]]
+    from lakebench.quantity import to_bytes
+
+    return -(-to_bytes(q) // 1024**2)
 
 
 # What the scheduler reserves for the lb-deps pod for its whole life: the

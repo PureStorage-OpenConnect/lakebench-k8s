@@ -314,7 +314,11 @@ def _engine_pods(cfg: LakebenchConfig) -> list[tuple[str, float, float]]:
             pod_gi = _parse_memory_gi(heap)
         pods.append(("Spark Thrift", float(qe.spark_thrift.cores), pod_gi))
     elif engine == "duckdb":
-        pods.append(("DuckDB", float(qe.duckdb.cores), _parse_memory_gi(qe.duckdb.memory)))
+        # A Spark-style size ("4g"); the pod requests it as deploy renders it.
+        from lakebench.deploy.engine import DeploymentEngine
+
+        pod = DeploymentEngine._spark_mem_to_k8s(qe.duckdb.memory)
+        pods.append(("DuckDB", float(qe.duckdb.cores), _parse_memory_gi(pod)))
     return pods
 
 
