@@ -49,7 +49,8 @@ class RunArgs:
     sustained: bool = False
     duration: int | None = None
     include_datagen: bool = False
-    skip_deploy: bool = False
+    skip_deploy: bool = False  # --skip-preflight
+    skip_infra: bool = False  # --skip-deploy
     skip_generate: bool = False
     regenerate: bool = False
     skip_maintenance: bool = False
@@ -122,6 +123,12 @@ RUN_RULES: tuple[RunRule, ...] = (
         "--deploy-only only deploys: --stage, --generate and --skip-generate do not apply",
         "drop them, or drop --deploy-only",
         "`--deploy-only` with `--stage`, `--generate` or `--skip-generate`",
+    ),
+    RunRule(
+        lambda a, mode: a.skip_infra and (a.deploy_only or a.generate_only),
+        "--skip-deploy skips the deploy: --deploy-only and --generate-only deploy",
+        "drop --skip-deploy, or drop --deploy-only/--generate-only",
+        "`--skip-deploy` with `--deploy-only` or `--generate-only`",
     ),
     RunRule(
         lambda a, mode: a.generate_only and a.skip_generate,

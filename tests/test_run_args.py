@@ -44,6 +44,7 @@ CASES = [
     (["--continuous", "--stage", "silver-build"], "--stage does not apply to a continuous run"),
     (["--deploy-only", "--generate-only"], "--deploy-only and --generate-only cannot be combined"),
     (["--deploy-only", "--stage", "silver-build"], "--deploy-only only deploys"),
+    (["--skip-deploy", "--deploy-only"], "--skip-deploy skips the deploy"),
     (["--generate-only", "--skip-generate"], "--generate-only and --skip-generate cannot be"),
     (["--local", "--force-rebuild"], "--local does not deploy, generate on its own, rebuild"),
     (["--regenerate"], "--regenerate only applies with --generate or --generate-only"),
@@ -82,6 +83,7 @@ def _args_of(argv: list[str]) -> RunArgs:
         "--regenerate": "regenerate",
         "--generate": "include_datagen",
         "--skip-generate": "skip_generate",
+        "--skip-deploy": "skip_infra",
     }
     kw: dict = {}
     it = iter(argv)

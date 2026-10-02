@@ -673,6 +673,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   continuous at scale 1-10 38 cores / 282 GB (was 272 GB) and AML
   continuous 118 cores / 990 GB (was 980 GB); the docs tables follow.
   What the pods request is unchanged.
+- **`deploy` runs the cluster capacity check before it creates anything,
+  and `run --skip-deploy` no longer skips the prerequisites.** A config the
+  cluster cannot hold was deployed and only failed at `run` (or never, with
+  `--skip-deploy`). Deploy now refuses it with exit 4 and creates nothing
+  (the check counts the pipeline and always-on pods, not datagen, which
+  deploy does not run; `--dry-run` shows the result).
+  `--skip-deploy` is no longer an alias of `--skip-preflight`: it skips the
+  deploy and the infrastructure readiness check, and the read-only
+  prerequisite checks still run; `--skip-preflight` skips both as before.
+  When the peak calculation itself fails, the message names the exception.
 - **The capacity check reads every Kubernetes quantity, and fails rather
   than skips when it cannot.** One parser (`lakebench.quantity`) now
   serves the preflight, the continuous stream budget, the autosizer, node

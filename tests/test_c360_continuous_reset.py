@@ -316,10 +316,10 @@ def test_run_command_passes_force_reset(monkeypatch, tmp_path):
         lambda *a, **kw: seen.update(kw),
     )
     res = CliRunner().invoke(
-        app, ["run", str(cfg_file), "--sustained", "--skip-deploy", "--force-reset"]
+        app, ["run", str(cfg_file), "--sustained", "--skip-preflight", "--force-reset"]
     )
     assert seen.get("force_reset") is True, res.output
-    res = CliRunner().invoke(app, ["run", str(cfg_file), "--sustained", "--skip-deploy"])
+    res = CliRunner().invoke(app, ["run", str(cfg_file), "--sustained", "--skip-preflight"])
     assert seen.get("force_reset") is False, res.output
 
 

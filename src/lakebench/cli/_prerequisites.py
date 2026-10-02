@@ -281,6 +281,18 @@ def _unreadable_config(e: Exception) -> PrereqResult:
     )
 
 
+def deploy_capacity_check(cfg) -> PrereqResult:
+    """The capacity check ``deploy`` runs before it creates anything.
+
+    Read-only: ``run``'s check (``config.sizing.check_capacity``, which
+    sizes a copy of the config against the cluster as ``run`` does) in the
+    config's own mode, without datagen. Deploy does not generate, so it
+    refuses only a config whose pipeline and always-on pods cannot fit;
+    ``run`` checks datagen too when it creates datagen pods.
+    """
+    return _check_cluster_capacity(cfg, datagen_runs=False)
+
+
 def _check_cluster_capacity(
     cfg,
     *,

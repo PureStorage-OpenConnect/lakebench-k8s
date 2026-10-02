@@ -109,6 +109,17 @@ class TestRecommendCommand:
 class TestPreflightCheck:
     """Tests for _preflight_check deploy guard."""
 
+    @pytest.fixture(autouse=True)
+    def _capacity_fits(self, monkeypatch):
+        # These tests are about the Stackable check; the capacity check has
+        # its own tests (tests/test_deploy_capacity.py).
+        from lakebench.cli._prerequisites import PrereqResult
+
+        monkeypatch.setattr(
+            "lakebench.cli._prerequisites.deploy_capacity_check",
+            lambda cfg: PrereqResult(name="cluster-capacity", passed=True, message="OK"),
+        )
+
     def test_preflight_blocks_on_missing_stackable(self, monkeypatch):
         """Preflight exits 1 when Stackable CRDs are missing and install is false."""
         from unittest.mock import MagicMock, patch

@@ -267,6 +267,12 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--force-legacy` | | `false` | Claim ownership without tag proof: a pre-1.5 annotation-less namespace or untagged bucket, or a bucket on a backend without tagging that does not match the deployment-name prefix. Use only when you have confirmed the resources are yours |
 
+Before it creates anything, deploy runs `run`'s cluster capacity check
+(read-only, without datagen: deploy does not generate) and refuses with exit
+4 when the cluster's allocatable capacity or its largest node cannot hold
+the config's pipeline and always-on pods; a cluster it cannot reach does not
+block it. `--dry-run` prints the result without refusing.
+
 Deploys components in order: namespace, secrets, S3 buckets, scratch
 StorageClass check (it must already exist; `lakebench admin
 install-scratch-storage-class` installs it), PostgreSQL, catalog (Hive or
@@ -325,7 +331,8 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--stage` | `-s` | all | Run a specific stage only (`bronze-verify`, `silver-build`, `gold-finalize`) |
 | `--timeout` | `-t` | auto | Timeout per job in seconds. When omitted: `max(3600, scale * 120)`; the AML workload adds 900 s and never goes below its bronze-verify budget |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
-| `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
+| `--skip-preflight` | | `false` | Skip prerequisite checks and infrastructure validation, the cluster capacity check included |
+| `--skip-deploy` | | `false` | Skip the deploy and the infrastructure readiness check (namespace and components); the read-only prerequisite checks, cluster capacity included, still run and fail the run with exit 4 |
 | `--skip-generate` | | `false` | Skip datagen (refused with `--generate`) |
 | `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused without `--generate` or `--generate-only`, and in a local or continuous run. |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
@@ -347,6 +354,7 @@ cluster call, and exits 2 (usage) naming the first refused one:
 - `--stage` with a continuous run (flag or config);
 - `--deploy-only` with `--generate-only`;
 - `--deploy-only` with `--stage`, `--generate` or `--skip-generate`;
+- `--skip-deploy` with `--deploy-only` or `--generate-only`;
 - `--generate-only` with `--skip-generate`;
 - `--local` with `--deploy-only`, `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
 - `--regenerate` without `--generate` or `--generate-only`;

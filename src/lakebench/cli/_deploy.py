@@ -60,7 +60,20 @@ def _preflight_check(cfg) -> None:
         print_error("S3 credentials not configured (set access_key and secret_key)")
         raise typer.Exit(ExitCode.USAGE)
 
-    # 3. Check Stackable CRDs if catalog=hive
+    # 3. The cluster can hold the config's peak (read-only; run's check).
+    from lakebench.cli._prerequisites import deploy_capacity_check
+
+    capacity = deploy_capacity_check(cfg)
+    if not capacity.passed:
+        print_error(f"cluster-capacity: {esc(capacity.message)}")
+        for line in (capacity.hint or "").split("\n"):
+            if line:
+                console.print(f"  [dim]{esc(line)}[/dim]")
+        print_info("Nothing was created.")
+        raise typer.Exit(ExitCode.PREREQUISITE)
+    print_info(f"cluster-capacity: {esc(capacity.message)}")
+
+    # 4. Check Stackable CRDs if catalog=hive
     if cfg.architecture.catalog.type.value == "hive":
         _missing_stackable: list[str] = []
         try:
@@ -550,6 +563,14 @@ def _deploy_impl(
     # Pre-flight validation (BUG-012)
     if not dry_run:
         _preflight_check(cfg)
+    else:
+        from lakebench.cli._prerequisites import deploy_capacity_check
+
+        preview = deploy_capacity_check(cfg)
+        print_info(
+            f"cluster-capacity: {esc(preview.message)}"
+            + ("" if preview.passed else " (deploy would refuse it, exit 4)")
+        )
 
     # Confirmation prompt (mirrors destroy command pattern)
     if not yes and not dry_run:
