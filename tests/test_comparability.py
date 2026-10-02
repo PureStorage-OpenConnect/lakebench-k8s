@@ -1113,3 +1113,11 @@ class TestDerivedBenchmarkRounds:
     def test_no_record_no_derivation(self):
         exp = sr.load_record("011043-e338c5")["experiment"]
         assert cmp.classify(exp).keys(cmp.CONDITIONS)["benchmark rounds"] is None
+
+
+def test_derived_rounds_zero_and_odd_values():
+    rec = sr.load_record("011043-e338c5")
+    rec["pipeline_benchmark"].pop("benchmark_rounds")
+    assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 0
+    rec["pipeline_benchmark"]["benchmark_rounds"] = [{"qph": "12.5"}, {"qph": "x"}, "bad"]
+    assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 1

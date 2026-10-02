@@ -301,10 +301,21 @@ def _benchmark_rounds(limits: Mapping[str, Any], record: Mapping[str, Any] | Non
     stored = limits.get("benchmark_rounds")
     if stored is not None:
         return stored
-    rounds = ((record or {}).get("pipeline_benchmark") or {}).get("benchmark_rounds")
+    pb = (record or {}).get("pipeline_benchmark")
+    if not isinstance(pb, Mapping):
+        return None
+    # A record with no in-stream round saves no rounds list: 0, as stored.
+    rounds = pb.get("benchmark_rounds") or []
     if not isinstance(rounds, list):
         return None
-    return sum(1 for r in rounds if isinstance(r, Mapping) and (r.get("qph") or 0) > 0)
+
+    def ran(r: Any) -> bool:
+        try:
+            return isinstance(r, Mapping) and float(r.get("qph") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    return sum(1 for r in rounds if ran(r))
 
 
 def access_paths(exp: Mapping[str, Any]) -> dict[str, Any]:

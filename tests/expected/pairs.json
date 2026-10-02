@@ -116,7 +116,7 @@
       "a": "20260927-011043-e338c5",
       "b": "20260927-095006-71b4a3",
       "design_before": "comparable, not like-for-like (effective maintenance, maintenance settings)",
-      "note": "benchmark rounds also differs (stored limits.benchmark_rounds absent on A, 5 on B) After the rounds derivation A reads 5 rounds (pipeline_benchmark rounds with QpH > 0) against B's stored 5, so benchmark rounds no longer differs.",
+      "note": "benchmark rounds also differs (stored limits.benchmark_rounds absent on A, 5 on B); after the rounds derivation A reads 5 rounds (pipeline_benchmark rounds with QpH > 0) against B's stored 5, so benchmark rounds no longer differs.",
       "before": {
         "verdict": "comparable",
         "like_for_like": false,
