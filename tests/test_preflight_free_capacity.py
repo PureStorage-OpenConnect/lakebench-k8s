@@ -306,15 +306,17 @@ def test_own_namespace_spark_pods_and_running_datagen_are_counted():
 
 
 def test_native_sidecar_counts_with_the_main_containers():
-    from lakebench.k8s.client import _pod_requests
+    from lakebench.quantity import pod_request
 
     sidecar = NS(resources=NS(requests={"cpu": "2", "memory": "2Gi"}), restart_policy="Always")
     plain_init = NS(resources=NS(requests={"cpu": "3", "memory": "1Gi"}), restart_policy=None)
     main = NS(resources=NS(requests={"cpu": "1", "memory": "1Gi"}))
     pod = NS(spec=NS(containers=[main], init_containers=[sidecar, plain_init], overhead=None))
-    cpu, mem = _pod_requests(pod)
-    assert cpu == 3.0  # max(1 + 2, 3)
-    assert mem == 3 * GIB  # max(1 + 2, 1) GiB
+    cpu, mem = pod_request(pod)
+    # The plain init container runs beside the sidecar started before it:
+    # max(main 1 + sidecar 2, init 3 + sidecar 2).
+    assert cpu == 5.0
+    assert mem == 3 * GIB  # max(1 + 2, 1 + 2) GiB
 
 
 def test_continuous_degraded_caps_against_the_allocatable_base():

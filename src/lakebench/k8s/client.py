@@ -200,33 +200,6 @@ def _quantity(value: Any) -> float:
     return float(parse(str(value)))
 
 
-def _pod_requests(pod: Any) -> tuple[float, float]:
-    """(cores, bytes) the scheduler reserves for *pod*: the larger of its
-    containers' summed requests and its largest init container, plus the
-    pod overhead."""
-
-    def _req(containers: Any) -> list[tuple[float, float]]:
-        out = []
-        for c in containers or []:
-            req = (getattr(c.resources, "requests", None) or {}) if c.resources else {}
-            out.append((_quantity(req.get("cpu", 0)), _quantity(req.get("memory", 0))))
-        return out
-
-    spec = pod.spec
-    main = _req(spec.containers)
-    inits = list(getattr(spec, "init_containers", None) or [])
-    # A native sidecar (an init container with restartPolicy Always) runs
-    # for the pod's life, so the scheduler adds it to the main containers.
-    sidecars = [c for c in inits if getattr(c, "restart_policy", None) == "Always"]
-    plain = [c for c in inits if getattr(c, "restart_policy", None) != "Always"]
-    main += _req(sidecars)
-    init = _req(plain)
-    cpu = max(sum(c for c, _ in main), max((c for c, _ in init), default=0.0))
-    mem = max(sum(m for _, m in main), max((m for _, m in init), default=0.0))
-    overhead = getattr(spec, "overhead", None) or {}
-    return cpu + _quantity(overhead.get("cpu", 0)), mem + _quantity(overhead.get("memory", 0))
-
-
 def _schedulable(node: Any) -> bool:
     """Ready, not cordoned, and no NoSchedule or NoExecute taint. A
     control-plane node counts when nothing keeps pods off it."""
@@ -1112,7 +1085,7 @@ class K8sClient:
         except Exception as e:  # noqa: BLE001
             return CapacityUnknown(f"listing pods failed ({type(e).__name__})")
 
-        from lakebench.quantity import QuantityError
+        from lakebench.quantity import QuantityError, pod_request
 
         known = {n.metadata.name for n in nodes}
         used: dict[str, list[float]] = {}
@@ -1132,7 +1105,7 @@ class K8sClient:
                     and not (count_own is not None and count_own(pod))
                 ):
                     continue
-                cpu, mem = _pod_requests(pod)
+                cpu, mem = pod_request(pod)
                 acc = used.setdefault(node_name, [0.0, 0.0])
                 acc[0] += cpu
                 acc[1] += mem

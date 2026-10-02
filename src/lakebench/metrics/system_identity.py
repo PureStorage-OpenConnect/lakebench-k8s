@@ -453,46 +453,18 @@ def _now() -> str:
 
 def _quantities(requests: Any) -> tuple[float, float]:
     """(cores, bytes) of a ``{cpu, memory}`` request mapping, any canonical
-    Kubernetes quantity (``lakebench.quantity``)."""
-    from lakebench.quantity import parse as parse_quantity
+    Kubernetes quantity (``lakebench.quantity.request_pair``)."""
+    from lakebench.quantity import request_pair
 
-    requests = requests or {}
-    cpu, mem = requests.get("cpu"), requests.get("memory")
-    return (
-        float(parse_quantity(str(cpu))) if cpu else 0.0,
-        float(parse_quantity(str(mem))) if mem else 0.0,
-    )
+    return request_pair(requests)
 
 
 def _pod_request(pod: Any) -> tuple[float, float]:
-    """(cores, bytes) a pod requests as the scheduler counts it: the larger
-    of (the containers plus the sidecars, which are init containers with
-    ``restartPolicy: Always``) and each regular init container plus the
-    sidecars started before it; replaced, per resource, by a pod-level
-    ``spec.resources`` request; plus the pod overhead."""
-    spec = pod.spec
+    """(cores, bytes) a pod requests as the scheduler counts it
+    (``lakebench.quantity.pod_request``, the one rule)."""
+    from lakebench.quantity import pod_request
 
-    def req(c: Any) -> tuple[float, float]:
-        return _quantities(getattr(getattr(c, "resources", None), "requests", None))
-
-    main = [req(c) for c in spec.containers or []]
-    cpu, mem = sum(c for c, _ in main), sum(m for _, m in main)
-    side_cpu = side_mem = 0.0
-    init_cpu = init_mem = 0.0
-    for c in getattr(spec, "init_containers", None) or []:
-        ic, im = req(c)
-        if getattr(c, "restart_policy", None) == "Always":
-            side_cpu, side_mem = side_cpu + ic, side_mem + im
-        else:
-            init_cpu = max(init_cpu, ic + side_cpu)
-            init_mem = max(init_mem, im + side_mem)
-    cpu, mem = max(cpu + side_cpu, init_cpu), max(mem + side_mem, init_mem)
-    pod_level = getattr(getattr(spec, "resources", None), "requests", None) or {}
-    p_cpu, p_mem = _quantities(pod_level)
-    cpu = p_cpu if pod_level.get("cpu") else cpu
-    mem = p_mem if pod_level.get("memory") else mem
-    o_cpu, o_mem = _quantities(getattr(spec, "overhead", None))
-    return cpu + o_cpu, mem + o_mem
+    return pod_request(pod)
 
 
 #: More pages than any cluster lakebench supports holds: a guard against a

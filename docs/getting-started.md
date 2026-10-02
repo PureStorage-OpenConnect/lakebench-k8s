@@ -143,7 +143,9 @@ checked". A batch
 over data from an earlier `lakebench generate` checks the Spark peak and the
 always-on pods. `lakebench deploy` runs the same check, without datagen,
 before it creates anything (so do `run --deploy-only`, `--generate-only`
-and run's auto-deploy), and refuses with exit 4; it has no flag to skip it.
+and run's auto-deploy), and refuses with exit 4 on the same free capacity;
+it has no flag to skip it. When it cannot read the capacity it warns and
+goes on, and `run`'s preflight refuses until it can.
 
 Above scale 50 a continuous run that generates its own corpus is refused,
 or admitted only with its streams capped hard (one bronze-ingest executor,

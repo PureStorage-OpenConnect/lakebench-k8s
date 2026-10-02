@@ -276,9 +276,12 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 
 Before it creates anything, deploy runs `run`'s cluster capacity check
 (read-only, without datagen: deploy does not generate) and refuses with exit
-4 when the cluster's allocatable capacity or its largest node cannot hold
-the config's pipeline and always-on pods; a cluster it cannot reach does not
-block it. `--dry-run` prints the result without refusing.
+4 when the cluster's free capacity (allocatable minus what pods in other
+namespaces request) or its largest free node cannot hold the config's
+pipeline and always-on pods. Capacity it cannot read (an unreachable
+cluster, a node or pod list it may not read) is a warning, not a refusal:
+deploy has no `--skip-preflight`, and `run`'s preflight refuses until the
+capacity can be read. `--dry-run` prints the result without refusing.
 
 Deploys components in order: namespace, secrets, S3 buckets, scratch
 StorageClass check (it must already exist; `lakebench admin

@@ -213,3 +213,34 @@ def test_deploy_check_leaves_datagen_out(cfg_file):
     with mock.patch.object(_prerequisites, "_check_cluster_capacity") as check:
         _prerequisites.deploy_capacity_check(cfg)
     check.assert_called_once_with(cfg, datagen_runs=False, fail_closed=False)
+
+
+def test_deploy_refuses_a_cluster_whose_capacity_is_taken(recording_k8s, cfg_file):
+    # Eight 40-core / 402 GiB workers hold the scale-1 peak by total, but
+    # another namespace's pods request most of every node: deploy reads free
+    # capacity, as run's preflight does (CC-24), and refuses.
+    from lakebench.cli._prerequisites import deploy_capacity_check
+
+    cfg = _seed(recording_k8s, cfg_file, [_node(f"w{i}", "40", "402Gi") for i in range(8)])
+    for i in range(8):
+        recording_k8s.add(
+            "pods",
+            {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": f"busy-{i}", "namespace": "someone-else"},
+                "spec": {
+                    "nodeName": f"w{i}",
+                    "containers": [
+                        {"name": "c", "resources": {"requests": {"cpu": "38", "memory": "390Gi"}}}
+                    ],
+                },
+                "status": {"phase": "Running"},
+            },
+            namespace="someone-else",
+        )
+    result = deploy_capacity_check(cfg)
+    assert not result.passed, result.message
+    assert "Insufficient free cluster capacity" in result.message
+    recording_k8s.assert_recorded(kind="pods", verb="list")
+    assert recording_k8s.mutations() == []

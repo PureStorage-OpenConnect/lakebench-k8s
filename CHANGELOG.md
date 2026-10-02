@@ -425,7 +425,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cluster run records `provenance.preflight` (provenance, not identity;
   `--local` runs have no preflight), and a run with
   `--skip-preflight` records `capacity: skipped` with the verdict qualifier
-  "capacity not checked".
+  "capacity not checked". `deploy`'s capacity check reads free capacity
+  too; when it cannot read the capacity it warns and goes on (it has no
+  `--skip-preflight`), and `run`'s preflight refuses until it can.
 - **`recommend` exits 3 on a context conflict** while reading capacity,
   instead of falling back to the reference table and exiting 0.
 - **Deploy records its nonce beside the config.** Every `deploy` writes
@@ -791,7 +793,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is named, and `admin --controller-tmp-size` no longer takes `1K` or
   `1 Gi`, which Kubernetes rejects too. A config value the check cannot read now fails it (`run` exits
   4) where it used to pass as "Capacity check skipped"; an unreachable
-  cluster still skips it. DuckDB's Spark-style memory (`4g`) is counted
+  cluster skips only `deploy`'s check (the `run` preflight fails closed,
+  above). DuckDB's Spark-style memory (`4g`) is counted
   as the pod deploy renders (`4Gi`).
 - **The capacity check, `config show` and `info` count driver overrides.**
   They read the job profiles only, so `platform.compute.spark.driver_memory`
