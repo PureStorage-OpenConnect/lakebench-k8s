@@ -440,6 +440,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **The configuration reference is generated from the schema.** The field
+  tables and the removed-keys table in `docs/configuration.md` are written by
+  `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with
+  its type, default, tier (`first day` for the keys `lakebench init`
+  writes) and description, and every removed key with what to do instead.
+  The descriptions live in `config/schema.py` (a field's `description` or
+  the string after it); `tests/test_config_reference_drift.py` fails on a
+  hand edit or a schema change without a regenerate. Keys the old tables
+  left out (several images, the Unity and Pushgateway fields, the AML
+  workload keys) are now listed.
 - **Nothing resolves from Maven or PyPI at run time.** Spark jobs name the
   set's jars by URL (`spark.jars`, in the order `--packages` used to load
   them; `spark.submit.pyFiles` for the Delta jar) and set no
