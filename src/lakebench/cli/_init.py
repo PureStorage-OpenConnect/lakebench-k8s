@@ -5,9 +5,9 @@ keeps comments, so it holds only what a first run needs: a unique name, the
 recipe written once, the workload and scale, the S3 endpoint and the two
 credentials as ``${VAR}`` references. The components the recipe sets are
 written commented. No plaintext secret is ever written, and no Polaris
-client secret is written: deploy generates one per deployment, and this
-module must not ship ahead of that deploy change. Before anything is written the text is validated in-process, so
-``init`` never leaves a file that does not load.
+client secret is written: deploy generates one for a new Polaris and keeps
+it in the deployment's namespace. Before anything is written the text is
+validated in-process, so ``init`` never leaves a file that does not load.
 
 The guided wizard (``init_wizard.py``) is removed. ``--interactive``, ``-i``
 and ``--advanced`` print one line saying so and write the default config;

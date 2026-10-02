@@ -131,8 +131,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`--credentials-env PREFIX` renames them). The recipe's components are
   written as a commented block, so `init --recipe polaris-*` no longer
   writes `catalog.type: hive` and resolves to Hive. No Polaris client
-  secret is written: deploy generates one per deployment. `init` prints its choices on stderr, with or without a
-  terminal, and refuses (exit 2, nothing written) a combination that would
+  secret is written: deploy generates one for a new Polaris. `init` prints
+  its choices on stderr, with or without a terminal, and refuses (exit 2, nothing written) a combination that would
   not load. `--access-key` and `--secret-key` are refused with exit 2 and
   the values are never echoed; `--interactive`, `-i` and `--advanced` print
   one line and write the default. `--overwrite` is the new spelling of
