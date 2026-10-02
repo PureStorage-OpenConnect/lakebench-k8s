@@ -241,6 +241,25 @@ def _journal_safe(fn, *args, **kwargs) -> None:
             _journal_warned = True
 
 
+def stop_previous_datagen_or_exit(cfg, what: str = "Refusing to generate") -> None:
+    """``stop_previous_datagen``; a refusal or an unknown pod state exits.
+
+    Called before the bronze gate (``generate``, ``run --generate``, the
+    multi-cycle loop) and before a continuous reset, so no pod of an
+    earlier datagen Job writes after the prefix is checked or cleared.
+    Live pods exit 3 (``datagen.pods_live``); pods that cannot be listed
+    or a Job that cannot be deleted exit 1.
+    """
+    from lakebench.deploy.datagen import DatagenRefused, stop_previous_datagen
+    from lakebench.exit_codes import path_code
+
+    try:
+        stop_previous_datagen(cfg)
+    except DatagenRefused as e:
+        print_error(f"{what}: {e}")
+        raise typer.Exit(path_code(e.exit_path) if e.exit_path else ExitCode.FAILED) from None
+
+
 def enforce_bronze_gate(
     cfg, regenerate: bool, allow_stale_bronze: bool = False, clear_owned: bool = False
 ):

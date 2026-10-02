@@ -943,13 +943,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The previous Job is deleted in the background, so its pods kept running
   for their grace period and could land a `part-*` file in the datagen
   prefix after it was cleared; silver then counted the old file as this
-  run's rows and nothing refused. `generate`, `run --generate`, a
-  multi-cycle run's first cycle and a continuous run (before its reset
-  clears the raw prefix, C360 and AML) now wait until no pod labelled
-  `app=lakebench-datagen` is still running before they clear anything or
-  start the new Job. The wait is bounded at five minutes; a pod still
-  running then refuses with exit 3 (`datagen.pods_live`) and names it, and
-  pods that cannot be listed fail the command (exit 1).
+  run's rows and nothing refused. `generate`, `run --generate` and a
+  multi-cycle run now delete the earlier Job and wait until no pod labelled
+  `app=lakebench-datagen` is still running before the bronze gate lists or
+  clears the prefix, and a continuous run (C360 and AML) does so before its
+  reset clears the raw prefix. The wait is bounded at five minutes; a pod
+  still running then refuses with exit 3 (`datagen.pods_live`) and names
+  it, and pods that cannot be listed fail the command (exit 1). The datagen
+  deployer now takes the gate's decision rather than the
+  `--allow-stale-bronze` flag, so objects that appear after the gate saw
+  an empty prefix are refused instead of written over with no
+  `datagen.stale_bronze` record.
 - **A datagen refusal exits 3.** A stale-bronze refusal raised by the
   datagen deployer (a continuous run, or a batch run whose prefix filled
   after the CLI gate) exited 1; it now exits 3 (`run.bronze_nonempty`), as

@@ -1654,11 +1654,6 @@ class FakeDatagenDeployer:
         self._rec = rec
         _checked(rec, DatagenDeployer.__init__, *args, **kwargs)
 
-    def stop_previous_job(self, *args, **kwargs) -> None:
-        """Before the continuous reset: no earlier datagen Job or pod is left."""
-        _checked(self._rec, self._real.stop_previous_job, *args, **kwargs)
-        self._rec.add("Datagen", "stop_previous_job")
-
     def deploy(self, *args, **kwargs):
         from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
@@ -2029,6 +2024,19 @@ def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     monkeypatch.setattr(
         lakebench.deploy, "DatagenDeployer", lambda *a, **k: FakeDatagenDeployer(rec, *a, **k)
     )
+    # Before a gate or a continuous reset: no earlier datagen Job or pod is left.
+    import lakebench.deploy.datagen
+
+    _real_stop = lakebench.deploy.datagen.stop_previous_datagen
+
+    def stop_previous_datagen(*args, **kwargs) -> None:
+        try:
+            inspect.signature(_real_stop).bind(*args, **kwargs)
+        except TypeError as e:
+            raise rec.refuse(f"call the real stop_previous_datagen would refuse: {e}") from None
+        rec.add("Datagen", "stop_previous_datagen")
+
+    monkeypatch.setattr(lakebench.deploy.datagen, "stop_previous_datagen", stop_previous_datagen)
     # The datagen pods' fleet (a run that generates reads it from its pods).
     import lakebench.metrics.datagen_aggregator
 

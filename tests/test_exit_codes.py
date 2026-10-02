@@ -24,6 +24,7 @@ import lakebench
 from lakebench import exit_codes
 from lakebench.cli import _exit as cli_exit
 from lakebench.cli import app
+from lakebench.deploy.datagen import stop_previous_datagen as _real_stop_previous_datagen
 from lakebench.exit_codes import (
     LEGACY_CODES,
     PATHS,
@@ -728,7 +729,12 @@ def _scenario_datagen_pods_live(monkeypatch, tmp_path):
         "_build_datagen_context",
         lambda self: {"datagen_path_prefix": "customer/interactions"},
     )
-    monkeypatch.setattr(_datagen.DatagenDeployer, "_delete_existing_job", lambda *a, **k: None)
+    from unittest.mock import MagicMock
+
+    import kubernetes.client as _kc
+
+    monkeypatch.setattr(_datagen, "stop_previous_datagen", _real_stop_previous_datagen)
+    monkeypatch.setattr(_kc, "BatchV1Api", MagicMock)  # the Job delete succeeds
     monkeypatch.setattr(_datagen, "live_datagen_pods", lambda ns: ["lakebench-datagen-0-old"])
     monkeypatch.setattr(_datagen, "DATAGEN_POD_STOP_WAIT_S", 0.0)
     cfg = dg._write_cfg(tmp_path)

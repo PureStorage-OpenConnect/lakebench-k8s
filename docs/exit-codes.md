@@ -57,7 +57,7 @@ the CLI down every path listed here and checks the code.
 | `reproduce.report_required` | 2 | `reproduce` of a registered look's package without --report (a look is never rerun) |
 | `run.args` | 2 | a `run` argument or combination is refused before any cluster call |
 | `context.changed` | 3 | the kubeconfig changed under the command: a second context, or the pinned context's server or CA moved |
-| `datagen.pods_live` | 3 | `generate`, `run --generate` or a continuous run: an earlier datagen Job's pods were still running five minutes after the Job was deleted, and would write into the new corpus |
+| `datagen.pods_live` | 3 | `generate`, `run --generate`, a multi-cycle or a continuous run: an earlier datagen Job's pods were still running five minutes after the Job was deleted, and would write into the new corpus |
 | `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`) |
 | `deploy.state_copied` | 3 | `deploy` found a state written for another directory or host (a copied directory) |
 | `destroy.incarnation_mismatch` | 3 | `destroy` found the namespace is not the deployment incarnation it checked or was told to expect |

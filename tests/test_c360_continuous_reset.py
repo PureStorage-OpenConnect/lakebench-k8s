@@ -195,7 +195,7 @@ def _drive_sustained(
             raise stop_raises
 
     dg.deploy.side_effect = dg_deploy
-    dg.stop_previous_job.side_effect = dg_stop
+    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: dg_stop())
     monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
 
     def ownership(c):

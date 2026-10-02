@@ -190,8 +190,8 @@ def wait_for_datagen_pods_stopped(
                 f"are still running {timeout_s:.0f}s after the Job was deleted. A fresh "
                 "generate would let them write into the new corpus, where silver would "
                 f"count their files as this run's rows. Re-run once `{_kubectl_pods_hint(cfg)}` "
-                "lists none (a pod stuck on an unreachable node may need "
-                "`kubectl delete pod --force`)."
+                "lists none. Do not force-delete a pod on an unreachable node until the "
+                "node is confirmed down: its container may still be writing."
             )
         if not announced and live:
             logger.info(
@@ -199,6 +199,43 @@ def wait_for_datagen_pods_stopped(
             )
             announced = True
         time.sleep(poll_s)
+
+
+def stop_previous_datagen(cfg: Any) -> None:
+    """Delete an earlier lakebench-datagen Job and wait for its pods to stop.
+
+    Every fresh generate calls this before it lists, clears or writes the
+    datagen prefix: the CLI before the bronze gate and before a continuous
+    reset, and the deployer before its cycle-0 clear. The delete uses
+    Background propagation, so the pods outlive the Job by their grace
+    period and may still land files; the wait is bounded
+    (``wait_for_datagen_pods_stopped``). Raises ``DatagenPodsStillRunning``
+    or ``DatagenPodsUnknown``; a failed delete is ``DatagenPodsUnknown``.
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    namespace = cfg.get_namespace()
+    try:
+        k8s_client.BatchV1Api().delete_namespaced_job(
+            name="lakebench-datagen",
+            namespace=namespace,
+            body=k8s_client.V1DeleteOptions(propagation_policy="Background"),
+            _request_timeout=30,
+        )
+    except ApiException as e:
+        if e.status != 404:
+            raise DatagenPodsUnknown(
+                f"could not delete the earlier lakebench-datagen Job in {namespace} "
+                f"(HTTP {e.status} {e.reason}); a fresh generate does not start while "
+                "its pods may still write"
+            ) from e
+    except Exception as e:  # noqa: BLE001 -- transport errors, a missing kubeconfig
+        raise DatagenPodsUnknown(
+            f"could not delete the earlier lakebench-datagen Job in {namespace} ({e}); a "
+            "fresh generate does not start while its pods may still write"
+        ) from e
+    wait_for_datagen_pods_stopped(cfg)
 
 
 def _refusal_details(e: BaseException) -> dict[str, Any]:
@@ -788,15 +825,8 @@ class DatagenDeployer:
             )
 
     def stop_previous_job(self) -> None:
-        """Delete an earlier lakebench-datagen Job and wait for its pods to stop.
-
-        The delete uses Background propagation, so the pods outlive the Job
-        by their grace period and may still land files. Raises
-        ``DatagenPodsStillRunning`` or ``DatagenPodsUnknown`` (bounded wait,
-        ``wait_for_datagen_pods_stopped``).
-        """
-        self._delete_existing_job(self.config.get_namespace())
-        wait_for_datagen_pods_stopped(self.config)
+        """``stop_previous_datagen`` for this deployer's config."""
+        stop_previous_datagen(self.config)
 
     def _delete_existing_job(self, namespace: str, *, request_timeout: int | None = None) -> None:
         """Delete existing datagen job if present.

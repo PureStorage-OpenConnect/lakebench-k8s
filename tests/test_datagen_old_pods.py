@@ -254,3 +254,122 @@ def test_stale_bronze_refusal_carries_its_exit_path(monkeypatch):
     assert r.status is DeploymentStatus.FAILED
     assert r.details == {REFUSAL_DETAIL: "run.bronze_nonempty"}
     assert world.applied == []
+
+
+# --- CLI order: the earlier Job's pods stop before the bronze gate looks -----
+
+
+_RUN = ["--skip-preflight", "--skip-benchmark", "--skip-maintenance", "--yes"]
+
+
+def _cli_order(monkeypatch, tmp_path, command, argv, *, gate_module, cycles=1):
+    """Run the CLI until the bronze gate; return the stop/gate order."""
+    import typer
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from tests import test_datagen_timeout_and_regenerate as dg
+
+    monkeypatch.chdir(tmp_path)
+    (dg._stub_run_deps if command == "generate" else dg._stub_full_run)(monkeypatch)
+    monkeypatch.setattr("lakebench.s3.S3Client", dg._FakeS3)
+    order: list[str] = []
+    monkeypatch.setattr(
+        "lakebench.deploy.datagen.stop_previous_datagen", lambda c: order.append("stop")
+    )
+
+    def gate(*_a, **_k):
+        order.append("gate")
+        raise typer.Exit(9)
+
+    monkeypatch.setattr(f"lakebench.cli.{gate_module}.enforce_bronze_gate", gate)
+    extras = {"architecture": f"{{pipeline: {{cycles: {cycles}}}}}"} if cycles > 1 else {}
+    cfg = dg._write_cfg(tmp_path, **extras)
+    res = CliRunner().invoke(app, [command, str(cfg), *argv])
+    assert res.exit_code == 9, res.output[-2000:]
+    return order
+
+
+def test_generate_stops_old_pods_before_the_gate(monkeypatch, tmp_path):
+    order = _cli_order(monkeypatch, tmp_path, "generate", ["--yes"], gate_module="_generate")
+    assert order == ["stop", "gate"]
+
+
+def test_run_generate_stops_old_pods_before_the_gate(monkeypatch, tmp_path):
+    order = _cli_order(monkeypatch, tmp_path, "run", ["--generate", *_RUN], gate_module="_run")
+    assert order == ["stop", "gate"]
+
+
+def test_multi_cycle_run_stops_old_pods_before_the_gate(monkeypatch, tmp_path):
+    order = _cli_order(monkeypatch, tmp_path, "run", _RUN, gate_module="_run", cycles=2)
+    assert order == ["stop", "gate"]
+
+
+def test_generate_refusal_from_live_pods_exits_3_before_the_gate(monkeypatch, tmp_path):
+    """The stop refuses before the gate lists or clears anything."""
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from lakebench.deploy.datagen import DatagenPodsStillRunning
+    from tests import test_datagen_timeout_and_regenerate as dg
+
+    monkeypatch.chdir(tmp_path)
+    dg._stub_run_deps(monkeypatch)
+
+    def stop(c):
+        raise DatagenPodsStillRunning("datagen pod(s) x are still running")
+
+    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", stop)
+    gate_calls: list[int] = []
+    monkeypatch.setattr(
+        "lakebench.cli._generate.enforce_bronze_gate", lambda *a, **k: gate_calls.append(1)
+    )
+    res = CliRunner().invoke(app, ["generate", str(dg._write_cfg(tmp_path)), "--yes"])
+    assert res.exit_code == 3, res.output
+    assert gate_calls == []
+    assert "still running" in res.output
+
+
+@pytest.mark.parametrize("command", ["generate", "run"])
+def test_deployer_takes_the_gates_decision_not_the_flag(monkeypatch, tmp_path, command):
+    """--allow-stale-bronze on a prefix the gate found empty: the deployer is
+    built without it, so objects that appear after the gate are refused
+    rather than written over with no stale-bronze record."""
+    from types import SimpleNamespace as NS
+
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from tests import test_datagen_timeout_and_regenerate as dg
+
+    monkeypatch.chdir(tmp_path)
+    (dg._stub_run_deps if command == "generate" else dg._stub_full_run)(monkeypatch)
+    monkeypatch.setattr("lakebench.s3.S3Client", dg._FakeS3)
+    gate_module = "_generate" if command == "generate" else "_run"
+    monkeypatch.setattr(
+        f"lakebench.cli.{gate_module}.enforce_bronze_gate",
+        lambda *a, **k: NS(stale_allowed=False, record=lambda: None),
+    )
+    built: list[bool] = []
+
+    class _Refusing:
+        def __init__(self, engine, allow_stale_bronze=False, **kw):
+            built.append(allow_stale_bronze)
+
+        def deploy(self):
+            from lakebench.deploy.engine import DeploymentResult
+            from lakebench.exit_codes import REFUSAL_DETAIL
+
+            return DeploymentResult(
+                component="datagen",
+                status=DeploymentStatus.FAILED,
+                message="holds objects",
+                details={REFUSAL_DETAIL: "run.bronze_nonempty"},
+            )
+
+    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", _Refusing)
+    argv = ["--yes"] if command == "generate" else ["--generate", *_RUN]
+    cfg = dg._write_cfg(tmp_path)
+    res = CliRunner().invoke(app, [command, str(cfg), *argv, "--allow-stale-bronze"])
+    assert built == [False]
+    assert res.exit_code == 3, res.output[-2000:]

@@ -399,9 +399,9 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "datagen.pods_live",
         _C.REFUSED,
-        "`generate`, `run --generate` or a continuous run: an earlier datagen Job's "
-        "pods were still running five minutes after the Job was deleted, and would "
-        "write into the new corpus",
+        "`generate`, `run --generate`, a multi-cycle or a continuous run: an earlier "
+        "datagen Job's pods were still running five minutes after the Job was deleted, "
+        "and would write into the new corpus",
     ),
     ExitPath(
         "series.corpus_changed",

@@ -253,13 +253,17 @@ clears the datagen prefix of an owned bucket, so a smaller generate never
 inherits a larger earlier generate's `part-*` files, and refuses a non-empty
 prefix in any other bucket unless `--allow-stale-bronze` was passed. Before
 1.7 it skipped such a bucket silently and silver over-counted the stale
-files. Before it clears anything it deletes an earlier `lakebench-datagen`
-Job and waits until none of its pods (label `app=lakebench-datagen`) is
-still running, since a pod in its grace period could otherwise land a file
-in the cleared prefix that silver would count as this run's. The wait is
-bounded at five minutes; a pod still running then refuses with exit 3
+files. Before the gate lists or clears the prefix, `generate`, `run
+--generate` and a multi-cycle run delete an earlier `lakebench-datagen` Job
+and wait until none of its pods (label `app=lakebench-datagen`) is still
+running, since a pod in its grace period could otherwise land a file in the
+cleared prefix that silver would count as this run's. The wait is bounded
+at five minutes; a pod still running then refuses with exit 3
 (`datagen.pods_live`), and pods that cannot be listed fail the command. A
-continuous run does the same before its reset clears the raw prefix.
+continuous run does the same before its reset clears the raw prefix. The
+deployer then follows the gate's decision, not the `--allow-stale-bronze`
+flag: objects that appear after the gate found the prefix empty are
+refused.
 
 A continuous run's own datagen never takes `--allow-stale-bronze`
 (`run --continuous --generate-only` does): its reset has already cleared
