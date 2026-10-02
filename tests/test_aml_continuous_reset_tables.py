@@ -151,7 +151,12 @@ def test_the_reset_drops_the_gold_tables_gold_refresh_writes():
             re.M,
         )
     )
-    gold_env = dict(re.findall(r'^(GOLD_[A-Z]+) = env\("([A-Z_]+)"', finalize, re.M))
+    gold_env = {
+        const: (key, default)
+        for const, key, default in re.findall(
+            r'^(GOLD_[A-Z]+) = env\("([A-Z_]+)", "([a-z_.]+)"\)', finalize, re.M
+        )
+    }
     wanted = {gold_env[ddl_table[d]] for d in ddls}
     tree = ast.parse((_SCRIPTS / "bronze_verify_financial.py").read_text())
     tup = next(
@@ -160,5 +165,5 @@ def test_the_reset_drops_the_gold_tables_gold_refresh_writes():
         if isinstance(n, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == "CONTINUOUS_GOLD_TABLES" for t in n.targets)
     )
-    dropped = {c.args[0].value for c in tup.elts if isinstance(c, ast.Call)}
+    dropped = {(c.args[0].value, c.args[1].value) for c in tup.elts if isinstance(c, ast.Call)}
     assert wanted == dropped
