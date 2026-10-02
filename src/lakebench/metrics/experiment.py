@@ -252,24 +252,14 @@ def experiment_inputs(
         params_id = _short_hash(declared)
         params = {"customer360": _c360_resolved(cfg)}
 
-    from lakebench.metrics.fingerprint_inputs import is_credential_key, is_location_key
-    from lakebench.modules.pipeline_engines.spark.conf_keys import user_spark_overrides
+    from lakebench.modules.pipeline_engines.spark.conf_keys import (
+        recordable_spark_conf,
+        user_spark_overrides,
+    )
 
     # Local runs build no Spark job manifest, so the user conf never ran.
-    # Values of keys that can hold a credential or name where a deployment
-    # lives are not written into the record.
     user_conf = (
-        {
-            k: (
-                "<redacted>"
-                if is_credential_key(k)
-                or is_location_key(k)
-                or "endpoint" in k.lower()
-                or ".bucket." in k
-                else v
-            )
-            for k, v in user_spark_overrides(cfg.spark.conf or {}).items()
-        }
+        recordable_spark_conf(user_spark_overrides(cfg.spark.conf or {}))
         if system != "local"
         else {}
     )

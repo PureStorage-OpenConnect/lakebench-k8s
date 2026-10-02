@@ -657,8 +657,11 @@ job script sets (`spark.sql.session.timeZone` and others), and the reserved
 driver memory, overhead, cores, off-heap, PySpark memory). The full set is in
 `src/lakebench/modules/pipeline_engines/spark/conf_keys.py`. `spark.conf`
 reaches the pipeline's Spark jobs only, not the Spark Thrift server or
-`--local` runs; the run record keeps it as `architecture.spark_conf_user`
-with credential, endpoint and bucket values redacted.
+`--local` runs. The run record keeps it as `architecture.spark_conf_user`:
+every key is named, but only tuning keys (SQL execution, shuffle, memory,
+speculation and the like) keep their values; any other value is recorded
+as `<redacted>`, because a key can hold a secret or a location under any
+name.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

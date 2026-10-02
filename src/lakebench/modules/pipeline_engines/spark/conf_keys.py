@@ -157,6 +157,8 @@ SCRIPT_SET_SPARK_KEYS: frozenset[str] = frozenset(
         "spark.sql.adaptive.coalescePartitions.minPartitionSize",
         "spark.sql.adaptive.skewJoin.skewedPartitionFactor",
         "spark.sql.requireAllClusterKeysForCoPartition",
+        # Set on the Hadoop configuration while an AML spill write runs.
+        "spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version",
     }
 )
 
@@ -276,4 +278,50 @@ def user_spark_overrides(conf: dict[str, str]) -> dict[str, str]:
     key except one set to its ``SPARK_CONF_DEFAULTS`` value, sorted."""
     return {
         str(k): str(v) for k, v in sorted(conf.items()) if SPARK_CONF_DEFAULTS.get(str(k)) != str(v)
+    }
+
+
+# Keys whose values the run record may carry in the clear. A spark.conf key
+# can hold a secret or a location under any name (a REST catalog header, an
+# executorEnv variable, a defaultFS URI), so every other value is recorded
+# as "<redacted>": the record names the key, not its value.
+_RECORDABLE_PREFIXES: tuple[str, ...] = (
+    "spark.sql.adaptive.",
+    "spark.sql.shuffle.",
+    "spark.sql.files.",
+    "spark.sql.parquet.",
+    "spark.sql.orc.",
+    "spark.sql.iceberg.",
+    "spark.sql.codegen.",
+    "spark.sql.execution.",
+    "spark.sql.optimizer.",
+    "spark.sql.join.",
+    "spark.sql.cbo.",
+    "spark.sql.statistics.",
+    "spark.sql.sources.",
+    "spark.speculation",
+    "spark.memory.",
+    "spark.shuffle.",
+    "spark.task.",
+    "spark.locality.",
+    "spark.network.timeout",
+    "spark.default.parallelism",
+    "spark.serializer",
+    "spark.kryo",
+    "spark.rdd.",
+    "spark.storage.",
+    "spark.io.compression.",
+    "spark.broadcast.",
+    "spark.reducer.",
+    "spark.dynamicAllocation.",
+)
+_RECORDABLE_KEYS: frozenset[str] = frozenset(SPARK_CONF_DEFAULTS) | USER_OVERRIDABLE_SPARK_KEYS
+
+
+def recordable_spark_conf(conf: dict[str, str]) -> dict[str, str]:
+    """*conf* with every value outside the recordable keys replaced by
+    "<redacted>"."""
+    return {
+        k: (v if k in _RECORDABLE_KEYS or k.startswith(_RECORDABLE_PREFIXES) else "<redacted>")
+        for k, v in conf.items()
     }

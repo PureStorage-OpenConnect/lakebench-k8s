@@ -142,14 +142,30 @@ def test_record_never_carries_a_secret_or_location():
                 "spark.hadoop.fs.s3a.secret.key": "SUPERSECRET",
                 "spark.hadoop.fs.azure.account.key.acct.dfs.core.windows.net": "AZSECRET",
                 "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://10.9.9.9:80",
+                # Secrets and locations under names no key predicate knows.
+                "spark.sql.catalog.other.header.Authorization": "Bearer TOKEN1",
+                "spark.executorEnv.DB_PASS": "ENVSECRET",
+                "spark.hadoop.fs.defaultFS": "s3a://hidden-bucket",
+                "spark.eventLog.dir": "s3a://log-bucket/events",
                 "spark.speculation": "true",
+                "spark.sql.files.openCostInBytes": "256m",
             }
         }
     )
     arch = experiment_inputs(cfg, run_mode="batch")["architecture"]
     text = repr(arch)
-    for leaked in ("SUPERSECRET", "AZSECRET", "10.9.9.9"):
+    for leaked in (
+        "SUPERSECRET",
+        "AZSECRET",
+        "10.9.9.9",
+        "TOKEN1",
+        "ENVSECRET",
+        "hidden-bucket",
+        "log-bucket",
+    ):
         assert leaked not in text
+    assert arch["spark_conf_user"]["spark.sql.files.openCostInBytes"] == "256m"
+    assert arch["spark_conf_user"]["spark.executorEnv.DB_PASS"] == "<redacted>"
     assert arch["spark_conf_user"]["spark.speculation"] == "true"
     assert arch["spark_conf_user"]["spark.hadoop.fs.s3a.secret.key"] == "<redacted>"
 
@@ -303,6 +319,13 @@ def test_keys_the_job_scripts_set_are_owned():
     for f in scripts.glob("*.py"):
         text = f.read_text()
         found.update(re.findall(r'spark\.conf\.set\(\s*"([^"]+)"', text))
+        # Keys set on the Hadoop configuration reach it as spark.hadoop.<key>.
+        if re.search(r"hconf\.set\(\s*key\b", text):
+            found.update(
+                "spark.hadoop." + k
+                for k in re.findall(r'\bkey\s*=\s*"((?:mapreduce|fs|hadoop)\.[^"]+)"', text)
+            )
+        found.update("spark.hadoop." + k for k in re.findall(r'hconf\.set\(\s*"([^"]+)"', text))
         if re.search(r"spark\.conf\.set\(\s*key\b", text):
             found.update(re.findall(r'\bkey\s*=\s*"(spark\.[^"]+)"', text))
     assert found
