@@ -128,6 +128,7 @@ def ensure_scc_rolebinding(
     scc: str = "anyuid",
     *,
     authz_api: Any = None,
+    cut_by_deadline: bool = True,
 ) -> None:
     """Grant ``scc`` to ServiceAccount ``sa`` in ``namespace``.
 
@@ -145,6 +146,11 @@ def ensure_scc_rolebinding(
     ``oc`` is never run. Every failure raises :class:`SCCGrantError` naming
     the admin command. When the review cannot be made (no permission to
     create LocalSubjectAccessReviews), steps 1 and 3 are skipped.
+
+    ``cut_by_deadline=False`` keeps the review poll at its fixed 15 s bound
+    whatever the deploy deadline: the Spark Operator calls this after a
+    committed shared helm change, and its patch, restart and verify must
+    follow (stopping there would leave the shared operator half configured).
     """
     from kubernetes.client.rest import ApiException
 
@@ -208,11 +214,14 @@ def ensure_scc_rolebinding(
 
     # The authorizer reads RoleBindings from an informer cache on each
     # apiserver, so a fresh binding can take a moment to count. Poll before
-    # concluding the grant did not take effect, within the deploy deadline
-    # (the binding is this namespace's own, so cutting the poll is safe).
+    # concluding the grant did not take effect. For a deployment's own
+    # namespace the poll is cut by the deploy deadline; the Spark Operator's
+    # callers pass cut_by_deadline=False (see the docstring).
     from lakebench.deploy import deadline as deploy_deadline
 
-    budget = deploy_deadline.clamp(SCC_VERIFY_TIMEOUT_S)
+    budget = (
+        deploy_deadline.clamp(SCC_VERIFY_TIMEOUT_S) if cut_by_deadline else SCC_VERIFY_TIMEOUT_S
+    )
     until = time.monotonic() + budget
     delay = 0.5
     while True:
@@ -223,7 +232,11 @@ def ensure_scc_rolebinding(
         delay = min(delay * 2, 2.0)
     if verdict is False:
         if budget < SCC_VERIFY_TIMEOUT_S:
-            deploy_deadline.check(f"SCC {scc} grant to {namespace}/{sa} to take effect")
+            deploy_deadline.check(
+                f"SCC {scc} grant to {namespace}/{sa} to take effect",
+                "RoleBinding written, review still denies; if this persists, "
+                + _grant_fix(scc, sa, namespace),
+            )
         raise SCCGrantError(
             f"{prefix}: RoleBinding {role} is in place but the SA still may not use SCC "
             f"{scc} (is ClusterRole {role} missing? OpenShift before 4.10 is not "
