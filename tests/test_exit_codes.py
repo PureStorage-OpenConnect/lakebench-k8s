@@ -147,8 +147,6 @@ PLANNED_BY = {
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
     "logs.no_pod": "CC-27",
-    "plan.missing_storage_class": "CC-23",
-    "plan.ok": "CC-23",
     "repeat.no_verified_corpus": "CC-30",
     "run.protected_corpus": "AM-22",
     "series.corpus_changed": "CC-30",
@@ -786,6 +784,37 @@ def _scenario_capacity_shortfall(monkeypatch, tmp_path):
     return _capacity_run(monkeypatch, tmp_path, FreeCapacity(small, small, ((8_000, 32 * gib),)))
 
 
+def _plan_online(monkeypatch, tmp_path, **status_by_id):
+    """``plan`` online against a fake cluster whose prerequisites report
+    *status_by_id* (others ok) and whose capacity check passes."""
+    from unittest import mock
+
+    from lakebench.cli import _prerequisites as pre
+    from lakebench.deploy.prereqs import PREREQS, PrereqOutcome, PrereqResult, PrereqStatus
+
+    k8s = mock.MagicMock()
+    k8s.test_connectivity.return_value = (True, "ok")
+    k8s.get_cluster_capacity.return_value = None
+    monkeypatch.setattr("lakebench.k8s.get_k8s_client", lambda **kw: k8s)
+    outcomes = [
+        PrereqOutcome(p, PrereqResult(PrereqStatus(status_by_id.get(p.id, "ok")), p.id))
+        for p in PREREQS
+    ]
+    monkeypatch.setattr("lakebench.deploy.prereqs.run_prereqs", lambda cfg: outcomes)
+    monkeypatch.setattr(
+        pre, "_check_cluster_capacity", lambda cfg, **kw: pre.PrereqResult("cc", True, "ok")
+    )
+    return _runner().invoke(app, ["plan", str(_init_config(tmp_path))])
+
+
+def _scenario_plan_ok(monkeypatch, tmp_path):
+    return _plan_online(monkeypatch, tmp_path)
+
+
+def _scenario_plan_missing_storage_class(monkeypatch, tmp_path):
+    return _plan_online(monkeypatch, tmp_path, **{"scratch-storage-class": "fail"})
+
+
 def _scenario_run_namespace_missing_no_yes(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -1375,6 +1404,8 @@ SCENARIOS = {
     "run.deps_stale": _scenario_run_deps_stale,
     "run.deps_mismatch": _scenario_run_deps_mismatch,
     "capacity.unknown": _scenario_capacity_unknown,
+    "plan.ok": _scenario_plan_ok,
+    "plan.missing_storage_class": _scenario_plan_missing_storage_class,
     "capacity.shortfall": _scenario_capacity_shortfall,
     "run.namespace_missing_no_yes": _scenario_run_namespace_missing_no_yes,
     "run.pass": _scenario_run_pass,
@@ -1431,6 +1462,7 @@ def test_scenarios_cover_exactly_the_live_paths():
 # Text in the combined output that shows the scenario took its named path,
 # where the code alone has more than one producer.
 EXPECTED_OUTPUT = {
+    "plan.missing_storage_class": "Next: (cluster admin) lakebench admin install --component",
     "capacity.unknown": "capacity could not be read: listing nodes failed",
     "capacity.shortfall": "Insufficient free cluster capacity",
     "run.datagen_timeout": "wait budget",

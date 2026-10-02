@@ -57,13 +57,14 @@ def _registry(image: str) -> str:
 
 
 def egress_hosts(cfg: Any) -> list[tuple[str, str]]:
-    """``[(host, why)]`` the deploy contacts outside the cluster.
+    """``[(host, why)]`` this deployment contacts outside the cluster.
 
     The dependency resolve module owns this list once it lands
-    (``deps.request.egress_hosts``); until then it is built from the Maven
-    repositories Spark jobs use, the PyPI packages the DuckDB pod and the
-    AML reference jobs install, the DuckDB extension repository and the
-    image registries of the components this config deploys.
+    (``deps.request.egress_hosts``); until then it is built from what the
+    code fetches today: the Maven repositories every Spark job resolves its
+    jars from at job start, the PyPI packages the DuckDB pod and the AML
+    reference jobs install, the DuckDB extensions, the observability Helm
+    chart, and the image registries of every image this config deploys.
     """
     try:
         from lakebench.deps.request import egress_hosts as _owned  # type: ignore[import-not-found]
@@ -79,26 +80,46 @@ def egress_hosts(cfg: Any) -> list[tuple[str, str]]:
     engine = arch.query_engine.type.value
     workload = arch.workload.schema_type.value
     out: list[tuple[str, str]] = [
-        (_host(_MAVEN_CENTRAL), "Maven Central: Spark job jars (Iceberg or Delta, S3A, AWS SDK)"),
+        (_host(_MAVEN_CENTRAL), "Maven Central: every Spark job resolves its jars at job start"),
     ]
     for repo in (r.strip() for r in _MAVEN_MIRROR_REPOS.split(",") if r.strip()):
         out.append((_host(repo), "Maven mirror Spark falls back to when Central rate-limits"))
+    pypi_why = []
     if engine == "duckdb":
-        out += [(h, "PyPI: the DuckDB pod installs duckdb") for h in _PYPI_HOSTS]
-        out.append((_DUCKDB_EXTENSIONS, "DuckDB iceberg and httpfs extensions"))
-    elif workload == "financial":
-        out += [(h, "PyPI: the AML reference jobs install their Python pins") for h in _PYPI_HOSTS]
+        pypi_why.append("the DuckDB pod installs duckdb at start")
+    if workload == "financial":
+        pypi_why.append("the AML reference jobs install their Python pins at job start")
+    if pypi_why:
+        out += [(h, "PyPI: " + "; ".join(pypi_why)) for h in _PYPI_HOSTS]
+    if engine == "duckdb":
+        out.append((_DUCKDB_EXTENSIONS, "DuckDB iceberg and httpfs extensions, at pod start"))
+    if cfg.observability.enabled:
+        out.append(
+            ("prometheus-community.github.io", "kube-prometheus-stack Helm chart, at deploy")
+        )
+        out += [
+            ("quay.io", "kube-prometheus-stack images (Prometheus, operator)"),
+            ("registry.k8s.io", "kube-prometheus-stack images (kube-state-metrics)"),
+        ]
     images = cfg.images
     used = {"spark": images.spark, "datagen": images.datagen, "postgres": images.postgres}
+    # Helper images the templates name directly (init containers, bootstrap).
+    helpers = {"busybox": "busybox:1.36"}
     if catalog == "polaris":
         used["polaris"] = images.polaris
         used["polaris_admin_tool"] = images.polaris_admin_tool
+        helpers["curl"] = "curlimages/curl"
+    if catalog == "unity":
+        used["unity"] = images.unity
     if catalog == "hive":
         used["hive (Stackable)"] = "oci.stackable.tech/sdp/hive"
     if engine == "trino":
         used["trino"] = images.trino
     if engine == "duckdb":
         used["duckdb"] = images.duckdb
+    if cfg.observability.enabled:
+        used["jmx_exporter"] = images.jmx_exporter
+    used.update(helpers)
     by_registry: dict[str, list[str]] = {}
     for role, image in used.items():
         by_registry.setdefault(_registry(str(image)), []).append(role)
@@ -129,21 +150,41 @@ def _raw_polaris_secret(path: Path) -> Any:
     return pol.get("client_secret") if isinstance(pol, dict) else None
 
 
+def _deploy_generates_polaris_secret() -> bool:
+    """Whether this tree's deploy generates the Polaris client secret.
+
+    Before per-deployment secrets, ``schema.require_polaris_client_secret``
+    makes deploy refuse a Polaris config with no ``client_secret``; the
+    per-deployment secrets change removes it.
+    """
+    from lakebench.config import schema
+
+    return not hasattr(schema, "require_polaris_client_secret")
+
+
 def polaris_secret_line(cfg: Any, path: Path, k8s: Any = None) -> str | None:
     """Where the Polaris client secret comes from; None for other catalogs.
 
-    Informational: it never changes the exit code and never prints a value.
-    Offline it cannot tell a new Polaris from one already bootstrapped, so it
-    says what holds for a new one. Online it reads the deployment's Secret
-    and whether the namespace already runs Polaris.
+    Informational: it never changes the exit code and never prints a value
+    (a ``${VAR:-default}`` reference is named by its variable only). Offline
+    it cannot tell a new Polaris from one already bootstrapped, so it says
+    what holds for a new one. Online it reads the deployment's Secret and
+    whether the namespace already runs Polaris.
     """
+    from lakebench.config.loader import _ENV_PATTERN
+
     if cfg.architecture.catalog.type.value != "polaris":
         return None
     raw = _raw_polaris_secret(path)
-    if isinstance(raw, str) and raw.startswith("${") and raw.endswith("}"):
-        return f"client secret: from {raw}"
+    if isinstance(raw, str) and (m := _ENV_PATTERN.search(raw)):
+        return f"client secret: from ${{{m.group(1)}}}"
     if raw:
         return "client secret: set in the config file (plaintext)"
+    if not _deploy_generates_polaris_secret():
+        return (
+            "client secret: not set; deploy refuses a Polaris config without "
+            "architecture.catalog.polaris.client_secret"
+        )
     if k8s is None:
         return (
             "client secret: generated at deploy for a new Polaris "
@@ -229,9 +270,13 @@ def plan_one(
 
     sizing_capacity = capacity
     if not offline:
-        from lakebench.k8s import get_k8s_client
+        from lakebench.k8s import K8sConnectionError, get_k8s_client
 
         k8s = get_k8s_client(context=cfg.platform.kubernetes.context, namespace=cfg.get_namespace())
+        reachable, why = k8s.test_connectivity()
+        if not reachable:
+            raise K8sConnectionError(why)
+        # As run sizes it: against the allocatable total it reads.
         sizing_capacity = k8s.get_cluster_capacity()
     plan = plan_requirements(cfg, capacity=sizing_capacity)
     out["sizing"] = {
@@ -253,8 +298,13 @@ def plan_one(
         "basis": list(plan.basis),
     }
     if capacity is not None:
+        # Node shape unknown: aggregate only, no one-pod-on-one-node check.
         verdict = check_capacity(cfg, capacity, check_pod=False)
-        out["capacity"] = {"status": verdict.status, "shortfalls": list(verdict.shortfalls)}
+        out["capacity"] = {
+            "status": verdict.status,
+            "shortfalls": list(verdict.shortfalls),
+            "note": "aggregate only: node shape unknown, so the largest pod is not checked",
+        }
         if verdict.status == "refused":
             code = int(ExitCode.PREREQUISITE)
 
@@ -267,27 +317,38 @@ def plan_one(
         rows = []
         for outcome in run_prereqs(cfg):
             p, r = outcome.prereq, outcome.result
-            row = {"id": p.id, "title": p.title, "status": r.status.value, "message": r.message}
-            if r.status is PrereqStatus.FAIL:
-                if p.component:
-                    row["next"] = (
-                        f"(cluster admin) lakebench admin install --component {p.component}"
-                    )
-                else:
-                    row["next"] = p.fix
-                if p.id in FATAL_PREREQS:
-                    code = int(ExitCode.PREREQUISITE)
-            rows.append(row)
-        cap = _check_cluster_capacity(cfg)
-        rows.append(
-            {
-                "id": "cluster-capacity",
-                "title": "Free cluster capacity",
-                "status": "ok" if cap.passed else "fail",
-                "message": cap.message,
-                **({"next": cap.hint} if (not cap.passed and cap.hint) else {}),
+            row: dict[str, Any] = {
+                "id": p.id,
+                "title": p.title,
+                "status": r.status.value,
+                "message": r.message,
             }
-        )
+            fatal = p.id in FATAL_PREREQS and r.status is PrereqStatus.UNKNOWN
+            if r.status is PrereqStatus.FAIL or fatal:
+                # Nothing deploys until these are in place, and one that
+                # could not be checked is not known to be (fails closed).
+                code = int(ExitCode.PREREQUISITE)
+                row["next"] = (
+                    f"(cluster admin) lakebench admin install --component {p.component}"
+                    if p.component
+                    else p.fix
+                )
+            rows.append(row)
+        cap = _check_cluster_capacity(cfg, sizing_capacity=sizing_capacity)
+        detail = [ln.strip() for ln in (cap.hint or "").splitlines() if ln.strip()]
+        cap_row: dict[str, Any] = {
+            "id": "cluster-capacity",
+            "title": "Free cluster capacity",
+            "status": "ok" if cap.passed else "fail",
+            "message": cap.message,
+        }
+        if not cap.passed:
+            code = int(ExitCode.PREREQUISITE)
+            cap_row["detail"] = [ln for ln in detail if not ln.startswith("Next:")]
+            nexts = [ln.removeprefix("Next:").strip() for ln in detail if ln.startswith("Next:")]
+            if nexts:
+                cap_row["next"] = "\n".join(nexts)
+        rows.append(cap_row)
         out["prerequisites"] = rows
 
     secret = polaris_secret_line(cfg, path, k8s)
@@ -321,7 +382,7 @@ def _print_plan(p: dict[str, Any]) -> None:
     say(f"  scratch: {esc(s['scratch'])}")
     if "capacity" in p:
         cap = p["capacity"]
-        say(f"  capacity (--cores/--memory): {esc(cap['status'])}")
+        say(f"  capacity (--cores/--memory): {esc(cap['status'])} ({esc(cap['note'])})")
         for line in cap["shortfalls"]:
             say(f"    {esc(line)}")
     pre = p["prerequisites"]
@@ -331,12 +392,14 @@ def _print_plan(p: dict[str, Any]) -> None:
         say("  prerequisites:")
         for row in pre:
             say(f"    {esc(row['status'])}: {esc(row['title'])}: {esc(row['message'])}")
+            for line in row.get("detail", []):
+                say(f"      {esc(line)}")
             if "next" in row:
                 for line in str(row["next"]).splitlines():
                     say(f"      Next: {esc(line.strip())}")
     if "polaris" in p:
         say(f"  Polaris {esc(p['polaris'])}")
-    say("  egress at deploy (no pod contacts these after deploy):")
+    say("  egress (hosts outside the cluster this deployment contacts):")
     for e in p["egress"]:
         say(f"    {esc(e['host'])}: {esc(e['why'])}")
 
@@ -360,6 +423,28 @@ def _differences(configs: list[Any]) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _deploy_refusal(path: Path, name: str | None) -> str | None:
+    """Why ``deploy`` would refuse the config at load, or None. Runs the
+    load deploy runs, without printing its notes."""
+    import warnings
+
+    from lakebench.config._load_context import LoadPurpose, collecting_notes
+    from lakebench.config.loader import ConfigError, ConfigNameRequired, _load_and_validate
+
+    try:
+        with collecting_notes(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _load_and_validate(path, LoadPurpose.MUTATE, name, False)
+    except ConfigNameRequired:
+        # A nameless config plans under --name or its resolved name (the
+        # READ rules); writing name: into the file is deploy's own refusal.
+        return None
+    except ConfigError as e:
+        lines = [ln.strip(" -") for ln in str(e).splitlines() if ln.strip()]
+        return "; ".join(ln for ln in lines if ln != "Configuration validation failed:")
+    return None
 
 
 def plan(
@@ -412,6 +497,12 @@ def plan(
         except ConfigError as e:
             print_error(f"{path}: {e}")
             raise typer.Exit(ExitCode.USAGE) from None
+        refusal = _deploy_refusal(path, name)
+        if refusal:
+            # READ skips what only deploy checks (derived name lengths,
+            # removed keys); plan must not call a config deploy refuses fine.
+            print_error(f"{path}: deploy refuses this config: {refusal}")
+            raise typer.Exit(ExitCode.USAGE)
         try:
             one, one_code = plan_one(cfg, path, offline=offline, capacity=capacity)
         except (ClusterUnreachable, K8sConnectionError) as e:

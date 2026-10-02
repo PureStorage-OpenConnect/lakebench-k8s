@@ -278,18 +278,26 @@ state; the minimum cluster from the same sizing function the `run` capacity
 preflight and the README tables use, with the scratch request ("not
 requested (scratch disabled)" when off); the cluster prerequisites from the
 registry `deploy` checks (`docs/prerequisites.md`) and the run's free
-capacity check; where the Polaris client secret comes from (never its
-value); and the hosts the deploy contacts outside the cluster (Maven and
-PyPI for the dependency resolve, the image registries). With several
+capacity check; where the Polaris client secret comes from (a `${VAR}`
+reference is named, a value is never printed); and the hosts outside the
+cluster the deployment contacts (Maven repositories every Spark job
+resolves from at job start, PyPI and the DuckDB extensions where used, the
+observability chart when enabled, the image registries). With several
 configs it then names the experiment-identity and execution-condition
-differences between each one and the first.
+differences between each one and the first; configs on different cluster
+contexts are planned one at a time (a second context in one process is
+refused, exit 3).
 
-Online, a missing scratch StorageClass, Spark Operator or Stackable ends
-with exit 4 and `Next: (cluster admin) lakebench admin install --component
-<component>`; an unreachable cluster is exit 4 with "use --offline". With
-`--offline`, `--cores/--memory` or `--json` there is no cluster call and
-prerequisites read "not checked (offline)"; `--cores/--memory` too small
-for the config is exit 4. A config that does not load is exit 2.
+Online, any prerequisite that fails, a scratch StorageClass, Spark Operator
+or Stackable that cannot be checked, or too little free capacity ends with
+exit 4; a missing shared component prints `Next: (cluster admin) lakebench
+admin install --component <component>`. An unreachable cluster is exit 4
+with "use --offline". With `--offline`, `--cores/--memory` or `--json`
+there is no cluster call and prerequisites read "not checked (offline)";
+`--cores/--memory` checks the aggregate only (the node shape is unknown, so
+the largest pod is not checked) and is exit 4 when the config does not
+fit. A config that does not load, or that `deploy` would refuse at load
+(for example a name too long for the names derived from it), is exit 2.
 
 ```bash
 lakebench plan lakebench.yaml --offline
