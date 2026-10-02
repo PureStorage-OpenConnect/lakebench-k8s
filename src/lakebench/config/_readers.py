@@ -203,7 +203,7 @@ READERS: dict[str, str] = {
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
     "architecture.pipeline.pattern": "lakebench.config.autosizer:_apply_cluster_scaling",
-    "architecture.pipeline.mode": "lakebench.cli._run:run",
+    "architecture.pipeline.mode": "lakebench.cli._run_args:run_mode",
     "architecture.pipeline.cycles": "lakebench.cli._run:run",
     "architecture.pipeline.pre_benchmark_maintenance": "lakebench.cli._run:run",
     "architecture.pipeline.sustained.bronze_trigger_interval": (
