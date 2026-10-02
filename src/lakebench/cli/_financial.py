@@ -284,10 +284,10 @@ def reference_score(
     job_manager = _get_job_manager(cfg)
     deps = job_manager.deps
     console.print(
-        f"  dependency set {deps.pinset_sha256} (request {deps.request_sha256}); "
+        f"  dependency set {esc(deps.pinset_sha256)} (request {esc(deps.request_sha256)}); "
         "reference wheels: "
         + ", ".join(
-            f"{e['file']}@{e['sha256'][:12]}"
+            f"{esc(e['file'])}@{esc(e['sha256'][:12])}"
             for e in deps.manifest["groups"].get("py-reference", [])
         )
     )

@@ -56,8 +56,9 @@ def test_thrift_and_jobs_share_the_set_in_its_order(recipe, image):
     jars = job_jars(cfg, handle)
     assert jars == list(handle.manifest["jar_order"])
     cp = thrift_classpath(cfg, handle)
-    assert cp[0] == "/opt/spark/jars/*"
-    assert [p.rsplit("/", 1)[1] for p in cp[1:]] == jars
+    # The conf dir and the image's jars first, then the set in its order.
+    assert cp[:2] == ["/opt/spark/conf", "/opt/spark/jars/*"]
+    assert [p.rsplit("/", 1)[1] for p in cp[2:]] == jars
     runtimes = [j for j in jars if "iceberg-spark-runtime-" in j]
     assert len(runtimes) == (0 if "delta" in recipe else 1)
     if runtimes and "4.1.1" in image:
@@ -78,4 +79,4 @@ def test_a_reordered_set_reorders_both():
         manifest={**h.manifest, "jar_order": order},
     )
     assert job_jars(cfg, flipped) == order
-    assert [p.rsplit("/", 1)[1] for p in thrift_classpath(cfg, flipped)[1:]] == order
+    assert [p.rsplit("/", 1)[1] for p in thrift_classpath(cfg, flipped)[2:]] == order

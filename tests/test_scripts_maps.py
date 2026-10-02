@@ -352,6 +352,8 @@ def test_pod_template_projects_every_role(schema, fmt):
     for jt in JobType:
         if sm.MOUNTS_BY_JOB_TYPE[jt] != sm.ROLES:
             continue
+        if jt is JobType.SCORE_FINANCIAL_REFERENCE and schema != "financial":
+            continue  # refused without the AML set's reference wheels
         manifest = mgr._build_manifest(jt)
         for side in ("driver", "executor"):
             tpl = manifest["spec"][side]["template"]
@@ -379,6 +381,8 @@ def test_every_main_file_ships_in_a_mounted_role(schema, fmt):
     }
     mgr = SparkJobManager(cfg, FakeK8s())
     for jt in JobType:
+        if jt is JobType.SCORE_FINANCIAL_REFERENCE and schema != "financial":
+            continue  # refused without the AML set's reference wheels
         main = mgr._build_manifest(jt)["spec"]["mainApplicationFile"]
         key = main.removeprefix("local:///opt/spark/scripts/")
         mounted = set().union(*(by_role[r] for r in sm.MOUNTS_BY_JOB_TYPE[jt]))
