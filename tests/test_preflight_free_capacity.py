@@ -367,3 +367,25 @@ def test_checked_record_reaches_the_run_record(tmp_path, monkeypatch):
     data = json.loads(path.read_text())
     assert data["provenance"]["preflight"] == record
     assert data["verdict"]["qualifiers"]["scratch_capacity"] == "scratch capacity not checked"
+
+
+def test_continuous_run_does_not_count_its_own_leftover_streams():
+    """A continuous run stops its leftover streams before starting, so they
+    are not subtracted (counting them refused reruns after an interrupt)."""
+    stream = _pod("old-stream-exec", "a", "30", "300Gi", ns="pf-t")
+    stream.metadata.labels = {"spark-role": "executor"}
+    k = _client([_node("a")], [stream])
+    seen = {}
+    real = k.get_free_capacity
+
+    def spy(**kw):
+        got = real(**kw)
+        seen["free_cpu"] = got.free.total_cpu_millicores
+        return got
+
+    k.get_free_capacity = spy
+    with mock.patch("lakebench.k8s.get_k8s_client", return_value=k):
+        _check_cluster_capacity(_cfg(), sustained=True)
+        assert seen["free_cpu"] == 64_000
+        _check_cluster_capacity(_cfg(), sustained=False)
+        assert seen["free_cpu"] == 34_000
