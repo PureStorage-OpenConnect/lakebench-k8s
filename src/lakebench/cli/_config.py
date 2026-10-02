@@ -117,25 +117,20 @@ def config_show(
             ),
         ]
 
-        # Peak requested resources from compute_peak_requirements(), the
-        # same figure run's capacity preflight checks. Auto-sizing first, as
-        # info and run do, so the co-resident request matches theirs.
-        from lakebench.cli import info_peak_request
+        # Peak requested resources from the one sizing source, the
+        # same plan_requirements() that info, recommend and run's capacity
+        # preflight use. Auto-sizing first, as info and run do, so the
+        # displayed fields match what the plan sized.
         from lakebench.config.autosizer import resolve_auto_sizing
+        from lakebench.config.sizing import breakdown_text, floor_text, plan_requirements
 
         resolve_auto_sizing(cfg)
-        from lakebench.config.schema import PipelineMode
-
-        sustained = cfg.architecture.pipeline.mode == PipelineMode.SUSTAINED
-        peak, co_cores, co_gb, co_label = info_peak_request(
-            cfg, cfg.architecture.workload.datagen.scale, sustained
-        )
+        plan = plan_requirements(cfg)
         fields.append(
             (
                 "peak_requested",
-                f"{peak.cpu_cores + co_cores} cores / {peak.memory_gb + co_gb} GB memory / "
-                f"{peak.scratch_gb} GB scratch",
-                f"derived: {peak.driving_job} + {co_label}",
+                floor_text(plan),
+                f"derived: {breakdown_text(plan)}",
             )
         )
         from lakebench.config.support import support_state_for_config
@@ -374,42 +369,53 @@ def config_storage(
 def config_recommend(
     config_file: Annotated[
         Path,
-        typer.Argument(help="Configuration file path (used for mode detection)", exists=True),
+        typer.Argument(
+            help="Configuration file path (sized as written, at each scale)", exists=True
+        ),
     ] = Path("lakebench.yaml"),
 ) -> None:
-    """Show sizing guidance for your cluster."""
-    from lakebench.cli import recommend as _recommend
+    """Show sizing guidance for your cluster, sized from this config."""
+    from lakebench.cli._recommend import recommend_impl
     from lakebench.config import LoadPurpose, load_config
+    from lakebench.k8s import get_k8s_client
 
-    # Extract pipeline mode from config to pass to recommend
-    schema: str | None = None
-    cfg = None
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
-        mode = cfg.architecture.pipeline.mode.value
-        schema = cfg.architecture.workload.schema_type.value
     except Exception as e:
-        mode = None
-        console.print(
-            f"[yellow]{esc(config_file)} did not load ({esc(type(e).__name__)}); sizing against "
-            "the kubeconfig's current context and the default mode.[/yellow]"
-        )
+        console.print(f"[red]Config error: {esc(e)}[/red]")
+        raise typer.Exit(_load_failure_code(e)) from None
 
-    if cfg is not None:
-        # Size against the config's cluster, not whichever is current: pin its context before
-        # recommend detects capacity, which otherwise uses the current one.
-        from kubernetes.config import ConfigException
-        from rich.markup import escape
+    # Size against the config's cluster, not whichever is current: pin its
+    # context before recommend detects capacity.
+    from kubernetes.config import ConfigException
 
-        from lakebench.k8s.target import pin_command
+    from lakebench.k8s.target import pin_command
 
-        try:
-            pin_command(cfg)
-        except ConfigException as e:
-            console.print(f"[red]Cannot use the config's cluster context:[/red] {escape(str(e))}")
-            raise typer.Exit(ExitCode.PREREQUISITE) from None
+    try:
+        pin_command(cfg)
+    except ConfigException as e:
+        console.print(f"[red]Cannot use the config's cluster context:[/red] {esc(e)}")
+        raise typer.Exit(ExitCode.PREREQUISITE) from None
 
-    _recommend(mode=mode, schema_type=schema)
+    def _detect():
+        from lakebench.k8s.target import ClusterTarget
+
+        target = ClusterTarget.current()  # the context pin_command pinned
+        console.print(f"[dim]Cluster context: {esc(target.label)}[/dim]")
+        return get_k8s_client(target=target, namespace=cfg.get_namespace()).get_cluster_capacity()
+
+    code = recommend_impl(
+        cluster_cores=None,
+        cluster_memory_gb=None,
+        target_scale=None,
+        slow_datagen=False,
+        mode=None,
+        schema_type=None,
+        base_cfg=cfg,
+        detect_capacity=_detect,
+    )
+    if code:
+        raise typer.Exit(code)
 
 
 @config_app.command("recipes")

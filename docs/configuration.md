@@ -905,7 +905,10 @@ computed count for that job (e.g., `spark.bronze_executors: 4`). Use
 
 ## Example: Scale 100 (~1 TB)
 
-A production-scale config for 1 TB benchmarking on a 64-core cluster:
+A production-scale config for 1 TB benchmarking. The cluster it needs is
+the scale-100 row of the sizing table in
+[Getting Started](getting-started.md#kubernetes-cluster) (`lakebench config show`
+prints it for your config):
 
 ```yaml
 name: lakebench-1tb
