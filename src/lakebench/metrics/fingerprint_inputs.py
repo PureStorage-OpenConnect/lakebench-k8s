@@ -104,16 +104,11 @@ def owned_conf(spark_conf: dict[str, Any], user: dict[str, str] | None = None) -
 
 
 def user_spark_conf(cfg: Any) -> dict[str, str]:
-    """The ``spark.conf`` entries the user set: those that differ from the
-    schema's default conf, or that the default does not have."""
-    from lakebench.config.schema import SparkConfOverrides
+    """The ``spark.conf`` entries the user set that change what runs (every
+    one not equal to its ``SPARK_CONF_DEFAULTS`` value)."""
+    from lakebench.modules.pipeline_engines.spark.conf_keys import user_spark_overrides
 
-    default = SparkConfOverrides().conf
-    return {
-        str(k): str(v)
-        for k, v in (cfg.spark.conf or {}).items()
-        if str(k) not in default or str(default[str(k)]) != str(v)
-    }
+    return user_spark_overrides(cfg.spark.conf or {})
 
 
 def user_conf_digest(spark_conf: dict[str, Any], user: dict[str, str]) -> str | None:

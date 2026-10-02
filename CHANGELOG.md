@@ -68,6 +68,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   financial config that named another layout with `path_template` (which
   v1.6 passed to the financial stages) is refused. Corpus and workload ids
   do not move. A schema walk test fails when a config field has no reader.
+- **`spark.conf` merges over the job defaults; keys Lakebench sets are
+  refused.** `spark.conf` now holds your own keys only (default `{}`). Each
+  job starts from seven proven defaults (S3A multipart size, upload blocks,
+  attempts, retries, retry interval, memory fraction and storage fraction),
+  then your keys, then the keys Lakebench sets for the job. Before, the
+  defaults were the schema default of `spark.conf`, so setting any key
+  dropped all of them: a config with a custom `spark.conf` now gets them back,
+  which changes what such a config runs. A `spark.conf` key Lakebench sets
+  for every job (shuffle partitions, the S3A connection pool and buffers,
+  the catalog, `spark.jars` and `spark.jars.*`, `spark.submit.pyFiles`,
+  adaptive execution, UI, `spark.kubernetes.*`, executor and driver sizing)
+  was silently overwritten and is now refused by the commands that change
+  data, naming what controls it; teardown and read commands drop it with a
+  note, and a key at its v1.6 schema default is dropped with a note
+  everywhere. `spark.driver.maxResultSize` still takes a user value. A
+  non-default `spark.conf` is recorded as `experiment.architecture.spark_conf_user`.
 - **`operator.install: true` is refused.** The Spark Operator
   (`platform.compute.spark.operator.install`) and the Stackable operators
   (`architecture.catalog.hive.operator.install`) are shared cluster

@@ -412,18 +412,12 @@ observability:
 # ---------------------------------------------------------------------------
 # SPARK CONFIGURATION OVERRIDES
 # ---------------------------------------------------------------------------
-# S3A and shuffle settings proven at 1 TB+ in production.
+# Your own Spark keys, merged over the job defaults. Keys Lakebench owns
+# (partitions, catalog, S3A connection pool, jars, UI) are refused.
 spark:
-  conf:
-    spark.hadoop.fs.s3a.connection.maximum: "500"
-    spark.hadoop.fs.s3a.threads.max: "200"
-    spark.hadoop.fs.s3a.fast.upload: "true"
-    spark.hadoop.fs.s3a.multipart.size: "268435456"
-    spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
-    spark.sql.shuffle.partitions: "200"
-    spark.default.parallelism: "200"
-    spark.memory.fraction: "0.8"
-    spark.memory.storageFraction: "0.3"
+  conf: {}
+    # spark.speculation: "true"
+    # spark.memory.fraction: "0.8"     # a default; set to change it
 ```
 
 ## Complete Field Reference
@@ -648,26 +642,39 @@ added at runtime.
 
 ### Spark Configuration Overrides
 
-The `spark.conf` section accepts arbitrary Spark configuration key-value pairs.
-These are passed directly to the SparkApplication manifest. The defaults below
-are proven at 1 TB+ scale.
+`spark.conf` holds your own Spark keys. Each job's conf is built in three
+layers, later ones winning: the job defaults below, then `spark.conf`, then
+the keys Lakebench sets for the job (per-job shuffle partitions and result
+size, the catalog and S3A connection settings, jars, adaptive execution, UI
+and Kubernetes settings). A `spark.conf` key Lakebench sets for the job is
+refused at load by the commands that change data, naming the setting that
+controls it instead (for example `spark.sql.shuffle.partitions` follows the
+executor count, `platform.compute.spark.<job>_executors`); `destroy`, `status`
+and the read-only commands drop it with a note. `spark.driver.maxResultSize`
+is the one Lakebench-set key a user value replaces. The full owned set is
+`LAKEBENCH_OWNED_SPARK_KEYS` in
+`src/lakebench/modules/pipeline_engines/spark/conf_keys.py`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `spark.conf` | dict | see annotated example | Map of Spark config keys to values. Any valid `spark.*` property is accepted. |
+| `spark.conf` | dict | `{}` | Your Spark keys, merged over the job defaults. Enters the experiment record (`architecture.spark_conf_user`) when it changes something. |
 
-Common keys and their defaults:
+Job defaults (`SPARK_CONF_DEFAULTS`), which a `spark.conf` value replaces:
 
 | Key | Default | Description |
 |---|---|---|
-| `spark.hadoop.fs.s3a.connection.maximum` | `500` | Max S3 connections. |
-| `spark.hadoop.fs.s3a.threads.max` | `200` | Max S3 threads. |
-| `spark.hadoop.fs.s3a.fast.upload` | `true` | Enable fast multipart upload. |
 | `spark.hadoop.fs.s3a.multipart.size` | `268435456` | Multipart upload part size (256 MB). |
-| `spark.sql.shuffle.partitions` | `200` | Shuffle partition count. |
-| `spark.default.parallelism` | `200` | Default RDD parallelism. |
+| `spark.hadoop.fs.s3a.fast.upload.active.blocks` | `16` | Upload blocks in flight per stream. |
+| `spark.hadoop.fs.s3a.attempts.maximum` | `20` | S3 request attempts. |
+| `spark.hadoop.fs.s3a.retry.limit` | `10` | S3A retries. |
+| `spark.hadoop.fs.s3a.retry.interval` | `500ms` | Wait between retries. |
 | `spark.memory.fraction` | `0.8` | Fraction of heap for execution + storage. |
 | `spark.memory.storageFraction` | `0.3` | Fraction of `memory.fraction` for storage. |
+
+Before v1.7 these defaults were the schema default of `spark.conf`, so
+setting any key there dropped all of them; they now stay. A config that still
+carries the v1.6 default map loads with a note for the Lakebench-set keys in
+it (they were overwritten then too).
 
 ## Scale Factors
 
