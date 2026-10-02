@@ -202,3 +202,108 @@ existing table (`src/lakebench/spark/scripts/gold_finalize_delta.py:_safe_write_
 0.4.1 says it fixed this, but no Unity combination is in
 `src/lakebench/config/schema.py:_SUPPORTED_COMBINATIONS`, so the workaround
 stays until a Unity recipe is supported and RTAS is proven live on it.
+
+---
+
+## Storage conformance
+
+**`config storage` reports; it does not gate.** S3 implementations differ
+in behaviour that mocked tests cannot see (SeaweedFS returns an empty
+bucket list while `head_bucket` succeeds, Garage checks the signing
+region), so `lakebench config storage <config>` runs graded checks against
+the real backend. A REQUIRED failure (connectivity, bucket enumeration,
+object operations, multipart abort) means Lakebench's code paths break
+there; an ADVISORY result (region strictness) changes Spark config and is
+recorded, not treated as a defect; the bucket-tagging check is advisory
+too and reports whether the backend supports bucket tags, which destroy
+uses to prove bucket ownership. The command never blocks `deploy` or
+`run`, so a store that works is never refused for being unlisted, and an
+account without `CreateBucket` gets read-only checks with the write checks
+reported as skipped rather than failed. The runner and the known-backend
+list are `src/lakebench/s3/conformance.py:ConformanceRunner` and
+`src/lakebench/s3/conformance.py:KNOWN_BACKENDS`; the mocked tests are
+`tests/test_s3_conformance_runner.py` and the live suite
+`tests/test_s3_conformance.py`. Keep those, the command in
+`src/lakebench/cli/_config.py` and [Storage Backends](storage-backends.md)
+in step when a check changes.
+
+---
+
+## Table maintenance
+
+**Iceberg expiry and orphan removal are built per engine.**
+`src/lakebench/modules/table_formats/iceberg/maintenance.py:build_maintenance_sql`
+builds the statements and
+`src/lakebench/modules/table_formats/iceberg/maintenance.py:exec_sql` runs
+each one through `kubectl exec` on the Trino coordinator or the Spark
+Thrift pod, raising on a non-zero exit and with `ExecSqlTimeout` when the
+client times out (the statement may still be running in the engine).
+DuckDB is read-only for Iceberg and runs none.
+
+- **Trino** refuses a retention under its system minimum unless the
+  session property is set in the same CLI process, so each statement is
+  one `--execute` string: `SET SESSION <catalog>.expire_snapshots_min_retention
+  = '...'; ALTER TABLE ... EXECUTE expire_snapshots(...)`, and the same for
+  `remove_orphan_files`.
+- **Spark** takes `CALL <catalog>.system.expire_snapshots(...)` with a
+  `TIMESTAMP` literal; a computed numeric expression fails argument binding
+  on Spark 4.
+
+**Two retention floors.** Orphan removal never uses a retention below
+`src/lakebench/modules/table_formats/iceberg/maintenance.py:ORPHAN_MIN_RETENTION_SECONDS`
+(24 h 10 min), because removing orphans beside a live writer can delete
+files a commit has not yet referenced; the builder enforces it whatever the
+caller passes. While streams are live, snapshot expiry is floored at
+`src/lakebench/modules/table_formats/iceberg/maintenance.py:LIVE_EXPIRE_MIN_RETENTION_SECONDS`,
+so a stream that falls behind does not lose the snapshots it still needs.
+The builder does not know about live streams: that floor (and Delta's
+7-day floor while streams are live) is applied by
+`src/lakebench/cli/_sustained.py:applied_retentions`, which is also what
+the run records, so a new call site must take its retentions from it.
+`retention_threshold` must be a whole number and one unit (`30m`, `1h`,
+`7d`) and is checked at load
+(`src/lakebench/config/schema.py:SustainedConfig`).
+
+**Where maintenance runs.** In a continuous run,
+`src/lakebench/cli/_sustained.py:_run_iceberg_maintenance` runs a round
+every `retention_interval` seconds (unset means a third of the window,
+clamped to the field's range, `SustainedConfig.effective_retention_interval`); a table that fails is
+logged and the round goes on to the next, and the run does not stop for
+it. Before a batch benchmark,
+`run` runs compaction and maintenance under one shared budget
+(`src/lakebench/cli/_run.py:PRE_BENCHMARK_MAINTENANCE_CAP`). A round that
+stops on that budget, or runs beside live streams, is recorded
+(`maintenance_stopped`, `maintenance_live_streams`), and the perf gate does
+not treat the post-maintenance QpH as a measurement
+(`src/lakebench/metrics/perf_gate.py:post_qph_unmeasured`). Destroy runs no
+maintenance. Delta maintenance is covered in
+[Troubleshooting](troubleshooting.md#delta-no-compaction-and-vacuum-only-on-trino).
+
+---
+
+## Metrics and output
+
+**Requested resources, not usage.** Per-stage executor counts, cores and
+memory in the record are what the job profiles requested from Kubernetes,
+and the core-hour and efficiency figures are built from them; they are
+named "requested" for that reason. When a job finishes too fast for the
+progress callback to see its executors, the count comes from the config's
+per-job executor override when set, otherwise from the profile and the
+scale (`src/lakebench/cli/_run.py`, using
+`src/lakebench/modules/pipeline_engines/spark/job.py:get_executor_count`).
+
+**Size fallbacks.** When a job reports no output size, the measured S3 size
+of that layer is used; when gold's input size is zero, the measured silver
+size is used. Both are in
+`src/lakebench/metrics/collector.py:build_pipeline_benchmark`.
+
+**The continuous mode is stored as `sustained`.** The user-facing mode is
+`continuous`, but records keep `pipeline_mode: "sustained"` so older
+records still read. `src/lakebench/config/schema.py:is_continuous_mode`
+accepts both spellings; new code should use it rather than compare with
+`"sustained"`.
+
+**One output root.** Journals, run records and reports all derive their
+paths from `src/lakebench/_constants.py:DEFAULT_OUTPUT_DIR`, so moving the
+output means changing one constant. The layout is in
+[Operations](operations.md#where-the-output-goes).
