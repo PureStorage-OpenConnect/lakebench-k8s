@@ -268,6 +268,31 @@ def _check_namespace(cfg) -> PrereqResult:
         )
 
 
+def _unreadable_config(e: Exception) -> PrereqResult:
+    """The capacity check's failure when the config's request cannot be read."""
+    return PrereqResult(
+        name="cluster-capacity",
+        passed=False,
+        message=f"Capacity check cannot read the config: {type(e).__name__}: {e}",
+        hint=(
+            "Fix the value it names: memory and CPU are Kubernetes quantities "
+            "(16Gi, 4G, 500m, 2), Spark heaps are Spark sizes (16g)."
+        ),
+    )
+
+
+def deploy_capacity_check(cfg) -> PrereqResult:
+    """The capacity check ``deploy`` runs before it creates anything.
+
+    Read-only: ``run``'s check (``config.sizing.check_capacity``, which
+    sizes a copy of the config against the cluster as ``run`` does) in the
+    config's own mode, without datagen. Deploy does not generate, so it
+    refuses only a config whose pipeline and always-on pods cannot fit;
+    ``run`` checks datagen too when it creates datagen pods.
+    """
+    return _check_cluster_capacity(cfg, datagen_runs=False)
+
+
 def _check_cluster_capacity(
     cfg,
     *,
@@ -288,14 +313,28 @@ def _check_cluster_capacity(
     batch datagen pod, plus the always-on pods and continuous datagen) fits
     the cluster, and that the largest pod fits the largest node. A batch
     datagen Job too large to run all at once passes with a warning: its pods
-    queue.
+    queue. A config value or node quantity it cannot read fails the check
+    (exit 4 from run), whether or not the cluster can be read; a cluster it
+    cannot reach, or whose nodes it cannot list, skips it.
     """
+    from lakebench.config.sizing import plan_requirements
+    from lakebench.k8s.target import ContextConflictError
+    from lakebench.quantity import QuantityError
+
+    run_mode = None if sustained is None else ("continuous" if sustained else "batch")
+    # The request comes from the config alone, so read it before the cluster:
+    # a value the plan cannot read fails the check even when the cluster
+    # cannot be read either.
+    try:
+        plan_requirements(cfg, run_mode=run_mode, datagen_runs=datagen_runs)
+    except Exception as e:
+        return _unreadable_config(e)
+
     try:
         from lakebench.config.sizing import check_capacity
         from lakebench.k8s import get_k8s_client
 
         scale = cfg.architecture.workload.datagen.scale
-        run_mode = None if sustained is None else ("continuous" if sustained else "batch")
 
         k8s = get_k8s_client(
             context=cfg.platform.kubernetes.context,
@@ -310,13 +349,18 @@ def _check_cluster_capacity(
                 hint="Requires permission to list nodes",
             )
 
-        verdict = check_capacity(
-            cfg,
-            capacity,
-            run_mode=run_mode,
-            datagen_runs=datagen_runs,
-            sizing_capacity=sizing_capacity,
-        )
+        try:
+            verdict = check_capacity(
+                cfg,
+                capacity,
+                run_mode=run_mode,
+                datagen_runs=datagen_runs,
+                sizing_capacity=sizing_capacity,
+            )
+        except Exception as e:
+            # Sized against the cluster, the plan can still fail on a value
+            # (autosizing to the capacity): the config's fault, not skipped.
+            return _unreadable_config(e)
         plan = verdict.plan
         gib = 1024**3
         avail_cores = capacity.total_cpu_millicores / 1000.0
@@ -327,7 +371,7 @@ def _check_cluster_capacity(
             f"{plan.co_resident.label}"
         )
         if plan.overrides_not_counted:
-            summary += "; per-job executor and driver overrides are not counted"
+            summary += "; per-job executor overrides are not counted"
         hint_lines = "\n".join(f"  {s}" for s in verdict.shortfalls)
 
         if verdict.status == "degraded":
@@ -340,7 +384,7 @@ def _check_cluster_capacity(
                 message=(
                     f"WARNING: cluster below the full request ({summary}); "
                     f"running degraded at ~{capped.cpu_cores} cores / "
-                    f"{capped.memory_gb} GB with Trino and datagen, capped: {names}"
+                    f"{capped.memory_gb} GB with {plan.co_resident.label}, capped: {names}"
                 ),
                 hint=hint_lines,
             )
@@ -374,8 +418,20 @@ def _check_cluster_capacity(
             logger.warning("Capacity: %s", warning)
             message += f"; WARNING: {warning}"
         return PrereqResult(name="cluster-capacity", passed=True, message=message)
+    except ContextConflictError:
+        raise
+    except QuantityError as e:
+        # A node quantity Lakebench cannot read is a parse failure, not an
+        # unknown cluster: fail rather than skip.
+        return PrereqResult(
+            name="cluster-capacity",
+            passed=False,
+            message=f"Capacity check cannot read a resource quantity: {e}",
+            hint="Report the value it names; the check will not pass without it.",
+        )
     except Exception as e:
-        # Never block a deploy because the capacity estimate itself failed.
+        # The cluster's capacity could not be read (API errors): the check
+        # cannot run, which does not block a deploy.
         logger.debug("Capacity check error: %s", e, exc_info=True)
         return PrereqResult(
             name="cluster-capacity",

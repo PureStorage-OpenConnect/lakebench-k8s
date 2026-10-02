@@ -280,7 +280,7 @@ class TestPreflightBetweenOldAndNewMinimum:
     The preflight sizes the config as ``run`` does (CC-22: auto-sizing on a
     copy against the cluster), so datagen is 4 pods x 8 cores here even
     though this test's config is not resolved in place. The capped request
-    is then 81 cores; before CC-22 an unresolved config was checked with the
+    is then 82 cores (81 before lb-deps was counted in it); before CC-22 an unresolved config was checked with the
     schema's datagen defaults and passed from 57 cores, a cluster on which
     ``run`` itself is refused.
     """
@@ -299,7 +299,7 @@ class TestPreflightBetweenOldAndNewMinimum:
             get_client.return_value.get_cluster_capacity.return_value = cap
             return _check_cluster_capacity(_config("financial", 10))
 
-    @pytest.mark.parametrize("cores", [81, 100, 117, 160])
+    @pytest.mark.parametrize("cores", [82, 100, 117, 160])
     def test_runs_degraded_with_a_warning(self, cores):
         r = self._check(cores)
         assert r.passed
@@ -307,12 +307,12 @@ class TestPreflightBetweenOldAndNewMinimum:
         assert "silver-stream" in r.message or "gold-refresh" in r.message
 
     def test_the_old_minimum_fails_once_trino_and_datagen_are_counted(self):
-        """The capped streams plus Trino, Hive/Postgres and datagen (4 pods x
-        8 cores, as run sizes them) need 81: below that the run would hang
-        Pending, so preflight fails."""
+        """The capped streams plus Trino, Hive/Postgres, lb-deps and datagen
+        (4 pods x 8 cores, as run sizes them) need 82: below that the run
+        would hang Pending, so preflight fails."""
         assert not self._check(54).passed
-        assert not self._check(80).passed
-        assert self._check(81).passed
+        assert not self._check(81).passed
+        assert self._check(82).passed
 
     @pytest.mark.parametrize("cores", [30, 37])
     def test_c360_below_the_capped_request_still_fails(self, cores):
@@ -346,7 +346,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         def run(driver_cores):
             cfg = _config("financial", 10)
             cfg.platform.compute.spark.driver_cores = driver_cores
-            cap = ClusterCapacity(81_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
+            cap = ClusterCapacity(82_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
             with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
                 get_client.return_value.get_cluster_capacity.return_value = cap
                 return _check_cluster_capacity(cfg).passed

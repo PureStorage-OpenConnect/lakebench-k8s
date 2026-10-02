@@ -326,12 +326,20 @@ def test_thrift_pod_memory_counts_its_overhead():
     assert co_resident_request(odd, False).memory_gb == 30 + 5 + 2  # lb-deps
 
 
-def test_driver_overrides_are_flagged():
+def test_driver_overrides_are_counted_not_flagged():
     from tests.conftest import make_config
 
+    base = plan_requirements(make_config())
     for field, value in (("driver_memory", "64g"), ("driver_cores", 8)):
         cfg = make_config(platform={"compute": {"spark": {field: value}}})
-        assert plan_requirements(cfg).overrides_not_counted, field
+        plan = plan_requirements(cfg)
+        assert not plan.overrides_not_counted, field
+        assert (plan.spark.memory_gb, plan.spark.cpu_cores) != (
+            base.spark.memory_gb,
+            base.spark.cpu_cores,
+        ), field
+    cfg = make_config(platform={"compute": {"spark": {"silver_executors": 4}}})
+    assert plan_requirements(cfg).overrides_not_counted
 
 
 def test_floor_driver_names_a_datagen_pod_when_it_sets_the_floor():

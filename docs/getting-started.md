@@ -122,11 +122,14 @@ that does not fit, or when a single pod fits no node. An explicit
 Lakebench checks this for you. The prerequisite phase of `lakebench run`
 compares the minimum against your cluster's allocatable capacity and fails
 immediately with the specific shortfall, rather than leaving pods `Pending`
-until the job times out. Skipped when you pass `--skip-preflight`. A batch
+until the job times out. `run` skips it only with `--skip-preflight`
+(`--skip-deploy` still runs it). A batch
 `run` counts datagen only when it creates datagen pods: with `--generate`
 (and not `--skip-generate`), or in a multi-cycle run. A plain batch `run`
 over data from an earlier `lakebench generate` checks the Spark peak and the
-always-on pods.
+always-on pods. `lakebench deploy` runs the same check, without datagen,
+before it creates anything (so do `run --deploy-only`, `--generate-only`
+and run's auto-deploy), and refuses with exit 4; it has no flag to skip it.
 
 Above scale 50 a continuous run that generates its own corpus is refused,
 or admitted only with its streams capped hard (one bronze-ingest executor,

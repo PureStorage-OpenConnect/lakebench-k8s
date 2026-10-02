@@ -1597,8 +1597,17 @@ def run(
         bool,
         typer.Option(
             "--skip-preflight",
-            "--skip-deploy",
             help="Skip prerequisite checks and infrastructure validation",
+        ),
+    ] = False,
+    skip_infra: Annotated[
+        bool,
+        typer.Option(
+            "--skip-deploy",
+            help=(
+                "Skip the deploy and the infrastructure readiness check; the read-only "
+                "prerequisite checks, cluster capacity included, still run"
+            ),
         ),
     ] = False,
     skip_generate: Annotated[
@@ -1775,6 +1784,7 @@ def run(
             duration=duration,
             include_datagen=include_datagen,
             skip_deploy=skip_deploy,
+            skip_infra=skip_infra,
             skip_generate=skip_generate,
             regenerate=regenerate,
             skip_maintenance=skip_maintenance,
@@ -1937,7 +1947,12 @@ def run(
             print_error("Prerequisites not met -- cannot proceed")
             raise typer.Exit(ExitCode.PREREQUISITE)
         print_success("All prerequisites passed")
+    else:
+        print_info("Skipping prerequisites (--skip-preflight)")
 
+    if skip_infra and not skip_deploy:
+        print_info("Skipping the infrastructure readiness check (--skip-deploy)")
+    elif not skip_deploy:
         # Also run infrastructure readiness check
         # If namespace doesn't exist and --yes is set, auto-deploy first
         ns = cfg.get_namespace()
@@ -1962,8 +1977,6 @@ def run(
             pass  # preflight will catch this
 
         _run_preflight_infra_check(cfg)
-    else:
-        print_info("Skipping prerequisites (--skip-preflight)")
 
     # Branch: sustained streaming pipeline (CLI flag overrides config)
     if _plan.mode == "continuous":

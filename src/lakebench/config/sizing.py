@@ -78,17 +78,15 @@ BEFORE_CLUSTER_SCALING = "before cluster scaling"
 #: PostgreSQL pod memory request (templates/postgres/statefulset.yaml.j2).
 POSTGRES_MEMORY_GI = 1.0
 
-#: The Spark overrides the peak does not count yet: the per-job
-#: executor counts, by pipeline mode, and the global driver overrides the
-#: manifests apply to every job. A plan whose config sets one says so.
-_DRIVER_OVERRIDE_FIELDS = ("driver_cores", "driver_memory")
+#: The Spark overrides the peak does not count yet: the per-job executor
+#: counts, by pipeline mode. A plan whose config sets one says so. The
+#: global driver overrides are counted (``job.effective_driver``).
 _OVERRIDE_FIELDS = {
-    "batch": ("bronze_executors", "silver_executors", "gold_executors", *_DRIVER_OVERRIDE_FIELDS),
+    "batch": ("bronze_executors", "silver_executors", "gold_executors"),
     "continuous": (
         "bronze_ingest_executors",
         "silver_stream_executors",
         "gold_refresh_executors",
-        *_DRIVER_OVERRIDE_FIELDS,
     ),
 }
 
@@ -267,13 +265,15 @@ def peak_for_config(cfg: LakebenchConfig, *, mode: str | None = None) -> PeakReq
     """``compute_peak_requirements`` for *cfg*'s scale, mode and schema.
 
     *mode* overrides the config's pipeline mode (``run --sustained`` on a
-    batch config). Per-job executor overrides are not counted yet;
-    ``SizingPlan.overrides_not_counted`` flags a config that sets one.
+    batch config). The drivers are the ones *cfg*'s manifests request
+    (driver overrides, the Spark 3 driver size). Per-job executor overrides
+    are not counted yet; ``SizingPlan.overrides_not_counted`` flags a
+    config that sets one.
     """
     from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
 
     scale = cfg.architecture.workload.datagen.get_effective_scale()
-    return compute_peak_requirements(scale, _mode_of(cfg, mode), _schema_of(cfg))
+    return compute_peak_requirements(scale, _mode_of(cfg, mode), _schema_of(cfg), config=cfg)
 
 
 def _engine_pods(cfg: LakebenchConfig) -> list[tuple[str, float, float]]:
@@ -314,7 +314,11 @@ def _engine_pods(cfg: LakebenchConfig) -> list[tuple[str, float, float]]:
             pod_gi = _parse_memory_gi(heap)
         pods.append(("Spark Thrift", float(qe.spark_thrift.cores), pod_gi))
     elif engine == "duckdb":
-        pods.append(("DuckDB", float(qe.duckdb.cores), _parse_memory_gi(qe.duckdb.memory)))
+        # A Spark-style size ("4g"); the pod requests it as deploy renders it.
+        from lakebench.deploy.engine import DeploymentEngine
+
+        pod = DeploymentEngine._spark_mem_to_k8s(qe.duckdb.memory)
+        pods.append(("DuckDB", float(qe.duckdb.cores), _parse_memory_gi(pod)))
     return pods
 
 
@@ -570,7 +574,7 @@ def breakdown_text(plan: SizingPlan) -> str:
             f"every datagen pod at once {plan.full.cpu_cores} cores / {plan.full.memory_gb} GB"
         )
     if plan.overrides_not_counted:
-        parts.append("per-job executor and driver overrides not counted")
+        parts.append("per-job executor overrides not counted")
     return "; ".join(parts)
 
 

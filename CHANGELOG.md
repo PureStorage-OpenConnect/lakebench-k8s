@@ -755,6 +755,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   continuous at scale 1-10 38 cores / 282 GB (was 272 GB) and AML
   continuous 118 cores / 990 GB (was 980 GB); the docs tables follow.
   What the pods request is unchanged.
+- **`deploy` runs the cluster capacity check before it creates anything,
+  and `run --skip-deploy` no longer skips the prerequisites.** A config the
+  cluster cannot hold was deployed and only failed at `run` (or never, with
+  `--skip-deploy`). Deploy now refuses it with exit 4 and creates nothing
+  (the check counts the pipeline and always-on pods, not datagen, which
+  deploy does not run; `--dry-run` shows the result).
+  `--skip-deploy` is no longer an alias of `--skip-preflight`: it skips the
+  deploy and the infrastructure readiness check, and the read-only
+  prerequisite checks still run; `--skip-preflight` skips both as before.
+  When the peak calculation itself fails, the message names the exception.
+- **The capacity check reads every Kubernetes quantity, and fails rather
+  than skips when it cannot.** One parser (`lakebench.quantity`) now
+  serves the preflight, the continuous stream budget, the autosizer, node
+  allocatable and the system fingerprint. `1Ti`, `2000000Ki`, `4G` and
+  `1e3` read correctly (`16G` is 16e9 bytes, 14.9 GiB, where the old
+  parser read 16 GiB); `16g` for a pod memory is not a Kubernetes size and
+  is named, and `admin --controller-tmp-size` no longer takes `1K` or
+  `1 Gi`, which Kubernetes rejects too. A config value the check cannot read now fails it (`run` exits
+  4) where it used to pass as "Capacity check skipped"; an unreachable
+  cluster still skips it. DuckDB's Spark-style memory (`4g`) is counted
+  as the pod deploy renders (`4Gi`).
+- **The capacity check, `config show` and `info` count driver overrides.**
+  They read the job profiles only, so `platform.compute.spark.driver_memory`
+  and `driver_cores` and the 24g Spark 3 silver and gold drivers were never
+  counted (a 64g driver under-counted silver-build by 45 GB). They now
+  count the driver each manifest requests. A `driver_memory` Spark cannot
+  read (`16Gi`, `1.5g`) is refused by the commands that change data, since
+  the job would fail at submit; `16gb` is accepted. The capped continuous request
+  counts the always-on pods as the capacity plan does (lb-deps once, the
+  catalog and Postgres memory), so AML continuous at scale 10 runs
+  degraded from 82 cores, not 81.
 - `lakebench clean silver` followed by `run` works on Delta recipes. The
   clean empties the silver bucket and keeps the catalog entry, and the next
   silver build failed on it (DELTA_TABLE_NOT_FOUND), with or without

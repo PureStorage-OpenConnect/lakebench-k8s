@@ -562,14 +562,39 @@ def _driver_pod_bytes(driver_memory: str) -> int:
     return (mib + max(int(0.4 * mib), 384)) * 1024**2
 
 
+def effective_driver(job_type: str, profile: dict, config: Any | None) -> tuple[int, str]:
+    """``(cores, memory)`` the manifest gives *job_type*'s driver: the
+    profile values; for a Spark 3 silver-build or gold-finalize driver 24g
+    (the profiles carry Spark 4's 32g, which the larger SDK v2 bundle and
+    the K8s API polling need; Spark 3 is fine with 24g); then the global
+    ``platform.compute.spark.driver_cores``/``driver_memory`` overrides.
+    Without a *config*, the profile values."""
+    cores, memory = profile["driver_cores"], profile["driver_memory"]
+    if config is None:
+        return cores, memory
+    spark_cfg = config.platform.compute.spark
+    if (
+        _parse_spark_major(config.images.spark) < 4
+        and spark_cfg.driver_memory is None
+        and job_type in (JobType.SILVER_BUILD.value, JobType.GOLD_FINALIZE.value)
+    ):
+        memory = "24g"
+    if spark_cfg.driver_cores is not None:
+        cores = spark_cfg.driver_cores
+    if spark_cfg.driver_memory is not None:
+        memory = spark_cfg.driver_memory
+    return cores, memory
+
+
 def _job_requirement(
-    job_type: str, scale: float, schema_type: str | None = None
+    job_type: str, scale: float, schema_type: str | None = None, config: Any | None = None
 ) -> JobRequirement | None:
     """Compute the resource request for one job at a given scale.
 
     ``schema_type`` (e.g. ``"financial"``) selects per-workload profile
     overrides. Omitted or unknown values fall through to the Customer360
-    baseline.
+    baseline. With *config*, the driver is the one the manifest builds
+    (``effective_driver``).
     """
     profile = _resolve_job_profile(job_type, schema_type)
     if not profile:
@@ -583,7 +608,8 @@ def _job_requirement(
 
     exec_mem = parse_spark_memory(profile["executor_memory"])
     exec_overhead = parse_spark_memory(profile["executor_memory_overhead"])
-    driver_mem = _driver_pod_bytes(profile["driver_memory"])
+    driver_cores, driver_memory = effective_driver(job_type, profile, config)
+    driver_mem = _driver_pod_bytes(driver_memory)
     exec_total_bytes = exec_mem + exec_overhead
 
     gib = 1024**3
@@ -593,16 +619,16 @@ def _job_requirement(
     return JobRequirement(
         job_type=job_type,
         executors=executors,
-        cpu_cores=executors * profile["executor_cores"] + profile["driver_cores"],
+        cpu_cores=executors * profile["executor_cores"] + driver_cores,
         memory_gb=-(-memory_bytes // gib),
         scratch_gb=scratch_gb,
-        max_pod_cpu_cores=max(profile["executor_cores"], profile["driver_cores"]),
+        max_pod_cpu_cores=max(profile["executor_cores"], driver_cores),
         max_pod_memory_gb=-(-max(exec_total_bytes, driver_mem) // gib),
     )
 
 
 def compute_peak_requirements(
-    scale: float, mode: str = "batch", schema_type: str | None = None
+    scale: float, mode: str = "batch", schema_type: str | None = None, config: Any | None = None
 ) -> PeakRequirement:
     """Compute the peak resources the pipeline requests at a given scale.
 
@@ -621,6 +647,9 @@ def compute_peak_requirements(
             per-workload profile overrides; ``None`` uses the Customer360
             baseline. AML at scale >= 5 needs a larger bronze-verify PVC
             than c360 (LB-118).
+        config: The deployment's config, when there is one: the drivers are
+            then the ones its manifests request (driver overrides, the
+            Spark 3 driver size). Without it, the profile drivers.
 
     Returns:
         PeakRequirement describing the peak CPU, memory, and scratch request.
@@ -633,7 +662,7 @@ def compute_peak_requirements(
     job_types = STREAMING_JOB_TYPES if streaming else BATCH_JOB_TYPES
 
     reqs = tuple(
-        r for jt in job_types if (r := _job_requirement(jt, scale, schema_type)) is not None
+        r for jt in job_types if (r := _job_requirement(jt, scale, schema_type, config)) is not None
     )
     if not reqs:
         return PeakRequirement(
@@ -768,10 +797,8 @@ def _streaming_concurrent_budget(
     # overridden stages outgrow: take the drivers out before sharing, or a
     # capped AML run asks for a few cores more than the cluster has (100
     # cores at scale 10: 101 with Trino and datagen).
-    forced_driver = config.platform.compute.spark.driver_cores
     driver_m = sum(
-        (forced_driver if forced_driver is not None else resolved[jt]["driver_cores"]) * 1000
-        for jt in _STREAMING_JOB_TYPES
+        effective_driver(jt.value, resolved[jt], config)[0] * 1000 for jt in _STREAMING_JOB_TYPES
     )
     override_budget_m = min(streaming_budget_m, int(max(0, remaining_m - driver_m) * 0.90))
     headroom_m = max(0, override_budget_m - used_m)
@@ -811,11 +838,11 @@ def streaming_request_under_budget(
     The capacity preflight uses this when the uncapped peak does not fit: the
     run caps the streams to what fits and warns, so the preflight fails only
     when even the capped request does not fit. The totals include what the
-    budget sets aside and the cluster must also hold (Trino, Hive/Postgres,
-    datagen), and an explicit per-job executor count, which the manifest
-    applies after the budget.
+    budget sets aside and the cluster must also hold
+    (``config.sizing.co_resident_request``: the query engine, catalog,
+    Postgres, lb-deps and running datagen), and an explicit per-job executor
+    count, which the manifest applies after the budget.
     """
-    from lakebench.config.autosizer import _parse_cpu_millicores, _parse_memory_gi
     from lakebench.config.schema import parse_spark_memory
 
     scale = config.architecture.workload.datagen.scale
@@ -845,29 +872,19 @@ def streaming_request_under_budget(
         exec_bytes = parse_spark_memory(prof["executor_memory"]) + parse_spark_memory(
             prof["executor_memory_overhead"]
         )
-        # The manifest applies the global driver overrides to every job.
-        drv_cores = spark_cfg.driver_cores or prof["driver_cores"]
-        drv_mem = spark_cfg.driver_memory or prof["driver_memory"]
+        drv_cores, drv_mem = effective_driver(jt.value, prof, config)
         cores_m += (n * prof["executor_cores"] + drv_cores) * 1000
         mem += n * exec_bytes + _driver_pod_bytes(drv_mem)
 
-    trino = config.architecture.query_engine.trino
-    datagen = config.architecture.workload.datagen
-    dg_pods = datagen.parallelism if datagen_running else 0
-    cores_m += (
-        _parse_cpu_millicores(trino.coordinator.cpu)
-        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
-        + 1000  # Hive + Postgres, as the budget counts them
-        + dg_pods * _parse_cpu_millicores(datagen.cpu)
-    )
-    co_gi = (
-        _parse_memory_gi(trino.coordinator.memory)
-        + trino.worker.replicas * _parse_memory_gi(trino.worker.memory)
-        + dg_pods * _parse_memory_gi(datagen.memory)
-    )
+    # The pods beside the streams, counted as the capacity plan counts
+    # them (the query engine, catalog and Postgres, lb-deps once, and
+    # datagen while it runs).
+    from lakebench.config.sizing import co_resident_request
+
+    co = co_resident_request(config, True, datagen_runs=datagen_running)
     return BudgetedStreamingRequest(
-        cpu_cores=-(-cores_m // 1000),
-        memory_gb=int(-(-(mem + co_gi * gib) // gib)),
+        cpu_cores=-(-cores_m // 1000) + co.cpu_cores,
+        memory_gb=int(-(-mem // gib)) + co.memory_gb,
         capped=tuple(capped),
     )
 
@@ -1937,35 +1954,18 @@ class SparkJobManager:
             profile["executor_cores"],
         )
 
-        # Driver resource overrides (global, applies to all jobs)
-        driver_cores = profile["driver_cores"]
-        driver_memory = profile["driver_memory"]
-
-        # Version-conditional driver memory: Spark 4 needs 32g for silver/gold
-        # due to 558MB SDK v2 bundle + K8s API polling overhead. Spark 3 is
-        # fine with 24g (280MB SDK v1 bundle).  Profile defaults are the Spark 4
-        # values (safe ceiling); downsize for Spark 3 when no user override.
-        if (
-            spark_major < 4
-            and spark_cfg.driver_memory is None
-            and job_type in (JobType.SILVER_BUILD, JobType.GOLD_FINALIZE)
-        ):
-            driver_memory = "24g"
-
-        if spark_cfg.driver_cores is not None:
+        # Driver resources: the Spark 3 driver size, then the global overrides
+        # (one rule with compute_peak_requirements, so the capacity check
+        # counts what this manifest requests).
+        driver_cores, driver_memory = effective_driver(job_type.value, profile, cfg)
+        if spark_cfg.driver_cores is not None or spark_cfg.driver_memory is not None:
             logger.info(
-                "Using driver cores override: %d (profile default: %d)",
-                spark_cfg.driver_cores,
+                "Using driver overrides: %s cores, %s memory (profile default: %d, %s)",
                 driver_cores,
-            )
-            driver_cores = spark_cfg.driver_cores
-        if spark_cfg.driver_memory is not None:
-            logger.info(
-                "Using driver memory override: %s (profile default: %s)",
-                spark_cfg.driver_memory,
                 driver_memory,
+                profile["driver_cores"],
+                profile["driver_memory"],
             )
-            driver_memory = spark_cfg.driver_memory
 
         # Warn when executor count is high and driver resources may be insufficient
         if executor_count > 24:

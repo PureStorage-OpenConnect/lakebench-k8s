@@ -1,0 +1,263 @@
+"""One Kubernetes quantity parser for capacity arithmetic (LB-246), and a
+capacity preflight that fails, not skips, when it cannot read a value."""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from unittest import mock
+
+import pytest
+
+from lakebench.config import LakebenchConfig
+from lakebench.k8s.client import ClusterCapacity, K8sClient
+from lakebench.quantity import QuantityError, parse, to_bytes, to_gib, to_millicores
+
+GIB = 1024**3
+
+
+@pytest.mark.parametrize(
+    ("value", "want"),
+    [
+        ("16Gi", 16 * GIB),
+        ("2000000Ki", 2_048_000_000),
+        ("1Ti", 1024 * GIB),
+        ("1Pi", 1024**5),
+        ("2Ei", 2 * 1024**6),
+        ("512Mi", 512 * 1024**2),
+        ("16G", 16 * 10**9),
+        ("4k", 4000),
+        ("3M", 3 * 10**6),
+        ("2T", 2 * 10**12),
+        ("1P", 10**15),
+        ("1E", 10**18),
+        ("1e3", 1000),
+        ("5E-2", Decimal("0.05")),
+        ("1.5Gi", Decimal("1.5") * GIB),
+        ("500m", Decimal("0.5")),
+        ("100n", Decimal("1E-7")),
+        ("7u", Decimal("7E-6")),
+        ("17179869184", 16 * GIB),
+        (" 8Gi ", 8 * GIB),
+        ("+4", 4),
+        (".5", Decimal("0.5")),
+        (4, 4),
+        (1.5, Decimal("1.5")),
+    ],
+)
+def test_parse_every_kubernetes_form(value, want):
+    assert parse(value) == Decimal(want)
+
+
+@pytest.mark.parametrize(
+    "value", ["16g", "1.5gb", "16GB", "-1Gi", "", "12e6Ki", "1K", "Gi", "1 Gi x", True, -2]
+)
+def test_rejects_what_kubernetes_rejects(value):
+    with pytest.raises(QuantityError):
+        parse(value)
+
+
+def test_rounding_and_units():
+    assert to_bytes("500m") == 1
+    assert to_millicores("1.5") == 1500
+    assert to_millicores("250m") == 250
+    assert to_millicores("0.0001") == 1
+    assert to_millicores(2) == 2000
+    assert to_gib("2000000Ki") == pytest.approx(1.9073486328125)
+
+
+def _old_mem(mem):
+    mem = mem.strip()
+    for suffix, mult in {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}.items():
+        if mem.endswith(suffix):
+            return int(mem[: -len(suffix)]) * mult
+    for suffix, mult in {"k": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4}.items():
+        if mem.endswith(suffix):
+            return int(mem[: -len(suffix)]) * mult
+    return int(mem)
+
+
+def _old_cpu(cpu):
+    cpu = cpu.strip()
+    if cpu.endswith("m"):
+        return int(cpu[:-1])
+    return int(float(cpu) * 1000)
+
+
+@pytest.mark.parametrize("mem", ["421547872Ki", "263842736Ki", "32Gi", "17179869184", "500M"])
+@pytest.mark.parametrize("cpu", ["39500m", "40", "7800m", "8"])
+def test_node_allocatable_reads_as_before(mem, cpu):
+    # The system fingerprint reads node allocatable through these: what the
+    # API returns must read exactly as it did, or every fingerprint moves.
+    assert K8sClient._parse_memory_to_bytes(mem) == _old_mem(mem)
+    assert K8sClient._parse_cpu_to_millicores(cpu) == _old_cpu(cpu)
+
+
+def test_node_allocatable_in_other_units_now_reads():
+    assert K8sClient._parse_memory_to_bytes("1Pi") == 1024**5
+    assert K8sClient._parse_memory_to_bytes("4e9") == 4 * 10**9
+    assert K8sClient._parse_cpu_to_millicores("1e2") == 100_000
+
+
+# -- the capacity preflight ---------------------------------------------------
+
+
+def _config(query_engine=None, mode="batch"):
+    return LakebenchConfig(
+        name="t",
+        platform={
+            "storage": {
+                "s3": {
+                    "endpoint": "http://minio:9000",
+                    "access_key": "a",
+                    "secret_key": "b",
+                    "buckets": {"bronze": "b", "silver": "s", "gold": "g"},
+                }
+            }
+        },
+        architecture={
+            "workload": {"schema": "customer360", "datagen": {"scale": 1}},
+            "pipeline": {"mode": mode},
+            **({"query_engine": query_engine} if query_engine else {}),
+        },
+    )
+
+
+def _check(cfg, cores=434, gb=4349, node_cores=40, node_gb=402):
+    from lakebench.cli._prerequisites import _check_cluster_capacity
+
+    k8s = mock.MagicMock()
+    k8s.get_cluster_capacity.return_value = ClusterCapacity(
+        cores * 1000, gb * GIB, 8, node_cores * 1000, node_gb * GIB
+    )
+    with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
+        return _check_cluster_capacity(cfg)
+
+
+def _engine_gb(cfg) -> float:
+    """Query-engine pod memory as the capacity plan counts it."""
+    from lakebench.config.sizing import _engine_pods
+
+    return sum(mem for _, _, mem in _engine_pods(cfg))
+
+
+def test_trino_memory_in_ti_is_counted():
+    trino = {"type": "trino", "trino": {"worker": {"replicas": 1, "memory": "1Ti"}}}
+    cfg = _config(trino)
+    coordinator = to_gib(cfg.architecture.query_engine.trino.coordinator.memory)
+    assert _engine_gb(cfg) == coordinator + 1024
+
+
+def test_trino_memory_in_ki_is_counted():
+    trino = {"type": "trino", "trino": {"worker": {"replicas": 2, "memory": "2000000Ki"}}}
+    cfg = _config(trino)
+    coordinator = to_gib(cfg.architecture.query_engine.trino.coordinator.memory)
+    assert _engine_gb(cfg) == pytest.approx(coordinator + 2 * to_gib("2000000Ki"))
+
+
+@pytest.mark.parametrize("bad", ["16g", "16GB", "lots"])
+def test_unreadable_config_quantity_fails_the_check(bad):
+    trino = {"type": "trino", "trino": {"worker": {"memory": bad}}}
+    result = _check(_config(trino))
+    assert not result.passed
+    assert "cannot read the config" in result.message
+    assert bad in result.message
+
+
+def test_unreadable_node_quantity_fails_the_check():
+    from lakebench.cli._prerequisites import _check_cluster_capacity
+
+    k8s = mock.MagicMock()
+    k8s.get_cluster_capacity.side_effect = QuantityError("'40x' is not a Kubernetes quantity")
+    with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
+        result = _check_cluster_capacity(_config())
+    assert not result.passed
+    assert "cannot read a resource quantity" in result.message
+
+
+def test_unreachable_cluster_still_skips():
+    from lakebench.cli._prerequisites import _check_cluster_capacity
+
+    with mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("no cluster")):
+        result = _check_cluster_capacity(_config())
+    assert result.passed and "skipped" in result.message
+
+
+def test_thrift_counts_the_pod_not_the_heap():
+    from lakebench.deploy.engine import thrift_pod_memory_limit
+
+    qe = {"type": "spark-thrift", "spark_thrift": {"memory": "16g"}}
+    gb = _engine_gb(_config(qe))
+    assert gb == to_gib(thrift_pod_memory_limit("16g"))
+    assert gb > 16
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_non_finite_numbers_are_quantity_errors(value):
+    with pytest.raises(QuantityError):
+        parse(value)
+
+
+@pytest.mark.parametrize(
+    "value", ["421547872Ki", "39500m", "40", "17179869184", "500M", "256Gi", "7800m", "1e3"]
+)
+def test_fingerprint_quantities_match_the_kubernetes_client(value):
+    # system_identity used kubernetes.utils.parse_quantity; canonical API
+    # strings must read identically, or stored fingerprints move.
+    from kubernetes.utils import parse_quantity as k8s_parse
+
+    from lakebench.metrics.system_identity import _quantities
+
+    assert parse(value) == k8s_parse(value)
+    assert _quantities({"cpu": value, "memory": value}) == (
+        float(k8s_parse(value)),
+        float(k8s_parse(value)),
+    )
+
+
+def test_bad_node_allocatable_fails_the_real_capacity_read():
+    from lakebench.cli._prerequisites import _check_cluster_capacity
+
+    node = mock.MagicMock()
+    node.metadata.labels = {}
+    node.status.allocatable = {"cpu": "40", "memory": "402 gigs"}
+    client = K8sClient.__new__(K8sClient)
+    client._core_v1 = mock.MagicMock()
+    client._core_v1.list_node.return_value.items = [node]
+    with mock.patch("lakebench.k8s.get_k8s_client", return_value=client):
+        result = _check_cluster_capacity(_config())
+    assert not result.passed
+    assert "402 gigs" in result.message
+
+
+def test_duckdb_counts_its_pod():
+    # A Spark-style size ("6g"), which deploy renders as 6Gi.
+    qe = {"type": "duckdb", "duckdb": {"memory": "6g"}}
+    assert _engine_gb(_config(qe)) == 6
+
+
+@pytest.mark.parametrize("cluster", ["unreachable", "nodes unlisted"])
+def test_unreadable_config_fails_even_without_the_cluster(cluster):
+    from lakebench.cli._prerequisites import _check_cluster_capacity
+
+    trino = {"type": "trino", "trino": {"coordinator": {"memory": "16g"}}}
+    if cluster == "unreachable":
+        patch = mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("down"))
+    else:
+        k8s = mock.MagicMock()
+        k8s.get_cluster_capacity.return_value = None
+        patch = mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s)
+    with patch:
+        result = _check_cluster_capacity(_config(trino))
+    assert not result.passed
+    assert "cannot read the config: QuantityError" in result.message
+
+
+def test_a_context_conflict_is_not_a_skip():
+    from lakebench.cli._prerequisites import _check_cluster_capacity
+    from lakebench.k8s.target import ContextConflictError
+
+    with (
+        mock.patch("lakebench.k8s.get_k8s_client", side_effect=ContextConflictError("moved")),
+        pytest.raises(ContextConflictError),
+    ):
+        _check_cluster_capacity(_config())

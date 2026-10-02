@@ -86,10 +86,10 @@ READERS: dict[str, str] = {
         "lakebench.modules.pipeline_engines.spark.job:streaming_request_under_budget"
     ),
     "platform.compute.spark.driver_memory": (
-        "lakebench.modules.pipeline_engines.spark.job:streaming_request_under_budget"
+        "lakebench.modules.pipeline_engines.spark.job:effective_driver"
     ),
     "platform.compute.spark.driver_cores": (
-        "lakebench.modules.pipeline_engines.spark.job:_streaming_concurrent_budget"
+        "lakebench.modules.pipeline_engines.spark.job:effective_driver"
     ),
     "platform.compute.postgres.storage": "lakebench.deploy.engine:DeploymentEngine._build_context",
     "platform.compute.postgres.storage_class": (
