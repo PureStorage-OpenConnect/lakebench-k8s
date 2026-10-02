@@ -147,7 +147,15 @@ def test_generate_drops_the_old_sidecar_before_it_replaces_the_corpus(tmp_path, 
     side.write_text(json.dumps({"namespace": namespace, "image_ids": [STALE_ID]}))
     _stub_run_deps(monkeypatch)
     monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-    _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=5, size_bytes=1_000_000)
+    # This deployment owns the bronze bucket (tests/test_bronze_gate.py
+    # covers ownership); the fake's class state is restored after the test.
+    monkeypatch.setattr("lakebench.deploy.datagen.deployment_may_empty", lambda *a, **k: True)
+    monkeypatch.setattr(_FakeS3, "instances", [])
+    monkeypatch.setattr(
+        _FakeS3,
+        "_next_info",
+        BucketInfo(name="b", exists=True, object_count=5, size_bytes=1_000_000),
+    )
     monkeypatch.setattr("lakebench.deploy.DeploymentEngine", MagicMock(side_effect=SystemExit(7)))
     res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes", "--regenerate"])
     assert res.exit_code == 7, (res.output, repr(res.exception))
@@ -209,7 +217,15 @@ def test_generate_refusal_keeps_the_sidecar(tmp_path, monkeypatch):
     side.write_text(json.dumps({"namespace": namespace, "image_ids": [STALE_ID]}))
     _stub_run_deps(monkeypatch)
     monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-    _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=5, size_bytes=1_000_000)
+    # This deployment owns the bronze bucket (tests/test_bronze_gate.py
+    # covers ownership); the fake's class state is restored after the test.
+    monkeypatch.setattr("lakebench.deploy.datagen.deployment_may_empty", lambda *a, **k: True)
+    monkeypatch.setattr(_FakeS3, "instances", [])
+    monkeypatch.setattr(
+        _FakeS3,
+        "_next_info",
+        BucketInfo(name="b", exists=True, object_count=5, size_bytes=1_000_000),
+    )
     res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes"])
     assert res.exit_code == ExitCode.REFUSED, res.output
     assert side.exists()
