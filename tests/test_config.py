@@ -199,7 +199,10 @@ class TestStackableOperatorConfig:
         assert op.namespace == "stackable"
         assert op.version == "25.7.0"
 
-    def test_override_install_true(self):
+    def test_install_true_outside_a_load_keeps_the_value(self):
+        """A model built without a load purpose keeps install as given (nothing
+        reads it); load_config refuses true for commands that change data
+        (tests/test_shared_components.py, test_cfg1_honoured_or_refused.py)."""
         cfg = make_config(architecture={"catalog": {"hive": {"operator": {"install": True}}}})
         assert cfg.architecture.catalog.hive.operator.install is True
 
@@ -594,9 +597,10 @@ class TestGeneratedYamlDrift:
         assert "LEGEND" in yaml_content
 
     def test_spark_operator_note(self):
-        """Generated YAML says a cluster admin installs the Spark Operator."""
+        """Generated YAML names the admin install, never install: true."""
         yaml_content = generate_example_config_yaml()
-        assert "lakebench admin install-spark-operator" in yaml_content
+        assert "admin install --component" in yaml_content
+        assert "spark-operator` once per cluster" in yaml_content
         assert "install: false" not in yaml_content
         assert "install: true" not in yaml_content
 

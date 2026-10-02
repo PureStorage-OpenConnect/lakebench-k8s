@@ -66,31 +66,32 @@ def _admin_module() -> ast.Module:
     return ast.parse(_ADMIN_PY.read_text(encoding="utf-8"), filename=str(_ADMIN_PY))
 
 
-def test_install_spark_operator_pins_context_and_operator_kube_context():
-    """The BLOCKER the adversarial review named: install-spark-operator
-    must thread context into both ``_get_core_v1`` and
-    ``SparkOperatorManager``, otherwise ``--file prod.yaml`` with a
-    stale KUBECONFIG helm-upgrades the shared operator on the wrong
-    cluster (LB-070 class).
+def test_admin_install_pins_context_and_operator_kube_context():
+    """The BLOCKER the adversarial review named: the install path must
+    thread context into both ``_get_core_v1`` and ``SparkOperatorManager``,
+    otherwise ``--file prod.yaml`` with a stale KUBECONFIG installs the
+    shared operator on the wrong cluster (LB-070 class). Both old verbs
+    and ``admin install`` go through ``_run_admin_install``.
     """
-    fn = _find_function(_admin_module(), "install_spark_operator")
+    fn = _find_function(_admin_module(), "_run_admin_install")
     assert _get_core_v1_takes_context(fn), (
-        "cli/_admin.py install_spark_operator no longer passes "
+        "cli/_admin.py _run_admin_install no longer passes "
         "context= to _get_core_v1(); LB-070-class regression."
     )
-    assert _spark_operator_manager_takes_kube_context(fn), (
-        "cli/_admin.py install_spark_operator no longer passes "
-        "kube_context= to SparkOperatorManager(); LB-070-class regression."
+    sc = _REPO_ROOT / "src" / "lakebench" / "deploy" / "shared_components.py"
+    mod = ast.parse(sc.read_text(encoding="utf-8"), filename=str(sc))
+    manager = _find_function(mod, "_manager")
+    assert _spark_operator_manager_takes_kube_context(manager), (
+        "shared_components SparkOperator._manager no longer passes kube_context= "
+        "to SparkOperatorManager(); LB-070-class regression."
     )
-
-
-def test_install_scratch_storage_class_pins_context():
-    fn = _find_function(_admin_module(), "install_scratch_storage_class")
-    assert _get_core_v1_takes_context(fn), (
-        "install_scratch_storage_class no longer pins the K8s context; "
-        "a stale KUBECONFIG would create a cluster-scoped StorageClass "
-        "on the wrong cluster."
-    )
+    for name in ("install_spark_operator", "install_scratch_storage_class", "install"):
+        calls = {
+            n.func.id
+            for n in ast.walk(_find_function(_admin_module(), name))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        }
+        assert "_run_admin_install" in calls, name
 
 
 def test_migrate_deployment_pins_context():

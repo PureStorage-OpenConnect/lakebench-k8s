@@ -124,6 +124,15 @@ def _seed_cluster(rec: K8sRecorder) -> None:
     rec.exec_output = "lbrole:0\nALTER ROLE\nCREATE ROLE\nCREATE DATABASE\nGRANT\n"
     rec.add_spark_operator(watched=["default"])
     rec.add_stackable()
+    # The shared observability stack is installed by admin install; deploy
+    # only verifies it and applies the deployment's own monitors.
+    rec.add_namespace("lakebench-observability")
+    rec.add_helm_release(
+        "lakebench-observability",
+        "lakebench-observability",
+        chart="kube-prometheus-stack",
+        version="87.19.2",
+    )
     rec.add_crd("podmonitors", "monitoring.coreos.com", "PodMonitor")
     rec.add_namespace("stackable")
     for op in ("hive-operator", "secret-operator"):

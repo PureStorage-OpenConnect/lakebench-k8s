@@ -29,6 +29,7 @@ from rich.table import Table
 
 from lakebench.cli._helpers import (
     console,
+    esc,
     print_error,
     print_info,
     print_success,
@@ -62,6 +63,17 @@ admin_app = typer.Typer(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _current_kube_context() -> str | None:
+    """The kubeconfig's current context name, or None (in-cluster, no kubeconfig)."""
+    try:
+        from kubernetes import config as k8s_config
+
+        _contexts, active = k8s_config.list_kube_config_contexts()
+        return str(active["name"]) if active and active.get("name") else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _get_core_v1(context: str | None = None):
@@ -261,8 +273,23 @@ def doctor(
         typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
 ) -> None:
-    """Read-only preflight report for Category 2/3/4 shared cluster state."""
+    """Read-only report on the shared cluster components and the lease.
+
+    Runs the shared-component checks of the prerequisite registry
+    (``deploy/prereqs.py``, the same checks ``run`` and
+    docs/prerequisites.md use): with a config, the ones it needs; without
+    one, all of them at the default names, with Stackable and the
+    observability stack reported but not gating. Exits 1 when a check fails
+    or cannot run.
+    """
+    from lakebench.config import LakebenchConfig
     from lakebench.deploy.cluster_lock import read_cluster_lock
+    from lakebench.deploy.prereqs import (
+        ClusterUnreachable,
+        KubeClusterReader,
+        PrereqStatus,
+        run_prereqs,
+    )
 
     cfg = None
     kube_ctx: str | None = None
@@ -273,48 +300,51 @@ def doctor(
 
     console.print(Panel("lakebench admin doctor", expand=False))
 
-    # StorageClass check. ADR-F8: when no config is passed we still
-    # check the default `px-csi-scratch` name so a bare
-    # `lakebench admin doctor` on a fresh cluster does not silently
-    # skip the check that would catch "SC missing" -- that is exactly
-    # the class of oversight the command exists to surface.
-    if cfg is not None and cfg.platform.storage.scratch.enabled:
-        sc_name = cfg.platform.storage.scratch.storage_class
-        sc_context = "from config"
-    elif cfg is None:
-        sc_name = "px-csi-scratch"
-        sc_context = "default (no config supplied)"
-    else:
-        sc_name = None
-        sc_context = ""
-    if sc_name is not None:
-        try:
-            from kubernetes import client as k8s_client
-
-            k8s_client.StorageV1Api().read_storage_class(sc_name)
-            print_success(f"StorageClass {sc_name!r} present ({sc_context})")
-        except Exception as e:  # noqa: BLE001
-            print_error(
-                f"StorageClass {sc_name!r} missing ({sc_context}): {e}. "
-                "Install with: lakebench admin install-scratch-storage-class"
-            )
-
-    # Spark Operator CRD check.
+    # Without a config every shared component is checked at its default
+    # name (px-csi-scratch, spark-operator, stackable, the observability
+    # release), so a bare doctor on a fresh cluster still reports a missing
+    # one -- the oversight the command exists to surface.
+    check_cfg = cfg or LakebenchConfig(
+        name="admin-doctor",
+        platform={"storage": {"scratch": {"enabled": True}}},
+        observability={"enabled": True},
+    )
     try:
-        from kubernetes import client as k8s_client
+        reader = KubeClusterReader(check_cfg, load_config=False)
+        outcomes = run_prereqs(check_cfg, reader)
+    except ClusterUnreachable as e:
+        print_error(str(e))
+        raise typer.Exit(ExitCode.FAILED) from e
 
-        apiext = k8s_client.ApiextensionsV1Api()
-        apiext.read_custom_resource_definition("sparkapplications.sparkoperator.k8s.io")
-        print_success("Spark Operator CRD present")
-    except Exception:  # noqa: BLE001
-        print_error(
-            "Spark Operator CRD missing. Install with: lakebench admin install-spark-operator"
-        )
-    else:
-        op_ns = "spark-operator"
-        if cfg is not None:
-            op_ns = cfg.platform.compute.spark.operator.namespace or op_ns
-        _print_operator_scratch(core_v1, op_ns)
+    failed = False
+    operator_ok = False
+    # Without a config, Stackable (Hive recipes only) and the observability
+    # stack (opt-in) are optional: report them, but gate only on what every
+    # deployment needs.
+    optional = {"stackable", "observability-stack"} if cfg is None else set()
+    for o in outcomes:
+        p, res = o.prereq, o.result
+        if p.component is None and p.id != "openshift-scc-clusterrole":
+            continue  # S3 and the like belong to the deployment, not the cluster
+        line = f"{p.title}: {res.message}"
+        if res.status is PrereqStatus.OK:
+            print_success(line)
+            operator_ok = operator_ok or p.id == "spark-operator"
+        elif res.status is PrereqStatus.SKIPPED:
+            print_info(line)
+        elif res.status is PrereqStatus.WARN:
+            print_warning(line)
+        elif res.status in (PrereqStatus.FAIL, PrereqStatus.UNKNOWN) and p.id in optional:
+            print_warning(f"{line} (pass a config that uses it to make this a failure)")
+            console.print(f"  Fix: {esc(p.fix)}")
+        else:
+            # FAIL, or UNKNOWN: a check that could not run proves nothing.
+            failed = True
+            print_error(line)
+            console.print(f"  Fix: {esc(p.fix)}")
+
+    if operator_ok:
+        _print_operator_scratch(core_v1, check_cfg.platform.compute.spark.operator.namespace)
 
     # Lease state.
     try:
@@ -332,6 +362,8 @@ def doctor(
         )
     else:
         print_info(f"Cluster lease active (holder={state.holder}, acquired={state.acquired_at})")
+    if failed:
+        raise typer.Exit(ExitCode.FAILED)
 
 
 # ---------------------------------------------------------------------------
@@ -390,8 +422,201 @@ def release_lock(
 
 
 # ---------------------------------------------------------------------------
-# install-scratch-storage-class
+# install --component (and the two v1.6 verbs, now aliases)
 # ---------------------------------------------------------------------------
+
+
+def _print_component_table(report) -> None:
+    from lakebench.deploy.shared_components import ComponentStatus
+
+    rows: dict[str, ComponentStatus] = report.final or {p.component: p.status for p in report.plans}
+    if not rows:
+        return
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("component")
+    table.add_column("installed")
+    table.add_column("version")
+    table.add_column("ready")
+    table.add_column("detail")
+    for name, st in rows.items():
+        installed = "unknown" if st.installed is None else ("yes" if st.installed else "no")
+        table.add_row(
+            esc(name),
+            installed,
+            esc(st.version or "-"),
+            "yes" if st.ready else "no",
+            esc(st.detail),
+        )
+    console.print(table)
+
+
+def _emit(level: str, message: str) -> None:
+    {"ok": print_success, "warn": print_warning, "error": print_error}.get(level, print_info)(
+        message
+    )
+
+
+def _run_admin_install(
+    *,
+    cfg,
+    components: list[str],
+    version_pairs: list[str],
+    allow_version_change: bool,
+    dry_run: bool,
+    yes: bool,
+    controller_tmp_size: str | None,
+    spark_operator_namespace: str | None = None,
+) -> None:
+    from lakebench.deploy import shared_components as sc
+    from lakebench.modules.pipeline_engines.spark.operator_scratch import validate_size
+
+    if not components:
+        print_error("name at least one --component (or --component all)")
+        raise typer.Exit(sc.EXIT_USAGE)
+    unknown = [c for c in components if c != "all" and c not in sc.COMPONENTS]
+    if unknown:
+        print_error(
+            f"unknown component(s) {unknown}; choose from {', '.join(sc.COMPONENTS)} or all"
+        )
+        raise typer.Exit(sc.EXIT_USAGE)
+    explicit = "all" not in components
+    if not explicit:
+        if cfg is None:
+            print_error(
+                "--component all needs a config (it installs what that config uses); name "
+                "the components instead"
+            )
+            raise typer.Exit(sc.EXIT_USAGE)
+        resolved = sc.components_for_config(cfg)
+        print_info(f"--component all: {', '.join(resolved)} (what this config uses)")
+        names = sorted(
+            set(resolved) | {c for c in components if c != "all"}, key=sc.COMPONENTS.index
+        )
+    else:
+        names = [c for c in sc.COMPONENTS if c in components]
+    try:
+        versions = sc.parse_versions(version_pairs, names)
+        if controller_tmp_size is not None:
+            validate_size(controller_tmp_size)
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(sc.EXIT_USAGE) from e
+    if controller_tmp_size is not None and sc.SPARK_OPERATOR not in names:
+        print_error("--controller-tmp-size applies to --component spark-operator only")
+        raise typer.Exit(sc.EXIT_USAGE)
+
+    settings = sc.Settings.from_config(
+        cfg,
+        controller_tmp_size=controller_tmp_size,
+        spark_operator_namespace=spark_operator_namespace,
+    )
+    if settings.kube_context is None:
+        # No config context: pin the current one now, so a kubeconfig change
+        # mid-run cannot split helm and the API client across two clusters.
+        current = _current_kube_context()
+        if current:
+            from dataclasses import replace
+
+            settings = replace(settings, kube_context=current)
+    # Every client below follows this context: _get_core_v1 loads it into
+    # the kubernetes client, and helm and the operator manager pin it.
+    core_v1 = _get_core_v1(context=settings.kube_context)
+
+    def _confirm(prompt: str) -> bool:
+        if yes:
+            return True
+        return typer.confirm(prompt, default=False)
+
+    report = sc.run_install(
+        settings,
+        names,
+        versions=versions,
+        allow_version_change=allow_version_change,
+        dry_run=dry_run,
+        confirm=_confirm,
+        core_v1=core_v1,
+        emit=_emit,
+    )
+    _print_component_table(report)
+    if report.code:
+        raise typer.Exit(report.code)
+
+
+@admin_app.command("install")
+def install(
+    config_file: Annotated[
+        Path | None,
+        typer.Argument(help="Config whose names and versions to use (optional)."),
+    ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option("--file", "-f", help="Alternative to positional argument."),
+    ] = None,
+    component: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--component",
+            "-c",
+            help="scratch-storage-class, spark-operator, stackable, observability, or all "
+            "(what the config uses). Repeatable.",
+        ),
+    ] = None,
+    version: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--version",
+            help="COMPONENT=VERSION, the exact chart version for a component that is not "
+            "installed. Repeatable. An installed component keeps its version.",
+        ),
+    ] = None,
+    allow_version_change: Annotated[
+        bool,
+        typer.Option(
+            "--allow-version-change",
+            help="For an installed component at another version: list what a change needs. "
+            "Lakebench refuses the change itself (exit 3).",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would be installed; change nothing.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask before installing.")] = False,
+    controller_tmp_size: Annotated[
+        str | None,
+        typer.Option(
+            "--controller-tmp-size",
+            help="spark-operator only, fresh install: sizeLimit of the controller's /tmp "
+            f"emptyDir (default {DEFAULT_CONTROLLER_TMP_SIZE}). An installed operator is "
+            "resized with 'admin repair-operator --controller-tmp-size'.",
+        ),
+    ] = None,
+) -> None:
+    """Install the shared cluster components a deployment needs.
+
+    Cluster-admin operation, once per cluster: deploy only verifies these.
+    A component that is installed is left as it is (exit 0 when every one
+    is installed and ready); one that is missing is installed at its
+    --version, else the config's pin, else the Lakebench default. Installs
+    hold the cluster lease, so deploys and destroys wait while it runs.
+    Exit 2: a request that needs a flag or is malformed. Exit 3: refused by
+    the safety model (a version change, a second operator, leftover CRDs).
+    """
+    cfg = None
+    if config_file is not None or file_option is not None:
+        cfg = _load_cfg(config_file, file_option)
+    _run_admin_install(
+        cfg=cfg,
+        components=list(component or []),
+        version_pairs=list(version or []),
+        allow_version_change=allow_version_change,
+        dry_run=dry_run,
+        yes=yes,
+        controller_tmp_size=controller_tmp_size,
+    )
+
+
+def _alias_notice(old: str, new: str) -> None:
+    typer.echo(f"'lakebench admin {old}' is now 'lakebench admin {new}'.", err=True)
 
 
 @admin_app.command("install-scratch-storage-class")
@@ -405,96 +630,18 @@ def install_scratch_storage_class(
         typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
 ) -> None:
-    """Install the scratch StorageClass named by config.
-
-    Cluster-admin operation. Uses the settings under
-    ``platform.storage.scratch`` (``storage_class`` name, ``provisioner``,
-    ``parameters``). Runs under the cluster lease.
-    """
-    from lakebench.deploy.cluster_lock import (
-        ADMIN_MAX_HOLD_S,
-        LEASE_REQUEST_TIMEOUT,
-        ClusterLockError,
-        ClusterLockHeld,
-        LeaseHoldExceeded,
-        cluster_lock,
-    )
-
+    """Alias of 'admin install --component scratch-storage-class'."""
+    _alias_notice("install-scratch-storage-class", "install --component scratch-storage-class")
     cfg = _load_cfg(config_file, file_option)
-    scratch = cfg.platform.storage.scratch
-    # Pin every K8s call to the configured context (LB-070 class:
-    # cluster-scoped StorageClass write on a stale KUBECONFIG hits the
-    # wrong cluster). StorageV1Api reuses whatever context the SDK
-    # loaded in _get_core_v1(context=...).
-    core_v1 = _get_core_v1(context=cfg.platform.kubernetes.context or None)
-
-    from kubernetes import client as k8s_client
-    from kubernetes.client.exceptions import ApiException
-
-    storage_v1 = k8s_client.StorageV1Api()
-
-    # ADR-F9: both the read and the create happen inside the lease so
-    # two admins racing this command produce one "created" + one
-    # "already exists no-op" instead of a spurious 409 for whichever
-    # loses the race.
-    try:
-        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
-            try:
-                storage_v1.read_storage_class(
-                    scratch.storage_class, _request_timeout=LEASE_REQUEST_TIMEOUT
-                )
-                print_info(f"StorageClass {scratch.storage_class!r} already exists; no-op")
-                return
-            except ApiException as e:
-                if e.status != 404:
-                    print_error(f"cannot read StorageClass: {e}")
-                    raise typer.Exit(ExitCode.FAILED) from e
-
-            manifest = {
-                "apiVersion": "storage.k8s.io/v1",
-                "kind": "StorageClass",
-                "metadata": {
-                    "name": scratch.storage_class,
-                    "labels": {"app.kubernetes.io/managed-by": "lakebench-admin"},
-                },
-                "provisioner": scratch.provisioner,
-                "reclaimPolicy": "Delete",
-                "volumeBindingMode": "WaitForFirstConsumer",
-                "parameters": scratch.parameters,
-            }
-            try:
-                storage_v1.create_storage_class(
-                    body=manifest, _request_timeout=LEASE_REQUEST_TIMEOUT
-                )
-            except ApiException as e:
-                if e.status == 409:
-                    # A third writer sneaked in (or a stale-cache read
-                    # earlier missed the object). Treat as no-op.
-                    print_info(f"StorageClass {scratch.storage_class!r} already exists; no-op")
-                    return
-                print_error(f"cannot create StorageClass: {e}")
-                raise typer.Exit(ExitCode.FAILED) from e
-    except ClusterLockHeld as e:
-        print_error(str(e))
-        raise typer.Exit(ExitCode.REFUSED) from e
-    except ClusterLockError as e:
-        print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
-        # A command inside the lease ran out of its hold budget; the lease
-        # has been released.
-        print_error(str(e))
-        raise typer.Exit(ExitCode.FAILED) from e
-
-    print_success(
-        f"created StorageClass {scratch.storage_class!r} "
-        f"(provisioner {scratch.provisioner}, parameters {scratch.parameters})"
+    _run_admin_install(
+        cfg=cfg,
+        components=["scratch-storage-class"],
+        version_pairs=[],
+        allow_version_change=False,
+        dry_run=False,
+        yes=True,
+        controller_tmp_size=None,
     )
-
-
-# ---------------------------------------------------------------------------
-# install-spark-operator
-# ---------------------------------------------------------------------------
 
 
 @admin_app.command("install-spark-operator")
@@ -509,85 +656,35 @@ def install_spark_operator(
     ] = None,
     version: Annotated[
         str | None,
-        typer.Option("--version", help="Chart version to install/upgrade to."),
+        typer.Option("--version", help="Chart version for a fresh install."),
     ] = None,
     operator_namespace: Annotated[
-        str,
-        typer.Option("--operator-namespace", help="Namespace to install into."),
-    ] = "spark-operator",
+        str | None,
+        typer.Option("--operator-namespace", help="Namespace to install into (no config)."),
+    ] = None,
     controller_tmp_size: Annotated[
         str | None,
         typer.Option(
             "--controller-tmp-size",
-            help="sizeLimit of the controller's /tmp emptyDir, which holds "
-            "spark-submit's Ivy jar cache (chart default 1Gi is too small). "
-            f"Default {DEFAULT_CONTROLLER_TMP_SIZE}; an upgrade without the flag "
-            "keeps a larger size already set.",
+            help="sizeLimit of the controller's /tmp emptyDir on a fresh install "
+            f"(default {DEFAULT_CONTROLLER_TMP_SIZE}).",
         ),
     ] = None,
 ) -> None:
-    """Install or upgrade the shared Spark Operator Helm release.
-
-    Runs under the cluster lease so concurrent admins cannot race the
-    same Helm upgrade. An existing release is upgraded with
-    its stored values (the watch list is kept) and stays on its chart
-    unless ``--version`` or the config names one. The controller's /tmp
-    emptyDir is sized to ``--controller-tmp-size``.
-    """
-    from lakebench.modules.pipeline_engines.spark.operator_scratch import validate_size
-
-    try:
-        if controller_tmp_size is not None:
-            validate_size(controller_tmp_size)
-    except ValueError as e:
-        print_error(f"--controller-tmp-size: {e}")
-        raise typer.Exit(ExitCode.USAGE) from e
-    from lakebench.deploy.cluster_lock import (
-        ADMIN_MAX_HOLD_S,
-        ClusterLockError,
-        ClusterLockHeld,
-        LeaseHoldExceeded,
-        cluster_lock,
-    )
-    from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
-
-    # Load cfg first so the K8s client and the operator manager both pin
-    # the configured context. Without this, a stale KUBECONFIG plus a
-    # `--file prod.yaml` invocation would helm-upgrade the shared spark-
-    # operator release on the wrong cluster (LB-070 class).
-    ns = operator_namespace
-    v = version
-    kube_ctx: str | None = None
+    """Alias of 'admin install --component spark-operator'."""
+    _alias_notice("install-spark-operator", "install --component spark-operator")
+    cfg = None
     if config_file is not None or file_option is not None:
         cfg = _load_cfg(config_file, file_option)
-        ns = cfg.platform.compute.spark.operator.namespace or ns
-        v = v or cfg.platform.compute.spark.operator.version
-        kube_ctx = cfg.platform.kubernetes.context or None
-    core_v1 = _get_core_v1(context=kube_ctx)
-
-    try:
-        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
-            mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
-            ok = mgr.install(version=v, tmp_size=controller_tmp_size)
-    except ClusterLockHeld as e:
-        print_error(str(e))
-        raise typer.Exit(ExitCode.REFUSED) from e
-    except ClusterLockError as e:
-        print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
-        # A command inside the lease ran out of its hold budget; the lease
-        # has been released.
-        print_error(str(e))
-        raise typer.Exit(ExitCode.FAILED) from e
-
-    if not ok:
-        print_error("Spark Operator install/upgrade failed. See logs above.")
-        raise typer.Exit(ExitCode.FAILED)
-    print_success(
-        f"Spark Operator install/upgrade ok (namespace={ns}, "
-        f"version={v or 'installed chart'}, "
-        f"controller /tmp={controller_tmp_size or 'default or larger existing'})"
+    _run_admin_install(
+        cfg=cfg,
+        components=["spark-operator"],
+        version_pairs=[f"spark-operator={version}"] if version else [],
+        allow_version_change=False,
+        dry_run=False,
+        yes=True,
+        controller_tmp_size=controller_tmp_size,
+        spark_operator_namespace=operator_namespace if cfg is None else None,
     )
 
 

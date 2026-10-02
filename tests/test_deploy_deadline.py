@@ -400,17 +400,12 @@ def test_transient_error_is_not_retried_after_the_deadline(clock):
     assert results[0].status == DeploymentStatus.FAILED
 
 
-def test_no_stackable_install_after_the_deadline(clock):
+def test_no_stackable_install_after_the_deadline():
+    """Deploy has no Stackable install left to cut: `admin install
+    --component stackable` installs it, outside any deploy deadline (SD-10)."""
     from lakebench.modules.catalogs.hive import deployer as hive
 
-    d = hive.HiveDeployer.__new__(hive.HiveDeployer)
-    d.config = MagicMock()
-    with patch("lakebench.k8s.pinned_helm") as helm, deadline.deploy_deadline(5):
-        clock.sleep(5)
-        with pytest.raises(deadline.DeployTimeout) as e:
-            d._install_stackable_operators()
-    helm.assert_not_called()
-    assert "helm install of Stackable commons-operator" in str(e.value)
+    assert not hasattr(hive.HiveDeployer, "_install_stackable_operators")
 
 
 def test_scc_verify_poll_stops_at_the_deadline(clock):
@@ -479,7 +474,15 @@ _CHECKS = _CLAMPS | {"check"}
 # never by the deploy deadline (operator.py _POST_UPGRADE_*).
 _POST_UPGRADE = re.compile(r"^_POST_UPGRADE_\w+_S$")
 # Files whose code never runs inside deploy_all, so no deploy deadline is set.
-_OUTSIDE_DEPLOY = {"deploy/destroy.py", "deploy/datagen.py", "deploy/garage.py", "deploy/local.py"}
+_OUTSIDE_DEPLOY = {
+    "deploy/destroy.py",
+    "deploy/datagen.py",
+    "deploy/garage.py",
+    "deploy/local.py",
+    # admin install, doctor and status only (SD-10): deploy never installs a
+    # shared component, so no deploy deadline is set there.
+    "deploy/shared_components.py",
+}
 # Functions on the destroy path inside the scanned files (no deploy deadline).
 _DESTROY_PATH = {
     ("modules/pipeline_engines/spark/operator.py", "_remove_namespace_from_watch_locked"),

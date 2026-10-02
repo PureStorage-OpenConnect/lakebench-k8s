@@ -122,6 +122,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   continuous pair Trino against Spark Thrift (runs 011043-e338c5 and
   073533-9de9c9, 5 rounds against 4), which 1.6 and earlier 1.7 builds called
   like-for-like, now reads not like-for-like; no identity digest moves.
+- **Deploy never installs a shared component; `lakebench admin install
+  --component` does.** The scratch StorageClass, the Spark Operator, the
+  Stackable operators and the kube-prometheus-stack observability release
+  serve every deployment on a cluster, so a cluster admin installs them once
+  with `lakebench admin install --component <c> <config>` (`c` is
+  `scratch-storage-class`, `spark-operator`, `stackable`, `observability`, or
+  `all` for what the config uses; repeatable), under the cluster lease.
+  `deploy` only checks them and fails the step with that command when one is
+  missing: the Hive step no longer installs Stackable, the Spark Operator step
+  no longer installs the operator, and the observability step no longer
+  installs the stack, takes no lease and applies only the deployment's own
+  PodMonitors and Pushgateway (the shared Grafana dashboard is applied by
+  `admin install`); with observability enabled, the deploy preflight stops
+  before creating anything when the stack is missing.
+  `platform.compute.spark.operator.install: true` and
+  `architecture.catalog.hive.operator.install: true` are refused by the
+  commands that change data, with the admin command; `destroy`, `status` and
+  `admin` load them as false. `false` loads as before.
+- **`admin install` never changes an installed component.** It installs what
+  is missing at `--version C=V`, else the config's pin, else the Lakebench
+  default, with `helm install` (never an upgrade). On a cluster that has
+  everything installed and ready it changes nothing, takes no lease and exits
+  0; the one thing it refreshes is the shared Grafana dashboard ConfigMap
+  when it differs. A config pin that differs from the installed version is
+  kept, with a warning. `--version` naming another version is refused (exit
+  2; exit 3 with `--allow-version-change`, which lists the deployments using
+  the Spark Operator and any deleted namespaces in its watch list).
+  Lakebench does not automate a version change: `helm upgrade` leaves the
+  CRDs each chart ships in `crds/` at the installed version. A release that
+  is not `deployed`, a second Spark Operator or kube-prometheus-stack,
+  leftover CRDs with no operator, or a scratch StorageClass whose parameters
+  differ from the config's are refused without a change (the
+  `install-scratch-storage-class` alias exits 3 there, where 1.6 exited 0).
+  An installed component that is not ready exits 1. Chart repos are
+  refreshed before the lease is taken; deploys and destroys wait for the
+  lease up to 10 minutes, then fail without changing anything shared. `--dry-run` shows the plan; `-y` skips the
+  confirmation.
+- **`admin install-spark-operator` and `admin install-scratch-storage-class`
+  are aliases** of `admin install --component spark-operator` and
+  `--component scratch-storage-class`, with a notice on stderr.
+  `install-spark-operator --version` no longer upgrades an installed operator
+  (exit 2); resize an installed controller's `/tmp` with `admin
+  repair-operator --controller-tmp-size`.
+- **The watch-list edits never fall back to the config's operator version.**
+  `deploy`, `run` and `destroy` pin the installed chart, read inside the
+  cluster lease; when it cannot be read the edit is refused rather than let
+  Helm move the shared operator to the config's or the repo's latest chart.
+  A refused removal fails `destroy`, which keeps the namespace (as for any
+  failed watch-list removal); re-run it once `helm list` answers.
+- **`admin doctor` runs the prerequisite checks** of `docs/prerequisites.md`
+  for the shared components and exits 1 when one fails or cannot run.
+  Without a config it checks all of them at their default names, and
+  Stackable and the observability stack are reported without failing.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to

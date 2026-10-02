@@ -32,13 +32,13 @@ Version-asserted at preflight. Never created, never destroyed by lakebench.
 
 Kubernetes API server, CNI, StorageClasses (`px-csi-scratch`, `px-csi-db`, `thin-csi`), CRDs (`SparkApplication`, `HiveCluster`), FlashBlade endpoint, S3 credentials rotation policy.
 
-Rule: `deploy` preflight refuses with an actionable error when any of these is missing. A cluster admin installs them once with `lakebench admin install-*`. `destroy` never touches them.
+Rule: `deploy` preflight refuses with an actionable error when any of these is missing. A cluster admin installs them once with `lakebench admin install --component`. `destroy` never touches them.
 
 ### Category 3 -- shared operator installations
 
 Single installation per cluster. Version-asserted at preflight.
 
-Spark Operator, Stackable operators, Prometheus/Grafana Helm release. `deploy` refuses if the operator is absent or at an unsupported version; it never installs one (`platform.compute.spark.operator.install: true` is refused at load). `lakebench admin install-spark-operator` (and friends) install them; a cluster admin runs `admin` once, a developer runs `deploy` many times without touching the operator install.
+Spark Operator, Stackable operators, Prometheus/Grafana Helm release. `deploy` refuses if one is absent and never installs one (`operator.install: true` is refused by the commands that change data). `lakebench admin install --component spark-operator|stackable|observability` installs them under the cluster lease and never changes an installed one; a cluster admin runs `admin` once, a developer runs `deploy` many times without touching the operator install.
 
 ### Category 4 -- shared mutable state
 

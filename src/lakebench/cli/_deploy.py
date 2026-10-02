@@ -79,35 +79,34 @@ def _preflight_check(cfg) -> None:
             logger.debug("Preflight CRD check skipped (K8s not reachable)", exc_info=True)
 
         if _missing_stackable:
-            op_install = getattr(
-                getattr(getattr(cfg.architecture.catalog, "hive", None), "operator", None),
-                "install",
-                False,
+            print_error(f"Missing Stackable operators: {', '.join(_missing_stackable)}")
+            print_info(
+                "A cluster admin installs them once:\n"
+                "  lakebench admin install --component stackable <config>\n"
+                "Or switch to a Polaris recipe (no operators needed):\n"
+                "  Set recipe: polaris-iceberg-spark-trino in your config"
             )
-            if op_install:
-                print_info(
-                    f"Stackable operators missing ({', '.join(_missing_stackable)}) "
-                    "-- will be auto-installed during deploy (install: true)"
-                )
-            else:
-                print_error(f"Missing Stackable operators: {', '.join(_missing_stackable)}")
-                print_info("Install operators first:")
-                for op in [
-                    "commons-operator",
-                    "listener-operator",
-                    "secret-operator",
-                    "hive-operator",
-                ]:
-                    console.print(
-                        f"  helm install {op} "
-                        f"oci://oci.stackable.tech/sdp-charts/{op} "
-                        f"--version 25.7.0 --namespace stackable --create-namespace"
-                    )
-                print_info(
-                    "Or switch to a Polaris recipe (no operators needed):\n"
-                    "  Set recipe: polaris-iceberg-spark-trino in your config"
-                )
-                raise typer.Exit(ExitCode.PREREQUISITE)
+            raise typer.Exit(ExitCode.PREREQUISITE)
+
+    # 4. The shared observability stack, when this deploy uses it: deploy
+    # never installs it, so stop before creating anything rather than at the
+    # last step. An unreadable answer is left to the observability step.
+    if cfg.observability.enabled:
+        release_ns: str | None = ""
+        try:
+            from lakebench.deploy.observability import find_observability_release
+
+            release_ns = find_observability_release(cfg.platform.kubernetes.context or None)
+        except Exception:
+            logger.debug("Preflight observability check skipped", exc_info=True)
+        if release_ns is None:
+            print_error("The shared observability stack (kube-prometheus-stack) is not installed")
+            print_info(
+                "A cluster admin installs it once:\n"
+                "  lakebench admin install --component observability <config>\n"
+                "Or set observability.enabled: false"
+            )
+            raise typer.Exit(ExitCode.PREREQUISITE)
 
 
 def _build_component_list(cfg) -> str:
@@ -127,12 +126,8 @@ def _build_component_list(cfg) -> str:
         parts.append("DuckDB")
     parts.append("Spark RBAC")
     # The operator step always runs: it verifies the shared operator and adds
-    # this namespace to its watch list; install=true also installs it if
-    # missing, so the summary lists it either way.
-    if cfg.platform.compute.spark.operator.install:
-        parts.append("Spark Operator (installed if missing, namespace watched)")
-    else:
-        parts.append("Spark Operator watch list")
+    # this namespace to its watch list. Deploy never installs it.
+    parts.append("Spark Operator watch list")
     parts.append("Dependency server")
     if cfg.observability.enabled:
         # observability.enabled always installs or reuses the full stack.
@@ -451,12 +446,13 @@ def deploy(
     Deploys all components in this order:
     1. Namespace, secrets and S3 buckets
     2. Scratch StorageClass check (it must already exist; a cluster admin
-       installs it with `lakebench admin install-scratch-storage-class`)
+       installs it with `lakebench admin install --component scratch-storage-class`)
     3. PostgreSQL
     4. Catalog (Hive Metastore or Polaris)
     5. Spark RBAC (then Unity Catalog, only if catalog.type is unity)
     6. Spark Operator check and watch-list entry for the namespace (always
-       runs; never installs the shared operator)
+       runs; deploy never installs shared operators, `lakebench admin install
+       --component` does)
     7. Dependency server (lb-deps): resolves the jars and wheels this
        deployment needs onto its own PVC once, then serves them in the
        namespace

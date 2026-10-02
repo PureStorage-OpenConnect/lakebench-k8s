@@ -79,7 +79,7 @@ READERS: dict[str, str] = {
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
     "platform.compute.spark.operator.install": (
-        "lakebench.deploy.engine:DeploymentEngine._deploy_spark_operator"
+        "lakebench.config.schema:SparkOperatorConfig._refuse_install"
     ),
     "platform.compute.spark.operator.namespace": "lakebench.deploy.destroy:destroy_all",
     "platform.compute.spark.operator.version": "lakebench.deploy.destroy:destroy_all",
@@ -113,13 +113,13 @@ READERS: dict[str, str] = {
     ),
     "architecture.catalog.type": "lakebench.deploy.destroy:destroy_all",
     "architecture.catalog.hive.operator.install": (
-        "lakebench.modules.catalogs.hive.deployer:HiveDeployer.deploy"
+        "lakebench.config.schema:StackableOperatorConfig._refuse_install"
     ),
     "architecture.catalog.hive.operator.namespace": (
-        "lakebench.modules.catalogs.hive.deployer:HiveDeployer._install_stackable_operators"
+        "lakebench.deploy.shared_components:Stackable.status"
     ),
     "architecture.catalog.hive.operator.version": (
-        "lakebench.modules.catalogs.hive.deployer:HiveDeployer._install_stackable_operators"
+        "lakebench.deploy.shared_components:Stackable.config_version"
     ),
     "architecture.catalog.hive.resources.cpu_min": (
         "lakebench.deploy.engine:DeploymentEngine._build_context"
@@ -387,17 +387,11 @@ READERS: dict[str, str] = {
     "architecture.tables.gold_alert_dispositions": "lakebench.benchmark.executor:get_executor",
     "architecture.tables.gold_cases": "lakebench.benchmark.executor:get_executor",
     "observability.enabled": "lakebench.deploy.datagen:DatagenDeployer._build_datagen_context",
-    "observability.dashboards_enabled": (
-        "lakebench.deploy.observability:ObservabilityDeployer._apply_dashboard"
-    ),
-    "observability.retention": (
-        "lakebench.deploy.observability:ObservabilityDeployer._deploy_locked"
-    ),
-    "observability.storage": (
-        "lakebench.deploy.observability:ObservabilityDeployer._build_helm_values"
-    ),
+    "observability.dashboards_enabled": ("lakebench.deploy.observability:build_helm_values"),
+    "observability.retention": "lakebench.deploy.observability:build_helm_values",
+    "observability.storage": "lakebench.deploy.observability:build_helm_values",
     "observability.chart_version": (
-        "lakebench.deploy.observability:ObservabilityDeployer._deploy_locked"
+        "lakebench.deploy.shared_components:Observability.config_version"
     ),
     "observability.pushgateway_enabled": (
         "lakebench.deploy.datagen:DatagenDeployer._build_datagen_context"

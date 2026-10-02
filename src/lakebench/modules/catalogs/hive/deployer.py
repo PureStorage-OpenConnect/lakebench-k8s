@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import time
 from typing import TYPE_CHECKING
 
@@ -115,85 +114,11 @@ class HiveDeployer:
         operators are running (or their state cannot be read)."""
         return all(self._check_stackable_crds().values())
 
-    # Stackable operators in required install order
-    _INSTALL_ORDER = [
-        "commons-operator",
-        "listener-operator",
-        "secret-operator",
-        "hive-operator",
-    ]
-
-    def _install_stackable_operators(self) -> bool:
-        """Install Stackable operators via Helm.
-
-        Installs commons, listener, secret, and hive operators in order.
-
-        Returns:
-            True if all operators installed successfully.
-        """
-        op_cfg = self.config.architecture.catalog.hive.operator
-        namespace = op_cfg.namespace
-        version = op_cfg.version
-
-        for i, op in enumerate(self._INSTALL_ORDER):
-            # Not after the deploy deadline: each install is a shared change.
-            deploy_deadline.check(f"helm install of Stackable {op}")
-            chart = f"oci://oci.stackable.tech/sdp-charts/{op}"
-            cmd = [
-                "install",
-                op,
-                chart,
-                "--version",
-                version,
-                "--namespace",
-                namespace,
-            ]
-            if i == 0:
-                cmd.append("--create-namespace")
-
-            logger.info("Installing Stackable %s (v%s)...", op, version)
-            try:
-                from lakebench.k8s import pinned_helm
-
-                result = pinned_helm(
-                    self.config,
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if result.returncode != 0:
-                    stderr = result.stderr.strip()
-                    # Already installed is not an error
-                    if "cannot re-use a name that is still in use" in stderr:
-                        logger.info("Stackable %s already installed, skipping", op)
-                        continue
-                    logger.error("Failed to install %s: %s", op, stderr)
-                    return False
-                logger.info("Stackable %s installed", op)
-            except subprocess.TimeoutExpired:
-                logger.error("Helm install timed out for %s", op)
-                return False
-            except FileNotFoundError:
-                logger.error("helm not found on PATH")
-                return False
-
-        # Wait for CRDs to register
-        logger.info("Waiting for Stackable CRDs to register...")
-        for _ in range(30):
-            if self._is_stackable_available():
-                return True
-            deploy_deadline.check("Stackable CRDs to register")
-            time.sleep(2)
-
-        logger.error("Stackable CRDs did not appear after install")
-        return False
-
     def deploy(self) -> DeploymentResult:
-        """Deploy Hive Metastore.
+        """Deploy Hive Metastore on the Stackable operators.
 
-        Uses Stackable operator if available (recommended),
-        falls back to raw deployment otherwise.
+        The operators must already be installed (``lakebench admin install
+        --component stackable``); a missing one fails the step.
 
         Returns:
             DeploymentResult with status
@@ -217,61 +142,26 @@ class HiveDeployer:
                 elapsed_seconds=0,
             )
 
-        use_stackable = self._is_stackable_available()
+        if not self._is_stackable_available():
+            # Deploy never installs shared operators (they serve every
+            # deployment on the cluster); a cluster admin does, once.
+            crd_status = self._check_stackable_crds()
+            missing = [
+                self._REQUIRED_CRDS[crd] for crd, available in crd_status.items() if not available
+            ]
+            return DeploymentResult(
+                component="hive",
+                status=DeploymentStatus.FAILED,
+                message=(
+                    f"Stackable platform not fully installed (missing or not running: "
+                    f"{', '.join(missing)}). A cluster admin installs it once: lakebench admin "
+                    "install --component stackable <config>. Or use a Polaris recipe, which "
+                    "needs no operator."
+                ),
+                elapsed_seconds=time.time() - start,
+            )
 
-        if not use_stackable:
-            op_cfg = self.config.architecture.catalog.hive.operator
-            if op_cfg.install:
-                # Auto-install Stackable operators
-                logger.info("Stackable operators not found, auto-installing...")
-                if not self._install_stackable_operators():
-                    return DeploymentResult(
-                        component="hive",
-                        status=DeploymentStatus.FAILED,
-                        message="Failed to auto-install Stackable operators",
-                        elapsed_seconds=time.time() - start,
-                    )
-                use_stackable = True
-            else:
-                # Report missing CRDs with install commands
-                crd_status = self._check_stackable_crds()
-                missing = [
-                    self._REQUIRED_CRDS[crd]
-                    for crd, available in crd_status.items()
-                    if not available
-                ]
-                operators_needed = set(missing)
-                if operators_needed:
-                    operators_needed.update(["commons-operator", "listener-operator"])
-                version = op_cfg.version
-                ns = op_cfg.namespace
-                install_cmds = "\n  ".join(
-                    f"helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
-                    f"--version {version} --namespace {ns} --create-namespace"
-                    for op in self._INSTALL_ORDER
-                    if op in operators_needed
-                )
-                return DeploymentResult(
-                    component="hive",
-                    status=DeploymentStatus.FAILED,
-                    message=(
-                        f"Stackable platform not fully installed "
-                        f"(missing or not running: {', '.join(missing)}). "
-                        "A cluster admin installs them once:\n"
-                        f"  {install_cmds}"
-                    ),
-                    elapsed_seconds=time.time() - start,
-                )
-
-        if use_stackable:
-            return self._deploy_stackable(namespace, start)
-
-        return DeploymentResult(
-            component="hive",
-            status=DeploymentStatus.FAILED,
-            message="Stackable operators not available after install attempt",
-            elapsed_seconds=time.time() - start,
-        )
+        return self._deploy_stackable(namespace, start)
 
     def _deploy_stackable(self, namespace: str, start: float) -> DeploymentResult:
         """Deploy Hive using Stackable operator.

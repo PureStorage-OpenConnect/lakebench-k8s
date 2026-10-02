@@ -69,13 +69,10 @@ architecture:
 
 **Does not deploy:** Polaris.
 
-**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) and the commons, listener and secret operators it depends on. A cluster admin installs them once (lakebench does not):
+**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) and the commons, listener and secret operators it depends on. A cluster admin installs them once with:
 
 ```bash
-for op in commons-operator listener-operator secret-operator hive-operator; do
-  helm install $op oci://oci.stackable.tech/sdp-charts/$op \
-    --version 25.7.0 --namespace stackable --create-namespace
-done
+lakebench admin install --component stackable lakebench.yaml
 ```
 
 ---

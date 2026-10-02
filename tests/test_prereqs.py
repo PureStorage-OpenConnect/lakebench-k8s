@@ -177,17 +177,16 @@ def test_spark_operator_is_read_in_the_configured_namespace():
     assert "spark-operator:app.kubernetes.io/name=spark-operator" in r.calls
 
 
-def test_operator_missing_under_install_true_is_a_warning():
+def test_operator_missing_is_a_failure_naming_admin_install():
+    """Deploy never installs the operator, so a missing one is a FAIL whose
+    fix is the admin command. Reverted, install: true made it a WARN that
+    said deploy would install it."""
     r = _reader()
     r.deps["app.kubernetes.io/name=spark-operator"] = []
-    cfg = _cfg(
-        platform={
-            "storage": {"s3": {"endpoint": "http://x", "access_key": "a", "secret_key": "b"}},
-            "compute": {"spark": {"operator": {"install": True}}},
-        }
-    )
-    res = _result(pr.run_prereqs(cfg, r), "spark-operator")
-    assert res.status is PrereqStatus.WARN
+    res = _result(pr.run_prereqs(_cfg(), r), "spark-operator")
+    assert res.status is PrereqStatus.FAIL
+    fix = next(p.fix for p in pr.PREREQS if p.id == "spark-operator")
+    assert "lakebench admin install --component spark-operator" in fix
 
 
 def test_spark_operator_crd_missing():
@@ -207,10 +206,13 @@ def test_stackable_crds_without_running_operator_fail():
     assert "hive-operator, secret-operator" in res.message
 
 
-def test_observability_missing_is_a_warning():
+def test_observability_missing_is_a_failure():
+    """Deploy no longer installs the shared stack; a missing one fails."""
     cfg = _cfg(observability={"enabled": True})
     res = _result(pr.run_prereqs(cfg, _reader()), "observability-stack")
-    assert res.status is PrereqStatus.WARN
+    assert res.status is PrereqStatus.FAIL
+    fix = next(p.fix for p in pr.PREREQS if p.id == "observability-stack")
+    assert "lakebench admin install --component observability" in fix
 
 
 @pytest.mark.parametrize("ready,status", [(1, PrereqStatus.OK), (0, PrereqStatus.WARN)])
@@ -484,7 +486,8 @@ def test_run_preflight_uses_the_registry(monkeypatch):
     }
     assert applicable <= set(results)
     scratch = results["scratch-storage-class"]
-    assert scratch.passed is False and "install-scratch-storage-class" in scratch.hint
+    assert scratch.passed is False
+    assert "admin install --component scratch-storage-class" in scratch.hint
 
 
 def test_run_preflight_without_cluster_does_not_reach_one(monkeypatch):
