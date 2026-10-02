@@ -18,11 +18,14 @@ import pytest
 
 from tests.harness.run_harness import (
     FIXTURES,
+    SCENARIOS,
     TraceMismatch,
     assert_trace_equal,
     fixture_problems,
+    invoke_scenario,
     load_golden,
     run_scenario,
+    saved_record,
     scrub_driver_log,
 )
 
@@ -51,6 +54,25 @@ def test_seeded_stage_order_change_fails(tmp_path, monkeypatch):
     # golden has bronze-verify.
     with pytest.raises(TraceMismatch, match=r"submit_job', 'silver-build'"):
         assert_trace_equal(trace, load_golden("batch_c360"))
+
+
+def test_c360_check_that_raises_fails_the_run_and_its_verdict(tmp_path, monkeypatch):
+    """The Customer 360 check raising (here evaluate_run) leaves a record
+    with no facts, so the saved verdict is FAILED on the c360 gate and the
+    run exits non-zero, not only through pipeline_success."""
+    from lakebench.metrics import c360_correctness
+
+    def boom(*_a, **_k):
+        raise KeyError("window_start")
+
+    monkeypatch.setattr(c360_correctness, "evaluate_run", boom)
+    result, _rec = invoke_scenario(SCENARIOS["batch_c360"], tmp_path, monkeypatch)
+    assert result.exit_code != 0
+    rec = saved_record(tmp_path)
+    c3 = rec["c360_correctness"]
+    assert c3["facts_present"] is False and "KeyError" in c3["reason"]
+    assert rec["verdict"]["status"] == "FAILED"
+    assert rec["verdict"]["gates"].get("c360") == "FAIL"
 
 
 def test_batch_c360_silver_fails(tmp_path, monkeypatch):

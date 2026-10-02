@@ -610,6 +610,20 @@ comparable to runs at the same nominal scale.
 layer. This score depends on the query engine (Trino, Spark Thrift, DuckDB),
 worker count, and memory allocation. It is independent of pipeline throughput.
 
+**Customer 360 expected results.** A Customer 360 batch run on the
+cluster checks silver and gold against what the generator wrote, and
+records every check in `metrics.json` as `c360_correctness`. Sixteen checks
+gate the run: the fifteen invariant and reconcile checks (bronze rows equal
+to the rows datagen was sized to write, the silver invariants, bronze to
+silver to gold reconciliation and the gold KPI identities) and the overall
+average transaction value. The run fails when one of them fails or could
+not be evaluated, or when gold-finalize logged no facts or the check itself
+raised. The other
+statistical checks and the benchmark row counts are printed and recorded but
+do not fail the run; a failed one is also listed in `metrics.json` under
+`verdict.qualifiers.c360_failed_not_gating`. A `--local` run and a
+`--stage` run make no Customer 360 check.
+
 ### Continuous Mode
 
 **Data Freshness** (`data_freshness_seconds`) is the gold staleness headline:

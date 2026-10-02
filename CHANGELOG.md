@@ -411,6 +411,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   financial package while the look record cannot be read are refused (3).
   A package whose `pipeline_mode` is unknown or disagrees with its
   experiment identity is refused (2).
+- **Customer 360 batch runs are gated on sixteen expected-result checks.**
+  The fifteen invariant and reconcile checks (bronze rows, silver
+  invariants, bronze to silver to gold reconciliation, gold KPI identities)
+  and the overall average transaction value now fail the run and its
+  verdict when they fail or cannot be evaluated, or when gold-finalize
+  logged no facts or the check itself raised. Until now the verdict failed
+  on any failed check, statistical ones included, while a run whose exact
+  checks could not be evaluated, or that logged no facts, read PASSED. A
+  failed check outside the sixteen no longer fails the verdict; it is
+  printed, and listed in `metrics.json` under
+  `verdict.qualifiers.c360_failed_not_gating`. `--local` and `--stage` runs
+  make no Customer 360 check, as before.
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets
