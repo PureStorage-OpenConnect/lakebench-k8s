@@ -706,7 +706,8 @@ class TestPolarisDeployer:
         ctx = engine.context
         assert ctx["catalog_type"] == "polaris"
         assert ctx["polaris_port"] == 8181
-        assert ctx["polaris_version"] == "1.6.0"
+        # The Polaris that runs is the images.polaris tag.
+        assert "polaris_version" not in ctx
         assert ctx["polaris_cpu"] == "1"
         assert ctx["polaris_memory"] == "2Gi"
 

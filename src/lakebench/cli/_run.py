@@ -1272,12 +1272,10 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
 
         s3 = cfg.platform.storage.s3
         # Manifest URI mirrors bronze_verify_financial:
-        # {bronze}/{prefix}/manifest/manifest.parquet. Datagen maps the C360
-        # default path_template ("customer/interactions") to "pacs008".
-        prefix = cfg.architecture.pipeline.medallion.bronze.path_template
-        if prefix == "customer/interactions":
-            prefix = "pacs008"
-        prefix = prefix.rstrip("/")
+        # {bronze}/{prefix}/manifest/manifest.parquet.
+        from lakebench.deploy.datagen import bronze_datagen_prefix
+
+        prefix = bronze_datagen_prefix(cfg).rstrip("/")
         # Glob over every cycle's manifest (manifest.parquet, manifest-cNNN.parquet).
         manifest_uri = f"s3a://{s3.buckets.bronze}/{prefix}/manifest/manifest*.parquet"
         json_key = f"scoring/{run_id}/recall.json"

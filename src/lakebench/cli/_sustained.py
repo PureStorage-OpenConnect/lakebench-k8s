@@ -347,12 +347,9 @@ def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
         (b.gold, f"{base}/gold-refresh"),
     ]
     if clear_raw:
-        raw = cfg.architecture.pipeline.medallion.bronze.path_template
-        if raw == "customer/interactions" and cfg.architecture.workload.schema_type.value == (
-            "financial"
-        ):
-            raw = "pacs008"
-        targets.append((b.bronze, raw.strip("/")))
+        from lakebench.deploy.datagen import bronze_datagen_prefix
+
+        targets.append((b.bronze, bronze_datagen_prefix(cfg).strip("/")))
     for bucket, prefix in targets:
         try:
             n = client.delete_prefix(bucket, prefix)
@@ -392,7 +389,9 @@ def _c360_existing_state(cfg, *, clear_raw: bool) -> list[str]:
         (b.bronze, "warehouse/default.db/bronze_raw/"),
     ]
     if clear_raw:
-        raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
+        from lakebench.deploy.datagen import bronze_datagen_prefix
+
+        raw = bronze_datagen_prefix(cfg).strip("/")
         prefixes.append((b.bronze, f"{raw}/"))
     found = []
     for bucket, prefix in prefixes:
@@ -417,7 +416,9 @@ def _c360_only_fresh_generate(cfg, existing: list[str]) -> bool:
     fresh generate and keeps the refusal. Whether replacing the corpus is
     safe is a separate question, see ``_c360_raw_replace_problem``.
     """
-    raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+
+    raw = bronze_datagen_prefix(cfg).strip("/")
     raw_entry = f"{cfg.platform.storage.s3.buckets.bronze}/{raw}/"
     return bool(existing) and all(e == raw_entry for e in existing)
 
@@ -514,7 +515,9 @@ def _c360_raw_replace_problem(cfg) -> str | None:
         return f"could not check for a running datagen Job: {detail}"
 
     s3_cfg = cfg.platform.storage.s3
-    raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+
+    raw = bronze_datagen_prefix(cfg).strip("/")
     try:
         info = S3Client(
             endpoint=s3_cfg.endpoint,

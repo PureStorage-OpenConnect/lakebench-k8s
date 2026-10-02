@@ -60,7 +60,6 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "endpoint": ("platform", "storage", "s3", "endpoint"),
     "access_key": ("platform", "storage", "s3", "access_key"),
     "secret_key": ("platform", "storage", "s3", "secret_key"),
-    "secret_ref": ("platform", "storage", "s3", "secret_ref"),
     "scale": ("workload", "datagen", "scale"),
     "namespace": ("platform", "kubernetes", "namespace"),
     "mode": ("architecture", "pipeline", "mode"),
@@ -592,11 +591,7 @@ def generate_default_config(
     Returns:
         LakebenchConfig with defaults
     """
-    config_dict: dict[str, Any] = {
-        "name": name,
-        "description": f"Lakebench deployment: {name}",
-        "version": 1,
-    }
+    config_dict: dict[str, Any] = {"name": name}
 
     # Platform configuration
     platform: dict[str, Any] = {}
@@ -657,9 +652,6 @@ def generate_example_config_yaml() -> str:
 # REQUIRED: Unique name for this deployment (also used as K8s namespace)
 name: my-lakehouse
 
-# Optional description
-# description: "My Lakebench lakehouse deployment"
-
 # Recipe shorthand -- sets catalog + table_format + engine + query_engine in one line.
 # Valid recipes: default, hive-iceberg-spark-trino, hive-iceberg-spark-thrift,
 #   hive-iceberg-spark-duckdb, hive-iceberg-spark-none,
@@ -667,9 +659,6 @@ name: my-lakehouse
 #   polaris-iceberg-spark-duckdb, polaris-iceberg-spark-none
 # See docs/recipes.md for details.
 # recipe: hive-iceberg-spark-trino
-
-# Config schema version (always 1)
-# version: 1
 
 # ============================================================================
 # IMAGES
@@ -680,7 +669,6 @@ name: my-lakehouse
 #   datagen: docker.io/sillidata/lb-datagen:1.6.0 # Customizable (see docs/datagen-custom-images.md)
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
-#   hive: apache/hive:3.1.3
 #   trino: trinodb/trino:483
 #   polaris: apache/polaris:1.6.0
 #   duckdb: python:3.11-slim
@@ -820,28 +808,6 @@ architecture:
 
   pipeline:
     mode: batch                    # batch | continuous
-  #   ## Medallion layer configuration
-  #   medallion:
-  #     bronze:
-  #       format: parquet
-  #       path_template: customer/interactions
-  #     silver:
-  #       format: iceberg
-  #       table_name: customer_interactions_enriched
-  #       partition_by:
-  #         - date
-  #       transforms:
-  #         - normalize_email
-  #         - normalize_phone
-  #         - geo_enrichment
-  #         - customer_segmentation
-  #         - quality_flags
-  #     gold:
-  #       format: iceberg
-  #       tables:
-  #         - name: customer_executive_dashboard
-  #           partition_by: [date]
-  #           aggregations: [daily_revenue, daily_engagement, churn_indicators, channel_performance]
   #   ## Continuous pipeline settings (used when mode: continuous)
   #   continuous:
   #     bronze_trigger_interval: "30 seconds"
@@ -912,7 +878,6 @@ workload:
   ## Customer360 workload overrides
   # customer360:
   #   unique_customers: null       # Override: derived from scale if null
-  #   date_range_days: null        # Override: defaults to 365 if null
 
 # ============================================================================
 # LAYER 3: OBSERVABILITY
@@ -920,7 +885,6 @@ workload:
 # Flat schema -- use top-level keys directly under observability:
 # observability:
 #   enabled: false                   # Deploy kube-prometheus-stack (Prometheus + Grafana)
-#   prometheus_stack_enabled: true   # Prometheus collection
 #   dashboards_enabled: true         # Grafana dashboards
 #   retention: 7d                    # Prometheus data retention
 #   storage: 10Gi                    # Prometheus PVC size

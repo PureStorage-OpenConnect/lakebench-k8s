@@ -2147,6 +2147,67 @@ CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
 }
 
 
+# The config fields build_config_snapshot records, as dotted schema paths.
+# tests/test_schema_walk.py derives the same set from the function and fails
+# when they differ, and every one of them must have a reader outside the
+# recording modules: a recorded setting nothing honours fails the walk.
+SNAPSHOT_SOURCE_FIELDS: frozenset[str] = frozenset(
+    {
+        "architecture.benchmark.iterations",
+        "architecture.benchmark.maintenance_settle.enabled",
+        "architecture.benchmark.maintenance_settle.interval_seconds",
+        "architecture.benchmark.maintenance_settle.max_seconds",
+        "architecture.benchmark.maintenance_settle.probe_query",
+        "architecture.benchmark.maintenance_settle.probe_samples",
+        "architecture.benchmark.maintenance_settle.tolerance_pct",
+        "architecture.catalog.type",
+        "architecture.pipeline.mode",
+        "architecture.pipeline.pattern",
+        "architecture.pipeline.pre_benchmark_maintenance",
+        "architecture.pipeline.sustained.benchmark_interval",
+        "architecture.pipeline.sustained.benchmark_warmup",
+        "architecture.pipeline.sustained.bronze_target_file_size_mb",
+        "architecture.pipeline.sustained.bronze_trigger_interval",
+        "architecture.pipeline.sustained.compaction_enabled",
+        "architecture.pipeline.sustained.gold_refresh_interval",
+        "architecture.pipeline.sustained.gold_target_file_size_mb",
+        "architecture.pipeline.sustained.retention_threshold",
+        "architecture.pipeline.sustained.run_duration",
+        "architecture.pipeline.sustained.silver_target_file_size_mb",
+        "architecture.pipeline.sustained.silver_trigger_interval",
+        "architecture.pipeline_engine",
+        "architecture.query_engine.trino.coordinator.cpu",
+        "architecture.query_engine.trino.coordinator.memory",
+        "architecture.query_engine.trino.worker.cpu",
+        "architecture.query_engine.trino.worker.memory",
+        "architecture.query_engine.trino.worker.replicas",
+        "architecture.query_engine.type",
+        "architecture.table_format.type",
+        "architecture.workload.datagen.file_size",
+        "architecture.workload.datagen.mode",
+        "architecture.workload.datagen.parallelism",
+        "architecture.workload.datagen.scale",
+        "architecture.workload.schema_type",
+        "images.datagen",
+        "images.spark",
+        "images.trino",
+        "name",
+        "platform.compute.spark.bronze_executors",
+        "platform.compute.spark.bronze_ingest_executors",
+        "platform.compute.spark.gold_executors",
+        "platform.compute.spark.gold_refresh_executors",
+        "platform.compute.spark.silver_executors",
+        "platform.compute.spark.silver_stream_executors",
+        "platform.storage.s3.buckets.bronze",
+        "platform.storage.s3.buckets.gold",
+        "platform.storage.s3.buckets.silver",
+        "platform.storage.s3.endpoint",
+        "platform.storage.scratch.enabled",
+        "platform.storage.scratch.storage_class",
+    }
+)
+
+
 def build_config_snapshot(
     cfg: Any,
     *,

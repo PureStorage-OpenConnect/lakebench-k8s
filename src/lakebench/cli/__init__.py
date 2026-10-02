@@ -1598,7 +1598,7 @@ def info(
     # Add monitoring info if enabled
     obs = cfg.observability
     if obs.enabled:
-        prom_status = "enabled" if obs.prometheus_stack_enabled else "disabled"
+        prom_status = "enabled"
         graf_status = "enabled" if obs.dashboards_enabled else "disabled"
         lines.append(
             (

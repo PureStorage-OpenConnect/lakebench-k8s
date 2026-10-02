@@ -2819,12 +2819,12 @@ class SparkJobManager:
         env.append({"name": "LB_SCALE", "value": str(_scale)})
 
         # Financial workload: point bronze_verify_financial / silver_build_financial
-        # at the same S3 prefix the datagen K8s Job wrote to. Datagen picks
-        # `pacs008` when path_template is at its C360 default; mirror that here.
+        # at the same S3 prefix the datagen K8s Job wrote to. Imported here:
+        # deploy/datagen.py imports deploy/engine.py, which imports this module.
         if cfg.architecture.workload.schema_type.value == "financial":
-            _bronze_prefix = cfg.architecture.pipeline.medallion.bronze.path_template
-            if _bronze_prefix == "customer/interactions":
-                _bronze_prefix = "pacs008"
+            from lakebench.deploy.datagen import bronze_datagen_prefix
+
+            _bronze_prefix = bronze_datagen_prefix(cfg)
             env.append(
                 {
                     "name": "LB_FINANCIAL_BRONZE_PREFIX",

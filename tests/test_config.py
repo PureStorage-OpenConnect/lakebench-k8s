@@ -68,7 +68,8 @@ class TestLakebenchConfig:
         """Test creating config with just the required field."""
         config = LakebenchConfig(name="test-deployment")
         assert config.name == "test-deployment"
-        assert config.version == 1
+        # The schema version number was removed (nothing read it).
+        assert not hasattr(config, "version")
 
     def test_missing_name_raises(self):
         """Test that missing name raises validation error."""
@@ -117,17 +118,15 @@ class TestLakebenchConfig:
         # No credentials
         config = LakebenchConfig(name="test")
         assert not config.has_inline_s3_credentials()
-        assert not config.has_s3_secret_ref()
 
         # Inline credentials
         config = LakebenchConfig(
             name="test", platform={"storage": {"s3": {"access_key": "key", "secret_key": "secret"}}}
         )
         assert config.has_inline_s3_credentials()
-        assert not config.has_s3_secret_ref()
 
-        # Secret ref alongside inline keys: loads (and warns, LB-190). A
-        # secret_ref-only config is refused; see test_config_honesty_v16.
+        # secret_ref was removed: built without a load purpose it is dropped
+        # with a DeprecationWarning; see test_config_honesty_v16.
         with pytest.warns(DeprecationWarning, match="secret_ref"):
             config = LakebenchConfig(
                 name="test",
@@ -138,7 +137,7 @@ class TestLakebenchConfig:
                 },
             )
         assert config.has_inline_s3_credentials()
-        assert config.has_s3_secret_ref()
+        assert not hasattr(config.platform.storage.s3, "secret_ref")
 
     def test_s3_tls_fields_defaults(self):
         """Test S3Config ca_cert and verify_ssl default values."""
@@ -276,7 +275,6 @@ platform:
 
         loaded = load_config(config_path)
         assert loaded.name == config.name
-        assert loaded.description == config.description
         assert loaded.platform.storage.s3.buckets.bronze == "test-bronze"
 
 
@@ -538,7 +536,7 @@ class TestGenerateConfig:
         """Test generating default config with minimal inputs."""
         config = generate_default_config(name="test")
         assert config.name == "test"
-        assert "test" in config.description
+        assert not hasattr(config, "description")
 
     def test_generate_config_with_s3(self):
         """Test generating config with S3 settings."""
@@ -721,7 +719,6 @@ class TestComponentValidation:
             },
         )
         assert config.architecture.catalog.polaris.port == 8181
-        assert config.architecture.catalog.polaris.version == "1.6.0"
         assert config.architecture.catalog.polaris.resources.cpu == "1"
         assert config.architecture.catalog.polaris.resources.memory == "2Gi"
 

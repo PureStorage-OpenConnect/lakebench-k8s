@@ -251,20 +251,25 @@ def test_old_metrics_with_sustained_mode_still_read_as_continuous(tmp_path):
     ],
 )
 def test_dead_field_set_warns_no_effect_and_v17_removal(overrides, field):
+    # Superseded by CFG-9: the v1.6 dead fields are removed in v1.7. Built
+    # without a load purpose they are dropped with a warning; load_config
+    # refuses them for the commands that change data (test_cfg9_removals).
     with pytest.warns(DeprecationWarning) as rec:
         make_config(**overrides)
     msgs = [str(w.message) for w in rec]
     hit = [m for m in msgs if field in m]
     assert hit, msgs
-    assert "has no effect" in hit[0] and "removed in v1.7" in hit[0]
+    assert "is no longer used" in hit[0]
 
 
-def test_dead_fields_at_default_do_not_warn():
-    _quiet(
-        make_config,
-        images={"prometheus": "prom/prometheus:v2.48.0"},
-        observability={"reports": {"enabled": True}},
-    )
+def test_dead_fields_at_default_are_dropped_with_an_old_default_note():
+    with pytest.warns(DeprecationWarning) as rec:
+        make_config(
+            images={"prometheus": "prom/prometheus:v2.48.0"},
+            observability={"reports": {"enabled": True}},
+        )
+    msgs = [str(w.message) for w in rec if "old default" in str(w.message)]
+    assert len(msgs) == 2, msgs
 
 
 def test_pipeline_pattern_other_than_medallion_warns():

@@ -40,17 +40,15 @@ if TYPE_CHECKING:
 def bronze_datagen_prefix(config: LakebenchConfig) -> str:
     """Return the S3 prefix under bronze where datagen writes.
 
-    Kept in one place so the deployer, the CLI's ``--regenerate`` guard and
-    tests all read the same mapping. Financial (AML) datagen writes under
-    ``pacs008/`` on the C360 default ``customer/interactions/`` template
-    (see ``_build_datagen_context``); every other schema writes under
-    ``bronze.path_template`` unchanged.
+    The one prefix function: the deployer, the CLI's ``--regenerate`` guard,
+    the continuous reset and the financial Spark jobs
+    (``LB_FINANCIAL_BRONZE_PREFIX``) all read it. The layout is fixed per
+    workload, because the Spark stages read a fixed path: ``pacs008`` for
+    financial (AML), ``customer/interactions`` otherwise.
     """
-    schema_value = config.architecture.workload.schema_type.value
-    path_prefix = config.architecture.pipeline.medallion.bronze.path_template
-    if schema_value == "financial" and path_prefix == "customer/interactions":
-        path_prefix = "pacs008"
-    return path_prefix
+    if config.architecture.workload.schema_type.value == "financial":
+        return "pacs008"
+    return "customer/interactions"
 
 
 class DatagenDeployer:
@@ -89,11 +87,10 @@ class DatagenDeployer:
 
         effective_mode = _resolve_datagen_mode(cfg)
 
-        # Route datagen to the right Generator + schema-appropriate S3 prefix.
-        # When path_template is still the C360 default and schema=financial,
-        # substitute the pacs.008 prefix the Financial Spark scripts read from
-        # (LB_FINANCIAL_BRONZE_PREFIX default). Keeps the datagen upload and
-        # bronze_verify_financial.py pointed at the same S3 location.
+        # Route datagen to the right Generator + schema-appropriate S3 prefix,
+        # the same prefix the financial Spark scripts read from
+        # (LB_FINANCIAL_BRONZE_PREFIX), so the datagen upload and
+        # bronze_verify_financial.py point at the same S3 location.
         schema_value = workload.schema_type.value
         path_prefix = bronze_datagen_prefix(cfg)
 

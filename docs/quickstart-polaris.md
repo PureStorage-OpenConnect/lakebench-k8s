@@ -193,8 +193,7 @@ images:
   polaris_admin_tool: "apache/polaris-admin-tool:1.6.0"
 ```
 
-The Polaris version that runs is the tag of `images.polaris`;
-`architecture.catalog.polaris.version` is not read by the deployer.
+The Polaris version that runs is the tag of `images.polaris`.
 
 ### Bootstrap job fails with "already been bootstrapped"
 

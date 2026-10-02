@@ -26,7 +26,25 @@ REMOVED = [
     ("images", "pull_secrets", ["regcred"]),
     ("platform.storage.scratch", "create_storage_class", False),
     ("architecture.table_format", "hudi", {"version": "0.14.0", "properties": {}}),
-    ("architecture.pipeline.medallion.silver", "strategy", {"enable_salting": True}),
+    # medallion.silver.strategy went in v1.5; the whole medallion block in v1.7.
+    ("architecture.pipeline", "medallion", {"silver": {"strategy": {"enable_salting": True}}}),
+    # Removed in v1.7 (nothing read them).
+    ("images", "hive", "apache/hive:4.0.1"),
+    ("images", "prometheus", "prom/prometheus:v3"),
+    ("images", "grafana", "grafana/grafana:11"),
+    ("platform.storage.s3", "secret_ref", "my-secret"),
+    ("architecture.catalog.hive", "thrift", {"min_threads": 20}),
+    ("architecture.catalog.polaris", "version", "1.5.0"),
+    ("architecture.catalog.unity", "version", "0.3.0"),
+    ("architecture.table_format.iceberg", "file_format", "orc"),
+    ("architecture.table_format.iceberg", "properties", {"a": "b"}),
+    ("architecture.table_format.delta", "properties", {"a": "b"}),
+    ("architecture.workload.customer360", "date_range_days", 90),
+    ("observability", "reports", {"format": "json"}),
+    ("observability", "storage_class", "fast"),
+    ("observability", "prometheus_stack_enabled", False),
+    ("observability", "s3_metrics_enabled", False),
+    ("observability", "spark_metrics_enabled", False),
     ("architecture.workload.customer360", "channels", ["web"]),
     ("architecture.workload.customer360", "event_types", ["purchase"]),
     ("architecture.workload.customer360", "quality_distribution", {"clean": 0.92}),
@@ -40,7 +58,9 @@ def _nest(dotted: str, key: str, value) -> dict:
     return {"name": "t", **d}
 
 
-@pytest.mark.parametrize(("where", "key", "value"), REMOVED, ids=[k for _, k, _ in REMOVED])
+@pytest.mark.parametrize(
+    ("where", "key", "value"), REMOVED, ids=[f"{w}.{k}" for w, k, _ in REMOVED]
+)
 def test_removed_key_warns_and_is_dropped(where, key, value):
     with pytest.warns(DeprecationWarning, match=key):
         cfg = LakebenchConfig.model_validate(_nest(where, key, value))
