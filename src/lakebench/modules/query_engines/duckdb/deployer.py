@@ -61,8 +61,11 @@ class DuckDBDeployer:
             )
 
         try:
+            from lakebench.deploy.deps import consumer_context
+
+            context = consumer_context(self.engine, "DuckDB")
             for template_name in self.TEMPLATES:
-                yaml_content = self.renderer.render(template_name, self.context)
+                yaml_content = self.renderer.render(template_name, context)
                 for doc in yaml.safe_load_all(yaml_content):
                     if doc:
                         self.k8s.apply_manifest(doc, namespace=namespace)
@@ -89,43 +92,25 @@ class DuckDBDeployer:
             )
 
     def _wait_for_ready(self, namespace: str, timeout_seconds: float = 300) -> None:
-        """Wait for the DuckDB Deployment to have ready replicas.
+        """Wait until the DuckDB Deployment has rolled out and its pod runs
+        this deploy's dependency set and is Ready.
 
-        Readiness alone cannot say *why* a pod is not ready. A slow pip
-        install, a crash-looping container, an unschedulable pod, and a
-        Deployment that was never created all present as ``ready_replicas: 0``
-        for the full timeout and then raise the same bare message. DuckDB
-        installs itself at startup, so the wait is long enough that a bad
-        failure hides in it for 15 minutes. The pod state is collected so the
-        error names the actual problem.
+        Readiness alone cannot say *why* a pod is not ready, so a timeout
+        names the pod state (crash loop, unschedulable, never created).
         """
-        from kubernetes import client as k8s_client
+        from lakebench.deploy.deps import wait_consumer_rolled
 
-        apps_api = k8s_client.AppsV1Api()
-        deadline = time.time() + timeout_seconds
-        last = "not created"
-
-        while time.time() < deadline:
-            try:
-                dep = apps_api.read_namespaced_deployment(
-                    name="lakebench-duckdb",
-                    namespace=namespace,
-                )
-                ready = dep.status.ready_replicas or 0
-                desired = dep.spec.replicas or 1
-                if ready >= desired:
-                    return
-                last = f"{ready}/{desired} ready"
-            except k8s_client.rest.ApiException as e:
-                if e.status != 404:
-                    raise
-            time.sleep(5)
-
-        deploy_deadline.check("deployment lakebench-duckdb", last)
-        raise RuntimeError(
-            f"DuckDB did not become ready within {timeout_seconds}s. "
-            f"{self._describe_not_ready(namespace)}"
-        )
+        handle = self.engine.deps
+        try:
+            wait_consumer_rolled(
+                namespace,
+                "lakebench-duckdb",
+                handle.pinset_sha256 if handle is not None else None,
+                timeout_seconds=timeout_seconds,
+                what="DuckDB",
+            )
+        except RuntimeError as e:
+            raise RuntimeError(f"{e}. {self._describe_not_ready(namespace)}") from e
 
     def _describe_not_ready(self, namespace: str) -> str:
         """Best-effort explanation of why the DuckDB pod is not ready.

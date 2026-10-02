@@ -61,8 +61,11 @@ class SparkThriftDeployer:
             )
 
         try:
+            from lakebench.deploy.deps import consumer_context
+
+            context = consumer_context(self.engine, "Spark Thrift Server")
             for template_name in self.TEMPLATES:
-                yaml_content = self.renderer.render(template_name, self.context)
+                yaml_content = self.renderer.render(template_name, context)
                 for doc in yaml.safe_load_all(yaml_content):
                     if doc:
                         self.k8s.apply_manifest(doc, namespace=namespace)
@@ -89,28 +92,16 @@ class SparkThriftDeployer:
             )
 
     def _wait_for_ready(self, namespace: str, timeout_seconds: float = 300) -> None:
-        """Wait for the Spark Thrift Server Deployment to have ready replicas."""
-        from kubernetes import client as k8s_client
+        """Wait until the Thrift Deployment has rolled out and its pod runs
+        this deploy's dependency set and is Ready (DeployTimeout when the
+        deploy deadline cuts the wait)."""
+        from lakebench.deploy.deps import wait_consumer_rolled
 
-        apps_api = k8s_client.AppsV1Api()
-        deadline = time.time() + timeout_seconds
-        last = "not created"
-
-        while time.time() < deadline:
-            try:
-                dep = apps_api.read_namespaced_deployment(
-                    name="lakebench-spark-thrift",
-                    namespace=namespace,
-                )
-                ready = dep.status.ready_replicas or 0
-                desired = dep.spec.replicas or 1
-                if ready >= desired:
-                    return
-                last = f"{ready}/{desired} ready"
-            except k8s_client.rest.ApiException as e:
-                if e.status != 404:
-                    raise
-            time.sleep(10)
-
-        deploy_deadline.check("deployment lakebench-spark-thrift", last)
-        raise RuntimeError(f"Spark Thrift Server did not become ready within {timeout_seconds}s")
+        handle = self.engine.deps
+        wait_consumer_rolled(
+            namespace,
+            "lakebench-spark-thrift",
+            handle.pinset_sha256 if handle is not None else None,
+            timeout_seconds=timeout_seconds,
+            what="Spark Thrift Server",
+        )

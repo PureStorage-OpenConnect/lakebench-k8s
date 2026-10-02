@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
@@ -18,6 +18,9 @@ from lakebench.exit_codes import REFUSAL_DETAIL
 from lakebench.k8s import K8sClient, K8sResourceError
 
 from . import deadline as deploy_deadline
+
+if TYPE_CHECKING:
+    from lakebench.deps.manifest import DepsHandle
 
 logger = logging.getLogger(__name__)
 
@@ -348,10 +351,11 @@ class DeploymentEngine:
     2. S3 bucket validation/creation
     3. PostgreSQL (StatefulSet + Service)
     4. Catalog Service (Hive Metastore / Polaris / Unity)
-    5. Query Engine (Trino / Spark Thrift Server)
-    6. Spark Operator (if not already installed)
-    7. Spark RBAC (ServiceAccount, Role, RoleBinding)
-    8. Monitoring Stack (if enabled)
+    5. Spark RBAC (ServiceAccount, Role, RoleBinding)
+    6. Spark Operator check and watch-list entry
+    7. Dependency server (lb-deps: resolves and serves the jars and wheels)
+    8. Query Engine (Trino / Spark Thrift Server / DuckDB)
+    9. Monitoring Stack (if enabled)
     """
 
     #: Class default, so an engine built without __init__ (tests) reads False.
@@ -389,6 +393,8 @@ class DeploymentEngine:
         # from "we created it" into "unowned legacy" that then requires
         # the dangerous --force-legacy flag.
         self._namespace_created_this_run: set[str] = set()
+        # The verified, served dependency set; set by the deps step.
+        self.deps: DepsHandle | None = None
 
         if k8s_client:
             self.k8s = k8s_client
@@ -496,18 +502,6 @@ class DeploymentEngine:
         return spark_mem
 
     @staticmethod
-    def _build_spark_thrift_packages(cfg: Any) -> str:
-        """``spark.jars.packages`` CSV for Spark Thrift Server.
-
-        The same list the Spark jobs load (``deps.request.jar_coordinates``),
-        so Thrift and the jobs run one Iceberg runtime (UX D2). It goes when
-        Thrift fetches the set from the deployment's lb-deps server.
-        """
-        from lakebench.deps.request import jar_coordinates
-
-        return ",".join(jar_coordinates(cfg))
-
-    @staticmethod
     def _read_ca_cert_pem(path: str) -> str:
         """Read PEM certificate file content for embedding in K8s Secret.
 
@@ -533,7 +527,7 @@ class DeploymentEngine:
         # Parse S3 endpoint for Stackable (needs host and port separately)
         from urllib.parse import urlparse
 
-        from lakebench.spark.job import _MAVEN_MIRROR_REPOS, _spark_compat
+        from lakebench.spark.job import _spark_compat
 
         parsed_s3 = urlparse(s3.endpoint)
         s3_host = (
@@ -628,12 +622,6 @@ class DeploymentEngine:
             "spark_thrift_memory_k8s": self._thrift_pod_memory(cfg),
             "spark_thrift_catalog_name": cfg.architecture.query_engine.spark_thrift.catalog_name,
             "query_engine_type": cfg.architecture.query_engine.type.value,
-            # Spark Thrift packages (computed from config versions)
-            "spark_thrift_packages": self._build_spark_thrift_packages(cfg),
-            # Fallback Maven mirror -- Ivy falls to this when Central 429s
-            # on the cluster's egress IP (see _MAVEN_MIRROR_REPOS in
-            # spark/job.py for the rationale).
-            "spark_thrift_repositories": _MAVEN_MIRROR_REPOS,
             "spark_major_minor": self._get_spark_major_minor(cfg),
             "scala_suffix": _spark_compat(cfg.images.spark)[0],
             # DuckDB
@@ -674,6 +662,7 @@ class DeploymentEngine:
         Returns:
             List of deployment results
         """
+        from .deps import DependencyServerDeployer
         from .duckdb import DuckDBDeployer
         from .hive import HiveDeployer
         from .observability import ObservabilityDeployer
@@ -693,6 +682,7 @@ class DeploymentEngine:
         spark_thrift = SparkThriftDeployer(self)
         duckdb = DuckDBDeployer(self)
         rbac = RBACDeployer(self)
+        deps = DependencyServerDeployer(self)
         observability = ObservabilityDeployer(self)
 
         # Both HiveDeployer and PolarisDeployer have self-skip guards.
@@ -722,6 +712,8 @@ class DeploymentEngine:
                 "Checking Spark Operator and watch list",
                 self._deploy_spark_operator,
             ),
+            # Ready before Thrift and DuckDB render and before any run.
+            ("deps", "Starting dependency server", deps.deploy),
             ("trino", "Deploying Trino", trino.deploy),
             ("spark-thrift", "Deploying Spark Thrift Server", spark_thrift.deploy),
             ("duckdb", "Deploying DuckDB", duckdb.deploy),

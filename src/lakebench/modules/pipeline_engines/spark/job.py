@@ -15,12 +15,14 @@ from typing import TYPE_CHECKING, Any
 
 from lakebench._constants import POLARIS_CLIENT_ID, SPARK_SERVICE_ACCOUNT
 from lakebench.modules.pipeline_engines.spark.conf_keys import (  # noqa: F401 -- job.py's names
+    DEPENDENCY_SET_SPARK_KEYS,
     LAKEBENCH_OWNED_SPARK_KEYS,
     SPARK_CONF_DEFAULTS,
 )
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
+    from lakebench.deps.manifest import DepsHandle
     from lakebench.k8s import K8sClient
 
 logger = logging.getLogger(__name__)
@@ -1424,6 +1426,45 @@ class JobType(Enum):
     SCORE_FINANCIAL_REFERENCE = "score-financial-reference"
 
 
+def _deps_ready_init(cfg: LakebenchConfig, deps: Any) -> dict[str, Any]:
+    """A driver init container that waits (up to 2 min) until the
+    deployment's dependency server serves this job's set. The driver's jar
+    fetch does not retry, and a registered look runs once: a server that is
+    restarting delays the job instead of failing it, and a server on another
+    set fails it here with a clear line."""
+    from urllib.parse import urlsplit
+
+    from lakebench.deps.manifest import PORT
+
+    ready = f"http://{urlsplit(deps.base_url).hostname}:{PORT}/ready"
+    script = (
+        "import sys, time, urllib.request\n"
+        "got = ''\n"
+        "end = time.monotonic() + 120\n"
+        "while time.monotonic() < end:\n"
+        "    try:\n"
+        f"        got = urllib.request.urlopen('{ready}', timeout=5).read().decode()\n"
+        f"        if got == '{deps.pinset_sha256}':\n"
+        "            sys.exit(0)\n"
+        "    except Exception as e:\n"
+        "        got = str(e)\n"
+        "    time.sleep(2)\n"
+        f"sys.exit('LB_DEPS_ERROR lb-deps does not serve set {deps.pinset_sha256}: ' + got)\n"
+    )
+    return {
+        "name": "lb-deps-ready",
+        "image": cfg.images.spark,
+        "imagePullPolicy": cfg.images.pull_policy.value,
+        "securityContext": {"runAsUser": 185, "runAsGroup": 185},
+        "command": ["python3", "-c", script],
+    }
+
+
+# Jobs whose driver installs the reference wheels (py-reference group) from
+# the deployment's dependency set into REFERENCE_PY_DEPS_DIR.
+REFERENCE_SET_JOB_TYPES: tuple[JobType, ...] = (JobType.SCORE_FINANCIAL_REFERENCE,)
+
+
 # Streaming job types (for conditional manifest logic)
 _STREAMING_JOB_TYPES = frozenset(
     {
@@ -1551,10 +1592,10 @@ class SparkJobManager:
         # Set by deploy_scripts_configmap: {"scripts_sha256", "scripts_maps"}
         # for run provenance. None until the maps are applied.
         self.scripts_provenance: dict[str, Any] | None = None
-        # The dependency set the run's pods use, for provenance.deps
-        # (metrics/provenance.py). None until a dependency check records it;
-        # the run record then says "not_recorded".
-        self.deps: dict[str, Any] | None = None
+        # The deployment's verified dependency set. run sets it from the
+        # lb-deps-manifest ConfigMap before the first submit; the run record's
+        # provenance.deps is built from it (metrics/provenance.py).
+        self.deps: DepsHandle | None = None
 
         # Cache cluster capacity for streaming concurrent budget calculation
         try:
@@ -1596,6 +1637,15 @@ class SparkJobManager:
             Initial JobStatus
         """
         job_name = f"lakebench-{job_type.value}"
+        # Built before the delete: a manifest that cannot be built (no
+        # verified set, a refused key) must not cost the previous application
+        # its record.
+        manifest = self._build_manifest(
+            job_type,
+            extra_conf,
+            cycle_env=cycle_env,
+            arguments=arguments,
+        )
         # Delete existing job if present
         self._delete_job(job_name)
         # A later stage is not submitted on scripts other than the ones this
@@ -1605,14 +1655,6 @@ class SparkJobManager:
         if changed:
             logger.error("%s: %s", job_name, changed)
             return JobStatus(name=job_name, state=JobState.FAILED, message=changed)
-
-        # Build SparkApplication manifest
-        manifest = self._build_manifest(
-            job_type,
-            extra_conf,
-            cycle_env=cycle_env,
-            arguments=arguments,
-        )
 
         # Apply manifest
         from kubernetes import client as k8s_client
@@ -1817,6 +1859,23 @@ class SparkJobManager:
 
         job_name = f"lakebench-{job_type.value}"
         spark_major = _parse_spark_major(cfg.images.spark)
+        from lakebench.deps import manifest as deps_manifest
+
+        deps = self.deps
+        if deps is None:
+            raise deps_manifest.DepsSetMissing(f"build {job_name}")
+        owned = sorted(DEPENDENCY_SET_SPARK_KEYS & set(cfg.spark.conf))
+        if owned:
+            raise ValueError(
+                f"spark.conf sets {', '.join(owned)}, which Lakebench sets from the "
+                "deployment's verified dependency set; remove them"
+            )
+        if job_type in REFERENCE_SET_JOB_TYPES and not deps_manifest.has_group(
+            deps, "py-reference"
+        ):
+            raise deps_manifest.DepsSetMissing(
+                f"build {job_name}: the dependency set has no py-reference wheels"
+            )
 
         # Per-job resource profile (proven at 1TB+ scale). Schema-aware:
         # AML bronze-verify needs a bigger scratch PVC than c360 to survive
@@ -2018,22 +2077,23 @@ class SparkJobManager:
         catalog_name = cfg.architecture.query_engine.trino.catalog_name
         catalog_type = cfg.architecture.catalog.type.value
 
-        # Packages come from deps.request, the one definition shared with
-        # Spark Thrift (UX D2).
-        from lakebench.deps.request import jar_coordinates
+        # The jars come from the deployment's dependency server, in the
+        # order Spark's own --packages resolve listed them (the classpath
+        # order). The Operator controller resolves nothing: in cluster mode it
+        # passes remote jars to the driver, whose in-pod spark-submit fetches
+        # them; executors fetch from the driver.
+        spark_conf["spark.jars"] = ",".join(deps_manifest.jar_urls(deps))
+        if table_format == "delta":
+            # --packages used to put the resolved jars on the Python path;
+            # silver_stream_delta.py imports delta.tables from the jar.
+            delta_jar = deps_manifest.delta_jar(deps)
+            if delta_jar is None:
+                raise deps_manifest.DepsSetMissing(
+                    f"build {job_name}: the dependency set has no delta-spark jar"
+                )
+            from urllib.parse import quote
 
-        packages = jar_coordinates(cfg)
-        spark_conf["spark.jars.packages"] = ",".join(packages)
-        # Central rate-limits per-egress-IP (HTTP 429), and a burst of
-        # UAT deploys can silently starve a fresh driver pod's Ivy
-        # resolve. Google's Central mirror at
-        # ``maven-central.storage-download.googleapis.com`` is
-        # rate-limited independently and works with a plain
-        # ``--repositories`` entry -- Ivy falls to it when Central
-        # returns 429 as "not found". Adding as spark_conf so both
-        # the SparkApplication CR and the ivy-warmer init container
-        # (which reads spark.jars.* from the same conf) see it.
-        spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
+            spark_conf["spark.submit.pyFiles"] = f"{deps.base_url}/jars/{quote(delta_jar)}"
         if table_format == "delta":
             spark_conf["spark.sql.extensions"] = "io.delta.sql.DeltaSparkSessionExtension"
         else:
@@ -2190,17 +2250,6 @@ class SparkJobManager:
                 }
             )
 
-        # Ivy cache must be writable. Two processes resolve spark.jars.packages
-        # into this path: the driver (the spark-ivy-cache emptyDir below) and,
-        # first, spark-submit inside the Spark Operator controller, whose /tmp
-        # is the chart's 1Gi emptyDir. This job's jars (~1.2 GB) overflow that
-        # and the kubelet evicts the shared controller; `lakebench admin
-        # install-spark-operator` / `repair-operator` size it to 8Gi
-        # (operator_scratch.py). Moving the path would not help: the
-        # controller's root filesystem is read-only, so /tmp is its only
-        # writable volume. The durable fix is jars baked into the Spark image
-        # so spark.jars.packages is empty at submit.
-        spark_conf["spark.jars.ivy"] = "/tmp/.ivy2"
         spark_conf["spark.files.useFetchCache"] = "false"
 
         # S3A performance tuning (proven FlashBlade defaults)
@@ -2344,73 +2393,50 @@ class SparkJobManager:
         # support the configMap type.
         from lakebench.modules.pipeline_engines.spark.scripts_maps import scripts_volume
 
-        packages_str = ",".join(packages)
-        _pod_template_volumes: list[dict[str, Any]] = [
-            # One projected volume over the per-role scripts ConfigMaps
-            # (scripts_maps.MOUNTS_BY_JOB_TYPE), flat at /opt/spark/scripts.
-            scripts_volume(job_type),
-            {
-                "name": "spark-work-dir",
-                "emptyDir": {"sizeLimit": "20Gi"},
-            },
-            {
-                "name": "spark-ivy-cache",
-                "emptyDir": {"sizeLimit": "5Gi"},
-            },
-        ]
-        _pod_template_volume_mounts = [
-            {"name": "spark-scripts", "mountPath": "/opt/spark/scripts"},
-            {"name": "spark-work-dir", "mountPath": "/opt/spark/work-dir"},
-            {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
-        ]
+        def _volumes() -> list[dict[str, Any]]:
+            return [
+                # One projected volume over the per-role scripts ConfigMaps
+                # (scripts_maps.MOUNTS_BY_JOB_TYPE), flat at /opt/spark/scripts.
+                scripts_volume(job_type),
+                {"name": "spark-work-dir", "emptyDir": {"sizeLimit": "20Gi"}},
+            ]
+
+        def _mounts() -> list[dict[str, Any]]:
+            return [
+                {"name": "spark-scripts", "mountPath": "/opt/spark/scripts"},
+                {"name": "spark-work-dir", "mountPath": "/opt/spark/work-dir"},
+            ]
+
+        # Each template owns its lists: a volume or mount added for the driver
+        # (the download dir, the reference wheels, the truststore) must not
+        # land on the executor template twice or at all.
         driver_pod_template: dict[str, Any] = {
             "spec": {
-                "volumes": _pod_template_volumes,
-                "initContainers": [
-                    {
-                        "name": "resolve-deps",
-                        "image": cfg.images.spark,
-                        "imagePullPolicy": cfg.images.pull_policy.value,
-                        "securityContext": {
-                            "runAsUser": 185,
-                            "runAsGroup": 185,
-                        },
-                        "command": [
-                            "/bin/bash",
-                            "-c",
-                            (
-                                "set -e; "
-                                "/opt/spark/bin/spark-submit "
-                                f'--packages "{packages_str}" '
-                                f'--repositories "{_MAVEN_MIRROR_REPOS}" '
-                                "--conf spark.jars.ivy=/tmp/.ivy2 "
-                                "--class org.apache.spark.deploy.DummyNonExistent "
-                                "local:///dev/null 2>&1 || true; "
-                                "echo 'Ivy cache warmed:'; "
-                                "ls /tmp/.ivy2/jars/ 2>/dev/null | wc -l; "
-                                "echo 'jars resolved'"
-                            ),
-                        ],
-                        "volumeMounts": [
-                            {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
-                        ],
-                    },
+                "volumes": [
+                    *_volumes(),
+                    # The driver's in-pod spark-submit downloads the remote jars
+                    # into java.io.tmpdir; bounded as the Ivy cache it replaces.
+                    {"name": "lb-deps-dl", "emptyDir": {"sizeLimit": "5Gi"}},
                 ],
+                "initContainers": [_deps_ready_init(cfg, deps)],
                 "containers": [
                     {
                         "name": "spark-kubernetes-driver",
-                        "volumeMounts": _pod_template_volume_mounts,
+                        "volumeMounts": [
+                            *_mounts(),
+                            {"name": "lb-deps-dl", "mountPath": "/tmp"},
+                        ],
                     },
                 ],
             },
         }
         executor_pod_template: dict[str, Any] = {
             "spec": {
-                "volumes": _pod_template_volumes,
+                "volumes": _volumes(),
                 "containers": [
                     {
                         "name": "spark-kubernetes-executor",
-                        "volumeMounts": _pod_template_volume_mounts,
+                        "volumeMounts": _mounts(),
                     },
                 ],
             },
@@ -2420,15 +2446,16 @@ class SparkJobManager:
         s3 = cfg.platform.storage.s3
         if s3.ca_cert:
             # Add CA cert secret + truststore emptyDir volumes
-            _pod_template_volumes.extend(
-                [
-                    {
-                        "name": "ca-cert",
-                        "secret": {"secretName": "lakebench-ca-certificate"},
-                    },
-                    {"name": "truststore", "emptyDir": {}},
-                ]
-            )
+            for template in (driver_pod_template, executor_pod_template):
+                template["spec"]["volumes"].extend(
+                    [
+                        {
+                            "name": "ca-cert",
+                            "secret": {"secretName": "lakebench-ca-certificate"},
+                        },
+                        {"name": "truststore", "emptyDir": {}},
+                    ]
+                )
             _truststore_mounts = [
                 {
                     "name": "ca-cert",
@@ -2473,17 +2500,34 @@ class SparkJobManager:
             ).strip()
 
         # The reference detector trains on the driver only; executors do not
-        # need the packages. Driver-side only: the volume is added to the
-        # driver template's own copy of the volume list.
-        if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
+        # need the packages. Driver-side only.
+        if job_type in REFERENCE_SET_JOB_TYPES:
+            # The frozen scorer reads its packages from /opt/lb-pydeps. They
+            # are installed from the deployment's set, hash-checked against
+            # the manifest ConfigMap, by the same pip into the same path as
+            # the PyPI install they replace.
+            from urllib.parse import urlsplit
+
+            host = urlsplit(deps.base_url).hostname
+            requirements = f"{deps_manifest.MANIFEST_MOUNT}/requirements-py-reference.txt"
             driver_pod_template["spec"]["volumes"] = [
                 *driver_pod_template["spec"]["volumes"],
                 {"name": "lb-pydeps", "emptyDir": {"sizeLimit": "2Gi"}},
+                {
+                    "name": "lb-deps-manifest",
+                    "configMap": {"name": deps_manifest.MANIFEST_CONFIGMAP},
+                },
             ]
             _deps_mount = {"name": "lb-pydeps", "mountPath": REFERENCE_PY_DEPS_DIR}
+            pip = (
+                "python3 -m pip install --no-index --no-deps --no-cache-dir "
+                f"--only-binary=:all: --trusted-host {host} "
+                f"--find-links {deps.base_url}/py-reference/ --require-hashes "
+                f"-r {requirements} --target {REFERENCE_PY_DEPS_DIR}"
+            )
             driver_pod_template["spec"]["initContainers"].append(
                 {
-                    "name": "install-pydeps",
+                    "name": "lb-deps-py-reference",
                     "image": cfg.images.spark,
                     "imagePullPolicy": cfg.images.pull_policy.value,
                     "securityContext": {"runAsUser": 185, "runAsGroup": 185},
@@ -2491,11 +2535,21 @@ class SparkJobManager:
                     "command": [
                         "/bin/bash",
                         "-c",
-                        "set -e; python3 -m pip install --no-cache-dir --no-deps "
-                        f"--only-binary=:all: --target {REFERENCE_PY_DEPS_DIR} "
-                        + " ".join(REFERENCE_PY_DEPS),
+                        # A driver pod is never restarted (restartPolicy
+                        # Never), and a registered look runs once: a dependency
+                        # server restart must not fail it, so the install is
+                        # retried from an empty target for up to about 2 min.
+                        f"for i in 1 2 3 4 5 6; do rm -rf {REFERENCE_PY_DEPS_DIR}/*; "
+                        f"if {pip}; then exit 0; fi; sleep 20; done; exit 1",
                     ],
-                    "volumeMounts": [_deps_mount],
+                    "volumeMounts": [
+                        _deps_mount,
+                        {
+                            "name": "lb-deps-manifest",
+                            "mountPath": deps_manifest.MANIFEST_MOUNT,
+                            "readOnly": True,
+                        },
+                    ],
                 }
             )
             for container in driver_pod_template["spec"]["containers"]:
@@ -2531,11 +2585,10 @@ class SparkJobManager:
                 "type": "OnFailure",
                 "onFailureRetries": 2,
                 "onFailureRetryInterval": 30,
-                # Submission runs spark-submit inside the SHARED operator,
-                # which resolves spark.jars.packages into one Ivy cache;
-                # concurrent deployments race there on a cold cache
-                # (SPARK-10878) and fail FAILED DOWNLOADS until one of them
-                # fills it. Retry more, and wait longer between attempts.
+                # Submission runs spark-submit inside the SHARED operator. It
+                # no longer resolves packages (the jars are lb-deps URLs), but
+                # a busy operator still fails submissions now and then; retry
+                # more, and wait longer between attempts.
                 "onSubmissionFailureRetries": 5,
                 "onSubmissionFailureRetryInterval": 60,
             }
@@ -2548,7 +2601,7 @@ class SparkJobManager:
             # A registered look runs once: an operator retry after the gate
             # computed AP (a crash or an error verdict) would look again.
             # Submission retries stay: they run before the driver starts,
-            # so no AP exists yet (shared Ivy cache race, see above).
+            # so no AP exists yet.
             _restart_policy = {
                 "type": "OnFailure",
                 "onFailureRetries": 0,
@@ -2599,6 +2652,7 @@ class SparkJobManager:
                     },
                     "env": self._build_env_vars(job_type, cycle_env=cycle_env),
                     "template": driver_pod_template,
+                    "annotations": {deps_manifest.POD_ANNOTATION_SET: deps.pinset_sha256},
                 },
                 "executor": {
                     "cores": profile["executor_cores"],
@@ -2619,6 +2673,7 @@ class SparkJobManager:
                     },
                     "env": self._build_env_vars(job_type, cycle_env=cycle_env),
                     "template": executor_pod_template,
+                    "annotations": {deps_manifest.POD_ANNOTATION_SET: deps.pinset_sha256},
                 },
                 "sparkConf": spark_conf,
             },

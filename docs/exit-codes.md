@@ -16,8 +16,8 @@ path yet says so.
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone` |
 | 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused` |
-| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `reproduce.existing_namespace`, `reproduce.nonce_changed`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.bronze_nonempty`, `lease.held`, `context.changed` |
-| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable` |
+| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `reproduce.existing_namespace`, `reproduce.nonce_changed`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `lease.held`, `context.changed` |
+| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
 | 10 | `COMPARE_NOT_COMPARABLE` | compare: NOT COMPARABLE. | no command yet |
@@ -64,10 +64,13 @@ the CLI down every path listed here and checks the code.
 | `reproduce.existing_namespace` | 3 | `reproduce` would reuse a namespace or bucket that already exists |
 | `reproduce.nonce_changed` | 3 | the deployment `reproduce` created was replaced before its run or its destroy |
 | `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix without --regenerate |
+| `run.deps_mismatch` | 3 | the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded |
 | `deploy.state_unrecordable` | 4 | `deploy` could not read the namespace or write the nonce to the directory's state |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
 | `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
 | `nameless.namespace_unreadable` | 4 | a nameless config's namespace could not be read for its check |
+| `run.deps_missing` | 4 | the deployment has no dependency server (deployed by 1.6, or never deployed) |
+| `run.deps_stale` | 4 | the dependency set is not verified for this config: the deploy did not finish, the request changed since deploy, or the server has no Ready pod |
 | `run.prereq_failed` | 4 | a `run` preflight check failed |
 | `s3.unreachable` | 4 | `generate` or `run --generate` cannot read the bronze bucket to check it is empty |
 | `confirm.declined` | 5 | a confirmation prompt was answered no |

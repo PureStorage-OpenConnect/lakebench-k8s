@@ -113,6 +113,8 @@ class KeptObject:
 
 
 _PRE = "pre-1.7"
+# The work item that adds the in-namespace dependency server (v1.7).
+_DEPS = "deps-server"
 
 
 def _named(api: str, kind: str, step: str, *names: str, owner: str = _PRE) -> list[Cat1Entry]:
@@ -256,13 +258,33 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
             "lakebench-pushgateway",
         )
     ),
-    # The per-deployment cluster-scoped entries sort last in the category1 step.
+    # The dependency server's objects: last in the category1 step, and the
+    # Deployment before its claim so pvc-protection lets the claim go once
+    # the pod is gone.
+    *_named("apps_v1", "deployments", CATEGORY1_STEP, "lb-deps", owner=_DEPS),
+    *_named("core_v1", "services", CATEGORY1_STEP, "lb-deps", owner=_DEPS),
+    *_named("core_v1", "configmaps", CATEGORY1_STEP, "lb-deps-manifest", owner=_DEPS),
+    # The tools maps are named by their request (lb-deps-tools-<16 hex>).
+    Cat1Entry(
+        "core_v1",
+        "configmaps",
+        label_selector=(
+            "app.kubernetes.io/component=deps,lakebench.io/deps-role=tools,"
+            "app.kubernetes.io/instance={name}"
+        ),
+        owner_wi=_DEPS,
+        step=CATEGORY1_STEP,
+    ),
+    *_named("core_v1", "persistentvolumeclaims", CATEGORY1_STEP, "lb-deps-data", owner=_DEPS),
 )
 
 # Namespace annotations the category1 step removes from a surviving
 # namespace. ``state-schema`` is written by deploy beside the deploy nonce
 # (DESIGN ch01 d3 N3); removing an absent key is a no-op.
-CATEGORY1_ANNOTATIONS: tuple[str, ...] = ("lakebench.deployment/state-schema",)
+CATEGORY1_ANNOTATIONS: tuple[str, ...] = (
+    "lakebench.deployment/state-schema",
+    "lakebench.deployment/deps-set",  # the dependency server's verified set
+)
 
 KEPT_ON_DESTROY: tuple[KeptObject, ...] = (
     KeptObject(

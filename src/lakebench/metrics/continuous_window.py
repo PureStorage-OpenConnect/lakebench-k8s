@@ -479,10 +479,12 @@ _DOWNLOAD = re.compile(
 def classify_submission_failure(message: str | None) -> str:
     """A one-line reason for a SUBMISSION_FAILED status message.
 
-    The operator runs spark-submit, which resolves ``spark.jars.packages``
-    with Ivy; a truncated Maven download (0 bytes of a 63 MB jar in the
-    2026-09-27 discovery run) is the common case and is named with the
-    artifact and byte counts. Anything else is the message's first line.
+    Before 1.7 the operator's spark-submit resolved ``spark.jars.packages``
+    with Ivy, and a truncated Maven download (0 bytes of a 63 MB jar in the
+    2026-09-27 discovery run) was the common case; it is still named with
+    the artifact and byte counts for applications that set packages. Since
+    1.7 Lakebench's jobs name their jars as lb-deps URLs. Anything else is
+    the message's first line.
     """
     text = message or ""
     m = _DOWNLOAD.search(text)

@@ -356,6 +356,12 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=1,
     ),
     ExitPath(
+        "run.deps_mismatch",
+        _C.REFUSED,
+        "the recorded dependency set does not check, or the server or a query engine "
+        "pod runs another set than the deployment recorded",
+    ),
+    ExitPath(
         "run.bronze_nonempty",
         _C.REFUSED,
         "datagen would write over a non-empty bronze prefix without --regenerate",
@@ -443,8 +449,13 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.deps_missing",
         _C.PREREQUISITE,
-        "the deployment predates the v1.7 dependency server and needs a new deploy",
-        planned=True,
+        "the deployment has no dependency server (deployed by 1.6, or never deployed)",
+    ),
+    ExitPath(
+        "run.deps_stale",
+        _C.PREREQUISITE,
+        "the dependency set is not verified for this config: the deploy did not "
+        "finish, the request changed since deploy, or the server has no Ready pod",
     ),
     # 5
     ExitPath(

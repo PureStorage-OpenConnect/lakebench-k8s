@@ -48,18 +48,18 @@ from the default-parallelism column below:
 
 | Workload | Mode | Scale | Minimum CPU | Minimum RAM | Spark peak | Datagen (default parallelism) | Always on | Scratch PVC (if enabled) | Largest pod |
 |:---|:---|---:|---:|---:|:---|:---|:---|---:|---:|
-| Customer 360 | batch | 1 | 40 cores | 542 GB | 36 cores / 525 GB | 2 pods, 16 cores / 8 GB | 4 cores / 17 GB | 2,400 Gi | 8 cores / 60 GB |
-| Customer 360 | batch | 10 | 47 cores | 570 GB | 36 cores / 525 GB | 4 pods, 32 cores / 16 GB | 11 cores / 45 GB | 2,400 Gi | 8 cores / 60 GB |
-| Customer 360 | batch | 100 | 113 cores | 1,338 GB | 76 cores / 1,125 GB | 10 pods, 80 cores / 40 GB | 37 cores / 213 GB | 5,400 Gi | 8 cores / 60 GB |
-| Customer 360 | continuous | 1 | 58 cores | 307 GB | 38 cores / 282 GB | in always on | 20 cores / 25 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 10 | 81 cores | 343 GB | 38 cores / 282 GB | in always on | 43 cores / 61 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 100 | 201 cores | 953 GB | 84 cores / 700 GB | in always on | 117 cores / 253 GB | 1,700 Gi | 8 cores / 48 GB |
-| AML | batch | 1 | 40 cores | 542 GB | 36 cores / 525 GB | 2 pods, 16 cores / 14 GB | 4 cores / 17 GB | 2,400 Gi | 8 cores / 60 GB |
-| AML | batch | 10 | 47 cores | 570 GB | 36 cores / 525 GB | 4 pods, 32 cores / 28 GB | 11 cores / 45 GB | 2,400 Gi | 8 cores / 60 GB |
-| AML | batch | 100 | 113 cores | 1,338 GB | 76 cores / 1,125 GB | 10 pods, 80 cores / 80 GB | 37 cores / 213 GB | 5,500 Gi | 8 cores / 60 GB |
-| AML | continuous | 1 | 138 cores | 1,021 GB | 118 cores / 990 GB | in always on | 20 cores / 31 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 10 | 161 cores | 1,063 GB | 118 cores / 990 GB | in always on | 43 cores / 73 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 100 | 339 cores | 2,251 GB | 222 cores / 1,958 GB | in always on | 117 cores / 293 GB | 4,660 Gi | 8 cores / 48 GB |
+| Customer 360 | batch | 1 | 41 cores | 544 GB | 36 cores / 525 GB | 2 pods, 16 cores / 8 GB | 5 cores / 19 GB | 2,400 Gi | 8 cores / 60 GB |
+| Customer 360 | batch | 10 | 48 cores | 572 GB | 36 cores / 525 GB | 4 pods, 32 cores / 16 GB | 12 cores / 47 GB | 2,400 Gi | 8 cores / 60 GB |
+| Customer 360 | batch | 100 | 114 cores | 1,340 GB | 76 cores / 1,125 GB | 10 pods, 80 cores / 40 GB | 38 cores / 215 GB | 5,400 Gi | 8 cores / 60 GB |
+| Customer 360 | continuous | 1 | 59 cores | 309 GB | 38 cores / 282 GB | in always on | 21 cores / 27 GB | 640 Gi | 8 cores / 40 GB |
+| Customer 360 | continuous | 10 | 82 cores | 345 GB | 38 cores / 282 GB | in always on | 44 cores / 63 GB | 640 Gi | 8 cores / 40 GB |
+| Customer 360 | continuous | 100 | 202 cores | 955 GB | 84 cores / 700 GB | in always on | 118 cores / 255 GB | 1,700 Gi | 8 cores / 48 GB |
+| AML | batch | 1 | 41 cores | 544 GB | 36 cores / 525 GB | 2 pods, 16 cores / 14 GB | 5 cores / 19 GB | 2,400 Gi | 8 cores / 60 GB |
+| AML | batch | 10 | 48 cores | 572 GB | 36 cores / 525 GB | 4 pods, 32 cores / 28 GB | 12 cores / 47 GB | 2,400 Gi | 8 cores / 60 GB |
+| AML | batch | 100 | 114 cores | 1,340 GB | 76 cores / 1,125 GB | 10 pods, 80 cores / 80 GB | 38 cores / 215 GB | 5,500 Gi | 8 cores / 60 GB |
+| AML | continuous | 1 | 139 cores | 1,023 GB | 118 cores / 990 GB | in always on | 21 cores / 33 GB | 2,300 Gi | 8 cores / 40 GB |
+| AML | continuous | 10 | 162 cores | 1,065 GB | 118 cores / 990 GB | in always on | 44 cores / 75 GB | 2,300 Gi | 8 cores / 40 GB |
+| AML | continuous | 100 | 340 cores | 2,253 GB | 222 cores / 1,958 GB | in always on | 118 cores / 295 GB | 4,660 Gi | 8 cores / 48 GB |
 
 <!-- END GENERATED: sizing-detail -->
 

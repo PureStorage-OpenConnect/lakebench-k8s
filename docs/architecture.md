@@ -318,10 +318,13 @@ The deployment engine creates resources in a strict dependency order:
 11. **Spark Operator** -- verifies the shared operator (a cluster admin
     installs it once; deploy never does) and adds the namespace to its watch
     list under the cluster lease
-12. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
-13. **Spark Thrift Server** -- if selected
-14. **DuckDB** -- if selected
-15. **Observability** -- one step for Prometheus, Grafana and the
+12. **Dependency server** -- the `lb-deps` Deployment, Service and PVC in
+    the namespace: resolves the jars and wheels once per request and serves
+    them read-only; deploy waits until it is Ready and records the set
+13. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
+14. **Spark Thrift Server** -- if selected
+15. **DuckDB** -- if selected
+16. **Observability** -- one step for Prometheus, Grafana and the
     deployment's Pushgateway (if enabled)
 
 Destruction follows the reverse order: an ownership check, Spark jobs and pods

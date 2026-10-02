@@ -133,6 +133,7 @@ def _build_component_list(cfg) -> str:
         parts.append("Spark Operator (installed if missing, namespace watched)")
     else:
         parts.append("Spark Operator watch list")
+    parts.append("Dependency server")
     if cfg.observability.enabled:
         # observability.enabled always installs or reuses the full stack.
         parts.append("Prometheus")
@@ -456,8 +457,11 @@ def deploy(
     5. Spark RBAC (then Unity Catalog, only if catalog.type is unity)
     6. Spark Operator check and watch-list entry for the namespace (always
        runs; never installs the shared operator)
-    7. Query Engine (Trino / Spark Thrift / DuckDB)
-    8. Observability (if enabled)
+    7. Dependency server (lb-deps): resolves the jars and wheels this
+       deployment needs onto its own PVC once, then serves them in the
+       namespace
+    8. Query Engine (Trino / Spark Thrift / DuckDB)
+    9. Observability (if enabled)
     """
     if require_new and (local or force_legacy):
         from lakebench.exit_codes import UsageError

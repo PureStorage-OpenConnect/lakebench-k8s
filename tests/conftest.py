@@ -283,6 +283,41 @@ def load_script_module(request: pytest.FixtureRequest) -> Iterator[Callable[...,
 
 
 @pytest.fixture(autouse=True)
+def _offline_deps_set(request, monkeypatch):
+    """Spark job manifests need the deployment's verified dependency set,
+    which `run`, `continuous` and `financial` load from the cluster before
+    any submit (deps.runtime.load_handle). A unit test that builds a manifest
+    gets the offline placeholder set instead. A test marked ``real_deps``
+    keeps the production default (no set) and proves the guard; the static
+    and CLI tests in test_job_deps.py prove every production path loads one.
+    """
+    if request.node.get_closest_marker("real_deps"):
+        return
+    from lakebench.deps import runtime
+    from lakebench.deps.manifest import placeholder_handle
+    from lakebench.modules.pipeline_engines.spark import job
+
+    # The CLI's run-start check reads the cluster; CLI tests run offline.
+    monkeypatch.setattr(runtime, "load_handle", lambda cfg, k8s, **kw: placeholder_handle(cfg))
+    monkeypatch.setattr(
+        runtime, "check_pods", lambda cfg, handle, since: {"pods_checked": 0, "pod_mismatches": []}
+    )
+    monkeypatch.setattr(runtime, "attach_refusal", lambda cfg, run: None)
+
+    real = job.SparkJobManager.__init__
+
+    def init(self, *a, **k):
+        real(self, *a, **k)
+        if self.deps is None:
+            try:
+                self.deps = placeholder_handle(self.config)
+            except Exception:  # noqa: BLE001 -- a config the request cannot serve
+                pass
+
+    monkeypatch.setattr(job.SparkJobManager, "__init__", init)
+
+
+@pytest.fixture(autouse=True)
 def _journal_in_tmp(tmp_path, monkeypatch):
     """CLI commands journal to ./lakebench-output/journal by default, which
     left session files in the repository after every test run. Point the

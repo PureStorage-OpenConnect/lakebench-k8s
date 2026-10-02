@@ -351,11 +351,18 @@ def co_resident_request(
         _parse_cpu_millicores,
         _parse_memory_gi,
     )
+    from lakebench.deps.manifest import POD_REQUEST_MEMORY_MI
 
+    # The CPU budget includes the lb-deps pod's reservation; its memory is
+    # added here.
     cpu_m = _co_resident_cpu_m(cfg)
-    mem_gi = sum(mem for _, _, mem in _engine_pods(cfg)) + _catalog_memory_gi(cfg)
+    mem_gi = (
+        sum(mem for _, _, mem in _engine_pods(cfg))
+        + _catalog_memory_gi(cfg)
+        + POD_REQUEST_MEMORY_MI / 1024
+    )
     engine = cfg.architecture.query_engine.type.value
-    parts = ["catalog/Postgres"]
+    parts = ["catalog/Postgres", "lb-deps"]
     engine_label = {"trino": "Trino", "spark-thrift": "Spark Thrift", "duckdb": "DuckDB"}
     if engine in engine_label:
         parts.insert(0, engine_label[engine])

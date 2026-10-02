@@ -31,6 +31,12 @@ READERS: dict[str, str] = {
     "platform.kubernetes.context": "lakebench.deploy.destroy:_classify_buckets",
     "platform.kubernetes.namespace": "lakebench.config.schema:LakebenchConfig.get_namespace",
     "platform.kubernetes.create_namespace": "lakebench.deploy.destroy:destroy_all",
+    "platform.deps.maven_repository": "lakebench.deps.request:_deps_key",
+    "platform.deps.pypi_index": "lakebench.deps.request:_deps_key",
+    "platform.deps.duckdb_extension_repository": "lakebench.deps.request:_deps_key",
+    "platform.deps.storage_class": (
+        "lakebench.deploy.deps:DependencyServerDeployer._check_storage_class"
+    ),
     "platform.storage.s3.endpoint": (
         "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
     ),
@@ -145,12 +151,8 @@ READERS: dict[str, str] = {
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
     "architecture.table_format.type": "lakebench.deploy.destroy:destroy_all",
-    "architecture.table_format.iceberg.version": (
-        "lakebench.deps.request:jar_coordinates"
-    ),
-    "architecture.table_format.delta.version": (
-        "lakebench.deps.request:jar_coordinates"
-    ),
+    "architecture.table_format.iceberg.version": ("lakebench.deps.request:jar_coordinates"),
+    "architecture.table_format.delta.version": ("lakebench.deps.request:jar_coordinates"),
     "architecture.pipeline_engine": "lakebench.engine.protocol:get_engine",
     "architecture.query_engine.type": "lakebench.deploy.destroy:destroy_all",
     "architecture.query_engine.trino.coordinator.cpu": (
@@ -199,9 +201,7 @@ READERS: dict[str, str] = {
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
     "architecture.query_engine.duckdb.catalog_name": "lakebench.benchmark.executor:get_executor",
-    "architecture.query_engine.duckdb.version": (
-        "lakebench.deploy.engine:DeploymentEngine._build_context"
-    ),
+    "architecture.query_engine.duckdb.version": "lakebench.deps.request:select_request",
     "architecture.pipeline.pattern": "lakebench.config.autosizer:_apply_cluster_scaling",
     "architecture.pipeline.mode": "lakebench.cli._run_args:run_mode",
     "architecture.pipeline.cycles": "lakebench.cli._run:run",

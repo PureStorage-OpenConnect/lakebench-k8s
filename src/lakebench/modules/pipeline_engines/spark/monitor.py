@@ -6,6 +6,7 @@ Provides waiting and progress tracking for Spark jobs.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -45,6 +46,52 @@ _SLOW_POLL_S = 45.0
 # (SUBMITTED, PENDING_RERUN, UNKNOWN, ...) this long is logged once per state.
 # A 2026-09-27 sweep lost ~10 min per stage this way with nothing on screen.
 _STALL_WARN_S = 60.0
+
+
+# What a failed jar fetch from the deployment's dependency server looks like
+# in a driver log. Spark opens http jars with URL.openConnection(): a 404 is a
+# FileNotFoundException naming the URL; a refused or unresolvable connection
+# names no URL, so it counts only next to Spark's fetch frames.
+_DEPS_NOT_SERVED = re.compile(r"java\.io\.FileNotFoundException: (http://lb-deps\.\S+)")
+_DEPS_SERVER_ERROR = re.compile(
+    r"Server returned HTTP response code: (5\d\d) for URL: (http://lb-deps\.\S+)"
+)
+_DEPS_UNREACHABLE = re.compile(
+    r"(java\.net\.ConnectException[^\n]*|java\.net\.UnknownHostException: lb-deps\.\S+"
+    r"|java\.net\.SocketTimeoutException[^\n]*)"
+)
+_FETCH_FRAMES = ("Utils$.doFetchFile", "Utils.doFetchFile", "DependencyUtils", "downloadFile")
+
+
+def classify_dependency_failure(log: str | None) -> str | None:
+    """A reason when a driver failed fetching the dependency set, else None."""
+    text = log or ""
+    m = _DEPS_NOT_SERVED.search(text)
+    if m:
+        return (
+            f"dependency server does not serve this set ({m.group(1)} not found); "
+            "the deployment's set changed since the run started: re-run deploy, then run"
+        )
+    m = _DEPS_SERVER_ERROR.search(text)
+    if m:
+        return f"dependency server error {m.group(1)} for {m.group(2)}"
+    # A connection error counts only when Spark's fetch frames are in its
+    # own stack (the frame and "Caused by" lines right after it), not
+    # anywhere in the tail. The JDK puts about 20 frames above Spark's.
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = _DEPS_UNREACHABLE.search(line)
+        if not m:
+            continue
+        stack = []
+        for ln in lines[i + 1 :]:
+            s = ln.strip()
+            if not (s.startswith("at ") or s.startswith("...") or s.startswith("Caused by")):
+                break
+            stack.append(s)
+        if any(f in s for s in stack for f in _FETCH_FRAMES):
+            return f"dependency server unreachable ({m.group(1).strip()[:200]})"
+    return None
 
 
 @dataclass
@@ -371,12 +418,17 @@ class SparkJobMonitor:
                 _close_open_failure()
 
             if status.state in FAILURE_STATES:
+                logs = self._get_driver_logs(job_name)
+                message = f"Job failed: {status.message}"
+                reason = classify_dependency_failure(logs) or self._init_failure(job_name)
+                if reason:
+                    message += f" ({reason})"
                 return _result(
                     job_name=job_name,
                     success=False,
-                    message=f"Job failed: {status.message}",
+                    message=message,
                     elapsed_seconds=elapsed,
-                    driver_logs=self._get_driver_logs(job_name),
+                    driver_logs=logs,
                     final_status=status,
                     last_running_elapsed=last_running,
                 )
@@ -479,6 +531,30 @@ class SparkJobMonitor:
                     driver_logs=self._get_driver_logs(job_name),
                 )
             time.sleep(poll_interval)
+
+    def _init_failure(self, job_name: str) -> str | None:
+        """A driver init container that failed (the reference wheels install
+        from the dependency server), with its last log line."""
+        from kubernetes import client as k8s_client
+
+        try:
+            core_v1 = k8s_client.CoreV1Api()
+            pods = core_v1.list_namespaced_pod(
+                self.namespace,
+                label_selector=f"spark-role=driver,sparkoperator.k8s.io/app-name={job_name}",
+            ).items
+            for pod in pods:
+                for cs in (pod.status.init_container_statuses or []) if pod.status else []:
+                    term = cs.state.terminated if cs.state else None
+                    if term is not None and term.exit_code:
+                        log = core_v1.read_namespaced_pod_log(
+                            pod.metadata.name, self.namespace, container=cs.name, tail_lines=5
+                        )
+                        last = (str(log or "").strip().splitlines() or ["no log"])[-1]
+                        return f"init container {cs.name} exited {term.exit_code}: {last[:200]}"
+        except Exception as e:  # noqa: BLE001 -- diagnostics only
+            logger.debug("cannot read %s init containers: %s", job_name, e)
+        return None
 
     def _get_driver_logs(self, job_name: str, tail_lines: int | None = 100) -> str | None:
         """Get driver pod logs for debugging.

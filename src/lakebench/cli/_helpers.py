@@ -346,3 +346,49 @@ def write_run_report(metrics_storage, run_id: str) -> Path | None:
         return None
     print_info(f"Report written to {path}")
     return path
+
+
+def load_deps_handle(cfg, config_file=None):
+    """The deployment's verified dependency set for the Spark jobs:
+    called before anything is recorded or submitted. A typed refusal
+    (``run.deps_missing``, ``run.deps_stale``, ``run.deps_mismatch``)
+    propagates to the CLI's error handler."""
+    from lakebench.deps import runtime
+
+    handle = runtime.load_handle(cfg, None, config_path=config_file)
+    print_info(f"Dependency set {handle.pinset_sha256[:12]} verified")
+    return handle
+
+
+def record_deps_provenance(run, handle) -> None:
+    """``provenance.deps`` from the run-start handle."""
+    from lakebench.deps.manifest import provenance_block
+
+    if run is not None and handle is not None:
+        run.provenance = {**(run.provenance or {}), "deps": provenance_block(handle)}
+
+
+def record_deps_pods(run, cfg, handle, skipped: str | None = None) -> bool:
+    """The run-end check that the query engine pods ran the run's set
+    (``provenance.deps.pods_checked`` and ``pod_mismatches``). True when the
+    run must fail: a pod on another set, or pods that could not be read.
+    With ``skipped`` (why: the run was interrupted, the namespace went,
+    nothing reached the cluster) nothing is read, and the record says why
+    in ``pods_check_skipped``."""
+    from lakebench.deps import runtime
+
+    if run is None or handle is None or not isinstance((run.provenance or {}).get("deps"), dict):
+        return False
+    if skipped:
+        run.provenance["deps"]["pods_check_skipped"] = skipped
+        return False
+    result = runtime.check_pods(cfg, handle, run.start_time)
+    run.provenance["deps"].update(result)
+    if result.get("pods_checked") is None:
+        print_warning(f"Query engine dependency set not checked: {result.get('pods_check_error')}")
+    elif result.get("pod_mismatches"):
+        print_error(
+            "Pods ran different dependency sets: "
+            + ", ".join(f"{p['pod']} on {p['pinset'][:12]}" for p in result["pod_mismatches"])
+        )
+    return bool(result.get("pod_mismatches")) or result.get("pods_checked") is None

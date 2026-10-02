@@ -1,8 +1,10 @@
 """The Spark Operator controller's ``/tmp`` scratch volume.
 
 The operator runs spark-submit inside its controller pod, and spark-submit
-resolves ``spark.jars.packages`` with Ivy into ``spark.jars.ivy``
-(``/tmp/.ivy2`` for every lakebench job). The controller's root filesystem is
+resolves ``spark.jars.packages`` with Ivy into ``spark.jars.ivy`` (before 1.7,
+``/tmp/.ivy2`` for every lakebench job; since 1.7 the jobs name lb-deps jar
+URLs and set no packages, but other tenants' applications may). The
+controller's root filesystem is
 read-only (chart ``controller.securityContext.readOnlyRootFilesystem``), so
 ``/tmp`` is the chart's ``tmp`` emptyDir, and chart 2.5.1 (like 2.4.0) caps
 it at ``sizeLimit: 1Gi``. The Iceberg or Delta runtime, hadoop-aws and the

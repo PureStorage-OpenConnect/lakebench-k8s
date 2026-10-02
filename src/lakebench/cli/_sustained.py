@@ -2898,8 +2898,21 @@ def _run_sustained(
         )
     )
 
+    from lakebench.cli._helpers import (
+        load_deps_handle,
+        record_deps_pods,
+        record_deps_provenance,
+    )
+
+    # Before anything is recorded: the streams need the deployment's verified
+    # dependency set; a refusal exits 3 or 4 with no run saved.
+    deps_handle = load_deps_handle(cfg, config_file)
+
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.RUN, {"sustained": True, "duration": run_duration})
+    _deps_check_failed = False
+    _exception_in_flight = False
+    _k8s_unreachable = False
 
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
@@ -2911,6 +2924,7 @@ def _run_sustained(
 
     config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
+    record_deps_provenance(collector.current_run, deps_handle)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
 
@@ -2991,6 +3005,7 @@ def _run_sustained(
             namespace=cfg.get_namespace(),
         )
         job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
+        job_manager.deps = deps_handle
         monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
 
         _short = short_window_problem(cfg, run_duration)
@@ -4076,6 +4091,8 @@ def _run_sustained(
         # (k8s/client.py), so nothing was submitted: a prerequisite (4).
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
+        _exception_in_flight = True
+        _k8s_unreachable = True
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     except typer.Exit as e:
@@ -4083,6 +4100,7 @@ def _run_sustained(
         # exits non-zero is never recorded as a success.
         if e.exit_code:
             pipeline_success = False
+            _exception_in_flight = True
         raise
     except KeyboardInterrupt as e:
         # SIGINT or SIGTERM anywhere (the settle phase can last 30 min). Sealed
@@ -4108,11 +4126,26 @@ def _run_sustained(
     except BaseException:
         # Any other error is not a pass.
         pipeline_success = False
+        _exception_in_flight = True
         raise
     finally:
         # A signal from here on does not stop the record being written (a
         # third one still does, cli/_interrupt.py).
         _interrupt.begin_seal()
+        # The query engine pods (Thrift, DuckDB) against the run's set; not
+        # after an interrupt, once the namespace is gone, or without a cluster.
+        _pods_skipped = (
+            "interrupted"
+            if _interrupted is not None
+            else (
+                "namespace gone"
+                if _abort is not None
+                else ("cluster unreachable" if _k8s_unreachable else None)
+            )
+        )
+        if record_deps_pods(collector.current_run, cfg, deps_handle, skipped=_pods_skipped):
+            pipeline_success = False
+            _deps_check_failed = True
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
         _ns_watch.close()
@@ -4227,4 +4260,8 @@ def _run_sustained(
         if _exit_interrupted:
             raise typer.Exit(ExitCode.INTERRUPTED)
         if _abort is not None:
+            raise typer.Exit(ExitCode.FAILED)
+        if _deps_check_failed and not _exception_in_flight:
+            # The run-end dependency check failed after the pipeline itself
+            # finished: the exit code says so (exit 0 is not a pass).
             raise typer.Exit(ExitCode.FAILED)

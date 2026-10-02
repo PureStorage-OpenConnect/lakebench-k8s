@@ -34,14 +34,19 @@ CA-import container when `platform.storage.s3.ca_cert` is set):
    - Hive: waits for `lakebench-hive-metastore:9083` (TCP)
    - Polaris: waits for `lakebench-polaris:8181` (TCP)
 
-2. **JAR download** -- downloads the table-format runtime (Iceberg or
-   Delta), AWS SDK, and Hadoop S3 JARs from Maven Central. These are
-   required for reading the tables on S3-compatible storage.
+2. **Dependency fetch** (`lb-deps-fetch`) -- copies the table-format
+   runtime (Iceberg or Delta), AWS SDK and Hadoop S3 jars from the
+   deployment's dependency server (`lb-deps`), checking each file's sha256
+   against the `lb-deps-manifest` ConfigMap. These are the jars the Spark
+   jobs load. The Thrift Server puts them on its driver classpath after the
+   image's own jars, in the order the jobs load them. Nothing is downloaded
+   from Maven at start.
 
 ### Health checks
 
 - **Readiness/Liveness**: TCP socket probe on port 10000
-- Startup can take 3-5 minutes due to JAR downloads and JVM initialization
+- Startup is the jar copy from the in-namespace dependency server plus JVM
+  initialization (not measured on this release yet)
 
 ### Cache behavior
 
@@ -88,8 +93,9 @@ architecture:
 
 - **Single pod.** Runs as a driver-only process with no executor distribution.
   All query work happens in one JVM.
-- **Startup time.** 3-5 minutes due to Maven JAR downloads and JVM warmup.
-  Subsequent runs are faster if the pod is already running.
+- **Startup time.** The jars come from the in-namespace dependency server,
+  then the JVM warms up. A new dependency set (a changed image or format
+  version) restarts the pod once.
 - **No concurrent query streams.** Benchmark throughput mode (concurrent
   streams) runs serially through the single Thrift connection.
 - **Shared image with pipeline.** Uses the same `apache/spark` image as

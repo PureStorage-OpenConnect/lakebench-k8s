@@ -42,7 +42,8 @@ Lakebench requires **Kubeflow Spark Operator v2.x** (2.5.1 is the current
 default). ConfigMap volumes cannot use Spark's native
 `spark.kubernetes.*.volumes.*` conf properties, because Spark's
 `KubernetesVolumeUtils` has no `configMap` volume type, so lakebench defines
-its volumes (the projected scripts volume and the work-dir and Ivy-cache emptyDirs)
+its volumes (the projected scripts volume, the work-dir emptyDir and, on the
+driver, the `lb-deps-dl` emptyDir the jars are downloaded into)
 in `driver.template`/`executor.template` pod templates; see `_build_manifest()`
 in `modules/pipeline_engines/spark/job.py`. Only the executor scratch PVC uses
 the conf-property path. The operator's webhook injection was checked against

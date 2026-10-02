@@ -824,7 +824,7 @@ The JSON structure includes:
     "config_path": "/abs/path/to/config.yaml",
     "scripts_sha256": "<sha256 over the Spark scripts ConfigMaps>",
     "scripts_maps": { "common": "<sha256>" },
-    "deps": "not_recorded",
+    "deps": { "pinset_sha256": "<sha256>", "request_sha256": "<sha256>", "...": "...", "pods_checked": 1, "pod_mismatches": [] },
     "images_observed": {
       "spark_driver": "<registry>/spark@sha256:...",
       "spark_executor": "<registry>/spark@sha256:...",
@@ -878,8 +878,16 @@ observed none, is not a difference). The rest is provenance only:
   absolute.
 - `scripts_sha256`, `scripts_maps` and `scripts_files_sha256`: the Spark
   scripts ConfigMaps the run applied and read back.
-- `deps`: the dependency set the job manager recorded for the run's pods,
-  or `"not_recorded"` when it recorded none.
+- `deps`: the deployment's dependency set the run checked before anything
+  was submitted: `pinset_sha256` (the set's identity, which compare reads),
+  `request_sha256`, the repositories and index, the files per group with
+  their sha256, `resolved_at` and the server pod. At run end the Spark
+  Thrift or DuckDB pods are checked against it: `pods_checked` (how many),
+  `pod_mismatches` (pods on another set, which fail the run),
+  `pods_check_error` (the pods could not be read, which fails the run too),
+  or `pods_check_skipped` (why the check did not read: interrupted, a
+  prerequisite failed, the namespace went, no cluster). `"not_recorded"`
+  for a `--local` run and for records made before 1.7.
 - `images_observed`: the image digests this run's pods ran (`imageID` from
   the pod status): the Spark driver and executors of the run's own
   applications, and the running Trino coordinator and Spark Thrift server.

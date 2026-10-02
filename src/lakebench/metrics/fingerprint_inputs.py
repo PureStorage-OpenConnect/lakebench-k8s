@@ -53,6 +53,7 @@ FINGERPRINT_LOCATION_KEYS = frozenset(
         "spark.sql.warehouse.dir",
         "spark.hadoop.hive.metastore.uris",
         "spark.jars",
+        "spark.submit.pyFiles",
     }
 )
 FINGERPRINT_LOCATION_SUFFIXES = (".uri", ".warehouse", ".s3.endpoint")
@@ -283,7 +284,12 @@ def _build(cfg: Any, continuous: bool) -> dict[str, Any]:
     )
 
     offline = _redacted_copy(cfg)
+    from lakebench.deps.manifest import placeholder_handle
+
     manager = SparkJobManager(offline, _NoCluster())  # type: ignore[arg-type]
+    # The jar URLs are location keys (their content is the pinset), so an
+    # offline placeholder set stands in for the deployment's.
+    manager.deps = placeholder_handle(offline)
     # The real env build reads the deployment namespace and runs git; the
     # environment is not part of the fingerprint.
     setattr(manager, "_build_env_vars", lambda *a, **k: [])  # noqa: B010

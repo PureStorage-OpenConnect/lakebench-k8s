@@ -137,11 +137,17 @@ class TestDiagnosticsNeverMaskTheTimeout:
         apps = MagicMock()
         dep = MagicMock()
         dep.status.ready_replicas = 0
+        dep.status.replicas = dep.status.updated_replicas = dep.status.observed_generation = 1
+        dep.metadata.generation = 1
         dep.spec.replicas = 1
+        dep.spec.selector.match_labels = {"app.kubernetes.io/component": "duckdb"}
         apps.read_namespaced_deployment.return_value = dep
+        core = MagicMock()
+        core.list_namespaced_pod.return_value.items = []
 
         with (
             patch("kubernetes.client.AppsV1Api", return_value=apps),
+            patch("kubernetes.client.CoreV1Api", return_value=core),
             patch.object(
                 DuckDBDeployer,
                 "_describe_not_ready",
@@ -153,5 +159,5 @@ class TestDiagnosticsNeverMaskTheTimeout:
             deployer._wait_for_ready("u01", timeout_seconds=0)
 
         msg = str(exc.value)
-        assert "did not become ready" in msg
+        assert "to roll out" in msg
         assert "OOMKilled" in msg, "the timeout must carry the reason, not just the fact"

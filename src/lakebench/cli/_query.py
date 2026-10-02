@@ -509,6 +509,12 @@ def query(
     # writable=True: this is the rewrite path; never fall back to a legacy
     # record (which could belong to another deployment) and rewrite it.
     latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
+    from lakebench.deps import runtime as deps_runtime
+
+    refusal = deps_runtime.attach_refusal(cfg, latest_run) if latest_run else None
+    if refusal:
+        print_warning(f"Query metrics not appended: {refusal}")
+        latest_run = None
     if latest_run:
         latest_run.queries.append(query_metrics)
         storage.save_run(latest_run)
@@ -691,6 +697,16 @@ def benchmark(
         )
     )
 
+    # Before the benchmark runs: say now, not after an hour of queries, that
+    # its results will not be added to the latest run (another dependency set).
+    from lakebench.deps import runtime as deps_runtime
+    from lakebench.metrics import MetricsStorage as _Storage
+
+    _latest = _Storage().get_latest_run_for_deployment(cfg.name, writable=True)
+    early_refusal = deps_runtime.attach_refusal(cfg, _latest) if _latest else None
+    if early_refusal and _latest is not None:
+        print_warning(f"Results may not be added to run {_latest.run_id}: {early_refusal}")
+
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(
@@ -799,6 +815,12 @@ def benchmark(
     # writable=True: this is the rewrite path; never fall back to a legacy
     # record (which could belong to another deployment) and rewrite it.
     latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
+    from lakebench.deps import runtime as deps_runtime
+
+    refusal = deps_runtime.attach_refusal(cfg, latest_run) if latest_run else None
+    if refusal:
+        print_warning(f"Benchmark metrics not appended: {refusal}")
+        latest_run = None
     if latest_run:
         bench_metrics = BenchmarkMetrics(
             mode=primary_result.mode,
