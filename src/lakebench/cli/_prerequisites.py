@@ -205,11 +205,11 @@ def _registry_checks(cfg) -> list[PrereqResult]:
             )
         ]
     results: list[PrereqResult] = []
-    for o in run_prereqs(cfg, reader):
+    for o in run_prereqs(cfg, reader, for_run=True):
         status = o.result.status
         if status is PrereqStatus.SKIPPED:
             continue
-        passed = status in (PrereqStatus.OK, PrereqStatus.WARN)
+        passed = status in (PrereqStatus.OK, PrereqStatus.WARN, PrereqStatus.INFO)
         hint = ""
         if status is PrereqStatus.FAIL:
             hint = o.prereq.fix
