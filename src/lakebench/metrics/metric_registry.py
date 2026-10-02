@@ -416,7 +416,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "diagnostic",
         _CONT,
         _ALL_WL,
-        (),
+        (BOUND_TRICKLE,),
         description="When intake_limit is trickle_rate: seconds the trickle needs to ingest the whole corpus at the rate it held (datagen rows / sustained_throughput_rps); a window this long drains it",
     ),
     MetricMeta(

@@ -204,7 +204,9 @@ cap, a 30-minute window takes about 19% of the scale-100 corpus. The larger
 corpus is not a failure:
 the scorecard reports `intake_limit: trickle_rate` and
 `pipeline_saturated: false` when the pipeline kept pace with the trickle, and
-`corpus_drain_seconds` for the window that would drain the corpus. See
+`corpus_drain_seconds` for the window that would drain the corpus; a run the
+trickle held is recorded in `experiment.limits.trickle_bound` and its
+throughput is labelled the offered load. See
 [Scoring and Benchmarking](benchmarking.md#continuous-mode).
 
 The measurement window opens when all three streams are running and lasts

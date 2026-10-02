@@ -4156,9 +4156,12 @@ def _run_sustained(
                             if pb.stage_latency_profile
                             else "n/a"
                         )
+                        from lakebench.metrics.bounds import trickle_note
+
                         print_info(
                             f"Pipeline Score: {pipeline_score_freshness(pb)} freshness"
                             f" | {pb.sustained_throughput_rps:,.0f} rows/s continuous"
+                            f"{trickle_note(run_metrics)}"
                             f" | {latency_str}ms latency (b/s/g)"
                         )
                     if pb.corpus_drained:

@@ -544,28 +544,26 @@ def trickle_kept_pace(
     *,
     ingested_rows: float | None,
     released_rows: float | None,
-    rows_per_trigger: float | None,
     corpus_taken: bool,
     window_s: float | None,
     last_write_offset_s: float | None,
     trigger_s: float | None,
 ) -> dict[str, Any]:
     """Whether bronze kept pace with what the trickle offered (SPEC section
-    8): ingested / offered rows >= TRICKLE_KEPT_PACE_RATIO and lag at window
-    end <= one trigger interval.
+    8): ingested / offered rows >= TRICKLE_KEPT_PACE_RATIO, offered rows
+    being the rows the trickle had released (``released_rows``), and lag at
+    window end (window seconds less bronze's last write) <= one trigger
+    interval.
 
-    Offered rows are what the trickle had released (``released_rows``) less
-    the last trigger's batch, which the lag allowance lets be in flight at
-    window end; without that, whether a run clears 0.99 would turn on where
-    the window edge fell between two triggers. When bronze had taken the
-    whole corpus there is nothing left to offer and the lag is not tested.
-    ``kept_pace`` is True, False, or None with ``not_measured`` saying which
-    input was missing.
+    When bronze had taken the whole corpus there was nothing left to offer:
+    a last write long before the window end is not falling behind, so the
+    lag is not tested. ``kept_pace`` is True, False, or None with
+    ``not_measured`` naming the input that was missing.
     """
     out: dict[str, Any] = {
         "kept_pace": None,
         "ingested_rows": ingested_rows,
-        "offered_rows": None,
+        "offered_rows": released_rows,
         "ratio": None,
         "lag_s": None,
         "trigger_s": trigger_s,
@@ -573,11 +571,7 @@ def trickle_kept_pace(
     if ingested_rows is None or not released_rows:
         out["not_measured"] = "the rows the trickle offered are not known"
         return out
-    offered = float(released_rows) - float(rows_per_trigger or 0.0)
-    if offered <= 0:
-        offered = float(released_rows)
-    out["offered_rows"] = round(offered)
-    ratio = float(ingested_rows) / offered
+    ratio = float(ingested_rows) / float(released_rows)
     out["ratio"] = round(ratio, 4)
     if ratio < TRICKLE_KEPT_PACE_RATIO:
         out["kept_pace"] = False

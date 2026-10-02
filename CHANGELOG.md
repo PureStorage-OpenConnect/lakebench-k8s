@@ -155,11 +155,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - **BOUNDED BY trickle.** A continuous run whose trickle
-  (`max_files_per_trigger`) held intake, meaning ingested over offered rows
-  of at least 0.99 and a lag at window end of at most one trigger, records
-  `experiment.limits.trickle_bound` and a `trickle:` line in `limits.bound`.
-  The report labels the continuous throughput and efficiency figures as the
-  offered load, not capacity, and `compare` marks those rows `capped`; QpH,
+  (`max_files_per_trigger`) held intake, meaning `ingest_ratio` (ingested
+  over released rows) of at least 0.99 and a lag at window end of at most
+  one trigger, records `experiment.limits.trickle_bound` and a `trickle:`
+  line in `limits.bound`. The report labels the continuous rows/s, GB/s and
+  efficiency figures as the offered load, not capacity, and `compare` marks
+  those rows `capped` (`comparison.json` gains a per-row `capped`); QpH,
   freshness and time to detect are not labelled. Stored records get the same
   answer when read. The trickle is not a bound kind, so no experiment
   identity moves. The `intake_limit` description now says `none` means

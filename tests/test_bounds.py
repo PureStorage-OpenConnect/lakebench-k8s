@@ -16,7 +16,6 @@ from unittest import mock
 import pytest
 
 from lakebench.metrics import bounds
-from lakebench.metrics.continuous_window import trickle_kept_pace
 from tests.fixtures import stored_records as sr
 
 #: The seven stored continuous exp1 records and their lag at window end,
@@ -49,7 +48,9 @@ def test_seven_stored_continuous_bounded(run_id, lag):
     assert tb["lag_s"] == lag
     assert tb["source"] == "auto"
     assert tb["value"] == _rec(run_id)["config_snapshot"]["sustained"]["max_files_per_trigger"]
-    assert tb["ratio"] >= 0.99
+    # Ingested over released rows: the record's own ingest_ratio.
+    assert tb["ratio"] == _scores(_rec(run_id))["ingest_ratio"]
+    assert tb["offered_rows"] == _scores(_rec(run_id))["released_rows"]
 
 
 def test_record_and_run_agree():
@@ -115,38 +116,53 @@ def test_corpus_taken_skips_the_lag():
     """Bronze took the whole corpus early: nothing was left to offer, so a
     last write long before the window end is not falling behind."""
     rec = _rec()
-    _scores(rec)["corpus_ingest_ratio"] = 1.0
+    corpus = rec["pipeline_benchmark"]["config_snapshot"]["datagen_output_rows"]
+    _scores(rec)["released_rows"] = corpus
+    _scores(rec)["ingest_ratio"] = 1.0
     bronze = next(s for s in rec["streaming"] if s["job_type"] == "bronze-ingest")
     bronze["last_write_offset_seconds"] = 900.0
     tb = bounds.trickle_bound(rec)
-    assert tb["kept_pace"] is True and tb["lag_s"] is None
+    assert tb["kept_pace"] is True and tb["lag_s"] is None and tb["lag_note"]
 
 
-def test_the_trigger_in_flight_is_not_counted_against_pace():
-    """released_rows counts the trigger at the window edge; a batch of it in
-    flight is within the one-interval lag the definition allows."""
-    one_trigger = 2 * 2478560 / 160  # files per trigger x rows per file
-    released = 1858920
-    kept = trickle_kept_pace(
-        ingested_rows=released - one_trigger,
-        released_rows=released,
-        rows_per_trigger=one_trigger,
-        corpus_taken=False,
-        window_s=1800.0,
-        last_write_offset_s=1790.0,
-        trigger_s=30.0,
+@pytest.mark.parametrize(("ratio", "bound"), [(0.985, False), (0.9899, False), (0.99, True)])
+def test_the_ratio_is_ingested_over_released(ratio, bound):
+    """SPEC's 0.99 applies to ingested over released rows, as the record's
+    ingest_ratio states it: one trigger short at 1800 s / 30 s (0.983) is
+    not kept pace."""
+    rec = _rec()
+    _scores(rec)["ingest_ratio"] = ratio
+    tb = bounds.trickle_bound(rec)
+    assert (tb is not None) is bound
+    if bound:
+        assert tb["ratio"] == ratio and tb["offered_rows"] == _scores(rec)["released_rows"]
+
+
+def test_intake_limit_trickle_rate_is_not_shown_as_capacity():
+    """The collector says the trickle held intake (intake_limit trickle_rate)
+    while the ratio is under 0.99: labelled, pace not shown either way."""
+    rec = _rec()
+    _scores(rec)["ingest_ratio"] = 0.93
+    _scores(rec)["intake_limit"] = "trickle_rate"
+    tb = bounds.trickle_bound(rec)
+    assert tb is not None and tb["kept_pace"] is None and "intake_limit" in tb["not_measured"]
+
+
+def test_an_unreadable_continuous_record_is_not_capacity(monkeypatch):
+    monkeypatch.setattr(bounds, "trickle_bound", lambda _r: 1 / 0)
+    tb = bounds.record_trickle_bound(_rec())
+    assert tb is not None and tb["kept_pace"] is None
+    assert bounds.record_trickle_bound(_rec("231711-6dd3bc")) is None
+
+
+def test_not_measured_line_and_label():
+    tb = bounds.trickle_bound(_rec("215221-65567b"))
+    assert bounds.trickle_line(tb) == (
+        "trickle: max_files_per_trigger 50; whether the pipeline kept pace was not measured"
     )
-    assert kept["kept_pace"] is True and kept["ratio"] == 1.0
-    behind = trickle_kept_pace(
-        ingested_rows=released - 3 * one_trigger,
-        released_rows=released,
-        rows_per_trigger=one_trigger,
-        corpus_taken=False,
-        window_s=1800.0,
-        last_write_offset_s=1790.0,
-        trigger_s=30.0,
+    assert bounds.trickle_label(tb) == (
+        "trickle 50 files per trigger set; whether the pipeline kept pace was not measured"
     )
-    assert behind["kept_pace"] is False
 
 
 # --- the experiment block ----------------------------------------------------
@@ -160,14 +176,16 @@ def _rebuilt(run_id: str):
     return build_experiment(m)
 
 
-def test_block_records_the_trickle_and_identity_does_not_move():
+@pytest.mark.parametrize("run_id", sorted(SEVEN))
+def test_block_records_the_trickle_and_identity_does_not_move(run_id):
     from lakebench.metrics.experiment import identity_hash
 
-    exp = _rebuilt("011043-e338c5")
+    exp = _rebuilt(run_id)
     limits = exp["limits"]
+    value = _rec(run_id)["config_snapshot"]["sustained"]["max_files_per_trigger"]
     assert limits["trickle_bound"]["kept_pace"] is True
     assert limits["bound"][-1] == (
-        "trickle: max_files_per_trigger 2 (auto), the pipeline kept pace"
+        f"trickle: max_files_per_trigger {value} (auto), the pipeline kept pace"
     )
     assert "trickle" not in " ".join(limits["bound_kinds"])
     without = copy.deepcopy(exp)
@@ -263,7 +281,29 @@ def test_bound_kind_registered():
 def test_an_unregistered_kind_fails(monkeypatch):
     monkeypatch.setattr(bounds, "BOUND_KINDS", bounds.BOUND_KINDS[1:])  # drop executor cap
     with pytest.raises(ValueError, match="not in BOUND_KINDS"):
-        bounds.bound_entries(FULL_LIMITS, FULL_RULES)
+        bounds.bound_entries(FULL_LIMITS, FULL_RULES, strict=True)
+    # A run saving its record never fails on it.
+    assert len(bounds.bound_entries(FULL_LIMITS, FULL_RULES)) == 6
+
+
+def test_every_bound_kind_caps_some_metric():
+    """A registered kind that caps no metric would leave the numbers it
+    holds down looking like capacity once readers cap per metric."""
+    from lakebench.metrics import metric_registry as reg
+
+    for kind in bounds.BOUND_KINDS:
+        concrete = kind.name.replace("*", "silver-build" if ":" in kind.name else "W3")
+        hits = [
+            key
+            for key, entries in reg.METRICS.items()
+            for e in entries
+            if reg.capped_by(key, [concrete], next(iter(e.modes)))
+        ]
+        if kind.name == bounds.BOUND_EXECUTOR_OVERRIDE:
+            # Its writer and its metric reach come with the config override
+            # work; until then nothing binds it.
+            continue
+        assert hits, kind.name
 
 
 def test_stored_blocks_reproduce_their_bound_lists():
@@ -314,11 +354,24 @@ def test_p2_rendered_capped_token_on_throughput_only():
     assert "capped" in rps and "capped" not in qph
 
 
+def test_one_side_trickle_bound_caps_the_row():
+    a, b = _rec("011043-e338c5"), _rec("073533-9de9c9")
+    b["experiment"]["limits"]["trickle_bound"] = None  # stored: B was not bound
+    rows = _rows(a, b)
+    assert rows["sustained_throughput_rps"]["capped"] is True
+    assert rows["corpus_drain_seconds"]["capped"] is True
+
+
 def test_another_cap_still_caps_every_row():
     a, b = _rec("011043-e338c5"), _rec("073533-9de9c9")
     a["experiment"]["limits"]["bound_kinds"] = ["silver-stream: concurrent executor budget"]
     rows = _rows(a, b)
     assert rows["composite_qph"]["capped"] is True
+
+
+def _cards(html: str) -> dict[str, str]:
+    cards = re.findall(r'<div class="card">(.*?)</div>\s*</div>', html, re.S)
+    return {re.search(r'card-label">(.*?)<', c).group(1): c for c in cards if "card-label" in c}
 
 
 def test_report_labels_intake_cards_only():
@@ -328,11 +381,49 @@ def test_report_labels_intake_cards_only():
     m = sr.load_metrics("011043-e338c5")
     assert caps_bound_from(m) == []  # the trickle does not bound every number
     (label,) = trickle_caps_from(m)
-    assert "offered load, not infrastructure capacity" in label
-    html = ReportGenerator(output_dir="/nonexistent")._generate_sustained_summary(m)
-    cards = re.findall(r'<div class="card">(.*?)</div>\s*</div>', html, re.S)
-    by_label = {re.search(r'card-label">(.*?)<', c).group(1): c for c in cards if "card-label" in c}
+    assert label == (
+        "trickle 2 files per trigger; this is the offered load, not infrastructure capacity"
+    )
+    gen = ReportGenerator(output_dir="/nonexistent")
+    html = gen._generate_sustained_summary(m)
+    by_label = _cards(html)
     assert "BOUNDED BY" in by_label["Sustained Throughput"]
     assert "BOUNDED BY" in by_label["Compute Efficiency"]
     assert "BOUNDED BY" not in by_label["In-Stream QpH"]
     assert "BOUNDED BY" not in by_label["Data Freshness"]
+    avg = re.search(
+        r"Avg Pipeline Throughput:(.*?)</span>\s*</span>|Avg Pipeline Throughput:(.*?)\n",
+        html,
+        re.S,
+    )
+    assert avg and "BOUNDED BY" in (avg.group(0))
+    pipeline = gen._generate_pipeline_benchmark_section(m)
+    summary = re.search(r"Throughput: <strong>(.*?)</strong>", pipeline, re.S).group(1)
+    assert "BOUNDED BY" in summary
+
+
+def test_report_on_a_new_block_keeps_the_trickle_off_other_numbers():
+    """A block built with the trickle line: caps_bound_from leaves it out,
+    the cap count and the experiment section show it once."""
+    from lakebench.reports.formatter import caps_bound_from
+    from lakebench.reports.generator import ReportGenerator
+
+    m = sr.load_metrics("011043-e338c5")
+    m.experiment = _rebuilt("011043-e338c5")
+    assert any(b.startswith("trickle:") for b in m.experiment["limits"]["bound"])
+    assert caps_bound_from(m) == []
+    assert len(caps_bound_from(m, include_trickle=True)) == 1
+    assert bounds.binding_caps(m) == [
+        "trickle: max_files_per_trigger 2 (auto), the pipeline kept pace"
+    ]
+    gen = ReportGenerator(output_dir="/nonexistent")
+    section = gen._generate_experiment_section(m)
+    assert section.count("trickle: max_files_per_trigger 2") == 1
+    stored = sr.load_metrics("011043-e338c5")  # block from before the field
+    assert gen._generate_experiment_section(stored).count("trickle: max_files_per_trigger 2") == 1
+
+
+def test_cli_rows_per_second_carries_the_note():
+    m = sr.load_metrics("011043-e338c5")
+    assert bounds.trickle_note(m) == " (BOUNDED BY trickle: offered load, not capacity)"
+    assert bounds.trickle_note(sr.load_metrics("231711-6dd3bc")) == ""

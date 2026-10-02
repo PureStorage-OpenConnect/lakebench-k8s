@@ -572,14 +572,21 @@ def _build_comparison(
     # Which rows a Lakebench limit holds down. A bound kind on either side
     # caps every row, as before; the trickle (not a bound kind) caps only the
     # metrics whose registry entry depends on it (metrics/bounds.py).
-    from lakebench.metrics.bounds import BOUND_TRICKLE, record_trickle_bound
+    from lakebench.metrics.bounds import BOUND_TRICKLE, TRICKLE_LINE_PREFIX, record_trickle_bound
     from lakebench.metrics.metric_registry import capped_by
 
     def _kinds_of(m: dict) -> list[str]:
+        """Bound kinds, or the display lines of a block without them; never
+        the trickle line."""
         if "error" in m:
             return []
-        kinds = ((experiment_of(m) or {}).get("limits") or {}).get("bound_kinds") or []
-        return list(kinds) if isinstance(kinds, list) else []
+        limits = (experiment_of(m) or {}).get("limits") or {}
+        kinds = limits.get("bound_kinds")
+        if not isinstance(kinds, list):
+            kinds = [
+                b for b in limits.get("bound") or [] if not str(b).startswith(TRICKLE_LINE_PREFIX)
+            ]
+        return list(kinds)
 
     def _trickle_of(m: dict) -> dict | None:
         if "error" in m:
@@ -641,10 +648,17 @@ def _build_comparison(
     # uses these to render `capped` instead of a bogus winner when a
     # Lakebench cap held either run.
     def _caps_of(m: dict) -> list[str]:
-        exp = experiment_of(m) or {}
-        limits = exp.get("limits", {}) or {}
-        bound = limits.get("bound", []) or []
-        return list(bound) if isinstance(bound, list) else []
+        """Every limit that bound the side, the trickle line included for a
+        record from before it was stored (metrics/bounds.binding_caps)."""
+        if "error" in m:
+            return []
+        from lakebench.metrics.bounds import binding_caps
+
+        try:
+            return binding_caps(m)
+        except Exception:  # noqa: BLE001 -- a malformed block: its stored lines as they are
+            bound = ((experiment_of(m) or {}).get("limits") or {}).get("bound") or []
+            return list(bound) if isinstance(bound, list) else []
 
     caps_bound_a = _caps_of(metrics_a)
     caps_bound_b = _caps_of(metrics_b)

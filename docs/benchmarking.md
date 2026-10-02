@@ -95,20 +95,31 @@ pipeline kept pace, the throughput figures (`sustained_throughput_rps`,
 run) are the offered load, not what the infrastructure can do. Kept pace
 means ingested rows over offered rows is at least 0.99 and the lag at window
 end (window seconds minus bronze's last write) is at most one trigger
-interval. Offered rows are the rows the trickle had released less the last
-trigger's batch, which that one-interval lag lets be in flight; when bronze
-took the whole corpus the lag is not tested. The experiment block records
+interval. Offered rows are `released_rows`, so the ratio is the record's
+`ingest_ratio`; when bronze took the whole corpus there was nothing left to
+offer and the lag is not tested. A run whose `intake_limit` is
+`trickle_rate` is labelled too. The experiment block records
 `limits.trickle_bound` (`{kind, value, source, kept_pace, ratio, lag_s,
-trigger_s, offered_rows, ingested_rows}`, or null when the trickle did not
-hold intake) and adds a line `trickle: max_files_per_trigger N (auto), the
+trigger_s, offered_rows, ingested_rows}`, with `not_measured` when
+`kept_pace` is null and `lag_note` when the lag was not tested; null when
+the trickle did not hold intake) and adds a line `trickle: max_files_per_trigger N (auto), the
 pipeline kept pace` to `limits.bound`. When an input was not recorded,
 `kept_pace` is null and the line says so; the throughput is still not shown
 as a capacity. The trickle is not one of `limits.bound_kinds`, so it is not
-part of the experiment identity. The report labels the throughput and
-efficiency figures "BOUNDED BY: trickle N files per trigger; this is the
-offered load, not infrastructure capacity", and `compare` shows those rows
-as `capped`. A record written before 1.7 gets the same answer, computed when
-it is read.
+part of the experiment identity. The report labels the continuous rows/s
+(headline card, Pipeline Stages summary, the bronze stream and stage rows),
+GB/s and efficiency figures "BOUNDED BY: trickle (offered load, not
+capacity)", with "trickle N files per trigger; this is the offered load,
+not infrastructure capacity" as the tooltip, and counts the trickle among
+the run's limits. `compare` marks the rows that depend on the trickle
+(`sustained_throughput_rps`, `pipeline_throughput_gb_per_second`, compute
+efficiency and `corpus_drain_seconds`) `capped` per row, and
+`comparison.json` carries each row's `capped` and each side's
+`trickle_bound_a` / `trickle_bound_b`. A record written before 1.7 gets the
+same answer, computed when it is read. Known resolution: `released_rows`
+counts the trigger at the window's edge, so a run whose last batch was still
+in flight reads about one trigger short (0.983 at an 1800 s window and a 30 s
+trigger) and is not labelled.
 
 ### Per-Stage Metrics
 
@@ -316,12 +327,15 @@ partly succeeded is partial: it keeps `compaction=ran` in the id (which reads
 attempted.
 
 `experiment.limits` records the Lakebench-imposed caps a run executed
-under, and `limits.bound` lists the ones that bound it. They include the
-continuous trickle (`max_files_per_trigger`, auto-capped at 50 files per
-trigger), the per-job executor caps (28 at most) and any concurrent
-executor budget, auto-sizing cuts, the pre-benchmark maintenance budget
-when it stopped maintenance early, and the benchmark iterations and
-in-stream rounds. A number measured under a cap that bound is a property of
+under (among them the continuous trickle, `max_files_per_trigger`,
+auto-capped at 50 files per trigger, the benchmark iterations and the
+in-stream rounds), and `limits.bound` lists the ones that bound it: the
+per-job executor caps (28 at most) and any concurrent executor budget,
+auto-sizing cuts, TM alerts over capacity, AML rules skipped on a cap, the
+pre-benchmark maintenance budget when it stopped maintenance early, and the
+trickle line when the trickle held intake (BOUNDED BY trickle, above).
+`limits.bound_kinds` names the same limits without their counts, the
+trickle excepted. A number measured under a cap that bound is a property of
 the cap, not of the infrastructure.
 
 ---

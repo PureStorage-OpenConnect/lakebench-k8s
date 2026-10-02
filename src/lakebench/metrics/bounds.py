@@ -82,12 +82,15 @@ def is_registered(kind: str) -> bool:
     return any(fnmatch.fnmatchcase(kind, k.name) for k in BOUND_KINDS)
 
 
-def bound_entries(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[tuple[str, str]]:
+def bound_entries(
+    limits: Mapping[str, Any], rules: Mapping[str, Any], *, strict: bool = False
+) -> list[tuple[str, str]]:
     """``(kind, display line)`` for each Lakebench limit that bound the run,
     in display order. ``limits.bound`` is the lines; ``limits.bound_kinds``
     the sorted distinct kinds (the counts in a line, such as a budget
     granted from live cluster capacity, vary between runs of one config).
-    Raises ValueError for a kind ``BOUND_KINDS`` does not list."""
+    With *strict* (the tests), raises ValueError for a kind ``BOUND_KINDS``
+    does not list; a run saving its record never fails on one."""
     out: list[tuple[str, str]] = []
     executors = list(limits.get("executors") or [])
     for x in executors:
@@ -122,9 +125,10 @@ def bound_entries(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[t
     for rule, why in (rules.get("skipped") or {}).items():
         if "cap" in str(why):
             out.append((f"rule {rule} cap", f"rule {rule} skipped: {why}"))
-    for kind, _line in out:
-        if not is_registered(kind):
-            raise ValueError(f"bound kind {kind!r} is not in BOUND_KINDS")
+    if strict:
+        for kind, _line in out:
+            if not is_registered(kind):
+                raise ValueError(f"bound kind {kind!r} is not in BOUND_KINDS")
     return out
 
 
@@ -141,6 +145,27 @@ def _interval_seconds(interval: Any) -> float | None:
     return parse(interval)
 
 
+def _trickle_value(snapshot: Mapping[str, Any], trickle: Mapping[str, Any]) -> Any:
+    """max_files_per_trigger as the run resolved it (``continuous.trickle``),
+    else as its config snapshot recorded it."""
+    inputs = snapshot.get("experiment_inputs") or {}
+    for v in (
+        trickle.get("value"),
+        (snapshot.get("sustained") or {}).get("max_files_per_trigger"),
+        (inputs.get("config_limits") or {}).get("max_files_per_trigger"),
+    ):
+        if v is not None:
+            return v
+    return None
+
+
+def _round4(value: Any) -> float | None:
+    """As the record's scores keep ratios (4 places), so a run being saved
+    and its saved record give one answer."""
+    v = _num(value)
+    return round(v, 4) if v is not None else None
+
+
 def _from_record(rec: Mapping[str, Any]) -> dict[str, Any] | None:
     """The trickle inputs from a metrics.json dict, or None for a batch run."""
     pb = rec.get("pipeline_benchmark") or {}
@@ -148,36 +173,23 @@ def _from_record(rec: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     scores = pb.get("scores") or {}
     snapshot = rec.get("config_snapshot") or {}
-    sustained = snapshot.get("sustained") or {}
     trickle = (rec.get("continuous") or {}).get("trickle") or {}
-    inputs = snapshot.get("experiment_inputs") or {}
-    value = next(
-        (
-            v
-            for v in (
-                trickle.get("value"),
-                sustained.get("max_files_per_trigger"),
-                (inputs.get("config_limits") or {}).get("max_files_per_trigger"),
-            )
-            if v is not None
-        ),
-        None,
-    )
     bronze: Mapping[str, Any] = next(
         (s for s in rec.get("streaming") or [] if s.get("job_type") == "bronze-ingest"), {}
     )
     pb_snap = pb.get("config_snapshot") or {}
     return {
-        "value": value,
+        "value": _trickle_value(snapshot, trickle),
         "source": trickle.get("source"),
-        "ingest_ratio": _num(scores.get("ingest_ratio")),
+        "ingest_ratio": _round4(scores.get("ingest_ratio")),
         "released_rows": _num(scores.get("released_rows")),
-        "corpus_ingest_ratio": _num(scores.get("corpus_ingest_ratio")),
+        "intake_limit": scores.get("intake_limit"),
         "window_s": _num(scores.get("window_seconds")),
         "last_write_offset_s": _num(bronze.get("last_write_offset_seconds")),
-        "trigger_s": _interval_seconds(sustained.get("bronze_trigger_interval")),
+        "trigger_s": _interval_seconds(
+            (snapshot.get("sustained") or {}).get("bronze_trigger_interval")
+        ),
         "corpus_rows": _num(pb_snap.get("datagen_output_rows")),
-        "corpus_files": _num(pb_snap.get("datagen_output_files")),
     }
 
 
@@ -187,21 +199,7 @@ def _from_metrics(metrics: Any) -> dict[str, Any] | None:
     if pb is None or getattr(pb, "pipeline_mode", None) not in ("sustained", "continuous"):
         return None
     snapshot = getattr(metrics, "config_snapshot", None) or {}
-    sustained = snapshot.get("sustained") or {}
     trickle = (getattr(metrics, "continuous", None) or {}).get("trickle") or {}
-    inputs = snapshot.get("experiment_inputs") or {}
-    value = next(
-        (
-            v
-            for v in (
-                trickle.get("value"),
-                sustained.get("max_files_per_trigger"),
-                (inputs.get("config_limits") or {}).get("max_files_per_trigger"),
-            )
-            if v is not None
-        ),
-        None,
-    )
     bronze = next(
         (s for s in getattr(metrics, "streaming", None) or [] if s.job_type == "bronze-ingest"),
         None,
@@ -209,17 +207,18 @@ def _from_metrics(metrics: Any) -> dict[str, Any] | None:
     pb_snap = getattr(pb, "config_snapshot", None) or {}
     window = _num(getattr(pb, "window_seconds", None))
     return {
-        "value": value,
+        "value": _trickle_value(snapshot, trickle),
         "source": trickle.get("source"),
-        "ingest_ratio": _num(getattr(pb, "ingest_ratio", None)),
+        "ingest_ratio": _round4(getattr(pb, "ingest_ratio", None)),
         "released_rows": _num(getattr(pb, "released_rows", None)),
-        "corpus_ingest_ratio": _num(getattr(pb, "corpus_ingest_ratio", None)),
-        # As metrics.json records it, so a run and its saved record agree.
+        "intake_limit": getattr(pb, "intake_limit", None),
+        # As metrics.json records it (0.1 s).
         "window_s": round(window, 1) if window is not None else None,
         "last_write_offset_s": _num(getattr(bronze, "last_write_offset_seconds", None)),
-        "trigger_s": _interval_seconds(sustained.get("bronze_trigger_interval")),
+        "trigger_s": _interval_seconds(
+            (snapshot.get("sustained") or {}).get("bronze_trigger_interval")
+        ),
         "corpus_rows": _num(pb_snap.get("datagen_output_rows")),
-        "corpus_files": _num(pb_snap.get("datagen_output_files")),
     }
 
 
@@ -229,32 +228,38 @@ def trickle_bound(source: Any) -> dict[str, Any] | None:
 
     None for a batch run, a run with no trickle, and a run whose bronze fell
     behind what the trickle offered (``continuous_window.trickle_kept_pace``
-    False). Otherwise ``{"kind": "trickle", "value", "source", "kept_pace",
-    ...}``: ``kept_pace`` True, or None when an input to the test was not
-    recorded (the trickle was set and the run cannot be shown to have fallen
-    behind, so the number it holds is still not a capacity)."""
+    False), unless the collector's own ``intake_limit`` says the trickle held
+    intake. Otherwise ``{"kind": "trickle", "value", "source", "kept_pace",
+    ...}``: ``kept_pace`` True, or None when it was not shown either way (an
+    input missing, or ``intake_limit`` and the 0.99 test disagree). The
+    number the trickle holds is then still not a capacity."""
     from lakebench.metrics.continuous_window import trickle_kept_pace
 
     v = _from_record(source) if isinstance(source, Mapping) else _from_metrics(source)
     if v is None or v["value"] is None:
         return None
     ratio, released = v["ingest_ratio"], v["released_rows"]
-    per_trigger = None
-    if v["corpus_rows"] and v["corpus_files"]:
-        per_trigger = float(v["value"]) * v["corpus_rows"] / v["corpus_files"]
+    # ingest_ratio is ingested over released only when released is known
+    # (otherwise the collector falls back to the corpus share).
+    ingested = ratio * released if (ratio is not None and released) else None
     pace = trickle_kept_pace(
-        # ingest_ratio is ingested over released only when released is known
-        # (otherwise the collector falls back to the corpus share).
-        ingested_rows=ratio * released if (ratio is not None and released) else None,
+        ingested_rows=round(ingested) if ingested is not None else None,
         released_rows=released,
-        rows_per_trigger=per_trigger,
-        corpus_taken=bool(v["corpus_ingest_ratio"] is not None and v["corpus_ingest_ratio"] >= 1),
+        corpus_taken=bool(
+            ingested is not None and v["corpus_rows"] and ingested >= v["corpus_rows"]
+        ),
         window_s=v["window_s"],
         last_write_offset_s=v["last_write_offset_s"],
         trigger_s=v["trigger_s"],
     )
     if pace["kept_pace"] is False:
-        return None
+        if v["intake_limit"] != "trickle_rate":
+            return None
+        pace["kept_pace"] = None
+        pace["not_measured"] = (
+            "ingested rows were under 0.99 of the offered rows, but intake_limit says the "
+            "trickle held intake"
+        )
     return {"kind": BOUND_TRICKLE, "value": v["value"], "source": v["source"], **pace}
 
 
@@ -288,4 +293,50 @@ def record_trickle_bound(record: Any) -> dict[str, Any] | None:
     if isinstance(limits, Mapping) and "trickle_bound" in limits:
         stored = limits["trickle_bound"]
         return dict(stored) if isinstance(stored, Mapping) else None
-    return trickle_bound(record)
+    try:
+        return trickle_bound(record)
+    except Exception:  # noqa: BLE001 -- unreadable: a continuous run is not shown as capacity
+        mode = (
+            (record.get("pipeline_benchmark") or {}).get("pipeline_mode")
+            if isinstance(record, Mapping)
+            else getattr(getattr(record, "pipeline_benchmark", None), "pipeline_mode", None)
+        )
+        if mode in ("sustained", "continuous"):
+            return {
+                "kind": BOUND_TRICKLE,
+                "value": None,
+                "source": None,
+                "kept_pace": None,
+                "not_measured": "the trickle inputs could not be read",
+            }
+        return None
+
+
+def binding_caps(record: Any) -> list[str]:
+    """Every Lakebench limit that bound the run, one line each: the stored
+    ``limits.bound`` lines and the trickle line, whether or not the stored
+    block has it (a record from before it gets it computed). For lists and
+    counts; a figure takes only the caps that bound it."""
+    if isinstance(record, Mapping):
+        exp = record.get("experiment")
+    else:
+        block = getattr(record, "experiment_block", None)
+        exp = block() if callable(block) else getattr(record, "experiment", None)
+    limits = (exp or {}).get("limits") if isinstance(exp, Mapping) else None
+    lines = [
+        str(x)
+        for x in ((limits or {}).get("bound") or [])
+        if x and not str(x).startswith(TRICKLE_LINE_PREFIX)
+    ]
+    tb = record_trickle_bound(record)
+    if tb:
+        lines.append(trickle_line(tb))
+    return lines
+
+
+def trickle_note(record: Any) -> str:
+    """A plain-text suffix for a rows/s figure the trickle held (CLI
+    output), or "" when it did not."""
+    return (
+        " (BOUNDED BY trickle: offered load, not capacity)" if record_trickle_bound(record) else ""
+    )

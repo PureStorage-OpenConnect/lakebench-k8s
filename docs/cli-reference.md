@@ -107,7 +107,10 @@ differ (confounded) or whose only architecture difference is the dependency
 set. A difference in the architecture or the system alone is what the
 comparison measures and does not make a pair not like-for-like. Each side's support state (supported, unverified, unsupported) is
 shown. `comparison.json` records `verdict`, `comparable`, `like_for_like`,
-`condition_differences`, `support` and `refusals`.
+`condition_differences`, `support` and `refusals`, each row's `capped`
+(a Lakebench limit bound that row on either side: any bound kind caps every
+row; the trickle caps only the throughput rows) and each side's
+`trickle_bound_a` / `trickle_bound_b`.
 
 The two configs run one after the other, not side by side. Running them
 concurrently on one host would measure the contention between them rather than
