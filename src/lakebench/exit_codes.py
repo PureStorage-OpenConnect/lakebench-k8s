@@ -392,7 +392,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.bronze_nonempty",
         _C.REFUSED,
-        "datagen would write over a non-empty bronze prefix without --regenerate",
+        "datagen would write over a non-empty bronze prefix: without --regenerate, or "
+        "with it on a bucket this deployment cannot prove it owns",
         v16_code=2,
     ),
     ExitPath(
@@ -412,7 +413,6 @@ PATHS: tuple[ExitPath, ...] = (
         "destroy.unverified_cluster",
         _C.REFUSED,
         '"Destroy NOT completed": this cluster has no fingerprint, so buckets are kept',
-        planned=True,
     ),
     ExitPath(
         "admin.version_change_in_use",

@@ -17,6 +17,7 @@ from lakebench.cli._admin import (
     admin_app,
 )
 from lakebench.deploy.cluster_lock import ClusterLockHeld
+from lakebench.exit_codes import ExitCode
 from lakebench.modules.pipeline_engines.spark.operator_scratch import TmpVolume
 
 runner = CliRunner()
@@ -248,6 +249,7 @@ class TestReclaimBucket:
         s3 = MagicMock()
         s3._init_error = None
         s3.raw_client.list_objects_v2.return_value = {"KeyCount": key_count, "Contents": []}
+        s3.has_user_objects.return_value = key_count > 0
         cfg = MagicMock()
         cfg.name = "new-owner"
         cfg.platform.storage.s3 = MagicMock()
@@ -261,6 +263,7 @@ class TestReclaimBucket:
             patch("lakebench.cli._admin._get_core_v1"),
             patch("lakebench.cli._admin._load_cfg", return_value=cfg),
             patch("lakebench.s3.S3Client", return_value=s3),
+            patch("lakebench.deploy.ownership.api_server_fingerprint", return_value="fp1"),
         ):
             r = runner.invoke(admin_app, ["reclaim-bucket", "some-bucket", str(yaml_path)])
         assert r.exit_code == 3  # refused: the bucket holds objects
@@ -282,11 +285,30 @@ class TestReclaimBucket:
             patch("lakebench.s3.S3Client", return_value=s3),
             patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=cm_ctx),
             patch("lakebench.deploy.ownership.write_bucket_ownership_tag") as mock_tag,
+            patch("lakebench.deploy.ownership.api_server_fingerprint", return_value="fp1"),
         ):
             r = runner.invoke(admin_app, ["reclaim-bucket", "some-bucket", str(yaml_path)])
         assert r.exit_code == 0, r.output
         mock_tag.assert_called_once()
+        # SAF-10: the claim carries this cluster's stamp.
+        assert mock_tag.call_args.kwargs["cluster"] == "fp1"
         cm_ctx.__enter__.assert_called_once()
+
+    def test_refuses_without_a_cluster_fingerprint(self, tmp_path):
+        s3, cfg = self._mock_s3_and_cfg(key_count=0)
+        yaml_path = tmp_path / "cfg.yaml"
+        yaml_path.write_text("name: x\n")
+        with (
+            patch("lakebench.cli._admin._get_core_v1"),
+            patch("lakebench.cli._admin._load_cfg", return_value=cfg),
+            patch("lakebench.s3.S3Client", return_value=s3),
+            patch("lakebench.deploy.ownership.write_bucket_ownership_tag") as mock_tag,
+            patch("lakebench.deploy.ownership.api_server_fingerprint", return_value=None),
+        ):
+            r = runner.invoke(admin_app, ["reclaim-bucket", "some-bucket", str(yaml_path)])
+        assert r.exit_code == ExitCode.PREREQUISITE
+        assert "fingerprint" in r.output
+        mock_tag.assert_not_called()
 
 
 class TestRepairOperator:

@@ -1136,6 +1136,7 @@ class _FakePaginator:
 
     def paginate(self, **kwargs: Any) -> Iterator[dict[str, Any]]:
         kwargs.pop("PaginationConfig", None)
+        kwargs.pop("MaxKeys", None)  # a page size: the one page holds everything
         yield self._fn(**kwargs)
 
 
@@ -1232,13 +1233,21 @@ class _FakeS3:
 
     # -- objects -----------------------------------------------------------
 
-    def list_objects_v2(self, Bucket: str, Prefix: str = "", **_kw: Any) -> dict[str, Any]:  # noqa: N803
+    def list_objects_v2(self, Bucket: str, Prefix: str = "", **kw: Any) -> dict[str, Any]:  # noqa: N803
+        """Keys in UTF-8 byte (code point) order; honours MaxKeys and StartAfter."""
         self._record("list_objects_v2", Bucket)
         objects = self._bucket(Bucket, "ListObjectsV2")
+        after = kw.get("StartAfter") or ""
         contents = [
-            {"Key": k, "Size": len(v)} for k, v in sorted(objects.items()) if k.startswith(Prefix)
+            {"Key": k, "Size": len(v)}
+            for k, v in sorted(objects.items())
+            if k.startswith(Prefix) and k > after
         ]
-        return {"Contents": contents, "KeyCount": len(contents), "IsTruncated": False}
+        limit = kw.get("MaxKeys")
+        truncated = limit is not None and len(contents) > int(limit)
+        if truncated:
+            contents = contents[: int(limit)]
+        return {"Contents": contents, "KeyCount": len(contents), "IsTruncated": truncated}
 
     def list_multipart_uploads(self, Bucket: str, Prefix: str = "", **_kw: Any) -> dict:  # noqa: N803
         self._record("list_multipart_uploads", Bucket)
@@ -1259,11 +1268,19 @@ class _FakeS3:
     def put_object(self, Bucket: str, Key: str, Body: Any = b"", **kw: Any) -> dict:  # noqa: N803
         self._record("put_object", Bucket, Key)
         objects = self._bucket(Bucket, "PutObject")
-        if kw.get("IfNoneMatch") == "*" and Key in objects:
-            raise self._error("PreconditionFailed", 412, "PutObject")
+        if kw.get("IfNoneMatch") is not None:
+            mode = self._r.s3_conditional
+            if mode == "unsupported":
+                raise self._error("NotImplemented", 501, "PutObject")
+            if mode == "enforced" and kw.get("IfNoneMatch") == "*" and Key in objects:
+                raise self._error("PreconditionFailed", 412, "PutObject")
+            # "ignored": the header is accepted and has no effect
         data = Body.read() if hasattr(Body, "read") else Body
         objects[Key] = data.encode() if isinstance(data, str) else bytes(data or b"")
-        return {"ETag": f'"{abs(hash(objects[Key]))}"'}
+        etag = f'"{abs(hash(objects[Key]))}"'
+        if self._r.after_put is not None:
+            self._r.after_put(Bucket, Key)
+        return {"ETag": etag}
 
     def upload_file(self, Filename: str, Bucket: str, Key: str, **_kw: Any) -> None:  # noqa: N803
         self._record("upload_file", Bucket, Key)
@@ -1382,6 +1399,11 @@ class K8sRecorder:
         self.exec_output = ""
         self.can_i = True
         self.s3_tagging = True  # False: the backend answers NotImplemented (FlashBlade)
+        # Conditional PutObject (IfNoneMatch): "enforced" (412 when the key
+        # exists), "ignored" (accepted, no effect), "unsupported" (501).
+        self.s3_conditional = "enforced"
+        # Runs after every put_object (a hook for racing writers in tests).
+        self.after_put: Callable[[str, str], None] | None = None
         self.teardown_check = True
         self._s3_errors: list[tuple[str, str, int, list[int]]] = []
         self._responders: list[_Responder] = []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import Annotated
 
@@ -365,9 +366,50 @@ def clean(
             except Exception:
                 other_deployments = None
 
+            # This cluster's stamp, and the namespace's record of the
+            # buckets it created or adopted while empty.
+            from lakebench.deploy.ownership import (
+                api_server_fingerprint,
+                read_created_buckets,
+            )
+
+            my_cluster = api_server_fingerprint(cfg.platform.kubernetes.context or "")
+            try:
+                from kubernetes import client as _k8s_record
+
+                _core = _k8s_record.CoreV1Api()
+                # The created record only (not 1.6's adopted-empty one).
+                ns_record = read_created_buckets(_core, cfg.get_namespace())
+            except Exception:  # noqa: BLE001 -- unreadable: nothing is proven by it
+                ns_record = set()
+
             for layer, bucket in bucket_targets.items():
                 try:
-                    v = verify_bucket_ownership(s3.raw_client, bucket, cfg.name)
+                    v = verify_bucket_ownership(
+                        s3.raw_client,
+                        bucket,
+                        cfg.name,
+                        expected_cluster=my_cluster,
+                        created_record=ns_record,
+                    )
+                    if v.verdict is IdentityVerdict.LEGACY_PROVEN:
+                        # Row 3: a tagged one is ours as a MATCH is; a
+                        # tagless one takes the record branch below.
+                        v = dataclasses.replace(
+                            v,
+                            verdict=(
+                                IdentityVerdict.MATCH if v.tagged else IdentityVerdict.UNSUPPORTED
+                            ),
+                        )
+                    if v.verdict in (
+                        IdentityVerdict.FOREIGN_CLUSTER,
+                        IdentityVerdict.LEGACY_UNPROVEN,
+                        IdentityVerdict.UNVERIFIED_CLUSTER,
+                    ):
+                        errors.append(f"{layer}: {v.hint}")
+                        refusals += 1
+                        print_error(f"Refusing to clean {layer}: {v.hint}")
+                        continue
                     if v.verdict is IdentityVerdict.MISMATCH:
                         errors.append(f"{layer}: {v.hint}")
                         refusals += 1

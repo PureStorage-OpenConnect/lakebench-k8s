@@ -301,7 +301,7 @@ def test_continuous_reset_needs_the_record_on_tagless_backends(monkeypatch, reco
         patch("lakebench.s3.S3Client"),
         patch(
             "lakebench.deploy.ownership.verify_bucket_ownership",
-            side_effect=lambda _c, bucket, _n: IdentityReport(
+            side_effect=lambda _c, bucket, _n, **_k: IdentityReport(
                 verdict=IdentityVerdict.UNSUPPORTED, resource_name=bucket, expected_deployment="a"
             ),
         ),

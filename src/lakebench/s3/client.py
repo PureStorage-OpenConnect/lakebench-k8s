@@ -15,6 +15,86 @@ from botocore.exceptions import ClientError, EndpointConnectionError, NoCredenti
 
 logger = logging.getLogger(__name__)
 
+# Lakebench's own bookkeeping keys (the owner marker
+# ``.lakebench/owner.json``). They are never user data: every emptiness
+# check, count and size skips them, and every emptying keeps them except
+# destroy's release of a bucket (DESIGN ch01 section 4).
+LAKEBENCH_KEY_PREFIX = ".lakebench/"
+# Sorts after every key under LAKEBENCH_KEY_PREFIX (keys list in UTF-8 byte
+# order, and U+10FFFF is the largest code point).
+_AFTER_LAKEBENCH_KEYS = LAKEBENCH_KEY_PREFIX + "\U0010ffff"
+
+
+def is_lakebench_key(key: str) -> bool:
+    return key.startswith(LAKEBENCH_KEY_PREFIX)
+
+
+def has_user_objects(boto_client: Any, bucket: str, prefix: str = "") -> bool:
+    """Whether ``bucket`` holds any object under ``prefix`` that is not Lakebench's own.
+
+    At most two ``MaxKeys=1`` listings, however many marker keys there are:
+
+    1. A prefix that cannot contain ``.lakebench/`` keys (non-empty, and
+       neither under ``.lakebench/`` nor a prefix of it) needs one listing.
+    2. Otherwise the first key decides unless it is a marker key: nothing
+       sorts before the first key.
+    3. When the first key is a marker key, a second listing starts after
+       every ``.lakebench/`` key; any key there is a user object.
+
+    Raises on listing errors; a caller that cannot tell must not treat the
+    bucket as empty.
+    """
+    could_hold_markers = (
+        not prefix
+        or LAKEBENCH_KEY_PREFIX.startswith(prefix)
+        or (prefix.startswith(LAKEBENCH_KEY_PREFIX))
+    )
+    args: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1}
+    resp = boto_client.list_objects_v2(**args)
+    contents = resp.get("Contents") or []
+    if not contents:
+        return False
+    if not could_hold_markers or not is_lakebench_key(contents[0]["Key"]):
+        return True
+    if prefix.startswith(LAKEBENCH_KEY_PREFIX):
+        return False  # everything under this prefix is Lakebench's own
+    resp = boto_client.list_objects_v2(**args, StartAfter=_AFTER_LAKEBENCH_KEYS)
+    contents = resp.get("Contents") or []
+    if not contents:
+        return False
+    if not is_lakebench_key(contents[0]["Key"]):
+        return True
+    # The backend ignored StartAfter: a full listing decides (never a guess).
+    return bool(list_user_keys(boto_client, bucket, prefix, limit=1))
+
+
+def list_user_objects(boto_client: Any, bucket: str, prefix: str) -> list[dict[str, Any]]:
+    """Every ``list_objects_v2`` entry under ``prefix`` (key, size, ETag and
+    the rest) except Lakebench's own keys. Raises on listing errors."""
+    out: list[dict[str, Any]] = []
+    paginator = boto_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            if not is_lakebench_key(str(obj.get("Key", ""))):
+                out.append(dict(obj))
+    return out
+
+
+def list_user_keys(boto_client: Any, bucket: str, prefix: str = "", limit: int = 50) -> list[str]:
+    """Up to ``limit`` keys under ``prefix`` that are not Lakebench's own."""
+    out: list[str] = []
+    paginator = boto_client.get_paginator("list_objects_v2")
+    args: dict[str, Any] = {"Bucket": bucket}
+    if prefix:
+        args["Prefix"] = prefix
+    for page in paginator.paginate(**args):
+        for obj in page.get("Contents") or []:
+            if not is_lakebench_key(obj["Key"]):
+                out.append(obj["Key"])
+                if len(out) >= limit:
+                    return out
+    return out
+
 
 class S3Error(Exception):
     """Base exception for S3 errors."""
@@ -315,6 +395,14 @@ class S3Client:
         except ClientError as e:
             raise S3Error(f"Failed to list buckets: {e}")  # noqa: B904
 
+    def has_user_objects(self, bucket_name: str, prefix: str = "") -> bool:
+        """Whether the bucket holds an object under ``prefix`` other than Lakebench's own.
+
+        See the module function ``has_user_objects``.
+        """
+        self._check_client()
+        return has_user_objects(self._client, bucket_name, prefix)
+
     def get_bucket_info(self, bucket_name: str) -> BucketInfo:
         """Get information about a bucket.
 
@@ -336,7 +424,9 @@ class S3Client:
         try:
             # List first 1000 objects to estimate
             response = self._client.list_objects_v2(Bucket=bucket_name, MaxKeys=1000)
-            objects = response.get("Contents", [])
+            objects = [
+                o for o in response.get("Contents", []) if not is_lakebench_key(o.get("Key", ""))
+            ]
             object_count = len(objects)
             size_bytes = sum(obj.get("Size", 0) for obj in objects)
 
@@ -358,7 +448,8 @@ class S3Client:
         """Get accurate bucket size by paginating all objects.
 
         Unlike :meth:`get_bucket_info`, this paginates through ALL
-        objects to return an accurate total size and count.
+        objects to return an accurate total size and count. Lakebench's own
+        ``.lakebench/`` keys are not counted.
 
         Args:
             bucket_name: Name of the bucket
@@ -380,7 +471,9 @@ class S3Client:
                 paginate_args["Prefix"] = prefix
 
             for page in paginator.paginate(**paginate_args):
-                objects = page.get("Contents", [])
+                objects = [
+                    o for o in page.get("Contents", []) if not is_lakebench_key(o.get("Key", ""))
+                ]
                 total_objects += len(objects)
                 total_bytes += sum(obj.get("Size", 0) for obj in objects)
 
@@ -395,15 +488,21 @@ class S3Client:
                 f"Failed to get bucket size for {bucket_name}: {e}"
             )
 
-    def delete_prefix(self, bucket_name: str, prefix: str) -> int:
+    def delete_prefix(self, bucket_name: str, prefix: str, *, abort_multipart: bool = False) -> int:
         """Delete every object under ``prefix``. Returns the count deleted.
 
         Refuses an empty or root prefix: this is for scoped state such as
         stream checkpoints, and emptying a whole bucket is ``empty_bucket``.
+        Also refuses a prefix under ``.lakebench/`` (Lakebench's own keys).
+        ``abort_multipart`` also aborts incomplete multipart uploads under the
+        prefix (FlashBlade keeps them as ghosts otherwise, GOTCHAS 2); they
+        are not counted in the return value.
         """
         if not prefix.strip("/"):
             raise ValueError("delete_prefix needs a non-empty prefix")
         prefix = prefix.rstrip("/") + "/"
+        if prefix.startswith(LAKEBENCH_KEY_PREFIX):
+            raise ValueError(f"delete_prefix refuses Lakebench's own keys ({prefix})")
         deleted = 0
         try:
             paginator = self._client.get_paginator("list_objects_v2")
@@ -424,6 +523,19 @@ class S3Client:
                             f"{first.get('Code')} {first.get('Message')})"
                         )
                     deleted += len(chunk)
+            if abort_multipart:
+                mp = self._client.get_paginator("list_multipart_uploads")
+                for page in mp.paginate(Bucket=bucket_name, Prefix=prefix):
+                    for upload in page.get("Uploads", []) or []:
+                        try:
+                            self._client.abort_multipart_upload(
+                                Bucket=bucket_name,
+                                Key=upload["Key"],
+                                UploadId=upload["UploadId"],
+                            )
+                        except ClientError as e:
+                            if e.response.get("Error", {}).get("Code") != "NoSuchUpload":
+                                raise
         except ClientError as e:
             raise S3BucketError(  # noqa: B904
                 f"Failed to delete {bucket_name}/{prefix}: {e}"
@@ -436,8 +548,15 @@ class S3Client:
         max_wait: int = 300,
         progress_callback: Callable[[str, int], None] | None = None,
         before_batch: Callable[[], None] | None = None,
+        keep_prefixes: tuple[str, ...] = (LAKEBENCH_KEY_PREFIX,),
     ) -> int:
         """Delete all objects and abort incomplete multipart uploads in a bucket.
+
+        Keys under ``keep_prefixes`` are kept, and are not counted when the
+        loop verifies the bucket empty: by default Lakebench's own
+        ``.lakebench/`` keys (the owner marker), so ``clean`` and
+        ``--regenerate`` leave the bucket owned. Only destroy releasing a
+        bucket passes ``keep_prefixes=()``.
 
         Cleanup pattern: delete, abort multipart uploads, then
         retry until the bucket is truly empty (FlashBlade may lag on cleanup).
@@ -469,7 +588,11 @@ class S3Client:
                 # 1. Delete all completed objects
                 paginator = self._client.get_paginator("list_objects_v2")
                 for page in paginator.paginate(Bucket=bucket_name):
-                    objects = page.get("Contents", [])
+                    objects = [
+                        obj
+                        for obj in page.get("Contents", [])
+                        if not obj["Key"].startswith(keep_prefixes)
+                    ]
                     if not objects:
                         continue
                     delete_objects = [{"Key": obj["Key"]} for obj in objects]
@@ -525,9 +648,13 @@ class S3Client:
                 # 3. Verify empty -- recount objects and uploads
                 obj_count = 0
                 for page in self._client.get_paginator("list_objects_v2").paginate(
-                    Bucket=bucket_name, MaxKeys=1
+                    Bucket=bucket_name
                 ):
-                    obj_count += page.get("KeyCount", 0)
+                    obj_count += sum(
+                        1
+                        for obj in page.get("Contents", []) or []
+                        if not obj["Key"].startswith(keep_prefixes)
+                    )
 
                 mp_count = 0
                 for page in self._client.get_paginator("list_multipart_uploads").paginate(

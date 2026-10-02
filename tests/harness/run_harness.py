@@ -54,7 +54,8 @@ The continuous scenarios (``lakebench.cli._sustained._run_sustained``) add:
 - The ownership check before the continuous reset: the namespace carries the
   deployment's identity stamp and created-buckets record, the kubeconfig's
   cluster fingerprint (``deploy.ownership.api_server_fingerprint``) matches
-  it, and the backend has no bucket tagging (FlashBlade).
+  it, and the backend has no bucket tagging (FlashBlade), so each bucket
+  carries the owner marker deploy writes there (``.lakebench/owner.json``).
 - Streams: submitted streams are RUNNING on their first driver until deleted;
   their driver logs are the record's, cut at the fake cluster clock
   (:func:`log_until`), so the window and the settle wait see them grow.
@@ -638,6 +639,16 @@ class FakeCoreV1Api(_FakeApi):
         self._rec.add("CoreV1Api", "list_namespace")
         return SimpleNamespace(items=[_namespace_object(self._rec.namespace)])
 
+    def read_namespaced_config_map(self, name, namespace, **kw):
+        """lakebench-silver-state of a deployment that has not yet run
+        bronze-verify: no data clock to clear before a fresh generate."""
+        self._rec.add("CoreV1Api", "read_namespaced_config_map", name, namespace)
+        if name != "lakebench-silver-state" or namespace != self._rec.namespace:
+            raise self._rec.refuse(f"unscripted ConfigMap {namespace}/{name}")
+        return SimpleNamespace(
+            data={"bronze_data_clock": ""}, metadata=SimpleNamespace(resource_version="1")
+        )
+
     def read_namespaced_pod(self, name, namespace, **kw):
         # Driver pods of an earlier run's streams: none are left.
         self._rec.add("CoreV1Api", "read_namespaced_pod", name, namespace)
@@ -1156,8 +1167,9 @@ def log_until(text: str, until: datetime) -> str:
 
 class _FakeBoto:
     """The boto3 client under ``S3Client.raw_client``: the backend has no
-    bucket tagging (FlashBlade answers NotImplemented), and the scenario
-    deployment's buckets are empty before its first run."""
+    bucket tagging (FlashBlade answers NotImplemented), so deploy claimed the
+    scenario deployment's buckets with the owner marker, and they are
+    otherwise empty before its first run."""
 
     def __init__(self, rec: Recorder) -> None:
         self._rec = rec
@@ -1171,12 +1183,20 @@ class _FakeBoto:
         )
 
     def get_object(self, Bucket, Key):  # noqa: N803 -- boto3 keywords
-        """An object the scenario serves (the AML recall.json sidecar)."""
+        """An object the scenario serves: the owner marker deploy writes on a
+        backend without tagging, and the AML recall.json sidecar."""
         import io
+
+        from lakebench.deploy.ownership import OWNER_MARKER_KEY, cluster_stamp
 
         self._rec.add("S3", "get_object", Bucket, Key)
         if not Bucket.startswith(f"{NAME}-"):
             raise self._rec.refuse(f"read from a bucket not of the deployment: {Bucket}")
+        if Key == OWNER_MARKER_KEY:
+            # What deploy's claim of a tagless bucket left (deployment name
+            # and this cluster's stamp).
+            marker = {"deployment": NAME, "cluster": cluster_stamp(API_SERVER_FP)}
+            return {"Body": io.BytesIO(json.dumps(marker, sort_keys=True).encode())}
         # The key must name this run: run() exports LB_RUN_ID before the
         # score stage, so a read of another run's sidecar is unscripted.
         run_id = os.environ.get("LB_RUN_ID") or "<no run id>"
@@ -1274,6 +1294,27 @@ class FakeS3:
     def raw_client(self) -> _FakeBoto:
         self._rec.add("S3", "raw_client")
         return _FakeBoto(self._rec)
+
+    def bucket_exists(self, *args, **kwargs) -> bool:
+        """The bronze gate's first look: the deployment's buckets exist."""
+        _checked(self._rec, self._real.bucket_exists, *args, **kwargs)
+        bound = inspect.signature(self._real.bucket_exists).bind(None, *args, **kwargs)
+        name = bound.arguments["bucket_name"]
+        self._rec.add("S3", "bucket_exists", name)
+        if not name.startswith(f"{NAME}-"):
+            raise self._rec.refuse(f"unscripted bucket {name}")
+        return True
+
+    def has_user_objects(self, *args, **kwargs) -> bool:
+        """Whether a prefix holds data: the datagen prefix of a fresh
+        deployment is empty before it generates, as get_bucket_size says."""
+        _checked(self._rec, self._real.has_user_objects, *args, **kwargs)
+        bound = inspect.signature(self._real.has_user_objects).bind(None, *args, **kwargs)
+        bound.apply_defaults()
+        name, prefix = bound.arguments["bucket_name"], bound.arguments["prefix"]
+        self._rec.add("S3", "has_user_objects", name, prefix)
+        layer = name.rsplit("-", 1)[-1]
+        return not (prefix and self._rec.fresh_bronze and layer == "bronze")
 
     def delete_prefix(self, *args, **kwargs) -> int:
         _checked(self._rec, self._real.delete_prefix, *args, **kwargs)

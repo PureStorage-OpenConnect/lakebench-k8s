@@ -275,11 +275,11 @@ def test_existing_state_lists_only_non_empty_prefixes(monkeypatch):
     cfg = _c360_cfg()
     raw = MagicMock()
 
-    def list_objects_v2(Bucket, Prefix, MaxKeys):
+    def list_objects_v2(Bucket, Prefix, MaxKeys, **_kw):
         if Bucket == "c-g":
             raise RuntimeError("NoSuchBucket")
         if (Bucket, Prefix) == ("c-s", ""):
-            return {"KeyCount": 1}
+            return {"KeyCount": 1, "Contents": [{"Key": "x"}]}
         if (Bucket, Prefix) == ("c-b", "checkpoints/bronze-ingest/"):
             raise RuntimeError("AccessDenied")
         return {"KeyCount": 0}

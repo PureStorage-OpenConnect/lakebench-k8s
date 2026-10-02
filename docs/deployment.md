@@ -268,7 +268,8 @@ The destroy engine follows a specific sequence to ensure clean removal:
     `create_namespace: false` one object is kept on purpose: the
     `lakebench-silver-state` ConfigMap, whose silver rebuild-epoch counters
     must not go back while table data written under them may outlive destroy
-    (a reset counter makes Delta skip writes as already committed). The
+    (a reset counter makes Delta skip writes as already committed); its
+    `bronze_data_clock` is cleared when destroy empties the bronze bucket. The
     deployment's identity annotations (`lakebench.deployment/name` and the
     rest) also stay, so a re-run of a destroy that stopped half way still
     finds its record; a deployment with another name cannot deploy into that
@@ -292,8 +293,12 @@ Pre-provisioned buckets (`create_buckets: false`), buckets deploy adopted, and
 `--keep-buckets` runs are emptied but kept. On a backend without bucket
 tagging (FlashBlade) the bucket name is the only other ownership evidence, so
 a pre-existing bucket is emptied only when deploy found it empty and recorded
-that (`lakebench.deployment/adopted-empty-buckets`); one that already held
-objects is left in place and reported unless you pass `--force-legacy`. If a recorded bucket cannot be
+that, which from 1.7 deploy does only with `--force-legacy` and with an
+owner marker (`.lakebench/owner.json`); a bucket 1.6 recorded in
+`lakebench.deployment/adopted-empty-buckets` without a marker is kept. One that already held objects is left in place
+and reported unless you pass `--force-legacy`. A bucket stamped by another
+cluster (`lakebench.cluster`), or one that carries this deployment's name but
+no cluster stamp and is not in this namespace's record, is always kept. If a recorded bucket cannot be
 emptied or deleted, destroy keeps the namespace, because its annotations are
 the only ownership record a re-run can use to finish the job.
 

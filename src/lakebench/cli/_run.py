@@ -16,7 +16,7 @@ from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
-    enforce_bronze_regenerate,
+    enforce_bronze_gate,
     journal_open,
     load_deps_handle,
     print_error,
@@ -1613,10 +1613,25 @@ def run(
         typer.Option(
             "--regenerate",
             help=(
-                "With --generate: empty the bronze bucket before generating. "
-                "Without this flag, a non-empty bronze prefix is refused "
-                "(exit 3) so existing datagen output is never overwritten "
-                "silently. Refused without --generate or --generate-only."
+                "With --generate: clear the datagen prefix in the bronze "
+                "bucket before generating, when this deployment owns the "
+                "bucket. Without this flag, a non-empty bronze prefix is "
+                "refused (exit 3) so existing datagen output is never "
+                "overwritten silently. Never clears a bucket this deployment "
+                "does not own. A multi-cycle run clears an owned prefix before "
+                "cycle 0 without it. Refused without --generate or --generate-only."
+            ),
+        ),
+    ] = False,
+    allow_stale_bronze: Annotated[
+        bool,
+        typer.Option(
+            "--allow-stale-bronze",
+            help=(
+                "With --generate (or a multi-cycle run): generate over objects "
+                "already in the datagen prefix of a bronze bucket this "
+                "deployment did not create. Rows may be over-counted; "
+                "metrics.json records it (datagen.stale_bronze)."
             ),
         ),
     ] = False,
@@ -1875,6 +1890,7 @@ def run(
             timeout=timeout or 14400,
             yes=yes,
             regenerate=regenerate,
+            allow_stale_bronze=allow_stale_bronze,
         )
         return
 
@@ -2126,13 +2142,15 @@ def run(
 
                 from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
-                # A4 (v1.6): CLI-level bronze safety. Refuse a non-empty
-                # bronze prefix unless --regenerate was passed; with the
-                # flag, empty the bronze bucket first.
-                enforce_bronze_regenerate(cfg, regenerate)
+                # Refuse a non-empty bronze prefix unless --regenerate
+                # (owned bucket: clear the datagen prefix) or
+                # --allow-stale-bronze (any other bucket, recorded).
+                _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
+                if collector.current_run is not None:
+                    collector.current_run.datagen_stale_bronze = _gate.record()
 
                 dg_engine = DeploymentEngine(cfg)
-                datagen_deployer = DatagenDeployer(dg_engine)
+                datagen_deployer = DatagenDeployer(dg_engine, allow_stale_bronze=allow_stale_bronze)
                 _interrupt.creating("Job", "lakebench-datagen")
                 _dg_deploy = datagen_deployer.deploy()
                 if _dg_deploy.status == DeploymentStatus.SUCCESS:
@@ -2228,7 +2246,7 @@ def run(
                     logger.warning("Could not measure bronze bucket size: %s", e)
             except typer.Exit as e:
                 # A4 (v1.6): _handle_datagen_timeout, the OOM / error
-                # branches above and enforce_bronze_regenerate raise their
+                # branches above and enforce_bronze_gate raise their
                 # own typer.Exit with a specific code (3 for the regenerate
                 # refusal, 4 when S3 cannot be read, 1 for a wait-budget
                 # timeout).
@@ -2305,6 +2323,22 @@ def run(
                     )
                     raise typer.Exit(ExitCode.FAILED) from e
 
+        # A multi-cycle run's cycle 0 is a fresh write; the same gate
+        # as generate, before the first cycle's datagen (unless the
+        # single-cycle --generate path above already ran it). Cycle 0 of an
+        # owned bucket is cleared as 1.6 did, so the gate runs with
+        # regenerate on: only a bucket this deployment may not empty refuses.
+        if total_cycles > 1 and not (include_datagen and not skip_generate):
+            _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)
+            if collector.current_run is not None:
+                collector.current_run.datagen_stale_bronze = _gate.record()
+        elif not (include_datagen and not skip_generate) and collector.current_run is not None:
+            # No datagen in this run: a stale-bronze note left by the
+            # generate that made this bronze still describes it.
+            from lakebench.cli._helpers import load_stale_bronze
+
+            collector.current_run.datagen_stale_bronze = load_stale_bronze(cfg)
+
         for cycle_idx in range(total_cycles):
             # Track per-cycle metrics (v1.1.0)
             _cycle_start = datetime.now()
@@ -2328,7 +2362,9 @@ def run(
 
                     _stage = "datagen"
                     _cycle_engine = DeploymentEngine(cfg)
-                    _cycle_datagen = DatagenDeployer(_cycle_engine)
+                    _cycle_datagen = DatagenDeployer(
+                        _cycle_engine, allow_stale_bronze=allow_stale_bronze
+                    )
                     _interrupt.creating("Job", "lakebench-datagen")
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
                     if datagen_result.status == DeploymentStatus.SUCCESS:

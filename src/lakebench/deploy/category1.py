@@ -295,7 +295,7 @@ KEPT_ON_DESTROY: tuple[KeptObject, ...] = (
         "table data written under them can outlive destroy (bucket cleanup off, or "
         "buckets this deployment does not own); a reset counter makes Delta skip "
         "writes as already committed. Deploy backfills it and keeps its values. "
-        "Its bronze_data_clock survives too, so a later deploy's silver stages read "
-        "the old clock until bronze-verify rewrites it",
+        "Its bronze_data_clock is cleared when the destroy empties the bronze "
+        "bucket, so a later deploy does not read the old data's clock",
     ),
 )

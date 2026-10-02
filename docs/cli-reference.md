@@ -304,7 +304,8 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 |---|---|---|---|
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting; `0` computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--regenerate` | | `false` | Empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. |
+| `--regenerate` | | `false` | Clear the datagen prefix (not the whole bucket) before generating, when this deployment owns the bronze bucket (its stamp, or a bucket it created). Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused (exit 3) on a bucket this deployment cannot prove it owns (`lakebench admin reclaim-bucket` claims one). |
+| `--allow-stale-bronze` | | `false` | Generate over objects already in the datagen prefix of a bronze bucket this deployment cannot prove it owns. Rows may be over-counted; `run` records it in `metrics.json` (`datagen.stale_bronze`) and the report shows "bronze held N objects before generate". |
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
@@ -312,9 +313,13 @@ may take hours. Without `--yes`, the command prompts for confirmation before
 submitting jobs. The Rust generator has no checkpoint-resume; an interrupted
 run is re-run from the start.
 
-**Exit codes**: `0` on success, `1` on generic failure, `2` when bronze is
-non-empty and `--regenerate` was not passed, `5` when datagen exceeds its
-wait budget (`--timeout`); in that case the datagen Job and any leftover
+**Exit codes**: `0` on success, `1` on generic failure and when datagen
+exceeds its wait budget (`--timeout`), `3` (refused) when the bronze datagen
+prefix is non-empty and neither `--regenerate` (on a bucket this deployment
+owns) nor `--allow-stale-bronze` (on one it does not) applies, or
+`--regenerate` was passed for a bucket it does not own or with an empty
+datagen prefix, and `4` when bronze or its ownership cannot be checked;
+when datagen exceeds its wait budget the datagen Job and any leftover
 streaming SparkApplication consuming the trickle are stopped before exit.
 Only the initial-pass datagen is guarded by this exit code; per-cycle
 datagen inside a multi-cycle run reports its own timeout independently.
@@ -334,7 +339,8 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
 | `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
 | `--skip-generate` | | `false` | Skip datagen (refused with `--generate`) |
-| `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused without `--generate` or `--generate-only`, and in a local or continuous run. |
+| `--regenerate` | | `false` | With `--generate`: clear the datagen prefix before generating, when this deployment owns the bronze bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment does not own. A multi-cycle run clears an owned prefix before cycle 0 without it. Refused without `--generate` or `--generate-only`, and in a local or continuous run. |
+| `--allow-stale-bronze` | | `false` | With `--generate` (or a multi-cycle run): generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; `metrics.json` records it (`datagen.stale_bronze`). |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. On Delta the silver table's own log has the last word: the rebuild writes under an epoch above every one the table has used, even if the counter reads lower |
 | `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
@@ -818,7 +824,7 @@ the cluster-wide `lakebench-cluster-lock` lease.
 | `admin install-spark-operator [CONFIG]` | `--version`, `--operator-namespace`, `--controller-tmp-size` (default 8Gi, floor 4Gi), `-f/--file` | Install or upgrade the shared Spark Operator. An upgrade keeps the tenants' watch lists, the installed chart unless `--version` or the config names one, and a larger `/tmp` already set |
 | `admin repair-operator [CONFIG]` | `--dry-run`, `--controller-tmp-size` (default 8Gi), `-f/--file` | Remove stale watch-list entries and raise a controller `/tmp` smaller than the given size |
 | `admin migrate-deployment NAMESPACE [CONFIG]` | `--api-server-fingerprint`, `-f/--file` | Stamp identity annotations on a legacy pre-ownership namespace |
-| `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment (refused when the bucket holds objects unless `--force-nonempty`) |
+| `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment and this cluster, or on a backend without tagging its owner marker (`.lakebench/owner.json`); refused (exit 3) when the bucket holds objects unless `--force-nonempty`, exit 4 when the cluster fingerprint cannot be computed |
 | `admin release-lock` | `--force` | Release an expired cluster lease; `--force` releases a live one (last resort) |
 
 The Spark Operator runs spark-submit in its controller pod, which caches

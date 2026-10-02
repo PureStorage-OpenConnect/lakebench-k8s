@@ -16,7 +16,7 @@ path yet says so.
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass`, `compare.like_for_like` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone` |
 | 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `compare.equal_names`, `compare.bad_ref`, `compare.same_runs`, `compare.unreadable_record`, `compare.removed_flag`, `reproduce.report_required` |
-| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `reproduce.existing_namespace`, `reproduce.nonce_changed`, `reproduce.held_out`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `lease.held`, `context.changed` |
+| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `reproduce.existing_namespace`, `reproduce.nonce_changed`, `reproduce.held_out`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `lease.held`, `context.changed`, `destroy.unverified_cluster` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
@@ -59,6 +59,7 @@ the CLI down every path listed here and checks the code.
 | `deploy.state_copied` | 3 | `deploy` found a state written for another directory or host (a copied directory) |
 | `destroy.incarnation_mismatch` | 3 | `destroy` found the namespace is not the deployment incarnation it checked or was told to expect |
 | `destroy.redeployed` | 3 | "Destroy NOT completed": the namespace now belongs to a newer deployment |
+| `destroy.unverified_cluster` | 3 | "Destroy NOT completed": this cluster has no fingerprint, so buckets are kept |
 | `lease.held` | 3 | another command holds the cluster lock lease |
 | `nameless.ambiguous` | 3 | a nameless config shares its directory with another nameless config and no --name |
 | `nameless.copied_dir` | 3 | a nameless config's state was written for another directory or host |
@@ -71,7 +72,7 @@ the CLI down every path listed here and checks the code.
 | `reproduce.existing_namespace` | 3 | `reproduce` would reuse a namespace or bucket that already exists |
 | `reproduce.held_out` | 3 | `reproduce` would regenerate a held-out corpus (its look has not run, its seed or the look record cannot be read, or the config names one) |
 | `reproduce.nonce_changed` | 3 | the deployment `reproduce` created was replaced before its run or its destroy |
-| `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix without --regenerate |
+| `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns |
 | `run.deps_mismatch` | 3 | the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded |
 | `deploy.state_unrecordable` | 4 | `deploy` could not read the namespace or write the nonce to the directory's state |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |

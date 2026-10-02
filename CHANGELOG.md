@@ -859,6 +859,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rule, score or query reads these two columns, and `passthrough_ratio`
   was already equal.
 ### Changed
+- **Stale bronze on buckets this deployment did not create is refused.**
+  `generate`, `run --generate` and a multi-cycle run's first cycle
+  go through one gate. `--regenerate` now clears only the datagen prefix
+  (aborting its incomplete multipart uploads) instead of the whole bronze
+  bucket, and only on a bucket this deployment owns; on any other bucket it
+  exits 3 (refused), where 1.6 emptied the bucket whoever owned it. Datagen over a
+  non-empty prefix of such a bucket needs the new `--allow-stale-bronze`
+  flag on `generate` and `run`; the run records `datagen.stale_bronze` in
+  `metrics.json` and the report warns "bronze held N objects before
+  generate; rows may be over-counted". The deployer no longer skips such a
+  bucket silently before cycle 0. A user with a pre-provisioned bronze
+  bucket who relied on `--regenerate` clears the prefix, or claims the bucket
+  once with `lakebench admin reclaim-bucket` and then uses `--regenerate`
+  (`--allow-stale-bronze` would over-count). A multi-cycle run still clears
+  an owned prefix before cycle 0, and a `run` after `generate
+  --allow-stale-bronze` still records the note.
+- **`destroy` clears the kept silver-state's data clock when it empties
+  bronze.** With `create_namespace: false`, `lakebench-silver-state`
+  survives destroy for its rebuild counters; its `bronze_data_clock` now
+  goes when destroy empties the bronze bucket, and when a generate replaces
+  bronze, so silver stages no longer read the old data's clock.
+- **Bucket ownership names the cluster.** Deploy stamps each bucket
+  it owns with `lakebench.cluster=<API-server fingerprint>` and refuses when it
+  cannot compute the fingerprint. Deploy refuses, and destroy, `clean` and
+  the continuous reset keep, a bucket another cluster stamped, so the same
+  deployment name on two clusters sharing an object store can no longer
+  empty each other's data. A 1.6 bucket without the stamp is stamped on the
+  next deploy when this namespace's record shows it created or adopted it;
+  one it does not record (adopted by 1.6) is used but no longer emptied or
+  deleted, and `lakebench admin reclaim-bucket` can claim it. With no
+  fingerprint, destroy keeps every stamped bucket: "Destroy NOT completed:
+  this cluster has no fingerprint". On a backend without tagging
+  (FlashBlade), deploy adopts a pre-existing empty bucket, or a
+  pre-provisioned one with `create_buckets: false`, only with
+  `--force-legacy`; without it the bucket is used but destroy leaves its data.
+  A bucket 1.6 recorded as adopted while empty is no longer emptied on that
+  record (1.6 wrote it for another cluster's bucket too); claim it with
+  `admin reclaim-bucket`. Destroy stamps a recorded 1.6 bucket before it
+  empties it, and keeps the stamp on every bucket it keeps (`--keep-buckets`
+  included), so the bucket stays this deployment's.
+  There the stamp is an owner marker object, `.lakebench/owner.json`, written
+  with a conditional PUT where the backend enforces it. `.lakebench/` keys
+  are never counted as data, and `clean` and `--regenerate` keep them. The
+  `boto3` floor rises to 1.35.2, the first release whose botocore accepts
+  `IfNoneMatch` on PutObject.
 - **`destroy` removes what it used to leave in a surviving namespace.** With
   `create_namespace: false`, destroy left the PostgreSQL ServiceAccount, the
   `lakebench-ca-certificate` Secret (with `s3.ca_cert`) and, with

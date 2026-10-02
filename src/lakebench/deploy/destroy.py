@@ -6,6 +6,7 @@ Called by DeploymentEngine.destroy_all() -- not used directly.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 import time
@@ -501,6 +502,57 @@ def _delete_namespace_and_wait(
     )
 
 
+def _stamp_legacy_proven(engine, s3, namespace: str, plan, guard) -> list[str]:
+    """Stamp this cluster on the plan's ownership-row-3 buckets; notes for failures.
+
+    Tagged: the ownership tags rewritten with ``lakebench.cluster`` (the
+    created flag and workload kept). Tagless: the owner marker. A failure
+    is a note, not a refusal: the bucket then reads row 4 on a later deploy
+    and is kept, never emptied by mistake.
+    """
+    from lakebench.deploy.ownership import (
+        TAG_WORKLOAD_SCHEMA,
+        cluster_stamp,
+        owner_marker_identity,
+        read_bucket_ownership_tag,
+        write_bucket_ownership_tag,
+        write_owner_marker,
+    )
+
+    stamp = cluster_stamp(plan.cluster_fp)
+    if stamp is None or not plan.legacy_proven:
+        return []
+    notes: list[str] = []
+    deployment = engine.config.name
+    for bucket, tagged in plan.legacy_proven:
+        try:
+            guard()
+            if tagged:
+                prior = read_bucket_ownership_tag(s3.raw_client, bucket) or {}
+                write_bucket_ownership_tag(
+                    s3.raw_client,
+                    bucket,
+                    deployment,
+                    workload_schema=prior.get(TAG_WORKLOAD_SCHEMA),
+                    # Row 3 means the created record lists it: keep that
+                    # proof on the bucket once the record goes.
+                    created=True,
+                    cluster=stamp,
+                )
+            else:
+                got = write_owner_marker(
+                    s3.raw_client, bucket, owner_marker_identity(deployment, stamp, namespace)
+                )
+                if not got.ours:
+                    notes.append(f"{bucket}: claimed meanwhile by {got.marker!r}")
+        except (_NamespaceReplaced, _NamespaceUnverifiable):
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not stamp this cluster on bucket %s: %s", bucket, e)
+            notes.append(f"{bucket}: cluster stamp not written ({e})")
+    return notes
+
+
 def _delete_owned_buckets(
     s3,
     buckets: list[str],
@@ -544,6 +596,9 @@ def _delete_owned_buckets(
         if guard is not None:
             guard()
         try:
+            # The bucket is empty but for Lakebench's own keys (the
+            # owner marker); they go last, right before the bucket.
+            s3.empty_bucket(bucket, before_batch=guard, keep_prefixes=())
             if s3.delete_bucket(bucket):
                 removed.append(bucket)
                 if on_deleted is not None:
@@ -595,6 +650,11 @@ class _BucketPlan:
     created_record: set[str]
     record_unreadable: list[str]
     owned_by_tag: list[str]
+    owned_by_marker: list[str]
+    unverified_cluster: list[str]
+    # Ownership row 3 buckets (name, tagged) the bucket step stamps.
+    legacy_proven: list[tuple[str, bool]]
+    cluster_fp: str | None
     absent_buckets: list[str]
     legacy_forced: list[str]
     unsupported_by_prefix: list[str]
@@ -657,7 +717,7 @@ def _classify_buckets(
         if report is not None:
             report(component, status, message)
 
-    from lakebench.deploy.ownership import read_adopted_empty_buckets, read_created_buckets
+    from lakebench.deploy.ownership import read_created_buckets
 
     s3_cfg = engine.config.platform.storage.s3
     transient = False
@@ -679,12 +739,17 @@ def _classify_buckets(
     # workload. `--force-legacy` is the explicit opt-in.
     from lakebench.deploy.ownership import (
         IdentityVerdict,
+        api_server_fingerprint,
         bucket_name_matches_deployment,
         list_lakebench_deployment_names,
         verify_bucket_ownership,
     )
 
     identity_name = engine.config.name
+    # The stamp a bucket must carry to be this deployment's on this
+    # cluster. None (no CA data) keeps every stamped bucket (row 8);
+    # --allow-unverified-cluster waives the namespace check, never this one.
+    my_cluster = api_server_fingerprint(engine.config.platform.kubernetes.context or "")
     # Cluster-scan other lakebench deployments so the
     # UNSUPPORTED fallback can enforce longest-prefix-wins.
     # ``None`` means "cannot know" and the UNSUPPORTED
@@ -710,17 +775,10 @@ def _classify_buckets(
     # too (each still has to pass the ownership check below),
     # or they leak and the namespace delete erases the record.
     created_record: set[str] = set()
-    # Tagless backends: buckets deploy adopted while empty. Their
-    # data is this deployment's, so they may be emptied (never
-    # deleted: not in created_record).
-    adopted_empty_record: set[str] = set()
     record_unreadable: list[str] = []
     if namespace_present:
         try:
             created_record = set(read_created_buckets(k8s_client.CoreV1Api(), namespace))
-            adopted_empty_record = set(
-                read_adopted_empty_buckets(k8s_client.CoreV1Api(), namespace)
-            )
         except Exception as e:  # noqa: BLE001
             logger.warning("could not read created-buckets record: %s", e)
             record_unreadable.append(f"namespace annotation: {e}")
@@ -747,9 +805,53 @@ def _classify_buckets(
     unsupported_unrecorded: list[str] = []
     unsupported_forced_unrecorded: list[str] = []
     owned_by_tag: list[str] = []
+    # Tagless buckets whose owner marker names this deployment and cluster.
+    owned_by_marker: list[str] = []
     absent_buckets: list[str] = []
+    # Ownership refusals: another cluster's claim, an unproven 1.6 claim, or no
+    # fingerprint for this run.
+    foreign_cluster: list[str] = []
+    legacy_unproven: list[str] = []
+    unverified_cluster: list[str] = []
+    legacy_proven: list[tuple[str, bool]] = []
+    # Only the created record proves this cluster made a bucket; the
+    # adopted-empty record is what a 1.6 deploy wrote when it adopted another
+    # cluster's empty bucket (a 1.7 adoption carries an owner marker).
+    record = created_record
     for bucket in buckets:
-        v = verify_bucket_ownership(s3.raw_client, bucket, identity_name)
+        v = verify_bucket_ownership(
+            s3.raw_client,
+            bucket,
+            identity_name,
+            expected_cluster=my_cluster,
+            created_record=record,
+        )
+        if v.verdict is IdentityVerdict.LEGACY_PROVEN:
+            # Row 3: the created record proves this cluster made it. It is
+            # stamped by the bucket step (a bucket destroy keeps then stays
+            # this deployment's after the record goes with the namespace).
+            # A tagged one is ours as a MATCH is; a tagless one takes the
+            # record branch below, as before cluster stamps.
+            legacy_proven.append((bucket, v.tagged))
+            v = dataclasses.replace(
+                v,
+                verdict=IdentityVerdict.MATCH if v.tagged else IdentityVerdict.UNSUPPORTED,
+            )
+        if v.verdict is IdentityVerdict.MATCH and not v.tagged:
+            owned_by_marker.append(bucket)
+            continue
+        if v.verdict is IdentityVerdict.FOREIGN_CLUSTER:
+            foreign_cluster.append(f"{bucket} ({v.hint})")
+            refused_names.append(bucket)
+            continue
+        if v.verdict is IdentityVerdict.LEGACY_UNPROVEN:
+            legacy_unproven.append(bucket)
+            refused_names.append(bucket)
+            continue
+        if v.verdict is IdentityVerdict.UNVERIFIED_CLUSTER:
+            unverified_cluster.append(bucket)
+            refused_names.append(bucket)
+            continue
         if v.verdict is IdentityVerdict.MATCH:
             owned_by_tag.append(bucket)
         elif v.verdict is IdentityVerdict.NOT_FOUND:
@@ -798,7 +900,7 @@ def _classify_buckets(
             # --force-legacy a tagged backend demands. Only the
             # namespace's created-buckets record shows lakebench
             # made it, so an unrecorded bucket is left alone.
-            if prefix_ok and bucket not in created_record and bucket not in adopted_empty_record:
+            if prefix_ok and bucket not in created_record:
                 if force_legacy:
                     unsupported_forced_unrecorded.append(bucket)
                     logger.warning(
@@ -819,8 +921,7 @@ def _classify_buckets(
                 continue
             if prefix_ok and bucket in recorded_only_set:
                 try:
-                    resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
-                    holds = int(resp.get("KeyCount", 0)) > 0
+                    holds = s3.has_user_objects(bucket)
                 except Exception:  # noqa: BLE001
                     holds = True
             else:
@@ -881,8 +982,29 @@ def _classify_buckets(
         or unsupported_refused
         or held_recorded
         or unsupported_unrecorded
+        or foreign_cluster
+        or legacy_unproven
+        or unverified_cluster
     ):
         parts = []
+        if unverified_cluster:
+            parts.append(
+                "Destroy NOT completed: this cluster has no fingerprint (kubeconfig "
+                "has no CA data); buckets kept: "
+                + ", ".join(unverified_cluster)
+                + " (`lakebench admin reclaim-bucket` (owner) can release them)"
+            )
+        if foreign_cluster:
+            parts.append("claimed from another cluster: " + "; ".join(foreign_cluster))
+        if legacy_unproven:
+            parts.append(
+                "carry this deployment's name but no cluster stamp, and this "
+                "namespace does not record creating or adopting them (claimed by an "
+                "earlier lakebench): "
+                + ", ".join(legacy_unproven)
+                + " (left in place; an owner can claim them with "
+                "`lakebench admin reclaim-bucket`)"
+            )
         if unsupported_unrecorded:
             parts.append(
                 "backend does not support bucket tagging and this "
@@ -954,6 +1076,10 @@ def _classify_buckets(
         created_record=created_record,
         record_unreadable=record_unreadable,
         owned_by_tag=owned_by_tag,
+        owned_by_marker=owned_by_marker,
+        unverified_cluster=unverified_cluster,
+        legacy_proven=[(b, t) for b, t in legacy_proven if b not in refused_set],
+        cluster_fp=my_cluster,
         absent_buckets=absent_buckets,
         legacy_forced=legacy_forced,
         unsupported_by_prefix=unsupported_by_prefix,
@@ -1242,8 +1368,7 @@ def _buckets_hold_data(engine) -> bool | None:
         for bucket in (s3_cfg.buckets.bronze, s3_cfg.buckets.silver, s3_cfg.buckets.gold):
             if not s3.bucket_exists(bucket):
                 continue
-            resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
-            if int(resp.get("KeyCount", 0)) > 0:
+            if s3.has_user_objects(bucket):
                 return True
         return False
     except Exception as e:  # noqa: BLE001
@@ -1382,6 +1507,7 @@ def _category1_step(
     *,
     ns_goes: bool,
     conditions: frozenset[str] = frozenset(),
+    bronze_emptied: bool = False,
 ) -> DeploymentResult:
     """Delete the ``category1`` registry entries and the Category-1 annotations.
 
@@ -1400,6 +1526,12 @@ def _category1_step(
     When the namespace step is meant to delete it, the annotations are left:
     if that step then keeps the namespace (an operator pod still watching
     it, say), the deployment is still whole.
+
+    ``lakebench-silver-state`` is kept (KEPT_ON_DESTROY), but its
+    ``bronze_data_clock`` describes the bronze data. When this destroy
+    emptied the bronze bucket, the clock is cleared (a 404, the namespace
+    already gone, is fine), so a later deploy's silver stages do not read
+    the old data's clock; the rebuild-epoch counters are left alone.
     """
     from kubernetes.client.rest import ApiException
 
@@ -1441,6 +1573,18 @@ def _category1_step(
                 problems.append(f"{entry.kind}/{name}: {e.reason}")
             except Exception as e:  # noqa: BLE001
                 problems.append(f"{entry.kind}/{name}: {e}")
+    if bronze_emptied:
+        # Whether or not the namespace step then deletes the namespace: one it
+        # keeps (a refusal) must not keep the emptied data's clock.
+        try:
+            from lakebench.deploy.datagen import clear_bronze_data_clock
+
+            clear_bronze_data_clock(namespace)
+        except ApiException as e:
+            if e.status != 404:
+                problems.append(f"lakebench-silver-state bronze_data_clock: {e.reason}")
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"lakebench-silver-state bronze_data_clock: {e}")
     try:
         if not ns_goes:
             core_v1 = _category1_api("core_v1")
@@ -2742,6 +2886,9 @@ def destroy_all(
             return stopped
 
     # Step 4: Clean S3 buckets (optional)
+    # Whether this destroy emptied the bronze bucket (its data clock
+    # in lakebench-silver-state is then stale).
+    bronze_emptied = False
     if clean_buckets and not data_steps_allowed:
         results.append(
             DeploymentResult(
@@ -2804,6 +2951,8 @@ def destroy_all(
                 created_record = plan_b.created_record
                 record_unreadable = plan_b.record_unreadable
                 owned_by_tag = plan_b.owned_by_tag
+                owned_by_marker = plan_b.owned_by_marker
+                unverified_cluster = plan_b.unverified_cluster
                 absent_buckets = plan_b.absent_buckets
                 unsupported_by_prefix = plan_b.unsupported_by_prefix
                 unsupported_forced_unrecorded = plan_b.unsupported_forced_unrecorded
@@ -2816,6 +2965,11 @@ def destroy_all(
                 # reuse the names and pass the same ownership checks.
                 guard = partial(_check_same_namespace, engine, namespace, namespace_token_at_start)
                 guard()
+                # Ownership row 3: stamp this cluster on the recorded legacy
+                # buckets before anything else, so one destroy keeps
+                # (--keep-buckets, create_buckets false) is still provably
+                # this deployment's after the namespace and its record go.
+                stamp_notes = _stamp_legacy_proven(engine, s3, namespace, plan_b, guard)
                 # LB-159: only buckets lakebench created are deleted. The
                 # record is the namespace annotation (all backends) plus
                 # the created tag where tagging works. An unreadable
@@ -2836,6 +2990,9 @@ def destroy_all(
                 for bucket in buckets:
                     guard()
                     try:
+                        # The owner marker is kept: a bucket destroy
+                        # keeps stays this deployment's. It goes only with
+                        # the bucket (_delete_owned_buckets).
                         deleted = s3.empty_bucket(bucket, before_batch=guard)
                     except S3BucketVanished:
                         # A concurrent destroy of this deployment deleted
@@ -2845,6 +3002,8 @@ def destroy_all(
                         vanished = bucket
                         break
                     total_deleted += deleted
+                    if bucket == s3_cfg.buckets.bronze:
+                        bronze_emptied = True
                 # LB-159: emptying alone leaked one empty bucket per
                 # deployment. Delete only buckets proven to be this
                 # deployment's (ownership tag, or the name-prefix claim
@@ -2869,7 +3028,10 @@ def destroy_all(
                     bucket_notes, delete_failed = _delete_owned_buckets(
                         s3,
                         buckets,
-                        deletable=(set(owned_by_tag) | set(unsupported_by_prefix)) & created_set,
+                        deletable=(
+                            set(owned_by_tag) | set(owned_by_marker) | set(unsupported_by_prefix)
+                        )
+                        & created_set,
                         enabled=delete_buckets,
                         create_buckets=bool(s3_cfg.create_buckets),
                         absent=set(absent_buckets),
@@ -2987,6 +3149,7 @@ def destroy_all(
                         "AND without name-prefix match: " + ", ".join(unsupported_forced)
                     )
                 notes.extend(bucket_notes)
+                notes.extend(f"WARN: {n}" for n in stamp_notes)
                 # The step is a refusal only when nothing else in it failed and
                 # nothing was transient: a retry can fix those, so they exit 1.
                 bucket_refused_only = bool(refusal_msg) and not (
@@ -3029,19 +3192,24 @@ def destroy_all(
                 bucket_status = (
                     DeploymentStatus.FAILED if delete_failed else DeploymentStatus.SUCCESS
                 )
+                # Ownership row 8 is a refusal with its own exit code
+                # (the REFUSAL_DETAIL key), when it is the only refusal.
+                bucket_details: dict = {}
+                if bucket_refused_only:
+                    bucket_details[REFUSAL_DETAIL] = (
+                        "destroy.unverified_cluster"
+                        if unverified_cluster and set(unverified_cluster) == refused_set
+                        else "deploy.identity_foreign"
+                    )
                 results.append(
                     DeploymentResult(
                         component="s3-buckets",
                         status=bucket_status,
-                        details=(
-                            {REFUSAL_DETAIL: "deploy.identity_foreign"}
-                            if bucket_refused_only
-                            else {}
-                        ),
                         message=(
                             f"Emptied {len(buckets)} S3 buckets "
                             f"({total_deleted} objects)" + summary_note
                         ),
+                        details=bucket_details,
                     )
                 )
                 report(
@@ -3678,6 +3846,7 @@ def destroy_all(
         engine.config.name,
         ns_goes=engine.config.platform.kubernetes.create_namespace is True,
         conditions=frozenset({"observability"} if engine.config.observability.enabled else ()),
+        bronze_emptied=bronze_emptied,
     )
     results.append(cat1)
     report("category1", cat1.status, cat1.message)

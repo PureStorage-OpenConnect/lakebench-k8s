@@ -37,35 +37,19 @@ READERS: dict[str, str] = {
     "platform.deps.storage_class": (
         "lakebench.deploy.deps:DependencyServerDeployer._check_storage_class"
     ),
-    "platform.storage.s3.endpoint": (
-        "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
-    ),
-    "platform.storage.s3.region": (
-        "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
-    ),
-    "platform.storage.s3.path_style": (
-        "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
-    ),
-    "platform.storage.s3.access_key": (
-        "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
-    ),
-    "platform.storage.s3.secret_key": (
-        "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
-    ),
-    "platform.storage.s3.ca_cert": (
-        "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
-    ),
-    "platform.storage.s3.verify_ssl": (
-        "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
-    ),
+    "platform.storage.s3.endpoint": "lakebench.deploy.datagen:_s3_client_for",
+    "platform.storage.s3.region": "lakebench.deploy.datagen:_s3_client_for",
+    "platform.storage.s3.path_style": "lakebench.deploy.datagen:_s3_client_for",
+    "platform.storage.s3.access_key": "lakebench.deploy.datagen:_s3_client_for",
+    "platform.storage.s3.secret_key": "lakebench.deploy.datagen:_s3_client_for",
+    "platform.storage.s3.ca_cert": "lakebench.deploy.datagen:_s3_client_for",
+    "platform.storage.s3.verify_ssl": "lakebench.deploy.datagen:_s3_client_for",
     "platform.storage.s3.buckets.bronze": (
         "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
     ),
     "platform.storage.s3.buckets.silver": "lakebench.deploy.destroy:_classify_buckets",
     "platform.storage.s3.buckets.gold": "lakebench.deploy.destroy:_classify_buckets",
-    "platform.storage.s3.create_buckets": (
-        "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
-    ),
+    "platform.storage.s3.create_buckets": "lakebench.deploy.engine:DeploymentEngine._deploy_buckets",
     "platform.storage.scratch.enabled": (
         "lakebench.deploy.engine:DeploymentEngine._deploy_scratch_storageclass"
     ),

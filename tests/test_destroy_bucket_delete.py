@@ -37,8 +37,10 @@ class FakeBoto:
         # Owned but not marked created (adopted); tests override as needed.
         return {"TagSet": [{"Key": "lakebench.deployment", "Value": "a"}]}
 
-    def list_objects_v2(self, Bucket, MaxKeys=1000):
-        keys = self.buckets.get(Bucket, [])[:MaxKeys]
+    def list_objects_v2(self, Bucket, MaxKeys=1000, Prefix="", StartAfter=""):
+        keys = sorted(
+            k for k in self.buckets.get(Bucket, []) if k.startswith(Prefix) and k > StartAfter
+        )[:MaxKeys]
         return {"KeyCount": len(keys), "Contents": [{"Key": k} for k in keys]}
 
     def head_bucket(self, Bucket):
@@ -281,7 +283,7 @@ class TestDestroyAllBuckets:
         # Default: deploy recorded all three as created (LB-159 marker).
         created_record = set(verdicts) if created is None else set(created)
 
-        def verify(_boto, bucket, _name):
+        def verify(_boto, bucket, _name, **_kw):
             return IdentityReport(
                 verdict=getattr(IdentityVerdict, verdicts[bucket]),
                 resource_name=bucket,
@@ -465,19 +467,23 @@ class TestDestroyAllBuckets:
         assert "lists neither as created nor as adopted while empty" in r.message
         assert "a-bronze" in r.message
 
-    def test_tagless_bucket_adopted_while_empty_is_emptied_not_deleted(self):
-        """--keep-buckets then redeploy, or create_buckets=false: deploy adopted
-        the bucket empty, so its data is this deployment's."""
-        boto = FakeBoto({"a-bronze": ["ours"], "a-silver": [], "a-gold": []})
+    def test_tagless_bucket_in_a_16_adopted_empty_record_is_kept(self):
+        """SAF-10: 1.6 recorded a bucket as adopted while empty even when it was
+        another cluster's bucket not yet written (the cross-cluster hole), so
+        that record proves nothing now. A 1.7 adoption carries an owner marker
+        instead (tests/test_bucket_fingerprint_matrix.py). Before 1.7 this
+        bucket was emptied."""
+        boto = FakeBoto({"a-bronze": ["theirs"], "a-silver": [], "a-gold": []})
         r = self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
             created={"a-silver", "a-gold"},
             adopted_empty={"a-bronze"},
         )
-        assert boto.buckets == {"a-bronze": []}
+        assert boto.buckets == {"a-bronze": ["theirs"]}
         assert "a-bronze" not in boto.delete_bucket_calls
-        assert r.status is DeploymentStatus.SUCCESS, r.message
+        assert r.status is DeploymentStatus.FAILED
+        assert "a-bronze" in r.message
 
     def test_tagless_unrecorded_bucket_is_emptied_only_on_force_legacy_never_deleted(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})

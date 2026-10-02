@@ -522,7 +522,7 @@ idempotent -- components that already exist are skipped.
 (4 hours). The Rust generator has no checkpoint-resume, so a re-run starts
 from the beginning, and because the failed run left partial data in bronze,
 the re-run needs `--regenerate` (`lakebench generate lakebench.yaml
---regenerate`), which empties the bronze bucket first. Without it `generate`
+--regenerate`), which clears the datagen prefix first. Without it `generate`
 exits 3 (refused) and names the non-empty prefix.
 
 **A pipeline stage fails:** Re-run just that stage:

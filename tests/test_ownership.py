@@ -504,11 +504,15 @@ class TestBucketOwnershipTag:
         s3.put_bucket_tagging.assert_not_called()
 
     def test_verify_match(self):
+        """SAF-10 row 1: our name and this cluster's stamp."""
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.return_value = {
-            "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "mine"}]
+            "TagSet": [
+                {"Key": TAG_DEPLOYMENT_NAME, "Value": "mine"},
+                {"Key": "lakebench.cluster", "Value": "fp1"},
+            ]
         }
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster="fp1", created_record=())
         assert r.verdict is IdentityVerdict.MATCH
 
     def test_verify_mismatch_refuses(self):
@@ -518,21 +522,21 @@ class TestBucketOwnershipTag:
         s3.get_bucket_tagging.return_value = {
             "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "someone-else"}]
         }
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
         assert r.verdict is IdentityVerdict.MISMATCH
         assert "someone-else" in (r.hint or "")
 
     def test_verify_legacy_untagged_bucket_absent(self):
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
         assert r.verdict is IdentityVerdict.ABSENT
         assert "force-legacy" in (r.hint or "")
 
     def test_verify_missing_bucket(self):
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.side_effect = _client_error("NoSuchBucket")
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
         assert r.verdict is IdentityVerdict.NOT_FOUND
 
 
@@ -575,7 +579,8 @@ class TestBucketTaggingUnsupported:
     def test_verify_returns_unsupported_verdict(self):
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.side_effect = _client_error("NotImplemented")
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        s3.get_object.side_effect = _client_error("NoSuchKey")  # no owner marker
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
         assert r.verdict is IdentityVerdict.UNSUPPORTED
         assert "NotImplemented" in (r.hint or "")
 
@@ -584,13 +589,21 @@ class TestBucketTaggingUnsupported:
         prefix instead of the --force-legacy migration path."""
         s3_unsupported = mock.MagicMock()
         s3_unsupported.get_bucket_tagging.side_effect = _client_error("NotImplemented")
+        s3_unsupported.get_object.side_effect = _client_error("NoSuchKey")
         s3_absent = mock.MagicMock()
         s3_absent.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
         assert (
-            verify_bucket_ownership(s3_unsupported, "b1", "mine").verdict
+            verify_bucket_ownership(
+                s3_unsupported, "b1", "mine", expected_cluster=None, created_record=()
+            ).verdict
             is IdentityVerdict.UNSUPPORTED
         )
-        assert verify_bucket_ownership(s3_absent, "b1", "mine").verdict is IdentityVerdict.ABSENT
+        assert (
+            verify_bucket_ownership(
+                s3_absent, "b1", "mine", expected_cluster=None, created_record=()
+            ).verdict
+            is IdentityVerdict.ABSENT
+        )
 
 
 class TestBucketNamePrefixFallback:

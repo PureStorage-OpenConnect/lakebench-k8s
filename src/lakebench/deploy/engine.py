@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from collections.abc import Callable
@@ -228,8 +229,10 @@ def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
     refusing the deploy for a different reason and cleanup is
     best-effort.
     """
+    from lakebench.s3.client import has_user_objects
+
     try:
-        r = boto_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        holds = has_user_objects(boto_client, bucket)
     except Exception:  # noqa: BLE001
         logger.warning(
             "orphan bucket %s: could not verify empty before delete; "
@@ -238,7 +241,7 @@ def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
             exc_info=True,
         )
         return
-    if r.get("KeyCount", 0) > 0 or r.get("Contents"):
+    if holds:
         logger.warning(
             "orphan bucket %s: contains objects (a concurrent process "
             "wrote between our CreateBucket and our ownership refusal). "
@@ -1313,22 +1316,33 @@ class DeploymentEngine:
             detail=self.SILVER_STATE_CONFIGMAP,
         )
 
-    def _record_preprovisioned_empty_buckets(self) -> None:
+    def _record_preprovisioned_empty_buckets(self, force_legacy: bool = False) -> None:
         """create_buckets=false on a backend without tagging: record empty buckets.
 
         Pre-provisioned buckets are never created by lakebench, so without a
-        record destroy, clean and the continuous reset would refuse to empty
-        them on a tagless backend. One that is empty now, whose name gives
-        this deployment the longest-prefix claim, holds only this
-        deployment's data from here on. Best effort: any failure just leaves
-        it unrecorded, which is the safe side.
+        record destroy, clean and the continuous reset refuse to empty them
+        on a tagless backend. An empty, unmarked bucket may be another
+        cluster's bucket that has not been written yet; nothing visible from
+        here tells them apart (ownership row 7, the cross-cluster hole). So one
+        is recorded as adopted while empty only with ``--force-legacy``, the
+        operator's statement that no other cluster uses the name. Best
+        effort: any failure just leaves it unrecorded, which is the safe side.
         """
+        if not force_legacy:
+            logger.info(
+                "create_buckets is false on a backend without tagging: pre-provisioned "
+                "buckets are used but not owned, so destroy will not empty them. "
+                "Deploy with --force-legacy once if no other cluster uses these names."
+            )
+            return
         try:
             from kubernetes import client as _kclient
 
             from lakebench.deploy.ownership import (
                 IdentityVerdict,
+                api_server_fingerprint,
                 bucket_name_matches_deployment,
+                cluster_stamp,
                 list_lakebench_deployment_names,
                 record_adopted_empty_buckets,
                 verify_bucket_ownership,
@@ -1359,18 +1373,77 @@ class DeploymentEngine:
                 return
             empty: list[str] = []
             b = s3_cfg.buckets
+            fp = api_server_fingerprint(self.config.platform.kubernetes.context or "")
             for name in dict.fromkeys([b.bronze, b.silver, b.gold]):
-                v = verify_bucket_ownership(s3.raw_client, name, self.config.name)
+                v = verify_bucket_ownership(
+                    s3.raw_client,
+                    name,
+                    self.config.name,
+                    expected_cluster=fp,
+                    created_record=(),
+                )
+                # Only a tagless bucket with no owner marker can be adopted here.
                 if v.verdict is not IdentityVerdict.UNSUPPORTED:
                     continue
                 if not bucket_name_matches_deployment(name, self.config.name, others):
                     continue
-                resp = s3.raw_client.list_objects_v2(Bucket=name, MaxKeys=1)
-                if int(resp.get("KeyCount", 0)) == 0:
+                if not s3.has_user_objects(name):
                     empty.append(name)
-            record_adopted_empty_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), empty)
+            stamp = cluster_stamp(fp)
+            if stamp is None:
+                logger.warning(
+                    "cannot compute this cluster's fingerprint; pre-provisioned buckets "
+                    "are not claimed"
+                )
+                return
+            # Claim first (the owner marker decides a race), record only what
+            # this deployment won.
+            ours: list[str] = []
+            for name in empty:
+                refused = self._stamp_owner_marker(s3.raw_client, name, self.config.name, stamp)
+                if refused:
+                    logger.warning("pre-provisioned bucket not claimed: %s", refused)
+                    continue
+                ours.append(name)
+            record_adopted_empty_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), ours)
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not record pre-provisioned empty buckets: %s", e)
+
+    def _stamp_owner_marker(self, boto: Any, bucket: str, deployment: str, cluster: str) -> str:
+        """Write the owner marker on a tagless bucket; "" when it is ours.
+
+        Returns the refusal text when the bucket turns out to carry another
+        deployment's or another cluster's marker (a racing claim won).
+        """
+        from lakebench.deploy.ownership import owner_marker_identity, write_owner_marker
+
+        namespace = self.config.get_namespace()
+        try:
+            uid = self.k8s.get_namespace_uid(namespace)
+        except Exception:  # noqa: BLE001 -- informational in the marker
+            uid = ""
+        identity = owner_marker_identity(
+            deployment, cluster, namespace, uid if isinstance(uid, str) else ""
+        )
+        result = write_owner_marker(boto, bucket, identity)
+        try:
+            from kubernetes import client as _kclient
+
+            from lakebench.deploy.ownership import ANNOTATION_MARKER_WRITE
+
+            _kclient.CoreV1Api().patch_namespace(
+                namespace, {"metadata": {"annotations": {ANNOTATION_MARKER_WRITE: result.mode}}}
+            )
+        except Exception as e:  # noqa: BLE001 -- the record is informational
+            logger.warning("could not record the marker write mode on %s: %s", namespace, e)
+        if result.ours:
+            return ""
+        found = result.marker or {}
+        return (
+            f"bucket {bucket!r} is claimed by deployment {found.get('deployment')!r} on "
+            f"cluster {found.get('cluster')!r} (.lakebench/owner.json), not by "
+            f"{deployment!r} on this cluster"
+        )
 
     def _deploy_buckets(self, force_legacy: bool = False) -> DeploymentResult:
         """Create S3 buckets if create_buckets is enabled.
@@ -1391,7 +1464,7 @@ class DeploymentEngine:
                     "s3-buckets", "pre-provisioned buckets (create_buckets=false)", start
                 )
             if not self.dry_run and s3_cfg.endpoint:
-                self._record_preprovisioned_empty_buckets()
+                self._record_preprovisioned_empty_buckets(force_legacy=force_legacy)
             return DeploymentResult(
                 component="s3-buckets",
                 status=DeploymentStatus.SKIPPED,
@@ -1467,17 +1540,33 @@ class DeploymentEngine:
             IdentityVerdict,
             bucket_name_matches_deployment,
             build_identity_from_config,
+            cluster_stamp,
             list_lakebench_deployment_names,
             read_bucket_ownership_tag,
             record_created_buckets,
             verify_bucket_ownership,
             write_bucket_ownership_tag,
         )
+        from lakebench.s3.client import has_user_objects
 
         identity = build_identity_from_config(
             self.config,
             context=self.config.platform.kubernetes.context or "",
         )
+        # Every bucket this deployment claims carries this cluster's
+        # stamp, so a deployment of the same name on another cluster sharing
+        # the object store cannot adopt it.
+        my_cluster = cluster_stamp(identity.api_server)
+        if my_cluster is None:
+            return DeploymentResult(
+                component="s3-buckets",
+                status=DeploymentStatus.FAILED,
+                message=(
+                    "cannot compute this cluster's fingerprint (kubeconfig has no CA "
+                    "data); ownership cannot be stamped"
+                ),
+                elapsed_seconds=time.time() - start,
+            )
         boto = s3.raw_client  # boto3 client under the hood
         unsupported_warned = False  # log the tagging fallback once per deploy
         # Enumerate other lakebench deployments on the cluster once so
@@ -1538,7 +1627,41 @@ class DeploymentEngine:
             return _created_cache[0]
 
         for name in bucket_names:
-            v = verify_bucket_ownership(boto, name, identity.name)
+            # Only the created record proves this cluster made a
+            # bucket (a 1.6 adopted-empty record does not).
+            record = _recorded_created() | set(created)
+            v = verify_bucket_ownership(
+                boto,
+                name,
+                identity.name,
+                expected_cluster=identity.api_server,
+                created_record=record,
+            )
+            if v.verdict in (
+                IdentityVerdict.FOREIGN_CLUSTER,
+                IdentityVerdict.UNVERIFIED_CLUSTER,
+            ):
+                return DeploymentResult(
+                    component="s3-buckets",
+                    status=DeploymentStatus.FAILED,
+                    message=f"Bucket ownership refused: {v.hint}",
+                    elapsed_seconds=time.time() - start,
+                    details={REFUSAL_DETAIL: "deploy.identity_foreign"},
+                )
+            if v.verdict is IdentityVerdict.LEGACY_UNPROVEN:
+                # Ownership row 4: ours by name, claimed by an earlier lakebench
+                # without a cluster stamp, and nothing here proves this
+                # cluster made it. Use it as 1.6 did; never stamp it.
+                logger.warning("%s", v.hint)
+                continue
+            if v.verdict is IdentityVerdict.LEGACY_PROVEN and not v.tagged:
+                # Tagless, recorded by this namespace: handled by the
+                # record branch below like any tagless bucket.
+                v = dataclasses.replace(v, verdict=IdentityVerdict.UNSUPPORTED)
+            if not v.tagged and v.verdict is IdentityVerdict.MATCH:
+                # Tagless with this deployment's and this cluster's owner
+                # marker: nothing to write.
+                continue
             if v.verdict is IdentityVerdict.MISMATCH:
                 return DeploymentResult(
                     component="s3-buckets",
@@ -1642,23 +1765,34 @@ class DeploymentEngine:
                         identity.name,
                     )
                     unsupported_warned = True
+                stamp = was_created or name in _recorded_created()
                 if was_created:
                     logger.info(
                         "bucket %s: created under name-prefix ownership; "
                         "no tag written (backend unsupported).",
                         name,
                     )
-                elif name not in _recorded_created():
+                elif not stamp:
                     # The name does not prove ownership of a pre-existing
-                    # bucket, so destroy will not empty it on name alone.
-                    # One adopted while empty holds only this deployment's
-                    # data from here on; record that so destroy may empty it
-                    # (never delete). A bucket that already holds objects
-                    # stays unrecorded and destroy leaves its data alone.
+                    # bucket, so destroy will not empty it on name alone. An
+                    # empty, unmarked one may be another cluster's bucket not
+                    # yet written (ownership row 7): it is adopted (recorded as
+                    # adopted while empty, so destroy may empty but never
+                    # delete it) only with --force-legacy. Without the flag
+                    # it is used but not owned.
+                    if not force_legacy:
+                        logger.warning(
+                            "bucket %s pre-exists on a backend without bucket tagging "
+                            "and has no lakebench owner marker; it is used but not "
+                            "owned, so destroy will not empty it. Deploy with "
+                            "--force-legacy once if no other cluster uses this name.",
+                            name,
+                        )
+                        continue
                     try:
-                        resp = boto.list_objects_v2(Bucket=name, MaxKeys=1)
-                        if int(resp.get("KeyCount", 0)) == 0:
+                        if not has_user_objects(boto, name):
                             adopted_empty.append(name)
+                            stamp = True
                         else:
                             logger.warning(
                                 "bucket %s already holds objects and the backend has no "
@@ -1668,6 +1802,18 @@ class DeploymentEngine:
                             )
                     except Exception as e:  # noqa: BLE001
                         logger.warning("could not check whether bucket %s is empty: %s", name, e)
+                if stamp:
+                    # Claim it for this deployment on this cluster
+                    # with the owner marker (created, recorded, or adopted
+                    # empty with --force-legacy).
+                    refused = self._stamp_owner_marker(boto, name, identity.name, my_cluster)
+                    if refused:
+                        return DeploymentResult(
+                            component="s3-buckets",
+                            status=DeploymentStatus.FAILED,
+                            message=f"Bucket ownership refused: {refused}",
+                            elapsed_seconds=time.time() - start,
+                        )
                 continue
             # LB-159: keep the created-by-lakebench marker across redeploys
             # (the tag set is rewritten each time) and add it on create.
@@ -1688,6 +1834,7 @@ class DeploymentEngine:
                     identity.name,
                     workload_schema=identity.workload_schema,
                     created=created_here,
+                    cluster=my_cluster,
                 )
             except BucketTaggingUnsupported:
                 # Rare race: verify said tags exist earlier in this
