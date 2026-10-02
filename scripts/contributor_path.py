@@ -52,7 +52,11 @@ INTEGRATE = "origin/integrate/v1.5.0"
 
 _CLONE = re.compile(r"^git clone (?P<url>\S+)(?: (?P<dir>\S+))?\s*$")
 # make options that take the next word as their argument, not a target.
-_MAKE_ARG_OPTS = frozenset({"-C", "-f", "-I", "-j", "-l", "-o", "-W", "--directory", "--file"})
+# (-j and -l take an optional number, so only a numeric next word is theirs.)
+_MAKE_ARG_OPTS = frozenset({"-C", "-f", "-I", "-o", "-W", "--directory", "--file"})
+_MAKE_NUM_OPTS = frozenset({"-j", "-l"})
+# Words that run the command after them.
+_PREFIX_WORDS = frozenset({"env", "sudo", "command", "exec", "nice", "time"})
 
 
 def always_runs(ref: str) -> bool:
@@ -86,23 +90,30 @@ def problems(lines: Sequence[str], makefile: str) -> list[str]:
         if not re.search(r"(^|[\s;&|(])make(\s|$)", ln):
             continue
         try:
-            words = shlex.split(ln, comments=True)
+            lex = shlex.shlex(ln, posix=True, punctuation_chars=True)
+            lex.whitespace_split = True
+            lex.commenters = "#"
+            words = list(lex)
         except ValueError:
             out.append(f"cannot parse the make line {ln!r}")
             continue
         for cmd in _commands(words):
+            while cmd and (cmd[0] in _PREFIX_WORDS or "=" in cmd[0] or cmd[0].startswith("-")):
+                cmd = cmd[1:]  # VAR=value, env, sudo and their options
             if cmd[:1] != ["make"]:
                 continue
             skip = False
+            prev = ""
             for w in cmd[1:]:
                 if skip:
                     skip = False
                 elif w in _MAKE_ARG_OPTS:
                     skip = True
-                elif w.startswith("-") or "=" in w:
-                    continue
+                elif w.startswith("-") or "=" in w or (w.isdigit() and prev in _MAKE_NUM_OPTS):
+                    pass
                 elif w not in targets:
                     out.append(f"`make {w}` has no Makefile target")
+                prev = w
     return out
 
 
@@ -125,7 +136,7 @@ def _commands(words: list[str]) -> list[list[str]]:
     """Split shell words into simple commands at ``&&``, ``||``, ``;`` and ``|``."""
     cmds: list[list[str]] = [[]]
     for w in words:
-        if w in ("&&", "||", ";", "|"):
+        if w in ("&&", "||", ";", "|", "&", "(", ")", ";;"):
             cmds.append([])
         else:
             cmds[-1].append(w)
@@ -159,8 +170,11 @@ def should_run(event: str, ref: str, changed: Iterable[str] | None) -> bool:
 def changed_files(event: str, base_ref: str, repo: Path = ROOT) -> list[str] | None:
     """The files a pull request or push changes, from git; None if unknown."""
 
+    # No inherited GIT_* variables: under a git hook they name another repository.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
     def git(*args: str) -> str | None:
-        r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=env)
         return r.stdout.strip() if r.returncode == 0 else None
 
     if event == "pull_request":

@@ -15,7 +15,7 @@ under test, so it stays true:
 ```bash
 git clone https://github.com/PureStorage-OpenConnect/lakebench-k8s.git
 cd lakebench-k8s
-# any Python from 3.10 to 3.13
+# python3.11 here; python3.10, python3.12 or python3.13 work too
 python3.11 -m venv .venv && . .venv/bin/activate
 make dev
 make check-fast

@@ -76,6 +76,13 @@ def test_a_removed_make_target_is_reported(tmp_path):
         ("make -C . dev", []),
         ("cd x && make dev && make nope", ["nope"]),
         ("make dev check-fast nope", ["nope"]),
+        ("true&&make nope", ["nope"]),
+        ("VAR=x make nope", ["nope"]),
+        ("env X=1 make nope", ["nope"]),
+        ("sudo make nope", ["nope"]),
+        ("make -j nope", ["nope"]),
+        ("make -j 4 dev", []),
+        ("(cd x; make nope)", ["nope"]),
     ],
 )
 def test_make_lines_are_parsed_as_shell(line, missing):
