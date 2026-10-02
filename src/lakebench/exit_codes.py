@@ -288,20 +288,18 @@ PATHS: tuple[ExitPath, ...] = (
         "reproduce.existing_namespace",
         _C.REFUSED,
         "`reproduce` would reuse a namespace or bucket that already exists",
-        planned=True,
         v16_code=2,
     ),
     ExitPath(
         "reproduce.nonce_changed",
         _C.REFUSED,
-        "the deployment `reproduce` created was replaced before its destroy",
-        planned=True,
+        "the deployment `reproduce` created was replaced before its run or its destroy",
     ),
     ExitPath(
         "destroy.incarnation_mismatch",
         _C.REFUSED,
-        "`destroy` was told to expect a different deployment incarnation",
-        planned=True,
+        "`destroy` found the namespace is not the deployment incarnation it checked or "
+        "was told to expect",
     ),
     ExitPath(
         "destroy.redeployed",
@@ -310,31 +308,45 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=1,
     ),
     ExitPath(
+        "nameless.ambiguous",
+        _C.REFUSED,
+        "a nameless config shares its directory with another nameless config and no --name",
+    ),
+    ExitPath(
         "nameless.nonce_mismatch",
         _C.REFUSED,
-        "a nameless config's nonce does not match the namespace",
-        planned=True,
+        "a nameless config's recorded nonces do not include the namespace's",
     ),
     ExitPath(
         "nameless.copied_dir",
         _C.REFUSED,
-        "a nameless config's state directory was copied",
-        planned=True,
+        "a nameless config's state was written for another directory or host",
     ),
+    ExitPath("nameless.moved", _C.REFUSED, "a nameless config's state moved to another directory"),
     ExitPath(
-        "nameless.moved", _C.REFUSED, "a nameless config moved away from its state", planned=True
+        "nameless.name_required",
+        _C.REFUSED,
+        "a nameless config in a v1.6 directory (no v1.7 state) was given no --name",
     ),
     ExitPath(
         "nameless.stamp_mismatch",
         _C.REFUSED,
-        "a nameless config's stamp does not match the namespace",
-        planned=True,
+        "a nameless v1.6 config's --name or buckets do not match the namespace's stamps",
     ),
     ExitPath(
         "nameless.v17_state_elsewhere",
         _C.REFUSED,
         "the namespace carries v1.7 state that lives with another config",
-        planned=True,
+    ),
+    ExitPath(
+        "deploy.state_copied",
+        _C.REFUSED,
+        "`deploy` found a state written for another directory or host (a copied directory)",
+    ),
+    ExitPath(
+        "nameless.namespace_missing",
+        _C.REFUSED,
+        "a nameless config's teardown found no namespace to check against",
     ),
     ExitPath(
         "deploy.identity_foreign",
@@ -375,6 +387,16 @@ PATHS: tuple[ExitPath, ...] = (
         planned=True,
     ),
     # 4
+    ExitPath(
+        "deploy.state_unrecordable",
+        _C.PREREQUISITE,
+        "`deploy` could not read the namespace or write the nonce to the directory's state",
+    ),
+    ExitPath(
+        "nameless.namespace_unreadable",
+        _C.PREREQUISITE,
+        "a nameless config's namespace could not be read for its check",
+    ),
     ExitPath("run.prereq_failed", _C.PREREQUISITE, "a `run` preflight check failed", v16_code=1),
     ExitPath(
         "capacity.shortfall",
