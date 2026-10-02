@@ -278,10 +278,15 @@ Before it creates anything, deploy runs `run`'s cluster capacity check
 (read-only, without datagen: deploy does not generate) and refuses with exit
 4 when the cluster's free capacity (allocatable minus what pods in other
 namespaces request) or its largest free node cannot hold the config's
-pipeline and always-on pods. Capacity it cannot read (an unreachable
-cluster, a node or pod list it may not read) is a warning, not a refusal:
-deploy has no `--skip-preflight`, and `run`'s preflight refuses until the
-capacity can be read. `--dry-run` prints the result without refusing.
+pipeline and always-on pods, sized against the worker nodes' allocatable
+as the deploy itself sizes. When only the pod side of free capacity cannot
+be read (a pod list it may not read, a pod on a node the list does not
+show) it checks the workers' allocatable instead. When it cannot read
+capacity otherwise (an unreachable cluster, a node list it may not read,
+no worker or no schedulable node) it skips the check with a warning, since
+deploy has no `--skip-preflight` and `run`'s preflight refuses until the
+capacity can be read. A worker node quantity it cannot read refuses.
+`--dry-run` prints the result without refusing.
 
 Deploys components in order: namespace, secrets, S3 buckets, scratch
 StorageClass check (it must already exist; `lakebench admin

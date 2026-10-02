@@ -310,11 +310,18 @@ def deploy_capacity_check(cfg) -> PrereqResult:
     refuses only a config whose pipeline and always-on pods cannot fit;
     ``run`` checks datagen too when it creates datagen pods.
 
-    It refuses on free capacity, as ``run`` does. Capacity it cannot read
-    (an unreachable cluster, a node or pod list it may not read) is a
-    warning, not a refusal: deploy has no ``--skip-preflight``, it measures
-    nothing, and ``run``'s preflight fails closed before anything is
-    measured. A config value it cannot read still refuses.
+    It refuses on free capacity, as ``run`` does, and sizes the config
+    against ``get_cluster_capacity`` (the worker nodes' allocatable) as the
+    deploy engine and ``run`` do. When only the pod side of free capacity
+    cannot be read (a pod list it may not read, a pod on a node the list
+    does not show) it checks the workers' allocatable instead, the check it
+    ran before free capacity. Otherwise, when it cannot read capacity (an
+    unreachable cluster, a node list it cannot read, no worker node, as on
+    a cluster whose only nodes are control planes, no schedulable node, a
+    quantity on a node or pod it cannot read) it skips the check with a
+    warning: deploy has no ``--skip-preflight``, it measures nothing, and
+    ``run``'s preflight fails closed before anything is measured. A config
+    value, or a worker node quantity, it cannot read still refuses.
     """
     return _check_cluster_capacity(cfg, datagen_runs=False, fail_closed=False)
 
@@ -356,8 +363,9 @@ def _check_cluster_capacity(
     """
     from lakebench.config.sizing import plan_requirements
     from lakebench.k8s import get_k8s_client
-    from lakebench.k8s.client import CapacityUnknown
+    from lakebench.k8s.client import CapacityUnknown, ClusterCapacity, FreeCapacity
     from lakebench.k8s.target import ContextConflictError
+    from lakebench.quantity import QuantityError
 
     run_mode = None if sustained is None else ("continuous" if sustained else "batch")
     # The request comes from the config alone, so read it before the cluster:
@@ -392,6 +400,7 @@ def _check_cluster_capacity(
         is_job = "job-name" in labels or "batch.kubernetes.io/job-name" in labels
         return is_job and not datagen_runs
 
+    k8s = None
     try:
         k8s = get_k8s_client(
             context=cfg.platform.kubernetes.context,
@@ -402,13 +411,40 @@ def _check_cluster_capacity(
         raise  # exit 3 (context.changed), as everywhere else
     except Exception as e:  # noqa: BLE001 -- unreachable cluster or bad context
         found = CapacityUnknown(f"{type(e).__name__}: {e}")
-    if isinstance(found, CapacityUnknown) and not fail_closed:
-        return PrereqResult(
-            name="cluster-capacity",
-            passed=True,
-            message=f"WARNING: capacity could not be read ({found.reason}) -- check skipped",
-            hint="run's preflight checks it again and refuses until it can be read",
-        )
+    fallback: str | None = None
+    if not fail_closed:
+        # deploy: sized as the deploy engine and run size it (allocatable of
+        # the worker nodes, get_cluster_capacity); when only the pod side of
+        # free capacity could not be read, checked against that allocatable
+        # instead, as deploy checked before free capacity.
+        if k8s is not None and sizing_capacity is SAME_CAPACITY:
+            try:
+                sizing_capacity = k8s.get_cluster_capacity()
+            except ContextConflictError:
+                raise
+            except QuantityError as e:
+                return PrereqResult(
+                    name="cluster-capacity",
+                    passed=False,
+                    message=f"Capacity check cannot read a resource quantity: {e}",
+                    hint="Report the value it names; the check will not pass without it.",
+                )
+            except Exception as e:  # noqa: BLE001 -- as run and the engine: no sizing capacity
+                logger.debug("Cluster capacity for deploy sizing: %s", e, exc_info=True)
+                sizing_capacity = None
+        if isinstance(found, CapacityUnknown):
+            total = sizing_capacity if isinstance(sizing_capacity, ClusterCapacity) else None
+            if total is None or not found.pods_only:
+                return PrereqResult(
+                    name="cluster-capacity",
+                    passed=True,
+                    message=(
+                        f"WARNING: capacity could not be read ({found.reason}) -- check skipped"
+                    ),
+                    hint="run's preflight checks it again and refuses until it can be read",
+                )
+            fallback = found.reason
+            found = FreeCapacity(free=total, allocatable=total)
     if isinstance(found, CapacityUnknown):
         return PrereqResult(
             name="cluster-capacity",
@@ -420,7 +456,9 @@ def _check_cluster_capacity(
             ),
         )
     try:
-        return _decide_capacity(cfg, k8s, found, record, sustained, datagen_runs, sizing_capacity)
+        return _decide_capacity(
+            cfg, k8s, found, record, sustained, datagen_runs, sizing_capacity, fallback
+        )
     except ContextConflictError:
         raise
     except Exception as e:  # noqa: BLE001 -- fail closed on a broken estimate too
@@ -429,15 +467,32 @@ def _check_cluster_capacity(
             name="cluster-capacity",
             passed=False,
             message=f"capacity check failed: {type(e).__name__}: {e}",
-            hint="Next: report this, or run with --skip-preflight (the run records "
-            "'capacity not checked')",
+            hint=(
+                "Next: report this, or run with --skip-preflight (the run records "
+                "'capacity not checked')"
+                if fail_closed
+                else "Next: report this"
+            ),
         )
 
 
 def _decide_capacity(
-    cfg, k8s, found, record: dict[str, Any], sustained, datagen_runs, sizing_capacity
+    cfg,
+    k8s,
+    found,
+    record: dict[str, Any],
+    sustained,
+    datagen_runs,
+    sizing_capacity,
+    fallback: str | None = None,
 ) -> PrereqResult:
-    """The capacity decision on a free capacity that was read."""
+    """The capacity decision on a free capacity that was read.
+
+    *fallback* is set (to why free capacity could not be read) when *found*
+    is the worker nodes' allocatable instead (``deploy`` only): the check is
+    then the one deploy ran before free capacity, with the largest pod
+    checked against the largest node in each dimension.
+    """
     from lakebench.config.sizing import check_capacity
 
     free, allocatable = found.free, found.allocatable
@@ -453,10 +508,11 @@ def _decide_capacity(
             # Sized as run sizes it: against the allocatable total, not what
             # is free, unless run says what it sized against.
             sizing_capacity=allocatable if sizing_capacity is SAME_CAPACITY else sizing_capacity,
-            allocatable=allocatable,
+            allocatable=None if fallback else allocatable,
             # One pod must fit one node in cores and memory at once; that
-            # needs the per-node free list, so it is checked here.
-            check_pod=False,
+            # needs the per-node free list, so it is checked here (in the
+            # allocatable fallback there is no such list).
+            check_pod=bool(fallback),
         )
     except Exception as e:
         # Sized against the cluster, the plan can still fail on a value
@@ -468,7 +524,7 @@ def _decide_capacity(
     warnings = list(verdict.warnings)
 
     pod = plan.largest_pod
-    pod_short = not found.pod_fits(pod.cpu_cores, pod.memory_gb)
+    pod_short = not fallback and not found.pod_fits(pod.cpu_cores, pod.memory_gb)
     if pod_short:
         most_cores = max((c for c, _ in found.free_by_node), default=0) / 1000.0
         most_gb = max((m for _, m in found.free_by_node), default=0) / gib
@@ -514,17 +570,32 @@ def _decide_capacity(
         summary += "; per-job executor overrides are not counted"
     hint_lines = "\n".join(f"  {s}" for s in shortfalls)
 
+    unread = f"; free capacity could not be read ({fallback})" if fallback else ""
+    if fallback:
+        cluster_line = (
+            f"\nCluster: {free.node_count} worker node(s), {alloc_cores:.1f} cores / "
+            f"{alloc_gb:.1f} GB allocatable (free capacity could not be read)."
+            "\nReduce 'scale' or use a larger cluster."
+        )
+    else:
+        cluster_line = (
+            f"\nCluster: {free.node_count} schedulable node(s), {free_cores:.1f} cores / "
+            f"{free_gb:.1f} GB free of {alloc_cores:.1f} cores / {alloc_gb:.1f} GB "
+            "allocatable."
+            "\nReduce 'scale', free the cluster, or use a larger one."
+        )
     if verdict.status == "refused" or scratch_short or pod_short:
         return PrereqResult(
             name="cluster-capacity",
             passed=False,
-            message=f"Insufficient free cluster capacity -- {summary}",
+            message=(
+                f"Insufficient cluster capacity, allocatable -- {summary}{unread}"
+                if fallback
+                else f"Insufficient free cluster capacity -- {summary}"
+            ),
             hint=(
                 hint_lines
-                + f"\nCluster: {free.node_count} schedulable node(s), {free_cores:.1f} cores / "
-                + f"{free_gb:.1f} GB free of {alloc_cores:.1f} cores / {alloc_gb:.1f} GB "
-                + "allocatable."
-                + "\nReduce 'scale', free the cluster, or use a larger one."
+                + cluster_line
                 + (
                     "\nA finished datagen Job is not counted: run 'lakebench "
                     "generate' first, then 'lakebench run --skip-generate' within "
@@ -544,9 +615,14 @@ def _decide_capacity(
         capped = verdict.capped_request or plan.floor
         logger.warning("Continuous streams will be capped to fit the cluster: %s", names)
         message = (
-            f"WARNING: free capacity below the full request ({summary}); "
-            f"running degraded at ~{capped.cpu_cores} cores / "
-            f"{capped.memory_gb} GB with {plan.co_resident.label}, capped: {names}"
+            f"WARNING: {'allocatable' if fallback else 'free capacity'} below the full "
+            f"request ({summary}); running degraded at ~{capped.cpu_cores} cores / "
+            f"{capped.memory_gb} GB with {plan.co_resident.label}, capped: {names}{unread}"
+        )
+    elif fallback:
+        message = (
+            f"Cluster capacity OK on allocatable ({alloc_cores:.0f} cores / "
+            f"{alloc_gb:.0f} GB allocatable, {summary}){unread}"
         )
     else:
         message = (

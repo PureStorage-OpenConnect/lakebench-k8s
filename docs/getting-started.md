@@ -144,8 +144,10 @@ over data from an earlier `lakebench generate` checks the Spark peak and the
 always-on pods. `lakebench deploy` runs the same check, without datagen,
 before it creates anything (so do `run --deploy-only`, `--generate-only`
 and run's auto-deploy), and refuses with exit 4 on the same free capacity;
-it has no flag to skip it. When it cannot read the capacity it warns and
-goes on, and `run`'s preflight refuses until it can.
+it has no flag to skip it. When only the pod list cannot be read it checks
+the workers' allocatable instead, and when it cannot read the nodes (or
+none is schedulable) it warns and goes on; `run`'s preflight refuses until
+it can read them.
 
 Above scale 50 a continuous run that generates its own corpus is refused,
 or admitted only with its streams capped hard (one bronze-ingest executor,

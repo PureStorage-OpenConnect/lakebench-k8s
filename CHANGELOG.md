@@ -426,7 +426,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--local` runs have no preflight), and a run with
   `--skip-preflight` records `capacity: skipped` with the verdict qualifier
   "capacity not checked". `deploy`'s capacity check reads free capacity
-  too; when it cannot read the capacity it warns and goes on (it has no
+  too, and sizes against the worker nodes' allocatable as deploy does.
+  When only the pod side cannot be read (a pod list it may not read) it
+  checks the workers' allocatable instead; when it cannot read capacity
+  otherwise (an unreachable cluster, a node list it may not read, no worker
+  or no schedulable node) it skips with a warning (deploy has no
   `--skip-preflight`), and `run`'s preflight refuses until it can.
 - **`recommend` exits 3 on a context conflict** while reading capacity,
   instead of falling back to the reference table and exiting 0.

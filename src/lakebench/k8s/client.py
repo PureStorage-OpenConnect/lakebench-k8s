@@ -171,9 +171,15 @@ class FreeCapacity:
 
 @dataclass(frozen=True)
 class CapacityUnknown:
-    """The capacity could not be read; the preflight refuses (fails closed)."""
+    """The capacity could not be read; the preflight refuses (fails closed).
+
+    ``pods_only`` says the node list was read and only the pod side failed
+    (the pod list, or a pod on a node the list does not show), so the
+    nodes' allocatable is still known; ``deploy`` checks that instead.
+    """
 
     reason: str
+    pods_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1081,9 +1087,9 @@ class K8sClient:
                 field_selector="status.phase!=Succeeded,status.phase!=Failed"
             ).items
         except ApiException as e:
-            return CapacityUnknown(f"listing pods failed ({e.status} {e.reason})")
+            return CapacityUnknown(f"listing pods failed ({e.status} {e.reason})", pods_only=True)
         except Exception as e:  # noqa: BLE001
-            return CapacityUnknown(f"listing pods failed ({type(e).__name__})")
+            return CapacityUnknown(f"listing pods failed ({type(e).__name__})", pods_only=True)
 
         from lakebench.quantity import QuantityError, pod_request
 
@@ -1097,7 +1103,8 @@ class K8sClient:
                 if node_name not in known:
                     return CapacityUnknown(
                         f"pod {pod.metadata.namespace}/{pod.metadata.name} runs on node "
-                        f"{node_name}, which the node list does not show"
+                        f"{node_name}, which the node list does not show",
+                        pods_only=True,
                     )
                 if (
                     exclude_namespace
