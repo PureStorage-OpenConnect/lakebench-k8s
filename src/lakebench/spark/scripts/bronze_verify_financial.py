@@ -104,6 +104,16 @@ CONTINUOUS_SILVER_TABLES = (
     SILVER_PROFILES,
     SILVER_BATCH_VERSIONS,
 )
+# The gold tables gold-refresh writes, besides the TM tables (TM_TABLES):
+# until its first tick a reader would take the previous run's rows as this
+# run's (score_financial reads the run id from detection_status).
+CONTINUOUS_GOLD_TABLES = (
+    env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts"),
+    env("LB_FINANCIAL_GOLD_RISK_SCORES", "gold.risk_scores"),
+    env("LB_FINANCIAL_GOLD_CLUSTERS", "gold.entity_clusters"),
+    env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards"),
+    env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status"),
+)
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 
 
@@ -282,6 +292,11 @@ def _continuous_reset(spark, df):
     for t in TM_TABLES:
         _drop_owned_table(spark, t)
     log("Continuous reset: dropped the TM operations tables")
+    # The other gold tables are the previous run's alerts, scores, clusters,
+    # dashboards and detection status; gold-refresh recreates them empty.
+    for t in CONTINUOUS_GOLD_TABLES:
+        _drop_owned_table(spark, t)
+    log(f"Continuous reset: dropped {', '.join(CONTINUOUS_GOLD_TABLES)}")
 
 
 def _drop_owned_table(spark, table):

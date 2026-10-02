@@ -113,3 +113,27 @@ def test_the_set_matches_the_tables_the_stream_bootstraps():
         == len(reset)
         == len(_tuple_names("silver_stream_financial.py", "refuse_reused_silver"))
     )
+
+
+def test_the_reset_drops_the_gold_tables_gold_refresh_writes():
+    """gold-refresh writes these five besides the TM tables; each must go."""
+    src = (_SCRIPTS / "gold_refresh_financial.py").read_text()
+    reset = _func("bronze_verify_financial.py", "_continuous_reset")
+    loops = [
+        n
+        for n in ast.walk(reset)
+        if isinstance(n, ast.For)
+        and isinstance(n.iter, ast.Name)
+        and n.iter.id == "CONTINUOUS_GOLD_TABLES"
+    ]
+    assert loops, "_continuous_reset no longer drops CONTINUOUS_GOLD_TABLES"
+    gold_src = (_SCRIPTS / "bronze_verify_financial.py").read_text()
+    for default in (
+        "gold.alerts",
+        "gold.risk_scores",
+        "gold.entity_clusters",
+        "gold.daily_dashboards",
+        "gold.detection_status",
+    ):
+        assert f'"{default}"' in gold_src, default
+    assert "DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS" in src
