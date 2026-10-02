@@ -238,10 +238,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   their next deploy; other combinations are unchanged.
 
 ### Added
-- **Corpus id v2.** A run whose corpus observation was recorded
-  (the generator's per-node markers and `series.json` under the datagen
-  prefix, read once before the record is saved) gains in
-- **Corpus id v2 (EVD-6).** Every `run` (batch, continuous and `--local`)
+- **Corpus id v2.** Every `run` (batch, continuous and `--local`)
   now records its corpus observation (one listing of the datagen prefix
   and a read of the generator's per-node markers and `series.json`, taken
   just before the record is saved, in
