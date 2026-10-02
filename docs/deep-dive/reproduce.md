@@ -88,9 +88,10 @@ or `ingest_ratio` (continuous).
    record holds no report sha256, and 2 without `--report`. A held-out
    package whose seed is not spent is refused (exit 3), and so is any
    financial package while the look record cannot be read. The role
-   comes from the package, else its experiment identity, else its
-   run-start inputs; a financial package without a role whose seed is
-   spent or held out is treated as a look. The seed is never printed.
+   is held out when any of the package, its experiment identity or its
+   run-start inputs says so, and a financial package whose seed is spent
+   or held out is treated as a look whatever role it states. The seed is
+   never printed.
 2. Compares the current commit (`git rev-parse --short=7 HEAD`) with
    `commit_sha`. On a mismatch it exits 14 (requirement unmet) unless
    `--allow-commit-drift` is passed, which turns it into a warning.

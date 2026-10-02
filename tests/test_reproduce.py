@@ -1462,3 +1462,35 @@ def test_config_error_text_hides_held_out_seeds(monkeypatch):
     _stub_protected(monkeypatch, {654: "robustness"})
     out = _redact_seed_text("seed 654 is held out; seed 321 is listed as spent; scale 10")
     assert "654" not in out and "321" not in out and "scale 10" in out
+
+
+def test_stated_role_cannot_hide_a_held_out_seed(monkeypatch):
+    """A package whose metadata says calibration while its identity holds a
+    held-out seed (a hand edit) is still refused."""
+    from lakebench.cli._reproduce import _spent_look
+
+    _stub_looks(monkeypatch, [], ())
+    _stub_protected(monkeypatch, {654: "evaluation"})
+    meta = {
+        "corpus_role": "calibration",
+        "experiment_identity": {"workload": "financial", "seed": 654, "corpus role": "calibration"},
+    }
+    assert _spent_look(meta)[0] == "refuse"
+    meta["experiment_identity"]["corpus role"] = "evaluation"
+    meta["experiment_identity"]["seed"] = 1
+    assert _spent_look(meta)[0] == "refuse"
+
+
+def test_unreadable_record_refuses_a_calibration_package(monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+    from lakebench.config import datagen_seed
+
+    def broken(path=None):
+        raise FileNotFoundError("aml_registered_looks.json")
+
+    monkeypatch.setattr(datagen_seed, "load_looks", broken)
+    meta = {
+        "corpus_role": "calibration",
+        "experiment_identity": {"workload": "financial", "seed": 43},
+    }
+    assert _spent_look(meta)[0] == "refuse"

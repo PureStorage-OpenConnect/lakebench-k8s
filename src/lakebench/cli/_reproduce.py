@@ -1176,18 +1176,25 @@ def _post_destroy_refusal(refusals: list[Any]) -> None:
         )
 
 
-def _package_corpus(meta: dict[str, Any]) -> tuple[Any, Any, Any]:
-    """(workload, corpus role, seed) of a package: the recorded role, else
-    the experiment identity's ``corpus role``, else the run-start inputs'
-    role (a package from before roles were recorded); the seed as the
-    experiment identity holds it."""
+def _package_roles(meta: dict[str, Any]) -> list[Any]:
+    """Every role a package states: its recorded role, its experiment
+    identity's ``corpus role`` and its run-start inputs' role."""
     ident = meta.get("experiment_identity") or {}
-    role = meta.get("corpus_role") or ident.get("corpus role")
-    if role is None:
-        inputs = (meta.get("config_snapshot") or {}).get("experiment_inputs") or {}
-        role = ((inputs.get("corpus") if isinstance(inputs, dict) else None) or {}).get(
-            "corpus_role"
-        )
+    inputs = (meta.get("config_snapshot") or {}).get("experiment_inputs") or {}
+    corpus = (inputs.get("corpus") if isinstance(inputs, dict) else None) or {}
+    return [meta.get("corpus_role"), ident.get("corpus role"), corpus.get("corpus_role")]
+
+
+def _package_corpus(meta: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """(workload, corpus role, seed) of a package: the first role it states
+    (a held-out one wins), and the seed as the experiment identity holds
+    it."""
+    from lakebench.config import datagen_seed
+
+    ident = meta.get("experiment_identity") or {}
+    roles = [r for r in _package_roles(meta) if r is not None]
+    held = [r for r in roles if r in datagen_seed.PROTECTED_ROLES]
+    role = held[0] if held else (roles[0] if roles else None)
     return ident.get("workload"), role, ident.get("seed")
 
 
@@ -1196,19 +1203,29 @@ def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
     entry or None)``, ``("refuse", reason)``, or None for an ordinary
     package.
 
-    A package whose role is evaluation or robustness, or a financial package
-    without a role whose seed is held out, spent or has a recorded look, is
-    never rerun: a spent seed is verified against its look's report, and an
-    unspent held-out seed is refused. A seed this cannot read as an integer
-    (a recorded ``seed_ref`` form) is refused for a held-out role, and the
-    look record unreadable refuses every financial package. Never prints a
-    seed."""
+    A package that states an evaluation or robustness role anywhere, or a
+    financial package whose seed is held out, spent or has a recorded look
+    (whatever role it states), is never rerun: a spent seed is verified
+    against its look's report, and an unspent held-out seed is refused. A
+    seed this cannot read as an integer (a recorded ``seed_ref`` form) is
+    refused for a held-out role, and an unreadable look record refuses
+    every financial package. Never prints a seed."""
     from lakebench.config import datagen_seed
 
     workload, role, seed = _package_corpus(meta)
     protected = role in datagen_seed.PROTECTED_ROLES
-    if not protected and not (role is None and workload == "financial"):
+    if not protected and workload != "financial":
         return None
+    try:
+        looks = datagen_seed.load_looks()
+        spent_set = datagen_seed.spent_seeds()
+        held_set = datagen_seed.protected_seeds()
+    except Exception as e:  # noqa: BLE001 -- unreadable: fail closed
+        return (
+            "refuse",
+            f"the look record cannot be read ({type(e).__name__}); a "
+            f"{role or 'financial'} package is not reproduced without it",
+        )
     if isinstance(seed, bool) or not isinstance(seed, int):
         if protected:
             return (
@@ -1216,21 +1233,12 @@ def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
                 f"the {role} package's seed cannot be checked against the look record",
             )
         return None
-    try:
-        looks = [e for e in datagen_seed.load_looks() if int(e["seed"]) == seed]
-        spent = seed in datagen_seed.spent_seeds()
-        held_out = seed in datagen_seed.protected_seeds()
-    except Exception as e:  # noqa: BLE001 -- unreadable: fail closed
-        return (
-            "refuse",
-            f"the look record cannot be read ({type(e).__name__}); a "
-            f"{role or 'financial'} package is not reproduced without it",
-        )
-    if looks:
-        return ("verify", looks[0])
-    if spent:
+    mine = [e for e in looks if int(e["seed"]) == seed]
+    if mine:
+        return ("verify", mine[0])
+    if seed in spent_set:
         return ("verify", None)
-    if protected or held_out:
+    if protected or seed in held_set:
         return ("refuse", "a held-out corpus whose look has not run is never reproduced")
     return None
 
