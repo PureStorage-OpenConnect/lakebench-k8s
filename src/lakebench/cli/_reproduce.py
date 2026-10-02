@@ -19,8 +19,13 @@ Exit codes (see docs/exit-codes.md):
   14 -- requirement unmet: correctness violation (missing stages,
         scale_ratio mismatch, ...), performance drift outside its band, or
         commit drift without --allow-commit-drift (2 and 1 in 1.6)
-  2  -- usage: a package or config that cannot be read or does not match
+  2  -- usage: a package or config that cannot be read or does not match,
+        or a registered look's package without --report
+  3  -- refused: a held-out corpus the package or config would regenerate,
+        an existing namespace or bucket, a replaced deployment
   1  -- the reproduction could not run or its run could not be found
+  A registered look's package is never rerun: --report matching the look
+  record exits 0, a mismatch (or no recorded hash) 14
 """
 
 from __future__ import annotations
@@ -74,8 +79,9 @@ DEFAULT_TOLERANCES: dict[str, float] = {
 #     lower  -- lower-is-better; positive drift is bad.
 #     higher -- higher-is-better; negative drift is bad.
 #     exact  -- either direction of drift is bad (correctness signals like
-#               scale_ratio and ingest_ratio: 2x is a bug just as much as
-#               0.5x is; and every metric with no better side).
+#               scale_ratio: 2x is a bug just as much as 0.5x is; and every
+#               metric with no better side). ingest_ratio is a range guard
+#               (registry guard band), checked in _compare.
 
 # Per-query QpH (3600 / query seconds) lives in an open namespace keyed by
 # query name, for example ``query_qph_Q1_full_aggregation_scan``. Higher is
@@ -439,8 +445,8 @@ def _build_package(
             "source_run_id": getattr(metrics, "run_id", None),
             "deployment_name": getattr(metrics, "deployment_name", None),
             "pipeline_mode": pipeline_mode,
-            # The corpus role (development, calibration, evaluation,
-            # robustness): a package from a held-out corpus whose seed is
+            # The corpus role (calibration, evaluation, robustness, or None):
+            # a package from a held-out corpus whose seed is
             # spent is verified against its look's report, never rerun.
             "corpus_role": (experiment.get("corpus") or {}).get("corpus_role"),
             "config_reference": config_reference,
@@ -531,6 +537,16 @@ def _load_package(path: Path) -> dict[str, Any]:
     meta = raw.get("reproduction_metadata")
     if not isinstance(meta, dict):
         raise ReproduceError("Package missing 'reproduction_metadata' section")
+
+    mode = meta.get("pipeline_mode", "batch")
+    if mode not in ("batch", "sustained", "continuous"):
+        raise ReproduceError(f"pipeline_mode must be batch or continuous, got {mode!r}")
+    ident_mode = (meta.get("experiment_identity") or {}).get("mode")
+    if ident_mode is not None and (ident_mode == "batch") != (mode == "batch"):
+        # The mode decides which values are gated; it must be the identity's.
+        raise ReproduceError(
+            f"pipeline_mode {mode!r} disagrees with the experiment identity's mode {ident_mode!r}"
+        )
 
     numbers = meta.get("expected_numbers")
     if not isinstance(numbers, dict) or not numbers:
@@ -1162,10 +1178,11 @@ def _post_destroy_refusal(refusals: list[Any]) -> None:
 
 def _package_corpus(meta: dict[str, Any]) -> tuple[Any, Any, Any]:
     """(workload, corpus role, seed) of a package: the recorded role, else
-    the run-start inputs' role (a package from before roles were recorded);
-    the seed as the experiment identity holds it."""
+    the experiment identity's ``corpus role``, else the run-start inputs'
+    role (a package from before roles were recorded); the seed as the
+    experiment identity holds it."""
     ident = meta.get("experiment_identity") or {}
-    role = meta.get("corpus_role")
+    role = meta.get("corpus_role") or ident.get("corpus role")
     if role is None:
         inputs = (meta.get("config_snapshot") or {}).get("experiment_inputs") or {}
         role = ((inputs.get("corpus") if isinstance(inputs, dict) else None) or {}).get(
@@ -1175,13 +1192,17 @@ def _package_corpus(meta: dict[str, Any]) -> tuple[Any, Any, Any]:
 
 
 def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
-    """Whether the package is from a registered look, as
-    ``("verify", look entry or None)``, ``("refuse", reason)``, or None for
-    an ordinary package. A held-out corpus whose seed is spent is verified
-    against its look's report and never regenerated; one whose seed is not
-    spent is never reproduced at all. A package without a role is a look
-    only when its seed has a recorded look (financial workloads only: the
-    spent seeds are AML seeds). Never prints a seed."""
+    """Whether the package is from a held-out corpus, as ``("verify", look
+    entry or None)``, ``("refuse", reason)``, or None for an ordinary
+    package.
+
+    A package whose role is evaluation or robustness, or a financial package
+    without a role whose seed is held out, spent or has a recorded look, is
+    never rerun: a spent seed is verified against its look's report, and an
+    unspent held-out seed is refused. A seed this cannot read as an integer
+    (a recorded ``seed_ref`` form) is refused for a held-out role, and the
+    look record unreadable refuses every financial package. Never prints a
+    seed."""
     from lakebench.config import datagen_seed
 
     workload, role, seed = _package_corpus(meta)
@@ -1198,21 +1219,53 @@ def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
     try:
         looks = [e for e in datagen_seed.load_looks() if int(e["seed"]) == seed]
         spent = seed in datagen_seed.spent_seeds()
+        held_out = seed in datagen_seed.protected_seeds()
     except Exception as e:  # noqa: BLE001 -- unreadable: fail closed
-        if protected:
-            return ("refuse", f"the look record cannot be read ({type(e).__name__})")
         return (
             "refuse",
-            f"the look record cannot be read ({type(e).__name__}); a financial "
-            "package is not reproduced without it",
+            f"the look record cannot be read ({type(e).__name__}); a "
+            f"{role or 'financial'} package is not reproduced without it",
         )
     if looks:
         return ("verify", looks[0])
-    if protected:
-        if spent:
-            return ("verify", None)
-        return ("refuse", f"an {role} corpus whose look has not run is never reproduced")
+    if spent:
+        return ("verify", None)
+    if protected or held_out:
+        return ("refuse", "a held-out corpus whose look has not run is never reproduced")
     return None
+
+
+def _redact_seed_text(text: str) -> str:
+    """A config error with any digit run that names a held-out or spent seed
+    replaced, so a refusal never prints one."""
+    import re
+
+    try:
+        from lakebench.config import datagen_seed
+
+        hidden = {str(x) for x in (*datagen_seed.protected_seeds(), *datagen_seed.spent_seeds())}
+    except Exception:  # noqa: BLE001 -- unreadable: hide every long number
+        return re.sub(r"\b\d{4,}\b", "<seed>", text)
+    return re.sub(r"\b\d+\b", lambda m: "<seed>" if m.group(0) in hidden else m.group(0), text)
+
+
+def _config_held_out(cfg: Any) -> bool:
+    """Whether the config that would run declares a held-out role or names
+    a held-out seed (the package may describe another corpus than the
+    config generates)."""
+    from lakebench.config import datagen_seed
+
+    workload = cfg.architecture.workload
+    dg = workload.datagen
+    if getattr(dg, "corpus_role", None) in datagen_seed.PROTECTED_ROLES:
+        return True
+    seed = getattr(dg, "seed", None)
+    if workload.schema_type.value != "financial" or not isinstance(seed, int):
+        return False
+    try:
+        return seed in datagen_seed.protected_seeds() or seed in datagen_seed.spent_seeds()
+    except Exception:  # noqa: BLE001 -- unreadable: fail closed
+        return True
 
 
 def _verify_spent_look(entry: Any, role: Any, report: Path | None) -> None:
@@ -1324,12 +1377,17 @@ def _verify(
     from lakebench.config import ConfigError, LoadPurpose, load_config
 
     try:
-        _iterations = load_config(
-            config_file, purpose=LoadPurpose.RUN
-        ).architecture.benchmark.iterations
+        _cfg = load_config(config_file, purpose=LoadPurpose.RUN)
     except ConfigError as e:
-        print_error(str(e))
+        print_error(_redact_seed_text(str(e)))
         raise typer.Exit(ExitCode.USAGE) from None
+    if _config_held_out(_cfg):
+        print_error(
+            "Refused: the config would generate a held-out corpus; reproduce never "
+            "regenerates one (a registered look is verified with --report instead)."
+        )
+        raise typer.Exit(ExitCode.REFUSED)
+    _iterations = _cfg.architecture.benchmark.iterations
     _mismatch = _sample_mismatch(meta, _iterations)
     if _mismatch:
         print_error(_mismatch)
@@ -1508,6 +1566,9 @@ def reproduce(
             raise typer.Exit(ExitCode.USAGE)
         if package is not None:
             print_error("Positional PACKAGE cannot be combined with --record")
+            raise typer.Exit(ExitCode.USAGE)
+        if report is not None:
+            print_error("--report applies to verify mode only")
             raise typer.Exit(ExitCode.USAGE)
         _record(record, write, config_reference)
         return

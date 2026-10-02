@@ -278,6 +278,11 @@ PATHS: tuple[ExitPath, ...] = (
         planned=True,
     ),
     ExitPath(
+        "reproduce.report_required",
+        _C.USAGE,
+        "`reproduce` of a registered look's package without --report (a look is never rerun)",
+    ),
+    ExitPath(
         "admin.version_change_needs_flag",
         _C.USAGE,
         "`admin install` would change a component version without --allow-version-change",
@@ -294,6 +299,12 @@ PATHS: tuple[ExitPath, ...] = (
         "reproduce.nonce_changed",
         _C.REFUSED,
         "the deployment `reproduce` created was replaced before its run or its destroy",
+    ),
+    ExitPath(
+        "reproduce.held_out",
+        _C.REFUSED,
+        "`reproduce` would regenerate a held-out corpus (its look has not run, its seed or "
+        "the look record cannot be read, or the config names one)",
     ),
     ExitPath(
         "destroy.incarnation_mismatch",
@@ -500,8 +511,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "reproduce.verify_out_of_band",
         _C.REQUIREMENT_UNMET,
-        "`reproduce` could not verify the result in band",
-        planned=True,
+        "`reproduce --report` of a registered look: the report does not match the look "
+        "record, or the record holds no report sha256",
     ),
     # 130
     ExitPath(

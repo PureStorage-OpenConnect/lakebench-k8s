@@ -86,8 +86,11 @@ or `ingest_ratio` (continuous).
    `--report PATH` it compares the report's sha256 with the look record's
    `report_sha256` and exits 0 on a match, 14 on a mismatch or when the
    record holds no report sha256, and 2 without `--report`. A held-out
-   package whose seed is not spent, or whose look record cannot be read,
-   is refused (exit 3). The seed is never printed.
+   package whose seed is not spent is refused (exit 3), and so is any
+   financial package while the look record cannot be read. The role
+   comes from the package, else its experiment identity, else its
+   run-start inputs; a financial package without a role whose seed is
+   spent or held out is treated as a look. The seed is never printed.
 2. Compares the current commit (`git rev-parse --short=7 HEAD`) with
    `commit_sha`. On a mismatch it exits 14 (requirement unmet) unless
    `--allow-commit-drift` is passed, which turns it into a warning.
@@ -98,8 +101,10 @@ or `ingest_ratio` (continuous).
    `architecture.benchmark.iterations` differs from
    `benchmark_samples_per_query` (batch packages with QpH), if the
    package's maintenance policy differs from the running version's,
-   or if the package has no `experiment_identity`. `--dry-run` stops
-   here.
+   or if the package has no `experiment_identity`, and refuses (exit 3)
+   a config that would generate a held-out corpus (an evaluation or
+   robustness role, or a held-out or spent financial seed), whatever the
+   package says. `--dry-run` stops here.
 5. Refuses (exit 3) when the config's namespace or any of its three
    buckets already exists, and exits 2 when the config sets
    `create_namespace: false` or `create_buckets: false`: reproduce

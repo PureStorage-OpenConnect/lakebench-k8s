@@ -189,8 +189,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   package's are shown as ignored. A package records its corpus role; one
   from a registered evaluation or robustness look is never rerun:
   `reproduce PACKAGE --report PATH` compares the report's sha256 with the
-  look record (0 on a match, 14 on a mismatch, 2 without `--report`), and
-  a held-out package whose look has not run is refused (3).
+  look record (0 on a match, 14 on a mismatch or when the record holds no
+  report sha256, 2 without `--report`). A held-out package whose look has
+  not run, a config that would generate a held-out corpus, and any
+  financial package while the look record cannot be read are refused (3).
+  A package whose `pipeline_mode` is unknown or disagrees with its
+  experiment identity is refused (2).
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets
