@@ -16,7 +16,7 @@ path yet says so.
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout` |
 | 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `config.upgrade_refused` |
-| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `destroy.redeployed`, `deploy.identity_foreign`, `run.bronze_nonempty`, `lease.held` |
+| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `destroy.redeployed`, `deploy.identity_foreign`, `run.bronze_nonempty`, `lease.held`, `context.changed` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
@@ -45,6 +45,7 @@ the CLI down every path listed here and checks the code.
 | `config.unsupported` | 2 | the workload, recipe and mode combination is unsupported, or the scale is above the workload's datagen ceiling |
 | `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
 | `config.validation` | 2 | the config fails to load or validate |
+| `context.changed` | 3 | the kubeconfig changed under the command: a second context, or the pinned context's server or CA moved |
 | `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`) |
 | `destroy.redeployed` | 3 | "Destroy NOT completed": the namespace now belongs to a newer deployment |
 | `lease.held` | 3 | another command holds the cluster lock lease |

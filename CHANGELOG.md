@@ -96,7 +96,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   first file that sets it; the Python client used to take the last), so a
   deployment made with a multi-file `$KUBECONFIG` and no configured context
   may now resolve another context: set `platform.kubernetes.context` for
-  those. A second context in one process is refused,
+  those. A second context in one process is refused (exit 3,
+  `context.changed`),
   and so is a context whose API server or CA changes in the kubeconfig
   while the command runs; the check runs at each `kubectl`, `helm` or `oc`
   call and at each client load, and the ownership fingerprint a deploy

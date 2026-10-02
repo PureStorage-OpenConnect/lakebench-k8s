@@ -657,6 +657,17 @@ def _scenario_lease_held(monkeypatch, tmp_path):
     return _destroy_with(monkeypatch, [_result("spark-operator-watch", "failed", msg, **flag)])
 
 
+def _scenario_context_changed(monkeypatch, tmp_path):
+    from lakebench.k8s.target import ContextConflictError
+
+    def conflict(*a, **k):
+        raise ContextConflictError("one cluster context per process: A is active, refusing B")
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", conflict)
+    (tmp_path / "c.yaml").write_text("name: x\n")
+    return _runner().invoke(app, ["destroy", str(tmp_path / "c.yaml"), "--yes"])
+
+
 def _scenario_destroy_namespace_terminating(monkeypatch, tmp_path):
     from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
@@ -851,6 +862,7 @@ SCENARIOS = {
     "s3.unreachable": _scenario_s3_unreachable,
     "destroy.redeployed": _scenario_destroy_redeployed,
     "lease.held": _scenario_lease_held,
+    "context.changed": _scenario_context_changed,
     "destroy.namespace_terminating": _scenario_destroy_namespace_terminating,
     "deploy.identity_foreign": _scenario_deploy_identity_foreign,
     "run.bronze_nonempty": _scenario_run_bronze_nonempty,
