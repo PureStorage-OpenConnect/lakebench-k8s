@@ -258,6 +258,7 @@ def _capacity_k8s(cores):
         largest_node_cpu_millicores=cores * 1000 // 8,
         largest_node_memory_bytes=432 * 1024**3,
     )
+    _free_from_total(k8s)
     return k8s
 
 
@@ -297,6 +298,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         )
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             return _check_cluster_capacity(_config("financial", 10))
 
     @pytest.mark.parametrize("cores", [82, 100, 117, 160])
@@ -323,6 +325,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         cap = ClusterCapacity(cores * 1000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             assert not _check_cluster_capacity(_config("customer360", 10)).passed
 
     def test_an_explicit_count_is_counted_uncapped(self):
@@ -336,6 +339,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         cap = ClusterCapacity(80_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             assert not _check_cluster_capacity(cfg).passed
 
     def test_a_driver_override_is_counted(self):
@@ -349,6 +353,7 @@ class TestPreflightBetweenOldAndNewMinimum:
             cap = ClusterCapacity(82_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
             with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
                 get_client.return_value.get_cluster_capacity.return_value = cap
+                _free_from_total(get_client.return_value)
                 return _check_cluster_capacity(cfg).passed
 
         assert run(None)
@@ -386,6 +391,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         cap = ClusterCapacity(20_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             assert not _check_cluster_capacity(cfg).passed
 
 
@@ -450,3 +456,18 @@ def test_peak_rounds_driver_overhead_up():
     peak = compute_peak_requirements(1, "batch")
     sb = next(r for r in peak.per_job if r.job_type == "silver-build")
     assert sb.memory_gb == 525  # 524.8 GiB, never rounded down
+
+
+def _free_from_total(k8s_mock):
+    """The preflight reads free capacity: make the mock report the capacity
+    its get_cluster_capacity returns as both free and allocatable (one node
+    with the largest node's resources free), with no published scratch."""
+    from lakebench.k8s.client import FreeCapacity, ScratchCapacity
+
+    def _free(**_kw):
+        cap = k8s_mock.get_cluster_capacity.return_value
+        node = (cap.largest_node_cpu_millicores, cap.largest_node_memory_bytes)
+        return FreeCapacity(free=cap, allocatable=cap, free_by_node=(node,))
+
+    k8s_mock.get_free_capacity.side_effect = _free
+    k8s_mock.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")
