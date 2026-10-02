@@ -1,4 +1,4 @@
-.PHONY: help install dev check-fast test test-unit test-integration test-e2e test-extended test-stress lint typecheck fmt clean
+.PHONY: help install dev check-fast test-spark test test-unit test-integration test-e2e test-extended test-stress lint typecheck fmt clean
 
 help:
 	@echo "Lakebench Development Commands"
@@ -11,6 +11,7 @@ help:
 	@echo "Testing:"
 	@echo "  check-fast       Lint, format check, mypy and the unit tests in parallel (XDIST_WORKERS=N caps workers)"
 	@echo "  test             The unit tests of check-fast, without the lint and type checks"
+	@echo "  test-spark       The Spark tier on the installed pyspark, with its pinned jars"
 	@echo "  test-unit        Run unit tests only, serially (slow AML statistics tests included)"
 	@echo "  test-integration Run integration tests (requires K8s/S3)"
 	@echo "  test-e2e         Run end-to-end tests (full workflow)"
@@ -56,6 +57,14 @@ check-fast:
 
 test:
 	$(UNIT_PYTEST)
+
+# The Spark tier as one CI job runs it: the jars pinned in
+# tests/spark/jars.lock.json for the installed pyspark, every jar-reason skip
+# an error, serially (the Spark sessions share the JVM's working directory).
+# CI also runs it once with --lb-reverse.
+test-spark:
+	jars="$$(python scripts/fetch_test_jars.py --leg auto --print-env)" && export "$$jars" && \
+	LB_REQUIRE_JARS=1 PYSPARK_PYTHON="$$(command -v python)" pytest tests/spark -q -rsxX -p no:cacheprovider
 
 test-unit:
 	pytest tests/ -v -m "not integration and not e2e"

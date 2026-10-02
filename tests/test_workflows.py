@@ -713,3 +713,17 @@ def test_xdist_is_pinned_in_dev():
     assert re.search(r'^\s*"pytest-xdist==\d+\.\d+\.\d+",', text, re.M), (
         "pytest-xdist must be pinned"
     )
+
+
+def test_spark_tier_runs_each_leg_forward_and_reverse_in_parallel_jobs():
+    job = _load("ci.yml")["jobs"]["spark-tests"]
+    entries = job["strategy"]["matrix"]["include"]
+    pairs = {(e["pyspark"], e["order"]) for e in entries}
+    assert pairs == {(v, o) for v in ("4.0.1", "4.1.1") for o in ("forward", "reverse")}
+    for e in entries:
+        assert ("--lb-reverse" in e["args"]) == (e["order"] == "reverse"), e
+        assert ("--cov=" in e["args"]) == (e["pyspark"] == "4.0.1" and e["order"] == "forward"), e
+    budgeted = {n: b for n, _, _, b in _budgeted_steps()}
+    assert budgeted.get("spark-tests", 0) and budgeted["spark-tests"] <= 2400
+    floors = next(s for s in job["steps"] if s.get("name") == "Coverage floors")
+    assert floors["if"] == "matrix.leg == '4.0' && matrix.order == 'forward'"
