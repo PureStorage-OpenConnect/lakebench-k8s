@@ -518,25 +518,49 @@ def test_repeat_refusal_in_a_repetition_keeps_its_code(tmp_path, monkeypatch):
     assert manifest["attempted"] == 2 and manifest["runs"][1]["exit_code"] == 3
 
 
-def test_repeat_usage_error_in_a_repetition_keeps_click_code(tmp_path, monkeypatch):
-    import click
+def _client_raises(monkeypatch, exc):
+    """Every K8sClient construction raises *exc* (after the fakes are in)."""
+    import lakebench.k8s
+    from tests.harness import run_harness
 
-    import lakebench.cli._run as run_mod
+    real_install = run_harness.install_fakes
 
-    real = run_mod._run_once
-    seen = [0]
+    def install(monkeypatch_, rec, scenario):
+        out = real_install(monkeypatch_, rec, scenario)
 
-    def once(*a, **k):
-        seen[0] += 1
-        if seen[0] == 2:
-            raise click.UsageError("bad")
-        return real(*a, **k)
+        def boom(*a, **k):
+            raise exc
 
-    monkeypatch.setattr(run_mod, "_run_once", once)
+        monkeypatch_.setattr(lakebench.k8s, "get_k8s_client", boom)
+        return out
+
+    monkeypatch.setattr(run_harness, "install_fakes", install)
+
+
+@pytest.mark.parametrize(
+    ("exc", "code"),
+    [
+        ("context", 3),
+        ("connection", 4),
+    ],
+)
+def test_repeat_client_failure_before_repetition_1_keeps_its_code(tmp_path, monkeypatch, exc, code):
+    """The series' first cluster call makes a K8sClient: a context refusal
+    exits 3 and an unloadable kubeconfig 4, as for a run, before any
+    repetition starts."""
+    from lakebench.k8s import K8sConnectionError
+    from lakebench.k8s.target import ContextConflictError
+
+    error = (
+        ContextConflictError("one cluster context per process: A is active")
+        if exc == "context"
+        else K8sConnectionError("Failed to load Kubernetes config: none")
+    )
+    _client_raises(monkeypatch, error)
     result, rec, records, manifest = _series(tmp_path, monkeypatch)
-    # The harness calls the command without Click's main, which would exit 2.
-    assert isinstance(result.exception, click.UsageError), result.output
-    assert manifest["runs"][1]["exit_code"] == 2
+    assert result.exit_code == code, result.output
+    assert records == []
+    assert manifest["attempted"] == 0 and type(error).__name__ in manifest["stopped_reason"]
 
 
 def test_repeat_marker_mismatch_stops(tmp_path, monkeypatch):
