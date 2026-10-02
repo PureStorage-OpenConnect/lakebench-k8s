@@ -22,9 +22,9 @@ def _profile(spark, common, group, work):
     sc = spark.sparkContext
     sc.setJobGroup(group, "test", interruptOnCancel=False)
     try:
-        first = common.spark_jobs_submitted(spark)
+        mark = common.rule_profile_mark(spark)
         work()
-        return first, common.rule_stage_profile(spark, group, "WX", first_job=first)
+        return mark, common.rule_stage_profile(spark, group, "WX", mark=mark)
     finally:
         sc.setLocalProperty("spark.jobGroup.id", None)
         sc.setLocalProperty("spark.job.description", None)
@@ -33,14 +33,15 @@ def _profile(spark, common, group, work):
 
 def test_profile_of_one_job(spark_session, load_script, capsys):
     common = load_script("common")
-    first, rows = _profile(
+    mark, rows = _profile(
         spark_session, common, "g-one", lambda: spark_session.range(1000).collect()
     )
-    assert isinstance(first, int)
+    assert isinstance(mark["jobs"], int) and mark["dropped"] == 0, mark
     assert rows and rows[0]["tasks"] >= 1 and rows[0]["max_task_s"] is not None, rows
     out = capsys.readouterr().out
     assert "[stage-profile] rule=WX group=g-one stage=" in out
-    assert "truncated=false" in out
+    assert "truncated=false complete=true lossy=false" in out
+    assert "status=COMPLETE" in out
 
 
 def test_evicted_jobs_mark_the_profile_truncated(spark_session, load_script, capsys):

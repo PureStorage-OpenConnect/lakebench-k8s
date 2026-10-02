@@ -2272,8 +2272,10 @@ def run_tm_operations(
     import time
 
     started = time.time()
-    # Wall seconds per stage of the pass, in order, for the [tm-ops] summary.
-    # Spark is lazy, so a phase holds the work its own actions triggered.
+    # Wall seconds per stage of the pass for the [tm-ops] summary (logged
+    # with sorted keys). Spark is lazy, so a phase holds the work its own
+    # actions trigger; the two persisted frames are counted at their
+    # boundaries so their work lands in their own phase.
     phases: dict = {}
     phase_start = [started]
 
@@ -2382,11 +2384,16 @@ def run_tm_operations(
         alerts = spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == lit(run_id))
         inputs = build_alert_inputs(spark, alerts, entities, manifest, params, carry).persist()
         held.append(inputs)
+        # Materialise the persisted frame here, so the alert-input build is
+        # timed as its own phase. Later reads use the cache, as they did
+        # when the first write materialised it: results are unchanged.
+        inputs.count()
         _phase("inputs")
         disp_sim, cases_sim, tagged = simulate(
             spark, inputs, carry, params, as_of, prev_as_of, cycle_no
         )
         held.append(tagged)
+        tagged.count()  # the per-customer replay, persisted by simulate()
         _phase("simulate")
         run_cols = [
             lit(as_of).cast("date").alias("as_of_date"),

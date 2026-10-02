@@ -2775,54 +2775,76 @@ def write_delta_table(
         writer.saveAsTable(fq_table)
 
 
-def spark_jobs_submitted(spark):
-    """How many Spark jobs this application has submitted so far
-    (DAGScheduler.numTotalJobs), or None when it cannot be read."""
+def _status_events_dropped(jsc):
+    """Events the driver's status listener queue has dropped so far."""
+    registry = jsc.listenerBus().metrics().metricRegistry()
+    return int(registry.counter("queue.appStatus.numDroppedEvents").getCount())
+
+
+def rule_profile_mark(spark):
+    """Where the application stands when a rule's job group is set: jobs
+    submitted so far (DAGScheduler.numTotalJobs) and status events dropped
+    so far. Pass it to ``rule_stage_profile``. None when it cannot be read."""
     try:
-        return int(spark.sparkContext._jsc.sc().dagScheduler().numTotalJobs())
+        jsc = spark.sparkContext._jsc.sc()
+        return {
+            "jobs": int(jsc.dagScheduler().numTotalJobs()),
+            "dropped": _status_events_dropped(jsc),
+        }
     except Exception:  # noqa: BLE001 -- diagnostic only
         return None
 
 
-def rule_stage_profile(spark, group, rule_id, top=3, first_job=None):
+def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
     """Log the ``top`` stages of job group ``group`` by executor run time.
 
     Reads the driver's AppStatusStore through py4j. The store is live with
-    ``spark.ui.enabled=false`` (only the UI server is off) and keeps the
-    last ``spark.ui.retainedStages`` stages. One line per stage, heaviest
-    first::
+    ``spark.ui.enabled=false`` (only the UI server is off). It is filled by
+    an asynchronous listener, so this first waits up to ``wait_s`` for the
+    listener bus to drain. One line per stage, heaviest first::
 
-        [stage-profile] rule=<id> group=<g> stage=<n> attempt=<a> tasks=<t>
-            wall_s=<s> exec_s=<s> shuffle_read_mb=<m> max_task_s=<s>
-            stages=<k> truncated=<true|false> name=<stage name>
+        [stage-profile] rule=<id> group=<g> stage=<n> attempt=<a> status=<s>
+            tasks=<t> wall_s=<s> exec_s=<s> shuffle_read_mb=<m> max_task_s=<s>
+            stages=<k> truncated=<b> complete=<b> lossy=<b> name=<stage name>
 
     ``wall_s`` is submission to completion, ``exec_s`` the summed executor
     run time of the stage's tasks, ``max_task_s`` its longest task,
-    ``stages`` the number of stages the group ran that the store still
-    holds (skipped stages, whose output was reused, are not counted).
-    ``truncated=true`` means some of the group's jobs or stages had already
-    left the store (it keeps ``spark.ui.retainedJobs`` jobs and
-    ``spark.ui.retainedStages`` stages), so the list may miss stages.
-    Evicted jobs are not listed under the group at all, so they are found
-    by count: ``first_job`` is ``spark_jobs_submitted`` taken when the
-    group was set, and fewer retained group jobs than jobs submitted since
-    marks the profile truncated. A group that ran no stage logs ``stages=0``
-    and no stage line.
+    ``stages`` the number of the group's stages the store holds (skipped
+    stages, whose output was reused, are not counted). The three flags say
+    how far the numbers can be trusted:
 
-    Best effort: any failure logs ``[stage-profile] rule=<id> group=<g>
-    unavailable reason=<one line>`` and returns None. Never raises, so
-    detection cannot fail because of it. Returns the logged rows.
+    - ``complete=false``: the listener had not caught up within ``wait_s``,
+      so the rule's last jobs or task ends may be missing;
+    - ``truncated=true``: the store had already dropped some of the
+      group's jobs or stages (it keeps ``spark.ui.retainedJobs`` jobs and
+      ``spark.ui.retainedStages`` stages). Dropped jobs are not listed under
+      the group at all, so they are found by count against ``mark``;
+    - ``lossy=true``: the listener queue dropped events during the rule
+      (against ``mark``), so the stored task totals are low.
+
+    A group with no stage in the store logs ``stages=0`` with the same flags
+    and no stage line. Any other failure logs ``[stage-profile] rule=<id>
+    group=<g> unavailable reason=<one line>`` and returns None. Never
+    raises, so detection cannot fail because of it. Returns the logged
+    stage rows.
     """
     try:
         sc = spark.sparkContext
+        jsc = sc._jsc.sc()
+        complete = True
+        try:
+            jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
+        except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
+            complete = False
         tracker = sc.statusTracker()
-        store = sc._jsc.sc().statusStore()
-        truncated = False
-        stage_ids = set()
+        store = jsc.statusStore()
         job_ids = list(tracker.getJobIdsForGroup(group))
-        submitted = spark_jobs_submitted(spark)
-        if first_job is not None and submitted is not None:
-            truncated = len(job_ids) < submitted - first_job
+        truncated = False
+        lossy = False
+        if mark is not None:
+            truncated = len(job_ids) < int(jsc.dagScheduler().numTotalJobs()) - mark["jobs"]
+            lossy = _status_events_dropped(jsc) > mark["dropped"]
+        stage_ids = set()
         for job_id in job_ids:
             info = tracker.getJobInfo(job_id)
             if info is None:
@@ -2833,10 +2855,13 @@ def rule_stage_profile(spark, group, rule_id, top=3, first_job=None):
         for sid in sorted(stage_ids):
             try:
                 sd = store.lastStageAttempt(sid)
-            except Exception:  # noqa: BLE001 -- evicted from the store
-                truncated = True
+            except Exception as e:  # noqa: BLE001
+                if "NoSuchElementException" not in str(e):
+                    raise
+                truncated = True  # dropped from the store
                 continue
-            if sd.status().toString() in ("SKIPPED", "PENDING"):
+            status = sd.status().toString()
+            if status in ("SKIPPED", "PENDING"):
                 continue
             sub, comp = sd.submissionTime(), sd.completionTime()
             wall = (
@@ -2848,6 +2873,7 @@ def rule_stage_profile(spark, group, rule_id, top=3, first_job=None):
                 {
                     "stage": sid,
                     "attempt": int(sd.attemptId()),
+                    "status": status,
                     "tasks": int(sd.numTasks()),
                     "wall_s": wall,
                     "exec_s": round(int(sd.executorRunTime()) / 1000.0, 1),
@@ -2873,15 +2899,18 @@ def rule_stage_profile(spark, group, rule_id, top=3, first_job=None):
             f"reason={one_line(f'{type(e).__name__}: {e}')}"
         )
         return None
-    flag = "true" if truncated else "false"
+    flags = " ".join(
+        f"{k}={'true' if v else 'false'}"
+        for k, v in (("truncated", truncated), ("complete", complete), ("lossy", lossy))
+    )
     if not rows:
-        log(f"[stage-profile] rule={rule_id} group={group} stages=0 truncated={flag}")
+        log(f"[stage-profile] rule={rule_id} group={group} stages=0 {flags}")
     for r in rows:
         log(
             f"[stage-profile] rule={rule_id} group={group} stage={r['stage']} "
-            f"attempt={r['attempt']} tasks={r['tasks']} wall_s={r['wall_s']} "
-            f"exec_s={r['exec_s']} shuffle_read_mb={r['shuffle_read_mb']} "
-            f"max_task_s={r['max_task_s']} stages={len(stages)} truncated={flag} "
-            f"name={r['name']}"
+            f"attempt={r['attempt']} status={r['status']} tasks={r['tasks']} "
+            f"wall_s={r['wall_s']} exec_s={r['exec_s']} "
+            f"shuffle_read_mb={r['shuffle_read_mb']} max_task_s={r['max_task_s']} "
+            f"stages={len(stages)} {flags} name={r['name']}"
         )
     return rows

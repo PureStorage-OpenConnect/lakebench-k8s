@@ -150,9 +150,10 @@ def _check(spark):
 
 
 def _check_stage_profile(spark):
-    """AML-1: each rule runs in its own job group, logs a [stage-profile]
-    line (stages, none, or unavailable) whatever its outcome, and the
-    caller's job group is back after the pass."""
+    """AML-1: with profile_stages, each rule runs in its own job group, logs a
+    [stage-profile] line (stages, none, or unavailable) whatever its outcome,
+    and the caller's job group is back after the pass. Without it nothing
+    changes."""
     import common
     import detection_rules
     import gold_finalize_financial as gf
@@ -190,7 +191,11 @@ def _check_stage_profile(spark):
     gf.log = common.log = capture
     try:
         txns = spark.createDataFrame([(f"u{i}",) for i in range(5)], "uetr string")
-        gf.run_detection_rules(spark, txns, "run-sp", rules=tuple(rules))
+        # Default (the continuous tick): no group, no profile.
+        gf.run_detection_rules(spark, txns, "run-sp", rules=("WX_ran",))
+        assert groups.pop("WX_ran") == "caller-group"
+        assert not [m for m in logged if m.startswith("[stage-profile]")], logged
+        gf.run_detection_rules(spark, txns, "run-sp", rules=tuple(rules), profile_stages=True)
     finally:
         gf.log, common.log = real
         for r in rules:

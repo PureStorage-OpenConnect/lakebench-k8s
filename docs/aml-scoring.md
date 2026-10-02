@@ -487,22 +487,32 @@ The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
   started (ran, failed or skipped for a structural reason such as W1's
   vertex cap), from the rule's start to its alerts' commit.
 - `stage_profile`: per rule, its three heaviest Spark stages by summed
-  executor run time (`exec_s`), with the stage's task count, wall time,
-  longest task (`max_task_s`), shuffle read in MB, the number of stages the
-  rule ran, and `truncated: true` when some of the rule's jobs or stages
-  had already left the driver's status store (it keeps the last 100 of
-  each), so the three may not be the heaviest. Each
-  rule runs in its own Spark job group, `lb-rule-<rule>-<id>`, which is
-  how its stages are told apart. An empty list means the rule ran no
-  stage. When the status store cannot be read, the rule is listed in
-  `stage_profile_unavailable` with the reason instead; detection is never
-  affected.
-- `tm_ops.phases`: wall seconds per stage of the TM operations pass
-  (`pin`, `reconcile`, `prior_state`, `inputs`, `simulate`,
-  `write_ledger`, `write_dispositions`, `write_cases`, `coverage`,
-  `read_back`, `recon_write`, `invariants`), which together make up
-  `tm_ops.elapsed_seconds`. Spark evaluates lazily, so a phase holds the
-  work its own reads and writes triggered.
+  executor run time (`exec_s`), with the stage's status, task count, wall
+  time, longest task (`max_task_s`), shuffle read in MB and the number of
+  stages the rule ran. Each rule runs in its own Spark job group,
+  `lb-rule-<rule>-<id>`, which is how its stages are told apart; the
+  stages are read from the driver's status store after the rule's commit,
+  outside `rule_elapsed_s`. Three flags say how far the numbers can be
+  trusted: `complete: false` when the driver's status listener had not
+  caught up within 5 seconds, `truncated: true` when the store had already
+  dropped some of the rule's jobs or stages (it keeps the last 100 of
+  each), and `lossy: true` when the listener dropped events during the
+  rule, so task totals are low. An empty list means the rule ran no stage.
+  When there is no usable list (the store could not be read, or it held no
+  stage of the rule while a flag is set), the rule is listed in
+  `stage_profile_unavailable` with the reason instead. Detection is never
+  affected. The wait for the listener adds at most 5 seconds per rule to
+  the gold-finalize job, and nothing when the listener keeps up. The
+  continuous gold tick does not profile, so its timings are unchanged.
+- `tm_ops.phases`: wall seconds per stage of the TM operations pass, in
+  pass order `pin`, `reconcile`, `prior_state`, `inputs` (the alert-input
+  build), `simulate` (the per-customer replay), `write_ledger`,
+  `write_dispositions`, `write_cases`, `coverage`, `read_back`,
+  `recon_write`, `invariants`; together they make up
+  `tm_ops.elapsed_seconds`. The JSON keys are sorted, not in pass order.
+  Spark evaluates lazily, so a phase holds the work its own reads and
+  writes trigger; the alert inputs and the replay are materialised at the
+  end of their own phases.
 
 ## Known limitations in v1.6
 

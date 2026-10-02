@@ -311,6 +311,9 @@ def _check(spark):
         "invariants",
     }, phases
     assert all(v >= 0 for v in phases.values()), phases
+    # The alert-input build and the per-customer replay are timed in their
+    # own phases, not in the first write that used to trigger them.
+    assert phases["inputs"] > 0 and phases["simulate"] > 0, phases
     total, elapsed = sum(phases.values()), ops[0]["elapsed_seconds"]
     # elapsed_seconds is rounded to 0.1 s and also covers the invariant log
     # lines after the last phase.

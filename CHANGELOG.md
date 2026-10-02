@@ -46,10 +46,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **AML gold-finalize records where its time goes.** The gold-finalize
   job in `metrics.json` gains `rule_elapsed_s` (seconds per detection
   rule), `stage_profile` (each rule's three heaviest Spark stages, read
-  from the driver's status store with every rule in its own job group) and
+  from the driver's status store with every rule in its own job group,
+  flagged when the store may be missing stages) and
   `stage_profile_unavailable`, and the TM operations summary gains
-  `tm_ops.phases` (seconds per stage of the pass). Additive: no result,
-  alert or published measurement changes. See
+  `tm_ops.phases` (seconds per stage of the pass). No alert, gold table or
+  score changes. Reading the profile can add up to 5 seconds per rule to
+  the gold-finalize job when the driver's status listener lags, and none
+  when it keeps up; continuous gold ticks do not profile. See
   [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service

@@ -82,11 +82,12 @@ class JobMetrics:
     # for a structural reason), not mode-excluded rules, which never start.
     rule_elapsed_s: dict[str, float] = field(default_factory=dict)
     # Heaviest Spark stages per rule from the ``[stage-profile]`` lines
-    # (common.rule_stage_profile), heaviest first: {"stage", "attempt",
-    # "tasks", "wall_s", "exec_s", "shuffle_read_mb", "max_task_s",
-    # "stages", "truncated", "name"}. An empty list means the rule's group
-    # ran no stage. ``stage_profile_unavailable`` holds the reason when the
-    # status store could not be read for a rule.
+    # (common.rule_stage_profile, metrics/stage_profile.py), heaviest first:
+    # {"stage", "attempt", "status", "tasks", "wall_s", "exec_s",
+    # "shuffle_read_mb", "max_task_s", "stages", "truncated", "complete",
+    # "lossy", "name"}. An empty list means the rule's group ran no stage.
+    # ``stage_profile_unavailable`` holds the reason when there is no usable
+    # list for a rule (store unreadable, or empty while a flag is set).
     stage_profile: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     stage_profile_unavailable: dict[str, str] = field(default_factory=dict)
     # TM operations layer (GOALS P10, AML gold only), from the driver's
@@ -3051,10 +3052,14 @@ class MetricsCollector:
             rule = m.group("rule")
             try:
                 metrics.alerts_by_rule[rule] = int(m.group("n"))
-                metrics.rule_elapsed_s[rule] = float(m.group("elapsed"))
             except ValueError:
                 continue
             mid = (m.group("mid") or "").strip()
+            if mid != "error=unknown-rule":  # never started
+                try:
+                    metrics.rule_elapsed_s[rule] = float(m.group("elapsed"))
+                except ValueError:
+                    pass
             err_match = re.search(r"\berror=(.+)$", mid)
             if err_match:
                 metrics.rule_errors[rule] = err_match.group(1).strip()

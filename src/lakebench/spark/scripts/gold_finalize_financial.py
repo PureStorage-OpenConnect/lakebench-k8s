@@ -40,9 +40,9 @@ from common import (
     log,
     log_job_metrics,
     one_line,
+    rule_profile_mark,
     rule_stage_profile,
     sealed_txns_filter,
-    spark_jobs_submitted,
 )
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession
@@ -335,7 +335,7 @@ def main() -> None:
     log(f"Wrote {GOLD_DASH} baseline rows")
 
     try:
-        run_detection_rules(spark, txns, RUN_ID)
+        run_detection_rules(spark, txns, RUN_ID, profile_stages=True)
     finally:
         # W1's reliable checkpoints; see detection_rules.cleanup_w1_checkpoints.
         from detection_rules import cleanup_w1_checkpoints
@@ -368,7 +368,9 @@ def main() -> None:
     spark.stop()
 
 
-def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None) -> dict:
+def run_detection_rules(
+    spark, txns, run_id: str, rules=None, skipped_rules=None, profile_stages=False
+) -> dict:
     """Invoke each configured detection rule and append alerts to gold.alerts.
 
     Per-rule isolation: a rule that raises is logged and skipped, and
@@ -410,6 +412,13 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     which the rule's alerts were committed to gold.alerts, None for a rule
     that did not run (skip or error). ``cleanup_s`` is the per-rule cache
     and path-spill cleanup, summed. Batch ignores it.
+
+    ``profile_stages`` (batch gold-finalize): run each rule in its own Spark
+    job group and log its heaviest stages after it (``[stage-profile]``,
+    common.rule_stage_profile), restoring the caller's job group after each
+    rule. The profile runs after the rule's commit, so the rule's elapsed
+    time and commit time do not include it; it counts in ``cleanup_s``. Off
+    by default, so the continuous tick's timings are unchanged.
     """
     import inspect
 
@@ -480,11 +489,12 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{run_id}'")
     log(f"[detection] cleared {GOLD_ALERTS} rows from runs other than {run_id}")
     timings["setup_s"] = time.time() - pass_start
-    # Each rule runs in its own Spark job group, so its jobs and stages can be
-    # attributed to it ([stage-profile] lines, read from the status store
-    # after the rule). The caller's group is restored after every rule.
+    # With profile_stages, each rule runs in its own Spark job group, so its
+    # jobs and stages can be attributed to it ([stage-profile] lines, read
+    # from the status store after the rule). The caller's group is restored
+    # after every rule.
     sc = spark.sparkContext
-    caller_group = _job_group_props(sc)
+    caller_group = _job_group_props(sc) if profile_stages else None
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
@@ -493,11 +503,13 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             status_rows.append((rule_id, "error", "unknown-rule", target_typology, None))
             timings["rules"][rule_id] = {"elapsed_s": 0.0, "committed_s": None}
             continue
-        # Unique per invocation: the continuous loop runs the same rule every
-        # tick, and the status store keeps earlier ticks' jobs.
-        group = f"lb-rule-{rule_id}-{uuid.uuid4().hex[:8]}"
-        sc.setJobGroup(group, f"{rule_id} run {run_id}", interruptOnCancel=False)
-        first_job = spark_jobs_submitted(spark)
+        group = mark = None
+        if profile_stages:
+            # Unique per invocation: a rerun of the rule in the same driver
+            # must not read the earlier run's jobs from the status store.
+            group = f"lb-rule-{rule_id}-{uuid.uuid4().hex[:8]}"
+            sc.setJobGroup(group, f"{rule_id} run {run_id}", interruptOnCancel=False)
+            mark = rule_profile_mark(spark)
         rule_start = time.time()
         try:
             # Signature-based param filter, NOT ``__code__.co_varnames``
@@ -584,9 +596,10 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": None}
             status_rows.append((rule_id, "error", err, target_typology, None))
         finally:
-            rule_stage_profile(spark, group, rule_id, first_job=first_job)
-            _restore_job_group(sc, caller_group)
             cleanup_start = time.time()
+            if profile_stages:
+                rule_stage_profile(spark, group, rule_id, mark=mark)
+                _restore_job_group(sc, caller_group)
             # The alerts frame and W1/W3/W17's intermediate frames (edges,
             # step, path levels) are persisted. Nothing outlives the rule's
             # write, and left cached they hold executor memory and scratch
