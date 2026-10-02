@@ -252,6 +252,18 @@ def experiment_inputs(
         params_id = _short_hash(declared)
         params = {"customer360": _c360_resolved(cfg)}
 
+    from lakebench.metrics.fingerprint_inputs import record_spark_conf
+    from lakebench.modules.pipeline_engines.spark.conf_keys import user_spark_overrides
+
+    # Local runs build no Spark job manifest, so the user conf never ran.
+    buckets = cfg.platform.storage.s3.buckets
+    layers = {buckets.bronze: "bronze", buckets.silver: "silver", buckets.gold: "gold"}
+    user_conf = (
+        record_spark_conf(user_spark_overrides(cfg.spark.conf or {}), layers)
+        if system != "local"
+        else {}
+    )
+
     corpus = {
         "schema": schema,
         "generator_image": images.datagen,
@@ -344,6 +356,9 @@ def experiment_inputs(
                 "spark-thrift": "catalog",
                 "duckdb": "direct_storage",
             }.get(query_engine),
+            # The user's Spark conf over the job defaults, only when it
+            # changes something, so a default config's block is unchanged.
+            **({"spark_conf_user": user_conf} if user_conf else {}),
         },
         "maintenance_config": {
             "pre_benchmark_maintenance": arch.pipeline.pre_benchmark_maintenance,

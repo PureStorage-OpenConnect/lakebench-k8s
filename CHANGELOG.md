@@ -19,13 +19,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   another set, or a Thrift or DuckDB pod on another set exits 3. New exit
   paths `run.deps_stale` (4) and `run.deps_mismatch` (3); `run.deps_missing`
   (4) is live. Redeploy once after upgrading.
-- `spark.conf` may no longer set `spark.jars`, `spark.submit.pyFiles`,
-  `spark.jars.packages`, `spark.jars.repositories`, `spark.jars.ivy`,
-  `spark.jars.ivySettings`, `spark.driver.extraClassPath` /
-  `spark.executor.extraClassPath`, `spark.driver.userClassPathFirst` /
-  `spark.executor.userClassPathFirst` or the pod template file keys:
-  Lakebench sets the jars and their order from the verified set. Such a
-  config is refused at load (exit 2).
+- `spark.conf` may also not set `spark.driver.userClassPathFirst` or
+  `spark.executor.userClassPathFirst`: the jobs take their jars, in a fixed
+  order, from the verified set, and these keys would change which copy of a
+  class wins. Refused at load by the commands that change data (exit 2), as
+  for every key Lakebench owns.
 
 ### Added
 - **Each deployment gets a dependency server.** `deploy` runs a new
@@ -52,6 +50,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   scheme are refused at load.
 
 ### Breaking changes
+- **`run` refuses arguments it used to ignore, before any cluster call.**
+  An unknown `--stage` used to be found only after `run` had read the
+  cluster's capacity (and, with `--yes`, could auto-deploy first), and
+  several flags were silently dropped by the mode they did not apply to.
+  Now `run` exits 2 before contacting the cluster for: an unknown
+  `--stage`; `--stage` with a continuous run; `--deploy-only` with
+  `--generate-only`, `--stage`, `--generate` or `--skip-generate`;
+  `--generate-only` with `--skip-generate`; `--local` with `--deploy-only`,
+  `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
+  `--regenerate` without `--generate` or `--generate-only`, or with
+  `--local` or a continuous run other than `--generate-only`; `--skip-generate` with `--generate`;
+  `--force-reset` on a batch run; `--force-rebuild` on a continuous run;
+  `--duration` on a batch run or below 60; `--timeout` below 1. The full
+  list is under `run` in docs/cli-reference.md. `reproduce` refuses a
+  `--timeout` below 1 before its pre-run destroy. Drop the flag the mode
+  does not use.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
@@ -113,6 +127,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   financial config that named another layout with `path_template` (which
   v1.6 passed to the financial stages) is refused. Corpus and workload ids
   do not move. A schema walk test fails when a config field has no reader.
+- **`spark.conf` merges over the job defaults; keys Lakebench sets are
+  refused.** `spark.conf` now holds your own keys only (default `{}`). Each
+  job starts from seven proven defaults (S3A multipart size, upload blocks,
+  attempts, retries, retry interval, memory fraction and storage fraction),
+  then your keys, then the keys Lakebench sets for the job. Before, the
+  defaults were the schema default of `spark.conf`, so setting any key
+  dropped all of them: a config with a custom `spark.conf` now gets them back,
+  which changes what such a config runs. A `spark.conf` key Lakebench sets
+  for every job (shuffle partitions, the S3A connection pool and buffers,
+  the catalog, adaptive execution, UI) or a job script sets
+  (`spark.sql.session.timeZone`, `spark.sql.autoBroadcastJoinThreshold` and
+  three adaptive tunables) was silently overwritten and is now refused by
+  the commands that change data, naming what controls it. Also refused, as
+  reserved for Lakebench although v1.6 passed them through:
+  `spark.kubernetes.*` (so node selectors, tolerations and pod annotations
+  can no longer be set here), `spark.jars` and `spark.jars.*`,
+  `spark.submit.pyFiles`, and executor and driver memory, overhead, cores,
+  off-heap and PySpark memory, which would change the pod request outside
+  the capacity check. Teardown and read commands drop such a key with a
+  note, and a key at its v1.6 schema default is dropped with a note
+  everywhere. `spark.driver.maxResultSize` still takes a user value. A
+  non-default `spark.conf` is recorded as
+  `experiment.architecture.spark_conf_user` and enters the experiment
+  identity as `spark conf`; only tuning keys keep their values there.
+  Credential, secret-named, environment-variable and location values are
+  recorded as `<redacted>`, and other values by digest; a per-bucket S3A
+  key names the bucket's layer, not the bucket.
+  `spark.conf` reaches the pipeline's Spark jobs only: not the Spark Thrift
+  server, and not `--local` runs.
 - **`operator.install: true` is refused.** The Spark Operator
   (`platform.compute.spark.operator.install`) and the Stackable operators
   (`architecture.catalog.hive.operator.install`) are shared cluster
@@ -425,6 +468,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   earlier cycle, which was a silent no-op). When the metastore is lost and
   the table files are kept, cycle 0 on the Hive catalog already refused to
   adopt the old Delta log; that is unchanged.
+- **Ctrl-C or SIGTERM during `run` seals the record INTERRUPTED and stops
+  this run's jobs.** A batch run interrupted while a stage ran used to save
+  `success: true` and a PASSED verdict, and left the SparkApplication and
+  any datagen Job running; a continuous run read FAILED and left its datagen
+  Job. Now the run deletes every SparkApplication and datagen Job it created
+  and has not seen finish, each with the uid of the object it created as a
+  precondition, so an object of the same name created since by another
+  invocation is never deleted (it is listed as left). The cleanup takes at
+  most about 60 s. metrics.json gains `interrupted` (signal, stage, time,
+  `prior_failure`, and the objects stopped, left and skipped) and the
+  verdict gate `interrupt`; the verdict is INTERRUPTED, or FAILED when
+  something had already failed, never PASSED. The run then exits 130. A
+  signal while the results are gathered no longer loses the record. A
+  second Ctrl-C cuts the cleanup short and still writes the record; a third
+  stops at once. After an interrupt the run does not measure bucket sizes or
+  read Prometheus; it still lists the datagen prefix once for the corpus
+  observation. `report --list` shows such a run as Interrupted. Inside
+  the cluster lease the signal still waits for the shared change to finish
+  first. SIGHUP is not handled.
+- **A continuous run notices that its namespace is gone.** It used to keep
+  looping to the end of its window and its settle wait after `destroy`,
+  then stopped streams by name, which after a redeploy were the new
+  deployment's. It now reads the namespace every 30 s in the window and
+  the settle wait, around each benchmark round, before each maintenance and
+  compaction round and before stopping its streams; when the namespace was
+  deleted, is being deleted or was deleted and deployed again (or three
+  reads in a row fail), it stops at that read, exits 1 and saves the record
+  with `abort_reason`.
+### Fixed
+
+- `run --continuous --skip-generate` no longer journals a "Datagen started"
+  event for a datagen it did not start.
+
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one

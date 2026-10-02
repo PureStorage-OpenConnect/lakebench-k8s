@@ -302,21 +302,15 @@ workload:
 # ============================================================================
 # SPARK CONFIGURATION OVERRIDES
 # ============================================================================
-# Proven defaults for S3A and shuffle. Override as needed.
+# Your own Spark keys, merged over the job defaults (each a key=value under
+# conf). Keys Lakebench sets for every job (shuffle partitions, the S3A
+# connection pool, catalog, jars, UI) are refused. The job defaults:
 # spark:
 #   conf:
-#     # S3A performance settings
-#     spark.hadoop.fs.s3a.connection.maximum: "500"
-#     spark.hadoop.fs.s3a.threads.max: "200"
-#     spark.hadoop.fs.s3a.fast.upload: "true"
 #     spark.hadoop.fs.s3a.multipart.size: "268435456"
 #     spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
 #     spark.hadoop.fs.s3a.attempts.maximum: "20"
 #     spark.hadoop.fs.s3a.retry.limit: "10"
 #     spark.hadoop.fs.s3a.retry.interval: "500ms"
-#     # Shuffle settings
-#     spark.sql.shuffle.partitions: "200"
-#     spark.default.parallelism: "200"
-#     # Memory settings
 #     spark.memory.fraction: "0.8"
 #     spark.memory.storageFraction: "0.3"

@@ -184,7 +184,7 @@ When using Pure Storage FlashBlade as the S3 backend, keep the following in mind
 
 ## Spark S3A Integration
 
-Spark jobs access the S3 buckets through the Hadoop S3A connector. Lakebench injects proven S3A tuning parameters (connection pool size, multipart upload size, retry settings) into every Spark job automatically. These defaults are defined under `spark.conf` in the config schema and have been battle-tested at 1TB+ scale on FlashBlade. They can be overridden in the `spark.conf` section of the YAML file if needed.
+Spark jobs access the S3 buckets through the Hadoop S3A connector. Lakebench injects proven S3A tuning parameters into every Spark job, proven at 1TB+ scale on FlashBlade. The multipart part size, upload blocks and retry settings are job defaults that the `spark.conf` section of the YAML file can override; the connection pool, thread count and upload buffer are set by Lakebench for every job and are refused in `spark.conf` (see [Spark Reference](component-spark.md)).
 
 ## See Also
 

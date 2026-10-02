@@ -19,6 +19,10 @@ import yaml
 from lakebench.config.recipes import RECIPES
 from lakebench.deploy.engine import DeploymentEngine, TemplateRenderer
 from lakebench.deps import manifest as m
+from lakebench.modules.pipeline_engines.spark.conf_keys import (
+    DEPENDENCY_SET_SPARK_KEYS,
+    is_owned_spark_key,
+)
 from lakebench.modules.pipeline_engines.spark.job import (
     REFERENCE_SET_JOB_TYPES,
     JobType,
@@ -28,7 +32,7 @@ from lakebench.modules.pipeline_engines.spark.monitor import classify_dependency
 from tests.conftest import make_config
 
 RECIPE_NAMES = sorted(r for r in RECIPES if r != "default")
-OWNED = sorted(m.OWNED_SPARK_CONF_KEYS)
+OWNED = sorted(DEPENDENCY_SET_SPARK_KEYS)
 
 
 def _configs():
@@ -139,6 +143,11 @@ def test_lakebench_owned_spark_conf_keys_are_refused(key):
     cfg.spark.conf[key] = "x"
     with pytest.raises(ValueError, match=re.escape(key)):
         _manager(cfg)._build_manifest(JobType.BRONZE_VERIFY)
+
+
+def test_dependency_set_keys_are_owned():
+    """The jar keys are a subset of the keys the config refuses."""
+    assert [k for k in DEPENDENCY_SET_SPARK_KEYS if not is_owned_spark_key(k)] == []
 
 
 @pytest.mark.real_deps

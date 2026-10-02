@@ -203,7 +203,7 @@ READERS: dict[str, str] = {
     "architecture.query_engine.duckdb.catalog_name": "lakebench.benchmark.executor:get_executor",
     "architecture.query_engine.duckdb.version": "lakebench.deps.request:select_request",
     "architecture.pipeline.pattern": "lakebench.config.autosizer:_apply_cluster_scaling",
-    "architecture.pipeline.mode": "lakebench.cli._run:run",
+    "architecture.pipeline.mode": "lakebench.cli._run_args:run_mode",
     "architecture.pipeline.cycles": "lakebench.cli._run:run",
     "architecture.pipeline.pre_benchmark_maintenance": "lakebench.cli._run:run",
     "architecture.pipeline.sustained.bronze_trigger_interval": (

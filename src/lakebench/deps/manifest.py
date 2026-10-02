@@ -326,27 +326,6 @@ class DepsSetMissing(RuntimeError):
         )
 
 
-# Spark conf keys Lakebench owns: a user value in ``spark.conf`` would load
-# jars from outside the verified set, or make the controller resolve again.
-OWNED_SPARK_CONF_KEYS: frozenset[str] = frozenset(
-    {
-        "spark.jars",
-        "spark.submit.pyFiles",
-        "spark.jars.packages",
-        "spark.jars.repositories",
-        "spark.jars.ivy",
-        "spark.jars.ivySettings",
-        "spark.driver.extraClassPath",
-        "spark.executor.extraClassPath",
-        # They change which of two jars' classes load first, which the
-        # pinset's jar order describes, or replace the pod templates.
-        "spark.driver.userClassPathFirst",
-        "spark.executor.userClassPathFirst",
-        "spark.kubernetes.driver.podTemplateFile",
-        "spark.kubernetes.executor.podTemplateFile",
-    }
-)
-
 PLACEHOLDER_HOST = "lb-deps.placeholder.invalid"
 
 

@@ -18,11 +18,12 @@ Seams (each records its calls into one ordered list):
   :class:`RecordingK8s`, a ``K8sClient`` stand-in. ``exec_in_pod`` answers
   Trino SQL from :class:`FakeTrino`.
 - ``kubernetes.client`` ``CoreV1Api``, ``AppsV1Api``, ``CustomObjectsApi``,
-  ``BatchV1Api`` and ``VersionApi``: recording fakes that script reads only.
-  Every other API class reaches ``ApiClient.call_api``, which refuses. Batch
-  ``run`` mutates nothing through the API today, so any create, patch or
-  delete is unscripted and fails the trace (SD-9's ``recording_k8s`` fixture
-  is the general SAF-4 oracle, with the namespace rule).
+  ``BatchV1Api`` and ``VersionApi``: recording fakes that script reads, and
+  the uid-precondition deletes of an interrupted run's SparkApplications and
+  datagen Job. Every other API class reaches ``ApiClient.call_api``, which
+  refuses, so any other create, patch or delete is unscripted and fails the
+  trace (SD-9's ``recording_k8s`` fixture is the general SAF-4 oracle, with
+  the namespace rule).
 - ``lakebench.spark.SparkOperatorManager``: ready, watching the namespace.
 - ``lakebench.engine.get_engine``: :class:`FakeJobManager`.
 - ``lakebench.spark.SparkJobMonitor``: :class:`FakeMonitor`, whose driver logs
@@ -67,6 +68,23 @@ against the real method's signature: a call the real seam would reject with a
 ``Unscripted`` (a ``NotImplementedError``) and is recorded in the trace's
 ``unscripted`` list even when the code under test catches it, so a new seam is
 never silent; every golden expects that list empty.
+
+Failure scenarios (V16-5 interrupt, V16-6 namespace loss) use:
+
+- ``Scenario.interrupt``: a batch stage whose wait is interrupted, by a
+  raised ``KeyboardInterrupt`` or a real ``SIGINT``/``SIGTERM`` sent to this
+  process; ``Scenario.submit_interrupt``: a stage whose submission is
+  interrupted after the API server created the application.
+- ``Scenario.events``: the fake-time event hook, ``FakeClock.at``; at a
+  window second it sends a signal or makes the namespace disappear.
+- ``Recorder.namespace_present``: the scenario namespace exists (separate
+  from ``Recorder.namespace``, its name).
+- ``Scenario.lease_signal``: the fake ``ensure_namespace_watched`` takes the
+  real ``cluster_lock`` against an in-memory lease and sends the signal while
+  it holds it, then finishes a fake helm upgrade.
+- SparkApplications and the datagen Job carry uids; their deletes record the
+  uid precondition, answer 404 when gone and 409 when the uid differs or the
+  object is listed in ``Recorder.foreign`` (recreated by someone else).
 
 There is no golden update flag (SPEC section 6.4): a change that moves a
 trace on purpose ships a new golden written by a second agent from the record.
@@ -190,6 +208,8 @@ class FakeClock:
     def __init__(self, start: float) -> None:
         self.t = float(start)
         self._origin = float(start)
+        #: (seconds after the origin, action) not yet fired, in time order.
+        self._events: list[tuple[float, Callable[[], None]]] = []
 
     def time(self) -> float:
         return self.t
@@ -202,6 +222,17 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.t += max(0.0, float(seconds))
+        # Fire every event now due, oldest first. An action may raise (a
+        # signal whose handler raises KeyboardInterrupt does so here, inside
+        # the sleep or the slow fake that advanced the clock, as it would live).
+        while self._events and self._events[0][0] <= self.t - self._origin:
+            _, action = self._events.pop(0)
+            action()
+
+    def at(self, seconds: float, action: Callable[[], None]) -> None:
+        """Run *action* when the clock reaches *seconds* after its origin."""
+        self._events.append((float(seconds), action))
+        self._events.sort(key=lambda e: e[0])
 
     def cluster_now(self) -> datetime:
         """The cluster's clock now, naive UTC (pod log timestamps)."""
@@ -244,6 +275,38 @@ class Recorder:
     sizes: dict[str, int] | None = None
     #: S3 objects the scenario's fake boto client serves, by (bucket, key).
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
+    #: The scenario namespace exists (False: deleted mid-run).
+    namespace_present: bool = True
+    #: Its uid (changes when it is destroyed and deployed again), its phase,
+    #: and reads that fail with a 503 before it answers again (-1: all).
+    namespace_uid: str = "ns-uid-runchar-1"
+    namespace_phase: str = "Active"
+    namespace_errors: int = 0
+    #: SparkApplications that exist in the fake cluster: name -> uid. A
+    #: submit creates one; a delete removes it; a completed stage keeps it.
+    apps: dict[str, str] = field(default_factory=dict)
+    #: Each application's LB_RUN_ID values (the driver env of its submit).
+    app_run_ids: dict[str, list[str]] = field(default_factory=dict)
+    #: The datagen Job's uid while it exists (None: no Job).
+    datagen_uid: str | None = None
+    #: Objects recreated by someone else since the run created them: their
+    #: deletes with the run's uid answer 409.
+    foreign: set[str] = field(default_factory=set)
+    #: Stage whose wait is interrupted, and how ("raise", "SIGINT", "SIGTERM").
+    interrupt: tuple[str, str] | None = None
+    #: Stage whose submit is interrupted after the application was created.
+    submit_interrupt: str | None = None
+    #: Signal sent while the fake operator heal holds the cluster lease.
+    lease_signal: str | None = None
+    #: Number of deletes left before one is interrupted (None: never).
+    interrupt_delete_after: int | None = None
+    #: The bronze datagen prefix is empty (a batch --generate scenario).
+    fresh_bronze: bool = False
+    #: The datagen Job this run deployed has not finished.
+    datagen_running: bool = False
+    #: With ``interrupt``: the state the monitor reports before the signal
+    #: ("completed", "failed"): the application ended, its log is being read.
+    interrupt_after_state: str | None = None
 
     def add(self, *entry: Any) -> None:
         self.calls.append(list(entry))
@@ -252,6 +315,18 @@ class Recorder:
         """Record an unscripted call; the caller raises the result."""
         self.unscripted.append(message)
         return Unscripted(message)
+
+
+def send_interrupt(how: str) -> None:
+    """Interrupt this process as an operator would: ``"raise"`` raises
+    ``KeyboardInterrupt`` (Python's own SIGINT handler), ``"SIGINT"`` and
+    ``"SIGTERM"`` send the real signal to this process, so whatever handler
+    the code under test installed runs."""
+    import signal as _signal
+
+    if how == "raise":
+        raise KeyboardInterrupt
+    os.kill(os.getpid(), getattr(_signal, how))
 
 
 def _unbound(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -384,7 +459,7 @@ class RecordingK8s:
         _checked(self._rec, self._real.namespace_exists, *args, **kwargs)
         name = args[0] if args else kwargs["name"]
         self._rec.add("k8s", "namespace_exists", name)
-        return name == self._rec.namespace
+        return name == self._rec.namespace and self._rec.namespace_present
 
     def exec_in_pod(self, name, command, namespace=None, container=None, timeout=30):
         _checked(self._rec, self._real.exec_in_pod, name, command, namespace, container, timeout)
@@ -403,6 +478,7 @@ class RecordingK8s:
         if a["namespace"] != self._rec.namespace:
             raise self._rec.refuse(f"delete outside the namespace: {a['namespace']}")
         self._rec.live_streams.discard(a["name"])
+        self._rec.apps.pop(a["name"], None)
         return True
 
     # The raw API handles metrics/system_identity reads through (the system
@@ -464,7 +540,39 @@ def _fake_pod(namespace: str, node: str, cpu: str, memory: str):
 def _api_exception(status: int):
     from kubernetes.client.rest import ApiException
 
-    return ApiException(status=status, reason="Not Found" if status == 404 else "Error")
+    reason = {404: "Not Found", 409: "Conflict"}.get(status, "Error")
+    return ApiException(status=status, reason=reason)
+
+
+def _precondition_uid(body: Any) -> str | None:
+    pre = getattr(body, "preconditions", None)
+    return getattr(pre, "uid", None)
+
+
+def _delete_with_uid(rec: Recorder, kind: str, name: str, namespace: str, body: Any) -> None:
+    """A delete as the API server answers it: 404 when the object is gone,
+    409 when the uid precondition names another object, else it is gone."""
+    if namespace != rec.namespace:
+        raise rec.refuse(f"delete outside the namespace: {kind} {name} in {namespace}")
+    if rec.interrupt_delete_after is not None:
+        if rec.interrupt_delete_after == 0:
+            rec.interrupt_delete_after = None
+            send_interrupt("SIGINT")
+        else:
+            rec.interrupt_delete_after -= 1
+    uid = _precondition_uid(body)
+    current = rec.apps.get(name) if kind == "SparkApplication" else rec.datagen_uid
+    if current is None:
+        raise _api_exception(404)
+    if uid is None:
+        raise rec.refuse(f"delete of {kind} {name} without a uid precondition")
+    if uid != current or f"{kind}/{name}" in rec.foreign:
+        raise _api_exception(409)
+    if kind == "SparkApplication":
+        rec.apps.pop(name, None)
+        rec.live_streams.discard(name)
+    else:
+        rec.datagen_uid = None
 
 
 class _FakeApi:
@@ -498,17 +606,33 @@ def _namespace_object(name: str):
     }
     return SimpleNamespace(
         metadata=SimpleNamespace(
-            name=name, annotations=annotations, labels={}, deletion_timestamp=None
-        )
+            name=name,
+            annotations=annotations,
+            labels={},
+            deletion_timestamp=None,
+            uid=NAMESPACE_UID,
+        ),
+        status=SimpleNamespace(phase="Active"),
     )
+
+
+#: The scenario namespace's uid.
+NAMESPACE_UID = "ns-uid-runchar-1"
 
 
 class FakeCoreV1Api(_FakeApi):
     def read_namespace(self, name, **kw):
         self._rec.add("CoreV1Api", "read_namespace", name)
-        if name != self._rec.namespace:
+        if name != self._rec.namespace or not self._rec.namespace_present:
             raise _api_exception(404)
-        return _namespace_object(name)
+        if self._rec.namespace_errors:
+            if self._rec.namespace_errors > 0:
+                self._rec.namespace_errors -= 1
+            raise _api_exception(503)
+        ns = _namespace_object(name)
+        ns.metadata.uid = self._rec.namespace_uid
+        ns.status.phase = self._rec.namespace_phase
+        return ns
 
     def list_namespace(self, **kw):
         self._rec.add("CoreV1Api", "list_namespace")
@@ -572,8 +696,32 @@ class FakeCustomObjectsApi(_FakeApi):
         self._rec.add("CustomObjectsApi", "get", plural, name, namespace)
         if name in self._rec.live_streams:
             return {"status": {"applicationState": {"state": "RUNNING"}}}
+        if name in self._rec.apps:
+            env = [{"name": "LB_RUN_ID", "value": v} for v in self._rec.app_run_ids.get(name, [])]
+            return {
+                "metadata": {"name": name, "uid": self._rec.apps[name]},
+                "spec": {"driver": {"env": env}},
+                "status": {"applicationState": {"state": "RUNNING"}},
+            }
         # No SparkApplication is left over from an earlier run.
         raise _api_exception(404)
+
+    def delete_namespaced_custom_object(
+        self, group, version, namespace, plural, name, body=None, **kw
+    ):
+        self._rec.add(
+            "CustomObjectsApi",
+            "delete",
+            plural,
+            name,
+            namespace,
+            _precondition_uid(body),
+            getattr(body, "propagation_policy", None),
+        )
+        if (group, version, plural) != ("sparkoperator.k8s.io", "v1beta2", "sparkapplications"):
+            raise self._rec.refuse(f"delete of {group}/{version} {plural}/{name}")
+        _delete_with_uid(self._rec, "SparkApplication", name, namespace, body)
+        return {"status": "Success"}
 
 
 class FakeBatchV1Api(_FakeApi):
@@ -584,7 +732,24 @@ class FakeBatchV1Api(_FakeApi):
         if name != "lakebench-datagen" or namespace != self._rec.namespace:
             raise _api_exception(404)
         cond = SimpleNamespace(type="Complete", status="True")
-        return SimpleNamespace(status=SimpleNamespace(conditions=[cond]))
+        running = self._rec.datagen_running and self._rec.datagen_uid is not None
+        return SimpleNamespace(
+            metadata=SimpleNamespace(name=name, uid=self._rec.datagen_uid or "uid-datagen-pre"),
+            status=SimpleNamespace(conditions=[] if running else [cond]),
+        )
+
+    def delete_namespaced_job(self, name, namespace, body=None, **kw):
+        self._rec.add(
+            "BatchV1Api",
+            "delete_namespaced_job",
+            name,
+            namespace,
+            _precondition_uid(body),
+            getattr(body, "propagation_policy", None),
+        )
+        if name != "lakebench-datagen":
+            raise self._rec.refuse(f"delete of Job {name}")
+        _delete_with_uid(self._rec, "Job", name, namespace, body)
 
 
 class FakeApisApi(_FakeApi):
@@ -616,6 +781,56 @@ def _refuse_call_api(rec: Recorder):
         raise rec.refuse(f"unscripted Kubernetes API call: {method} {resource_path}")
 
     return call_api
+
+
+class FakeLeaseApi:
+    """The cluster lease ConfigMap in ``lakebench-system`` as the API server
+    keeps it, for ``cluster_lock`` (the calls ``acquire_cluster_lock`` and
+    ``release_cluster_lock`` make). Its create and delete are traced."""
+
+    def __init__(self, rec: Recorder) -> None:
+        self._rec = rec
+        self.cm: Any = None
+        self._rv = 0
+
+    def _stamp(self, body: Any) -> Any:
+        self._rv += 1
+        body.metadata.resource_version = str(self._rv)
+        body.metadata.uid = "uid-lease-1"
+        self.cm = body
+        return body
+
+    def read_namespace(self, name, **kw):
+        return SimpleNamespace(metadata=SimpleNamespace(name=name))
+
+    def create_namespaced_config_map(self, namespace, body, **kw):
+        self._rec.add("Lease", "create", namespace, body.metadata.name)
+        if self.cm is not None:
+            raise _api_exception(409)
+        return self._stamp(body)
+
+    def replace_namespaced_config_map(self, name, namespace, body, **kw):
+        if self.cm is None:
+            raise _api_exception(404)
+        if body.metadata.resource_version != self.cm.metadata.resource_version:
+            raise _api_exception(409)
+        return self._stamp(body)
+
+    def read_namespaced_config_map(self, name, namespace, **kw):
+        if self.cm is None:
+            raise _api_exception(404)
+        return self.cm
+
+    def delete_namespaced_config_map(self, name, namespace, body=None, **kw):
+        self._rec.add("Lease", "delete", namespace, name)
+        if self.cm is None:
+            raise _api_exception(404)
+        self.cm = None
+
+    def __getattr__(self, attr: str):
+        if attr.startswith("_"):
+            raise AttributeError(attr)
+        raise self._rec.refuse(f"unscripted lease API call {attr}")
 
 
 class FakeOperator:
@@ -653,6 +868,17 @@ class FakeOperator:
     def ensure_namespace_watched(self, *args, **kwargs):
         _checked(self._rec, self._real.ensure_namespace_watched, *args, **kwargs)
         self._rec.add("SparkOperator", "ensure_namespace_watched", kwargs.get("can_heal", False))
+        if self._rec.lease_signal is not None:
+            # The heal path: the watch list changes under the real cluster
+            # lease (operator.py takes it the same way), and the signal
+            # arrives while the shared helm upgrade is running.
+            from lakebench.deploy import cluster_lock
+
+            lease = FakeLeaseApi(self._rec)
+            with cluster_lock.cluster_lock(lease, timeout=0):
+                self._rec.add("SparkOperator", "helm upgrade", "start")
+                send_interrupt(self._rec.lease_signal)
+                self._rec.add("SparkOperator", "helm upgrade", "done")
         return self._status(watching_namespace=True, watched_namespaces=[self.job_namespace])
 
     def __getattr__(self, attr: str):
@@ -701,7 +927,8 @@ class FakeJobManager:
         name = args[0] if args else kwargs["job_name"]
         self._rec.add("JobManager", "get_job_status", name)
         if name not in self._rec.live_streams:
-            return JobStatus(name=name, state=JobState.UNKNOWN, message="not found")
+            # The real manager's text for a 404 (job.py get_job_status).
+            return JobStatus(name=name, state=JobState.UNKNOWN, message="Job not found")
         stage = name.removeprefix("lakebench-")
         return JobStatus(
             name=name,
@@ -735,17 +962,26 @@ class FakeJobManager:
         values = {k: env.get(k) for k in TRACED_ENV_VALUES}
         values.update({k: env[k] for k in TRACED_ENV_IF_SET if k in env})
         self._rec.submits.append([job_type.value, sorted(env), values])
+        name = f"lakebench-{job_type.value}"
+        # The API server's object: a fresh uid per create, and the run id
+        # its driver env carries.
+        uid = f"uid-{job_type.value}-{len(self._rec.submits)}"
+        self._rec.apps[name] = uid
+        self._rec.app_run_ids[name] = [env["LB_RUN_ID"]] if "LB_RUN_ID" in env else []
+        if self._rec.submit_interrupt == job_type.value:
+            # The create landed; the interrupt arrived before its reply.
+            self._rec.submit_interrupt = None
+            send_interrupt("SIGINT")
         if job_type.value in STREAM_EXECUTORS:
-            self._rec.live_streams.add(f"lakebench-{job_type.value}")
+            self._rec.live_streams.add(name)
             return JobStatus(
-                name=f"lakebench-{job_type.value}",
+                name=name,
                 state=JobState.SUBMITTED,
                 message="submitted",
                 executor_count=STREAM_EXECUTORS[job_type.value],
+                uid=uid,
             )
-        return JobStatus(
-            name=f"lakebench-{job_type.value}", state=JobState.SUBMITTED, message="submitted"
-        )
+        return JobStatus(name=name, state=JobState.SUBMITTED, message="submitted", uid=uid)
 
     def __getattr__(self, attr: str):
         if attr.startswith("_"):
@@ -799,6 +1035,13 @@ class FakeMonitor:
         running = JobStatus(name=job_name, state=JobState.RUNNING, message="", executor_count=4)
         if a["progress_callback"] is not None:
             a["progress_callback"](running)
+        if self._rec.interrupt is not None and self._rec.interrupt[0] == stage:
+            # Ctrl-C (or SIGTERM) while the stage's application runs, or, with
+            # interrupt_after_state, once it has ended and its log is read.
+            ended = self._rec.interrupt_after_state
+            if ended is not None and a["progress_callback"] is not None:
+                a["progress_callback"](JobStatus(name=job_name, state=JobState(ended), message=""))
+            send_interrupt(self._rec.interrupt[1])
         failed = stage in self._failing
         final = JobStatus(
             name=job_name,
@@ -974,6 +1217,8 @@ class FakeS3:
     #: Bytes per bucket at the end of the continuous record
     #: run-20261001-090400-db3ffe (bronze_size_gb 17.3319..., exact).
     CONTINUOUS_SIZES = {"bronze": 18_609_986_568, "silver": 13_972_495_805, "gold": 423_926}
+    #: The client constructed (``S3Client`` sets it to the error otherwise).
+    _init_error = None
 
     def __init__(self, rec: Recorder, *args, **kwargs) -> None:
         from lakebench.s3.client import S3Client
@@ -1007,6 +1252,9 @@ class FakeS3:
         sizes = self._rec.sizes or self.SIZES
         if layer not in sizes:
             raise self._rec.refuse(f"unscripted bucket {bucket_name}")
+        if bound.arguments["prefix"] and self._rec.fresh_bronze and layer == "bronze":
+            # The datagen prefix of a fresh deployment, before it generates.
+            return BucketInfo(name=bucket_name, exists=True, object_count=0, size_bytes=0)
         return BucketInfo(name=bucket_name, exists=True, object_count=100, size_bytes=sizes[layer])
 
     @property
@@ -1143,6 +1391,8 @@ class FakeBenchmark:
             a["fingerprint"],
         )
         progress = a["progress_callback"]
+        if self._rec.interrupt is not None and self._rec.interrupt[0] == "benchmark":
+            send_interrupt(self._rec.interrupt[1])
         queries = self._queries()
         if a["fingerprint"]:
             # The batch benchmark and the continuous result check: fixed
@@ -1304,9 +1554,18 @@ class FakeDatagenDeployer:
 
         _checked(self._rec, self._real.deploy, *args, **kwargs)
         self._rec.add("Datagen", "deploy")
+        self._rec.datagen_uid = "uid-datagen-1"
         return DeploymentResult(
             component="datagen", status=DeploymentStatus.SUCCESS, message="datagen started"
         )
+
+    def get_progress(self, *args, **kwargs) -> dict[str, Any]:
+        """Batch --generate's progress poll: both pods have finished."""
+        _checked(self._rec, self._real.get_progress, *args, **kwargs)
+        self._rec.add("Datagen", "get_progress")
+        if self._rec.interrupt is not None and self._rec.interrupt[0] == "datagen":
+            send_interrupt(self._rec.interrupt[1])
+        return {"running": False, "completions": 2, "succeeded": 2}
 
     def __getattr__(self, attr: str):
         if attr.startswith("_"):
@@ -1408,6 +1667,19 @@ class Scenario:
     clock_start: float | None = None
     #: FakeTrino's table health answers.
     trino: dict[str, Any] = field(default_factory=dict)
+    #: Failure scenarios: see the module docstring.
+    interrupt: tuple[str, str] | None = None
+    submit_interrupt: str | None = None
+    lease_signal: str | None = None
+    #: (window second, "SIGINT" | "SIGTERM" | "namespace_gone" |
+    #: "namespace_redeployed" | "namespace_terminating" |
+    #: "namespace_unreadable" | "namespace_blip" (two failed reads)).
+    events: tuple[tuple[float, str], ...] = ()
+    #: The continuous datagen Job is still running when the streams start.
+    datagen_running: bool = False
+    interrupt_after_state: str | None = None
+    foreign: tuple[str, ...] = ()
+    interrupt_delete_after: int | None = None
 
 
 #: The continuous record's window opened at 15:05:56.504 cluster time
@@ -1527,6 +1799,14 @@ _SCENARIO_SIZES = {
 def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     """Replace every seam ``lakebench run`` reaches (module docstring)."""
     rec.sizes = _SCENARIO_SIZES.get(scenario.name)
+    rec.interrupt = scenario.interrupt
+    rec.submit_interrupt = scenario.submit_interrupt
+    rec.lease_signal = scenario.lease_signal
+    rec.foreign = set(scenario.foreign)
+    rec.interrupt_delete_after = scenario.interrupt_delete_after
+    rec.fresh_bronze = "--generate" in scenario.argv
+    rec.datagen_running = scenario.datagen_running
+    rec.interrupt_after_state = scenario.interrupt_after_state
     recall = FIXTURES / scenario.logs / "recall.json"
     if recall.exists():
         # The score stage's sidecar, at the key the run reads.
@@ -1617,6 +1897,12 @@ def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     # A fresh journal in the scenario's working directory.
     monkeypatch.setattr(lakebench.cli._helpers, "_journal", None)
 
+    import lakebench.deploy
+
+    monkeypatch.setattr(
+        lakebench.deploy, "DatagenDeployer", lambda *a, **k: FakeDatagenDeployer(rec, *a, **k)
+    )
+
     if scenario.clock_start is not None:
         _install_continuous(monkeypatch, rec, scenario)
 
@@ -1633,6 +1919,18 @@ def _install_continuous(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     assert scenario.clock_start is not None
     clock = FakeClock(scenario.clock_start)
     rec.clock = clock
+    namespace_events: dict[str, Callable[[], None]] = {
+        "namespace_gone": lambda: setattr(rec, "namespace_present", False),
+        "namespace_redeployed": lambda: setattr(rec, "namespace_uid", "ns-uid-runchar-2"),
+        "namespace_terminating": lambda: setattr(rec, "namespace_phase", "Terminating"),
+        "namespace_unreadable": lambda: setattr(rec, "namespace_errors", -1),
+        "namespace_blip": lambda: setattr(rec, "namespace_errors", 2),
+    }
+    for when, what in scenario.events:
+        if what in namespace_events:
+            clock.at(when, namespace_events[what])
+        else:
+            clock.at(when, lambda how=what: send_interrupt(how))
     monkeypatch.setattr(lakebench.cli._sustained, "time", clock.time_module())
     monkeypatch.setattr(lakebench.cli._sustained, "datetime", clock.datetime_class())
     # The run record's start and end (and with them total_elapsed_seconds,
@@ -1664,9 +1962,6 @@ def _install_continuous(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
 
     monkeypatch.setattr(budget_cls, "__init__", clocked_init)
     monkeypatch.setattr(
-        lakebench.deploy, "DatagenDeployer", lambda *a, **k: FakeDatagenDeployer(rec, *a, **k)
-    )
-    monkeypatch.setattr(
         lakebench.metrics.datagen_aggregator, "collect_from_k8s", _fake_collect_from_k8s(rec)
     )
     real_fp = _unbound(lakebench.deploy.ownership.api_server_fingerprint)
@@ -1683,11 +1978,33 @@ def _install_continuous(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
 
 def run_scenario(name: str, tmp_path: Path, monkeypatch) -> dict[str, Any]:
     """Run ``lakebench run`` for scenario *name* in *tmp_path*; return its trace."""
+    return run_scenario_full(SCENARIOS[name], tmp_path, monkeypatch)[0]
+
+
+def saved_record(workdir: Path) -> dict[str, Any]:
+    """The metrics.json the run saved under *workdir* ({} when none)."""
+    runs = sorted((workdir / "lakebench-output" / "runs").glob("run-*/metrics.json"))
+    return json.loads(runs[-1].read_text()) if runs else {}
+
+
+def run_scenario_full(
+    scenario: Scenario, tmp_path: Path, monkeypatch
+) -> tuple[dict[str, Any], Recorder]:
+    """Run ``lakebench run`` for *scenario*; return its trace and the
+    recorder (the fake cluster's state after the run)."""
+    result, rec = invoke_scenario(scenario, tmp_path, monkeypatch)
+    if result.exception is not None and not isinstance(result.exception, SystemExit):
+        raise result.exception
+    return build_trace(result.exit_code, rec, tmp_path, os.environ.get("LB_RUN_ID")), rec
+
+
+def invoke_scenario(scenario: Scenario, tmp_path: Path, monkeypatch) -> tuple[Any, Recorder]:
+    """Run ``lakebench run`` for *scenario*; return the ``CliRunner`` result
+    and the recorder."""
     from typer.testing import CliRunner
 
     from lakebench.cli import app
 
-    scenario = SCENARIOS[name]
     rec = Recorder()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -1704,10 +2021,7 @@ def run_scenario(name: str, tmp_path: Path, monkeypatch) -> dict[str, Any]:
 
     cfg_path = tmp_path / f"{NAME}.yaml"
     cfg_path.write_text(yaml.safe_dump(scenario.config, sort_keys=False))
-    result = CliRunner().invoke(app, ["run", str(cfg_path), *scenario.argv])
-    if result.exception is not None and not isinstance(result.exception, SystemExit):
-        raise result.exception
-    return build_trace(result.exit_code, rec, tmp_path, os.environ.get("LB_RUN_ID"))
+    return CliRunner().invoke(app, ["run", str(cfg_path), *scenario.argv]), rec
 
 
 #: Maintenance outcome fields the trace keeps (counts and skips, not timings).

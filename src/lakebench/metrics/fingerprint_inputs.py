@@ -87,6 +87,89 @@ def is_credential_key(key: str) -> bool:
     return _CREDENTIAL_KEY.search(key) is not None
 
 
+# The last segment of a key that names a secret, as a whole word: DB_PASS,
+# header.Authorization, api_key; not partitionKey, bypass or authenticate.
+_SECRET_SEGMENT = re.compile(
+    r"(?:^|[_-])(?:pass|passwd|password|pwd|token|secret|credentials?|cookie|"
+    r"authorization|apikey|api_key)(?:[_-]|$)|(?:password|secret|token)$",
+    re.IGNORECASE,
+)
+# Environment variables are where secrets usually go.
+_ENV_PREFIXES = ("spark.executorEnv.", "spark.yarn.appMasterEnv.")
+_PER_BUCKET_PREFIX = "spark.hadoop.fs.s3a.bucket."
+# A bare IPv4 address, or one after a scheme, credentials or a path; not a
+# four-part version string inside a coordinate.
+_IPV4 = re.compile(r"(?:^|[/@])\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:$|/)")
+
+
+def _bucket_label(key: str, layers: dict[str, str]) -> tuple[str, str | None]:
+    """*key* with a per-bucket S3A bucket name replaced by its layer
+    (``<bronze>``, ``<silver>``, ``<gold>``) or by ``<other-bucket>``, and
+    the bucket name (None when *key* is not per-bucket). Known names are
+    matched whole, longest first, so a dotted name is replaced whole."""
+    if not key.startswith(_PER_BUCKET_PREFIX):
+        return key, None
+    rest = key[len(_PER_BUCKET_PREFIX) :]
+    for name in sorted(layers, key=len, reverse=True):
+        if rest.startswith(name + "."):
+            return f"{_PER_BUCKET_PREFIX}<{layers[name]}>.{rest[len(name) + 1 :]}", name
+    name, _, tail = rest.partition(".")
+    return f"{_PER_BUCKET_PREFIX}<other-bucket>.{tail}", name
+
+
+def record_spark_conf(
+    conf: dict[str, str], bucket_layers: dict[str, str] | None = None
+) -> dict[str, str]:
+    """The user's spark.conf as the run record (and the "spark conf" identity
+    key) carries it, keys sorted.
+
+    - Tuning keys (``conf_keys.RECORDABLE_SPARK_KEYS`` and prefixes) keep
+      their value.
+    - A key that names a credential, a secret, an endpoint, a location or an
+      environment variable, or whose value names a location (a URI or an
+      IPv4 address), reads "<redacted>": no digest, because a short secret's
+      digest can be guessed offline and a location differs per deployment,
+      not per workload.
+    - Every other value reads "<redacted sha256:16 hex>", so two runs that
+      differ in it differ in identity.
+
+    A per-bucket S3A key names its bucket, which differs per deployment:
+    the record names the bucket's layer from *bucket_layers* (bucket name to
+    "bronze", "silver" or "gold") instead, or ``<other-bucket>``. The
+    predicates run on that key, so a bucket name never decides a value's
+    form."""
+    from lakebench.modules.pipeline_engines.spark.conf_keys import (
+        RECORDABLE_SPARK_KEYS,
+        RECORDABLE_SPARK_PREFIXES,
+    )
+
+    layers = dict(bucket_layers or {})
+    out: dict[str, str] = {}
+    for key, value in sorted(conf.items()):
+        v = str(value)
+        name, _bucket = _bucket_label(key, layers)
+        # Two unknown buckets with one setting: keep every value, in key order.
+        while name in out:
+            name += "+"
+        probe = re.sub(r"<[^>]+>", "b", name).rstrip("+")
+        last = probe.rsplit(".", 1)[-1]
+        if key in RECORDABLE_SPARK_KEYS or key.startswith(RECORDABLE_SPARK_PREFIXES):
+            out[name] = v
+        elif (
+            is_credential_key(probe)
+            or is_location_key(probe)
+            or probe.startswith(_ENV_PREFIXES)
+            or _SECRET_SEGMENT.search(last)
+            or "endpoint" in last.lower()
+            or "://" in v
+            or _IPV4.search(v)
+        ):
+            out[name] = "<redacted>"
+        else:
+            out[name] = f"<redacted sha256:{hashlib.sha256(v.encode()).hexdigest()[:16]}>"
+    return out
+
+
 def owned_conf(spark_conf: dict[str, Any], user: dict[str, str] | None = None) -> dict[str, str]:
     """*spark_conf* without location and credential keys, values as strings.
 
@@ -105,16 +188,11 @@ def owned_conf(spark_conf: dict[str, Any], user: dict[str, str] | None = None) -
 
 
 def user_spark_conf(cfg: Any) -> dict[str, str]:
-    """The ``spark.conf`` entries the user set: those that differ from the
-    schema's default conf, or that the default does not have."""
-    from lakebench.config.schema import SparkConfOverrides
+    """The ``spark.conf`` entries the user set that change what runs (every
+    one not equal to its ``SPARK_CONF_DEFAULTS`` value)."""
+    from lakebench.modules.pipeline_engines.spark.conf_keys import user_spark_overrides
 
-    default = SparkConfOverrides().conf
-    return {
-        str(k): str(v)
-        for k, v in (cfg.spark.conf or {}).items()
-        if str(k) not in default or str(default[str(k)]) != str(v)
-    }
+    return user_spark_overrides(cfg.spark.conf or {})
 
 
 def user_conf_digest(spark_conf: dict[str, Any], user: dict[str, str]) -> str | None:

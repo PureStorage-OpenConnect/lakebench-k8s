@@ -194,52 +194,46 @@ StorageClass exists; it never creates it. A cluster admin creates it once with
 ```yaml
 spark:
   conf:
-    # S3A tuning (proven defaults for FlashBlade / S3-compatible stores)
-    spark.hadoop.fs.s3a.connection.maximum: "500"
-    spark.hadoop.fs.s3a.threads.max: "200"
-    spark.hadoop.fs.s3a.fast.upload: "true"
-    spark.hadoop.fs.s3a.multipart.size: "268435456"       # 256 MB
-    spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
-    spark.hadoop.fs.s3a.attempts.maximum: "20"
-    spark.hadoop.fs.s3a.retry.limit: "10"
-    spark.hadoop.fs.s3a.retry.interval: "500ms"
-
-    # Shuffle settings
-    spark.sql.shuffle.partitions: "200"
-    spark.default.parallelism: "200"
-
-    # Memory settings
-    spark.memory.fraction: "0.8"
-    spark.memory.storageFraction: "0.3"
+    spark.speculation: "true"            # your keys, merged over the defaults
+    spark.hadoop.fs.s3a.retry.limit: "20"  # replaces a job default
 ```
 
-These are the schema defaults of `spark.conf`, and they are the base Spark
-configuration for every job. Lakebench then sets its own tuning on top, so
-for the keys below the value in `spark.conf` has no effect and cannot
-currently be overridden:
+Each job's conf is the job defaults, then `spark.conf`, then the keys
+Lakebench sets for the job. The defaults (`SPARK_CONF_DEFAULTS` in
+`src/lakebench/modules/pipeline_engines/spark/conf_keys.py`), which a
+`spark.conf` value replaces:
+
+| Key | Default |
+|---|---|
+| `spark.hadoop.fs.s3a.multipart.size` | `268435456` (256 MB) |
+| `spark.hadoop.fs.s3a.fast.upload.active.blocks` | `16` |
+| `spark.hadoop.fs.s3a.attempts.maximum` | `20` |
+| `spark.hadoop.fs.s3a.retry.limit` | `10` |
+| `spark.hadoop.fs.s3a.retry.interval` | `500ms` |
+| `spark.memory.fraction` | `0.8` |
+| `spark.memory.storageFraction` | `0.3` |
+
+Lakebench then sets its own keys for every job, and `spark.conf` cannot
+change them: the commands that change data refuse a config that sets one,
+naming what controls it. They include:
 
 | Key | Value that runs |
 |---|---|
-| `spark.hadoop.fs.s3a.connection.maximum` | `200` (not the `500` default above) |
-| `spark.hadoop.fs.s3a.threads.max` | `100` (not the `200` default above) |
+| `spark.hadoop.fs.s3a.connection.maximum` | `200` |
+| `spark.hadoop.fs.s3a.threads.max` | `100` |
 | `spark.hadoop.fs.s3a.fast.upload` | `true` |
 | `spark.hadoop.fs.s3a.fast.upload.buffer` | `bytebuffer` |
 | `spark.hadoop.fs.s3a.multipart.threshold` | `268435456` |
 | `spark.hadoop.fs.s3a.max.total.tasks` | `200` |
 | `spark.hadoop.fs.s3a.block.size` | `268435456` |
 | `spark.hadoop.fs.s3a.connection.timeout` | `60000` |
-| `spark.memory.fraction` / `spark.memory.storageFraction` | `0.8` / `0.3` |
+| `spark.sql.shuffle.partitions`, `spark.default.parallelism` | per job: at scale 10 or below the job profile's `base_partitions`, unless an executor override raises the count above the profile default; otherwise `executor_count * cores * 2` |
 
-The same applies to the other adaptive-execution, stability, Parquet and
-Spark UI settings lakebench sets in `_build_manifest()` in
-`src/lakebench/modules/pipeline_engines/spark/job.py`;
-`spark.driver.maxResultSize` is the exception and honours a user value. The
-remaining S3A keys above (`multipart.size`, `fast.upload.active.blocks`,
-`attempts.maximum`, `retry.limit`, `retry.interval`) are not set later and
-take the `spark.conf` value. Per-job shuffle partitions (`spark.sql.shuffle.partitions` and
-`spark.default.parallelism`) are then overridden: at scale 10 or below the
-job profile's `base_partitions` is used, unless an executor override raises
-the count above the profile default; otherwise `executor_count * cores * 2`.
+and the catalog, jar (`spark.jars`, `spark.jars.*`, `spark.submit.pyFiles`),
+adaptive-execution, stability, Parquet, Spark UI and `spark.kubernetes.*`
+keys (`LAKEBENCH_OWNED_SPARK_KEYS`). `spark.driver.maxResultSize` is the
+exception: Lakebench sets it from the executor count only when `spark.conf`
+does not.
 
 ## Job Profiles
 

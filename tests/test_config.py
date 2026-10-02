@@ -97,9 +97,9 @@ class TestLakebenchConfig:
         assert config.architecture.query_engine.type.value == "trino"
         assert config.architecture.pipeline.pattern.value == "medallion"
 
-        # Spark conf defaults (S3A tuning)
-        assert config.spark.conf["spark.hadoop.fs.s3a.connection.maximum"] == "500"
-        assert config.spark.conf["spark.hadoop.fs.s3a.fast.upload"] == "true"
+        # spark.conf holds user keys only; the job defaults are
+        # SPARK_CONF_DEFAULTS, merged under it in each manifest.
+        assert config.spark.conf == {}
 
     def test_get_namespace_defaults_to_name(self):
         """Test that namespace defaults to deployment name."""

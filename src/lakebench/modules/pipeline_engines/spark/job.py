@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING, Any
 
 from lakebench._constants import POLARIS_CLIENT_ID, SPARK_SERVICE_ACCOUNT
 from lakebench.config.schema import require_polaris_client_secret
+from lakebench.modules.pipeline_engines.spark.conf_keys import (  # noqa: F401 -- job.py's names
+    DEPENDENCY_SET_SPARK_KEYS,
+    LAKEBENCH_OWNED_SPARK_KEYS,
+    SPARK_CONF_DEFAULTS,
+)
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
@@ -1525,6 +1530,9 @@ class JobStatus:
     executor_count: int = 0
     # Operator submission attempts (status.submissionAttempts); 0 when unknown.
     submission_attempts: int = 0
+    # metadata.uid of the SparkApplication submit_job created; None otherwise.
+    # The interrupt cleanup deletes only this object (cli/_interrupt.py).
+    uid: str | None = None
 
 
 class SparkJobManager:
@@ -1619,13 +1627,15 @@ class SparkJobManager:
 
         for attempt in range(4):  # 1 initial + 3 retries
             try:
-                custom_api.create_namespaced_custom_object(
+                created = custom_api.create_namespaced_custom_object(
                     group="sparkoperator.k8s.io",
                     version="v1beta2",
                     namespace=self.namespace,
                     plural="sparkapplications",
                     body=manifest,
                 )
+                meta = created.get("metadata") if isinstance(created, dict) else None
+                uid = meta.get("uid") if isinstance(meta, dict) else None
 
                 logger.info(f"Submitted Spark job: {job_name}")
 
@@ -1636,6 +1646,7 @@ class SparkJobManager:
                     # What was requested after the concurrent budget and any
                     # override, so the scorecard's CPU-hours match it.
                     executor_count=int(manifest["spec"]["executor"].get("instances") or 0),
+                    uid=uid if isinstance(uid, str) and uid else None,
                 )
 
             except ApiException as e:
@@ -1810,7 +1821,7 @@ class SparkJobManager:
         deps = self.deps
         if deps is None:
             raise deps_manifest.DepsSetMissing(f"build {job_name}")
-        owned = sorted(deps_manifest.OWNED_SPARK_CONF_KEYS & set(cfg.spark.conf))
+        owned = sorted(DEPENDENCY_SET_SPARK_KEYS & set(cfg.spark.conf))
         if owned:
             raise ValueError(
                 f"spark.conf sets {', '.join(owned)}, which Lakebench sets from the "
@@ -2002,8 +2013,9 @@ class SparkJobManager:
         # (projected from the lakebench-scripts-<role> ConfigMaps)
         main_file = f"local:///opt/spark/scripts/{script_map[job_type]}"
 
-        # Build Spark configuration (start from user overrides, then apply profile)
-        spark_conf = dict(cfg.spark.conf)
+        # Spark conf in three layers: the defaults, the user's spark.conf, then
+        # the keys Lakebench owns (the config refuses a user value for one).
+        spark_conf = {**SPARK_CONF_DEFAULTS, **cfg.spark.conf}
 
         # Apply per-job shuffle partition count (scales with executor count)
         spark_conf["spark.sql.shuffle.partitions"] = shuffle_partitions
@@ -2217,8 +2229,6 @@ class SparkJobManager:
         # Memory and stability tuning
         spark_conf.update(
             {
-                "spark.memory.fraction": "0.8",
-                "spark.memory.storageFraction": "0.3",
                 "spark.dynamicAllocation.enabled": "false",
                 "spark.network.timeout": "600s",
                 "spark.executor.heartbeatInterval": "30s",

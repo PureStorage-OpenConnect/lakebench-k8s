@@ -45,7 +45,7 @@ from lakebench.cli._helpers import (
     print_success,
     print_warning,
 )
-from lakebench.exit_codes import ExitCode
+from lakebench.exit_codes import ExitCode, UsageError
 
 logger = logging.getLogger(__name__)
 
@@ -865,6 +865,11 @@ def _run_pipeline(
         cfg = load_config(config_file, purpose=LoadPurpose.RUN)
     except ConfigError as e:
         raise ReproduceError(str(e)) from None
+
+    # The run below would refuse a bad timeout, but only after the destroy,
+    # deploy and generate: check it first.
+    if timeout is not None and timeout < 1:
+        raise UsageError("--timeout must be at least 1 s", path="run.args")
 
     # F5: pre-destroy is idempotent-safe. destroy(--force) on a missing
     # namespace returns implicitly (exit 0). A non-zero exit means a
