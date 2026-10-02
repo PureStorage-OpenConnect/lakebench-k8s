@@ -270,11 +270,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unverified. In batch that is the check for `run --generate`. In
   continuous `recommend` prints two answers, a plain `run` (datagen counted
   beside the streams) and a corpus generated first (`generate`, then
-  `run --skip-generate`).
+  `run --skip-generate`). On `recommend`, `--slow-datagen` is ignored and
+  `--scale` must be 1 or more.
   `config recommend` sizes the config itself (its query engine and datagen
   settings) and fails on a config that does not load, where it used to fall
-  back to Customer 360 batch. `--slow-datagen` is ignored, and
-  `--scale` must be 1 or more.
+  back to Customer 360 batch.
 - typer is capped below 0.28 (`typer>=0.12.0,<0.28`), so a new typer minor
   cannot change the CLI without a tested raise of the cap.
 - The `[dev]` extra includes `[aml]`, so a development install now gets the
