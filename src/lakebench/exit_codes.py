@@ -71,7 +71,7 @@ MEANINGS: dict[ExitCode, str] = {
         "Requirement unmet: a reproduction drifted outside its tolerance, was asked "
         "to verify at another commit, or could only be verified out of band."
     ),
-    ExitCode.INTERRUPTED: "Interrupted (SIGINT, Ctrl-C).",
+    ExitCode.INTERRUPTED: "Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM).",
 }
 
 
@@ -197,7 +197,11 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=5,
     ),
     ExitPath(
-        "run.namespace_gone", _C.FAILED, "the namespace disappeared during `run`", planned=True
+        "run.namespace_gone",
+        _C.FAILED,
+        "the namespace was deleted, or deleted and deployed again, during a continuous "
+        "`run`, or could not be read three times over a minute; the record names it "
+        "in abort_reason",
     ),
     ExitPath(
         "repeat.no_verified_corpus",
@@ -245,7 +249,11 @@ PATHS: tuple[ExitPath, ...] = (
         "v1.6 state names a deployment",
         v16_code=0,
     ),
-    ExitPath("run.args", _C.USAGE, "a `run` argument or combination is refused", planned=True),
+    ExitPath(
+        "run.args",
+        _C.USAGE,
+        "a `run` argument or combination is refused before any cluster call",
+    ),
     ExitPath(
         "config.upgrade_refused",
         _C.USAGE,
@@ -476,8 +484,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.interrupted",
         _C.INTERRUPTED,
-        "`run` interrupted; the record is sealed as interrupted",
-        planned=True,
+        "`run` interrupted by SIGINT or SIGTERM; the record is sealed as interrupted "
+        "and the run's unfinished jobs are stopped",
     ),
 )
 

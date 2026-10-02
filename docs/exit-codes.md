@@ -14,8 +14,8 @@ path yet says so.
 | Code | Name | Meaning | Produced by |
 |---|---|---|---|
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass` |
-| 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout` |
-| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `config.upgrade_refused` |
+| 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone` |
+| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused` |
 | 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `destroy.redeployed`, `deploy.identity_foreign`, `run.bronze_nonempty`, `lease.held` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
@@ -25,7 +25,7 @@ path yet says so.
 | 12 | `COMPARE_NOT_LIKE_FOR_LIKE` | compare: comparable, not like-for-like. | no command yet |
 | 13 | `COMPARE_CONFOUNDED` | compare: comparable, confounded. | no command yet |
 | 14 | `REQUIREMENT_UNMET` | Requirement unmet: a reproduction drifted outside its tolerance, was asked to verify at another commit, or could only be verified out of band. | `reproduce.drift`, `reproduce.commit_drift` |
-| 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C). | `sigint` |
+| 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM). | `sigint`, `run.interrupted` |
 
 ## Named paths
 
@@ -37,6 +37,7 @@ the CLI down every path listed here and checks the code.
 | `run.pass` | 0 | `run` finished and its verdict passed |
 | `version.ok` | 0 | `lakebench version` prints the version |
 | `run.datagen_timeout` | 1 | datagen did not finish in time; the record says "datagen timed out" in verdict.reasons |
+| `run.namespace_gone` | 1 | the namespace was deleted, or deleted and deployed again, during a continuous `run`, or could not be read three times over a minute; the record names it in abort_reason |
 | `run.verdict_failed` | 1 | `run` finished with a failing verdict |
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `cli.bad_argument` | 2 | a command refuses an argument it checks itself: an unknown recipe, component, stage or example, a missing file, conflicting options |
@@ -45,6 +46,7 @@ the CLI down every path listed here and checks the code.
 | `config.unsupported` | 2 | the workload, recipe and mode combination is unsupported, or the scale is above the workload's datagen ceiling |
 | `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
 | `config.validation` | 2 | the config fails to load or validate |
+| `run.args` | 2 | a `run` argument or combination is refused before any cluster call |
 | `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`) |
 | `destroy.redeployed` | 3 | "Destroy NOT completed": the namespace now belongs to a newer deployment |
 | `lease.held` | 3 | another command holds the cluster lock lease |
@@ -59,6 +61,7 @@ the CLI down every path listed here and checks the code.
 | `destroy.namespace_terminating` | 6 | `destroy` finished its steps but the namespace is still terminating |
 | `reproduce.commit_drift` | 14 | `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift |
 | `reproduce.drift` | 14 | `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol |
+| `run.interrupted` | 130 | `run` interrupted by SIGINT or SIGTERM; the record is sealed as interrupted and the run's unfinished jobs are stopped |
 | `sigint` | 130 | a command interrupted with Ctrl-C outside a prompt (Ctrl-C at a prompt is 5) |
 
 ## Errors and output

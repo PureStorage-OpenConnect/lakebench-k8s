@@ -279,8 +279,8 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--timeout` | `-t` | auto | Timeout per job in seconds. When omitted: `max(3600, scale * 120)`; the AML workload adds 900 s and never goes below its bronze-verify budget |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
 | `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
-| `--skip-generate` | | `false` | Skip datagen even with `--generate` |
-| `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. No effect without `--generate`. |
+| `--skip-generate` | | `false` | Skip datagen (refused with `--generate`) |
+| `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused without `--generate` or `--generate-only`, and in a local or continuous run. |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. On Delta the silver table's own log has the last word: the rebuild writes under an epoch above every one the table has used, even if the counter reads lower |
 | `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
@@ -292,6 +292,29 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | `false` | Skip confirmation prompts |
 | `--local` | | `false` | Run locally with podman/docker instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
+
+**Refused arguments.** `run` checks every option before it makes any
+cluster call, and exits 2 (usage) naming the first refused one:
+
+- `--stage` that is not `bronze-verify`, `silver-build` or `gold-finalize`;
+- `--stage` with a continuous run (flag or config);
+- `--deploy-only` with `--generate-only`;
+- `--deploy-only` with `--stage`, `--generate` or `--skip-generate`;
+- `--generate-only` with `--skip-generate`;
+- `--local` with `--deploy-only`, `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
+- `--regenerate` without `--generate` or `--generate-only`;
+- `--regenerate` with `--local`, or with a continuous run other than `--generate-only`;
+- `--skip-generate` with `--generate`;
+- `--force-reset` on a batch run;
+- `--force-rebuild` on a continuous run;
+- `--duration` on a batch run;
+- `--duration` below 60;
+- `--timeout` below 1.
+
+`--local` with a continuous run, and any workload, recipe and mode `run`
+does not support, are refused just after these, also before any cluster
+call. Benchmark settings `run` does not honour are refused when the config
+loads.
 
 The run command executes 7 phases:
 
@@ -308,7 +331,45 @@ In continuous mode (`--continuous`), `run` launches the three stream jobs
 benchmark rounds and maintenance during the measurement window, gates on
 continuous output inside the window, then lets the corpus settle and
 fingerprints the query set over the settled tables. See
-[Running Pipelines](running-pipelines.md#continuous-mode).
+[Running Pipelines](running-pipelines.md#continuous-mode). The run reads
+its namespace every 30 s during the window and the settle wait, before and
+after each benchmark round, before each maintenance and compaction round,
+and before it stops its streams. When the namespace is gone (deleted, being
+deleted, or deleted and deployed again), or three reads in a row fail, the
+run stops at that read, exits 1 and saves its record with `abort_reason`
+(the reason and the run second). A maintenance or compaction statement in
+flight finishes first. The run does not try to stop streams that went with
+the namespace, or that belong to a deployment that replaced it.
+
+**Interrupting a run.** Ctrl-C (SIGINT) or SIGTERM stops `run` and exits
+130. The run first deletes the SparkApplications and the datagen Job it
+created and has not seen finish: a stage, or a datagen Job, that completed
+is kept, so its logs stay readable. Each delete carries the uid of the
+object this run created, so an object of the same name that another
+invocation created since is left alone. The cleanup takes at most about
+60 s. The record is then saved: its verdict is INTERRUPTED (FAILED when
+something had already failed before the interrupt, never PASSED), and its
+`interrupted` block names the signal, the stage, and the objects stopped,
+left and skipped. After an interrupt the run does not measure bucket sizes
+or read Prometheus; it still lists the datagen prefix once to record which
+corpus it read (a corpus cut short is recorded as incomplete). A signal that arrives while the results are being
+gathered at the end of a run does not stop the record being written; the
+record is sealed the same way, at stage `results` (a run that had already
+failed keeps its own exit code). One that arrives after the record is
+saved changes nothing.
+
+Press Ctrl-C a second time to cut the cleanup short: what it had not reached
+is recorded as skipped (a quick double press can skip all of it). A third
+press stops at once and may lose the record. For anything left or skipped
+the run prints the `kubectl delete` that stops it. While the run holds the
+cluster lease (the Spark Operator watch-list heal at the start), the
+interrupt waits for that shared change to finish, as for any command (see
+[Troubleshooting](troubleshooting.md)). SIGHUP (a closed terminal or a
+dropped SSH session) is not handled and ends the run without a record or a
+cleanup: run long jobs under `tmux` or `nohup`. Trino queries of an
+interrupted benchmark or maintenance step are not cancelled. `report
+--list` shows such a run as Interrupted; the HTML report shows it as
+failed, with the interrupt as its reason.
 
 A recipe without a query engine (`*-none`) skips the benchmark and exits 0
 with no QpH. `run` refuses an unsupported workload x recipe x mode

@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **`run` refuses arguments it used to ignore, before any cluster call.**
+  An unknown `--stage` used to be found only after `run` had read the
+  cluster's capacity (and, with `--yes`, could auto-deploy first), and
+  several flags were silently dropped by the mode they did not apply to.
+  Now `run` exits 2 before contacting the cluster for: an unknown
+  `--stage`; `--stage` with a continuous run; `--deploy-only` with
+  `--generate-only`, `--stage`, `--generate` or `--skip-generate`;
+  `--generate-only` with `--skip-generate`; `--local` with `--deploy-only`,
+  `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
+  `--regenerate` without `--generate` or `--generate-only`, or with
+  `--local` or a continuous run other than `--generate-only`; `--skip-generate` with `--generate`;
+  `--force-reset` on a batch run; `--force-rebuild` on a continuous run;
+  `--duration` on a batch run or below 60; `--timeout` below 1. The full
+  list is under `run` in docs/cli-reference.md. `reproduce` refuses a
+  `--timeout` below 1 before its pre-run destroy. Drop the flag the mode
+  does not use.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
@@ -349,6 +365,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   earlier cycle, which was a silent no-op). When the metastore is lost and
   the table files are kept, cycle 0 on the Hive catalog already refused to
   adopt the old Delta log; that is unchanged.
+- **Ctrl-C or SIGTERM during `run` seals the record INTERRUPTED and stops
+  this run's jobs.** A batch run interrupted while a stage ran used to save
+  `success: true` and a PASSED verdict, and left the SparkApplication and
+  any datagen Job running; a continuous run read FAILED and left its datagen
+  Job. Now the run deletes every SparkApplication and datagen Job it created
+  and has not seen finish, each with the uid of the object it created as a
+  precondition, so an object of the same name created since by another
+  invocation is never deleted (it is listed as left). The cleanup takes at
+  most about 60 s. metrics.json gains `interrupted` (signal, stage, time,
+  `prior_failure`, and the objects stopped, left and skipped) and the
+  verdict gate `interrupt`; the verdict is INTERRUPTED, or FAILED when
+  something had already failed, never PASSED. The run then exits 130. A
+  signal while the results are gathered no longer loses the record. A
+  second Ctrl-C cuts the cleanup short and still writes the record; a third
+  stops at once. After an interrupt the run does not measure bucket sizes or
+  read Prometheus; it still lists the datagen prefix once for the corpus
+  observation. `report --list` shows such a run as Interrupted. Inside
+  the cluster lease the signal still waits for the shared change to finish
+  first. SIGHUP is not handled.
+- **A continuous run notices that its namespace is gone.** It used to keep
+  looping to the end of its window and its settle wait after `destroy`,
+  then stopped streams by name, which after a redeploy were the new
+  deployment's. It now reads the namespace every 30 s in the window and
+  the settle wait, around each benchmark round, before each maintenance and
+  compaction round and before stopping its streams; when the namespace was
+  deleted, is being deleted or was deleted and deployed again (or three
+  reads in a row fail), it stops at that read, exits 1 and saves the record
+  with `abort_reason`.
+### Fixed
+
+- `run --continuous --skip-generate` no longer journals a "Datagen started"
+  event for a datagen it did not start.
+
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one

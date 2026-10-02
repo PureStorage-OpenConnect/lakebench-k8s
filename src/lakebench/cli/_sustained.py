@@ -12,7 +12,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.panel import Panel
@@ -555,7 +555,9 @@ def _refuse_c360_reset(cfg, existing: list[str]) -> None:
     )
 
 
-def _run_c360_continuous_reset(job_manager, monitor, console, *, timeout_seconds: int) -> bool:
+def _run_c360_continuous_reset(
+    job_manager, monitor, console, *, timeout_seconds: int, interrupt=None
+) -> bool:
     """Drop the c360 continuous tables through a bronze-verify preflight.
 
     False when the job fails; the caller then starts no stream over tables
@@ -566,13 +568,19 @@ def _run_c360_continuous_reset(job_manager, monitor, console, *, timeout_seconds
 
     console.print()
     console.print("[bold]Preflight: resetting continuous tables via bronze-verify...[/bold]")
+    if interrupt is not None:
+        interrupt.creating("SparkApplication", "lakebench-bronze-verify")
     status = job_manager.submit_job(JobType.BRONZE_VERIFY, cycle_env={"LB_CONTINUOUS_RESET": "1"})
+    if interrupt is not None:
+        interrupt.submitted(status)
     if status.state == JobState.FAILED:
         print_error(f"continuous reset submit failed: {status.message}")
         return False
     result = monitor.wait_for_completion(
         "lakebench-bronze-verify", timeout_seconds=timeout_seconds, poll_interval=15
     )
+    if interrupt is not None and result.success:
+        interrupt.finished("SparkApplication", "lakebench-bronze-verify")
     if not result.success:
         print_error(f"continuous reset failed: {result.message}")
         return False
@@ -2290,6 +2298,152 @@ def _size_mb(size: str) -> float:
     return float(text.rstrip("B")) / (1024 * 1024)
 
 
+class NamespaceGone(Exception):
+    """The run's namespace was deleted (or deleted and created again) mid-run."""
+
+    def __init__(self, reason: str, at_elapsed: float) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.at_elapsed = at_elapsed
+
+
+#: Consecutive failed namespace reads (other than 404) before the run stops,
+#: and the least time they must span: one 503, or a burst of quick failures
+#: in one loop pass, must not end a good run.
+NAMESPACE_READ_STRIKES = 3
+NAMESPACE_STRIKE_SPAN_S = 60.0
+
+
+class NamespaceWatch:
+    """Notices, within one poll interval, that the run's namespace is gone.
+
+    ``start`` records the namespace's uid when the window opens; ``check``
+    reads it again and raises :class:`NamespaceGone` on a 404, a namespace
+    being deleted (deletion timestamp or phase Terminating), a different uid
+    (destroyed and deployed again), or after ``NAMESPACE_READ_STRIKES``
+    consecutive failed reads spanning ``NAMESPACE_STRIKE_SPAN_S``. A single
+    failed read is not a reason. Reads go through a client that does not
+    retry, so one costs at most 15 s.
+    """
+
+    def __init__(self, namespace: str) -> None:
+        self.namespace = namespace
+        self.uid: str | None = None
+        self.failures = 0
+        self._first_failure: float | None = None
+        self._api_client: Any = None
+
+    def _read(self):
+        from kubernetes import client as k8s_client
+
+        from lakebench.cli._interrupt import no_retry_api_client
+
+        if self._api_client is None:
+            self._api_client = no_retry_api_client()
+        api = k8s_client.CoreV1Api(api_client=self._api_client)
+        return api.read_namespace(self.namespace, _request_timeout=(5, 10))
+
+    def close(self) -> None:
+        if self._api_client is not None:
+            try:
+                self._api_client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._api_client = None
+
+    def start(self) -> None:
+        """Record the namespace's uid; tried three times, and if it still
+        cannot be read, the first later read that answers sets it."""
+        for attempt in range(NAMESPACE_READ_STRIKES):
+            try:
+                ns = self._read()
+            except Exception as e:  # noqa: BLE001 -- the checks still see a 404
+                logger.warning(
+                    "Could not read namespace %s at the window start (%d of %d): %s",
+                    self.namespace,
+                    attempt + 1,
+                    NAMESPACE_READ_STRIKES,
+                    e,
+                )
+                continue
+            self._baseline(ns)
+            return
+
+    def gone(self) -> str | None:
+        """Why the namespace is gone, or None while it is there (or unread)."""
+        from kubernetes.client.rest import ApiException
+
+        try:
+            ns = self._read()
+        except ApiException as e:
+            if e.status == 404:
+                return f"namespace {self.namespace} was deleted"
+            return self._strike(f"{e.status} {e.reason}")
+        except Exception as e:  # noqa: BLE001 -- transport errors
+            return self._strike(str(e))
+        self.failures = 0
+        self._first_failure = None
+        meta = getattr(ns, "metadata", None)
+        phase = getattr(getattr(ns, "status", None), "phase", None)
+        if getattr(meta, "deletion_timestamp", None) is not None or phase == "Terminating":
+            return f"namespace {self.namespace} is being deleted"
+        uid = getattr(meta, "uid", None)
+        if self.uid is None:
+            self._baseline(ns)
+        elif isinstance(uid, str) and uid and uid != self.uid:
+            return f"namespace {self.namespace} was deleted and created again"
+        return None
+
+    def _baseline(self, ns: Any) -> None:
+        uid = getattr(getattr(ns, "metadata", None), "uid", None)
+        self.uid = uid if isinstance(uid, str) and uid else None
+
+    def _strike(self, error: str) -> str | None:
+        self.failures += 1
+        now = time.time()
+        if self._first_failure is None:
+            self._first_failure = now
+        logger.warning(
+            "Could not read namespace %s (%d of %d): %s",
+            self.namespace,
+            self.failures,
+            NAMESPACE_READ_STRIKES,
+            error,
+        )
+        if (
+            self.failures >= NAMESPACE_READ_STRIKES
+            and now - self._first_failure >= NAMESPACE_STRIKE_SPAN_S
+        ):
+            return f"namespace {self.namespace} unreadable ({error})"
+        return None
+
+    def check(self, elapsed: float) -> None:
+        reason = self.gone()
+        if reason is not None:
+            raise NamespaceGone(reason, elapsed)
+
+
+def _record_not_observed(run_metrics, reason: str) -> None:
+    """The record's corpus observation when the run did not observe it (the
+    namespace went, and its bucket may be a redeployment's): said so, not
+    left absent, which reads as a record from before observations. Never
+    raises."""
+    try:
+        from lakebench.metrics.corpus_identity import MarkerSet
+
+        inputs = (run_metrics.config_snapshot or {}).get("experiment_inputs")
+        if isinstance(inputs, dict):
+            inputs["corpus_observation"] = {
+                "format": 1,
+                "markers": MarkerSet(error=f"corpus not observed: {reason}").to_dict(),
+                "series": None,
+                "bronze_listing_sha256": None,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+    except Exception as e:  # noqa: BLE001 -- evidence, never a save failure
+        logger.warning("Could not record the missing corpus observation: %s", e)
+
+
 def _stop_streams(k8s, namespace: str, submitted: list) -> None:
     console.print("[bold]Stopping continuous jobs...[/bold]")
     for _job_type, job_name in submitted:
@@ -2585,10 +2739,16 @@ def settle_budget_seconds(cfg, datagen_rows: int, bronze_rows: int, rows_per_s: 
 
 
 def wait_for_settle(
-    monitor, job_names: list[str], datagen_rows: int, budget_s: float, poll_s: float = 30.0
+    monitor,
+    job_names: list[str],
+    datagen_rows: int,
+    budget_s: float,
+    poll_s: float = 30.0,
+    probe=None,
 ) -> dict:
     """Keep polling the stream logs until the whole corpus has reached gold
-    (continuous_window.settle_state) or *budget_s* runs out.
+    (continuous_window.settle_state) or *budget_s* runs out. *probe* runs
+    after every sleep (the namespace read, which raises when it is gone).
     Returns {"settled", "seconds", "reason"}."""
     from lakebench.metrics.continuous_window import settle_state
 
@@ -2609,6 +2769,8 @@ def wait_for_settle(
         if waited + poll_s > budget_s:
             return {"settled": False, "seconds": round(waited, 1), "reason": reason}
         time.sleep(poll_s)
+        if probe is not None:
+            probe()
 
 
 def continuous_result_check(bench_runner) -> tuple[dict, list[dict]]:
@@ -2778,6 +2940,22 @@ def _run_sustained(
         (JobType.SILVER_STREAM, "silver-stream"),
         (JobType.GOLD_REFRESH, "gold-refresh"),
     ]
+    # Ctrl-C and SIGTERM seal the record INTERRUPTED and stop the streams,
+    # the datagen Job and any preflight this run created, by uid
+    # (cli/_interrupt.py). Installed before the operator check, whose
+    # watch-list heal can take the cluster lease.
+    from lakebench.cli._interrupt import RunInterrupt
+
+    _interrupt = RunInterrupt(cfg.get_namespace(), run_id)
+    _interrupt.install()
+    _stage = "operator-check"
+    _interrupted: dict | None = None
+    # Exit 130 at the end: an interrupt, or a late signal in a run that had
+    # not failed (a failed run keeps its own exit).
+    _exit_interrupted = False
+    # Set when the namespace went away mid-window: {reason, at_elapsed}.
+    _abort: dict | None = None
+    _ns_watch = NamespaceWatch(cfg.get_namespace())
 
     try:
         # Check Spark operator
@@ -2863,6 +3041,7 @@ def _run_sustained(
         # bronze_verify LB_CONTINUOUS_RESET (c360, LB-142).
         # Ownership first: stopping streams in a namespace this run does
         # not own would already be the damage the gate exists to prevent.
+        _stage = "reset"
         _require_reset_ownership(cfg)
         if cfg.architecture.workload.schema_type.value != "financial" and not force_reset:
             # c360 keeps existing state unless the operator asks to drop it:
@@ -2904,32 +3083,38 @@ def _run_sustained(
             _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
             raise typer.Exit(ExitCode.FAILED)
         print_success("Spark scripts deployed")
+        dims = cfg.get_scale_dimensions()
         if skip_generate:
             console.print()
             print_info("Skipping datagen deploy (--skip-generate)")
         else:
+            _stage = "datagen"
             console.print()
             console.print("[bold]Starting datagen...[/bold]")
             datagen = DatagenDeployer(engine)
+            _interrupt.creating("Job", "lakebench-datagen")
             datagen_result = datagen.deploy()
             if datagen_result.status != DeploymentStatus.SUCCESS:
+                _interrupt.not_created("Job", "lakebench-datagen")
                 print_error(f"Failed to start datagen: {datagen_result.message}")
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
+            _interrupt.datagen_created()
             print_success("Datagen started (continuous mode)")
-        dims = cfg.get_scale_dimensions()
+            # Only when this run started datagen: --skip-generate journalled
+            # a datagen start that never happened.
+            _journal_safe(
+                j.record,
+                EventType.GENERATE_START,
+                message="Datagen started for continuous pipeline",
+                details={
+                    "scale": dims.scale,
+                    "parallelism": cfg.architecture.workload.datagen.parallelism,
+                    "target_gb": round(dims.approx_bronze_gb, 1),
+                },
+            )
         console.print(f"  Scale: {dims.scale}")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
-        _journal_safe(
-            j.record,
-            EventType.GENERATE_START,
-            message="Datagen started for continuous pipeline",
-            details={
-                "scale": dims.scale,
-                "parallelism": cfg.architecture.workload.datagen.parallelism,
-                "target_gb": round(dims.approx_bronze_gb, 1),
-            },
-        )
 
         # LB-091: AML sustained mode needs the bronze Iceberg table to
         # exist before bronze_ingest_financial starts -- the streaming
@@ -2955,12 +3140,15 @@ def _run_sustained(
             _wait_for_bronze_data(cfg, timeout_seconds=300)
 
             console.print("[bold]Preflight: registering bronze table via bronze-verify...[/bold]")
+            _stage = "preflight"
+            _interrupt.creating("SparkApplication", "lakebench-bronze-verify")
             preflight_status = job_manager.submit_job(
                 JobType.BRONZE_VERIFY,
                 # Reset, not register: see bronze_verify_financial
                 # CONTINUOUS_RESET.
                 cycle_env={"LB_REGISTER_TABLE": "schema"},
             )
+            _interrupt.submitted(preflight_status)
             if preflight_status.state == JobState.FAILED:
                 print_error(f"bronze-verify preflight submit failed: {preflight_status.message}")
                 pipeline_success = False
@@ -2988,6 +3176,7 @@ def _run_sustained(
                 print_error(f"bronze-verify preflight failed: {preflight_result.message}")
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
+            _interrupt.finished("SparkApplication", "lakebench-bronze-verify")
             print_success(
                 f"bronze-verify preflight complete in {preflight_result.elapsed_seconds:.0f}s"
             )
@@ -3001,8 +3190,9 @@ def _run_sustained(
             _reset_timeout = aml_bronze_verify_timeout_budget(
                 cfg.architecture.workload.datagen.get_effective_scale()
             )
+            _stage = "preflight"
             if not _run_c360_continuous_reset(
-                job_manager, monitor, console, timeout_seconds=_reset_timeout
+                job_manager, monitor, console, timeout_seconds=_reset_timeout, interrupt=_interrupt
             ):
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
@@ -3015,8 +3205,12 @@ def _run_sustained(
         job_manager.datagen_running = not _datagen_released(
             cfg.get_namespace(), deployed_here=not skip_generate
         )
+        if not job_manager.datagen_running:
+            # Finished (or gone): nothing of it to stop on an interrupt.
+            _interrupt.finished("Job", "lakebench-datagen")
 
         # Launch all streaming jobs concurrently
+        _stage = "streams-start"
         console.print()
         console.print("[bold]Launching continuous jobs...[/bold]")
 
@@ -3038,7 +3232,9 @@ def _run_sustained(
         requested_executors: dict[str, int] = {}
         stream_env = _streaming_job_env(run_id, run_duration)
         for job_type, job_name in streaming_jobs:
+            _interrupt.creating("SparkApplication", f"lakebench-{job_name}")
             job_status = job_manager.submit_job(job_type, cycle_env=stream_env)
+            _interrupt.submitted(job_status)
             if job_status.state == JobState.FAILED:
                 print_error(f"Failed to submit {job_name}: {job_status.message}")
                 pipeline_success = False
@@ -3096,6 +3292,9 @@ def _run_sustained(
         _host_window_start = utc_naive(datetime.now(timezone.utc))
         window_start = _host_window_start + _shift
         opened_identity = stream_identities(job_manager, [n for _, n in submitted])
+        # The namespace as the window opens: destroyed (or destroyed and
+        # deployed again) mid-run ends the run within one loop interval.
+        _ns_watch.start()
         _first_up = min(
             (datetime.fromisoformat(w.running_at) for w in stream_watch.values() if w.running_at),
             default=None,
@@ -3111,6 +3310,7 @@ def _run_sustained(
                 )
 
         # Monitor for configured duration, running benchmark rounds at intervals
+        _stage = "window"
         console.print()
         print_info(
             f"Streaming pipeline running for {run_duration}s ({run_duration / 60:.0f} min)..."
@@ -3245,6 +3445,7 @@ def _run_sustained(
                 and remaining >= min_remaining
                 and bench_runner_instream is not None
             ):
+                _ns_watch.check(elapsed)
                 round_index += 1
                 console.print(
                     f"\n  [{elapsed:.0f}s / {run_duration}s] "
@@ -3260,6 +3461,9 @@ def _run_sustained(
                     j=j,
                     k8s=k8s,
                 )
+                # A round takes minutes, and the loop goes straight on to
+                # the next pass without a sleep.
+                _ns_watch.check(time.time() - start)
                 last_round_seconds = time.time() - round_start
                 # Next round at interval from round completion
                 next_round_at = (time.time() - start) + bench_interval
@@ -3282,6 +3486,7 @@ def _run_sustained(
 
             # Iceberg retention maintenance
             if elapsed >= next_maintenance_at:
+                _ns_watch.check(elapsed)
                 # A plan-building error (a bad retention string, an engine
                 # lookup failure) must not end the continuous run.
                 bounds = continuous_round_bounds(
@@ -3326,6 +3531,7 @@ def _run_sustained(
             # maintenance round above, so the two cannot overrun the window.
             if compaction_enabled and elapsed >= next_compaction_at:
                 now = time.time() - start
+                _ns_watch.check(now)
                 bounds = continuous_round_bounds(compaction_interval, run_duration - now)
                 if now < compaction_hold_until:
                     console.print(
@@ -3369,6 +3575,7 @@ def _run_sustained(
             # Periodic health check
             elapsed = time.time() - start
             remaining = run_duration - elapsed
+            _ns_watch.check(elapsed)
             console.print(
                 f"  [{elapsed:.0f}s / {run_duration}s] "
                 f"Streaming jobs running... ({remaining:.0f}s remaining)"
@@ -3382,6 +3589,7 @@ def _run_sustained(
             )
 
         window_end = utc_naive(datetime.now(timezone.utc)) + _shift
+        _stage = "collect"
         window_seconds = (window_end - window_start).total_seconds()
         # A stream that died or restarted inside the window did not process
         # continuously.
@@ -3542,6 +3750,7 @@ def _run_sustained(
         # the query set over tables that are then a function of the corpus
         # alone. Not part of the window: nothing here is scored.
         settle: dict = {"settled": False}
+        _stage = "settle"
         result_check: dict = {}
         # Bucket sizes and object counts as of the window, before any settle
         # micro-batches add files.
@@ -3586,7 +3795,11 @@ def _run_sustained(
                     f"check (up to {_need:.0f}s, not scored)..."
                 )
                 settle = wait_for_settle(
-                    monitor, [n for _, n in submitted], _datagen_output_rows, _need
+                    monitor,
+                    [n for _, n in submitted],
+                    _datagen_output_rows,
+                    _need,
+                    probe=lambda: _ns_watch.check(time.time() - start),
                 )
                 if settle["settled"]:
                     print_success(f"Corpus settled in gold after {settle['seconds']:.0f}s")
@@ -3597,9 +3810,15 @@ def _run_sustained(
                         "results are not established, so it cannot be compared."
                     )
 
-        # Stop streaming jobs
+        # Stop streaming jobs. By name: so first make sure the namespace is
+        # still this run's (a redeployment's streams have the same names).
+        _stage = "stop-streams"
+        _ns_watch.check(time.time() - start)
         _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
+        for _job_type, job_name in submitted:
+            _interrupt.finished("SparkApplication", f"lakebench-{job_name}")
+        _stage = "result-check"
 
         _journal_safe(
             j.record,
@@ -3846,23 +4065,62 @@ def _run_sustained(
         pipeline_success = False
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
-    except typer.Exit:
+    except typer.Exit as e:
+        # Several refusals above exit without clearing the flag; a run that
+        # exits non-zero is never recorded as a success.
+        if e.exit_code:
+            pipeline_success = False
         raise
+    except KeyboardInterrupt as e:
+        # SIGINT or SIGTERM anywhere (the settle phase can last 30 min). Sealed
+        # first; then the streams, the datagen Job and an unfinished preflight
+        # this run created are deleted by uid. The finally must not then stop
+        # the streams by name: one left with 409 is not ours, and one skipped
+        # was skipped on request. Not re-raised: the finally exits 130.
+        _interrupted = _interrupt.seal(at_stage=_stage, prior_failure=not pipeline_success, exc=e)
+        pipeline_success = False
+        streams_stopped = True
+        _exit_interrupted = True
+        console.print()
+        print_warning(f"Interrupted by {_interrupted['signal']} during {_stage}")
+        _interrupt.stop_owned(_interrupted, console)
+    except NamespaceGone as e:
+        # Destroyed under the run: its streams, datagen Job and pods went
+        # with it, so nothing is stopped (a redeployed namespace's objects
+        # are not this run's either).
+        _abort = {"reason": e.reason, "at_elapsed": round(e.at_elapsed, 1)}
+        pipeline_success = False
+        streams_stopped = True
+        print_error(f"{e.reason} mid-run; stopping")
     except BaseException:
-        # An error or Ctrl-C anywhere (the settle phase can last 30 min)
-        # is not a pass.
+        # Any other error is not a pass.
         pipeline_success = False
         raise
     finally:
+        # A signal from here on does not stop the record being written (a
+        # third one still does, cli/_interrupt.py).
+        _interrupt.begin_seal()
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
-        if _total_s3_objects is None:
+        _ns_watch.close()
+        if _total_s3_objects is None and _interrupted is None and _abort is None:
+            # Not after an interrupt: partial data, and a long listing would
+            # hold the record back from a user who has just pressed Ctrl-C.
+            # Not after the namespace went: its buckets may be a redeployment's.
             _total_s3_objects = _measure_bucket_sizes(cfg, collector)
+        if _interrupted is None and _interrupt.late_signal():
+            # Interrupted while the run was being wound up: sealed the same way.
+            _interrupted = _interrupt.seal(at_stage="results", prior_failure=not pipeline_success)
+            _exit_interrupted = pipeline_success
+            pipeline_success = False
 
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
+            run_metrics.interrupted = _interrupted
+            run_metrics.abort_reason = _abort
             # Collect platform metrics from Prometheus (best-effort)
-            _collect_platform_metrics(cfg, run_metrics)
+            if _interrupted is None and _abort is None:
+                _collect_platform_metrics(cfg, run_metrics)
 
             # Build pipeline benchmark (stage-matrix view)
             try:
@@ -3874,7 +4132,9 @@ def _run_sustained(
                     datagen_output_rows=_datagen_output_rows,
                     datagen_output_files=_datagen_output_files,
                 )
-                pb.total_s3_objects = _total_s3_objects
+                # 0 when not measured (an interrupted run), as before for a
+                # failed listing.
+                pb.total_s3_objects = _total_s3_objects or 0
                 run_metrics.pipeline_benchmark = pb
                 if is_continuous_mode(pb.pipeline_mode):
                     if pb.sustained_throughput_rps > 0:
@@ -3913,14 +4173,45 @@ def _run_sustained(
             except Exception as e:
                 console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
-            sample_run_end(run_metrics, cfg)
-            # The corpus this run read, once, before the save (corpus id v2).
+            if _interrupted is None and _interrupt.late_signal():
+                # A signal since the check above (Prometheus, the scores):
+                # the record still says so. After the save, it is too late.
+                _interrupted = _interrupt.seal(
+                    at_stage="results", prior_failure=not pipeline_success
+                )
+                _exit_interrupted = pipeline_success
+                pipeline_success = False
+                run_metrics.success = False
+                run_metrics.interrupted = _interrupted
+            # The end load sample, then the corpus this run read (corpus id
+            # v2), both after an interrupt too: they never raise, the sample is
+            # bounded and reads the nodes and the other namespaces' pods, and
+            # a corpus cut short records as incomplete. After a lost namespace
+            # the sample is still taken, but the corpus is not read: its
+            # bucket may already be a redeployment's.
             from lakebench.metrics.corpus_identity import record_corpus_observation
 
-            record_corpus_observation(run_metrics, cfg)
+            sample_run_end(run_metrics, cfg)
+            if _abort is None:
+                record_corpus_observation(run_metrics, cfg)
+            else:
+                _record_not_observed(run_metrics, _abort["reason"])
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
             write_run_report(metrics_storage, run_id)
 
-        _journal_safe(j.end_command, success=pipeline_success)
+        _journal_safe(
+            j.end_command,
+            success=pipeline_success,
+            message=(
+                f"interrupted ({_interrupted['signal']} during {_interrupted['at_stage']})"
+                if _interrupted is not None
+                else (f"stopped: {_abort['reason']}" if _abort is not None else "")
+            ),
+        )
+        _interrupt.restore()
+        if _exit_interrupted:
+            raise typer.Exit(ExitCode.INTERRUPTED)
+        if _abort is not None:
+            raise typer.Exit(ExitCode.FAILED)
