@@ -1312,6 +1312,15 @@ def row_caps(
         )
 
 
+#: The missing condition of a round median not assessed for its rounds.
+ROUNDS_CONDITION = "in-stream rounds that each ran the same query set"
+
+
+def rounds_note(rounds_problems: Mapping[str, str]) -> str:
+    """``rounds ran different query sets (A)``, one clause per side."""
+    return "; ".join(f"{why} ({label})" for label, why in sorted(rounds_problems.items()))
+
+
 def rounds_problem(record: Mapping[str, Any]) -> str | None:
     """Why a record's in-stream round medians are over no one query set:
     its rounds executed different sets (``composite_qph_basis.blended``,
@@ -1363,11 +1372,10 @@ def assess(
             caps,
         )
     if rounds_problems and meta.blended_by_rounds:
-        why = "; ".join(f"{why} ({label})" for label, why in sorted(rounds_problems.items()))
         return Assessment(
             NOT_ASSESSED,
-            "in-stream rounds that each ran the same query set",
-            f"{why}; a median over them is not one QpH",
+            ROUNDS_CONDITION,
+            f"{rounds_note(rounds_problems)}; a median over them is not one QpH",
             caps,
         )
     if pair.verdict == cmp.CONFOUNDED:
@@ -1516,6 +1524,11 @@ def build_comparison(a: Side, b: Side) -> dict[str, Any]:
                 "missing": {"condition": asm.missing, "command": None},
                 "hint": asm.hint,
                 "capped_by": asm.capped_by,
+                # Why the row's in-stream rounds are over no one query set,
+                # when that is why it is not assessed.
+                "rounds": (
+                    rounds_note(rounds_problems) if asm.missing == ROUNDS_CONDITION else None
+                ),
             }
         )
     doc = {
@@ -1563,6 +1576,7 @@ CSV_COLUMNS = (
     "n_b",
     "assessment",
     "bound_by",
+    "rounds",
 )
 
 
@@ -1602,6 +1616,7 @@ def to_csv(doc: Mapping[str, Any]) -> str:
                 sb.get("n", 0),
                 r.get("assessment"),
                 ";".join(r.get("capped_by") or []),
+                r.get("rounds") or "",
             ]
         )
     return buf.getvalue()

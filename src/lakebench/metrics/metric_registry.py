@@ -992,8 +992,8 @@ _BY_ID = _by_id(_ENTRIES)
 
 
 def _merged(entries: tuple[MetricMeta, ...]) -> MetricMeta:
-    """The first (batch) entry of a mode-split key with every entry's modes
-    and caps: ``lookup(key, None)`` when the entries agree on unit,
+    """The first (batch) entry of a mode-split key with every entry's modes,
+    caps and ``blended_by_rounds``: ``lookup(key, None)`` when the entries agree on unit,
     direction and band, and ``reproduce_class`` always."""
     first = entries[0]
     if len(entries) == 1:
@@ -1002,7 +1002,12 @@ def _merged(entries: tuple[MetricMeta, ...]) -> MetricMeta:
     for m in entries:
         caps += [c for c in m.cap_dependence if c not in caps]
     modes = frozenset().union(*(m.modes for m in entries))
-    return replace(first, modes=modes, cap_dependence=tuple(caps))
+    return replace(
+        first,
+        modes=modes,
+        cap_dependence=tuple(caps),
+        blended_by_rounds=any(m.blended_by_rounds for m in entries),
+    )
 
 
 #: Every exact key and its entries, one per mode set (most keys have one).

@@ -8,6 +8,7 @@ blended and not assessed in compare.
 
 from __future__ import annotations
 
+import io
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -296,6 +297,41 @@ def test_compare_does_not_assess_a_blended_composite():
             assert f"rounds ran different query sets ({label})" in rows[metric]["hint"]
             assert rows[metric]["winner"] is None
         assert "query set" not in (rows["data_freshness_seconds"]["hint"] or "")
+
+
+def test_the_rounds_reason_reaches_the_table_and_the_csv():
+    from rich.console import Console
+
+    from lakebench.cli import _compare as cli_compare
+    from lakebench.metrics.compare import compare_records, to_csv
+
+    a = sr.load_record("011043-e338c5")
+    b = sr.load_record("011043-e338c5")
+    b["run_id"] = "20260927-011043-bbbbbb"
+    _fail_one_round(a["pipeline_benchmark"]["benchmark_rounds"])
+    doc = compare_records([a], [b])
+    rows = {r["metric"]: r for r in doc["metrics"]}
+    assert rows["composite_qph"]["rounds"] == "rounds ran different query sets (A)"
+    assert rows["data_freshness_seconds"]["rounds"] is None
+    csv_text = to_csv(doc)
+    assert csv_text.splitlines()[
+        next(i for i, line in enumerate(csv_text.splitlines()) if line.startswith("metric,"))
+    ].endswith(",rounds")
+    assert "rounds ran different query sets (A)" in csv_text
+    buf = io.StringIO()
+    with mock.patch.object(cli_compare, "console", Console(file=buf, width=300)):
+        cli_compare._print_table(doc)
+    assert "not_assessed: rounds ran different query sets (A)" in buf.getvalue()
+
+
+def test_a_mode_less_round_median_is_still_blended_by_rounds():
+    """lookup(key, None) merges a mode-split key's entries, so a pair whose
+    records name no mode still applies the rounds rule to composite_qph."""
+    from lakebench.metrics.metric_registry import lookup
+
+    for key in ROUND_MEDIANS:
+        assert lookup(key, None).blended_by_rounds is True
+    assert lookup("composite_qph", "batch").blended_by_rounds is False
 
 
 def test_compare_does_not_assess_rounds_that_all_missed_a_query():

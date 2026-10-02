@@ -173,10 +173,12 @@ member's `experiment` block, `support`, `bound`), `groups` (the differing
 keys per identity group), `warnings` and `metrics` (per row: `metric`,
 `unit`, `direction`, `a` and `b` with `median`, `min`, `max`, `values`, `n`,
 `delta_pct`, `assessment`, `winner` (always null), `missing`, `hint`,
-`capped_by`). `--format csv` writes the header fields as `# key: value`
+`capped_by`, and `rounds`, which says why a round median is not assessed
+for its rounds, else null). `--format csv` writes the header fields as `# key: value`
 lines, then one row per metric with `metric`, the medians and ranges,
-`delta_pct`, `verdict`, `attribution`, `n_a`, `n_b`, `assessment` and
-`bound_by`. A protected or spent AML seed is never printed; it reads
+`delta_pct`, `verdict`, `attribution`, `n_a`, `n_b`, `assessment`,
+`bound_by` and `rounds`; the table prints the `rounds` reason after the
+assessment. A protected or spent AML seed is never printed; it reads
 `<protected seed>`.
 
 ### config

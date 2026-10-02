@@ -223,6 +223,8 @@ def _print_table(doc: dict[str, Any]) -> None:
         delta = r.get("delta_pct")
         dtext = "-" if delta is None else f"{delta:+.2f}%"
         assessment = str(r["assessment"])
+        if r.get("rounds"):
+            assessment += f": {r['rounds']}"
         if r.get("capped_by"):
             assessment += " (BOUNDED BY " + ", ".join(r["capped_by"]) + ")"
         table.add_row(

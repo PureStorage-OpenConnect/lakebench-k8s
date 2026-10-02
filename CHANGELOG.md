@@ -265,8 +265,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `scores.composite_qph_by_set` say when the in-stream QpH blends rounds
   that executed different sets (a round with a failed query). Such a run's
   in-stream benchmark reads query set `blended`; `compare` marks its round
-  medians `not_assessed` ("rounds ran different query sets"), and the perf
-  gate and `reproduce` leave it out. A record stored before rounds named
+  medians `not_assessed` and gives the reason ("rounds ran different query
+  sets (A)") in the table, the cmp2 row's `rounds` field and a new CSV
+  `rounds` column, and the perf gate and `reproduce` leave it out. A record stored before rounds named
   their set gets each round's set from its queries' success flags, so an
   older continuous run in which a query failed in some rounds and not
   others now reads blended too. A run whose rounds all missed the same
