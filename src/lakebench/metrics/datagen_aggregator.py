@@ -27,6 +27,7 @@ import json
 import logging
 import statistics
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -534,3 +535,61 @@ def collect_from_k8s(
         pod_images=pod_images,
         pod_args=pod_args,
     )
+
+
+def fleet_record(fleet: FleetSummary, namespace: str) -> dict[str, Any]:
+    """*fleet* as a run record's ``datagen_fleet`` and the namespace's
+    sidecar carry it: the summary stamped with the namespace and the UTC
+    time it was read (``lakebench generate`` writes the same shape)."""
+    from datetime import datetime, timezone
+
+    out = fleet.to_dict()
+    out["namespace"] = namespace
+    out["written_at"] = datetime.now(timezone.utc).isoformat()
+    return out
+
+
+def sidecar_path(namespace: str) -> Path:
+    """Where the namespace's fleet sidecar lives
+    (``lakebench-output/datagen/<namespace>-datagen-metrics.json``)."""
+    from lakebench._constants import DEFAULT_OUTPUT_DIR
+
+    return Path(DEFAULT_OUTPUT_DIR) / "datagen" / f"{namespace}-datagen-metrics.json"
+
+
+def record_generated_fleet(namespace: str, job_completions: int | None) -> dict[str, Any] | None:
+    """After a run's own datagen Job finished: read the fleet from its pods,
+    write the namespace's sidecar (so a later run over this corpus finds
+    it), and return the record. When the fleet cannot be read the old
+    sidecar is removed, because it describes a corpus this run replaced.
+    Never raises."""
+    try:
+        record = fleet_record(
+            collect_from_k8s(namespace, job_completions=job_completions), namespace
+        )
+    except Exception as e:  # noqa: BLE001 -- best effort; the record says what is missing
+        logger.warning("could not read the datagen fleet of this run: %s", e)
+        drop_sidecar(namespace)
+        return None
+    write_sidecar(record, namespace)
+    return record
+
+
+def write_sidecar(record: dict[str, Any], namespace: str) -> None:
+    """Write *record* as the namespace's fleet sidecar. Never raises."""
+    path = sidecar_path(namespace)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2))
+    except OSError as e:
+        logger.warning("could not write the datagen sidecar %s: %s", path, e)
+
+
+def drop_sidecar(namespace: str) -> None:
+    """Remove the namespace's fleet sidecar: a run is replacing the corpus
+    it describes. Never raises."""
+    path = sidecar_path(namespace)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("could not remove the stale datagen sidecar %s: %s", path, e)

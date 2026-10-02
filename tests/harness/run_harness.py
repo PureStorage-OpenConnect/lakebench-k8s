@@ -1591,6 +1591,12 @@ class FakeDatagenDeployer:
 CONTINUOUS_FLEET = {"rows": 2_478_560, "files": 160}
 
 
+#: The image the fake datagen pods ran, and the resolved id their status
+#: reports (``collect_from_k8s``'s ``image`` and ``image_ids``).
+DATAGEN_FLEET_IMAGE = "docker.io/sillidata/lb-datagen:1.6.0"
+DATAGEN_FLEET_IMAGE_ID = "docker.io/sillidata/lb-datagen@sha256:" + "d" * 64
+
+
 def _fake_collect_from_k8s(rec: Recorder):
     from lakebench.metrics import datagen_aggregator
 
@@ -1602,11 +1608,19 @@ def _fake_collect_from_k8s(rec: Recorder):
         bound = inspect.signature(original).bind(*args, **kwargs)
         bound.apply_defaults()
         rec.add("Datagen", "collect_from_k8s", bound.arguments["namespace"])
-        return SimpleNamespace(
-            data_quality="complete",
-            total_rows_written=CONTINUOUS_FLEET["rows"],
-            total_files_written=CONTINUOUS_FLEET["files"],
-        )
+        summary = {
+            "data_quality": "complete",
+            "total_rows_written": CONTINUOUS_FLEET["rows"],
+            "total_files_written": CONTINUOUS_FLEET["files"],
+            "image": DATAGEN_FLEET_IMAGE,
+            "image_ids": [DATAGEN_FLEET_IMAGE_ID],
+            "seed": None,
+            "scale": None,
+            "pods_expected": 2,
+            "pods_reported": 2,
+            "pods_missing": 0,
+        }
+        return SimpleNamespace(**summary, to_dict=lambda: dict(summary))
 
     return collect_from_k8s
 
@@ -1915,6 +1929,12 @@ def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     monkeypatch.setattr(
         lakebench.deploy, "DatagenDeployer", lambda *a, **k: FakeDatagenDeployer(rec, *a, **k)
     )
+    # The datagen pods' fleet (a run that generates reads it from its pods).
+    import lakebench.metrics.datagen_aggregator
+
+    monkeypatch.setattr(
+        lakebench.metrics.datagen_aggregator, "collect_from_k8s", _fake_collect_from_k8s(rec)
+    )
 
     if scenario.clock_start is not None:
         _install_continuous(monkeypatch, rec, scenario)
@@ -1974,9 +1994,6 @@ def _install_continuous(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
         self.deadline = self._clock() + offset
 
     monkeypatch.setattr(budget_cls, "__init__", clocked_init)
-    monkeypatch.setattr(
-        lakebench.metrics.datagen_aggregator, "collect_from_k8s", _fake_collect_from_k8s(rec)
-    )
     real_fp = _unbound(lakebench.deploy.ownership.api_server_fingerprint)
 
     def api_server_fingerprint(*args, **kwargs):

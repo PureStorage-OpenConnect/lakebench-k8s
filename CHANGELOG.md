@@ -418,6 +418,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `experiment.benchmark_source`; that moves the record's identity digest,
   since it now describes another benchmark.
 ### Fixed
+- **A run that generates its corpus records the generator.** `lakebench run
+  --generate` (batch) and a continuous run that starts its own datagen now
+  read the fleet from their own datagen pods, record it as `datagen_fleet`
+  and write the namespace's sidecar, so `experiment.corpus.datagen` carries
+  the generator image digest instead of "no datagen fleet record for this
+  run". Before, only `lakebench generate` wrote the sidecar, and a batch
+  `run --generate` attached whatever an older generate had left, which could
+  describe a corpus the run had replaced. A run that generates now removes
+  that sidecar before it starts; a run that does not generate still takes it.
 
 - **The capacity check counts the Spark driver's memory overhead.**
   The driver pod requests its heap plus the overhead Spark on Kubernetes

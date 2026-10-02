@@ -1999,6 +1999,9 @@ def run(
     # written here first so the finally can honour it.
     _pipeline_exit_code: int = ExitCode.FAILED
     _datagen_elapsed = 0.0
+    # Set when this run generated its corpus (fleet read from its own pods).
+    _generated_here = False
+    _run_fleet: dict | None = None
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
     results: list[tuple[str, bool, float]] = []
@@ -2106,6 +2109,11 @@ def run(
                 # bronze prefix unless --regenerate was passed; with the
                 # flag, empty the bronze bucket first.
                 enforce_bronze_regenerate(cfg, regenerate)
+                # The namespace's fleet sidecar describes a corpus this run
+                # is about to replace.
+                from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+                drop_sidecar(cfg.get_namespace())
 
                 dg_engine = DeploymentEngine(cfg)
                 datagen_deployer = DatagenDeployer(dg_engine)
@@ -2177,6 +2185,13 @@ def run(
                 datagen_end = datetime.now()
                 _datagen_elapsed = (datagen_end - datagen_start).total_seconds()
                 print_success(f"Datagen completed in {_datagen_elapsed:.0f}s")
+                # This run generated the corpus: its fleet record comes from
+                # its own pods, never from an older sidecar.
+                _generated_here = True
+                if not _dg_timed_out:
+                    from lakebench.metrics.datagen_aggregator import record_generated_fleet
+
+                    _run_fleet = record_generated_fleet(cfg.get_namespace(), _total_pods)
 
                 # Measure bronze bucket after datagen
                 try:
@@ -3321,7 +3336,11 @@ def run(
             try:
                 from lakebench.metrics import build_pipeline_benchmark
 
-                fleet = _load_latest_datagen_fleet(cfg.get_namespace())
+                fleet = (
+                    _run_fleet
+                    if _generated_here
+                    else _load_latest_datagen_fleet(cfg.get_namespace())
+                )
                 if fleet is not None:
                     run_metrics.datagen_fleet = fleet
                 pb = build_pipeline_benchmark(
