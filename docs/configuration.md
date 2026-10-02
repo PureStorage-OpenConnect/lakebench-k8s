@@ -659,9 +659,12 @@ driver memory, overhead, cores, off-heap, PySpark memory). The full set is in
 reaches the pipeline's Spark jobs only, not the Spark Thrift server or
 `--local` runs. The run record keeps it as `architecture.spark_conf_user`:
 every key is named, but only tuning keys (SQL execution, shuffle, memory,
-speculation and the like) keep their values; any other value is recorded
-as `<redacted>`, because a key can hold a secret or a location under any
-name.
+speculation and the like) keep their values. Any other value is recorded
+as `<redacted sha256:...>`, because a key can hold a secret or a location
+under any name; a key whose name marks a secret, credential, endpoint or
+bucket is recorded as `<redacted>` with no digest. The recorded map is the
+`spark conf` key of the experiment identity, so two runs whose
+`spark.conf` differs are not like-for-like.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

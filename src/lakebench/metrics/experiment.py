@@ -252,14 +252,23 @@ def experiment_inputs(
         params_id = _short_hash(declared)
         params = {"customer360": _c360_resolved(cfg)}
 
+    from lakebench.metrics.fingerprint_inputs import is_credential_key, is_location_key
     from lakebench.modules.pipeline_engines.spark.conf_keys import (
         recordable_spark_conf,
         user_spark_overrides,
     )
 
+    def _unhashable(key: str) -> bool:
+        return (
+            is_credential_key(key)
+            or is_location_key(key)
+            or "endpoint" in key.lower()
+            or ".bucket." in key
+        )
+
     # Local runs build no Spark job manifest, so the user conf never ran.
     user_conf = (
-        recordable_spark_conf(user_spark_overrides(cfg.spark.conf or {}))
+        recordable_spark_conf(user_spark_overrides(cfg.spark.conf or {}), _unhashable)
         if system != "local"
         else {}
     )

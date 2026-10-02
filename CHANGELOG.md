@@ -90,8 +90,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   note, and a key at its v1.6 schema default is dropped with a note
   everywhere. `spark.driver.maxResultSize` still takes a user value. A
   non-default `spark.conf` is recorded as
-  `experiment.architecture.spark_conf_user`; only tuning keys keep their
-  values there, and every other value is recorded as `<redacted>`.
+  `experiment.architecture.spark_conf_user` and enters the experiment
+  identity as `spark conf`; only tuning keys keep their values there, other
+  values are recorded by digest, and secret-named keys as `<redacted>`.
   `spark.conf` reaches the pipeline's Spark jobs only: not the Spark Thrift
   server, and not `--local` runs.
 - **`operator.install: true` is refused.** The Spark Operator

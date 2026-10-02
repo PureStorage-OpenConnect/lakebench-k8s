@@ -239,6 +239,54 @@ def test_default_identity_unchanged():
     )
 
 
+def test_spark_conf_enters_the_identity():
+    """A user spark.conf is the "spark conf" identity key (Architecture);
+    two runs that differ only in a value the record redacts by digest still
+    differ in identity, and the default identity carries no such key."""
+    from lakebench.metrics.comparability import EXP2, optional_keys
+    from lakebench.metrics.experiment import experiment_inputs, identity
+
+    def ident(conf):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            exp = experiment_inputs(make_config(spark={"conf": conf}), run_mode="batch")
+        # The record writer stamps the schema; identity() reads it.
+        exp = {**exp, "schema": EXP2}
+        assert exp["identity_version"] == 2
+        return identity(exp), optional_keys(exp)
+
+    base_id, base_opt = ident({})
+    assert "spark conf" not in base_id and "spark conf" not in base_opt
+    one_id, one_opt = ident({"spark.executorEnv.TUNE": "1"})
+    two_id, two_opt = ident({"spark.executorEnv.TUNE": "2"})
+    assert one_opt["spark conf"] != two_opt["spark conf"]
+    assert one_opt["spark conf"]["spark.executorEnv.TUNE"].startswith("<redacted sha256:")
+    assert one_id["spark conf"] == one_opt["spark conf"]
+    assert one_id != two_id and one_id != base_id
+
+
+def test_secret_named_keys_carry_no_digest():
+    from lakebench.modules.pipeline_engines.spark.conf_keys import recordable_spark_conf
+
+    rec = recordable_spark_conf(
+        {
+            "spark.executorEnv.DB_PASS": "hunter2",
+            "spark.sql.catalog.x.header.Authorization": "Bearer t",
+            "spark.sql.catalog.x.token": "t",
+            "spark.hadoop.fs.defaultFS": "s3a://b",
+            "spark.speculation": "true",
+        },
+        unhashable=lambda k: k.endswith("defaultFS"),
+    )
+    assert rec == {
+        "spark.executorEnv.DB_PASS": "<redacted>",
+        "spark.sql.catalog.x.header.Authorization": "<redacted>",
+        "spark.sql.catalog.x.token": "<redacted>",
+        "spark.hadoop.fs.defaultFS": "<redacted>",
+        "spark.speculation": "true",
+    }
+
+
 # -- drift: the owned set is exactly what the manifest writes ------------------
 
 _RECIPES = ("hive-iceberg-spark-trino", "polaris-iceberg-spark-trino", "hive-delta-spark-trino")
