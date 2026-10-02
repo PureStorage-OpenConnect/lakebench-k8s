@@ -624,10 +624,13 @@ jobs:
   # (scripts/contributor_path.py turns its one clone line into a clone of
   # the commit under test). It includes `make test-spark`, so it is outside
   # the fast-path budgets and runs only where the path can have changed:
-  # every push to main, integrate/**, train/* and tags, and any other push
-  # or pull request that touches CONTRIBUTING.md, the Makefile,
-  # pyproject.toml or a workflow; otherwise its steps are skipped. The
-  # backstop is the slowest Spark pass plus check-fast and the installs.
+  # every push to main, integrate/** and train/*, tags (so a release's call
+  # waits for it), and any other push or pull request that touches one of
+  # the script's INPUTS; otherwise its steps are skipped and the step
+  # summary says so. Do not make it a required check: a skipped run is
+  # green. Nothing here is cached, so every run downloads pyspark and the
+  # jars. The backstop is the slowest Spark pass plus check-fast and the
+  # installs; build does not wait for this job.
   contributor-path:
     name: Contributor path
     runs-on: ubuntu-24.04
@@ -651,7 +654,15 @@ jobs:
         run: |
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          echo "run=$(python3 scripts/contributor_path.py --should-run)" >> "$GITHUB_OUTPUT"
+          # On its own line so a crash fails the step instead of skipping
+          # the quick path with a green job.
+          run="$(python3 scripts/contributor_path.py --should-run)"
+          case "$run" in
+            true) ;;
+            false) echo "Skipped: no quick-path input changed on this ref." >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo "::error::--should-run printed '$run'"; exit 1 ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
 
       - name: Install Java 17 and make
         if: steps.inputs.outputs.run == 'true'

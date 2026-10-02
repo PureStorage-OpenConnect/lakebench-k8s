@@ -15,8 +15,9 @@ Usage:
 
 ``--should-run`` reads ``EVENT``, ``REF`` and ``BASE_REF`` (the workflow's
 ``github.event_name``, ``github.ref`` and ``github.base_ref``): a push to
-``main``, ``integrate/**`` or ``train/*`` and a tag always run; any other
-push or pull request runs when it changes one of ``INPUTS``. Stdlib only:
+``main``, ``integrate/**`` or ``train/*`` and a tag always run (a release
+calls CI with the tag's ref); any other push or pull request runs when it
+changes one of ``INPUTS``, or when its change set cannot be read. Stdlib only:
 it runs on the container's Python before anything is installed.
 """
 
@@ -35,12 +36,27 @@ ROOT = Path(__file__).resolve().parents[1]
 BEGIN = "<!-- contributor-path:begin -->"
 END = "<!-- contributor-path:end -->"
 #: Files whose change can break the quick path; a change to one runs the job.
-INPUTS = ("CONTRIBUTING.md", "Makefile", "pyproject.toml", ".github/workflows/")
-ALWAYS = ("refs/heads/main", "refs/heads/integrate/", "refs/heads/train/", "refs/tags/")
+INPUTS = (
+    "CONTRIBUTING.md",
+    "Makefile",
+    "pyproject.toml",
+    ".pre-commit-config.yaml",
+    ".github/workflows/",
+    "scripts/contributor_path.py",
+    "scripts/fetch_test_jars.py",
+    "tests/spark/jars.lock.json",
+)
+#: Refs the job always runs on: main exactly, and these prefixes.
+ALWAYS_PREFIXES = ("refs/heads/integrate/", "refs/heads/train/", "refs/tags/")
 INTEGRATE = "origin/integrate/v1.5.0"
 
 _CLONE = re.compile(r"^git clone (?P<url>\S+)(?: (?P<dir>\S+))?\s*$")
-_MAKE = re.compile(r"(?:^|&&|;)\s*make\s+(?P<targets>[A-Za-z0-9_.\- ]+?)\s*(?=$|&&|;)")
+# make options that take the next word as their argument, not a target.
+_MAKE_ARG_OPTS = frozenset({"-C", "-f", "-I", "-j", "-l", "-o", "-W", "--directory", "--file"})
+
+
+def always_runs(ref: str) -> bool:
+    return ref == "refs/heads/main" or ref.startswith(ALWAYS_PREFIXES)
 
 
 def extract(text: str) -> tuple[list[str], list[str]]:
@@ -66,12 +82,54 @@ def problems(lines: Sequence[str], makefile: str) -> list[str]:
     if len(clones) != 1 or not _CLONE.match(clones[0]):
         out.append("the block needs exactly one plain `git clone <url> [dir]` line")
     targets = set(re.findall(r"^([A-Za-z0-9_.\-]+):", makefile, re.M))
-    for ln in lines:
-        for m in _MAKE.finditer(ln):
-            for t in m.group("targets").split():
-                if t not in targets:
-                    out.append(f"`make {t}` has no Makefile target")
+    for ln in _joined(lines):
+        if not re.search(r"(^|[\s;&|(])make(\s|$)", ln):
+            continue
+        try:
+            words = shlex.split(ln, comments=True)
+        except ValueError:
+            out.append(f"cannot parse the make line {ln!r}")
+            continue
+        for cmd in _commands(words):
+            if cmd[:1] != ["make"]:
+                continue
+            skip = False
+            for w in cmd[1:]:
+                if skip:
+                    skip = False
+                elif w in _MAKE_ARG_OPTS:
+                    skip = True
+                elif w.startswith("-") or "=" in w:
+                    continue
+                elif w not in targets:
+                    out.append(f"`make {w}` has no Makefile target")
     return out
+
+
+def _joined(lines: Sequence[str]) -> list[str]:
+    """Lines with backslash continuations joined, for parsing only."""
+    out: list[str] = []
+    cur = ""
+    for ln in lines:
+        if ln.rstrip().endswith("\\"):
+            cur += ln.rstrip()[:-1] + " "
+            continue
+        out.append(cur + ln)
+        cur = ""
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _commands(words: list[str]) -> list[list[str]]:
+    """Split shell words into simple commands at ``&&``, ``||``, ``;`` and ``|``."""
+    cmds: list[list[str]] = [[]]
+    for w in words:
+        if w in ("&&", "||", ";", "|"):
+            cmds.append([])
+        else:
+            cmds[-1].append(w)
+    return [c for c in cmds if c]
 
 
 def runnable(lines: Sequence[str]) -> str:
@@ -91,7 +149,7 @@ def runnable(lines: Sequence[str]) -> str:
 
 def should_run(event: str, ref: str, changed: Iterable[str] | None) -> bool:
     """``changed`` None means the change set is unknown, which runs the job."""
-    if event != "pull_request" and ref.startswith(ALWAYS):
+    if event != "pull_request" and always_runs(ref):
         return True
     if changed is None:
         return True
@@ -121,9 +179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.should_run:
         event, ref = os.environ.get("EVENT", ""), os.environ.get("REF", "")
-        changed = (
-            None if ref.startswith(ALWAYS) else changed_files(event, os.environ.get("BASE_REF", ""))
-        )
+        changed = None if always_runs(ref) else changed_files(event, os.environ.get("BASE_REF", ""))
         if changed is not None:
             print(f"changed files: {len(changed)}", file=sys.stderr)
         print("true" if should_run(event, ref, changed) else "false")

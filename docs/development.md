@@ -18,6 +18,7 @@ src/lakebench/
   benchmark/    Query engine benchmark (QpH; 8 c360 queries, 12 AML queries)
   cli/          CLI package (Typer commands, helpers, continuous pipeline)
   config/       Pydantic config schema, YAML loader, cluster autosizer
+  deps/         A deployment's dependency set: what it needs, resolved in its namespace
   deploy/       Deployment engine, destroy, ownership records, cluster lease,
                 and re-export shims for deployers
   engine/       PipelineEngine protocol and get_engine() factory
@@ -60,7 +61,7 @@ Supporting directories:
 | Valid architectures | `_SUPPORTED_COMBINATIONS` and `_COMBINATION_NOTES` in `src/lakebench/config/schema.py` |
 | Recipes | `src/lakebench/config/recipes.py` |
 | Support record | `src/lakebench/config/validated_combinations.yaml` and `config/support.py` |
-| Queries | `src/lakebench/benchmark/queries.py` |
+| Queries | `src/lakebench/benchmark/queries.py` (the QpH sets), `benchmark/aml_queries.py` and the SQL under `benchmark/queries/aml/` (the AML score queries) |
 | Metric definitions | `src/lakebench/metrics/metric_registry.py`, which the collector's score descriptions read |
 | Kubernetes manifests | the Jinja2 templates in `src/lakebench/templates/`; Spark jobs are built in code in `job.py` |
 
@@ -147,13 +148,13 @@ A coverage report: `make test-cov`, written to `htmlcov/index.html`.
 
 ### Makefile targets
 
-Run `make help` for the full list.
+`make help` lists the common targets; the table has every one.
 
 | Target | Description |
 |--------|-------------|
 | `make install` | Install the package in editable mode, without the dev extra |
 | `make dev` | Install with the dev extra and set up the pre-commit hooks |
-| `make check-fast` | Ruff, format check and mypy on `src/`, `tests/` and `scripts/`, then the unit tests in parallel without `tests/spark` and the `slow` tests (CI's Lint job runs it, budget 8 minutes) |
+| `make check-fast` | Ruff and the format check on `src/`, `tests/` and `scripts/`, mypy on `src/lakebench/`, then the unit tests in parallel without `tests/spark` and the `slow` tests (CI's Lint job runs it, budget 8 minutes) |
 | `make test` | The pytest command of `make check-fast` alone |
 | `make test-spark` | The Spark tier on the installed pyspark, with its pinned jars fetched and `LB_REQUIRE_JARS=1` |
 | `make test-unit` | Every test not marked `integration` or `e2e`, serially, `slow` tests included |
@@ -161,7 +162,7 @@ Run `make help` for the full list.
 | `make test-e2e` | End-to-end tests (full workflow) |
 | `make test-extended` | Scale matrix tests (scales 1, 10, 50, 100) |
 | `make test-stress` | Stress tests at large scales (250, 500, 1000) |
-| `make test-cov` | `pytest tests/` with no marker filter and a coverage report |
+| `make test-cov` | `pytest tests/` with the default marker filter of `pyproject.toml` (no `e2e` or `integration`) and a coverage report; not in `make help` |
 | `make lint` | Ruff on `src/`, `tests/` and `scripts/`, as CI runs it |
 | `make fmt` | Format `src/`, `tests/` and `scripts/` with ruff and apply auto-fixes |
 | `make typecheck` | Mypy on `src/lakebench/` |
@@ -223,9 +224,10 @@ one.
 - `python scripts/check_doc_overlap.py FILE` lists each paragraph of a
   local, untracked instructions file that repeats a tracked doc, and each
   line that repeats a fact (a number with a unit, a backticked identifier
-  with a digit) without pointing at the doc that owns it. It exits 1 on any
-  report; rewrite such a line as a pointer. Its unit tests run in CI on
-  planted files.
+  with a digit) without pointing at a doc that states it. `CHANGELOG.md` is
+  not in its corpus. It exits 1 on any report and 2 when it cannot run;
+  rewrite a reported line as a pointer. Its unit tests run in CI on planted
+  files.
 
 ## The Spark tier
 
@@ -343,8 +345,9 @@ To add one:
    in `job.py`. Verify each Maven artifact by fetching its POM, not through
    the search API.
 5. Regenerate the generated doc blocks:
-   `PYTHONPATH=src python -m lakebench.config.support .` for the support and
-   compatibility tables, `python scripts/gen_config_reference.py` and
+   `PYTHONPATH=src python -m lakebench.config.support .` for the support
+   states and recipe components tables in the README and the docs, and
+   `python scripts/gen_config_reference.py` and
    `python scripts/gen_sizing_tables.py` where the change moves their
    inputs. The drift tests fail on a stale block.
 6. Leave `src/lakebench/config/validated_combinations.yaml` alone: it is
@@ -424,10 +427,11 @@ that produces their inputs is frozen until the registered looks are spent:
   and the `REFERENCE_PY_DEPS` pins;
 - every symbol a frozen script imports from a module that is not frozen
   (in `common.py`, `detection_rules.py`, `tm_operations.py`,
-  `config/datagen_seed.py` and others), pinned by its definition, so a new
-  helper next to it is free but an edit to it is not.
+  `config/datagen_seed.py` and others): an edit to one counts as an edit
+  to a frozen file, while a new helper next to it does not.
 
-A commit that changes a frozen file names its cost in a `Freeze-cost:`
+At this commit the list is policy, held by review; no CI check enforces it
+yet. A commit that changes a frozen file names its cost in a `Freeze-cost:`
 trailer: `None`, `Parity proof` (the batch and stream parity guards on
 both Spark lines plus their mutation check), `Rebuild` (an output-neutral
 generator image with a byte-compare at a fixed seed), `Re-derive` (the
@@ -542,11 +546,16 @@ and git. `scripts/contributor_path.py` extracts it, fails on a `make`
 target the Makefile lacks, and replaces only the one `git clone` line with
 a clone of this repository at the commit under test. It runs on every push to `main`, `integrate/**` and
 `train/*` and on tags, and on any other push or pull request whose changes
-touch `CONTRIBUTING.md`, the `Makefile`, `pyproject.toml` or
-`.github/workflows/`; otherwise its steps are skipped. It is outside the
-fast-path budgets: the block includes `make test-spark`. A command in the
-block that needs a cluster or a local file fails the job on the pull
-request that adds it.
+touch `CONTRIBUTING.md`, the `Makefile`, `pyproject.toml`,
+`.github/workflows/`, `.pre-commit-config.yaml`, the script itself,
+`scripts/fetch_test_jars.py` or `tests/spark/jars.lock.json`; otherwise its
+steps are skipped and the step summary says so, so it must not be a
+required check. It is outside the fast-path budgets (the block includes
+`make test-spark`, and nothing is cached), the package build does not wait
+for it, and a release, which calls this workflow on the tag, does. A
+command in the block that needs a cluster or a local file fails the job on
+the pull request that adds it; `tests/test_contributor_path.py` also fails
+in the unit tier on a `make` target the Makefile lacks.
 
 ## Further reading
 

@@ -7,14 +7,16 @@ add a recipe or a workload, is in [the development guide](docs/development.md).
 
 ## Quick path
 
-From a fresh clone to a green local run. CI runs this block verbatim in a
-clean `python:3.11` container, so it stays true:
+From a fresh clone to a green local run. CI runs this block as written in
+a clean `python:3.11` container, with only the clone pointed at the commit
+under test, so it stays true:
 
 <!-- contributor-path:begin -->
 ```bash
 git clone https://github.com/PureStorage-OpenConnect/lakebench-k8s.git
 cd lakebench-k8s
-python3 -m venv .venv && . .venv/bin/activate
+# any Python from 3.10 to 3.13
+python3.11 -m venv .venv && . .venv/bin/activate
 make dev
 make check-fast
 pip install "pyspark==4.0.1"
@@ -28,8 +30,12 @@ an 8-minute budget: ruff, the format check, mypy and the unit tests in
 parallel. `make test-spark` runs the PySpark tests on a local Spark with
 the Iceberg and Delta jars they need, which it downloads and checks by
 sha256; it needs Java 17 and takes longer (30 to 50 minutes on a CI
-runner).
-Then push a branch to your fork and open a pull request against `main`.
+runner). Then make a branch, push it to your fork and open a pull request
+against `main` (see [Pull requests](#pull-requests)).
+
+New here? [README.md](README.md), [the recipes](docs/recipes.md) and
+[the configuration reference](docs/configuration.md) describe what
+Lakebench deploys and measures.
 
 ## Setup
 
@@ -45,7 +51,10 @@ live tier.
 
 The pre-push hook refuses a push that reaches a commit from before the
 repository's 2026-09-30 history rewrite and scans what you push for
-credentials with gitleaks. Install it by copying it into your clone:
+credentials with gitleaks, using the scanner config from `origin`'s
+`integrate/v1.5.0` branch. So keep `origin` pointing at this repository
+(the clone above does) and push to your fork as a second remote. Install
+the hook by copying it into your clone:
 
 ```bash
 cp scripts/hooks/pre-push "$(git rev-parse --git-common-dir)/hooks/pre-push"
@@ -74,7 +83,8 @@ every tier below it.
 - A change to datagen output, pipeline logic or resource sizing also proves
   itself live at scale 1. Only what unit tests cannot see needs a cluster:
   backend behaviour, concurrency between deployments, sizing, timing and
-  results that depend on the data.
+  results that depend on the data. Without a cluster you can load, say so
+  in the pull request; a maintainer runs the live tier before it merges.
 - A change under `datagen_rs/` runs `cargo fmt --check`,
   `cargo clippy --all-targets --locked -- -D warnings` and
   `cargo test --release --locked` there.
@@ -92,14 +102,20 @@ Tests that import pyspark go under `tests/spark/`.
 
 ## Pull requests
 
-1. Fork the repository and create a branch from `main`.
+1. Fork the repository on GitHub, add the fork as a remote of your clone
+   (`git remote add fork <your fork's URL>`) and create a branch from
+   `main` (`git switch -c my-change origin/main`).
 2. Keep one concern per pull request. A bug fix does not carry a drive-by
    refactor.
-3. Run the tiers your change needs (above), then push and open the pull
-   request against `main`.
-4. In the description, lead with what the change does and why, then how
+3. Add tests: new code comes with unit tests, and a fix with a test that
+   fails without it. CI also holds per-file coverage floors on the scoring
+   and metrics code (`scripts/check_coverage.py`).
+4. Run the tiers your change needs (above), then `git push fork my-change`
+   and open the pull request against `main`. To run every check a release
+   runs, `python scripts/release_gate.py` lists what failed.
+5. In the description, lead with what the change does and why, then how
    you tested it beyond the unit tier. Say whether docs changed.
-5. Update `docs/`, `README.md` and `CHANGELOG.md` in the same pull request
+6. Update `docs/`, `README.md` and `CHANGELOG.md` in the same pull request
    when the change alters behaviour, a CLI flag, a config key, a default or
    a number the docs quote.
 

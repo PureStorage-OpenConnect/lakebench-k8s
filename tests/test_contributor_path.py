@@ -66,6 +66,33 @@ def test_a_removed_make_target_is_reported(tmp_path):
     assert cp.main(args) == 1
 
 
+@pytest.mark.parametrize(
+    ("line", "missing"),
+    [
+        ("make dev  # a note", []),
+        ("make check-fast | tee log", []),
+        ("make check-fast XDIST_WORKERS=8", []),
+        ("make -j4 dev", []),
+        ("make -C . dev", []),
+        ("cd x && make dev && make nope", ["nope"]),
+        ("make dev check-fast nope", ["nope"]),
+    ],
+)
+def test_make_lines_are_parsed_as_shell(line, missing):
+    found = cp.problems(["git clone https://example.com/x.git", line], MAKEFILE)
+    assert found == [f"`make {t}` has no Makefile target" for t in missing]
+
+
+def test_make_line_continued_with_a_backslash_is_joined():
+    lines = ["git clone https://example.com/x.git", "make dev \\", "  nope"]
+    assert cp.problems(lines, MAKEFILE) == ["`make nope` has no Makefile target"]
+
+
+def test_unparseable_make_line_is_reported():
+    found = cp.problems(["git clone https://example.com/x.git", "make 'dev"], MAKEFILE)
+    assert found == ['cannot parse the make line "make \'dev"']
+
+
 def test_comment_lines_are_dropped_and_the_rest_kept_in_order():
     lines, _ = cp.extract(BLOCK)
     assert lines == [
@@ -114,10 +141,15 @@ def test_job_always_runs_on_main_integrate_trains_and_tags(ref):
     assert cp.should_run("push", ref, []) is True
 
 
+def test_only_main_itself_always_runs():
+    for ref in ("refs/heads/main-x", "refs/heads/maintenance"):
+        assert cp.should_run("push", ref, ["docs/x.md"]) is False, ref
+
+
 def test_job_runs_elsewhere_only_when_an_input_changed():
     lane = "refs/heads/lane/x"
     assert cp.should_run("push", lane, ["src/lakebench/cli/_run.py"]) is False
-    for path in ("CONTRIBUTING.md", "Makefile", "pyproject.toml", ".github/workflows/ci.yml"):
+    for path in (*cp.INPUTS[:-4], ".github/workflows/ci.yml", *cp.INPUTS[-3:]):
         assert cp.should_run("push", lane, [path]) is True, path
         assert cp.should_run("pull_request", "refs/pull/3/merge", [path]) is True, path
     assert cp.should_run("pull_request", "refs/pull/3/merge", ["docs/x.md"]) is False
@@ -161,7 +193,10 @@ def test_ci_job_runs_the_script_in_a_pinned_clean_container():
         image.startswith("python:3.11-bookworm@sha256:") and len(image.split("@sha256:")[1]) == 64
     )
     steps = {s.get("name"): s for s in job["steps"]}
-    assert "--should-run" in steps["Changed inputs"]["run"]
+    gate = steps["Changed inputs"]["run"]
+    # The result is checked, so a crash fails the step rather than skipping.
+    assert 'run="$(python3 scripts/contributor_path.py --should-run)"' in gate
+    assert "*) echo" in gate and "exit 1" in gate
     install = steps["Install Java 17 and make"]
     assert "openjdk-17-jre-headless" in install["run"] and "make" in install["run"]
     quick = steps["Run the quick path"]
