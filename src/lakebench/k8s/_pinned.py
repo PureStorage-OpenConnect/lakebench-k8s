@@ -108,9 +108,10 @@ class LeasedCommandTimeout(subprocess.TimeoutExpired):
         )
         if "helm" in str(self.cmd):
             text += (
-                "; the release may be left failed or pending-upgrade: check `helm "
-                "history` for it, roll back a pending revision with `helm rollback`, "
-                "then run `lakebench admin repair-operator`"
+                "; the release may be left failed or pending-upgrade: run `lakebench "
+                "admin repair-operator`, which rolls a stale pending release back when "
+                "the revision is safe (a `helm rollback` by hand skips that check and "
+                "the lease)"
             )
         return text
 

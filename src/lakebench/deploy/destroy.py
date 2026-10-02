@@ -1967,9 +1967,9 @@ def destroy_all(
                                 "so the operator's helm release and its Deployments "
                                 "disagree (an upgrade that did not apply); check "
                                 f"`helm history spark-operator -n {spark_op_cfg.namespace}`. "
-                                "`lakebench admin repair-operator` does not compare the "
-                                "Deployments yet; until it does, the release has to be "
-                                "re-applied by the cluster admin"
+                                "A cluster admin runs `lakebench admin repair-operator`, "
+                                "which sets the watch list from the helm values and both "
+                                "Deployments; then re-run destroy"
                             )
                         else:
                             hint = (

@@ -855,9 +855,8 @@ class _SignalDeferral:
             self.quiet()
             _say(
                 "aborting inside the cluster lease; the lease is released first. If a "
-                "helm upgrade was running, check `helm history` for the release and "
-                "roll back a pending-upgrade revision, then run "
-                "`lakebench admin repair-operator`"
+                "helm upgrade was running, run `lakebench admin repair-operator`: it "
+                "rolls a pending-upgrade revision back when that is safe"
             )
             raise LeaseAbort(signum)
 
