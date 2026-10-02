@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **`reproduce` no longer destroys before its run.** It refuses (exit 3)
+  when the config's namespace or one of its buckets already exists, and
+  refuses `create_namespace: false` or `create_buckets: false` (exit 2),
+  instead of destroying whatever deployment had that name. It deploys with
+  a nonce of its own, refuses a namespace or bucket that appears while it
+  deploys, and its post-run destroy acts only on the namespace incarnation
+  it created: if another deploy replaced it, nothing is deleted and
+  reproduce exits 3 after printing its verdict. Run `lakebench destroy
+  CONFIG` first to reuse a deployment's name.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to

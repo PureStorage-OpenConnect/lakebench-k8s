@@ -153,8 +153,6 @@ PLANNED_BY = {
     "plan.missing_storage_class": "CC-23",
     "plan.ok": "CC-23",
     "repeat.no_verified_corpus": "CC-30",
-    "reproduce.existing_namespace": "CC-4",
-    "reproduce.nonce_changed": "CC-4",
     "reproduce.verify_out_of_band": "ER-13",
     "run.args": "CC-6",
     "run.deps_missing": "SD-5c",
@@ -825,6 +823,37 @@ def _scenario_reproduce_drift(monkeypatch, tmp_path):
     return _runner().invoke(app, ["reproduce", str(pkg)])
 
 
+def _scenario_reproduce_existing_namespace(monkeypatch, tmp_path):
+    import lakebench.cli._reproduce as rep
+
+    pkg = _reproduce_package(tmp_path, "abc")
+    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
+    monkeypatch.setattr("lakebench.k8s.client.K8sClient.namespace_exists", lambda self, n: True)
+    return _runner().invoke(app, ["reproduce", str(pkg)])
+
+
+def _scenario_reproduce_nonce_changed(monkeypatch, tmp_path):
+    import lakebench.cli._reproduce as rep
+    from lakebench.exit_codes import SafetyRefusal
+
+    pkg = _reproduce_package(tmp_path, "abc")
+    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
+
+    def pipeline(config_file, timeout, keep, refusals=None):
+        # Its post-run destroy found another incarnation and deleted nothing.
+        refusals.append(SafetyRefusal("Destroy NOT started", path="destroy.incarnation_mismatch"))
+        return object()
+
+    monkeypatch.setattr(rep, "_run_pipeline", pipeline)
+    for check in ("_sample_mismatch", "_policy_refusal", "_experiment_refusal"):
+        monkeypatch.setattr(rep, check, lambda *a, **k: None)
+    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 1)
+    monkeypatch.setattr(rep, "_run_maintenance_policy", lambda m: None)
+    monkeypatch.setattr(rep, "_run_query_set", lambda m: None)
+    monkeypatch.setattr(rep, "_measure_actual_numbers", lambda m: {"scale_ratio": 0.992})
+    return _runner().invoke(app, ["reproduce", str(pkg)])
+
+
 def _config_name(path: Path) -> str:
     for line in path.read_text().splitlines():
         if line.startswith("name:"):
@@ -1046,6 +1075,8 @@ SCENARIOS = {
     "confirm.declined": _scenario_confirm_declined,
     "reproduce.commit_drift": _scenario_reproduce_commit_drift,
     "reproduce.drift": _scenario_reproduce_drift,
+    "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
+    "reproduce.nonce_changed": _scenario_reproduce_nonce_changed,
 }
 
 # The line each path must print on stderr, where it prints one.

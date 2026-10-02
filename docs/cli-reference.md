@@ -634,15 +634,18 @@ lakebench reproduce PACKAGE.yaml [OPTIONS]
 | `--config-reference` | | | Record mode: store this relative config path in the package |
 | `--config` | `-c` | package's config | Verify mode: config to run instead of the package's `config_reference` |
 | `--timeout` | `-t` | auto | Verify mode: per-job timeout in seconds |
-| `--keep` | | `false` | Verify mode: keep the deployment after the run (reproduce always destroys before the run) |
+| `--keep` | | `false` | Verify mode: keep the deployment after the run. reproduce never destroys before the run: it refuses an existing namespace or bucket |
 | `--allow-commit-drift` | | `false` | Verify mode: run even when HEAD differs from the recorded commit (refused with exit 14 otherwise) |
 | `--dry-run` | | `false` | Verify mode: parse the package and exit |
 
 Exit codes: `0` pass; `14` (requirement unmet) for performance or
 correctness drift, commit drift without `--allow-commit-drift`, or a run that
 did not follow the package (different samples, maintenance policy, experiment
-or benchmark results); `2` for a package or config refused before running;
-`1` when the pipeline could not run. 1.6 used `1` for performance drift and
+or benchmark results); `2` for a package or config refused before running
+(including `create_namespace: false` or `create_buckets: false`); `3` when
+the namespace or a bucket already exists, or when another deploy replaced the
+deployment reproduce created (then nothing is destroyed); `4` when the
+namespace or buckets cannot be read; `1` when the pipeline could not run. 1.6 used `1` for performance drift and
 `2` for correctness drift.
 
 ### financial

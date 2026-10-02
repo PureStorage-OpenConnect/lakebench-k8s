@@ -89,8 +89,19 @@ or `ingest_ratio` (continuous).
    package's maintenance policy differs from the running version's,
    or if the package has no `experiment_identity`. `--dry-run` stops
    here.
-5. Destroys any existing deployment, then deploys, generates and runs
-   the pipeline, and destroys again unless `--keep` is set.
+5. Refuses (exit 3) when the config's namespace or any of its three
+   buckets already exists, and exits 2 when the config sets
+   `create_namespace: false` or `create_buckets: false`: reproduce
+   measures against empty buckets it creates, and never destroys or
+   adopts what it did not create. A namespace or bucket it cannot read
+   stops it (exit 4). It then deploys with a nonce of its own; a
+   namespace or bucket that appears in the meantime is refused, not
+   adopted. It confirms the namespace carries that nonce (exit 3 if
+   another deploy replaced it, before generating or running anything),
+   generates and runs the pipeline, and, unless `--keep` is set,
+   destroys only that namespace incarnation (`uid#nonce`). If the
+   namespace was redeployed while the run went on, the destroy deletes
+   nothing, reproduce prints its verdict and then exits 3.
 6. Exits 14 if the run took a different number of samples per query,
    ran under a different maintenance policy, or is not the package's
    experiment or returned different benchmark results.

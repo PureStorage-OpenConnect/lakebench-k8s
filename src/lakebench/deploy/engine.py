@@ -363,6 +363,7 @@ class DeploymentEngine:
         k8s_client: K8sClient | None = None,
         dry_run: bool = False,
         deploy_nonce: str | None = None,
+        require_new: bool = False,
     ):
         """Initialize deployment engine.
 
@@ -372,8 +373,14 @@ class DeploymentEngine:
             dry_run: If True, show what would be deployed without making changes
             deploy_nonce: The nonce ``deploy`` recorded in the directory's
                 state before deploying; stamped on the namespace.
+            require_new: Refuse, instead of adopting, a namespace or bucket
+                that already exists (``reproduce``, which may destroy only
+                what it created). The namespace is created with a plain
+                create, so a competing create between a caller's check and
+                this step is refused (409), not adopted.
         """
         self.deploy_nonce = deploy_nonce
+        self.require_new = require_new
         self.config = config
         self.dry_run = dry_run
         self.results: list[DeploymentResult] = []
@@ -839,6 +846,22 @@ class DeploymentEngine:
             return True
         return False
 
+    def _existing_refusal(self, component: str, what: str, start: float) -> DeploymentResult:
+        """The refusal for an existing namespace or bucket under ``require_new``."""
+        import time
+
+        return DeploymentResult(
+            component=component,
+            status=DeploymentStatus.FAILED,
+            message=(
+                f"Refused: {what} already exists, and this deploy may only create new "
+                "resources (reproduce destroys only what it created). Nothing existing "
+                "was changed."
+            ),
+            elapsed_seconds=time.time() - start,
+            details={REFUSAL_DETAIL: "reproduce.existing_namespace"},
+        )
+
     def _namespace_already_using_name(self, namespace: str) -> str | None:
         """Return another namespace that carries this deployment's name, if any.
 
@@ -921,6 +944,9 @@ class DeploymentEngine:
                 elapsed_seconds=time.time() - start,
             )
 
+        if self.require_new and self.k8s.namespace_exists(namespace):
+            return self._existing_refusal("namespace", f"namespace {namespace!r}", start)
+
         # Check if namespace exists and wait if it's terminating
         pre_existing = False
         if self.k8s.namespace_exists(namespace):
@@ -981,7 +1007,21 @@ class DeploymentEngine:
             # branch still catches it before writing.
             self._namespace_created_this_run.add(namespace)
             try:
-                self.k8s.apply_manifest(manifest)
+                if self.require_new:
+                    from kubernetes import client as _kc
+                    from kubernetes.client.rest import ApiException as _ApiException
+
+                    try:
+                        _kc.CoreV1Api().create_namespace(body=manifest)
+                    except _ApiException as e:
+                        if e.status != 409:
+                            raise
+                        self._namespace_created_this_run.discard(namespace)
+                        return self._existing_refusal(
+                            "namespace", f"namespace {namespace!r} (created meanwhile)", start
+                        )
+                else:
+                    self.k8s.apply_manifest(manifest)
             except Exception as e:
                 # F2-A: on a non-transient failure (K8s definitively
                 # rejected the create), un-seed the tracking so a
@@ -1426,6 +1466,10 @@ class DeploymentEngine:
                     self.config.get_namespace(),
                     e,
                 )
+        if self.require_new and existed:
+            # Checked before any tag is written: an existing bucket is left
+            # exactly as it was. The buckets created above are recorded.
+            return self._existing_refusal("s3-buckets", "bucket(s) " + ", ".join(existed), start)
         other_deployments = list_lakebench_deployment_names(
             _kclient.CoreV1Api(), exclude=self.config.get_namespace()
         )

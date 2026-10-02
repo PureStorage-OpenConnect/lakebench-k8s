@@ -830,71 +830,223 @@ def _find_reproduce_run(storage, deployment_name: str, start_watermark: datetime
     return storage.load_run(candidates[0][1])
 
 
+def _refuse_existing(cfg: Any, config_file: Path) -> None:
+    """Refuse before deploy when anything reproduce would create already exists.
+
+    reproduce destroys only what it created in this invocation, and measures
+    against empty buckets, so it creates its namespace and buckets itself:
+    an existing namespace or bucket is refused, never destroyed or adopted.
+    Every read error stops it (exit 4) rather than reading as absent.
+    """
+    from lakebench.exit_codes import PrerequisiteError, SafetyRefusal, UsageError
+    from lakebench.k8s.target import ContextConflictError
+
+    k8s_cfg = cfg.platform.kubernetes
+    s3_cfg = cfg.platform.storage.s3
+    if not k8s_cfg.create_namespace:
+        raise UsageError(
+            "reproduce creates its own namespace, and this config sets "
+            "platform.kubernetes.create_namespace: false",
+            why="reproduce refuses an existing namespace and destroys only what it created",
+            next="set create_namespace: true in the config reproduce runs",
+            path="cli.bad_argument",
+        )
+    if not s3_cfg.create_buckets:
+        raise UsageError(
+            "reproduce creates its own buckets, and this config sets "
+            "platform.storage.s3.create_buckets: false",
+            why="reproduce measures against empty buckets it created and refuses existing ones",
+            next="set create_buckets: true in the config reproduce runs",
+            path="cli.bad_argument",
+        )
+
+    namespace = cfg.get_namespace()
+    try:
+        from lakebench.k8s import get_k8s_client
+
+        # Pins the process to the config's cluster context for every later call.
+        present = get_k8s_client(context=k8s_cfg.context, namespace=namespace).namespace_exists(
+            namespace
+        )
+    except ContextConflictError:
+        raise
+    except Exception as e:  # noqa: BLE001 -- unreadable is not absent
+        raise PrerequisiteError(
+            f"cannot check whether namespace {namespace} exists: {e}",
+            why="reproduce refuses an existing namespace, so it must read it first",
+            path="k8s.unreachable",
+        ) from e
+    if present:
+        raise SafetyRefusal(
+            f"reproduce needs a new deployment; namespace {namespace} exists",
+            why="reproduce destroys only a deployment it created in this run",
+            next=f"lakebench destroy {config_file}, then re-run, or give the package's "
+            "config a new name",
+            path="reproduce.existing_namespace",
+        )
+
+    from lakebench.s3 import S3Client
+
+    s3 = S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    )
+    if s3._init_error:
+        raise PrerequisiteError(
+            f"cannot check the buckets: {s3._init_error}",
+            why="reproduce refuses existing buckets, so it must read them first",
+            path="s3.unreachable",
+        )
+    for bucket in dict.fromkeys(
+        (s3_cfg.buckets.bronze, s3_cfg.buckets.silver, s3_cfg.buckets.gold)
+    ):
+        try:
+            exists = s3.bucket_exists(bucket)
+        except Exception as e:  # noqa: BLE001 -- 403 or unreachable is not absent
+            raise PrerequisiteError(
+                f"cannot check whether bucket {bucket} exists: {e}",
+                why="reproduce refuses existing buckets, so it must read them first",
+                path="s3.unreachable",
+            ) from e
+        if exists:
+            raise SafetyRefusal(
+                f"reproduce needs new buckets; bucket {bucket} exists",
+                why="reproduce measures against empty buckets it created, and destroys "
+                "only what it created",
+                next="remove the bucket if it is yours, or give the package's config "
+                "new bucket names",
+                path="reproduce.existing_namespace",
+            )
+
+
+def _own_incarnation(cfg: Any, config_file: Path, own: str) -> str:
+    """``uid#own`` when the namespace carries the nonce this reproduce deployed.
+
+    One ``read_namespace``. The comparison is against ``own``, never against
+    a value read back, so a deploy that replaced ours between our deploy and
+    this read is refused, not taken over.
+    """
+    from kubernetes import client
+
+    from lakebench.config.deploy_state import read_namespace_identity
+    from lakebench.exit_codes import PrerequisiteError, SafetyRefusal
+
+    namespace = cfg.get_namespace()
+    try:
+        ident = read_namespace_identity(client.CoreV1Api(), namespace)
+    except Exception as e:  # noqa: BLE001
+        raise PrerequisiteError(
+            f"cannot read namespace {namespace} after deploy: {e}",
+            why="reproduce confirms the namespace carries its own nonce before it runs "
+            "or destroys anything",
+            next=f"reproduce generated, ran and destroyed nothing; check "
+            f"lakebench status {config_file}",
+            path="k8s.unreachable",
+        ) from e
+    if ident is None or not ident.uid or ident.nonce != own:
+        found = "no namespace" if ident is None else (ident.nonce or "no nonce")
+        raise SafetyRefusal(
+            f"namespace {namespace} does not carry the nonce this reproduce deployed "
+            f"({own}); found {found}",
+            why="another deploy replaced the deployment after this reproduce made it",
+            next="reproduce generated, ran and destroyed nothing; check which deployment "
+            "the namespace holds before destroying it",
+            path="reproduce.nonce_changed",
+        )
+    return f"{ident.uid}#{own}"
+
+
 def _run_pipeline(
     config_file: Path,
     timeout: int | None,
     keep: bool,
+    refusals: list[Any] | None = None,
 ) -> Any:
-    """Run destroy -> deploy -> generate -> run -> (optional) destroy, then
-    return the PipelineMetrics the pipeline just produced.
+    """Deploy -> generate -> run -> (optional) destroy, then return the
+    PipelineMetrics the pipeline just produced.
 
-    Delegates to the existing CLI command functions so the reproduce path
-    does not fork the pipeline plumbing.
+    Delegates to the existing CLI command bodies so the reproduce path does
+    not fork the pipeline plumbing.
 
-    F5: --keep controls only the POST-run tear-down. Every reproduce starts
-    with a destroy pass so the pipeline runs against empty buckets -- a
-    prior --keep run cannot silently contaminate scale_ratio or ingest_ratio.
+    reproduce destroys only what it created in this invocation. It refuses an
+    existing namespace or bucket (that is also what keeps its buckets empty,
+    so a prior --keep run cannot contaminate scale_ratio or ingest_ratio),
+    deploys with its own nonce and with ``require_new`` (a namespace or bucket
+    that appears meanwhile is refused, not adopted), confirms the namespace
+    carries that nonce, and passes ``uid#nonce`` to its destroy, which refuses
+    any other incarnation. A refused post-run destroy is appended to
+    ``refusals``; the caller reports it after the verdict.
 
     F4: the produced run is identified by deployment_name + start-time
     watermark, so a concurrent `lakebench run` in another shell cannot
     poison the comparison.
     """
-    from lakebench.cli._deploy import deploy as _deploy_cmd
-    from lakebench.cli._destroy import destroy as _destroy_cmd
+    import uuid
+
+    from lakebench.cli._deploy import _deploy_impl
+    from lakebench.cli._destroy import _destroy_impl
     from lakebench.cli._generate import generate as _generate_cmd
+    from lakebench.cli._helpers import _journal_safe, journal_open
     from lakebench.cli._run import run as _run_cmd
     from lakebench.config import ConfigError, LoadPurpose, load_config
+    from lakebench.exit_codes import SafetyRefusal
+    from lakebench.journal import EventType
     from lakebench.metrics import MetricsStorage
 
     storage = MetricsStorage()
 
-    # Load first: deploy and run would refuse a nameless config or a removed
-    # key, and that refusal must come before the pre-run destroy below, which
-    # loads the config as a teardown and would accept it.
+    # Load first: deploy and run refuse a nameless config or a removed key,
+    # and that refusal comes before any cluster read.
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.RUN)
     except ConfigError as e:
         raise ReproduceError(str(e)) from None
 
-    # F5: pre-destroy is idempotent-safe. destroy(--force) on a missing
-    # namespace returns implicitly (exit 0). A non-zero exit means a
-    # component partially failed to clean up (Iceberg drop, S3 multipart,
-    # PVC finalizer) -- bronze/silver/gold may still hold stale data.
-    # R2: swallowing that would let the pipeline run against contaminated
-    # buckets and quietly inflate scale_ratio close to expected, defeating
-    # F5's whole purpose. Only exit 0 (or missing exit_code) means "safe
-    # to proceed"; anything else is a real destroy failure.
-    try:
-        _destroy_cmd(config_file=config_file, force=True)
-    except typer.Exit as e:
-        exit_code = getattr(e, "exit_code", None)
-        if exit_code not in (0, None):
-            raise ReproduceError(
-                f"Pre-run destroy failed with exit code {exit_code}. "
-                "Refusing to deploy against a namespace that may still hold "
-                "stale data (scale_ratio and ingest_ratio would be unreliable). "
-                "Fix the destroy problem, then rerun reproduce."
-            ) from None
-        logger.info("pre-run destroy exited cleanly (exit_code=%s); continuing", exit_code)
+    _refuse_existing(cfg, config_file)
+    namespace = cfg.get_namespace()
 
     # Watermark BEFORE deploy, so any run started by this reproduce falls
     # strictly after it.
     deployment_name = cfg.name
     start_watermark = datetime.now(timezone.utc)
 
-    _deploy_cmd(config_file=config_file, yes=True)
-    _generate_cmd(config_file=config_file, timeout=timeout or 14400, yes=True)
-    _run_cmd(config_file=config_file, yes=True, timeout=timeout)
+    own = uuid.uuid4().hex
+    try:
+        recorded = _deploy_impl(config_file, yes=True, nonce=own, require_new=True)
+    except BaseException:
+        print_warning(
+            f"reproduce stopped at deploy and destroyed nothing; check "
+            f"`lakebench status {config_file}` before removing namespace {namespace}"
+        )
+        raise
+    if recorded != own:  # _deploy_impl records and stamps the nonce it is given
+        raise RuntimeError(f"deploy recorded nonce {recorded!r}, not this reproduce's {own!r}")
+    created = _own_incarnation(cfg, config_file, own)
+    print_info(f"reproduce created namespace {namespace} as {created}")
+    j = journal_open(config_file, config_name=cfg.name)
+    _journal_safe(
+        j.record,
+        EventType.REPRODUCE_CREATED_INCARNATION,
+        message=f"reproduce created namespace {namespace}",
+        command="reproduce",
+        success=True,
+        details={"namespace": namespace, "incarnation": created},
+    )
+
+    try:
+        _generate_cmd(config_file=config_file, timeout=timeout or 14400, yes=True)
+        _run_cmd(config_file=config_file, yes=True, timeout=timeout)
+    except BaseException:
+        print_warning(
+            f"reproduce stopped before its destroy; namespace {namespace} ({created}) is "
+            f"left: `lakebench destroy {config_file}` removes it"
+        )
+        raise
 
     result = _find_reproduce_run(storage, deployment_name, start_watermark)
     if result is None:
@@ -902,12 +1054,39 @@ def _run_pipeline(
 
     if not keep:
         try:
-            _destroy_cmd(config_file=config_file, force=True)
+            _destroy_impl(config_file, force=True, expected_incarnation=created)
+        except SafetyRefusal as e:
+            # Nothing was deleted: the namespace is no longer the one we made.
+            print_warning(f"destroy refused, namespace {namespace} kept: {e.what}")
+            if refusals is not None:
+                refusals.append(e)
         except typer.Exit as e:
             # A destroy failure should not mask a passing reproduce; log it.
-            print_warning(f"destroy exited with code {e.exit_code}; continuing")
+            if e.exit_code not in (0, None):
+                print_warning(f"destroy exited with code {e.exit_code}; continuing")
+        except Exception as e:  # noqa: BLE001
+            print_warning(
+                f"destroy failed ({e}); namespace {namespace} may be left: "
+                f"`lakebench destroy {config_file}`"
+            )
 
     return result
+
+
+def _post_destroy_refusal(refusals: list[Any]) -> None:
+    """Exit 3 when reproduce's own destroy was refused: its deployment was
+    replaced while it ran, so the measurement may not be its own either."""
+    if refusals:
+        from lakebench.exit_codes import SafetyRefusal
+
+        raise SafetyRefusal(
+            "the deployment this reproduce created was replaced before its destroy; "
+            "nothing was destroyed",
+            why=str(refusals[0].what),
+            next="check which deployment the namespace holds, and re-run reproduce on a "
+            "new namespace",
+            path="reproduce.nonce_changed",
+        )
 
 
 def _verify(
@@ -1008,8 +1187,9 @@ def _verify(
         console.print(Panel("[green]Package parsed cleanly[/green]", title="Dry run", expand=False))
         return
 
+    refusals: list[Any] = []
     try:
-        metrics = _run_pipeline(config_file, timeout, keep)
+        metrics = _run_pipeline(config_file, timeout, keep, refusals)
     except ReproduceError as e:
         # The pipeline did not run cleanly, or its run could not be found.
         print_error(str(e))
@@ -1023,6 +1203,7 @@ def _verify(
     if _mismatch:
         # The run that just finished does not match the package's protocol.
         print_error(_mismatch)
+        _post_destroy_refusal(refusals)
         raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
 
     actual = _measure_actual_numbers(metrics)
@@ -1030,6 +1211,7 @@ def _verify(
         expected, actual, tolerances, (meta.get("query_set_id"), _run_query_set(metrics))
     )
     _print_comparison(rows, outcome)
+    _post_destroy_refusal(refusals)
 
     if outcome != 0:
         # _compare's verdict is 2 (correctness) or 1 (performance); both are
@@ -1092,8 +1274,8 @@ def reproduce(
             "--keep",
             help=(
                 "Verify mode: do not destroy the deployment after the run. "
-                "Note: reproduce always destroys BEFORE the run to guarantee "
-                "fresh buckets; --keep only affects post-run cleanup."
+                "reproduce never destroys before the run: it refuses an "
+                "existing namespace or bucket, and destroys only what it created."
             ),
         ),
     ] = False,

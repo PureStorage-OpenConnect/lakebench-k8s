@@ -280,14 +280,12 @@ PATHS: tuple[ExitPath, ...] = (
         "reproduce.existing_namespace",
         _C.REFUSED,
         "`reproduce` would reuse a namespace or bucket that already exists",
-        planned=True,
         v16_code=2,
     ),
     ExitPath(
         "reproduce.nonce_changed",
         _C.REFUSED,
-        "the deployment `reproduce` created was replaced before its destroy",
-        planned=True,
+        "the deployment `reproduce` created was replaced before its run or its destroy",
     ),
     ExitPath(
         "destroy.incarnation_mismatch",
