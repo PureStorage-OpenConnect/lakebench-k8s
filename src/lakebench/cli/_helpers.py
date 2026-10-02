@@ -368,13 +368,19 @@ def record_deps_provenance(run, handle) -> None:
         run.provenance = {**(run.provenance or {}), "deps": provenance_block(handle)}
 
 
-def record_deps_pods(run, cfg, handle) -> bool:
+def record_deps_pods(run, cfg, handle, skipped: str | None = None) -> bool:
     """The run-end check that the query engine pods ran the run's set
     (``provenance.deps.pods_checked`` and ``pod_mismatches``). True when the
-    run must fail: a pod on another set, or pods that could not be read."""
+    run must fail: a pod on another set, or pods that could not be read.
+    With ``skipped`` (why: the run was interrupted, the namespace went,
+    nothing reached the cluster) nothing is read, and the record says why
+    in ``pods_check_skipped``."""
     from lakebench.deps import runtime
 
     if run is None or handle is None or not (run.provenance or {}).get("deps"):
+        return False
+    if skipped:
+        run.provenance["deps"]["pods_check_skipped"] = skipped
         return False
     result = runtime.check_pods(cfg, handle, run.start_time)
     run.provenance["deps"].update(result)

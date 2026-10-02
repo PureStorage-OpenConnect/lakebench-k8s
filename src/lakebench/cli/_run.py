@@ -3306,9 +3306,14 @@ def run(
             pipeline_success = False
 
         # Always save metrics, even on failure
-        # Not after an interrupt: the run is no pass anyway, and the pod reads
-        # would hold the record back.
-        if _interrupted is None and record_deps_pods(collector.current_run, cfg, deps_handle):
+        # Not after an interrupt (the run is no pass anyway, and the pod reads
+        # would hold the record back), nor when a prerequisite stopped it.
+        _pods_skipped = (
+            "interrupted"
+            if _interrupted is not None
+            else ("a prerequisite failed" if _pipeline_exit_code == ExitCode.PREREQUISITE else None)
+        )
+        if record_deps_pods(collector.current_run, cfg, deps_handle, skipped=_pods_skipped):
             pipeline_success = False
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:

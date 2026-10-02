@@ -688,10 +688,12 @@ and the read-only commands drop it with a note. `spark.driver.maxResultSize`
 is the one Lakebench-set key a user value replaces. Also refused: keys a
 job script sets (`spark.sql.session.timeZone` and others), and the reserved
 `spark.kubernetes.*`, `spark.jars.*` and pod-sizing keys (executor and
-driver memory, overhead, cores, off-heap, PySpark memory), and
-`spark.driver.userClassPathFirst` and `spark.executor.userClassPathFirst`,
-which would change which copy of a class wins against the jars of the
-deployment's dependency set. The full set is in
+driver memory, overhead, cores, off-heap, PySpark memory). The jar keys
+are all Lakebench's, because every job takes its jars, in order, from the
+deployment's dependency set: `spark.jars`, `spark.jars.*`,
+`spark.submit.pyFiles`, `spark.files`, `spark.driver.extraClassPath`,
+`spark.executor.extraClassPath`, `spark.driver.userClassPathFirst` and
+`spark.executor.userClassPathFirst`. The full set is in
 `src/lakebench/modules/pipeline_engines/spark/conf_keys.py`. `spark.conf`
 reaches the pipeline's Spark jobs only, not the Spark Thrift server or
 `--local` runs. The run record keeps it as `architecture.spark_conf_user`:
