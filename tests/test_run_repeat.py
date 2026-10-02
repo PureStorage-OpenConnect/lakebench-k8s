@@ -518,6 +518,27 @@ def test_repeat_refusal_in_a_repetition_keeps_its_code(tmp_path, monkeypatch):
     assert manifest["attempted"] == 2 and manifest["runs"][1]["exit_code"] == 3
 
 
+def test_repeat_usage_error_in_a_repetition_keeps_click_code(tmp_path, monkeypatch):
+    import click
+
+    import lakebench.cli._run as run_mod
+
+    real = run_mod._run_once
+    seen = [0]
+
+    def once(*a, **k):
+        seen[0] += 1
+        if seen[0] == 2:
+            raise click.UsageError("bad")
+        return real(*a, **k)
+
+    monkeypatch.setattr(run_mod, "_run_once", once)
+    result, rec, records, manifest = _series(tmp_path, monkeypatch)
+    # The harness calls the command without Click's main, which would exit 2.
+    assert isinstance(result.exception, click.UsageError), result.output
+    assert manifest["runs"][1]["exit_code"] == 2
+
+
 def test_repeat_marker_mismatch_stops(tmp_path, monkeypatch):
     """A later repetition whose markers give another corpus id than
     repetition 1's is not a member and stops the series with 3."""
