@@ -643,6 +643,7 @@ class MetricsStorage:
             continuous=data.get("continuous"),
             interrupted=data.get("interrupted"),
             abort_reason=data.get("abort_reason"),
+            series=data.get("series"),
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),

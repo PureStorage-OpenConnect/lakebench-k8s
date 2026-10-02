@@ -1526,6 +1526,16 @@ def _run_local_mode(
         raise typer.Exit(ExitCode.FAILED)
 
 
+def _file_sha256(path: Path | None) -> str | None:
+    """sha256 hex of the file's bytes, or None when it cannot be read."""
+    import hashlib
+
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else None
+    except OSError:
+        return None
+
+
 def run(
     config_file: Annotated[
         Path | None,
@@ -1708,6 +1718,18 @@ def run(
             help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
         ),
     ] = None,
+    repeat: Annotated[
+        int | None,
+        typer.Option(
+            "--repeat",
+            min=1,
+            max=20,
+            help=(
+                "Run the batch pipeline N times as one series over one corpus: "
+                "repetition 1 as asked, then N-1 rebuilds from the same bronze"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Execute the data pipeline.
 
@@ -1726,35 +1748,14 @@ def run(
     rounds during the configured duration, then lets the corpus settle,
     stops the jobs and fingerprints the query set over the settled tables.
     """
-    import uuid
-
-    from lakebench.cli._sustained import (
-        MaintenanceBudget,
-        _collect_platform_metrics,
-        _live_stream_apps,
-        _probe_table_health,
-        _run_iceberg_compaction,
-        _run_iceberg_maintenance,
-        _run_sustained,
-        _wait_for_query_engine_ready,
-        resolve_maintenance_retention,
-    )
-    from lakebench.engine import get_engine
-    from lakebench.metrics import JobMetrics, MetricsCollector, MetricsStorage
-    from lakebench.spark import SparkJobMonitor, SparkOperatorManager
-    from lakebench.spark.job import (
-        JobState,
-        JobType,
-        SparkJobManager,
-        get_executor_count,
-        get_job_profile,
-    )
 
     config_file = resolve_config_path(config_file, file_option)
     if sustained:
         print_warning("--sustained is deprecated and will be removed; use --continuous")
 
-    # Load configuration
+    # Load configuration, once: a --repeat series runs every repetition from
+    # this one load, and records the hash of the bytes it was loaded from.
+    _config_sha256 = _file_sha256(config_file)
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.RUN)
     except ConfigFileNotFoundError as e:
@@ -1769,33 +1770,94 @@ def run(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    if repeat is not None and _file_sha256(config_file) != _config_sha256:
+        print_error(f"{config_file} changed while it was loaded; run again")
+        raise typer.Exit(ExitCode.USAGE)
 
     # Every argument and combination is checked before anything else, so a
     # refused one exits 2 with no cluster call made (cli/_run_args.py).
+    from lakebench.cli._interrupt import interrupt_scope
     from lakebench.cli._run_args import RunArgs, validate_run_args
 
-    _plan = validate_run_args(
-        RunArgs(
-            stage=stage,
-            timeout=timeout,
-            skip_benchmark=skip_benchmark,
-            continuous=continuous,
-            sustained=sustained,
-            duration=duration,
-            include_datagen=include_datagen,
-            skip_deploy=skip_deploy,
-            skip_infra=skip_infra,
-            skip_generate=skip_generate,
-            regenerate=regenerate,
-            skip_maintenance=skip_maintenance,
-            force_rebuild=force_rebuild,
-            force_reset=force_reset,
-            deploy_only=deploy_only,
-            generate_only=generate_only,
-            yes=yes,
-            local=local,
-        ),
-        cfg,
+    options: dict[str, Any] = {
+        "stage": stage,
+        "timeout": timeout,
+        "skip_benchmark": skip_benchmark,
+        "continuous": continuous,
+        "sustained": sustained,
+        "duration": duration,
+        "include_datagen": include_datagen,
+        "skip_deploy": skip_deploy,
+        "skip_infra": skip_infra,
+        "skip_generate": skip_generate,
+        "regenerate": regenerate,
+        "allow_stale_bronze": allow_stale_bronze,
+        "skip_maintenance": skip_maintenance,
+        "force_rebuild": force_rebuild,
+        "force_reset": force_reset,
+        "deploy_only": deploy_only,
+        "generate_only": generate_only,
+        "yes": yes,
+        "local": local,
+    }
+    _plan = validate_run_args(RunArgs(**options, repeat=repeat), cfg)
+
+    # The handlers a repetition installs are never left behind, even when its
+    # finally raised before restoring them (cli/_interrupt.py).
+    with interrupt_scope():
+        if repeat is None:
+            _run_once(cfg, config_file, _plan, workdir=workdir, **options)
+            return
+        from lakebench.cli._series import run_series
+
+        run_series(cfg, config_file, options, repeat, config_sha256=_config_sha256)
+
+
+def _run_once(
+    cfg: Any,
+    config_file: Path,
+    _plan: Any,
+    *,
+    stage: str | None,
+    timeout: int | None,
+    skip_benchmark: bool,
+    continuous: bool,
+    sustained: bool,
+    duration: int | None,
+    include_datagen: bool,
+    skip_deploy: bool,
+    skip_infra: bool,
+    skip_generate: bool,
+    regenerate: bool,
+    allow_stale_bronze: bool,
+    skip_maintenance: bool,
+    force_rebuild: bool,
+    force_reset: bool,
+    deploy_only: bool,
+    generate_only: bool,
+    yes: bool,
+    local: bool,
+    workdir: Path | None = None,
+    series: Any = None,
+    allow_auto_deploy: bool = True,
+) -> None:
+    """One ``run`` of the loaded *cfg*: the whole pipeline as the options
+    ask, ending in ``typer.Exit`` with the run's code when it did not pass.
+    *series* is the ``metrics.series.SeriesContext`` of a ``--repeat``
+    repetition (None otherwise); *allow_auto_deploy* False makes a missing
+    namespace an error instead of a deploy (repetitions 2 to N)."""
+    import uuid
+
+    from lakebench.cli._sustained import (
+        MaintenanceBudget,
+        _collect_platform_metrics,
+        _live_stream_apps,
+        _probe_table_health,
+        _run_iceberg_compaction,
+        _run_iceberg_maintenance,
+        _run_sustained,
+        _wait_for_query_engine_ready,
+        resolve_maintenance_retention,
     )
 
     # DESIGN 6.5: an unsupported workload x architecture x mode is refused
@@ -1803,6 +1865,16 @@ def run(
     # --continuous and --sustained do not write the mode back, so check the
     # mode this run will use. --local runs Customer 360 batch only.
     from lakebench.config.support import UNSUPPORTED, support_state_for_config
+    from lakebench.engine import get_engine
+    from lakebench.metrics import JobMetrics, MetricsCollector, MetricsStorage
+    from lakebench.spark import SparkJobMonitor, SparkOperatorManager
+    from lakebench.spark.job import (
+        JobState,
+        JobType,
+        SparkJobManager,
+        get_executor_count,
+        get_job_profile,
+    )
 
     _run_mode = _plan.mode
     if local:
@@ -1964,13 +2036,17 @@ def run(
                 namespace=ns,
             )
             if not _k8s_check.namespace_exists(ns):
-                if yes:
+                if yes and allow_auto_deploy:
                     from lakebench.cli._deploy import deploy as _deploy_cmd
 
                     print_info(f"Namespace '{ns}' not found -- auto-deploying...")
                     _deploy_cmd(config_file=config_file, yes=True)
                 else:
                     print_error(f"Namespace '{ns}' does not exist")
+                    if not allow_auto_deploy:
+                        # A later repetition never deploys: it would deploy
+                        # the file as it is now, not the config the series loaded.
+                        raise typer.Exit(ExitCode.FAILED)
                     print_info("Run 'lakebench deploy' first, or use --yes to auto-deploy")
                     raise typer.Exit(ExitCode.NOT_CONFIRMED)
         except K8sConnectionError:
@@ -2026,6 +2102,10 @@ def run(
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
+    if series is not None:
+        # The bytes the series loaded, not the file as it is now (provenance
+        # copies this hash at start_run).
+        config_snapshot["config_sha256"] = series.config_sha256
     collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
     record_deps_provenance(collector.current_run, deps_handle)
     # System identity and cluster load at run start; never raises.
@@ -3506,6 +3586,8 @@ def run(
             from lakebench.metrics.corpus_identity import record_corpus_observation
 
             record_corpus_observation(run_metrics, cfg)
+            if series is not None:
+                series.seal(run_metrics)
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")

@@ -359,6 +359,27 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | `false` | Skip confirmation prompts |
 | `--local` | | `false` | Run locally with podman/docker instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
+| `--repeat` | | off | Run the batch pipeline N times (1 to 20) as one series over one corpus; see below |
+
+**Repeating a run.** `run --repeat N` runs the batch pipeline N times as one
+series. Repetition 1 runs as the other options ask and may generate;
+repetitions 2 to N never generate and rebuild silver and gold from the same
+bronze (as `--force-rebuild`). The config is loaded once, so an edit during
+the series changes nothing that runs. The datagen prefix in the bronze
+bucket is listed before repetition 1 (when it does not generate), after it,
+and before every later repetition, and each record's own pre-save listing
+must match repetition 1's: a difference, even a same-size rewrite of one
+object, stops the series with exit 3 and the changed repetition is not
+counted. A later repetition inherits repetition 1's corpus identity only
+under that check (`experiment.corpus.inherited_from`). A repetition that
+fails its verdict does not stop the series; Ctrl-C does (exit 130). The
+series stops after repetition 1 when its bronze-verify or silver-build did
+not pass, or when its datagen Job is still running or cannot be read. Each
+record carries `series {id, index, size}`, and
+`lakebench-output/series/<id>.json` lists the repetitions, which passed,
+and the corpus; only repetitions that passed and share the corpus count.
+Exit: 0 when every repetition passed, 1 when any did not, 3 when bronze
+changed, 130 on an interrupt.
 
 **Refused arguments.** `run` checks every option before it makes any
 cluster call, and exits 2 (usage) naming the first refused one:
@@ -377,7 +398,11 @@ cluster call, and exits 2 (usage) naming the first refused one:
 - `--force-rebuild` on a continuous run;
 - `--duration` on a batch run;
 - `--duration` below 60;
-- `--timeout` below 1.
+- `--timeout` below 1;
+- `--repeat` below 1 or above 20;
+- `--repeat` with a continuous run;
+- `--repeat` with `cycles` above 1;
+- `--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`.
 
 `--local` with a continuous run, and any workload, recipe and mode `run`
 does not support, are refused just after these, also before any cluster
