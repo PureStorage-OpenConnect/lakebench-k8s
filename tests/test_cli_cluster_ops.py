@@ -713,7 +713,11 @@ def test_status_unready_exit1(cluster):
     assert r.exit_code == ExitCode.FAILED, r.output
     assert "Drift: lakebench-trino-worker" in _stderr(r)
     # The hint names a component `logs` accepts, not the object name.
-    assert f"Next: lakebench logs {cluster.config} trino-worker" in " ".join(_stderr(r).split())
+    # The exact line: no --name suffix for a config run without --name.
+    hint = (
+        f"Next: lakebench logs {cluster.config} trino-worker, or lakebench deploy {cluster.config}"
+    )
+    assert hint in " ".join(_stderr(r).split())
 
 
 def test_status_drift_hint_components_are_log_components():

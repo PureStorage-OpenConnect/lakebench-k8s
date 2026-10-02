@@ -558,7 +558,9 @@ so the logs of a failed stage stay readable with `lakebench logs`. A job
 already gone is reported as not running. When a deletion fails, `stop` still
 tries every other one, prints one line per failure and exits 1. A missing
 namespace means nothing to stop (exit 0). A cluster that cannot be reached, or
-a refused read of the namespace, exits 4 before anything is deleted.
+a refused read of the namespace, exits 4 before anything is deleted. A refused
+list of the SparkApplications or read of the datagen Job is a failure like a
+refused deletion: the other targets are still stopped and the exit is 1.
 
 ### benchmark
 

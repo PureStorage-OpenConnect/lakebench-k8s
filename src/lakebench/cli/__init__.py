@@ -968,10 +968,10 @@ def status(
     }
     rows = []
     try:
-        for name, kind in components:
-            row = ops.read_component(apps_v1, ns, name, kind)
+        for obj_name, kind in components:
+            row = ops.read_component(apps_v1, ns, obj_name, kind)
             rows.append(row)
-            table.add_row(name, kind, esc(row.detail), marks[row.state])
+            table.add_row(obj_name, kind, esc(row.detail), marks[row.state])
     except ops.ClusterReadError as e:
         raise _unreachable(e)  # noqa: B904
 
@@ -1976,8 +1976,8 @@ def logs(
         print_info("Log streaming stopped")
         raise typer.Exit(ExitCode.INTERRUPTED)  # noqa: B904
 
-    for name in outcome.empty:
-        print_warning(f"No log output from pod {name}")
+    for pod_name in outcome.empty:
+        print_warning(f"No log output from pod {pod_name}")
     for line in outcome.unavailable:
         print_warning(f"No log: {line}")
     for error in outcome.errors:

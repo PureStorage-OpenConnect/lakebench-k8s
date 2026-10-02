@@ -1045,8 +1045,8 @@ def test_nameless_stop_with_name_deletes_only_after_the_guard(
     case, tmp_path, fake_cluster, monkeypatch
 ):
     """`stop CFG --name X` on a nameless config: the guard runs before the
-    first list or delete, so a deployment the config cannot prove is its own
-    is refused (3) with no SparkApplication or Job call; a proven one is
+    cluster client is built, so a deployment the config cannot prove is its
+    own is refused (3) with no client and no deletion; a proven one is
     stopped."""
     import lakebench.cli as cli
     from lakebench.cli import app
@@ -1099,3 +1099,27 @@ def test_nameless_logs_hint_keeps_the_name(tmp_path, fake_cluster, monkeypatch):
 
     assert res.exit_code == 1, res.output  # logs.no_pod
     assert f"lakebench status {cfg} --name {NAME}" in " ".join(res.output.split())
+
+
+def test_nameless_status_drift_hint_keeps_the_name(tmp_path, fake_cluster, monkeypatch):
+    """The drift hint carries the deployment's --name, not a component's
+    object name (the component loop once shadowed the option)."""
+    import lakebench.cli as cli
+    from lakebench.cli import app
+    from tests import test_cli_cluster_ops as co
+
+    monkeypatch.chdir(tmp_path)
+    cfg = _nameless(tmp_path)
+    _legacy_state(tmp_path)
+    _v16_namespace(fake_cluster)
+    apps = co.FakeApps(dict(co._TRINO_HIVE, **{"lakebench-trino-worker": (1, 2)}))
+    monkeypatch.setattr(cli, "get_k8s_client", lambda **_k: co.FakeK8s())
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda: co.FakeCore())
+    monkeypatch.setattr("kubernetes.client.AppsV1Api", lambda: apps)
+    monkeypatch.setattr("kubernetes.client.BatchV1Api", lambda: co.FakeBatch())
+
+    res = CliRunner().invoke(app, ["status", str(cfg), "--name", NAME])
+
+    assert res.exit_code == 1, res.output  # status.drift
+    out = " ".join(res.output.split())
+    assert f"Next: lakebench logs {cfg} trino-worker --name {NAME}, or lakebench deploy" in out
