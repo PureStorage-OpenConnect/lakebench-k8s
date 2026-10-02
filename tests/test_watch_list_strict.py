@@ -332,6 +332,30 @@ class TestPinnedContext:
             assert mgr._add_namespace_to_watch("my-ns") is False
         impl.assert_not_called()
 
+    @pytest.mark.parametrize("raised", ["timeout", "lease_hold"])
+    def test_add_fails_closed_after_the_pin_check_on_a_leased_timeout(self, raised):
+        """The pinned-context check passes, then a command runs out of the
+        lease's time: the add reports failure, not an exception, so deploy
+        does not read the namespace as watched (merge of CC-7 and LEASE)."""
+        import subprocess
+
+        from lakebench.k8s.lease_state import LeaseHoldExceeded
+
+        exc = (
+            subprocess.TimeoutExpired(["helm"], 30)
+            if raised == "timeout"
+            else LeaseHoldExceeded("lease hold budget spent")
+        )
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_acquire_watch_lease", return_value=(None, "unlocked")),
+            patch("lakebench.k8s.target.cli_args", return_value=[]) as pin,
+            patch.object(mgr, "_add_namespace_to_watch_impl", side_effect=exc) as impl,
+        ):
+            assert mgr._add_namespace_to_watch("my-ns") is False
+        pin.assert_called_once()
+        impl.assert_called_once()
+
     def test_conflict_mid_sequence_names_repair_operator(self):
         from lakebench.k8s.target import ContextConflictError
 
