@@ -311,8 +311,26 @@ def test_refuses_when_gitleaks_logs_an_error_but_exits_0(repo, tmp_path):
     assert "gitleaks logged an error" in res.stderr
 
 
+def test_refuses_when_the_message_scan_logs_an_error_but_exits_0(repo, tmp_path):
+    # The same check on the commit and tag message scan (gitleaks stdin).
+    d = tmp_path / "errbin"
+    d.mkdir()
+    stub = d / "gitleaks"
+    stub.write_text(
+        "#!/bin/sh\nwhile read -r _; do :; done\n"
+        'if [ "$1" = stdin ]; then echo "10:00PM ERR cannot read input"; fi\nexit 0\n'
+    )
+    stub.chmod(0o755)
+    tip = _commit(repo, "notes.txt", "nothing secret here\n", "clean work")
+    res = _run(repo, [_new_branch(tip)], os.pathsep.join([str(d), _path_without_gitleaks()]))
+    assert res.returncode == 1, res.stderr
+    assert "gitleaks logged an error scanning the messages" in res.stderr
+
+
 def test_refuses_when_git_cannot_run_remerge_diff(repo, stub_bin, tmp_path):
-    # git older than 2.36 rejects --remerge-diff, which gitleaks is given.
+    # git older than 2.36 rejects --remerge-diff, which the hook passes to
+    # gitleaks; the hook checks git first and refuses (gitleaks itself would
+    # exit 0 having scanned nothing, as the ERR test above shows).
     d = tmp_path / "oldgit"
     d.mkdir()
     real_git = shutil.which("git")
