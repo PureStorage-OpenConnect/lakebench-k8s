@@ -398,9 +398,11 @@ def config_recommend(
         raise typer.Exit(ExitCode.PREREQUISITE) from None
 
     def _detect():
-        return get_k8s_client(
-            context=cfg.platform.kubernetes.context, namespace=cfg.get_namespace()
-        ).get_cluster_capacity()
+        from lakebench.k8s.target import ClusterTarget
+
+        target = ClusterTarget.current()  # the context pin_command pinned
+        console.print(f"[dim]Cluster context: {esc(target.label)}[/dim]")
+        return get_k8s_client(target=target, namespace=cfg.get_namespace()).get_cluster_capacity()
 
     code = recommend_impl(
         cluster_cores=None,
