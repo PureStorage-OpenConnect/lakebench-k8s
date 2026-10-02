@@ -107,7 +107,7 @@ def test_plan_offline_golden(tmp_path, workload, mode):
         "(sized against no cluster)",
         "scratch: not requested (scratch disabled)",
         "prerequisites: not checked (offline)",
-        "egress at deploy (no pod contacts these after deploy):",
+        "egress (hosts outside the cluster this deployment contacts):",
         "repo1.maven.org: Maven Central",
         "docker.io: image registry",
     ):
@@ -116,11 +116,27 @@ def test_plan_offline_golden(tmp_path, workload, mode):
 
 
 def test_plan_zero_cluster_calls_offline(tmp_path, no_cluster):  # noqa: F811
-    path = _write(tmp_path)
-    for extra in (["--offline"], ["--cores", "434", "--memory", "4349"], ["--json"]):
-        res = runner.invoke(app, ["plan", str(path), *extra])
-        assert res.exit_code == 0, (extra, res.output)
+    hive = _write(tmp_path)
+    polaris = _write(tmp_path, name="pol-t", recipe="polaris-iceberg-spark-trino")
+    duck = _write(tmp_path, name="duck-t", recipe="hive-iceberg-spark-duckdb")
+    import subprocess
+
+    argv_seen: list = []
+
+    def local_only(args, *a, **k):
+        # The experiment block's code provenance reads git; anything else
+        # started as a child process would be a cluster or network call.
+        argv_seen.append(list(args))
+        if list(args)[:1] != ["git"]:
+            raise AssertionError(f"child process: {args}")
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    with mock.patch.object(subprocess, "run", local_only):
+        for extra in (["--offline"], ["--cores", "434", "--memory", "4349"], ["--json"]):
+            res = runner.invoke(app, ["plan", str(hive), str(polaris), str(duck), *extra])
+            assert res.exit_code == 0, (extra, res.output)
     assert no_cluster == []
+    assert all(a[:1] == ["git"] for a in argv_seen), argv_seen
 
 
 def test_plan_cores_memory_too_small_exits_4(tmp_path):
@@ -151,6 +167,7 @@ def _online(monkeypatch, outcomes, k8s=None):
     from lakebench.cli import _prerequisites as pre
 
     k8s = k8s or mock.MagicMock()
+    k8s.test_connectivity.return_value = (True, "Connected")
     k8s.get_cluster_capacity.return_value = None
     monkeypatch.setattr("lakebench.k8s.get_k8s_client", lambda **kw: k8s)
     monkeypatch.setattr("lakebench.deploy.prereqs.run_prereqs", lambda cfg: outcomes)
@@ -205,21 +222,48 @@ def _polaris(tmp_path, secret=None):
     return _write(tmp_path, recipe="polaris-iceberg-spark-trino", **extra)
 
 
-def test_plan_polaris_secret_informational(tmp_path):
+@pytest.fixture
+def generates_secret(monkeypatch):
+    """This tree's deploy generates the Polaris client secret per deployment."""
+    from lakebench.config import schema
+
+    monkeypatch.delattr(schema, "require_polaris_client_secret", raising=False)
+
+
+def test_plan_polaris_secret_required_before_per_deployment_secrets(tmp_path):
+    """Until deploy generates it, a Polaris config with no client_secret is
+    one deploy refuses, and plan says so (informational, exit 0)."""
+    from lakebench.config import schema
+
+    if not hasattr(schema, "require_polaris_client_secret"):
+        pytest.skip("this tree generates the secret at deploy")
+    res = runner.invoke(app, ["plan", str(_polaris(tmp_path)), "--offline"])
+    assert res.exit_code == 0, res.output
+    out = " ".join(res.stdout.split())
+    assert "client secret: not set; deploy refuses a Polaris config without" in out
+    assert "generated at deploy" not in out
+
+
+def test_plan_polaris_secret_informational(tmp_path, generates_secret):
     res = runner.invoke(app, ["plan", str(_polaris(tmp_path)), "--offline"])
     assert res.exit_code == 0, res.output
     assert "client secret: generated at deploy for a new Polaris" in " ".join(res.stdout.split())
 
 
-def test_plan_polaris_secret_from_a_variable_is_named_not_printed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("ref", ["${LB_PLAN_REF}", "${LB_PLAN_REF:-plan-default-value}"])
+def test_plan_polaris_secret_from_a_variable_is_named_not_printed(tmp_path, monkeypatch, ref):
     monkeypatch.setenv("LB_PLAN_REF", "plan-sentinel")
-    res = runner.invoke(app, ["plan", str(_polaris(tmp_path, "${LB_PLAN_REF}")), "--offline"])
-    assert res.exit_code == 0, res.output
-    assert "client secret: from ${LB_PLAN_REF}" in res.stdout
-    assert "plan-sentinel" not in res.output
+    for extra in (["--offline"], ["--json"]):
+        res = runner.invoke(app, ["plan", str(_polaris(tmp_path, ref)), *extra])
+        assert res.exit_code == 0, res.output
+        assert "client secret: from ${LB_PLAN_REF}" in res.stdout
+        assert "plan-sentinel" not in res.output
+        assert "plan-default-value" not in res.output
 
 
-def test_plan_polaris_existing_without_secret_says_deploy_refuses(tmp_path, monkeypatch):
+def test_plan_polaris_existing_without_secret_says_deploy_refuses(
+    tmp_path, monkeypatch, generates_secret
+):
     """An already bootstrapped Polaris with no per-deployment Secret: deploy
     asks for client_secret, so plan must not say it is generated."""
     k8s = mock.MagicMock()
@@ -237,6 +281,64 @@ def test_plan_polaris_existing_without_secret_says_deploy_refuses(tmp_path, monk
     assert "client secret: from Secret lakebench-polaris-client in plan-t" in " ".join(
         res.stdout.split()
     )
+
+
+# -- review fixes -----------------------------------------------------------------
+
+
+def test_plan_dead_api_server_exits_4(tmp_path, monkeypatch):
+    """A kubeconfig that loads but an API server that does not answer is an
+    unreachable cluster, not a list of "could not check" and exit 0."""
+    k8s = mock.MagicMock()
+    _online(monkeypatch, _outcomes(), k8s)
+    k8s.test_connectivity.return_value = (False, "Connection error: timed out")
+    res = runner.invoke(app, ["plan", str(_write(tmp_path))])
+    assert res.exit_code == 4
+    assert "use --offline to size without a cluster" in res.output
+
+
+def test_plan_any_failed_prerequisite_or_capacity_exits_4(tmp_path, monkeypatch):
+    from lakebench.cli import _prerequisites as pre
+
+    _online(monkeypatch, _outcomes(**{"s3-reachable-and-credentials": "fail"}))
+    assert runner.invoke(app, ["plan", str(_write(tmp_path))]).exit_code == 4
+    _online(monkeypatch, _outcomes())
+    monkeypatch.setattr(
+        pre,
+        "_check_cluster_capacity",
+        lambda cfg, **kw: pre.PrereqResult(
+            "cc", False, "capacity could not be read: x", hint="Next: ask the cluster admin"
+        ),
+    )
+    res = runner.invoke(app, ["plan", str(_write(tmp_path))])
+    assert res.exit_code == 4
+    assert "Next: Next:" not in res.stdout
+    assert "Next: ask the cluster admin" in res.stdout
+
+
+def test_plan_unchecked_fatal_prerequisite_exits_4(tmp_path, monkeypatch):
+    _online(monkeypatch, _outcomes(**{"spark-operator": "unknown"}))
+    assert runner.invoke(app, ["plan", str(_write(tmp_path))]).exit_code == 4
+
+
+def test_plan_refuses_what_deploy_refuses(tmp_path):
+    """READ skips the derived-name length check; plan runs deploy's load too."""
+    path = _write(tmp_path, name="n" * 60)
+    res = runner.invoke(app, ["plan", str(path), "--offline"])
+    assert res.exit_code == 2, res.output
+    assert "deploy refuses this config" in res.output
+
+
+def test_plan_offline_json_golden(tmp_path):
+    """The offline JSON for Customer 360 batch at scale 1 (hand-written
+    from the docs tables and the default recipe)."""
+    golden = json.loads((ROOT / "tests" / "fixtures" / "plan" / "c360_batch_s1.json").read_text())
+    (p,) = _plan_json(_write(tmp_path))["plans"]
+    golden_hosts = golden.pop("egress_hosts")
+    got = {k: p[k] for k in golden if k != "sizing"}
+    got["sizing"] = {k: p["sizing"][k] for k in golden["sizing"]}
+    assert got == golden
+    assert [e["host"] for e in p["egress"]] == golden_hosts
 
 
 # -- egress and several configs ---------------------------------------------------

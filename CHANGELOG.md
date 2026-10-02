@@ -157,10 +157,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`lakebench plan CONFIG...`**, read-only: the components, recipe and
   support state, the minimum cluster from the one sizing source (the
   numbers the `run` preflight and the README tables use), the cluster
-  prerequisites with the `admin install --component` command for a missing
-  one (exit 4), the Polaris client secret's source, and the hosts the
-  deploy contacts. `--offline`, `--cores/--memory` and `--json` make no
-  cluster call. Several configs are compared by experiment identity and
+  prerequisites and free capacity (exit 4 when one fails, with the
+  `admin install --component` command for a missing shared component), the
+  Polaris client secret's source (never its value), and the hosts outside
+  the cluster the deployment contacts. `--offline`, `--cores/--memory` and
+  `--json` make no cluster call. A config `deploy` would refuse at load is
+  exit 2. Several configs are compared by experiment identity and
   execution conditions.
 - **Run provenance is complete.** `metrics.json` `provenance` now says how
   lakebench was installed (`install`), and a pip-installed run names the

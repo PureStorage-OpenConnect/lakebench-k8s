@@ -181,7 +181,7 @@ PATHS: tuple[ExitPath, ...] = (
         "compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like", planned=True
     ),
     ExitPath("status.ok", _C.OK, "`status` finds the deployment as configured", planned=True),
-    ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity", planned=True),
+    ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity"),
     # 1
     ExitPath(
         "unhandled_exception",
@@ -411,8 +411,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "plan.missing_storage_class",
         _C.PREREQUISITE,
-        "`plan` finds the scratch StorageClass missing",
-        planned=True,
+        "`plan` finds a prerequisite missing (the scratch StorageClass, the Spark Operator, "
+        "Stackable or another check) or too little free capacity",
     ),
     ExitPath(
         "k8s.unreachable",

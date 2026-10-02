@@ -1,0 +1,28 @@
+{
+  "name": "plan-t",
+  "namespace": "plan-t",
+  "workload": "customer360",
+  "mode": "batch",
+  "scale": 1.0,
+  "recipe": "hive-iceberg-spark-trino",
+  "components": {
+    "catalog": "hive",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "trino"
+  },
+  "sizing": {
+    "floor": {"cpu_cores": 40, "memory_gb": 542},
+    "driven_by": "silver-build",
+    "scratch_gi": 2400,
+    "scratch": "not requested (scratch disabled)",
+    "against": "no cluster"
+  },
+  "prerequisites": "not checked (offline)",
+  "egress_hosts": [
+    "repo1.maven.org",
+    "maven-central.storage-download.googleapis.com",
+    "docker.io",
+    "oci.stackable.tech"
+  ]
+}
