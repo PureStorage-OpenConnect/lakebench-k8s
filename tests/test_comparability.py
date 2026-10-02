@@ -1080,3 +1080,36 @@ def test_config_only_identity_is_not_v2():
     run.config_snapshot["experiment_inputs"]["system_identity"] = ident
     e = run.to_dict()["experiment"]
     assert e["schema"] == "exp1" and "system identity" in e["v2_unavailable"]
+
+
+class TestDerivedBenchmarkRounds:
+    """Owner decision 10-01 (EVD-7 P2): continuous records that do not store
+    limits.benchmark_rounds have it derived at read time."""
+
+    def test_stored_records_without_the_key_are_derived(self):
+        a, b = sr.load_record("011043-e338c5"), sr.load_record("073533-9de9c9")
+        assert a["experiment"]["limits"].get("benchmark_rounds") is None
+        ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
+        assert (
+            ca.keys(cmp.CONDITIONS)["benchmark rounds"],
+            cb.keys(cmp.CONDITIONS)["benchmark rounds"],
+        ) == (5, 4)
+        v = cmp.pair_verdict([a], [b])
+        assert (v.verdict, v.keys(cmp.CONDITIONS)) == (cmp.NOT_LIKE_FOR_LIKE, ["benchmark rounds"])
+
+    def test_stored_value_wins_and_identity_does_not_move(self):
+        rec = sr.load_record("011043-e338c5")
+        before = ex.identity_hash(rec["experiment"])
+        assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 5
+        rec["experiment"]["limits"]["benchmark_rounds"] = 3
+        assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 3
+        assert ex.identity_hash(sr.load_record("011043-e338c5")["experiment"]) == before
+
+    def test_rounds_without_qph_do_not_count(self):
+        rec = sr.load_record("011043-e338c5")
+        rec["pipeline_benchmark"]["benchmark_rounds"][0]["qph"] = 0
+        assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 4
+
+    def test_no_record_no_derivation(self):
+        exp = sr.load_record("011043-e338c5")["experiment"]
+        assert cmp.classify(exp).keys(cmp.CONDITIONS)["benchmark rounds"] is None

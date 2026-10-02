@@ -6,7 +6,8 @@
     "design_before quotes section 0.3. Where it names fewer keys than the records differ in, the extra keys are listed in note.",
     "EVD-7 work (ER-10a, ER-10b, ER-11) adds the After column here, with the WI id in the commit message and a second-agent review (SPEC section 6 rule 4).",
     "compare_after (ER-10a): what `_build_comparison` returns once the compaction operation (LB-212, derived from the query engine and table format of a record whose effective-maintenance id says compaction=ran) is a condition and the system and query access path are not; only the fields that differ from before are listed. Hand-derived from each record's recipe and effective-maintenance id.",
-    "after (ER-10b, EVD-7): what comparability.pair_verdict returns for the pair: verdict, code, ladder step, LIKE-FOR-LIKE attribution, the differing keys per OD-2 group (comparability.classify key names), the System relation and notes. Hand-derived from each pair's raw records (architecture fields, effective-maintenance ids, verdict status) and the ch03 section 0.3 After column; verdict-level only (metric rendering, hints and not_assessed are ER-11)."
+    "after (ER-10b, EVD-7): what comparability.pair_verdict returns for the pair: verdict, code, ladder step, LIKE-FOR-LIKE attribution, the differing keys per OD-2 group (comparability.classify key names), the System relation and notes. Hand-derived from each pair's raw records (architecture fields, effective-maintenance ids, verdict status) and the ch03 section 0.3 After column; verdict-level only (metric rendering, hints and not_assessed are ER-11).",
+    "P2 and P4 (owner decision 10-01): limits.benchmark_rounds is derived at read time from the record's pipeline_benchmark rounds with QpH > 0 when the block does not store it; P2 moves to NOT LIKE-FOR-LIKE on benchmark rounds (5 vs 4), P4 loses the benchmark rounds difference (5 vs 5)."
   ],
   "pairs": {
     "P1": {
@@ -53,23 +54,32 @@
         "result_refusals": 0
       },
       "after": {
-        "verdict": "LIKE-FOR-LIKE",
-        "code": 0,
-        "step": "8",
-        "attribution": "architecture differential",
+        "verdict": "NOT LIKE-FOR-LIKE",
+        "code": 12,
+        "step": "7",
+        "attribution": null,
         "workload": [],
         "corpus": [],
         "architecture": [
           "recipe",
           "query engine"
         ],
-        "conditions": [],
+        "conditions": [
+          "benchmark rounds"
+        ],
         "system": "same",
         "notes": [
           "system identity not recorded; assumed the same",
           "dependency set not recorded"
         ]
-      }
+      },
+      "compare_after": {
+        "like_for_like": false,
+        "condition_differences": [
+          "benchmark rounds"
+        ]
+      },
+      "note": "Owner decision 10-01: benchmark rounds are derived at read time for records that do not store limits.benchmark_rounds (A ran 5 in-stream rounds with QpH > 0, B 4), so the QpH medians cover different round counts: not like-for-like."
     },
     "P3": {
       "a": "20260927-011043-e338c5",
@@ -106,7 +116,7 @@
       "a": "20260927-011043-e338c5",
       "b": "20260927-095006-71b4a3",
       "design_before": "comparable, not like-for-like (effective maintenance, maintenance settings)",
-      "note": "benchmark rounds also differs (stored limits.benchmark_rounds absent on A, 5 on B)",
+      "note": "benchmark rounds also differs (stored limits.benchmark_rounds absent on A, 5 on B) After the rounds derivation A reads 5 rounds (pipeline_benchmark rounds with QpH > 0) against B's stored 5, so benchmark rounds no longer differs.",
       "before": {
         "verdict": "comparable",
         "like_for_like": false,
@@ -132,13 +142,18 @@
         ],
         "conditions": [
           "effective maintenance",
-          "maintenance settings",
-          "benchmark rounds"
+          "maintenance settings"
         ],
         "system": "same",
         "notes": [
           "system identity not recorded; assumed the same",
           "dependency set not recorded"
+        ]
+      },
+      "compare_after": {
+        "condition_differences": [
+          "effective maintenance",
+          "maintenance settings"
         ]
       }
     },
