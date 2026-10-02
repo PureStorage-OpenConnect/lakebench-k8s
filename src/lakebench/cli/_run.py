@@ -2246,7 +2246,7 @@ def run(
                     logger.warning("Could not measure bronze bucket size: %s", e)
             except typer.Exit as e:
                 # A4 (v1.6): _handle_datagen_timeout, the OOM / error
-                # branches above and enforce_bronze_regenerate raise their
+                # branches above and enforce_bronze_gate raise their
                 # own typer.Exit with a specific code (3 for the regenerate
                 # refusal, 4 when S3 cannot be read, 1 for a wait-budget
                 # timeout).
