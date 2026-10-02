@@ -109,6 +109,8 @@ def test_spark_thrift_delta_drops_only_inside_the_bucket_being_emptied(detail, d
 
 def test_spark_thrift_delta_with_its_files_already_gone_is_dropped():
     gone = RuntimeError("[DELTA_PATH_DOES_NOT_EXIST] s3a://my-clean-silver/x doesn't exist")
+    # (the error DESCRIBE DETAIL gives on a log-less table, path included;
+    # probed on Delta 4.0)
     res, sent = _run(
         _cfg("delta"),
         "silver",
@@ -252,7 +254,8 @@ def test_a_logless_delta_entry_is_dropped():
     long = (
         "query_sql failed (rc=1): Error: org.apache.hive.service.cli.HiveSQLException: "
         "Error running query: org.apache.spark.sql.delta.DeltaAnalysisException: "
-        "[DELTA_TABLE_NOT_FOUND] Delta table `silver`.`t` doesn't exist."
+        "[DELTA_PATH_DOES_NOT_EXIST] s3a://my-clean-silver/warehouse/silver.db/t doesn't "
+        "exist, or is not a Delta table."
     )
     res, sent = _run(
         _cfg("delta"),
@@ -310,3 +313,23 @@ def test_a_stuck_engine_stops_at_the_first_timeout():
         exec_error=lambda sql: ExecSqlTimeout("exec_sql timed out after 120s"),
     )
     assert len(sent) == 1 and len(res.failed) == 1 and not res.may_empty
+
+
+@pytest.mark.parametrize(
+    ("text", "kept", "failed"),
+    [
+        ("[DELTA_PATH_DOES_NOT_EXIST] s3a://other-bucket/silver.db/t doesn't exist", True, False),
+        ("[DELTA_TABLE_NOT_FOUND] Delta table `silver`.`t` doesn't exist.", False, True),
+    ],
+)
+def test_a_logless_delta_entry_elsewhere_or_unplaced_is_not_dropped(text, kept, failed):
+    """DROP deletes a managed table's directory even with its log gone."""
+    res, sent = _run(
+        _cfg("delta"),
+        "silver",
+        "my-clean-silver",
+        ("spark-thrift", "pod", "spark_catalog"),
+        detail=lambda sql: RuntimeError(text),
+    )
+    assert not any(x.startswith("DROP") for x in sent)
+    assert bool(res.kept) is kept and bool(res.failed) is failed

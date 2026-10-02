@@ -67,6 +67,7 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
     raises for a table: each outcome is in the result.
     """
     from lakebench.deploy.destroy import (
+        _S3_URI_RE,
         _is_schema_missing,
         _is_table_missing,
         _split_table,
@@ -101,12 +102,33 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
         else:
             sql = build_drop_table_sql(maint_engine, table)
             if table_format == "delta":
+                seen: list[str] = []
                 where, why = _table_location_bucket(
-                    _query_marking_gone(query_sql), maint_engine, k8s, pod_name, namespace, table
+                    _query_marking_gone(query_sql, seen),
+                    maint_engine,
+                    k8s,
+                    pod_name,
+                    namespace,
+                    table,
                 )
                 if why == "missing":
                     continue
                 gone = why == "gone"
+                if gone:
+                    # The log is gone, but DROP still deletes a managed
+                    # table's directory: only in the bucket being emptied,
+                    # read from the path Delta's error names.
+                    named = set(_S3_URI_RE.findall(seen[-1] if seen else ""))
+                    if named != {bucket}:
+                        if named:
+                            out.kept.append(
+                                (table, f"its location is in {', '.join(sorted(named))}")
+                            )
+                        else:
+                            out.failed.append(
+                                (table, "its files are gone and its location unknown")
+                            )
+                        continue
                 if not gone and where is None:
                     # Cannot tell where its files are: neither drop it (DROP
                     # deletes a managed table's directory) nor empty the bucket.
@@ -132,7 +154,7 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
     return out
 
 
-def _query_marking_gone(query_sql: Any) -> Any:
+def _query_marking_gone(query_sql: Any, seen: list[str]) -> Any:
     """``query_sql``, with a log-less Delta table's error reported in the
     form destroy's location reader treats as "files gone". It matches on the
     whole error, not the shortened text the reader keeps."""
@@ -142,6 +164,7 @@ def _query_marking_gone(query_sql: Any) -> Any:
             return str(query_sql(*args, **kwargs))
         except Exception as e:
             text = str(e)
+            seen.append(text)
             if re.search(r"\[DELTA_TABLE_NOT_FOUND\]|\[DELTA_PATH_DOES_NOT_EXIST\]", text):
                 raise RuntimeError("[DELTA_PATH_DOES_NOT_EXIST] " + text) from e
             raise
