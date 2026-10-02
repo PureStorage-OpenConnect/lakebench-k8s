@@ -147,7 +147,6 @@ PLANNED_BY = {
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
     "logs.no_pod": "CC-27",
-    "run.protected_corpus": "AM-22",
     "status.drift": "CC-27",
     "status.namespace_missing": "CC-27",
     "status.ok": "CC-27",
@@ -545,7 +544,7 @@ def _scenario_financial_k8s_unreachable(monkeypatch, tmp_path):
         platform=SimpleNamespace(kubernetes=SimpleNamespace(context=None)),
         get_namespace=lambda: "ns-x",
     )
-    monkeypatch.setattr(fin, "_load_config", lambda path: cfg)
+    monkeypatch.setattr(fin, "_load_config", lambda path, verb="financial": cfg)
 
     def unreachable(**_k):
         raise K8sConnectionError("connection refused")
@@ -1124,7 +1123,12 @@ def _stub_look(monkeypatch, report_sha256=None, spent=True, seed=987654):
     )
     monkeypatch.setattr(datagen_seed, "load_looks", lambda path=None: looks)
     monkeypatch.setattr(datagen_seed, "spent_seeds", lambda: frozenset({seed} if spent else ()))
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {seed: "evaluation"})
+    monkeypatch.setattr(
+        datagen_seed, "_heldout", lambda: __import__("types").SimpleNamespace(spent=frozenset())
+    )
+    monkeypatch.setattr(
+        datagen_seed, "heldout_role", lambda s, h=None: "evaluation" if s == seed else None
+    )
 
 
 def _scenario_reproduce_verify_out_of_band(monkeypatch, tmp_path):
@@ -1144,6 +1148,16 @@ def _scenario_reproduce_report_required(monkeypatch, tmp_path):
 def _scenario_reproduce_held_out(monkeypatch, tmp_path):
     _stub_look(monkeypatch, spent=False)
     return _runner().invoke(app, ["reproduce", str(_look_package(tmp_path))])
+
+
+def _scenario_run_protected_corpus(monkeypatch, tmp_path):
+    """A config naming the (test) evaluation seed and role, with looks open
+    so it loads: run refuses it before any cluster call."""
+    from tests.fixtures import protected_corpus as pc
+
+    pc.use_heldout(monkeypatch)
+    cfg = pc.financial_config(tmp_path / "c.yaml", seed=pc.EV, role="evaluation")
+    return _runner().invoke(app, ["run", str(cfg), "--yes"])
 
 
 def _scenario_reproduce_existing_namespace(monkeypatch, tmp_path):
@@ -1479,6 +1493,7 @@ SCENARIOS = {
     "reproduce.verify_out_of_band": _scenario_reproduce_verify_out_of_band,
     "reproduce.report_required": _scenario_reproduce_report_required,
     "reproduce.held_out": _scenario_reproduce_held_out,
+    "run.protected_corpus": _scenario_run_protected_corpus,
     "reproduce.drift": _scenario_reproduce_drift,
     "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
     "reproduce.nonce_changed": _scenario_reproduce_nonce_changed,
@@ -1529,6 +1544,7 @@ EXPECTED_OUTPUT = {
     "repeat.no_verified_corpus": "no verified corpus to reuse",
     "series.corpus_changed": "bronze changed during or between repetitions",
     "run.args": "--force-reset only applies to a continuous run",
+    "run.protected_corpus": "never runs on a protected AML corpus",
     "run.namespace_gone": "was deleted mid-run; stopping",
     "config.validation": "Config error",
     "config.name_required": "config has no name, so it cannot change data",

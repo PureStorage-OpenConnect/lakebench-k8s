@@ -174,6 +174,31 @@ def _run_subject_check(spark, manifest, status_rows) -> dict:
         return {"status": "unchecked", "reason": f"{type(e).__name__}: {e}"[:300]}
 
 
+def _manifest_protected_reason():
+    """``datagen_seed.manifest_protected_reason``: the package copy in tests,
+    the flat copy (mounted beside this script) on the driver. Neither
+    importable raises, so the check is never skipped."""
+    try:
+        from lakebench.config.datagen_seed import manifest_protected_reason
+    except ImportError:
+        from datagen_seed import manifest_protected_reason
+    return manifest_protected_reason
+
+
+def refuse_protected_corpus(manifest) -> None:
+    """Refuse to score a corpus from a protected AML seed (the evaluation or
+    robustness one, or a spent seed), outside the registered look
+    (``scripts/aml_gate.py --registered``). Every manifest row's
+    (typology_id, seed) is read, never a sample: a corpus that mixes a few
+    held-out instances into a development corpus is still refused. The
+    message names a role, never a seed."""
+    check = _manifest_protected_reason()
+    rows = ((r["typology_id"], r["seed"]) for r in manifest.select("typology_id", "seed").collect())
+    reason = check(rows)
+    if reason is not None:
+        raise SystemExit(f"refusing to score this corpus: {reason}")
+
+
 def check_status_run(status_run_id: str, own_run_id: str) -> None:
     """Refuse to score a detection status another run wrote.
 
@@ -437,6 +462,7 @@ def main() -> None:
             "write it, or the S3 URI is wrong. Cannot compute recall without ground truth."
         )
     log(f"Manifest typology instances: {manifest_count:,}")
+    refuse_protected_corpus(manifest)
 
     try:
         alerts_all = spark.table(f"{CATALOG}.{GOLD_ALERTS}")

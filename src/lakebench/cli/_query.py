@@ -12,6 +12,7 @@ import typer
 from rich.panel import Panel
 from rich.table import Table
 
+from lakebench.aml.look_guard import refuse_if_protected
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
@@ -144,6 +145,7 @@ def _run_query_repl(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    refuse_if_protected(cfg, "query")
 
     namespace = cfg.get_namespace()
 
@@ -384,6 +386,7 @@ def query(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    refuse_if_protected(cfg, "query")
 
     namespace = cfg.get_namespace()
 
@@ -672,6 +675,7 @@ def benchmark(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    refuse_if_protected(cfg, "benchmark")
 
     scale = cfg.architecture.workload.datagen.get_effective_scale()
     cache_mode = "cold" if cold else None  # None = let runner use config default

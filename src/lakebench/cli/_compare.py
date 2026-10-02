@@ -110,6 +110,14 @@ def compare(
         print_error(str(e))
         raise typer.Exit(ExitCode.USAGE) from None
 
+    # A run on a protected AML corpus (evaluation or robustness, by role or
+    # by seed hash) is read only by its registered look: refused, exit 2.
+    from lakebench.aml.look_guard import refuse_protected_records
+
+    refuse_protected_records(
+        ((m.run_id, m.record) for side in (a, b) for m in side.members), "compare"
+    )
+
     if output is not None:
         problem = _output_problem(output, [*a.inputs, *b.inputs], dirs)
         if problem:

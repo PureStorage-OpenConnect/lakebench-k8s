@@ -166,7 +166,7 @@ def test_protected_seed_allowed_with_its_role(seed, role, looks_open):
     [(EVAL, "robustness"), (ROBUST, "evaluation"), (7777, "evaluation"), (EVAL, "calibration")],
 )
 def test_role_must_match_its_registered_seed(seed, role):
-    with pytest.raises(ValidationError, match="registered for"):
+    with pytest.raises(ValidationError, match="registered for|does not match"):
         _cfg_role(seed, role)
 
 

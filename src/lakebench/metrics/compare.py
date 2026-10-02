@@ -567,25 +567,50 @@ def _continuous(side: Side) -> bool:
     return _mode(side) == "sustained"
 
 
-def _hidden_seeds() -> frozenset[int] | None:
-    """The protected and spent AML seeds, never printed; None when they
-    cannot be read (then no integer seed is printed)."""
+class ProtectedSeeds:
+    """The seeds a comparison must not print, as a membership test: held-out
+    seeds are known only by their salted hashes, so the set cannot be listed.
+    A seed is hidden when ``datagen_seed.seed_is_protected`` says so (held
+    out, spent, or with a recorded look; any seed when that cannot be read),
+    unless it is in ``public``."""
+
+    def __init__(self, public: frozenset[int] = frozenset()) -> None:
+        self.public = frozenset(public)
+
+    def __contains__(self, value: object) -> bool:
+        from lakebench.config import datagen_seed
+
+        try:
+            v = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return False
+        return v not in self.public and datagen_seed.seed_is_protected(v)
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __sub__(self, other: Iterable[int]) -> ProtectedSeeds:
+        return ProtectedSeeds(self.public | frozenset(other))
+
+
+Hidden = frozenset[int] | ProtectedSeeds | None
+
+
+def _hidden_seeds() -> Hidden:
+    """The protected, spent and recorded AML seeds, never printed; None when
+    they cannot be read (then no integer seed is printed)."""
     try:
         from lakebench.config import datagen_seed
 
-        return frozenset(
-            int(x)
-            for x in (
-                *datagen_seed.protected_seeds(),
-                *datagen_seed.spent_seeds(),
-                *datagen_seed.recorded_seeds(),
-            )
-        )
+        datagen_seed._heldout()
+        datagen_seed.spent_seeds()
+        datagen_seed.recorded_seeds()
     except Exception:  # noqa: BLE001 -- unreadable: hide every integer seed
         return None
+    return ProtectedSeeds()
 
 
-def _seed_out(v: Any, hidden: frozenset[int] | None) -> Any:
+def _seed_out(v: Any, hidden: Hidden) -> Any:
     """*v* as a recorded seed may be shown: a protected, spent or recorded
     look seed (or any integer seed when that list cannot be read) reads
     ``<protected seed>``."""
@@ -605,7 +630,7 @@ _INT_TOKEN = re.compile(r"(?<![\w.-])\d+(?!\w|\.\d)")
 _DIGIT_TO_LETTER = str.maketrans("0123456789", "abcdefghij")
 
 
-def _scrub_text(text: str, hidden: frozenset[int] | None) -> str:
+def _scrub_text(text: str, hidden: Hidden) -> str:
     """*text* with any hidden seed in it replaced. Only text that names a
     seed is touched. With the seed list unreadable, every integer in it
     except run ids is replaced."""
@@ -629,7 +654,7 @@ def _scrub_text(text: str, hidden: frozenset[int] | None) -> str:
     )
 
 
-def redact(node: Any, hidden: frozenset[int] | None) -> Any:
+def redact(node: Any, hidden: Hidden) -> Any:
     """A copy of *node* (a comparison document, or any part of one) with
     every protected seed hidden: a ``seed`` value, the ``a`` and ``b`` of an
     entry whose ``key`` is ``seed``, and a hidden seed inside text that
@@ -663,7 +688,7 @@ def _is_aml(record: Mapping[str, Any]) -> bool:
     )
 
 
-def hidden_for(*sides: Side) -> frozenset[int] | None:
+def hidden_for(*sides: Side) -> Hidden:
     """The seeds a comparison of *sides* must not print: the protected,
     spent and recorded AML seeds, on every pair. A pair with no AML member
     may print the public development seeds of the other workloads (the
@@ -677,7 +702,8 @@ def hidden_for(*sides: Side) -> frozenset[int] | None:
     from lakebench.metrics.corpus_identity import COMPARE_CASES
 
     public = {seed for case, seed in COMPARE_CASES.items() if case.startswith("C")}
-    return frozenset(hidden - public)
+    rest = hidden - public
+    return rest if isinstance(rest, ProtectedSeeds) else frozenset(rest)
 
 
 def _val(v: Any) -> str:

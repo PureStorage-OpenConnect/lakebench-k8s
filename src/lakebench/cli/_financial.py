@@ -51,7 +51,7 @@ def _assert_financial_schema(cfg) -> None:
         )
 
 
-def _load_config(config_path: Path):
+def _load_config(config_path: Path, verb: str = "financial"):
     from lakebench.config import ConfigError, LoadPurpose, load_config
 
     try:
@@ -61,6 +61,11 @@ def _load_config(config_path: Path):
         print_error(str(e))  # one ERROR line on stderr, like every load error
         raise typer.Exit(ExitCode.USAGE) from None  # config.validation, config.name_required
     _assert_financial_schema(cfg)
+    # Every financial subcommand reads or scores the corpus: a protected one
+    # is refused before any cluster call (scored only as its registered look).
+    from lakebench.aml.look_guard import refuse_if_protected
+
+    refuse_if_protected(cfg, verb)
     return cfg
 
 
@@ -161,7 +166,7 @@ def replay(
     """Rerun a detection rule against a historical Iceberg snapshot (W8)."""
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
-    cfg = _load_config(config)
+    cfg = _load_config(config, "financial replay")
 
     # Default target is a SEPARATE table (gold alerts + "_replay"). Replay
     # deletes its rule's rows in the target and writes new ones under a fresh
@@ -205,7 +210,7 @@ def reproduce(
     """Reproduce a specific past alert via Iceberg time-travel (W10)."""
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
-    cfg = _load_config(config)
+    cfg = _load_config(config, "financial reproduce")
     console.print(f"[bold]lakebench financial reproduce[/bold] alert_id={alert_id}")
     job_manager = _get_job_manager(cfg)
     status = job_manager.submit_job(
@@ -232,7 +237,7 @@ def score(
     """Compute recall from datagen manifest and gold.alerts."""
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
-    cfg = _load_config(config)
+    cfg = _load_config(config, "financial score")
     console.print("[bold]lakebench financial score[/bold]")
     job_manager = _get_job_manager(cfg)
     status = job_manager.submit_job(
@@ -279,7 +284,7 @@ def reference_score(
     """
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
-    cfg = _load_config(config)
+    cfg = _load_config(config, "financial reference-score")
     console.print("[bold]lakebench financial reference-score[/bold]")
     job_manager = _get_job_manager(cfg)
     deps = job_manager.deps

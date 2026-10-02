@@ -151,72 +151,27 @@ def report_seed(seed):
 
 
 def ledger_path() -> Path:
-    """An append-only record of look claims outside the checkout, so a
-    reverted or stashed aml_registered_looks.json cannot un-spend a seed on
-    this host (LB_AML_LOOKS_LEDGER overrides the location)."""
-    return Path(
-        os.environ.get("LB_AML_LOOKS_LEDGER") or Path.home() / ".lakebench" / "aml_looks.jsonl"
-    )
+    """The out-of-tree, append-only record of look claims
+    (``datagen_seed.looks_ledger_path``; LB_AML_LOOKS_LEDGER overrides it)."""
+    from lakebench.config.datagen_seed import looks_ledger_path
+
+    return looks_ledger_path()
 
 
 def seed_ever_recorded(seed: int) -> str | None:
-    """Why ``seed`` already has a look anywhere this host can see, or None:
-    the out-of-tree ledger, or any commit on any branch that added it to the
-    tracked record."""
-    from lakebench.config.datagen_seed import looks_path
+    """Why ``seed`` already has a look anywhere this host can see, or None
+    (``datagen_seed.seed_ever_recorded``: the look ledger, then the git
+    history of the tracked record). Never names a seed by value."""
+    from lakebench.config.datagen_seed import seed_ever_recorded as _ever
 
-    led = ledger_path()
-    if led.is_file():
-        for line in led.read_text().splitlines():
-            if line.strip() and int(json.loads(line)["seed"]) == int(seed):
-                # A claim that failed after its ledger line leaves a held-out
-                # seed unspent: name it by role then, never by value.
-                from lakebench.config.datagen_seed import heldout_role
-
-                role = heldout_role(seed)
-                label = f"the registered {role} seed" if role else f"seed {seed}"
-                return f"{label} is in the look ledger {led}"
-    rec = looks_path()
-    hits = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(ROOT),
-            "log",
-            "--all",
-            "--format=%H",
-            "-S",
-            f'"seed": {int(seed)}',
-            "--",
-            str(rec.relative_to(ROOT)),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if hits.returncode != 0:
-        # Not CalledProcessError: its text carries the argv, which holds the seed.
-        raise OSError(f"git log over {rec.name} failed (exit {hits.returncode})")
-    hits = hits.stdout.strip()
-    if hits:
-        # git log --all also sees stashes and unpushed branches, where a
-        # held-out seed can sit before its look: name it by role then.
-        from lakebench.config.datagen_seed import heldout_role
-
-        role = heldout_role(seed)
-        label = f"the registered {role} seed" if role else f"seed {seed}"
-        return f"{label} was recorded in {rec.name} by commit {hits.splitlines()[0]}"
-    return None
+    return _ever(seed)
 
 
 def append_ledger(entry: dict) -> None:
-    """Append ``entry`` to the ledger and fsync it (raises on failure)."""
-    led = ledger_path()
-    led.parent.mkdir(parents=True, exist_ok=True)
-    with open(led, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
+    """Append ``entry`` to the look ledger and fsync it (raises on failure)."""
+    from lakebench.config.datagen_seed import append_looks_ledger
+
+    append_looks_ledger(entry)
 
 
 def clean_checkout_error() -> str | None:

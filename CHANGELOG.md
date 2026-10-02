@@ -43,6 +43,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for every key Lakebench owns.
 
 ### Added
+- **A protected AML corpus is never read or scored outside its registered
+  look.** `run`, `benchmark`, `query`, `compare`, `reproduce` and every
+  `financial` subcommand refuse a config that declares the evaluation or
+  robustness `corpus_role`, or whose `datagen.seed` hashes to a held-out
+  seed, and `compare` refuses a run record from one. Each refusal exits 2
+  on the `run.protected_corpus` path before any cluster call and names a
+  role, never a seed. A spent seed, a held-out seed under another role and a
+  role that does not match its seed are refused when the config loads (the
+  same path); `destroy`, `stop`, `status`, `logs` and `config show` still
+  load such a config, so a registered look's deployment can be torn down
+  once its seed is spent. The in-run scorer (`score-financial`) also reads
+  every manifest row and refuses a corpus any of whose rows come from a
+  held-out or spent seed, so a development config over a bucket holding a
+  registered corpus is not scored.
+- **`lakebench generate --registered-corpus`** generates the registered
+  evaluation or robustness corpus, and is the only way to: without it a
+  protected config is refused (2). It needs `--yes`, refuses a seed that
+  already has a look, and appends the attempt to
+  `~/.lakebench/aml_corpora.jsonl` (`LB_AML_CORPORA_LEDGER`) before the first
+  cluster call, then `generated` (with the observed image digest) or
+  `failed`; a crash leaves `attempted`. The ledger, the datagen sidecar and
+  the journal name the seed by its salted hash only. Generating the corpus
+  is not a look and spends nothing.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
@@ -510,8 +533,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `reproduce PACKAGE --report PATH` compares the report's sha256 with the
   look record (0 on a match, 14 on a mismatch or when the record holds no
   report sha256, 2 without `--report`). A held-out package whose look has
-  not run, a config that would generate a held-out corpus, and any
-  financial package while the look record cannot be read are refused (3).
+  not run and any financial package while the look record cannot be read
+  are refused (3); a config that names a protected AML corpus is refused
+  (2, `run.protected_corpus`).
   A package whose `pipeline_mode` is unknown or disagrees with its
   experiment identity is refused (2).
 - **Customer 360 batch runs are gated on sixteen expected-result checks.**

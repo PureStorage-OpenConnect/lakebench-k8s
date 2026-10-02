@@ -926,13 +926,11 @@ def absence_problems(
 
 
 def _match_label(seed: int | None, role: str | None) -> str:
-    """How a refusal names a seed: a spent or unregistered seed by value
-    (public), a held-out seed only by its role."""
+    """How a refusal names a seed: never by value, a held-out seed by its
+    role, a spent one as spent. ``seed`` is kept for the signature only."""
     if role in PROTECTED_ROLES:
         return f"the registered {role} seed"
-    if seed is None:
-        return "a spent seed" if role == "spent" else "another seed"
-    return f"seed {seed}"
+    return "a spent seed" if role == "spent" else "another seed"
 
 
 def aml_seed_error(
@@ -1000,13 +998,18 @@ def aml_seed_error(
         # A spent seed is public, unless it is also held out (voided before its
         # look): then it is named by role only.
         held_role = heldout_role(eff, h) if eff is not None else None
-        label = "the corpus seed" if eff is None else _match_label(eff, held_role)
+        if eff is None:
+            label = "the corpus seed"
+        elif held_role is not None:
+            label = _match_label(eff, held_role)
+        else:
+            label = "the configured seed"
         return (
             f"{label} is listed as spent "
             "(the AML pre-registration's corpora.spent_seeds, a recorded look, or "
             "heldout_hashes.json): a corpus from it has already been looked at or voided and "
             "must not be regenerated or scored. Use the calibration seed "
-            f"({corpora['calibration_seed']}) or another unregistered seed."
+            "(corpora.calibration_seed) or another unregistered seed."
         )
     if corpus_role is not None:
         if counts_only and corpus_role in PROTECTED_ROLES:
@@ -1021,8 +1024,8 @@ def aml_seed_error(
             want = int(corpora["calibration_seed"])
             if eff != want:
                 return (
-                    f"corpus_role 'calibration' is registered for seed {want}, not "
-                    f"{_match_label(eff, eff_role)}"
+                    "corpus_role 'calibration' does not match the configured seed (the "
+                    "role names the pre-registration's corpora.calibration_seed)"
                 )
         if corpus_role in PROTECTED_ROLES and claim_verified is False:
             return (
@@ -1045,20 +1048,36 @@ def aml_seed_error(
         return None
     if eff_role in PROTECTED_ROLES and not counts_only:
         return (
-            f"the seed (given, or recovered from the corpus) is the pre-registered {eff_role} "
-            f"seed. It is generated and scored once, as the registered {eff_role} gate run "
-            f"after the datagen freeze: declare corpus_role: {eff_role} (config) or "
-            f"--registered {eff_role} (scripts/aml_gate.py) for that run. Any other use "
-            "burns the seed."
+            f"this seed (given, or recovered from the corpus) is the registered {eff_role} "
+            "seed: its corpus is generated only with `lakebench generate "
+            "--registered-corpus` and scored only by `scripts/aml_gate.py --registered "
+            f"{eff_role}`, once, after the datagen freeze. Any other use burns the seed."
         )
     return None
 
 
+class ProtectedCorpusError(ValueError):
+    """The AML protocol refuses this seed or role: spent, held out outside its
+    registered run, a role that does not match the seed, or a registered run
+    while looks are closed. The message never names a seed. ``load_config``
+    turns it into ``ConfigProtectedCorpusError`` (exit 2,
+    ``run.protected_corpus``)."""
+
+
 def check_aml_seed(seed: int | None, corpus_role: str | None = None) -> None:
-    """Raise ValueError unless ``seed`` may be used with ``corpus_role``."""
-    err = aml_seed_error(_corpora(), seed, corpus_role)
+    """Raise ProtectedCorpusError unless ``seed`` may be used with
+    ``corpus_role``. A record the guard cannot read (the pre-registration,
+    the look record, the hash file) raises a plain ValueError: the load still
+    fails closed, as a config error rather than an unhandled exception."""
+    try:
+        err = aml_seed_error(_corpora(), seed, corpus_role)
+    except OSError as e:
+        raise ValueError(
+            f"the AML seed guard cannot read its records ({type(e).__name__}: "
+            f"{getattr(e, 'filename', None) or e}); refusing"
+        ) from None
     if err:
-        raise ValueError(err)
+        raise ProtectedCorpusError(err)
 
 
 def check_seed(seed: int, schema: str, corpus_role: str | None = None) -> None:
@@ -1073,7 +1092,7 @@ def resolve_seed(seed: int | None, schema: str, corpus_role: str | None = None) 
     """The seed a deployment generates with (see the module docstring)."""
     if seed is None:
         if corpus_role in PROTECTED_ROLES and schema == "financial":
-            raise ValueError(
+            raise ProtectedCorpusError(
                 "a registered look names its seed in datagen.seed; it is checked against "
                 "heldout_hashes.json"
             )
@@ -1087,6 +1106,188 @@ def config_seed(cfg) -> int:
     workload = cfg.architecture.workload
     dg = workload.datagen
     return resolve_seed(dg.seed, workload.schema_type.value, getattr(dg, "corpus_role", None))
+
+
+# ---------------------------------------------------------------------------
+# Protected corpora: the manifest check, redaction, and the local ledgers
+# ---------------------------------------------------------------------------
+
+
+def _verdict_label(role: str | None) -> str:
+    if role in PROTECTED_ROLES:
+        return f"the registered {role} seed"
+    return "a spent seed" if role == "spent" else "a guarded seed"
+
+
+def prereg_spent_seeds() -> frozenset[int]:
+    """The pre-registration's ``corpora.spent_seeds`` plus every recorded
+    look, read from the packaged pre-registration or, on the Spark driver,
+    the flat copy next to this module. Raises when neither can be read."""
+    here = Path(__file__).resolve().parent
+    for p in (_PREREG_PATH, here / _PREREG_PATH.name):
+        if p.is_file():
+            with open(p, encoding="utf-8") as f:
+                return spent_from(with_recorded_looks(json.load(f)["corpora"]))
+    raise FileNotFoundError(f"{_PREREG_PATH.name} not found next to {__file__} or {_PREREG_PATH}")
+
+
+def manifest_protected_reason(
+    rows: Iterable[tuple[str, int]],
+    *,
+    heldout: HeldOut | None = None,
+    spent: Iterable[int] | None = None,
+) -> str | None:
+    """Why a corpus whose manifest holds ``rows`` (typology_id, instance
+    seed; every row, never a sample) may not be scored outside a registered
+    look, or None. ``corpus_verdict`` over every row: a recovered seed that
+    is held out or spent refuses. A manifest the corpus seed cannot be
+    recovered from, and a held-out record that cannot be read, refuse too
+    (fail closed). The reason names a role, never a seed."""
+    try:
+        known = spent if spent is not None else prereg_spent_seeds()
+        verdict = corpus_verdict(rows, heldout=heldout, spent=known)
+    except CorpusSeedError as e:
+        return f"the corpus seed cannot be recovered from the manifest ({e})"
+    except Exception as e:  # noqa: BLE001 -- unreadable held-out record: refuse
+        return (
+            f"the held-out record cannot be read ({type(e).__name__}), so the corpus is unchecked"
+        )
+    if verdict.verdict == "refused":
+        return f"the corpus manifest comes from {_verdict_label(verdict.role)}"
+    return None
+
+
+def seed_is_protected(value, heldout: HeldOut | None = None) -> bool:
+    """Whether an integer seed must not be shown: held out, spent (the hash
+    file, the pre-registration) or with a recorded look. A record that cannot
+    be read hides every seed (True). A value that is not an integer is not a
+    seed (False)."""
+    if isinstance(value, bool):
+        return False
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return False
+    try:
+        h = heldout if heldout is not None else _heldout()
+        if heldout_role(v, h) is not None or v in h.spent:
+            return True
+        return v in spent_seeds() or v in recorded_seeds()
+    except Exception:  # noqa: BLE001 -- unreadable: hide it
+        return True
+
+
+def looks_ledger_path() -> Path:
+    """The out-of-tree, append-only record of look claims, so a reverted or
+    stashed aml_registered_looks.json cannot un-spend a seed on this host
+    (``LB_AML_LOOKS_LEDGER`` overrides ``~/.lakebench/aml_looks.jsonl``)."""
+    return Path(
+        os.environ.get("LB_AML_LOOKS_LEDGER") or Path.home() / ".lakebench" / "aml_looks.jsonl"
+    )
+
+
+def _append_jsonl(path: Path, entry: dict) -> None:
+    """Append one JSON line to ``path`` under an exclusive lock, fsync the
+    file (and the directory when the file is new), and read the line back.
+    Raises on any failure: the caller must not go on as if it was written."""
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, sort_keys=True)
+    new = not path.exists()
+    with open(path, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    if new:
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    with open(path, encoding="utf-8") as f:
+        if line not in (ln.rstrip("\n") for ln in f):
+            raise OSError(f"{path}: the appended entry did not read back")
+
+
+def append_looks_ledger(entry: dict) -> None:
+    """Append a look claim to ``looks_ledger_path()`` (raises on failure)."""
+    _append_jsonl(looks_ledger_path(), entry)
+
+
+def seed_ever_recorded(seed: int) -> str | None:
+    """Why ``seed`` already has a look anywhere this host can see, or None:
+    the out-of-tree look ledger, or any commit on any branch (stashes and
+    unpushed branches included) that added it to the tracked look record.
+    A ledger line that cannot be read raises ValueError and a git history
+    that cannot be searched raises OSError: callers refuse then. Held-out
+    seeds are named by role, others as "the seed"; never by value."""
+    led = looks_ledger_path()
+    if led.is_file():
+        for i, line in enumerate(led.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                got = int(json.loads(line)["seed"])
+            except (ValueError, KeyError, TypeError):
+                raise ValueError(f"{led} line {i} is not a look entry") from None
+            if got == int(seed):
+                role = heldout_role(seed)
+                label = f"the registered {role} seed" if role else "the seed"
+                return f"{label} is in the look ledger {led}"
+    rec = looks_path()
+    import subprocess
+
+    hits = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(rec.parent),
+            "log",
+            "--all",
+            "--format=%H",
+            "-S",
+            f'"seed": {int(seed)}',
+            "--",
+            rec.name,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if hits.returncode != 0:
+        # Not CalledProcessError: its text carries the argv, which holds the seed.
+        raise OSError(f"git log over {rec.name} failed (exit {hits.returncode})")
+    out = hits.stdout.strip()
+    if out:
+        role = heldout_role(seed)
+        label = f"the registered {role} seed" if role else "the seed"
+        return f"{label} was recorded in {rec.name} by commit {out.splitlines()[0]}"
+    return None
+
+
+#: The local ledger of registered-corpus generations (``generate
+#: --registered-corpus``). Separate from the look record, because any entry
+#: there spends the seed, and generation is not a look.
+CORPORA_LEDGER_ENV = "LB_AML_CORPORA_LEDGER"
+
+
+def corpora_ledger_path() -> Path:
+    """``LB_AML_CORPORA_LEDGER`` or ``~/.lakebench/aml_corpora.jsonl``."""
+    return Path(
+        os.environ.get(CORPORA_LEDGER_ENV) or Path.home() / ".lakebench" / "aml_corpora.jsonl"
+    )
+
+
+def append_corpus_ledger(entry: dict) -> None:
+    """Append a registered-corpus entry to ``corpora_ledger_path()``,
+    fsynced and read back (raises on failure). The entry names the seed by
+    its salted hash only; a plaintext integer under any key is refused."""
+    for k, v in entry.items():
+        if isinstance(v, int) and not isinstance(v, bool):
+            raise ValueError(f"corpus ledger entry key {k!r} is an integer; seeds go in as hashes")
+    _append_jsonl(corpora_ledger_path(), entry)
 
 
 # ---------------------------------------------------------------------------

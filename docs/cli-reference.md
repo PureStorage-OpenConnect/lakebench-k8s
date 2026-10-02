@@ -370,6 +370,7 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--regenerate` | | `false` | Clear the datagen prefix (not the whole bucket) before generating, when this deployment owns the bronze bucket (its stamp, or a bucket it created). Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused (exit 3) on a bucket this deployment cannot prove it owns (`lakebench admin reclaim-bucket` claims one). |
 | `--allow-stale-bronze` | | `false` | Generate over objects already in the datagen prefix of a bronze bucket this deployment cannot prove it owns. Rows may be over-counted; `run` records it in `metrics.json` (`datagen.stale_bronze`) and the report shows "bronze held N objects before generate". |
+| `--registered-corpus` | | `false` | Generate the registered evaluation or robustness AML corpus: the config declares `corpus_role` and its `seed`, and `corpora.registered_looks_open` must be true. Needs `--yes`. Refused (exit 2) for a config that names no protected corpus and for a seed that already has a look. The attempt is appended to `~/.lakebench/aml_corpora.jsonl` (`LB_AML_CORPORA_LEDGER`) before the first cluster call, then `generated` or `failed`; the seed is recorded only by its salted hash. Without this flag a config that names a protected corpus is refused (exit 2). |
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
@@ -382,7 +383,9 @@ exceeds its wait budget (`--timeout`), `3` (refused) when the bronze datagen
 prefix is non-empty and neither `--regenerate` (on a bucket this deployment
 owns) nor `--allow-stale-bronze` (on one it does not) applies, or
 `--regenerate` was passed for a bucket it does not own or with an empty
-datagen prefix, and `4` when bronze or its ownership cannot be checked;
+datagen prefix, `2` for a protected AML corpus without `--registered-corpus`
+(or the flag on a config that names none, without `--yes`, or on a seed with a
+look), and `4` when bronze or its ownership cannot be checked;
 when datagen exceeds its wait budget the datagen Job and any leftover
 streaming SparkApplication consuming the trickle are stopped before exit.
 Only the initial-pass datagen is guarded by this exit code; per-cycle
@@ -897,7 +900,8 @@ namespace or buckets cannot be read; `1` when the pipeline could not run.
 A package from a registered evaluation or robustness look is never rerun:
 `--report` matching the look record exits `0`, a mismatch `14`, no
 `--report` `2`; a held-out package whose look has not run is refused with
-`3`. 1.6 used `1` for performance drift and
+`3`, and a config naming a protected AML corpus with `2` (`run.protected_corpus`).
+1.6 used `1` for performance drift and
 `2` for correctness drift.
 
 ### financial

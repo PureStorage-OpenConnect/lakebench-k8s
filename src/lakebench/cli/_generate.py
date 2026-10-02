@@ -17,7 +17,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
-from lakebench.exit_codes import ExitCode
+from lakebench.exit_codes import ExitCode, LakebenchError, UsageError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError, get_k8s_client
 from lakebench.k8s.target import ContextConflictError
@@ -100,6 +100,20 @@ def generate(
             ),
         ),
     ] = False,
+    registered_corpus: Annotated[
+        bool,
+        typer.Option(
+            "--registered-corpus",
+            help=(
+                "Generate the registered evaluation or robustness AML corpus "
+                "(the config declares the role and its seed). Needs --yes. "
+                "The attempt is recorded in ~/.lakebench/aml_corpora.jsonl "
+                "(LB_AML_CORPORA_LEDGER) before the first cluster call. "
+                "Without this flag a config that names a protected corpus is "
+                "refused (exit 2)."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Generate synthetic data to bronze bucket.
 
@@ -107,8 +121,6 @@ def generate(
     Uses parallel Kubernetes Jobs. Interrupted runs are re-run from the
     start; the Rust generator has no checkpoint-resume.
     """
-    from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
-
     config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
@@ -126,6 +138,166 @@ def generate(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+
+    # A protected AML corpus is generated only as the registered corpus, and
+    # the attempt is on disk before the first cluster call.
+    record = _registered_corpus_record(cfg, config_file, registered_corpus, yes)
+    if record is None:
+        _generate_loaded(cfg, config_file, timeout, yes, regenerate, allow_stale_bronze)
+        return
+    try:
+        fleet = _generate_loaded(
+            cfg, config_file, timeout, yes, regenerate, allow_stale_bronze, record=record
+        )
+    except typer.Exit as e:
+        if e.exit_code:
+            record.close("failed", exit_code=str(int(e.exit_code)))
+        raise
+    except (LakebenchError, ContextConflictError, K8sConnectionError) as e:
+        record.close("failed", error=type(e).__name__)
+        raise
+    record.close(
+        "generated", image_ids=list((fleet or {}).get("image_ids") or []) or "not_observed"
+    )
+
+
+class _CorpusRecord:
+    """One registered-corpus generation in the local corpus ledger: the
+    ``attempted`` entry is written by ``_registered_corpus_record``, then
+    ``close`` appends ``generated`` or ``failed`` for the same attempt. A
+    crash leaves only ``attempted``."""
+
+    def __init__(self, entry: dict) -> None:
+        self.entry = entry
+        self.submitted = False
+
+    @property
+    def seed_hash(self) -> str:
+        return str(self.entry["seed_hash"])
+
+    def close(self, state: str, **extra: object) -> None:
+        from lakebench.config.datagen_seed import append_corpus_ledger, corpora_ledger_path
+
+        entry = {
+            **self.entry,
+            "state": state,
+            "submitted": self.submitted,
+            "utc": _utc(),
+            **extra,
+        }
+        if state == "failed" and self.submitted:
+            entry["note"] = "the datagen Job was submitted and may still be writing the corpus"
+        try:
+            append_corpus_ledger(entry)
+        except (OSError, ValueError) as e:
+            print_warning(
+                f"The corpus ledger {corpora_ledger_path()} could not record {state!r}: {e}; "
+                "its attempted entry stands"
+            )
+
+
+def _utc() -> str:
+    import time
+
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _registered_corpus_record(cfg, config_file: Path, registered: bool, yes: bool):
+    """The guard for ``generate``: None for an ordinary config; for the
+    registered corpus, the ``_CorpusRecord`` whose ``attempted`` entry is
+    already on disk. Every refusal is exit 2 on ``run.protected_corpus``,
+    made before any cluster call, and names no seed."""
+    from lakebench.aml.look_guard import PATH, protected_corpus_reason
+    from lakebench.config import datagen_seed as ds
+
+    reason = protected_corpus_reason(cfg)
+    if not registered:
+        if reason is not None:
+            raise UsageError(
+                f"Refused: `generate` writes a protected AML corpus ({reason}) only with "
+                "--registered-corpus.",
+                next="A registered look's corpus is generated once, with "
+                "`lakebench generate --registered-corpus --yes`, and scored only by "
+                "`scripts/aml_gate.py --registered`.",
+                path=PATH,
+            )
+        return None
+    dg = cfg.architecture.workload.datagen
+    role = getattr(dg, "corpus_role", None)
+    if reason is None or role not in ds.PROTECTED_ROLES:
+        raise UsageError(
+            "Refused: --registered-corpus generates the registered evaluation or robustness "
+            "corpus, and this config declares neither role.",
+            path=PATH,
+        )
+    if not yes:
+        raise UsageError(
+            "Refused: --registered-corpus needs --yes (the attempt is recorded before the "
+            "first cluster call, so nothing may prompt after it).",
+            path=PATH,
+        )
+    seed = dg.seed
+    try:
+        held = ds._heldout()
+        if ds.heldout_role(seed, held) != role:
+            # The load-time guard already refuses this; never trust one check.
+            raise UsageError(
+                f"Refused: the configured seed is not the registered {role} seed.", path=PATH
+            )
+        seen = ds.seed_ever_recorded(seed)
+    except (OSError, ValueError) as e:
+        raise UsageError(
+            f"Refused: the look history cannot be checked ({type(e).__name__}); a registered "
+            "corpus is generated only from a checkout whose look record and ledger read.",
+            path=PATH,
+        ) from None
+    if seen:
+        raise UsageError(f"Refused: {seen}; its corpus is never generated again.", path=PATH)
+
+    import hashlib
+    import uuid
+
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+    from lakebench.metrics import provenance
+
+    code = provenance.sample()
+    entry = {
+        "kind": "registered_corpus",
+        "attempt": uuid.uuid4().hex,
+        "state": "attempted",
+        "role": role,
+        "seed_hash": ds.seed_hash(held.salt, seed),
+        "config_sha256": hashlib.sha256(Path(config_file).read_bytes()).hexdigest(),
+        "namespace": cfg.get_namespace(),
+        "bronze_uri": f"s3://{cfg.platform.storage.s3.buckets.bronze}/"
+        f"{bronze_datagen_prefix(cfg).rstrip('/')}/",
+        "image": cfg.images.datagen,
+        "lakebench_commit": code.get("git_sha"),
+        "lakebench_dirty": code.get("git_dirty"),
+        "utc": _utc(),
+    }
+    try:
+        ds.append_corpus_ledger(entry)
+    except (OSError, ValueError) as e:
+        print_error(f"Could not record the attempt in {ds.corpora_ledger_path()}: {e}")
+        raise typer.Exit(ExitCode.FAILED) from None
+    print_info(f"Registered {role} corpus: attempt recorded in {ds.corpora_ledger_path()}")
+    return _CorpusRecord(entry)
+
+
+def _generate_loaded(
+    cfg,
+    config_file: Path,
+    timeout: int,
+    yes: bool,
+    regenerate: bool,
+    allow_stale_bronze: bool,
+    *,
+    record: _CorpusRecord | None = None,
+) -> dict | None:
+    """Generate for a loaded, guarded config; the fleet metrics on success.
+    Every failure raises (``typer.Exit`` with its code)."""
+    from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
     check_datagen_scale(cfg)
 
@@ -248,6 +420,8 @@ def generate(
 
         # Submit job
         print_info("Submitting datagen job...")
+        if record is not None:
+            record.submitted = True  # from here a failure may leave a partial corpus
         result = datagen.deploy()
 
         if result.status != DeploymentStatus.SUCCESS:
@@ -378,6 +552,11 @@ def generate(
                     ),
                 )
                 fleet_dict = fleet.to_dict()
+                if record is not None:
+                    # The registered corpus's seed is held out: the sidecar
+                    # and the journal name it by its salted hash only.
+                    fleet_dict["seed"] = None
+                    fleet_dict["seed_ref"] = record.seed_hash
                 # Sidecar file keyed by namespace so parallel UAT runs in
                 # different namespaces do NOT overwrite each other. The
                 # payload also carries `namespace` so a run in ns-A that
@@ -437,6 +616,7 @@ def generate(
                     expand=False,
                 )
             )
+            return fleet_dict
         else:
             _journal_safe(
                 j.record,

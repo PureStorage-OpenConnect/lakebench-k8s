@@ -774,6 +774,7 @@ class TestNoPreRunDestroy:
             mock.patch("lakebench.cli._generate.generate", track("generate")),
             mock.patch("lakebench.cli._run.run", track("run")),
             mock.patch("lakebench.cli._reproduce._refuse_existing"),
+            mock.patch("lakebench.aml.look_guard.refuse_if_protected"),
             mock.patch(
                 "lakebench.cli._reproduce._own_incarnation",
                 side_effect=lambda cfg, path, own, **k: f"uid#{own}",
@@ -1330,9 +1331,7 @@ def test_ordinary_package_is_not_a_look(tmp_path, monkeypatch):
     from lakebench.cli._reproduce import _spent_look
 
     _stub_looks(monkeypatch, [], ())
-    monkeypatch.setattr(
-        "lakebench.config.datagen_seed.protected_seeds", lambda: {999: "evaluation"}
-    )
+    _stub_protected(monkeypatch, {999: "evaluation"})
     meta = {
         "corpus_role": "calibration",
         "experiment_identity": {"workload": "financial", "seed": 43},
@@ -1363,7 +1362,13 @@ def test_report_flag_refused_for_an_ordinary_package(tmp_path, monkeypatch):
 
 
 def _stub_protected(monkeypatch, protected):
-    monkeypatch.setattr("lakebench.config.datagen_seed.protected_seeds", lambda: dict(protected))
+    """Held-out seeds by role (test values), in place of the hash record."""
+    from lakebench.config import datagen_seed
+
+    held = dict(protected)
+    monkeypatch.setattr(datagen_seed, "_heldout", lambda: SimpleNamespace(spent=frozenset()))
+    monkeypatch.setattr(datagen_seed, "heldout_role", lambda s, h=None: held.get(s))
+    monkeypatch.setattr(datagen_seed, "recorded_seeds", lambda path=None: frozenset())
 
 
 def test_roleless_spent_seed_is_verify_only(monkeypatch):
@@ -1412,8 +1417,8 @@ def test_unreadable_look_record_refuses_financial(monkeypatch):
 
 def test_config_naming_a_held_out_corpus_is_refused(monkeypatch):
     """The package may be ordinary while --config generates a held-out
-    corpus: the config is checked too."""
-    from lakebench.cli._reproduce import _config_held_out
+    corpus: the config is checked too, through the look guard (exit 2)."""
+    from lakebench.aml.look_guard import protected_corpus_reason
 
     _stub_looks(monkeypatch, [], ())
     _stub_protected(monkeypatch, {777: "evaluation"})
@@ -1423,10 +1428,11 @@ def test_config_naming_a_held_out_corpus_is_refused(monkeypatch):
         wl = SimpleNamespace(datagen=dg, schema_type=SimpleNamespace(value=schema))
         return SimpleNamespace(architecture=SimpleNamespace(workload=wl))
 
-    assert _config_held_out(cfg(role="evaluation"))
-    assert _config_held_out(cfg(seed=777))
-    assert not _config_held_out(cfg(seed=43))
-    assert not _config_held_out(cfg(seed=777, schema="customer360"))
+    assert protected_corpus_reason(cfg(role="evaluation"))
+    assert protected_corpus_reason(cfg(seed=777))
+    assert protected_corpus_reason(cfg(seed=43)) is None
+    # Another workload with a held-out seed would publish it: refused too.
+    assert protected_corpus_reason(cfg(seed=777, schema="customer360"))
 
 
 def test_package_mode_validated(tmp_path):
