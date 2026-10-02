@@ -153,8 +153,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   take the cycle in their bronze file's name. The rebuild, on Iceberg and
   Delta, also reads only this run's bronze files (cycle 0 up to the current
   cycle, the files bronze-verify counts), not the later cycles' files an
-  earlier run with more cycles left under the prefix. A rebuild whose own
-  cycle's files are not named as datagen names them is refused.
+  earlier run with more cycles left under the prefix. On Iceberg, a rebuild
+  whose own cycle's files are not named as datagen names them is refused.
 - Silver-build no longer rebuilds a populated table without
   `--force-rebuild` when its check for existing rows fails. A failed read
   counted as an empty table; it is now a refusal that names the error. On
