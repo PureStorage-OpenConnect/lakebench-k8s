@@ -225,7 +225,7 @@ class FinancialScorecardBlock:
                 else:
                     status = "ran" if alerts is not None else "no data"
                     recall_cell = "-"
-            typ_cell = typ if typ is not None else "&mdash;"
+            typ_cell = typ if typ is not None else "-"
             body_rows.append(
                 f"<tr><td>{rule}</td><td>{typ_cell}</td>"
                 f"<td>{alerts_cell}</td><td>{recall_cell}</td>"

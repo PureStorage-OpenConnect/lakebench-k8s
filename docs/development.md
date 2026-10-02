@@ -232,7 +232,9 @@ one.
   attribution line in any tracked file (`tests/test_prose_style.py` runs it
   in the unit tier, and the release gate's `prose` check runs it too). A
   hit that has to stay goes in `scripts/prose_allowlist.txt` as
-  `path:line:kind  # reason`; an entry whose hit is gone fails the guard.
+  `path:kind:key  # reason`, with the key the hit prints (a hash of the
+  line, so the entry survives edits elsewhere in the file); an entry whose
+  hit is gone fails the guard.
 
 ## The Spark tier
 

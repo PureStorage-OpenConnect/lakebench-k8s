@@ -457,6 +457,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **The release gate's `em-dashes` check is now `prose`.** It runs
+  `scripts/prose_guard.py` over every tracked file instead of the docs,
+  workflows, examples and CLI sources, and fails on emoji and AI
+  attribution lines as well as em dashes (an HTML em dash entity counts).
+  The unit tests run the same guard (`tests/test_prose_style.py`). A hit
+  that has to stay is listed in `scripts/prose_allowlist.txt` with a
+  reason. `--only em-dashes` is now an unknown check; use `--only prose`.
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with
