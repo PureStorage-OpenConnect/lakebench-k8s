@@ -50,19 +50,19 @@ its source through 2.5.1 and is unchanged from 2.4.0, so the pod-template
 route stays. The v1.x line has broken volume
 injection entirely and is not supported.
 
-`lakebench deploy` always checks the operator and adds the deployment's
-namespace to the operator's watch list (`spark.jobNamespaces`), whatever
-`install` says. With `install: true` it also installs the operator when none
-is present. With `install: false` (the default) a missing operator fails the
-deploy; a cluster admin installs the shared operator once with
-`lakebench admin install-spark-operator`:
+`lakebench deploy` checks the operator and adds the deployment's namespace to
+the operator's watch list (`spark.jobNamespaces`). It never installs the
+operator: a missing operator fails the deploy, and a cluster admin installs
+the shared operator once with `lakebench admin install-spark-operator`.
+`operator.install: true` is refused by every command that changes data
+(`deploy`, `run`, `generate` and the rest); `destroy`, `status` and the
+read-only commands still load a config that carries it and say it is ignored.
 
 ```yaml
 platform:
   compute:
     spark:
       operator:
-        install: false              # true also installs a missing operator (requires cluster-admin)
         namespace: "spark-operator"  # Where the operator runs
         version: "2.5.1"            # Must be v2.x
 ```
@@ -115,22 +115,20 @@ platform:
   compute:
     spark:
       operator:
-        install: false               # Set true to auto-install via Helm (requires cluster-admin)
         namespace: "spark-operator"  # Operator namespace
         version: "2.5.1"            # Operator chart version (v2.x required)
 ```
 
 ### Driver Resources
 
+Each job's driver is sized by its job profile (see
+[Job Profiles](#job-profiles) below). Two global overrides apply to every
+Spark job:
+
 ```yaml
 platform:
   compute:
     spark:
-      driver:
-        cores: 4                     # Driver CPU cores (default for all jobs)
-        memory: "8g"                 # Driver memory (default for all jobs)
-
-      # Global driver overrides (apply to ALL Spark jobs)
       driver_cores: null             # Override driver cores (e.g. 2)
       driver_memory: null            # Override driver memory (e.g. "16g")
 ```
@@ -140,22 +138,14 @@ per-job profile default for every job. Use this when cluster nodes have
 limited resources or at extreme scales (500+) where the driver needs more
 memory to handle Iceberg commit metadata.
 
-### Executor Resources (Defaults)
+### Executor Resources
 
-```yaml
-platform:
-  compute:
-    spark:
-      executor:
-        instances: 8                 # Default executor count
-        cores: 4                     # Cores per executor
-        memory: "48g"                # Memory per executor
-        memory_overhead: "12g"       # JVM overhead per executor
-```
-
-These defaults are used by the auto-sizer for tier guidance. At runtime,
-the actual per-executor sizing comes from the fixed job profiles (see
-[Job Profiles](#job-profiles) below), not from these fields.
+Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed per job
+in the job profiles; only the count can be overridden (below). The v1.6
+`platform.compute.spark.driver` and `.executor` blocks sized nothing (the
+manifests never read them), so v1.7 removed them: a command that changes
+data refuses a config that sets either, with the fix, and `destroy`,
+`status` and the read-only commands load it and say the block is ignored.
 
 ### Per-Job Executor Count Overrides
 
@@ -186,12 +176,13 @@ platform:
     scratch:
       enabled: false                 # Enable Portworx scratch PVCs
       storage_class: "px-csi-scratch"  # Must be repl=1
-      size: "100Gi"                  # Default PVC size (overridden per job)
 ```
 
 When enabled, each executor gets a dynamically provisioned PVC mounted at
 `/tmp/spark-local` for shuffle spill. The PVC size comes from the per-job
-profile, not from `scratch.size`. The StorageClass must use `repl=1` --
+profile (`scratch_size`); `metrics.json` records it per job as
+`config_snapshot.scratch.size_per_job`. `scratch.size` sized nothing and is
+refused like the removed executor block. The StorageClass must use `repl=1` --
 using `repl=2+` doubles storage consumption with zero benefit for
 recomputable shuffle data. `lakebench deploy` only verifies that the
 StorageClass exists; it never creates it. A cluster admin creates it once with

@@ -181,8 +181,10 @@ class TestHiveDeployerDeploy:
 
         result = deployer.deploy()
         assert result.status == DeploymentStatus.FAILED
-        assert "Option 1" in result.message
-        assert "Option 2" in result.message
+        # A cluster admin installs the shared operators; the config cannot.
+        assert "A cluster admin installs them once" in result.message
+        assert "helm install hive-operator" in result.message
+        assert "operator.install: true" not in result.message
 
     @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
     @patch("subprocess.run")

@@ -46,13 +46,22 @@ def _snapshot(config: Path) -> dict:
     try:
         cfg = load_config(config)
         resolve_auto_sizing(cfg, None)
-        return build_config_snapshot(cfg)
+        # A run records the sha256 of the file it loaded.
+        return build_config_snapshot(cfg, config_path=config)
     finally:
         for k in env:
             os.environ.pop(k, None)
 
 
 QUERIES = {"Q1_scan": 4.0, "Q2_filter": 3.0, "Q3_join": 6.0}
+
+# The dependency pinset every synthetic run records (provenance.deps); the
+# gate refuses a run on another set and records no baseline without one.
+PINSET = "a1" * 32
+
+
+def _provenance(pinset: str | None = PINSET) -> dict:
+    return {"deps": {"pinset_sha256": pinset}} if pinset else {}
 
 
 def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
@@ -120,6 +129,7 @@ def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
             "experiment", stub_experiment(QUERIES, failed=over.get("failed", ()))
         ),
         "maintenance_policy_id": over.get("policy", MAINTENANCE_POLICY_ID),
+        "provenance": _provenance(over.get("pinset", PINSET)),
         "pipeline_benchmark": {
             "run_id": run_id,
             "pipeline_mode": "batch",
@@ -177,6 +187,7 @@ def _cont_run(
         # A continuous run with its end-of-run result check (a settled corpus).
         "experiment": stub_experiment(QUERIES, mode="sustained"),
         "maintenance_policy_id": MAINTENANCE_POLICY_ID,
+        "provenance": _provenance(),
         "pipeline_benchmark": {
             "run_id": run_id,
             "pipeline_mode": "sustained",
@@ -674,15 +685,7 @@ _ALWAYS = [
     "architecture.benchmark.mode",
     "architecture.benchmark.cache",
     "architecture.benchmark.iterations",
-    "architecture.benchmark.streams",
     "platform.storage.scratch.storage_class",
-    "platform.storage.scratch.size",
-    "platform.compute.spark.driver.cores",
-    "platform.compute.spark.driver.memory",
-    "platform.compute.spark.executor.instances",
-    "platform.compute.spark.executor.cores",
-    "platform.compute.spark.executor.memory",
-    "platform.compute.spark.executor.memory_overhead",
 ]
 _BATCH = [
     "platform.compute.spark.bronze_executors",
@@ -1145,6 +1148,8 @@ def _real_run(snap: dict, run_id: str, silver_s: float = 200.0):
         silver_size_gb=90.0,
         gold_size_gb=40.0,
         config_snapshot=snap,
+        # What SD-5c's run start fills from the deployment's manifest.
+        provenance=_provenance(),
     )
     t += timedelta(seconds=300)  # generate inside the run
     for jt, secs, gb, ex in (

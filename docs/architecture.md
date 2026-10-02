@@ -314,9 +314,9 @@ The deployment engine creates resources in a strict dependency order:
 9. **Spark RBAC** -- ServiceAccount, Role, RoleBinding (plus SCC on OpenShift)
 10. **Unity Catalog** -- skipped unless the catalog is Unity (not a supported
     combination)
-11. **Spark Operator** -- verifies the shared operator (or installs a missing
-    one when `platform.compute.spark.operator.install: true`) and adds the
-    namespace to its watch list under the cluster lease
+11. **Spark Operator** -- verifies the shared operator (a cluster admin
+    installs it once; deploy never does) and adds the namespace to its watch
+    list under the cluster lease
 12. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
 13. **Spark Thrift Server** -- if selected
 14. **DuckDB** -- if selected

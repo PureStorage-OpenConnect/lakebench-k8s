@@ -70,7 +70,7 @@ architecture:
 
 **Does not deploy:** Polaris.
 
-**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) and the commons, listener and secret operators it depends on. Either set `architecture.catalog.hive.operator.install: true` or install them with:
+**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) and the commons, listener and secret operators it depends on. A cluster admin installs them once (lakebench does not):
 
 ```bash
 for op in commons-operator listener-operator secret-operator hive-operator; do

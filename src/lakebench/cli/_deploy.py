@@ -299,7 +299,7 @@ def deploy(
     4. Catalog (Hive Metastore or Polaris)
     5. Spark RBAC (then Unity Catalog, only if catalog.type is unity)
     6. Spark Operator check and watch-list entry for the namespace (always
-       runs; operator.install: true also installs a missing operator)
+       runs; never installs the shared operator)
     7. Query Engine (Trino / Spark Thrift / DuckDB)
     8. Observability (if enabled)
     """

@@ -656,13 +656,6 @@ class DeploymentEngine:
             "scratch_storage_class": cfg.platform.storage.scratch.storage_class,
             "scratch_provisioner": cfg.platform.storage.scratch.provisioner,
             "scratch_parameters": cfg.platform.storage.scratch.parameters,
-            # Spark
-            "spark_driver_cores": cfg.platform.compute.spark.driver.cores,
-            "spark_driver_memory": cfg.platform.compute.spark.driver.memory,
-            "spark_executor_instances": cfg.platform.compute.spark.executor.instances,
-            "spark_executor_cores": cfg.platform.compute.spark.executor.cores,
-            "spark_executor_memory": cfg.platform.compute.spark.executor.memory,
-            "spark_executor_memory_overhead": cfg.platform.compute.spark.executor.memory_overhead,
             # Spark Thrift Server
             "spark_thrift_cores": cfg.architecture.query_engine.spark_thrift.cores,
             "spark_thrift_memory": cfg.architecture.query_engine.spark_thrift.memory,
@@ -1787,8 +1780,8 @@ class DeploymentEngine:
                 hint = ""
                 if not spark_op_cfg.install:
                     hint = (
-                        " (operator.install is false -- set to true for "
-                        "auto-install, or install the operator manually)"
+                        " (a cluster admin installs it once with "
+                        "'lakebench admin install-spark-operator')"
                     )
                 return DeploymentResult(
                     component="spark-operator",

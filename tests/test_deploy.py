@@ -195,7 +195,8 @@ class TestDeploymentEngine:
         assert ctx["namespace"] == "test-deploy"
         assert ctx["s3_endpoint"] == "http://minio:9000"
         assert ctx["s3_access_key"] == "minioadmin"
-        assert "spark_executor_instances" in ctx
+        # No template reads Spark executor sizing: it is the job profiles'.
+        assert not [k for k in ctx if k.startswith(("spark_executor_", "spark_driver_"))]
         assert "trino_worker_replicas" in ctx
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
@@ -527,9 +528,7 @@ class TestAutoSizerIntegration:
         k8s = _mock_k8s()
         engine = DeploymentEngine(config, k8s_client=k8s, dry_run=True)
 
-        # scale=1 → minimal tier: 2 executors, 4g memory
-        assert engine.context["spark_executor_instances"] == 2
-        assert engine.context["spark_executor_memory"] == "4g"
+        # scale=1 → minimal tier: 1 Trino worker
         assert engine.context["trino_worker_replicas"] == 1
 
 

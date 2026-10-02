@@ -197,7 +197,8 @@ lakebench validate [CONFIG_FILE] [OPTIONS]
 Checks performed: YAML syntax, required fields, S3 endpoint reachability,
 S3 credential validity, Kubernetes context accessibility, namespace status,
 platform security (SCC on OpenShift), storage classes, Spark Operator status,
-and compute adequacy for the configured scale. Before the first deploy, a
+and the configured scale. Executor sizing is not graded: it is the job
+profiles'. Before the first deploy, a
 namespace the Spark Operator does not watch yet is reported as advisory:
 `deploy` adds it to the watch list under the cluster lock.
 
@@ -227,8 +228,9 @@ recipe uses it), Spark Operator check and watch-list entry for the
 namespace (under the cluster lock), then the query engine (Trino, Spark
 Thrift or DuckDB), and optionally the shared observability stack. The Spark
 Operator step always runs: it checks the operator is ready and adds the
-namespace to its watch list whatever `operator.install` says;
-`operator.install: true` also installs a missing operator.
+namespace to its watch list. It never installs the shared operator (a cluster
+admin runs `lakebench admin install-spark-operator` once), and a config with
+`operator.install: true` is refused.
 
 With `--local`, lakebench runs the same pipeline against podman/docker
 containers on the local machine instead of a Kubernetes cluster, useful for

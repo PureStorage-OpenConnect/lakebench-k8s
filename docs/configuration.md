@@ -159,16 +159,14 @@ When you omit optional sections, these defaults apply:
 | `datagen.scale` | 10 | ~100 GB bronze data |
 | `catalog.type` | hive | Stackable Hive Metastore |
 | `query_engine.type` | trino | Trino coordinator + 2 workers |
-| `spark.operator.install` | false | Must opt in to auto-install Spark Operator |
-| `hive.operator.install` | false | Must opt in to auto-install Stackable operators (Hive recipes) |
 | `observability.enabled` | false | No Prometheus/Grafana |
 | `scratch.enabled` | false | emptyDir for shuffle |
 
 **What to tune first as you scale up:**
 
 1. `datagen.scale` -- controls data volume
-2. `compute.spark.*_executors` -- per-job executor counts (the `executor`
-   block does not size the Spark jobs; see [Executor Override Guide](#executor-override-guide))
+2. `compute.spark.*_executors` -- per-job executor counts (per-executor
+   sizing is fixed in the job profiles; see [Executor Override Guide](#executor-override-guide))
 3. `query_engine.trino.worker` -- match replicas/memory to your cluster
 4. `scratch` / `postgres` storage classes -- match to your storage provider
 
@@ -248,29 +246,17 @@ platform:
 
     scratch:
       enabled: false                  # Enable Portworx scratch StorageClass
-      storage_class: px-csi-scratch
-      size: 100Gi
+      storage_class: px-csi-scratch   # PVC size per executor: the job profile's
 
   compute:
     spark:
-      operator:
-        install: false                # default; true installs it via Helm (cluster-admin)
-        namespace: spark-operator
+      operator:                       # Shared; a cluster admin installs it once
+        namespace: spark-operator     # (lakebench admin install-spark-operator)
         version: "2.5.1"
 
-      driver:
-        cores: 4
-        memory: 8g
-
-      # The driver and executor blocks are not read by the Spark job
-      # manifests: each job takes its driver and executor sizing from its
-      # built-in job profile. They feed the `validate` compute check and
-      # are recorded in metrics.json.
-      executor:
-        instances: 8
-        cores: 4
-        memory: 48g
-        memory_overhead: 12g
+      # Each job takes its driver and executor sizing from its built-in job
+      # profile. The v1.6 driver and executor blocks are refused (they sized
+      # nothing).
 
       # Per-job executor count overrides (null = auto from scale factor).
       # Per-executor sizing (cores, memory, PVC) is fixed from proven profiles.
@@ -385,9 +371,10 @@ architecture:
       benchmark_warmup: 300           # Clamped to gold_refresh_interval at runtime
 
   benchmark:
-    mode: power                       # power | throughput | composite | standard | extended
-    streams: 4
-    cache: hot                        # hot | cold
+    mode: power                       # power | standard | extended; throughput and composite
+                                      # are `lakebench benchmark --mode` only (run refuses them)
+    # streams: 4                      # `lakebench benchmark` throughput streams; run refuses > 1
+    cache: hot                        # hot; cold is `lakebench benchmark --cold` only
     iterations: 3                     # timed runs per query; QpH uses the median
 
   tables:
@@ -496,7 +483,6 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 |---|---|---|---|
 | `platform.storage.scratch.enabled` | bool | `false` | Enable scratch StorageClass for Spark PVCs. |
 | `platform.storage.scratch.storage_class` | string | `px-csi-scratch` | StorageClass name for scratch volumes. |
-| `platform.storage.scratch.size` | string | `100Gi` | Default scratch PVC size. |
 | `platform.storage.scratch.provisioner` | string | `pxd.portworx.com` | CSI provisioner for the StorageClass. Use `rancher.io/local-path`, `ebs.csi.aws.com`, etc. for non-Portworx providers. |
 | `platform.storage.scratch.parameters` | dict | `{"repl": "1", ...}` | Provider-specific StorageClass parameters. |
 
@@ -504,15 +490,9 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `platform.compute.spark.operator.install` | bool | `false` | Install the Kubeflow Spark Operator via Helm. Requires cluster-admin. |
+| `platform.compute.spark.operator.install` | bool | `false` | Refused when `true` by every command that changes data: the operator is shared infrastructure that a cluster admin installs once with `lakebench admin install-spark-operator`. `destroy`, `status` and the read-only commands load `true` as `false` with a note. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | Namespace for the Spark Operator. |
 | `platform.compute.spark.operator.version` | string | `2.5.1` | Spark Operator chart version. v2.x required. |
-| `platform.compute.spark.driver.cores` | int | `4` | Not read by the Spark job manifests (drivers are sized from the job profiles). Used by the compute check in `validate` and recorded in `metrics.json`. |
-| `platform.compute.spark.driver.memory` | string | `8g` | As `driver.cores`: not read by the job manifests. Use `driver_memory` to override driver memory. |
-| `platform.compute.spark.executor.instances` | int | `8` | Not read by the Spark job manifests. Per-job executor counts come from the job profiles (scaled with `datagen.scale`) or the `*_executors` overrides below. Used by the compute check in `validate`. |
-| `platform.compute.spark.executor.cores` | int | `4` | Not read by the job manifests; per-executor sizing is fixed per job profile. |
-| `platform.compute.spark.executor.memory` | string | `48g` | Not read by the job manifests; per-executor sizing is fixed per job profile. |
-| `platform.compute.spark.executor.memory_overhead` | string | `12g` | Not read by the job manifests; per-executor sizing is fixed per job profile. |
 | `platform.compute.spark.bronze_executors` | int or null | `null` | Override bronze-verify executor count. Null = auto from scale. |
 | `platform.compute.spark.silver_executors` | int or null | `null` | Override silver-build executor count. Null = auto from scale. |
 | `platform.compute.spark.gold_executors` | int or null | `null` | Override gold-finalize executor count. Null = auto from scale. |
@@ -534,7 +514,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `architecture.catalog.type` | enum | `hive` | Catalog service: `hive`, `polaris`, or `none`. |
-| `architecture.catalog.hive.operator.install` | bool | `false` | Auto-install Stackable operators via Helm. Requires cluster-admin. |
+| `architecture.catalog.hive.operator.install` | bool | `false` | Refused when `true` by every command that changes data: a cluster admin installs the Stackable operators once (see [component-hive.md](component-hive.md#stackable-operator)). `destroy`, `status` and the read-only commands load `true` as `false` with a note. |
 | `architecture.catalog.hive.operator.namespace` | string | `stackable` | Namespace for Stackable operators. |
 | `architecture.catalog.hive.operator.version` | string | `25.7.0` | Stackable chart version. |
 | `architecture.catalog.hive.thrift.min_threads` | int | `10` | **No effect** (the template hardcodes 10); a non-default value warns. |
@@ -641,9 +621,9 @@ leave these at defaults and control volume via `datagen.scale`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.benchmark.mode` | enum | `power` | Benchmark mode: `power`, `standard`, `extended`, `throughput`, or `composite`. |
-| `architecture.benchmark.streams` | int | `4` | Concurrent query streams for throughput mode. Range: 1--64. |
-| `architecture.benchmark.cache` | enum | `hot` | Cache mode: `hot` (warm cache) or `cold` (cleared before each query). |
+| `architecture.benchmark.mode` | enum | `power` | Benchmark mode: `power`, `standard`, `extended`, `throughput`, or `composite`. `lakebench run` measures one power pass (`standard` and `extended` are power) and refuses `throughput` and `composite`, with or without `--skip-benchmark`; `lakebench benchmark --mode` runs them. |
+| `architecture.benchmark.streams` | int | `4` | Concurrent query streams for `lakebench benchmark` throughput mode. Range: 1--64. `lakebench run` uses one stream and refuses an explicit value above 1. |
+| `architecture.benchmark.cache` | enum | `hot` | Cache mode: `hot` (warm cache) or `cold` (cleared before each query). `lakebench run` measures a hot cache and refuses `cold`; use `lakebench benchmark --cold`. |
 | `architecture.benchmark.iterations` | int | `3` | Timed runs of each query per benchmark round. QpH is scored from the per-query median and every sample plus the spread is recorded in `metrics.json`. `1` is a quick run with no measured spread; the maintenance value is then not reported. Range: 1--100. |
 | `architecture.benchmark.maintenance_settle.enabled` | bool | `true` | Batch mode: probe until storage settles between maintenance and the post-maintenance round. See [benchmarking.md](benchmarking.md). |
 | `architecture.benchmark.maintenance_settle.max_seconds` | int | `2700` | Longest wait. When reached, the post round still runs and `maintenance_value_pct` is null. Range: 60--14400. |
@@ -834,17 +814,19 @@ The algorithm:
 1. **Always-on pods** (Trino coordinator + workers, Hive/Polaris, PostgreSQL)
    are sized from tier guidance and capped to fit the cluster. They are never
    boosted beyond the tier recommendation.
-2. **Datagen and Spark** share the remaining CPU budget.
-   - In **batch mode** (default), they run sequentially -- each gets the full
-     remaining budget.
-   - Only the deprecated `pipeline.pattern: streaming` splits the budget
-     40% datagen, 60% Spark. Continuous mode (`--continuous`) does not
-     change the split; the continuous Spark jobs are capped to a concurrent
-     budget when their manifests are built.
+2. **Datagen** gets the remaining CPU budget.
+   - In **batch mode** (default), datagen and Spark run sequentially, so
+     datagen gets the full remaining budget.
+   - Only the deprecated `pipeline.pattern: streaming` gives datagen 40% of
+     it. Continuous mode (`--continuous`) does not change that; the
+     continuous Spark jobs are capped to a concurrent budget when their
+     manifests are built.
 3. **Small scales (1--50):** Resources are only capped downward to fit.
-4. **Large scales (51+):** `executor.instances` is scaled up to use
-   available cluster capacity. The Spark job manifests do not read it.
-5. **Per-pod memory** is capped to 85% of the largest node.
+4. **Large scales (51+):** datagen parallelism is scaled up to use
+   available cluster capacity.
+5. **Trino worker memory** is capped to 85% of the largest node.
+
+Spark executor and driver sizing is not auto-sized: it is the job profiles.
 
 Per-job executor counts do not come from the auto-sizer. Each job takes a
 base count from its job profile and adds executors linearly above scale 10,
@@ -879,8 +861,9 @@ platform:
       storage_class: px-csi-db
 ```
 
-No executor tuning needed -- auto-sizing handles it. At scale 100 the
-resolved resources are approximately:
+No executor tuning needed: the job profiles scale executor counts with the
+data, and the auto-sizer sizes datagen and Trino. At scale 100 the resolved
+resources are approximately:
 
 | Component | Instances | Per-Instance Resources |
 |---|---|---|

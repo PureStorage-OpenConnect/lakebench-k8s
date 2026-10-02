@@ -11,7 +11,7 @@ to Kubernetes or S3.
 | Piece | Path | What it holds |
 |---|---|---|
 | Pinned configs | `benchmarks/perf/*.yaml` | One per workload and mode that matters, every sizing knob explicit |
-| Baseline store | `benchmarks/perf/baselines.yaml` | Accepted numbers per pinned config, with run id, git sha, config hash |
+| Baseline store | `benchmarks/perf/baselines.yaml` | Accepted numbers per pinned config, with run id, git sha, config hash, fingerprint version and dependency pinset (store `schema_version` 2; a schema 1 store still loads, its entries read as fingerprint version 1, and the next `record` writes schema 2) |
 | Gate logic | `src/lakebench/metrics/perf_gate.py` | Fingerprints, guards, compare, record |
 | CLI | `scripts/perf_gate.py` | `status`, `compare`, `record`, `seed`, `gate` |
 | Release check | `scripts/release_gate.py` check `perf-baselines` | Fails the release on a regression or a missing required baseline |
@@ -38,16 +38,47 @@ Two hashes, both recorded with the baseline:
   not count; any value does. If the pinned file changes after a baseline was
   recorded, compare refuses until a new baseline is recorded.
 - **`fingerprint_hash`** is the sha256 of the sizing-relevant part of the
-  `config_snapshot` a run records in `metrics.json`: scale, recipe, Spark
-  driver, executor and per-job executor counts, datagen scale, mode,
-  parallelism and file size, images, Trino coordinator and workers,
-  continuous-mode trigger intervals, benchmark mode, scratch storage, and the
-  maintenance settings (`pre_benchmark_maintenance`, `retention_interval`,
-  `retention_threshold`, `compaction_enabled`, `compaction_interval`).
+  `config_snapshot` a run records in `metrics.json`. Fingerprint version 2
+  (from v1.7) covers: scale, recipe, per-job executor count overrides,
+  datagen scale, mode, parallelism and file size, images, Trino coordinator
+  and workers, continuous-mode trigger intervals, the benchmark that ran
+  (for `lakebench run`: one hot power pass with one stream, the config's
+  `iterations` and the `maintenance_settle` settings), scratch storage with
+  the per-job scratch sizes, the maintenance settings
+  (`pre_benchmark_maintenance`, `retention_interval`, `retention_threshold`,
+  `compaction_enabled`, `compaction_interval`), and `fingerprint_inputs`:
+  - `job_profiles`: per Spark job of the run's mode, the driver cores and
+    memory, executor cores, memory, overhead and count, and scratch size
+    its manifest asks for (job profile, scale-derived count, overrides);
+    the count is the one before the continuous concurrent budget;
+  - `owned_conf`: per Spark job, the `sparkConf` its manifest writes,
+    without the keys that name where a deployment lives (S3 endpoint,
+    warehouse and catalog URIs, metastore URI, jar URLs) and without any
+    key that can hold a credential;
+  - the query engine's sizing block (Trino workers with spill and storage,
+    Spark Thrift or DuckDB cores and memory) and the catalog's resources.
+
   The snapshot is taken after autosizing and any cluster capping, so it is
-  what actually ran. A run whose fingerprint differs from the pinned
-  config's is refused, and the refusal names each differing field (for
-  example `trino.worker.replicas: pinned 2, run 8`).
+  what actually ran, and `fingerprint_version` and `fingerprint_inputs` are
+  stamped into it when the run starts: the gate reads them and never
+  rebuilds them, so a record keeps the fingerprint of the code that ran it.
+  A run whose fingerprint differs from the pinned config's is refused, and
+  the refusal names each differing field (for example
+  `trino.worker.replicas: pinned 2, run 8`). A change to a job profile or
+  to the conf Lakebench writes moves the pinned config's fingerprint too, so
+  its baseline is refused until re-recorded.
+- **Fingerprint version.** A run recorded before v1.7 has no
+  `fingerprint_version` (version 1) and is refused by name ("run predates
+  fingerprint v2"); a baseline recorded under version 1 is refused the same
+  way ("baseline predates fingerprint v2") until the v1.7 re-baseline
+  re-records it.
+- **Dependency set.** Each baseline stores the dependency pinset of its run
+  (`provenance.deps.pinset_sha256`). The gate compares a pinned config with
+  itself, so a run on another set differs from the baseline in its jars
+  alone, which is not like for like: it is refused ("dependency set differs
+  from the baseline"). `record` refuses a run that records no pinset. Runs
+  record the pinset once the in-deployment dependency server lands in v1.7;
+  until then no run can be recorded as a baseline.
 
 Defaults are not part of `config_hash`, which is why each pinned file sets
 every knob itself; `tests/test_perf_gate.py` fails if one is left to a
@@ -104,8 +135,8 @@ A run is refused, never compared, when:
   whose result fingerprints differ from the baseline's, is refused like a
   batch run;
 - its datagen fleet reported `data_quality` other than `complete`;
-- its snapshot records a `config_sha256` that is not the pinned file's. Runs
-  do not record this field yet; see "Known gaps";
+- its snapshot records a `config_sha256` that is not the pinned file's, or
+  (a v1.7 run) records none;
 - it is a batch run whose time to value was taken differently from the
   baseline's (from stage timestamps in one, from the scorecard in the other),
   or whose stages carry no timestamps while its datagen stage is stale or
@@ -293,12 +324,13 @@ run as `uat/perf/run-<id>/metrics.json` alongside `uat/results-<version>.md`.
 ## Known gaps
 
 The fingerprint can only compare what `build_config_snapshot` records. Some
-knobs that move numbers are not in it: datagen CPU, the datagen timestamp
-range, Trino spill settings, table format versions, and the Spark Thrift
-size. Pinning them in the file covers runs of the file itself, but a run of an
-edited copy with the same snapshot is not caught until runs record the sha256
-of the config file they used (`config_sha256` in the snapshot), which the gate
-already checks when present. The datagen sidecar does not record the image
+knobs that move numbers are not in it, such as datagen CPU and the datagen
+timestamp range; the config-file sha256 covers them for runs of a pinned
+file. Code-default changes outside the Spark manifest's conf and sizing are
+not fingerprinted: the Spark pods' environment, the restart policy, and the
+continuous bronze-verify preflight and AML scoring jobs, which are not
+stages the gate times. A change there is compared, not refused, like any
+other code change. The datagen sidecar does not record the image
 that wrote it, so a run that reuses a recent sidecar from a different image is
 not caught either.
 

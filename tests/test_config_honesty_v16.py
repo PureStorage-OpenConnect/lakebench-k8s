@@ -7,6 +7,7 @@ runtime strings describe what the code does.
 
 from __future__ import annotations
 
+import copy
 import time
 import warnings
 from pathlib import Path
@@ -187,6 +188,45 @@ def test_unread_field_set_warns_it_has_no_effect(overrides, field):
     hits = [str(w.message) for w in rec if field in str(w.message)]
     assert hits, [str(w.message) for w in rec]
     assert "has no effect" in hits[0]
+
+
+# The five fields above are CFG-9 removals (CC-17 turns their warning into a
+# refusal). The unread Spark sizing blocks and scratch.size were superseded by
+# CFG-1 (CC-11): a command that changes data refuses them with fix text, and
+# the read and teardown commands drop them with a note.
+@pytest.mark.parametrize(
+    ("overrides", "key", "fix"),
+    [
+        (
+            {"platform": {"compute": {"spark": {"executor": {"instances": 16}}}}},
+            "'executor' was removed",
+            "per-executor sizing is fixed in the job profiles",
+        ),
+        (
+            {"platform": {"compute": {"spark": {"driver": {"memory": "16g"}}}}},
+            "'driver' was removed",
+            "driver_memory/driver_cores for the driver",
+        ),
+        (
+            {"platform": {"storage": {"scratch": {"size": "200Gi"}}}},
+            "'size' was removed",
+            "per-job scratch comes from the job profiles",
+        ),
+    ],
+)
+def test_unread_spark_sizing_set_is_refused_with_fix_text(tmp_path, overrides, key, fix):
+    from lakebench.config import LoadPurpose, load_config
+    from lakebench.config.loader import ConfigValidationError
+
+    platform = copy.deepcopy(overrides["platform"])
+    platform.setdefault("storage", {})["s3"] = _s3(access_key="a", secret_key="b")["storage"]["s3"]
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump({"name": "t", "platform": platform}))
+    with pytest.raises(ConfigValidationError) as e:
+        load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
+    assert key in str(e.value) and fix in str(e.value)
+    # destroy still loads it.
+    assert load_config(path, purpose=LoadPurpose.TEARDOWN, print_notes=False).name == "t"
 
 
 @pytest.mark.parametrize(

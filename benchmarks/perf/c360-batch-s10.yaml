@@ -41,21 +41,12 @@ platform:
     scratch:
       enabled: true
       storage_class: px-csi-scratch
-      size: 100Gi
 
   compute:
     postgres:
       storage: 10Gi
       storage_class: px-csi-db
     spark:
-      driver:
-        cores: 4
-        memory: 8g
-      executor:
-        instances: 4
-        cores: 4
-        memory: 16g
-        memory_overhead: 4g
       # Per-job executor counts, equal to the scale-10 auto values today
       # (get_executor_count). Pinned so a profile change shows up as a
       # config change, not as a performance change.
@@ -102,4 +93,3 @@ architecture:
     # Median of 3 timed runs per query (LB-150); a run with a different
     # sample count is refused by the gate.
     iterations: 3
-    streams: 4

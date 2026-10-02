@@ -2729,7 +2729,7 @@ def _run_sustained(
     os.environ["LB_RUN_ID"] = run_id
     from lakebench.metrics import build_config_snapshot
 
-    config_snapshot = build_config_snapshot(cfg, run_mode="continuous")
+    config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts

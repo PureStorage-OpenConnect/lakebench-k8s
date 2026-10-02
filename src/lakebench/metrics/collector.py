@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar
 
 from lakebench._clock import utc_now
@@ -2140,7 +2142,11 @@ CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
 
 
 def build_config_snapshot(
-    cfg: Any, *, run_mode: str | None = None, system: str = "cluster"
+    cfg: Any,
+    *,
+    run_mode: str | None = None,
+    system: str = "cluster",
+    config_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build a config snapshot for metrics recording.
 
@@ -2149,11 +2155,19 @@ def build_config_snapshot(
 
     Args:
         cfg: A :class:`~lakebench.config.LakebenchConfig` instance.
+        config_path: The config file the run loaded. Its bytes' sha256 is
+            recorded as ``config_sha256``, which the perf gate compares with
+            the pinned file's.
 
     Returns:
         Dict suitable for JSON serialization.
     """
     from lakebench.config.schema import is_continuous_mode
+    from lakebench.metrics.fingerprint_inputs import (
+        FINGERPRINT_VERSION,
+        fingerprint_inputs,
+        scratch_size_per_job,
+    )
 
     spark = cfg.platform.compute.spark
     datagen = cfg.architecture.workload.datagen
@@ -2178,19 +2192,10 @@ def build_config_snapshot(
         "scratch": {
             "enabled": scratch.enabled,
             "storage_class": scratch.storage_class,
-            "size": scratch.size,
+            # Each executor's scratch PVC is its job profile's size.
+            "size_per_job": scratch_size_per_job(cfg, _continuous),
         },
         "spark": {
-            "driver": {
-                "cores": spark.driver.cores,
-                "memory": spark.driver.memory,
-            },
-            "executor": {
-                "instances": spark.executor.instances,
-                "cores": spark.executor.cores,
-                "memory": spark.executor.memory,
-                "memory_overhead": spark.executor.memory_overhead,
-            },
             "executor_overrides": {
                 "bronze": spark.bronze_executors,
                 "silver": spark.silver_executors,
@@ -2239,18 +2244,23 @@ def build_config_snapshot(
                 "memory": cfg.architecture.query_engine.trino.worker.memory,
             },
         },
-        # What the benchmark runs with. Continuous mode ignores the
-        # benchmark block: its in-stream rounds are fixed (one hot power
-        # pass, one sample per query), so recording the config's iterations
-        # and streams there would claim runs that never happened.
+        # What the benchmark ran. Continuous mode ignores the benchmark
+        # block: its in-stream rounds are fixed (one hot power pass, one
+        # sample per query). Batch `run` always runs one hot power pass with
+        # one stream and the config's iterations (`run` refuses another mode,
+        # a cold cache or several streams at load), and waits for storage to
+        # settle after maintenance as maintenance_settle says.
         "benchmark": (
             dict(CONTINUOUS_ROUND_BENCHMARK)
-            if is_continuous_mode(pipeline.mode)
+            if _continuous
             else {
-                "mode": cfg.architecture.benchmark.mode.value,
-                "streams": cfg.architecture.benchmark.streams,
-                "cache": cfg.architecture.benchmark.cache,
+                "mode": "power",
+                "streams": 1,
+                "cache": "hot",
                 "iterations": cfg.architecture.benchmark.iterations,
+                "maintenance_settle": cfg.architecture.benchmark.maintenance_settle.model_dump(
+                    mode="json"
+                ),
             }
         ),
         # What table maintenance the config asks for. Part of the perf-gate
@@ -2274,7 +2284,17 @@ def build_config_snapshot(
         # Config half of the metrics.json experiment block
         # (metrics/experiment.py). Not a perf-gate fingerprint key.
         "experiment_inputs": experiment_inputs(cfg, run_mode=run_mode, system=system),
+        # Perf-gate fingerprint version and the inputs it hashes beyond the
+        # fields above (metrics/fingerprint_inputs.py). Stamped here, at run
+        # start, so the gate reads them and never rebuilds them.
+        "fingerprint_version": FINGERPRINT_VERSION,
+        "fingerprint_inputs": fingerprint_inputs(cfg, _continuous, local=system == "local"),
     }
+    if config_path is not None:
+        try:
+            snapshot["config_sha256"] = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+        except OSError:
+            snapshot["config_sha256"] = None
 
     return snapshot
 

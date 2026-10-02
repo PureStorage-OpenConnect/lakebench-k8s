@@ -2183,7 +2183,6 @@ class TestBuildConfigSnapshot:
                     "scratch": {
                         "enabled": True,
                         "storage_class": "px-csi-scratch",
-                        "size": "150Gi",
                     },
                 },
             },
@@ -2200,8 +2199,10 @@ class TestBuildConfigSnapshot:
         assert snapshot["s3"]["endpoint"] == "http://test-s3-endpoint:80"
         assert snapshot["s3"]["buckets"]["bronze"] == "lb-bronze"
         assert snapshot["scratch"]["enabled"] is True
-        assert snapshot["spark"]["executor"]["instances"] == 8  # default
-        assert snapshot["spark"]["executor"]["cores"] == 4  # default
+        # Per-executor sizing is recorded per job, from the job profiles.
+        assert "executor" not in snapshot["spark"] and "driver" not in snapshot["spark"]
+        assert snapshot["scratch"]["size_per_job"]["silver-build"] == "300Gi"
+        assert "size" not in snapshot["scratch"]
         assert snapshot["catalog"] == "hive"  # default
         assert snapshot["table_format"] == "iceberg"  # default
         assert snapshot["pipeline_engine"] == "spark"  # default

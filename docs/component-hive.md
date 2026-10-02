@@ -21,24 +21,22 @@ leave it unset) to use it.
 The Stackable Hive Operator (plus commons, listener, and secret operators)
 must be present on the cluster before deploying a Hive catalog.
 
-Lakebench can auto-install the operators, or skip installation if they are
-already present on the cluster:
+They are shared cluster infrastructure: a cluster admin installs them once,
+and `lakebench deploy` only checks that they are there. The config names
+where they run and which version:
 
 ```yaml
 architecture:
   catalog:
     hive:
       operator:
-        install: false              # Set true to auto-install (requires cluster-admin)
         namespace: "stackable"      # Where the operators run
         version: "25.7.0"           # Stackable chart version
 ```
 
-When `install: true`, `lakebench deploy` installs all four Stackable operators
-via Helm before deploying the HiveCluster. If the operators are already
-installed, the step is skipped.
-
-To install manually instead:
+`operator.install: true` is refused by every command that changes data;
+`destroy`, `status` and the read-only commands load it as `false` with a
+note. Install the operators with:
 
 ```bash
 helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \
@@ -53,9 +51,8 @@ helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
 
 Lakebench checks for the `hiveclusters.hive.stackable.tech` and
 `secretclasses.secrets.stackable.tech` CRDs, and that their operators are
-running, at deploy time. If either is missing and `install` is false,
-deployment fails with an actionable error message that lists the Helm
-install commands.
+running, at deploy time. If either is missing, deployment fails with an
+error that lists the Helm install commands.
 
 ### Managed Resources
 
