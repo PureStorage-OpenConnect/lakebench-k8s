@@ -253,12 +253,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   when nothing else is left (before, it was always added, entries were
   dropped one upgrade at a time, and only the Helm values were read). When
   some of them watch every namespace and others list namespaces it changes
-  nothing and exits 3. A release left `pending-upgrade` or
-  `pending-rollback` that has not changed for 10 minutes is rolled back to
-  its last deployed revision when that revision names no deleted namespace,
-  and the list read before the rollback is then set, so a namespace an
-  interrupted add wrote is kept; otherwise, and for `pending-install`, it
-  exits 3 with the reason. With no release it exits 4; an unreadable
+  nothing and exits 3, before any rollback. A release left
+  `pending-upgrade` or `pending-rollback` whose pending revision started at
+  least 10 minutes ago, by the API server's clock (the revision Secret's
+  creation time against the server's Date), is rolled back to the newest
+  deployed revision that names no deleted namespace, and the list read
+  before the rollback is then set, so a namespace an interrupted add wrote
+  is kept. Otherwise, and for `pending-install`, it exits 3 with the
+  reason; when every earlier revision names a deleted namespace the message
+  gives the manual recovery. With no release it exits 4; an unreadable
   Deployment or namespace list exits 1. `--dry-run` reads without the lease,
   prints the rollback verdict and changes nothing.
 - **Deploy and run stop when the Spark Operator's watch list cannot be

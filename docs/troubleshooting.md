@@ -175,13 +175,16 @@ lease" and finishes the shared change first (its hold budget is 750 s,
 Ctrl-C twice more to abort at once; the lease is still released. If a helm
 upgrade was running, run `helm history spark-operator -n spark-operator`:
 a `pending-upgrade` revision blocks every deployment's watch-list change.
-`lakebench admin repair-operator` rolls it back to the last deployed
-revision when the release has not changed for 10 minutes (a helm call may
-still be running before that) and that revision watches no deleted
-namespace, then sets the list it read before the rollback, so a namespace
-the interrupted upgrade added is kept. Otherwise it exits 3 with the reason;
-`--dry-run` shows the verdict. Do not run `helm rollback` by hand: it skips
-the deleted-namespace check and the lease.
+`lakebench admin repair-operator` rolls it back once the pending revision
+is at least 10 minutes old by the API server's clock (a helm call may still
+be running before that), to the newest deployed revision that watches no
+deleted namespace, then sets the list it read before the rollback, so a
+namespace the interrupted upgrade added is kept. Otherwise it exits 3 with
+the reason; `--dry-run` shows the verdict. Do not run `helm rollback` by
+hand: it skips the deleted-namespace check and the lease. The one exception
+is when every earlier revision names a deleted namespace: the message then
+gives the `helm rollback` to run, followed at once by repair-operator, with
+no deploy or destroy running (the operator restarts in a loop in between).
 
 **An interrupted `run` left a job running.** `run` deletes the jobs it
 created when it is interrupted, but leaves any it cannot show to be its own

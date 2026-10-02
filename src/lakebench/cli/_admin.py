@@ -944,9 +944,10 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-# A pending release that has not changed for this long is taken as left by a
-# killed helm call, not one still running (lakebench's own helm calls under
-# the lease are bounded well inside it).
+# A pending revision this old (by the API server's clock) is taken as left by a
+# killed helm call, not one still running: lakebench's watch-list upgrades do
+# not --wait and apply in seconds, and a helm attempt under the lease is
+# stopped after 120 s.
 _PENDING_STALE_S = 600
 
 
@@ -979,9 +980,9 @@ def repair_operator(
     Deployments) and the Active namespaces, then:
 
     - rolls a release left ``pending-upgrade`` or ``pending-rollback`` (an
-      interrupted helm call) back to its last deployed revision, when the
-      release has not changed for 10 minutes and that revision's watch list
-      names no deleted namespace;
+      interrupted helm call) back, when the pending revision started at
+      least 10 minutes ago by the API server's clock, to the newest deployed
+      revision that names no deleted namespace;
     - sets the watch list, with one upgrade, to the namespaces any of the
       three sources lists (before a rollback included) that still exist and
       are Active (``default`` only when nothing else is left: an empty list
@@ -995,8 +996,6 @@ def repair_operator(
     after an earlier read is kept. ``--dry-run`` reads without the lease and
     only prints.
     """
-    import time
-
     from lakebench.deploy.cluster_lock import (
         ADMIN_MAX_HOLD_S,
         LEASE_REQUEST_TIMEOUT,
@@ -1144,32 +1143,61 @@ def repair_operator(
             "resize_from": resize_from,
         }
 
+    def _server_now() -> float | None:
+        # The API server's clock, from a response's Date header: the pending
+        # revision's age is server time minus server time, so a skewed
+        # workstation clock cannot make a running helm call look stale.
+        from email.utils import parsedate_to_datetime
+
+        try:
+            _data, _status, headers = core_v1.read_namespace_with_http_info(
+                ns, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
+            return parsedate_to_datetime(headers.get("Date")).timestamp()
+        except Exception:  # noqa: BLE001 -- unknown time refuses the rollback
+            return None
+
     def _rollback_verdict(p: dict[str, Any]) -> tuple[int | None, str | None]:
         """(revision to roll back to, None) or (None, why not)."""
         state = p["state"]
-        if state.updated is None:
-            return None, "its last change time cannot be read, so a helm call may still be running"
-        age = time.time() - state.updated
+        created = mgr.revision_created(state.revision)
+        now = _server_now()
+        if created is None or now is None:
+            return None, (
+                "the API server's time for the pending revision cannot be read, so a "
+                "helm call may still be running"
+            )
+        age = now - created
         if age < _PENDING_STALE_S:
             return None, (
-                f"it changed {age:.0f} s ago and a helm call may still be running; "
+                f"it started {age:.0f} s ago and a helm call may still be running; "
                 f"retry in {_PENDING_STALE_S - age:.0f} s"
             )
-        good = mgr.last_good_revision(state.revision)
-        if good is None:
-            return None, "no earlier deployed revision could be read from 'helm history'"
-        try:
-            good_list = mgr._get_watched_namespaces(revision=good)  # noqa: SLF001
-        except _WatchListReadError as e:
-            return None, f"revision {good}'s values cannot be read: {e}"
-        if good_list is not None:
-            gone = sorted(set(good_list) - p["active"] - {"default"})
-            if gone:
-                return None, (
-                    f"revision {good} watches {gone}, which no longer exist; rolling back "
-                    "to it would crash-loop the operator"
-                )
-        return good, None
+        revisions = mgr.good_revisions(state.revision)
+        if revisions is None:
+            return None, "'helm history' cannot be read"
+        if not revisions:
+            return None, "the release has no earlier deployed revision"
+        unsafe: list[str] = []
+        for rev in revisions:
+            try:
+                listed = mgr._get_watched_namespaces(revision=rev)  # noqa: SLF001
+            except _WatchListReadError as e:
+                return None, f"revision {rev}'s values cannot be read: {e}"
+            if listed is not None:
+                gone = sorted(set(listed) - p["active"] - {"default"})
+                if gone:
+                    unsafe.append(f"{rev} watches {gone}")
+                    continue
+            return rev, None
+        return None, (
+            "every earlier deployed revision names a namespace that no longer exists ("
+            + "; ".join(unsafe)
+            + "), and rolling back to one would crash-loop the operator. With no deploy "
+            f"or destroy running, a cluster admin runs 'helm rollback {rel} "
+            f"{revisions[0]} -n {ns}' and then 'lakebench admin repair-operator' at once "
+            "to drop those namespaces; the operator restarts in a loop in between"
+        )
 
     def _fmt(x: list[str] | None) -> str:
         return "every namespace" if x is None else esc(sorted(x))
@@ -1220,8 +1248,13 @@ def repair_operator(
 
     if dry_run:
         p = _plan(leased=False)
-        pending = p["state"].status in pending_states
+        pending = p["state"].status in pending_states and not p["mixed"]
         _report(p, _rollback_verdict(p) if pending else None)
+        if p["mixed"]:
+            print_warning(
+                "the watch-list sources disagree on watching every namespace; the real "
+                "run refuses (exit 3) without changing anything"
+            )
         if not _nothing_to_do(p):
             print_info("--dry-run set; not applying")
         return
@@ -1229,18 +1262,21 @@ def repair_operator(
     try:
         with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S, max_hold_s=ADMIN_MAX_HOLD_S):
             p = _plan(leased=True)
-            pending = p["state"].status in pending_states
+            # A disagreement is refused before any rollback: the rollback's
+            # carried list would otherwise narrow a watch-all operator.
+            pending = p["state"].status in pending_states and not p["mixed"]
             verdict = _rollback_verdict(p) if pending else None
             _report(p, verdict)
+            if p["mixed"]:
+                _refuse_mixed(p)
             if _nothing_to_do(p):
                 return
             if verdict is not None:
                 good, why = verdict
                 if why is not None or good is None:
                     _fail(
-                        f"Release {rel} is {p['state'].status}: {why}. Not rolling back. A "
-                        f"cluster admin checks 'helm history {rel} -n {ns}' and the operator "
-                        "pods, and re-runs repair-operator once no helm call is running.",
+                        f"Release {rel} is {p['state'].status}: {why}. Not rolling back; "
+                        f"'helm history {rel} -n {ns}' shows the revisions.",
                         ExitCode.REFUSED,
                     )
                 if not mgr.rollback_to(good):
@@ -1250,8 +1286,8 @@ def repair_operator(
                 # one or a Deployment listed (a killed add): carry them into
                 # the set, filtered to what is still Active.
                 p = _plan(leased=True, carry=frozenset() if p["watch_all"] else p["union"])
-            if p["mixed"]:
-                _refuse_mixed(p)
+                if p["mixed"]:
+                    _refuse_mixed(p)
             if p["needs_set"]:
                 if not mgr._set_watch_list_impl(p["target"]):  # noqa: SLF001
                     _fail(

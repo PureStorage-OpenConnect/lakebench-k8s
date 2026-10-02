@@ -137,11 +137,10 @@ class ReleaseState(NamedTuple):
 
     status: str  # deployed, pending-upgrade, ... or "absent"
     revision: int
-    updated: float | None  # info.last_deployed as epoch seconds, None if unparseable
 
 
-def _helm_time(value: object) -> float | None:
-    """Epoch seconds of a helm RFC 3339 time (nanosecond fraction allowed)."""
+def _rfc3339(value: object) -> float | None:
+    """Epoch seconds of an RFC 3339 time (nanosecond fraction allowed)."""
     from datetime import datetime
 
     if not isinstance(value, str) or not value:
@@ -1745,8 +1744,8 @@ class SparkOperatorManager:
         return None
 
     def release_state(self) -> ReleaseState | None:
-        """Status, revision and last-change time of this manager's release;
-        ``("absent", 0, None)`` when there is none; None when unreadable."""
+        """Status and revision of this manager's release; ``("absent", 0)``
+        when there is none; None when unreadable."""
         import json
 
         try:
@@ -1759,22 +1758,45 @@ class SparkOperatorManager:
             return None
         if result.returncode != 0:
             if re.search(r"release:? not found", (result.stderr or "").lower()):
-                return ReleaseState("absent", 0, None)
+                return ReleaseState("absent", 0)
             return None
         try:
             doc = json.loads(result.stdout or "{}")
             info = doc.get("info") or {}
-            return ReleaseState(
-                str(info.get("status") or ""),
-                int(doc.get("version") or 0),
-                _helm_time(info.get("last_deployed")),
-            )
+            return ReleaseState(str(info.get("status") or ""), int(doc.get("version") or 0))
         except (ValueError, TypeError, AttributeError):
             return None
 
-    def last_good_revision(self, before: int) -> int | None:
-        """The newest revision below *before* that was deployed (``deployed`` or
-        ``superseded``), from ``helm history``; None when unreadable or none."""
+    def revision_created(self, revision: int) -> float | None:
+        """When the API server created the release Secret of *revision* (helm
+        writes it as the operation starts), as epoch seconds; None when it
+        cannot be read. Server time, unlike helm's ``last_deployed``, which
+        the helm client stamps from its own clock."""
+        try:
+            result = self._run(
+                [
+                    "kubectl",
+                    "get",
+                    "secret",
+                    f"sh.helm.release.v1.{self.HELM_RELEASE_NAME}.v{revision}",
+                    "-n",
+                    self.namespace,
+                    "-o",
+                    "jsonpath={.metadata.creationTimestamp}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        return _rfc3339((result.stdout or "").strip())
+
+    def good_revisions(self, before: int) -> list[int] | None:
+        """Revisions below *before* that were deployed (``deployed`` or
+        ``superseded``), newest first, from ``helm history``; None when
+        unreadable."""
         import json
 
         try:
@@ -1795,7 +1817,7 @@ class SparkOperatorManager:
             ]
         except (OSError, subprocess.SubprocessError, ValueError, TypeError):
             return None
-        return max(good) if good else None
+        return sorted(good, reverse=True)
 
     def rollback_to(self, revision: int) -> bool:
         """``helm rollback`` to *revision* (the caller holds the lease and

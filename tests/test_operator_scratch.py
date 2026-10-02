@@ -261,7 +261,7 @@ def _admin_mgr(vol: TmpVolume, watched=None):
         mgr.controller_tmp_volume.return_value = vol
         mgr._get_watched_namespaces.return_value = watched
         mgr._get_active_namespaces.return_value = watched
-        mgr.release_state.return_value = ReleaseState("deployed", 3, None)
+        mgr.release_state.return_value = ReleaseState("deployed", 3)
         mgr.apply_controller_tmp_size.return_value = True
         yield mgr, lock
 

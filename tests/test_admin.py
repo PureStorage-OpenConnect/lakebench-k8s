@@ -303,13 +303,13 @@ def _page(*names: str) -> MagicMock:
     return page
 
 
-_OLD = 1_000.0  # a release last changed long ago (epoch seconds)
+_OLD = 1_000_000.0  # when the pending revision's Secret was created (server time)
 
 
-def _state(status: str = "deployed", revision: int = 3, updated: float | None = _OLD):
+def _state(status: str = "deployed", revision: int = 3):
     from lakebench.modules.pipeline_engines.spark.operator import ReleaseState
 
-    return ReleaseState(status, revision, updated)
+    return ReleaseState(status, revision)
 
 
 _SENTINEL = object()
@@ -407,6 +407,7 @@ class _Repair:
             return f
 
         self.mgr.release_state.side_effect = release_state
+        self.mgr.revision_created.return_value = _OLD
         self.mgr._get_watched_namespaces.side_effect = watched
         self.mgr._get_active_namespaces.side_effect = deployment
         self.mgr.controller_tmp_volume.side_effect = tmp_volume
@@ -414,7 +415,11 @@ class _Repair:
         self.mgr.rollback_to.side_effect = write("rollback")
         self.mgr.apply_controller_tmp_size.side_effect = write("resize")
 
-    def invoke(self, *args: str, now: float = _OLD + 3600):
+    def invoke(self, *args: str, now: float | None = _OLD + 3600):
+        from email.utils import formatdate
+
+        headers = {} if now is None else {"Date": formatdate(now, usegmt=True)}
+        self.core.read_namespace_with_http_info.return_value = (None, 200, headers)
         with (
             patch("lakebench.cli._admin._get_core_v1", return_value=self.core),
             patch(
@@ -422,7 +427,6 @@ class _Repair:
                 return_value=self.mgr,
             ),
             patch("lakebench.deploy.cluster_lock.cluster_lock", self.lock),
-            patch("time.time", return_value=now),
         ):
             return runner.invoke(admin_app, ["repair-operator", *args])
 
@@ -581,11 +585,11 @@ class TestRepairOperator:
                 "spark-operator-webhook": ["ns-a"],
             },
         )
-        h.mgr.last_good_revision.return_value = 4
+        h.mgr.good_revisions.return_value = [4]
         h.revision_lists[4] = ["ns-a"]
         r = h.invoke()
         assert r.exit_code == 0, r.output
-        h.mgr.last_good_revision.assert_called_once_with(5)
+        h.mgr.good_revisions.assert_called_once_with(5)
         assert h.writes() == ["rollback", "set"]
         h.mgr.rollback_to.assert_called_once_with(4)
         h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a", "ns-b"])
@@ -605,7 +609,7 @@ class TestRepairOperator:
                 "spark-operator-webhook": None,
             },
         )
-        h.mgr.last_good_revision.return_value = 4
+        h.mgr.good_revisions.return_value = [4]
         h.revision_lists[4] = None
         r = h.invoke()
         assert r.exit_code == 0, r.output
@@ -614,46 +618,92 @@ class TestRepairOperator:
 
     def test_pending_release_refuses_a_revision_naming_a_deleted_namespace(self):
         """Rolling back to a list naming a deleted namespace crash-loops the
-        operator for every tenant: refuse and name the manual step."""
+        operator for every tenant: refuse and name the manual recovery."""
         h = _Repair(
             values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 5)
         )
-        h.mgr.last_good_revision.return_value = 4
+        h.mgr.good_revisions.return_value = [4]
         h.revision_lists[4] = ["ns-a", "ns-gone"]
         r = h.invoke()
         assert r.exit_code == 3, r.output
-        assert "helm history" in _flat(r)
         assert "ns-gone" in _flat(r)
+        assert "helm rollback spark-operator 4" in _flat(r)
         assert h.writes() == []
 
     def test_a_recent_pending_release_is_not_rolled_back(self):
         """A helm call outside the lease (an admin, an unlocked add) may still
-        be running: rolling back under it makes two writers."""
+        be running: rolling back under it makes two writers. The age is the
+        API server's Date minus the revision Secret's creationTimestamp, both
+        server time, so a skewed workstation clock cannot change it."""
         h = _Repair(
-            values=["ns-a"],
-            live=["ns-a"],
-            active=("ns-a",),
-            state=_state("pending-upgrade", 5, updated=_OLD),
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 5)
         )
-        h.mgr.last_good_revision.return_value = 4
+        h.mgr.good_revisions.return_value = [4]
         h.revision_lists[4] = ["ns-a"]
-        r = h.invoke(now=_OLD + 30)
+        with patch("time.time", return_value=_OLD + 99_999):  # the local clock is ignored
+            r = h.invoke(now=_OLD + 30)
         assert r.exit_code == 3, r.output
         assert "may still be running" in _flat(r)
+        h.mgr.revision_created.assert_called_once_with(5)
         assert h.writes() == []
 
-    def test_a_pending_release_with_no_time_is_not_rolled_back(self):
+    def test_no_server_time_is_not_rolled_back(self):
         h = _Repair(
-            values=["ns-a"],
-            live=["ns-a"],
-            active=("ns-a",),
-            state=_state("pending-rollback", 5, updated=None),
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-rollback", 5)
         )
-        h.mgr.last_good_revision.return_value = 4
+        h.mgr.good_revisions.return_value = [4]
         h.revision_lists[4] = ["ns-a"]
+        r = h.invoke(now=None)
+        assert r.exit_code == 3, r.output
+        assert h.writes() == []
+
+    def test_no_secret_time_is_not_rolled_back(self):
+        h = _Repair(
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-rollback", 5)
+        )
+        h.mgr.good_revisions.return_value = [4]
+        h.revision_lists[4] = ["ns-a"]
+        h.mgr.revision_created.return_value = None
         r = h.invoke()
         assert r.exit_code == 3, r.output
         assert h.writes() == []
+
+    def test_an_older_safe_revision_is_used(self):
+        """The newest deployed revision names a deleted namespace; an older
+        one does not, so that one is the rollback target."""
+        h = _Repair(
+            values=["ns-a"],
+            live=["ns-a"],
+            active=("ns-a",),
+            state=_state("pending-upgrade", 5),
+            after={
+                "values": ["ns-a"],
+                "spark-operator-controller": ["ns-a"],
+                "spark-operator-webhook": ["ns-a"],
+            },
+        )
+        h.mgr.good_revisions.return_value = [4, 3]
+        h.revision_lists[4] = ["ns-a", "ns-gone"]
+        h.revision_lists[3] = ["ns-a"]
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        h.mgr.rollback_to.assert_called_once_with(3)
+
+    def test_mixed_sources_refuse_before_any_rollback(self):
+        """Deployments watch every namespace (the deployed revision had "")
+        while a killed upgrade's values list one: rolling back and setting
+        the carried list would narrow the operator for every tenant."""
+        h = _Repair(
+            values=["ns-a"], live=None, active=("ns-a", "ns-b"), state=_state("pending-upgrade", 5)
+        )
+        h.mgr.good_revisions.return_value = [4]
+        h.revision_lists[4] = None
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        assert h.writes() == []
+        r = h.invoke("--dry-run")
+        assert "refuses (exit 3)" in _flat(r)
+        assert "roll back to revision" not in _flat(r)
 
     def test_pending_release_with_unreadable_revision_values_refuses(self):
         from lakebench.modules.pipeline_engines.spark.operator import _WatchListReadError
@@ -661,7 +711,7 @@ class TestRepairOperator:
         h = _Repair(
             values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 5)
         )
-        h.mgr.last_good_revision.return_value = 4
+        h.mgr.good_revisions.return_value = [4]
 
         def watched(revision=None):
             if revision is not None:
@@ -677,7 +727,7 @@ class TestRepairOperator:
         h = _Repair(
             values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 1)
         )
-        h.mgr.last_good_revision.return_value = None
+        h.mgr.good_revisions.return_value = []
         r = h.invoke()
         assert r.exit_code == 3, r.output
         assert "None" not in _flat(r)
@@ -687,7 +737,7 @@ class TestRepairOperator:
         h = _Repair(
             values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 5)
         )
-        h.mgr.last_good_revision.return_value = 4
+        h.mgr.good_revisions.return_value = [4]
         h.revision_lists[4] = ["ns-a", "ns-gone"]
         r = h.invoke("--dry-run")
         assert r.exit_code == 0, r.output
@@ -705,7 +755,7 @@ class TestRepairOperator:
         assert h.writes() == []
 
     def test_absent_release_is_a_prerequisite(self):
-        h = _Repair(state=_state("absent", 0, None))
+        h = _Repair(state=_state("absent", 0))
         r = h.invoke()
         assert r.exit_code == 4, r.output
         assert "admin install --component spark-operator" in _flat(r)

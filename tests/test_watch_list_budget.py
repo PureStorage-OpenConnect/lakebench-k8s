@@ -455,17 +455,9 @@ class TestAddAwaitsPatchRollout:
 class TestReleaseState:
     def test_status_and_revision(self):
         mgr = _mgr()
-        doc = {
-            "info": {
-                "status": "pending-upgrade",
-                "last_deployed": "2026-10-02T04:53:00.123456789Z",
-            },
-            "version": 7,
-        }
+        doc = {"info": {"status": "pending-upgrade"}, "version": 7}
         with patch.object(mgr, "_run", return_value=_ok(json.dumps(doc))):
-            st = mgr.release_state()
-        assert (st.status, st.revision) == ("pending-upgrade", 7)
-        assert st.updated == pytest.approx(1790916780.123456, abs=1e-3)
+            assert mgr.release_state() == ("pending-upgrade", 7)
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -478,17 +470,27 @@ class TestReleaseState:
             (None, None),
         ],
     )
-    def test_helm_time(self, value, expected):
-        got = op._helm_time(value)
+    def test_rfc3339(self, value, expected):
+        got = op._rfc3339(value)
         if expected is None:
             assert got is None
         else:
             assert got == pytest.approx(expected, abs=1e-3)
 
+    def test_revision_created_reads_the_release_secret(self):
+        mgr = _mgr()
+        with patch.object(mgr, "_run", return_value=_ok("2026-10-02T04:53:00Z")) as run:
+            assert mgr.revision_created(5) == pytest.approx(1790916780.0)
+        cmd = run.call_args.args[0]
+        assert "sh.helm.release.v1.spark-operator.v5" in cmd
+        assert "jsonpath={.metadata.creationTimestamp}" in cmd
+        with patch.object(mgr, "_run", return_value=_fail("NotFound")):
+            assert mgr.revision_created(5) is None
+
     def test_absent(self):
         mgr = _mgr()
         with patch.object(mgr, "_run", return_value=_fail("Error: release: not found")):
-            assert mgr.release_state() == ("absent", 0, None)
+            assert mgr.release_state() == ("absent", 0)
 
     def test_unreadable(self):
         mgr = _mgr()
@@ -497,7 +499,7 @@ class TestReleaseState:
         with patch.object(mgr, "_run", return_value=_ok("not json")):
             assert mgr.release_state() is None
 
-    def test_last_good_revision_skips_failed_and_pending(self):
+    def test_good_revisions_skip_failed_and_pending(self):
         rows = [
             {"revision": 3, "status": "superseded"},
             {"revision": 4, "status": "deployed"},
@@ -506,14 +508,14 @@ class TestReleaseState:
         ]
         mgr = _mgr()
         with patch.object(mgr, "_run", return_value=_ok(json.dumps(rows))):
-            assert mgr.last_good_revision(6) == 4
-            assert mgr.last_good_revision(4) == 3
-            assert mgr.last_good_revision(3) is None
+            assert mgr.good_revisions(6) == [4, 3]
+            assert mgr.good_revisions(4) == [3]
+            assert mgr.good_revisions(3) == []
 
-    def test_last_good_revision_unreadable(self):
+    def test_good_revisions_unreadable(self):
         mgr = _mgr()
         with patch.object(mgr, "_run", return_value=_fail()):
-            assert mgr.last_good_revision(6) is None
+            assert mgr.good_revisions(6) is None
 
     def test_values_at_a_revision(self):
         mgr = _mgr()
@@ -539,7 +541,7 @@ class TestReleaseState:
         mgr = _mgr()
         rows = [{"revision": "x", "status": "deployed"}]
         with patch.object(mgr, "_run", return_value=_ok(json.dumps(rows))):
-            assert mgr.last_good_revision(6) is None
+            assert mgr.good_revisions(6) is None
 
     def test_rollback_names_the_revision_and_awaits_the_rollout(self):
         mgr = _mgr()
