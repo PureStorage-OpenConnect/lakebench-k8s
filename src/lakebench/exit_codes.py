@@ -412,7 +412,6 @@ PATHS: tuple[ExitPath, ...] = (
         "destroy.unverified_cluster",
         _C.REFUSED,
         '"Destroy NOT completed": this cluster has no fingerprint, so buckets are kept',
-        planned=True,
     ),
     ExitPath(
         "admin.version_change_in_use",

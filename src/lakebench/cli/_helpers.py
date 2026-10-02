@@ -244,7 +244,7 @@ def _journal_safe(fn, *args, **kwargs) -> None:
 def enforce_bronze_gate(
     cfg, regenerate: bool, allow_stale_bronze: bool = False, clear_owned: bool = False
 ):
-    """Run the bronze gate before datagen; exit 2 on a refusal.
+    """Run the bronze gate before datagen; a refusal exits with its code.
 
     ``lakebench.deploy.datagen.bronze_prefix_gate`` decides (one table for
     every caller: ``generate``, ``run --generate``, the multi-cycle loop

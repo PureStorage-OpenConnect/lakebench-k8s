@@ -782,7 +782,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   go through one gate. `--regenerate` now clears only the datagen prefix
   (aborting its incomplete multipart uploads) instead of the whole bronze
   bucket, and only on a bucket this deployment owns; on any other bucket it
-  exits 2, where 1.6 emptied the bucket whoever owned it. Datagen over a
+  exits 3 (refused), where 1.6 emptied the bucket whoever owned it. Datagen over a
   non-empty prefix of such a bucket needs the new `--allow-stale-bronze`
   flag on `generate` and `run`; the run records `datagen.stale_bronze` in
   `metrics.json` and the report warns "bronze held N objects before

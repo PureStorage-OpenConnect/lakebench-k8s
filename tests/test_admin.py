@@ -17,6 +17,7 @@ from lakebench.cli._admin import (
     admin_app,
 )
 from lakebench.deploy.cluster_lock import ClusterLockHeld
+from lakebench.exit_codes import ExitCode
 from lakebench.modules.pipeline_engines.spark.operator_scratch import TmpVolume
 
 runner = CliRunner()
@@ -305,7 +306,7 @@ class TestReclaimBucket:
             patch("lakebench.deploy.ownership.api_server_fingerprint", return_value=None),
         ):
             r = runner.invoke(admin_app, ["reclaim-bucket", "some-bucket", str(yaml_path)])
-        assert r.exit_code == 1
+        assert r.exit_code == ExitCode.PREREQUISITE
         assert "fingerprint" in r.output
         mock_tag.assert_not_called()
 

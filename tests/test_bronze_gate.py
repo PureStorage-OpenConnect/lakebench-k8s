@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lakebench.deploy.ownership import OWNER_MARKER_KEY, TAG_CLUSTER, TAG_DEPLOYMENT_NAME
+from lakebench.exit_codes import ExitCode
 from tests.fixtures.recording_k8s import K8sRecorder, recording
 
 NS = "u01"
@@ -140,7 +141,7 @@ class TestGate:
             got = _gate(cfg)
             assert not got.proceed and "could not list" in got.message
 
-    def test_cli_exits_2_on_refusal(self):
+    def test_cli_exits_refused_on_refusal(self):
         import typer
 
         from lakebench.cli._helpers import enforce_bronze_gate
@@ -149,7 +150,7 @@ class TestGate:
             cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
             with pytest.raises(typer.Exit) as e:
                 enforce_bronze_gate(cfg, regenerate=True)
-            assert e.value.exit_code == 2
+            assert e.value.exit_code == ExitCode.REFUSED  # run.bronze_nonempty
 
 
 class TestDeployerCycleZero:

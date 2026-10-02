@@ -142,7 +142,6 @@ PLANNED_BY = {
     "alias.refused": "CC-28",
     "capacity.shortfall": "CC-24",
     "capacity.unknown": "CC-24",
-    "destroy.unverified_cluster": "SD-18a",
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
     "logs.no_pod": "CC-27",
@@ -629,6 +628,15 @@ def _scenario_destroy_redeployed(monkeypatch, tmp_path):
     )
     flag = {exit_codes.REFUSAL_DETAIL: "destroy.redeployed"}
     return _destroy_with(monkeypatch, [_result("namespace", "failed", msg, **flag)])
+
+
+def _scenario_destroy_unverified_cluster(monkeypatch, tmp_path):
+    msg = (
+        "Destroy NOT completed: this cluster has no fingerprint, so buckets with a "
+        "cluster stamp are kept: v14user-bronze"
+    )
+    flag = {exit_codes.REFUSAL_DETAIL: "destroy.unverified_cluster"}
+    return _destroy_with(monkeypatch, [_result("s3-buckets", "failed", msg, **flag)])
 
 
 def _scenario_lease_held(monkeypatch, tmp_path):
@@ -1315,6 +1323,7 @@ SCENARIOS = {
     "k8s.unreachable": _scenario_k8s_unreachable,
     "s3.unreachable": _scenario_s3_unreachable,
     "destroy.redeployed": _scenario_destroy_redeployed,
+    "destroy.unverified_cluster": _scenario_destroy_unverified_cluster,
     "lease.held": _scenario_lease_held,
     "context.changed": _scenario_context_changed,
     "destroy.namespace_terminating": _scenario_destroy_namespace_terminating,
@@ -1359,7 +1368,8 @@ EXPECTED_STDERR = {
     "sigint": "ERROR  Interrupted.",
     "financial.k8s_unreachable": "ERROR  Cannot reach the Kubernetes cluster: connection refused",
     "k8s.unreachable": "ERROR Kubernetes connection failed: connection refused",
-    "run.bronze_nonempty": "Refusing to generate over it",
+    # The scenario's bucket has no ownership proof, so the gate's unowned row.
+    "run.bronze_nonempty": "cannot prove it owns",
     "s3.unreachable": "refusing to generate",
     "run.prereq_failed": "ERROR Prerequisites not met",
     "run.deps_missing": "has no dependency server",
@@ -1381,6 +1391,7 @@ def test_scenarios_cover_exactly_the_live_paths():
 EXPECTED_OUTPUT = {
     "run.datagen_timeout": "wait budget",
     "destroy.redeployed": "Destroy Incomplete",
+    "destroy.unverified_cluster": "Destroy Incomplete",
     "lease.held": "Destroy Incomplete",
     "destroy.namespace_terminating": "still terminating",
     "deploy.identity_foreign": "Deployment Failed",

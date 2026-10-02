@@ -1115,7 +1115,7 @@ def reclaim_bucket(
             "cannot compute this cluster's fingerprint (kubeconfig has no CA data); "
             "ownership cannot be stamped"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.PREREQUISITE)
     try:
         with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
             # ADR-F3: object-count check MUST run inside the lease.
@@ -1209,7 +1209,7 @@ def reclaim_bucket(
                             f"bucket {bucket!r}: the owner marker did not read back as "
                             f"{cfg.name!r} on this cluster (read {got!r})"
                         )
-                        raise typer.Exit(1) from None
+                        raise typer.Exit(ExitCode.REFUSED) from None
                     print_success(
                         f"bucket {bucket!r} on a backend that does not support tagging: "
                         f"wrote its owner marker ({OWNER_MARKER_KEY}) for deployment "
