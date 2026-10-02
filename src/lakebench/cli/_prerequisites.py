@@ -328,16 +328,22 @@ def _check_cluster_capacity(
         "scratch_reason": None,
         "storage_class": None,
     }
+    from lakebench.config.schema import is_continuous_mode
     from lakebench.k8s.target import ContextConflictError
+
+    continuous = (
+        sustained if sustained is not None else is_continuous_mode(cfg.architecture.pipeline.mode)
+    )
 
     def _count_own(pod: Any) -> bool:
         # The deployment's own pods are left out (the plan counts its
-        # Trino, catalog and Postgres), except what the plan does not:
-        # Spark pods left by an earlier run, and a datagen Job still running
-        # when this run does not count datagen itself.
+        # Trino, catalog and Postgres), except what the plan does not: Spark
+        # pods left by an earlier run, in batch (a continuous run stops its
+        # leftover streams before it starts its own), and a datagen Job
+        # still running when this run does not count datagen itself.
         labels = getattr(pod.metadata, "labels", None) or {}
         if "spark-role" in labels:
-            return True
+            return not continuous
         is_job = "job-name" in labels or "batch.kubernetes.io/job-name" in labels
         return is_job and not datagen_runs
 
