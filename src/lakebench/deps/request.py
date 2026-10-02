@@ -1,4 +1,4 @@
-"""What a deployment's dependency set must hold (DEP-2, ch01 s2.2).
+"""What a deployment's dependency set must hold.
 
 This module is the only definition of the jars, Python wheels and DuckDB
 files a deployment needs, where they are resolved from, and the two hashes
@@ -33,25 +33,25 @@ PYPI_INDEX = "https://pypi.org/simple/"
 PYPI_FILES_HOST = "files.pythonhosted.org"
 DUCKDB_EXTENSION_REPOSITORY = "http://extensions.duckdb.org"
 # Recent DuckDB iceberg releases autoload avro: an iceberg_scan with
-# autoinstall off fails without avro.duckdb_extension (SD-1 offline
-# pre-check on DuckDB 1.5.5, 2026-10-01; the live spike confirms it).
+# autoinstall off fails without avro.duckdb_extension (checked offline on
+# DuckDB 1.5.5 and in a live cluster run, 2026-10-01).
 DUCKDB_EXTENSIONS: tuple[str, ...] = ("httpfs", "iceberg", "avro")
 
 GROUP_JARS = "jars"
 GROUP_PY_REFERENCE = "py-reference"
 GROUP_DUCKDB = "duckdb"
 
-# Request group -> the manifest groups its resolve writes (ch01 s2.3 step 8).
-# SD-3's stdlib lb_deps.py cannot import this module, so it copies the names
-# and a parity test pins them to this mapping; SD-4a's deploy check (s2.5
-# step 4) reads the mapping directly.
+# Request group -> the manifest groups its resolve writes. The stdlib
+# lb_deps.py cannot import this module, so it copies the names and a parity
+# test pins them to this mapping; the deploy step's check reads the mapping
+# directly.
 MANIFEST_GROUPS: dict[str, tuple[str, ...]] = {
     GROUP_JARS: ("jars",),
     GROUP_PY_REFERENCE: ("py-reference",),
     GROUP_DUCKDB: ("duckdb-wheels", "duckdb-ext"),
 }
 
-# lb_deps.py's exit codes, for SD-4a's readiness messages; the resolver
+# lb_deps.py's exit codes, for the deploy step's messages; the resolver
 # copies them and a parity test pins the copy. Its error line carries
 # "egress:" when a repository or index could not be reached.
 LB_DEPS_EXIT: dict[str, int] = {
@@ -76,7 +76,7 @@ MANIFEST_DIRS: dict[str, str] = {
 # /opt/spark/jars at another version, as (artifactId, set version, image
 # version). Spark Thrift copies the set onto the system classpath, so a new
 # overlap can shadow the image's classes; deploy fails on one not listed
-# here (ch01 s2.3 step 7). Seeded from the SD-1 listing (2026-10-01): only
+# here. Seeded from a live listing of the stock images (2026-10-01): only
 # Delta 4.1.0 on apache/spark:4.1.1 overlaps at another version; today's
 # Thrift already loads these files. dlt40's antlr4-runtime 4.13.1 is the
 # image's own version and needs no entry.
@@ -102,7 +102,7 @@ def unknown_overlaps(overlaps: Iterable[Mapping[str, str]]) -> list[dict[str, st
     ]
 
 
-# The resolver shipped to the lb-deps pod (SD-3). Its sha256 enters the
+# The resolver shipped to the lb-deps pod. Its sha256 enters the
 # request, so a Lakebench upgrade that changes the resolver re-resolves.
 TOOLS_PATH = Path(__file__).resolve().parent.parent / "deploy" / "deps_tools" / "lb_deps.py"
 
@@ -151,9 +151,10 @@ def jar_coordinates(cfg: LakebenchConfig) -> list[str]:
 
 
 def _deps_key(cfg: LakebenchConfig, key: str) -> str | None:
-    """``platform.deps.<key>``. The keys arrive with SD-4a, which replaces
-    this getattr with direct access to str-typed fields; until then every
-    key reads None and the public repositories apply."""
+    """``platform.deps.<key>``. The keys arrive with the deploy step's config
+    block, which replaces this getattr with direct access to str-typed
+    fields; until then every key reads None and the public repositories
+    apply."""
     block = getattr(cfg.platform, "deps", None)
     value = getattr(block, key, None) if block is not None else None
     if value is None:
@@ -170,7 +171,7 @@ def repositories(cfg: LakebenchConfig) -> list[str]:
     the Google mirror. Today's runtime ``--packages`` chain is Central,
     ``repos.spark-packages.org``, then the ``spark.jars.repositories`` entry
     (Spark ``MavenUtils.createRepoResolvers``); spark-packages serves none of
-    Lakebench's coordinates, and the SD-1 pre-check found the two chains
+    Lakebench's coordinates, and an offline check found the two chains
     resolve byte-identical sets for the four release-matrix rows.
     """
     from lakebench.modules.pipeline_engines.spark.job import _MAVEN_MIRROR_REPOS
@@ -194,7 +195,7 @@ def selected_groups(cfg: LakebenchConfig) -> tuple[str, ...]:
 
     ``py-reference`` serves the AML reference detector's driver. The design
     also selects it for ``ml_loop.enabled``; the ML loop and its config key
-    moved to v1.8, so ML-5 adds that condition with the key.
+    moved to v1.8, which adds that condition with the key.
     """
     groups = [GROUP_JARS]
     if cfg.architecture.workload.schema_type.value == "financial":
@@ -207,7 +208,7 @@ def selected_groups(cfg: LakebenchConfig) -> tuple[str, ...]:
 def egress_hosts(cfg: LakebenchConfig) -> list[str]:
     """Hosts the lb-deps resolve contacts for the selected groups, sorted.
 
-    Once DEP-2 is complete the resolve is the only fetch from outside the
+    Once every consumer reads the set, the resolve is the only fetch from outside the
     deployment. pip downloading from pypi.org fetches the files from
     ``files.pythonhosted.org`` too; a configured index names only its own
     host, because where it redirects is the mirror's business.
@@ -268,7 +269,7 @@ def tools_sha256(path: Path = TOOLS_PATH) -> str:
 
 def select_request(cfg: LakebenchConfig, *, tools_digest: str | None = None) -> DepsRequest:
     """The request for this deployment. ``tools_digest`` overrides the
-    shipped resolver's hash (tests; the file arrives with SD-3)."""
+    shipped resolver's hash (tests)."""
     from lakebench.modules.pipeline_engines.spark.job import REFERENCE_PY_DEPS
 
     groups = selected_groups(cfg)
