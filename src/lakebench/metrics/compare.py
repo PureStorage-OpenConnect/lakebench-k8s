@@ -1312,6 +1312,30 @@ def row_caps(
         )
 
 
+#: The missing condition of a round median not assessed for its rounds.
+ROUNDS_CONDITION = "in-stream rounds that each ran the same query set"
+
+
+def rounds_note(rounds_problems: Mapping[str, str]) -> str:
+    """``rounds ran different query sets (A)``, one clause per side."""
+    return "; ".join(f"{why} ({label})" for label, why in sorted(rounds_problems.items()))
+
+
+def rounds_problem(record: Mapping[str, Any]) -> str | None:
+    """Why a record's in-stream round medians are over no one query set:
+    its rounds executed different sets (``composite_qph_basis.blended``,
+    read from the rounds), or every round missed the same query, so the
+    medians are over a smaller set than the run declared; None otherwise."""
+    from lakebench.metrics.storage import recorded_executed_query_set, recorded_qph_basis
+
+    basis = recorded_qph_basis(record)
+    if isinstance(basis, Mapping) and basis.get("blended"):
+        return "rounds ran different query sets"
+    if recorded_executed_query_set(record):
+        return "every round missed a query"
+    return None
+
+
 def assess(
     metric: str,
     mode: str | None,
@@ -1319,11 +1343,14 @@ def assess(
     pair_missing: MissingCondition,
     bound_kinds: Iterable[str],
     trickle_held: bool,
+    rounds_problems: Mapping[str, str] | None = None,
 ) -> Assessment:
     """What may be read from *metric*'s numbers (design section 8, the
     release default: no step past the caps names a winner). The outcome
     follows the design's order; the caps that bound the row are in
-    ``capped_by`` whatever the outcome."""
+    ``capped_by`` whatever the outcome. *rounds_problems* maps a side label
+    to its ``rounds_problem``: a median over in-stream rounds
+    (``blended_by_rounds``) on such a side is not assessed."""
     from lakebench.metrics.metric_registry import ModeRequired, lookup
 
     caps = row_caps(metric, mode, bound_kinds, trickle_held)
@@ -1342,6 +1369,13 @@ def assess(
             "both sides ran the ML loop with the same loop definition, Spark version, "
             "executor counts and write-mode pair",
             "ML loop metrics are not assessed in this release",
+            caps,
+        )
+    if rounds_problems and meta.blended_by_rounds:
+        return Assessment(
+            NOT_ASSESSED,
+            ROUNDS_CONDITION,
+            f"{rounds_note(rounds_problems)}; a median over them is not one QpH",
             caps,
         )
     if pair.verdict == cmp.CONFOUNDED:
@@ -1452,6 +1486,12 @@ def build_comparison(a: Side, b: Side) -> dict[str, Any]:
                 if k not in kinds:
                     kinds.append(k)
             trickle = trickle or _trickle_held(m.record)
+    rounds_problems: dict[str, str] = {}
+    for side in (a, b):
+        for m in side.passed:
+            why = rounds_problem(m.record)
+            if why and side.label not in rounds_problems:
+                rounds_problems[side.label] = why
     per_side: dict[str, dict[str, list[float]]] = {"A": {}, "B": {}}
     for side in (a, b):
         for m in side.passed:
@@ -1470,7 +1510,7 @@ def build_comparison(a: Side, b: Side) -> dict[str, Any]:
             meta = lookup(key, mode)
         except (ModeRequired, ValueError):
             meta = None
-        asm = assess(key, mode, pair, missing, kinds, trickle)
+        asm = assess(key, mode, pair, missing, kinds, trickle, rounds_problems)
         rows.append(
             {
                 "metric": key,
@@ -1484,6 +1524,11 @@ def build_comparison(a: Side, b: Side) -> dict[str, Any]:
                 "missing": {"condition": asm.missing, "command": None},
                 "hint": asm.hint,
                 "capped_by": asm.capped_by,
+                # Why the row's in-stream rounds are over no one query set,
+                # when that is why it is not assessed.
+                "rounds": (
+                    rounds_note(rounds_problems) if asm.missing == ROUNDS_CONDITION else None
+                ),
             }
         )
     doc = {
@@ -1531,6 +1576,7 @@ CSV_COLUMNS = (
     "n_b",
     "assessment",
     "bound_by",
+    "rounds",
 )
 
 
@@ -1570,6 +1616,7 @@ def to_csv(doc: Mapping[str, Any]) -> str:
                 sb.get("n", 0),
                 r.get("assessment"),
                 ";".join(r.get("capped_by") or []),
+                r.get("rounds") or "",
             ]
         )
     return buf.getvalue()

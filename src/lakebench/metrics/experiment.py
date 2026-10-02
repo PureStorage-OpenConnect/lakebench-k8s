@@ -865,6 +865,11 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     else:
         missing.append("identity version")
     exp2 = not missing
+    if exp2:
+        # exp2 ids name the compaction operation; exp1 ids never move.
+        from lakebench.metrics.maintenance_policy import with_compaction_operation
+
+        effective = with_compaction_operation(effective)
     block: dict[str, Any] = {
         "schema": EXPERIMENT_SCHEMA_V2 if exp2 else EXPERIMENT_SCHEMA_V1,
         **({"identity_version": IDENTITY_VERSION} if exp2 else {}),

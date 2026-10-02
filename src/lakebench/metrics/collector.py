@@ -579,6 +579,11 @@ class BenchmarkMetrics:
     # The query engine that ran it (trino, spark-thrift, duckdb). None on a
     # record from before the field whose benchmark_type does not name one.
     engine: str | None = None
+    # An in-stream round's record, written only by MetricsCollector.record_round:
+    # {index, started_at, ended_at, executed_queries, executed_query_set_id,
+    # investigator_queries}. Serialized beside the benchmark fields. None on
+    # an aggregate and on a round recorded before the field.
+    round_record: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.query_set_id is None:
@@ -617,6 +622,8 @@ class BenchmarkMetrics:
             d["stream_results"] = self.stream_results
         if self.round_meta is not None:
             d["round_meta"] = self.round_meta.to_dict()
+        if self.round_record is not None:
+            d.update(self.round_record)
         return d
 
 
@@ -1530,6 +1537,9 @@ class PipelineBenchmark:
             if in_stream_qph > 0:
                 scores["in_stream_composite_qph"] = in_stream_qph
                 scores["benchmark_rounds_count"] = len(self.benchmark_rounds)
+                basis, by_set = composite_qph_basis(self.benchmark_rounds)
+                scores["composite_qph_basis"] = basis
+                scores["composite_qph_by_set"] = by_set
             if self.qph_degradation_pct is not None:
                 scores["qph_degradation_pct"] = self.qph_degradation_pct
             # Maintenance metrics (v1.3) -- same fields for sustained
@@ -2030,6 +2040,115 @@ def build_pipeline_benchmark(
     return benchmark
 
 
+#: ``investigator_queries`` of a round: the investigator queries ran in it,
+#: were left out because no case existed yet, or their case probe failed.
+INVESTIGATOR_QUERY_STATES = ("included", "absent_no_cases", "probe_failed")
+#: Key of the rounds whose executed query set was not recorded.
+QUERY_SET_NOT_RECORDED = "not_recorded"
+#: query_set_id of a median over rounds that executed different query sets.
+BLENDED_QUERY_SET = "blended"
+
+
+def executed_query_set(benchmark: BenchmarkMetrics) -> tuple[list[str], str | None]:
+    """The queries a round executed (succeeded) and their query set id."""
+    from lakebench.benchmark.queries import query_set_id
+
+    names = [
+        str(q.get("name") or q.get("query_name"))
+        for q in benchmark.queries or []
+        if isinstance(q, dict) and q.get("success", True) and (q.get("name") or q.get("query_name"))
+    ]
+    return names, (query_set_id(names) if names else None)
+
+
+def round_label(benchmark: BenchmarkMetrics) -> str:
+    """How a round's query set reads in a report: ``<n>-query set``, with
+    "(before cases exist)" when the investigator queries were left out for
+    want of a case (AML continuous before its first TM pass). The label
+    the AML continuous report renders per round; nothing in this module
+    calls it."""
+    rec = benchmark.round_record or {}
+    executed = rec.get("executed_queries")
+    n = len(executed) if isinstance(executed, list) else len(executed_query_set(benchmark)[0])
+    label = f"{n}-query set"
+    if rec.get("investigator_queries") == "absent_no_cases":
+        label += " (before cases exist)"
+    elif rec.get("investigator_queries") == "probe_failed":
+        label += " (case probe failed)"
+    return label
+
+
+def rounds_by_query_set(rounds: list[BenchmarkMetrics]) -> dict[str, list[BenchmarkMetrics]]:
+    """Rounds that measured a QpH, grouped by the query set each executed
+    (``QUERY_SET_NOT_RECORDED`` for a round recorded before the field)."""
+    groups: dict[str, list[BenchmarkMetrics]] = {}
+    for r in rounds:
+        if (r.qph or 0) <= 0:
+            continue
+        key = (r.round_record or {}).get("executed_query_set_id")
+        if key is None and r.round_record is None:
+            # A round recorded before the field: its queries' success
+            # flags still say what it executed.
+            key = executed_query_set(r)[1]
+        groups.setdefault(str(key or QUERY_SET_NOT_RECORDED), []).append(r)
+    return groups
+
+
+def executed_subset_query_set(
+    rounds: list[BenchmarkMetrics], recorded_at: Any = None
+) -> str | None:
+    """The query set id in-stream rounds executed when they all executed the
+    same set and it is smaller than the set they listed (a query that failed
+    in every round); None otherwise, and the aggregate's id stands. Such a
+    QpH is over the smaller set. Rounds from before the round record map
+    their executed names through the legacy table (``"unknown"`` when it has
+    no entry), never through today's SQL."""
+    from lakebench.benchmark.queries import legacy_query_set_id
+
+    groups = rounds_by_query_set(rounds)
+    if len(groups) != 1:
+        return None
+    ((key, members),) = groups.items()
+    if key == QUERY_SET_NOT_RECORDED:
+        return None
+    listed = {
+        str(q.get("name") or q.get("query_name"))
+        for r in members
+        for q in r.queries or []
+        if isinstance(q, dict) and (q.get("name") or q.get("query_name"))
+    }
+    rec = members[0].round_record
+    executed = (rec or {}).get("executed_queries")
+    if not isinstance(executed, list):
+        executed = executed_query_set(members[0])[0]
+    if not listed or set(executed) == listed:
+        return None
+    return key if rec is not None else legacy_query_set_id(executed, recorded_at)
+
+
+def composite_qph_basis(rounds: list[BenchmarkMetrics]) -> tuple[dict[str, Any], dict[str, float]]:
+    """``(composite_qph_basis, composite_qph_by_set)`` for in-stream rounds.
+
+    The basis says whether the composite QpH (the median over rounds)
+    blends rounds that executed different query sets, and how many rounds
+    each set has; by_set is the median QpH per executed set. A round from
+    before the round record gets its set from its queries' success flags;
+    a round with no queries listed is ``QUERY_SET_NOT_RECORDED``, and the
+    basis says so."""
+    groups = rounds_by_query_set(rounds)
+    recorded = {k: v for k, v in groups.items() if k != QUERY_SET_NOT_RECORDED}
+    basis: dict[str, Any] = {
+        "blended": len(groups) > 1,
+        "sets": {k: len(v) for k, v in sorted(groups.items())},
+    }
+    if QUERY_SET_NOT_RECORDED in groups:
+        basis["note"] = "some rounds list no queries; their query set is not known"
+    by_set = {
+        k: round(statistics.median([r.qph for r in v]), 1) for k, v in sorted(recorded.items())
+    }
+    return basis, by_set
+
+
 def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetrics:
     """Aggregate multiple in-stream benchmark rounds into a single result.
 
@@ -2078,6 +2197,12 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
             qd["result_fingerprint_note"] = "aggregated over in-stream rounds"
         aggregated_queries.append(qd)
 
+    # The query set the median stands for: as before, the set of every
+    # query name the rounds ran, unless the rounds executed different sets,
+    # when it is "blended" (never comparable, not even with another blend;
+    # benchmark.queries.qph_comparable). The executed sets are in
+    # PipelineBenchmark's composite_qph_basis.
+    set_id = BLENDED_QUERY_SET if len(rounds_by_query_set(rounds)) > 1 else None
     return BenchmarkMetrics(
         mode=rounds[0].mode,
         cache=rounds[0].cache,
@@ -2088,6 +2213,7 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
         iterations=rounds[0].iterations,
         streams=rounds[0].streams,
         engine=rounds[0].engine,
+        query_set_id=set_id,
     )
 
 
@@ -2679,15 +2805,40 @@ class MetricsCollector:
         if self.current_run:
             self.current_run.benchmark = benchmark
 
-    def record_benchmark_round(self, benchmark: BenchmarkMetrics) -> None:
-        """Record an in-stream benchmark round.
-
-        Args:
-            benchmark: BenchmarkMetrics from a single round (should have
-                ``round_meta`` set)
-        """
-        if self.current_run:
-            self.current_run.benchmark_rounds.append(benchmark)
+    def record_round(
+        self,
+        benchmark: BenchmarkMetrics,
+        *,
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
+        investigator_queries: str | None = None,
+    ) -> None:
+        """Record an in-stream benchmark round: the one writer of
+        ``benchmark_rounds[]`` and of each round's record (index, start and
+        end, the queries it executed and their query set id, and whether the
+        investigator queries ran: one of ``INVESTIGATOR_QUERY_STATES``, None
+        for a workload without them)."""
+        if investigator_queries is not None and investigator_queries not in (
+            INVESTIGATOR_QUERY_STATES
+        ):
+            raise ValueError(f"investigator_queries {investigator_queries!r} is not a known state")
+        if not self.current_run:
+            return
+        executed, set_id = executed_query_set(benchmark)
+        index = (
+            benchmark.round_meta.round_index
+            if benchmark.round_meta is not None
+            else len(self.current_run.benchmark_rounds)
+        )
+        benchmark.round_record = {
+            "index": index,
+            "started_at": started_at.isoformat() if started_at else None,
+            "ended_at": ended_at.isoformat() if ended_at else None,
+            "executed_queries": executed,
+            "executed_query_set_id": set_id,
+            "investigator_queries": investigator_queries,
+        }
+        self.current_run.benchmark_rounds.append(benchmark)
 
     def record_actual_sizes(
         self,

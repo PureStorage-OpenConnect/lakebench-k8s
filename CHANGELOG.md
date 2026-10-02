@@ -318,6 +318,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   release workflow runs all four with `--require-all` on the full history.
   The perf gate now refuses a run an evaluation profile or a Lakebench limit
   bound. See `docs/releasing.md`, "Release evidence".
+- **Compaction by engine, and blended in-stream QpH.** A run's effective
+  maintenance records the compaction operation and its parameters (Trino
+  `optimize` with its 128 MB threshold, Iceberg `rewrite_data_files`
+  defaults), and an exp2 id names it (`compaction=ran(trino_optimize:128MB)`),
+  so a Trino and a Spark Thrift run that both compacted are not
+  like-for-like. Each in-stream round records the queries it executed and
+  their query set id; `scores.composite_qph_basis` and
+  `scores.composite_qph_by_set` say when the in-stream QpH blends rounds
+  that executed different sets (a round with a failed query). Such a run's
+  in-stream benchmark reads query set `blended`; `compare` marks its round
+  medians `not_assessed` and gives the reason ("rounds ran different query
+  sets (A)") in the table, the cmp2 row's `rounds` field and a new CSV
+  `rounds` column, and the perf gate and `reproduce` leave it out. A record stored before rounds named
+  their set gets each round's set from its queries' success flags, so an
+  older continuous run in which a query failed in some rounds and not
+  others now reads blended too. A run whose rounds all missed the same
+  query is not assessed in `compare` either, and `reproduce` reads it as
+  the smaller set it executed. A mix of engines reads
+  `compaction=ran(mixed(<op>+<op>))`. See `docs/benchmarking.md`.
 - **Run provenance is complete.** `metrics.json` `provenance` now says how
   lakebench was installed (`install`), and a pip-installed run names the
   commit its wheel was built from (the build writes it into the package;

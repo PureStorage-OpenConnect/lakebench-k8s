@@ -133,6 +133,46 @@ OPERATION_KIND = {
 _SEVERITY = (FAILED, NOT_RUN, SKIPPED_BY_USER, NOT_SUPPORTED, RAN_NO_EFFECT, RAN)
 
 
+def compaction_label(effective: Mapping[str, Any]) -> str | None:
+    """``<operation>:<param values>`` of the compaction a run's effective
+    maintenance records (``trino_optimize:128MB``,
+    ``iceberg_rewrite_data_files``), or None when it records none."""
+    detail = (((effective.get("detail") or {}).get("operations") or {}).get("compaction")) or {}
+    return operation_label(detail)
+
+
+def operation_label(detail: Any) -> str | None:
+    """``<operation>:<param values>`` of one recorded compaction entry
+    (``detail.operations.compaction``). A mixed entry names each operation,
+    ``mixed(iceberg_rewrite_data_files+trino_optimize:128MB)``, so two
+    different mixes never read the same."""
+    if not isinstance(detail, Mapping) or not detail.get("operation"):
+        return None
+    if detail["operation"] == "mixed":
+        parts = sorted(p for p in (operation_label(o) for o in detail.get("operations") or []) if p)
+        return f"mixed({'+'.join(parts)})"
+    params = detail.get("params") or {}
+    values = (
+        # ";" so the label never adds a "," to the comma-separated id.
+        ";".join(str(v) for _k, v in sorted(params.items())) if isinstance(params, Mapping) else ""
+    )
+    return f"{detail['operation']}:{values}" if values else str(detail["operation"])
+
+
+def with_compaction_operation(effective: dict[str, Any]) -> dict[str, Any]:
+    """*effective* with ``compaction=ran(<operation>:<params>)`` in its ``id``
+    when the compaction operation is recorded (``detail_id`` reads on, off
+    or partial and is left as it is). Only exp2 blocks carry it: an exp1 id
+    never moves, and its operation is derived at read time
+    (metrics/comparability.compaction_operation)."""
+    label = compaction_label(effective)
+    if label is None or not isinstance(effective.get("id"), str):
+        return effective
+    out = dict(effective)
+    out["id"] = re.sub(r"\bcompaction=ran\b(?!\()", f"compaction={RAN}({label})", out["id"])
+    return out
+
+
 def operations_for(table_format: str | None) -> tuple[str, ...]:
     """The maintenance operations the identity names for *table_format*."""
     return DELTA_OPERATIONS if (table_format or "").lower() == "delta" else ICEBERG_OPERATIONS
@@ -392,6 +432,30 @@ def effective_maintenance(
         detail_parts.append("stopped")
         reasons.append("pre-benchmark maintenance stopped on its budget")
     coarse = {k: _worst([v for op, v in op_cls.items() if OPERATION_KIND[op] == k]) for k in both}
+    # The compaction operation and its parameters as the run's compaction
+    # calls recorded them (from the builders that wrote the SQL): Trino
+    # optimize with its threshold is a different maintenance from Iceberg
+    # rewrite_data_files defaults.
+    # Calls that ran no statement say nothing about what ran; two engines
+    # (one call falling back to the other) are recorded as mixed.
+    named = {
+        (str(o["operation"]), tuple(sorted((o.get("params") or {}).items())))
+        for o in (outcomes or [])
+        if o.get("kind") == "compaction"
+        and o.get("operation")
+        and int(o.get("statements_succeeded", o.get("succeeded")) or 0) > 0
+    }
+    if named and op_cls.get("compaction") == RAN:
+        if len(named) == 1:
+            ((op_name, params),) = named
+            entry: dict[str, Any] = {"operation": op_name, "params": dict(params)}
+        else:
+            entry = {
+                "operation": "mixed",
+                "params": {},
+                "operations": [{"operation": n, "params": dict(p)} for n, p in sorted(named)],
+            }
+        per_op.setdefault("compaction", {}).update(entry)
     return {
         "id": f"{policy}:" + ",".join(f"{op}={op_cls[op]}" for op in ops),
         "detail_id": f"{policy}:" + ",".join(detail_parts),

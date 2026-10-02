@@ -275,10 +275,9 @@ def compaction_operation(exp: Mapping[str, Any]) -> str | None:
         return None
     detail = ((em.get("detail") or {}).get("operations") or {}).get("compaction")
     if isinstance(detail, Mapping) and detail.get("operation"):
-        params = detail.get("params") or {}
-        if isinstance(params, Mapping) and params:
-            return f"{detail['operation']}:" + ",".join(f"{v}" for _, v in sorted(params.items()))
-        return str(detail["operation"])
+        from lakebench.metrics.maintenance_policy import operation_label
+
+        return operation_label(detail)
     if not _compaction_ran(em):
         return None
     arch = exp.get("architecture") or {}

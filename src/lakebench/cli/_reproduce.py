@@ -228,14 +228,21 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
         if value is not None and value > 0:
             numbers[attr] = float(value)
 
-    # QpH -- prefer post-compaction, then the plain benchmark result
+    # QpH -- prefer post-compaction, then the plain benchmark result. A
+    # median over in-stream rounds that executed different query sets is no
+    # one QpH, so it is left out (metrics/collector.composite_qph_basis).
     post_qph = getattr(pb, "post_compaction_qph", 0.0) or 0.0
-    if post_qph > 0:
+    rounds = list(getattr(pb, "benchmark_rounds", None) or [])
+    blended = False
+    if rounds:
+        from lakebench.metrics.collector import composite_qph_basis
+
+        blended = bool(composite_qph_basis(rounds)[0].get("blended"))
+    qb = getattr(pb, "query_benchmark", None)
+    if not blended and post_qph > 0:
         numbers["composite_qph"] = float(post_qph)
-    else:
-        qb = getattr(pb, "query_benchmark", None)
-        if qb is not None and getattr(qb, "qph", 0) > 0:
-            numbers["composite_qph"] = float(qb.qph)
+    elif not blended and qb is not None and getattr(qb, "qph", 0) > 0:
+        numbers["composite_qph"] = float(qb.qph)
 
     # Per-stage seconds -- stage names come from live PipelineBenchmark
     # data (bronze/silver/gold/datagen/query for batch;
@@ -265,8 +272,17 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
 
 
 def _run_query_set(metrics: Any) -> str | None:
-    """The query-set id of the run's QpH (the benchmark the QpH came from)."""
+    """The query-set id of the run's QpH (the benchmark the QpH came from):
+    the smaller set when every in-stream round missed the same query
+    (collector.executed_subset_query_set), as compare reads it."""
+    from lakebench.metrics.collector import executed_subset_query_set
+
     pb = getattr(metrics, "pipeline_benchmark", None)
+    subset = executed_subset_query_set(
+        list(getattr(pb, "benchmark_rounds", None) or []), getattr(metrics, "start_time", None)
+    )
+    if subset:
+        return subset
     for bench in (getattr(pb, "query_benchmark", None), getattr(metrics, "benchmark", None)):
         qs = getattr(bench, "query_set_id", None)
         if qs:

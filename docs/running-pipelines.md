@@ -380,7 +380,7 @@ Continuous mode produces a different set of scores than batch:
 | **data_freshness_seconds** | Worst-case gold table staleness from the stream job logs. |
 | **query_time_event_age_seconds** | Diagnostic, not freshness: median age of gold's newest event date at query time (when in-stream rounds ran). Written as `query_time_freshness_seconds` before v1.6. |
 | **sustained_throughput_rps** | Rows/sec bronze ingested inside the window, over the seconds data was arriving (`arrival_seconds`). |
-| **composite_qph** | In-stream median QpH. |
+| **composite_qph** | In-stream median QpH. When the rounds executed different query sets (a round with a failed query), `composite_qph_basis.blended` is true, the median is over different queries and is not compared, and `composite_qph_by_set` holds the median per set. |
 | **in_stream_composite_qph** | Same as composite_qph (explicit label for in-stream origin). |
 | **composite_qph_rounds** | In-stream rounds behind the composite_qph median (0 when it is the post-stream benchmark). Benchmark iterations are an execution condition, so two runs with different counts are comparable but not like-for-like, and `lakebench compare` says so. |
 | **stage_latency_profile** | Average micro-batch processing time per stage (`bronze_ms`, `silver_ms`, `gold_ms`). |

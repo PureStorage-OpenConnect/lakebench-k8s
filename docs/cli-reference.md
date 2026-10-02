@@ -161,7 +161,7 @@ better side: the winner rule is not in this release. Each row's
 | `withheld` | The pair is NOT COMPARABLE or NOT ESTABLISHED; the delta is not computed |
 | `not_directional` | The score has no better side (correctness, guard and diagnostic scores, scores that follow the config, a score the registry does not know, or a mode-dependent score on a record without a mode) |
 | `confounded` | The pair is confounded |
-| `not_assessed` | Every other directional row: on a NOT LIKE-FOR-LIKE pair because the pair is not like-for-like, otherwise because the winner rule is not in this release |
+| `not_assessed` | A median over in-stream rounds (`composite_qph`, `in_stream_composite_qph`, `qph_degradation_pct`) on a side whose rounds ran different query sets or all missed the same query, on any pair that is not withheld (the hint names the side); every other directional row: on a NOT LIKE-FOR-LIKE pair because the pair is not like-for-like, otherwise because the winner rule is not in this release |
 | `capped` | On a like-for-like pair, a Lakebench limit bound the row on a passed member of either side (a bound kind the row depends on, or the trickle of a continuous run): the figure measures that limit, not the system |
 
 Whatever its assessment, a row that a Lakebench limit bound on either side
@@ -178,10 +178,12 @@ member's `experiment` block, `support`, `bound`), `groups` (the differing
 keys per identity group), `warnings` and `metrics` (per row: `metric`,
 `unit`, `direction`, `a` and `b` with `median`, `min`, `max`, `values`, `n`,
 `delta_pct`, `assessment`, `winner` (always null), `missing`, `hint`,
-`capped_by`). `--format csv` writes the header fields as `# key: value`
+`capped_by`, and `rounds`, which says why a round median is not assessed
+for its rounds, else null). `--format csv` writes the header fields as `# key: value`
 lines, then one row per metric with `metric`, the medians and ranges,
-`delta_pct`, `verdict`, `attribution`, `n_a`, `n_b`, `assessment` and
-`bound_by`. A protected or spent AML seed is never printed; it reads
+`delta_pct`, `verdict`, `attribution`, `n_a`, `n_b`, `assessment`,
+`bound_by` and `rounds`; the table prints the `rounds` reason after the
+assessment. A protected or spent AML seed is never printed; it reads
 `<protected seed>`.
 
 ### config

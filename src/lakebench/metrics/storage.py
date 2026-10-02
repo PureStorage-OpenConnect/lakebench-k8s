@@ -200,9 +200,65 @@ def _deserialize_benchmark_rounds(
                 streams=r.get("streams", 1),
                 stream_results=r.get("stream_results", []),
                 round_meta=round_meta,
+                round_record=(
+                    {k: r.get(k) for k in _ROUND_RECORD_KEYS}
+                    if "executed_query_set_id" in r
+                    else None
+                ),
             )
         )
     return rounds
+
+
+def recorded_qph_basis(record: Any) -> dict[str, Any] | None:
+    """The ``composite_qph_basis`` of a stored metrics.json record, read from
+    its in-stream rounds (collector.composite_qph_basis) so a record written
+    before the basis was stored gets the same answer in compare, the perf
+    gate and reproduce. A record that keeps no rounds gives its stored basis,
+    or None."""
+    from .collector import composite_qph_basis
+
+    rounds = _recorded_rounds(record)
+    if rounds:
+        return composite_qph_basis(rounds)[0]
+    if not isinstance(record, dict) or "error" in record:
+        return None
+    pb = record.get("pipeline_benchmark") or {}
+    stored = (pb.get("scores") or {}).get("composite_qph_basis") if isinstance(pb, dict) else None
+    return stored if isinstance(stored, dict) else None
+
+
+def recorded_executed_query_set(record: Any) -> str | None:
+    """collector.executed_subset_query_set over a stored record's rounds."""
+    from .collector import executed_subset_query_set
+
+    when = record.get("start_time") if isinstance(record, dict) else None
+    return executed_subset_query_set(_recorded_rounds(record), when)
+
+
+def _recorded_rounds(record: Any) -> list[BenchmarkMetrics]:
+    """A stored record's in-stream rounds, loaded as ``_dict_to_metrics``
+    loads them; rounds that are not objects are skipped."""
+    if not isinstance(record, dict) or "error" in record:
+        return []
+    pb = record.get("pipeline_benchmark") or {}
+    raw = pb.get("benchmark_rounds") if isinstance(pb, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return _deserialize_benchmark_rounds(
+        [r for r in raw if isinstance(r, dict)], record.get("start_time")
+    )
+
+
+#: The keys MetricsCollector.record_round writes beside a round's benchmark.
+_ROUND_RECORD_KEYS = (
+    "index",
+    "started_at",
+    "ended_at",
+    "executed_queries",
+    "executed_query_set_id",
+    "investigator_queries",
+)
 
 
 def recorded_engine(bench: dict[str, Any]) -> str | None:

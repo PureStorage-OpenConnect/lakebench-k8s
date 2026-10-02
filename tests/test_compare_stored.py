@@ -847,7 +847,7 @@ def test_caps_are_labelled_on_a_pair_that_is_not_like_for_like(tmp_path: Path) -
     assert "BOUNDED" in _stdout(result)
     csv_text = _stdout(_invoke(spec["a"], spec["b"], "--runs-dir", str(runs), "--format", "csv"))
     line = next(x for x in csv_text.splitlines() if x.startswith("sustained_throughput_rps,"))
-    assert line.endswith(",trickle")
+    assert line.endswith(",trickle,")
 
 
 def test_a_cap_on_one_side_labels_its_rows() -> None:

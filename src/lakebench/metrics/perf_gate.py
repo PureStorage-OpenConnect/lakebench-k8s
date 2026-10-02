@@ -655,6 +655,11 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
         if _classify_direction(k)[0] == "performance"
     }
     excluded: dict[str, str] = {}
+    from lakebench.metrics.storage import recorded_qph_basis
+
+    basis = recorded_qph_basis(run.raw)
+    if isinstance(basis, Mapping) and basis.get("blended"):
+        excluded["composite_qph"] = "in-stream rounds ran different query sets"
 
     if run.mode == "sustained":
         # Every continuous stage runs for the whole window, so its seconds

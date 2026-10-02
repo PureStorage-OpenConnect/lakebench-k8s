@@ -10,6 +10,7 @@ seconds).
 
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -106,7 +107,11 @@ def test_round_sends_the_spark_form_to_thrift():
         k8s=None,
     )
     assert len(sent) == 1 and "date_diff" not in sent[0].lower()
-    recorded = collector.record_benchmark_round.call_args.args[0]
+    call = collector.record_round.call_args
+    recorded = call.args[0]
+    # The round is recorded through record_round with its start and end.
+    assert isinstance(call.kwargs["started_at"], datetime)
+    assert isinstance(call.kwargs["ended_at"], datetime)
     assert recorded.round_meta.gold_event_age_seconds == 54805675
 
 

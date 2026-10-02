@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
@@ -201,11 +201,33 @@ def build_maintenance_sql(
     return []
 
 
+#: Trino's optimize threshold when the caller names none.
+DEFAULT_FILE_SIZE_THRESHOLD = "128MB"
+
+
+def compaction_operation(
+    engine: str, file_size_threshold: str = DEFAULT_FILE_SIZE_THRESHOLD
+) -> dict[str, Any] | None:
+    """What ``build_compaction_sql`` runs for *engine*, as the experiment
+    records it: ``{"operation", "params"}`` (Trino ``optimize`` with its
+    file size threshold; Spark Thrift ``rewrite_data_files`` with Iceberg's
+    defaults), or None for an engine that runs none. Kept next to the
+    builder so the record names what the statement does."""
+    if engine == "trino":
+        return {
+            "operation": "trino_optimize",
+            "params": {"file_size_threshold": file_size_threshold},
+        }
+    if engine == "spark-thrift":
+        return {"operation": "iceberg_rewrite_data_files", "params": {}}
+    return None
+
+
 def build_compaction_sql(
     engine: str,
     catalog: str,
     table: str,
-    file_size_threshold: str = "128MB",
+    file_size_threshold: str = DEFAULT_FILE_SIZE_THRESHOLD,
 ) -> list[str]:
     """Build Iceberg compaction SQL (rewrite_data_files / optimize).
 
@@ -296,7 +318,7 @@ def build_compaction_plan(
     engine: str,
     catalog: str,
     table: str,
-    file_size_threshold: str = "128MB",
+    file_size_threshold: str = DEFAULT_FILE_SIZE_THRESHOLD,
     partitions: list[str | None] | None = None,
 ) -> list[str]:
     """Compaction statements for *table*.
