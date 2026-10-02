@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
@@ -145,14 +146,13 @@ def profiles(spark, load_script_module):
 
     # --- Stream path: feed the same corpus as two micro-batches through
     # _merge_batch (proxy for the streaming trigger; the MERGE code path
-    # is identical). Batch 0 (T1 to T5) inserts A, B, Y and Z; batch 1 (T6
+    # is identical), with the foreachBatch local properties set
+    # (_foreach_batch). Batch 0 (T1 to T5) inserts A, B, Y and Z; batch 1 (T6
     # to T11) inserts C and updates the other four. In the UPDATE, the
     # Welford arms run as: B sends in both batches (the general arm with the
     # cross-term); Z only received in batch 0 and sends twice in batch 1
     # (the receive-then-send arm, and stddev at exactly two sends); A sends
-    # only in batch 0 (the keep arm). streaming_query_id is monkey-patched: Spark only
-    # binds the query id inside a real foreachBatch and a direct call
-    # would otherwise raise from streaming_query_id().
+    # only in batch 0 (the keep arm).
     #
     # The stream writes the tables its DDL literals name, which interpolate
     # the table names at import: the default silver.* names in catalog lh
@@ -160,7 +160,6 @@ def profiles(spark, load_script_module):
     # MERGE at tables the DDLs never created. The batch side writes only
     # lh.silver_batch.entity_profiles, so the two never share a table.
     assert ss.CATALOG == _CATALOG
-    ss.streaming_query_id = lambda _s: "qid-parity"
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver")
     for ddl_attr in (
         "DDL_TXNS",
@@ -176,8 +175,12 @@ def profiles(spark, load_script_module):
     ss._KYC_LOADED = True
     ss._kyc = lambda _s: None
     ss.append_new_dimensions = lambda *_a, **_kw: (0, 0)
-    ss._merge_batch(spark.createDataFrame(corpus[:5], _PACS_SCHEMA), 0)
-    ss._merge_batch(spark.createDataFrame(corpus[5:], _PACS_SCHEMA), 1)
+    foreach_batch_harness(
+        spark, ss._merge_batch, spark.createDataFrame(corpus[:5], _PACS_SCHEMA), 0
+    )
+    foreach_batch_harness(
+        spark, ss._merge_batch, spark.createDataFrame(corpus[5:], _PACS_SCHEMA), 1
+    )
 
     # --- Compare per-entity rows.
     batch_rows = {
@@ -210,11 +213,11 @@ def test_batch_and_stream_profile_sums_match(profiles):
 
 
 @pytest.mark.known_bug(
-    "QR-6",
+    "LB-240",
     match=r"total_(sent|received)_usd: batch=None, stream=0\.00",
     reason=(
-        "product difference the corrected test found: an entity that never sent (or never "
-        "received) gets NULL in batch and 0.00 in stream; LB id requested from the main lane"
+        "an entity that never sent (or never received) gets NULL in batch and 0.00 in "
+        "stream; fixed with AM-25"
     ),
 )
 def test_batch_and_stream_profile_sums_agree_on_null(profiles):

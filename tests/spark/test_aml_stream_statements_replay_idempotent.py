@@ -18,17 +18,13 @@ import sys
 import tempfile
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-@pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
-)
 def test_replay_is_idempotent_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
@@ -76,14 +72,18 @@ def _run(jars):
 
         for bid in (0, 1, 2):
             df = bronze_batch(spark, rows_by_batch[bid])
-            ss._merge_batch(df, bid)
+            foreach_batch_harness(spark, ss._merge_batch, df, bid)
 
         snapshot_after_first = _snapshot(spark)
 
-        # Simulate Structured Streaming's foreachBatch retry: replay batch 2
-        # under the SAME query id (job group) and the same batchId.
+        # Simulate Structured Streaming's retry: a failed batch stops its
+        # query, and the restarted query (same query id, new run id, which
+        # Spark uses as the job group) runs batch 2 again as its first batch.
+        # Within one run no batch repeats, so the replay check runs only on a
+        # run's first batch (common.replay_possible).
+        spark.sparkContext.setJobGroup("stream-run-2", "test")
         df_replay = bronze_batch(spark, rows_by_batch[2])
-        ss._merge_batch(df_replay, 2)
+        foreach_batch_harness(spark, ss._merge_batch, df_replay, 2)
 
         snapshot_after_replay = _snapshot(spark)
 

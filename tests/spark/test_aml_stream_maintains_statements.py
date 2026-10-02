@@ -23,15 +23,11 @@ import sys
 import tempfile
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
 
-@pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
-)
 @pytest.mark.requires_jars("iceberg")
 def test_stream_maintains_statements_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
@@ -76,7 +72,7 @@ def _run(jars):
         for bid in range(5):
             rows = batch_rows(bid, count=1)
             df = bronze_batch(spark, rows)
-            ss._merge_batch(df, bid)
+            foreach_batch_harness(spark, ss._merge_batch, df, bid)
 
         stmts = spark.sql(
             "SELECT iban, entry_seq, cdt_dbt_ind, amt, bal_before, bal_after "

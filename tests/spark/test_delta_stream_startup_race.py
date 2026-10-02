@@ -34,18 +34,18 @@ def _ran(result):
 
 
 @pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
+    "LB-223",
+    match="PARSE_SYNTAX_ERROR",
+    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
 )
 def test_no_errors(result):
     assert result["errors"] == [], result
 
 
 @pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
+    "LB-223",
+    match="PARSE_SYNTAX_ERROR",
+    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
 )
 def test_both_racers_wrote(result):
     """Both racers commit non-zero rows: neither is Delta-deduped by
@@ -57,9 +57,9 @@ def test_both_racers_wrote(result):
 
 
 @pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
+    "LB-223",
+    match="PARSE_SYNTAX_ERROR",
+    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
 )
 def test_no_data_loss(result):
     """After both writes settle, the table holds both racers' rows."""
@@ -68,9 +68,9 @@ def test_no_data_loss(result):
 
 
 @pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
+    "LB-223",
+    match="PARSE_SYNTAX_ERROR",
+    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
 )
 def test_both_stream_ids_visible(result):
     """The I6 columns let operators see both racers' rows partitioned by

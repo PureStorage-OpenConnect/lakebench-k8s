@@ -19,17 +19,13 @@ import sys
 import tempfile
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-@pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
-)
 def test_strict_env_var_refuses_late_arrival_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
@@ -73,7 +69,7 @@ def _run(jars):
         # Batch 0: no prior state -> no late arrivals -> commits cleanly.
         b0_rows = [("B0T0", BASE_TS + timedelta(hours=24), "GB01", "US02", "100.00")]
         try:
-            ss._merge_batch(bronze_batch(spark, b0_rows), 0)
+            foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, b0_rows), 0)
             batch0_committed = True
         except SilverAbort:
             batch0_committed = False
@@ -81,7 +77,7 @@ def _run(jars):
         # Batch 1: earlier book_ts -> late arrival -> strict mode raises.
         b1_rows = [("B1T0", BASE_TS + timedelta(hours=0), "GB01", "US02", "50.00")]
         try:
-            ss._merge_batch(bronze_batch(spark, b1_rows), 1)
+            foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, b1_rows), 1)
             batch1_raised = False
             b1_msg = ""
         except SilverAbort as exc:

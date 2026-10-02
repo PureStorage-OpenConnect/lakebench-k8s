@@ -47,11 +47,6 @@ def _session(warehouse, jars):
     )
 
 
-@pytest.mark.known_bug(
-    "LB-236",
-    match="W5_sanctions_match",
-    reason="W5_sanctions_match KeyError, not root-caused (v17-aml-rules decides the rule)",
-)
 def test_tm_operations_end_to_end(tmp_path, spark_subprocess, spark_jars):
     """Fresh interpreter: a JVM with its own static Spark conf.
     spark_subprocess puts the scripts directory on PYTHONPATH, so executor
@@ -325,7 +320,9 @@ def _check(spark):
     assert cov[("gather_scatter", "W1_connected_components")]["rule_status"] == "skipped"
     assert cov[("fan_in", None)]["coverage"] == "gap"
     assert ("random", None) not in cov
-    assert cov[(None, "W5_sanctions_match")]["coverage"] == "attribute"
+    # W5 has a target typology (RULE_TARGET_TYPOLOGY), so its coverage row is
+    # designated under it; the (None, W5) attribute row predates the target.
+    assert cov[("sanctions_match", "W5_sanctions_match")]["coverage"] == "designated"
 
     # Stage 6: dispositions, one per alert, none NULL.
     d = _disp(spark)
@@ -784,7 +781,11 @@ def _check(spark):
 
     # The continuous reset drops every TM table, so a new continuous run
     # never shows the previous run's queue before its first tick.
-    bvf._continuous_reset(spark, spark.table("lakehouse.default.pacs008_raw"))
+    # The product passes the raw-file read of the corpus, never a frame over
+    # the bronze table the reset drops: on Spark 4.1 a frame over a dropped
+    # table cannot be re-analysed for the create.
+    raw = spark.createDataFrame([], spark.table("lakehouse.default.pacs008_raw").schema)
+    bvf._continuous_reset(spark, raw)
     for t in ("tm_reconciliation", "scenario_coverage", "alert_dispositions", "cases"):
         assert not table_exists(spark, f"lakehouse.gold.{t}"), t
 

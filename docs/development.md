@@ -143,6 +143,12 @@ whole output to `spark-subprocess.log` under pytest's temporary directory
 and shows the last 60 lines plus every `Caused by:` line.
 To run such a child by hand, give it the same path:
 `PYTHONPATH=src/lakebench/spark/scripts:tests/spark:src python tests/spark/test_x.py ...`.
+A test that calls a stream's micro-batch handler directly wraps the call in
+`foreach_batch_harness(spark, handler, df, batch_id)` from
+`tests/spark/_foreach_batch.py`, which sets the local properties a real
+`foreachBatch` sets (the streaming query id the writers read) and restores
+them afterwards; with several writer threads, each thread enters
+`inside_foreach_batch` itself.
 `--lb-reverse` is defined in `tests/spark/conftest.py`, so pass it with
 `tests/spark` (or a file in it) on the command line.
 

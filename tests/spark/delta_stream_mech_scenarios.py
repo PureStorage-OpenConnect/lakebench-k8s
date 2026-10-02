@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 
+from _foreach_batch import inside_foreach_batch  # noqa: E402
 from c360_stream_scenarios import bronze_df  # noqa: E402
 
 
@@ -54,32 +55,13 @@ def _session(jars, work):
     )
 
 
-_THREAD_QID = threading.local()
-
-
-def _thread_streaming_query_id(_spark):
-    """A per-Python-thread streaming query id.
-
-    Spark's ``sparkContext.setLocalProperty`` binds a value to the JVM
-    thread the current Py4J call happened to grab from the connection pool,
-    which is not stable across a Python thread's own subsequent calls. The
-    startup-race scenario needs each racer to see its own query id inside
-    the same shared session, so we replace ``silver_stream_delta``'s bound
-    ``streaming_query_id`` with a threading.local lookup for the duration
-    of the scenario.
-    """
-    return _THREAD_QID.qid
-
-
 def _run_startup_race(spark, work):
     """Simulate two concurrent silver_stream_delta writers landing on the same
-    empty table. Each thread pretends to be inside a foreachBatch with a
-    distinct ``streaming_query_id``, matching the state Spark sets inside
-    a real ``foreachBatch``.
+    empty table. Each thread runs inside a foreachBatch of its own query id
+    (``inside_foreach_batch`` sets the local properties a real
+    ``foreachBatch`` sets, on that thread).
     """
     import silver_stream_delta as ss
-
-    ss.streaming_query_id = _thread_streaming_query_id
 
     dtbl = "spark_catalog.silver.customer_interactions_enriched"
     spark.sql("DROP TABLE IF EXISTS " + dtbl)
@@ -92,10 +74,10 @@ def _run_startup_race(spark, work):
 
     def _writer(name, start, qid):
         try:
-            _THREAD_QID.qid = qid
             df = bronze_df(spark, 5, start=start)
             barrier.wait(timeout=30)
-            n = ss.write_silver_batch(df, 0, dtbl, f"file://{work}/")
+            with inside_foreach_batch(spark, 0, qid):
+                n = ss.write_silver_batch(df, 0, dtbl, f"file://{work}/")
             written[name] = int(n)
         except Exception as e:  # noqa: BLE001 -- surfaced as JSON
             errors.append(f"{name}: {type(e).__name__}: {e}")
@@ -136,14 +118,12 @@ def _run_version_race(spark, work, batches=10):
     """
     import silver_stream_delta as ss
 
-    ss.streaming_query_id = _thread_streaming_query_id
-
     dtbl = "spark_catalog.silver.customer_interactions_enriched_vr"
     spark.sql("DROP TABLE IF EXISTS " + dtbl)
     spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.silver")
 
     # One fixed stream id for the whole scenario; only txnVersion varies per batch.
-    _THREAD_QID.qid = "qvr"
+    qid = "qvr"
 
     stop_ev = threading.Event()
 
@@ -159,7 +139,8 @@ def _run_version_race(spark, work, batches=10):
 
     # Seed the table before starting churn so ALTER doesn't fail forever.
     df0 = bronze_df(spark, 5, start=0)
-    n0 = ss.write_silver_batch(df0, 0, dtbl, f"file://{work}/")
+    with inside_foreach_batch(spark, 0, qid):
+        n0 = ss.write_silver_batch(df0, 0, dtbl, f"file://{work}/")
 
     ch = threading.Thread(target=_churn, daemon=True)
     ch.start()
@@ -169,7 +150,8 @@ def _run_version_race(spark, work, batches=10):
     try:
         for bid in range(1, batches):
             df = bronze_df(spark, 5, start=1000 + bid * 5)
-            n = ss.write_silver_batch(df, bid, dtbl, f"file://{work}/")
+            with inside_foreach_batch(spark, bid, qid):
+                n = ss.write_silver_batch(df, bid, dtbl, f"file://{work}/")
             returns.append(int(n))
             row_counts.append(int(spark.table(dtbl).count()))
     finally:
@@ -178,6 +160,7 @@ def _run_version_race(spark, work, batches=10):
 
     return {
         "scenario": "version_race",
+        "errors": [],
         "returns": returns,
         "row_counts": row_counts,
         "batches": batches,
@@ -204,7 +187,10 @@ def main():
     if scenario == "startup_race":
         out = _run_startup_race(spark, work)
     elif scenario == "version_race":
-        out = _run_version_race(spark, work, batches=10)
+        try:
+            out = _run_version_race(spark, work, batches=10)
+        except Exception as e:  # noqa: BLE001 -- surfaced as JSON, like startup_race
+            out = {"scenario": "version_race", "errors": [f"{type(e).__name__}: {e}"]}
     else:
         out = {"error": f"unknown scenario {scenario!r}"}
     spark.stop()

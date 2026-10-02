@@ -27,17 +27,13 @@ import sys
 import tempfile
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-@pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
-)
 def test_late_arrival_produces_arrival_order_label_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
@@ -99,7 +95,7 @@ def _run(jars):
         # Batch 0: one payment at hour 24.
         b0_rows = [("B0T0", BASE_TS + timedelta(hours=24), "GB01", "US02", "100.00")]
         captured_len_before_b0 = len(captured)
-        b0_result = ss._merge_batch(bronze_batch(spark, b0_rows), 0)
+        b0_result = foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, b0_rows), 0)
         b0_lines = captured[captured_len_before_b0:]
 
         # Batch 1: one payment at hour 0 -- EARLIER than batch 0's row, so
@@ -107,7 +103,7 @@ def _run(jars):
         # IBANs are late.
         b1_rows = [("B1T0", BASE_TS + timedelta(hours=0), "GB01", "US02", "50.00")]
         captured_len_before_b1 = len(captured)
-        b1_result = ss._merge_batch(bronze_batch(spark, b1_rows), 1)
+        b1_result = foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, b1_rows), 1)
         b1_lines = captured[captured_len_before_b1:]
 
         common.log = real_log  # type: ignore[assignment]

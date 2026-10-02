@@ -46,17 +46,13 @@ import tempfile
 from datetime import timedelta
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-@pytest.mark.known_bug(
-    "LB-195",
-    match="queryId is not set",
-    reason="sql.streaming.queryId is not set: the test calls the writer outside foreachBatch",
-)
 def test_batch_stream_parity_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=900)
     out = json.loads(res.stdout.strip().splitlines()[-1])
@@ -101,7 +97,7 @@ def _run(jars):
         ss = bind_stream_module(spark)
         spark.sparkContext.setJobGroup("stream-run-1", "test")
         for bid, batch in enumerate(batches):
-            ss._merge_batch(bronze_batch(spark, batch), bid)
+            foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, batch), bid)
 
         stream_stmts = _stmt_rows(spark, "lh.silver.account_statements")
         stream_cb = _current_balance_map(spark, "lh.silver.accounts")
