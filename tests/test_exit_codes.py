@@ -164,7 +164,6 @@ PLANNED_BY = {
     "reproduce.verify_out_of_band": "ER-13",
     "run.args": "CC-6",
     "run.deps_missing": "SD-5c",
-    "run.namespace_gone": "CD-17",
     "run.protected_corpus": "AM-22",
     "series.corpus_changed": "CC-30",
     "status.drift": "CC-27",
@@ -797,6 +796,19 @@ def _scenario_run_interrupted(monkeypatch, tmp_path):
     return invoke_scenario(scenario, tmp_path, monkeypatch)[0]
 
 
+def _scenario_run_namespace_gone(monkeypatch, tmp_path):
+    """The QA-9 harness's continuous run, its namespace deleted at second 95."""
+    import dataclasses
+
+    from tests.harness.run_harness import SCENARIOS as RUN_SCENARIOS
+    from tests.harness.run_harness import invoke_scenario
+
+    scenario = dataclasses.replace(
+        RUN_SCENARIOS["continuous_c360"], events=((95.0, "namespace_gone"),)
+    )
+    return invoke_scenario(scenario, tmp_path, monkeypatch)[0]
+
+
 def _scenario_confirm_declined(monkeypatch, tmp_path):
     a = _init_config(tmp_path)
     b = tmp_path / "b.yaml"
@@ -872,6 +884,7 @@ SCENARIOS = {
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
     "run.interrupted": _scenario_run_interrupted,
+    "run.namespace_gone": _scenario_run_namespace_gone,
     "confirm.declined": _scenario_confirm_declined,
     "reproduce.commit_drift": _scenario_reproduce_commit_drift,
     "reproduce.drift": _scenario_reproduce_drift,
@@ -910,6 +923,7 @@ EXPECTED_OUTPUT = {
     "run.pass": "Local mode is sized",
     "run.verdict_failed": "Local mode is sized",
     "run.interrupted": "Interrupted by SIGINT during silver-build",
+    "run.namespace_gone": "was deleted mid-run; stopping",
     "config.validation": "Config error",
     "config.name_required": "config has no name, so it cannot change data",
     "reproduce.commit_drift": "Commit drift",

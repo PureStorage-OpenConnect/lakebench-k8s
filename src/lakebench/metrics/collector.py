@@ -459,6 +459,11 @@ class PipelineMetrics:
     # None: the run was not interrupted.
     interrupted: dict[str, Any] | None = None
 
+    # Set when a continuous run stopped because its namespace was deleted
+    # (or deleted and created again) mid-window (cli/_sustained.py
+    # NamespaceWatch): {reason, at_elapsed}. None otherwise.
+    abort_reason: dict[str, Any] | None = None
+
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
     # None on a fresh run until it is saved; experiment_block() builds it then.
     experiment: dict[str, Any] | None = None
@@ -511,6 +516,8 @@ class PipelineMetrics:
             d["continuous"] = self.continuous
         if self.interrupted is not None:
             d["interrupted"] = self.interrupted
+        if self.abort_reason is not None:
+            d["abort_reason"] = self.abort_reason
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment

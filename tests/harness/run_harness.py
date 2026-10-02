@@ -277,6 +277,11 @@ class Recorder:
     objects: dict[tuple[str, str], bytes] = field(default_factory=dict)
     #: The scenario namespace exists (False: deleted mid-run).
     namespace_present: bool = True
+    #: Its uid (changes when it is destroyed and deployed again), its phase,
+    #: and reads that fail with a 503 before it answers again (-1: all).
+    namespace_uid: str = "ns-uid-runchar-1"
+    namespace_phase: str = "Active"
+    namespace_errors: int = 0
     #: SparkApplications that exist in the fake cluster: name -> uid. A
     #: submit creates one; a delete removes it; a completed stage keeps it.
     apps: dict[str, str] = field(default_factory=dict)
@@ -620,7 +625,14 @@ class FakeCoreV1Api(_FakeApi):
         self._rec.add("CoreV1Api", "read_namespace", name)
         if name != self._rec.namespace or not self._rec.namespace_present:
             raise _api_exception(404)
-        return _namespace_object(name)
+        if self._rec.namespace_errors:
+            if self._rec.namespace_errors > 0:
+                self._rec.namespace_errors -= 1
+            raise _api_exception(503)
+        ns = _namespace_object(name)
+        ns.metadata.uid = self._rec.namespace_uid
+        ns.status.phase = self._rec.namespace_phase
+        return ns
 
     def list_namespace(self, **kw):
         self._rec.add("CoreV1Api", "list_namespace")
@@ -1659,7 +1671,9 @@ class Scenario:
     interrupt: tuple[str, str] | None = None
     submit_interrupt: str | None = None
     lease_signal: str | None = None
-    #: (window second, "SIGINT" | "SIGTERM" | "namespace_gone").
+    #: (window second, "SIGINT" | "SIGTERM" | "namespace_gone" |
+    #: "namespace_redeployed" | "namespace_terminating" |
+    #: "namespace_unreadable" | "namespace_blip" (two failed reads)).
     events: tuple[tuple[float, str], ...] = ()
     #: The continuous datagen Job is still running when the streams start.
     datagen_running: bool = False
@@ -1905,13 +1919,16 @@ def _install_continuous(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     assert scenario.clock_start is not None
     clock = FakeClock(scenario.clock_start)
     rec.clock = clock
+    namespace_events: dict[str, Callable[[], None]] = {
+        "namespace_gone": lambda: setattr(rec, "namespace_present", False),
+        "namespace_redeployed": lambda: setattr(rec, "namespace_uid", "ns-uid-runchar-2"),
+        "namespace_terminating": lambda: setattr(rec, "namespace_phase", "Terminating"),
+        "namespace_unreadable": lambda: setattr(rec, "namespace_errors", -1),
+        "namespace_blip": lambda: setattr(rec, "namespace_errors", 2),
+    }
     for when, what in scenario.events:
-        if what == "namespace_gone":
-
-            def gone() -> None:
-                rec.namespace_present = False
-
-            clock.at(when, gone)
+        if what in namespace_events:
+            clock.at(when, namespace_events[what])
         else:
             clock.at(when, lambda how=what: send_interrupt(how))
     monkeypatch.setattr(lakebench.cli._sustained, "time", clock.time_module())

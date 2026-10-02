@@ -281,7 +281,7 @@ class RunInterrupt:
             return
         _print(console, "Interrupted: stopping this run's jobs (Ctrl-C again to skip)")
         deadline = time.monotonic() + CLEANUP_DEADLINE_S
-        api_client = _cleanup_api_client()
+        api_client = no_retry_api_client()
         self._in_cleanup = True
         try:
             for entry in todo:
@@ -430,9 +430,11 @@ def _timeout(deadline: float) -> tuple[float, float] | None:
     return connect, min(CLEANUP_READ_TIMEOUT_S, left_s - connect)
 
 
-def _cleanup_api_client() -> Any:
-    """An API client for the cleanup that does not retry, so a call costs at
-    most its timeout (the default client lets urllib3 retry three times)."""
+def no_retry_api_client() -> Any:
+    """An API client that does not retry, so a call costs at most its timeout
+    (the default client lets urllib3 retry three times). For the cleanup
+    and the continuous runner's namespace reads; None when it cannot be made
+    (the callers then use the default client)."""
     try:
         from kubernetes import client as k8s_client
 

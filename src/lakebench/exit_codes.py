@@ -197,7 +197,10 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=5,
     ),
     ExitPath(
-        "run.namespace_gone", _C.FAILED, "the namespace disappeared during `run`", planned=True
+        "run.namespace_gone",
+        _C.FAILED,
+        "the namespace was deleted, or deleted and deployed again, during a continuous "
+        "`run`; the record names it in abort_reason",
     ),
     ExitPath(
         "repeat.no_verified_corpus",
