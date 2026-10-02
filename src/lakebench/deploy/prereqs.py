@@ -437,9 +437,10 @@ def run_prereqs(cfg: LakebenchConfig, reader: ClusterReader | None = None) -> li
 class KubeClusterReader:
     """:class:`ClusterReader` over the Kubernetes API and an S3 probe.
 
-    Loads the client config the way ``K8sClient`` does (the configured
-    context, else in-cluster, else the current kubeconfig context), so both
-    talk to the same cluster. Every call is a read with a timeout.
+    Pins the client config through ``ClusterTarget`` as ``K8sClient`` does
+    (the configured context, else the kubeconfig's current context by name,
+    in-cluster only without a kubeconfig), so both talk to the same cluster.
+    Every call is a read with a timeout.
     """
 
     TIMEOUT_S = 15
@@ -447,19 +448,15 @@ class KubeClusterReader:
     def __init__(self, cfg: LakebenchConfig, *, load_config: bool = True):
         """``load_config=False`` when the caller already loaded the client
         config (for example through ``get_k8s_client``)."""
-        from kubernetes import client, config
+        from kubernetes import client
 
-        ctx = cfg.platform.kubernetes.context or None
+        from lakebench.k8s.target import ClusterTarget, ContextConflictError
+
         try:
-            if not load_config:
-                pass
-            elif ctx:
-                config.load_kube_config(context=ctx)
-            else:
-                try:
-                    config.load_incluster_config()
-                except config.ConfigException:
-                    config.load_kube_config()
+            if load_config:
+                ClusterTarget.resolve(cfg).activate()
+        except ContextConflictError:
+            raise  # the kubeconfig changed under the command: a refusal
         except Exception as e:  # noqa: BLE001
             raise ClusterUnreachable(f"no usable Kubernetes config: {e}") from None
         self._client = client
