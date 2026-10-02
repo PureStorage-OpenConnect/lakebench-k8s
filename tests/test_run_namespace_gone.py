@@ -142,7 +142,7 @@ def watch(monkeypatch):
 
     made: list = []
     yield make, clock
-    for p in made:
+    for p in reversed(made):  # the last patch saved the one before it
         p.stop()
 
 
