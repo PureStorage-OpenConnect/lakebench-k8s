@@ -124,18 +124,16 @@ def _call(run_once: Any, *args: Any, **kwargs: Any) -> tuple[int, BaseException 
     except Exception as e:  # noqa: BLE001 -- recorded in the manifest, then re-raised
         from lakebench.cli._exit import exit_code_for
 
-        # The code the CLI exits with once the series re-raises *e*: the
-        # classifier's, else Click's own (a usage error), else 1.
-        code = exit_code_for(e)
-        if code is None:
-            code = getattr(e, "exit_code", None)
-        return int(code if isinstance(code, int) and code else ExitCode.FAILED), e
+        # The code the CLI exits with once the series re-raises *e*.
+        return int(exit_code_for(e) or ExitCode.FAILED), e
     return 0, None
 
 
 def _unfinished_apps(cfg: Any) -> list[str] | None:
     """This deployment's lakebench SparkApplications that have not ended
-    (a stage a timeout left running); None when they cannot be listed."""
+    (a stage a timeout left running); None when the list call fails. Raises
+    what ``get_k8s_client`` raises (a context refusal, an unloadable
+    kubeconfig), which the CLI maps to its exit code."""
     from kubernetes import client as k8s_client
 
     import lakebench.k8s
