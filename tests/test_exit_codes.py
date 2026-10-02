@@ -1213,6 +1213,7 @@ def test_scenarios_cover_exactly_the_live_paths():
 # where the code alone has more than one producer.
 EXPECTED_OUTPUT = {
     "plan.missing_storage_class": "Next: (cluster admin) lakebench admin install --component",
+    "plan.ok": "ok: Kubeflow Spark Operator 2.x",
     "capacity.unknown": "capacity could not be read: listing nodes failed",
     "capacity.shortfall": "Insufficient free cluster capacity",
     "run.datagen_timeout": "wait budget",

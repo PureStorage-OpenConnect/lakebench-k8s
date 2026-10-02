@@ -71,7 +71,7 @@ the CLI down every path listed here and checks the code.
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
 | `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
 | `nameless.namespace_unreadable` | 4 | a nameless config's namespace could not be read for its check |
-| `plan.missing_storage_class` | 4 | `plan` finds a prerequisite missing (the scratch StorageClass, the Spark Operator, Stackable or another check) or too little free capacity |
+| `plan.missing_storage_class` | 4 | `plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, Stackable or another check), cannot check one of those three, or finds too little free capacity |
 | `run.prereq_failed` | 4 | a `run` preflight check failed |
 | `s3.unreachable` | 4 | `generate` or `run --generate` cannot read the bronze bucket to check it is empty |
 | `confirm.declined` | 5 | a confirmation prompt was answered no |
