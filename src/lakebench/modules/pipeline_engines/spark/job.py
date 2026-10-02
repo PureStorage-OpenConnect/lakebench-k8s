@@ -1516,8 +1516,8 @@ class SparkJobManager:
         # Set by deploy_scripts_configmap: {"scripts_sha256", "scripts_maps"}
         # for run provenance. None until the maps are applied.
         self.scripts_provenance: dict[str, Any] | None = None
-        # The deployment's verified dependency set (DEP-2). run sets it from
-        # the lb-deps-manifest ConfigMap before the first submit (SD-5c).
+        # The deployment's verified dependency set. run sets it from
+        # the lb-deps-manifest ConfigMap before the first submit.
         self.deps: DepsHandle | None = None
 
         # Cache cluster capacity for streaming concurrent budget calculation

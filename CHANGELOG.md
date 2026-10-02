@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- **Each deployment gets a dependency server (DEP-2).** `deploy` runs a new
+- **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
   Spark image. Its init containers resolve the jars (plus the AML reference

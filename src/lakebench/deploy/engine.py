@@ -384,7 +384,7 @@ class DeploymentEngine:
         # from "we created it" into "unowned legacy" that then requires
         # the dangerous --force-legacy flag.
         self._namespace_created_this_run: set[str] = set()
-        # The verified, served dependency set (DEP-2); set by the deps step.
+        # The verified, served dependency set; set by the deps step.
         self.deps: DepsHandle | None = None
 
         if k8s_client:
@@ -728,7 +728,7 @@ class DeploymentEngine:
                 "Checking Spark Operator and watch list",
                 self._deploy_spark_operator,
             ),
-            # DEP-2: Ready before Thrift and DuckDB render and before any run.
+            # Ready before Thrift and DuckDB render and before any run.
             ("deps", "Starting dependency server", deps.deploy),
             ("trino", "Deploying Trino", trino.deploy),
             ("spark-thrift", "Deploying Spark Thrift Server", spark_thrift.deploy),

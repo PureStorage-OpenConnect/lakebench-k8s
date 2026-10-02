@@ -1,4 +1,4 @@
-"""The ``deps`` deploy step: the dependency server in the namespace (DEP-2, ch01 s2.5).
+"""The ``deps`` deploy step: the dependency server in the namespace.
 
 One ``lb-deps`` Deployment per deployment resolves the jars, wheels and
 DuckDB files the request names onto its own PVC and serves them read-only.
@@ -13,7 +13,7 @@ only after every check passed and the ConfigMap is written, so when this
 step fails or is interrupted the annotation is absent and ``run`` refuses
 until a deploy succeeds. (A deploy that fails in an earlier step does not
 reach this one and leaves the annotation as it was; ``run`` also compares
-the request it would build with the ConfigMap's, SD-5c.)
+the request it would build with the ConfigMap's.)
 
 Every object is in the config's namespace (Category 1). Nothing here is
 cluster-scoped or shared, so the cluster lease is not involved.
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TEMPLATES = ("deps/pvc.yaml.j2", "deps/service.yaml.j2", "deps/deployment.yaml.j2")
-READY_TIMEOUT_S = 900  # SD-1: one cold row resolves in about 1 min
+READY_TIMEOUT_S = 900  # one cold resolve took about 1 min in a live run
 PVC_GONE_TIMEOUT_S = 120
 NO_CLASS_GRACE_S = 30
 STALE_REPLICA_FAILURE_GRACE_S = 120
@@ -74,7 +74,7 @@ def _status(e: Exception) -> int | None:
 
 
 class DependencyServerDeployer:
-    """Deploys and verifies the ``lb-deps`` server (DEP-2)."""
+    """Deploys and verifies the ``lb-deps`` server."""
 
     def __init__(self, engine: DeploymentEngine):
         self.engine = engine
@@ -899,7 +899,7 @@ class DependencyServerDeployer:
     def _remove_old_tools_configmaps(self, core: Any, sha: str, previous: str | None) -> None:
         """Tools maps older than the previous request's. The current map, the
         previous request's (consumers that have not rolled yet may still
-        mount it, SD-5b) and any map the live Deployment names are kept."""
+        mount it) and any map the live Deployment names are kept."""
         from kubernetes import client as k8s_client
 
         keep = {m.tools_configmap_name(sha)}

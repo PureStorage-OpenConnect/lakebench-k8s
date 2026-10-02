@@ -1,5 +1,5 @@
 ---
-# The dependency server (DEP-2, ch01 s2.3-2.5). The init containers resolve
+# The dependency server. The init containers resolve
 # the set onto the PVC once per request; the serving container re-hashes
 # every file at start and then serves the set read-only. Every flag that
 # decides what is resolved lives in lb_deps.py, whose sha256 is part of the
@@ -104,7 +104,7 @@ spec:
               cpu: "{{ serve_limits.cpu }}"
               memory: "{{ serve_limits.memory }}"
           # The start re-hashes the whole set before it listens (8.4 s for
-          # 2.8 GB in SD-1); the startup probe allows 10 minutes for it.
+          # 2.8 GB in a live run); the startup probe allows 10 minutes for it.
           startupProbe:
             httpGet:
               path: /ready

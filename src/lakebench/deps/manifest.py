@@ -1,10 +1,10 @@
-"""The served dependency set as the CLI sees it (DEP-2, ch01 s2.5-2.8).
+"""The served dependency set as the CLI sees it.
 
 ``deploy`` reads the set's manifest from the ``lb-deps`` server
 (``lb_deps.py show``), checks it here against the request it built, and
 writes the checked manifest into the ``lb-deps-manifest`` ConfigMap that the
 consumers and ``run`` read. Nothing here talks to the cluster:
-``deploy/deps.py`` does that, and SD-5c's ``run`` checks call
+``deploy/deps.py`` does that, and ``run``'s start checks call
 :func:`check_manifest` on the ConfigMap again.
 
 Names, labels and annotations of the server's objects live here too, so the
@@ -48,7 +48,7 @@ SERVE_CONTAINER = "serve"
 # served this pinset; absent while the server changes or after a failure.
 ANNOTATION_DEPS_SET = "lakebench.deployment/deps-set"
 # Pod annotations: the request the server pod was rendered for, and (on the
-# consumers, SD-5) the pinset a pod runs.
+# consumers) the pinset a pod runs.
 POD_ANNOTATION_REQUEST = "lakebench.io/deps-request"
 POD_ANNOTATION_SET = "lakebench.io/deps-set"
 LABEL_ROLE = "lakebench.io/deps-role"
@@ -64,7 +64,7 @@ SELECTOR_LABELS: dict[str, str] = {
 # --- resources ----------------------------------------------------------------
 
 # The resolve init containers (the Ivy JVM) and the serving container
-# (ch01 s2.3, s2.4; SD-1 ran with these).
+# (a live cluster run used these).
 RESOLVE_REQUESTS = {"cpu": "1", "memory": "2Gi"}
 RESOLVE_LIMITS = {"cpu": "2", "memory": "3Gi"}
 SERVE_REQUESTS = {"cpu": "250m", "memory": "512Mi"}
@@ -108,7 +108,7 @@ def base_url(namespace: str, pinset: str) -> str:
 @dataclass(frozen=True)
 class DepsHandle:
     """A verified, served set: what deploy exposes as ``engine.deps`` and
-    ``run`` sets as ``SparkJobManager.deps`` (SD-5a, SD-5c)."""
+    ``run`` sets as ``SparkJobManager.deps``."""
 
     pinset_sha256: str
     request_sha256: str
@@ -267,8 +267,8 @@ def manifest_configmap_data(
     ``jar_order``: ``lb_deps.py fetch`` reads ``pinset_sha256``, ``groups``
     and ``jar_order`` from it, and ``run`` reads ``request_sha256`` and the
     provenance fields. The pip requirement files carry one ``name==version
-    --hash=sha256:<h>`` line per pin (the ``--require-hashes`` form the SD-1
-    spike installed from)."""
+    --hash=sha256:<h>`` line per pin (the ``--require-hashes`` form a live
+    run installed from)."""
     groups = shown["groups"]
     data = {
         "manifest.json": json.dumps(dict(shown), indent=1, sort_keys=True) + "\n",

@@ -496,7 +496,7 @@ def _round_down_even(n: int) -> int:
     return max(2, n - (n % 2))
 
 
-# The lb-deps pod's reservation (DEP-2): the scheduler keeps the resolve
+# The lb-deps pod's reservation: the scheduler keeps the resolve
 # init container's request for the pod's whole life.
 _LB_DEPS_CPU_M = _deps_manifest.POD_REQUEST_CPU_M
 
@@ -530,7 +530,7 @@ def _co_resident_cpu_m(config: LakebenchConfig) -> int:
 
     Hive Metastore and PostgreSQL are always included (~1 CPU total), and so
     is the ``lb-deps`` dependency server at its pod's effective request
-    (DEP-2; the resolve init container's request stays reserved).
+    (the resolve init container's request stays reserved).
     """
     engine_type = config.architecture.query_engine.type.value
     # Hive + Postgres are small but add up (~1 CPU total)

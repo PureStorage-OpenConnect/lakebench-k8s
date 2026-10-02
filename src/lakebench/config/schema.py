@@ -711,7 +711,7 @@ def _is_dns1123_subdomain(name: str) -> bool:
 
 
 class DepsConfig(ConfigModel):
-    """The deployment's dependency server, ``lb-deps`` (DEP-2, ch01 s2.7).
+    """The deployment's dependency server, ``lb-deps``.
 
     Every key is optional. The three URL keys replace the public sources the
     ``lb-deps`` resolve reads, for clusters without egress to them. Each one
