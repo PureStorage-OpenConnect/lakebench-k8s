@@ -210,9 +210,15 @@ jobs:
           # still edit this workflow; review of the pull request is that
           # control.
           # trust-order begin
-          if { [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" = "main" ]; } \
-            || { [ "$EVENT" != "pull_request" ] \
-              && { [ "${REF:-}" = "refs/heads/main" ] || [ "${REF:-}" != "${REF#refs/tags/}" ]; }; }; then
+          to_main=no
+          if [ "${EVENT:-}" = "pull_request" ]; then
+            [ "${BASE_REF:-}" = "main" ] && to_main=yes
+          else
+            case "${REF:-}" in
+              refs/heads/main | refs/tags/*) to_main=yes ;;
+            esac
+          fi
+          if [ "$to_main" = yes ]; then
             trust_order="origin/main origin/integrate/v1.5.0"
           else
             trust_order="origin/integrate/v1.5.0 origin/main"

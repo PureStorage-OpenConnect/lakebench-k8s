@@ -512,17 +512,21 @@ def test_secrets_history_job_scans_full_history_and_requires_gitleaks():
     assert "secrets-history" in jobs["build"]["needs"]
 
 
-def _history_trust_order(event: str, ref: str, base_ref: str = "") -> list[str]:
-    """Run the trust-order block of the history scan step for one event."""
+def _history_trust_order(event: str, ref: str | None, base_ref: str = "") -> list[str]:
+    """Run the trust-order block of the history scan step for one event,
+    under ``set -euo pipefail`` as the step runs it; ``ref=None`` leaves REF unset."""
     import subprocess
 
     job = _load("ci.yml")["jobs"]["secrets-history"]
     scan = next(str(s["run"]) for s in job["steps"] if s.get("name") == "Scan history")
     m = re.search(r"# trust-order begin\n(.*?)# trust-order end", scan, re.S)
     assert m, "the Scan history step has no trust-order block"
+    env = {"EVENT": event, "BASE_REF": base_ref, "PATH": "/usr/bin:/bin"}
+    if ref is not None:
+        env["REF"] = ref
     out = subprocess.run(
-        ["bash", "-c", m.group(1) + 'printf "%s" "$trust_order"'],
-        env={"EVENT": event, "REF": ref, "BASE_REF": base_ref, "PATH": "/usr/bin:/bin"},
+        ["bash", "-c", "set -euo pipefail\n" + m.group(1) + 'printf "%s" "$trust_order"'],
+        env=env,
         capture_output=True,
         text=True,
         check=True,
@@ -553,6 +557,8 @@ def test_history_scan_trusts_integrate_first_for_every_other_ref():
         _history_trust_order("pull_request", "refs/pull/8/merge", "integrate/v1.5.0")
         == INTEGRATE_FIRST
     )
+    # REF unset (a caller that sets only EVENT and BASE_REF) is not an error.
+    assert _history_trust_order("push", None) == INTEGRATE_FIRST
 
 
 def test_history_scan_config_and_baseline_follow_the_trust_order():
