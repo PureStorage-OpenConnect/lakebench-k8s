@@ -217,18 +217,4 @@ def validate_run_args(args: RunArgs, cfg: Any) -> RunPlan:
         first = problems[0]
         more = f" ({len(problems) - 1} more refused argument(s))" if len(problems) > 1 else ""
         raise UsageError(f"{first.text(args)}{more}", next=first.next, path="run.args")
-    from lakebench.config.c360_run import (
-        GOLD_STRATEGY_KEY,
-        GOLD_STRATEGY_VALUES,
-        gold_override_problem,
-    )
-
-    gold = gold_override_problem(cfg)
-    if gold:
-        raise UsageError(
-            gold,
-            next=f"remove {GOLD_STRATEGY_KEY} from spark.conf, or set it to "
-            + ", ".join(GOLD_STRATEGY_VALUES),
-            path="spark.conf",
-        )
     return RunPlan(mode=run_mode(args, cfg), local=args.local)

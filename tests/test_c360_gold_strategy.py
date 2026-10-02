@@ -2,7 +2,8 @@
 
 The run-time half: ``config/c360_run.gold_override_problem`` refuses
 ``spark.lb.gold.strategy=incremental`` (and a value that names no strategy)
-before ``run`` makes any cluster call, the gold scripts lose the auto
+when a data-changing command loads the config, so ``run`` makes no cluster
+call and ``deploy`` builds nothing; the gold scripts lose the auto
 switch to incremental and the dead ``LB_GOLD_STRATEGY`` fallback, and the
 strategy that ran is recorded per job. The Spark-tier half, a repeat over
 changed silver, is ``tests/spark/test_gold_repeat_reaggregates_spark.py``.
@@ -12,7 +13,6 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -27,39 +27,56 @@ SCRIPTS = ROOT / "src/lakebench/spark/scripts"
 GOLD_SCRIPTS = ("gold_finalize.py", "gold_finalize_delta.py")
 
 
-def _cfg(conf):
-    return SimpleNamespace(spark=SimpleNamespace(conf=conf))
-
-
 @pytest.mark.parametrize("value", ["incremental", "INCREMENTAL", " incremental "])
 def test_incremental_override_is_refused(value):
-    problem = c360_run.gold_override_problem(_cfg({"spark.lb.gold.strategy": value}))
+    problem = c360_run.gold_override_problem({"spark.lb.gold.strategy": value})
     assert problem and "multi-cycle cycles 2+ only" in problem
 
 
 def test_unknown_override_is_refused():
-    problem = c360_run.gold_override_problem(_cfg({"spark.lb.gold.strategy": "fastest"}))
+    problem = c360_run.gold_override_problem({"spark.lb.gold.strategy": "fastest"})
     assert problem and "names no gold strategy" in problem
 
 
 @pytest.mark.parametrize("value", [None, "auto", "simple_agg", "TWO_PHASE_AGG", ""])
 def test_full_rebuild_overrides_are_accepted(value):
     conf = {} if value is None else {"spark.lb.gold.strategy": value}
-    assert c360_run.gold_override_problem(_cfg(conf)) is None
-    assert c360_run.gold_override_problem(SimpleNamespace()) is None
+    assert c360_run.gold_override_problem(conf) is None
 
 
 def test_incremental_override_refused_before_phase1(tmp_path, monkeypatch, no_cluster):  # noqa: F811
     """The refusal exits 2 with no Kubernetes, S3 or subprocess call and no
     record: nothing is created before it."""
     monkeypatch.chdir(tmp_path)
-    cfg = tmp_path / "gold.yaml"
-    cfg.write_text(CONFIG + "spark:\n  conf:\n    spark.lb.gold.strategy: incremental\n")
-    result = CliRunner().invoke(app, ["run", str(cfg), "--yes"])
+    result = CliRunner().invoke(app, ["run", str(_config(tmp_path)), "--yes"])
     assert result.exit_code == ExitCode.USAGE, result.output
-    assert "incremental gold is chosen by lakebench" in result.output, result.output
+    assert "spark.lb.gold.strategy=incremental is refused" in result.output, result.output
     assert no_cluster == []
     assert not list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
+
+
+def _config(tmp_path, workload="customer360", value="incremental"):
+    text = CONFIG.replace("schema: customer360", f"schema: {workload}")
+    cfg = tmp_path / "gold.yaml"
+    cfg.write_text(text + f"spark:\n  conf:\n    spark.lb.gold.strategy: {value}\n")
+    return cfg
+
+
+def test_load_refuses_for_data_changing_commands_only(tmp_path):
+    from lakebench.config import ConfigValidationError
+    from lakebench.config.loader import LoadPurpose, load_config
+
+    cfg = _config(tmp_path)
+    for purpose in (LoadPurpose.RUN, LoadPurpose.MUTATE):
+        with pytest.raises(ConfigValidationError) as exc:
+            load_config(cfg, purpose=purpose)
+        assert "multi-cycle cycles 2+ only" in str(exc.value.errors), purpose
+    # Teardown and read commands still load it, so the deployment can go.
+    load_config(cfg, purpose=LoadPurpose.TEARDOWN)
+    load_config(cfg, purpose=LoadPurpose.READ)
+    # No Customer 360 gold reads the key on another workload.
+    load_config(_config(tmp_path, workload="financial"), purpose=LoadPurpose.RUN)
+    load_config(_config(tmp_path, value="two_phase_agg"), purpose=LoadPurpose.RUN)
 
 
 def _functions(name: str) -> dict[str, ast.FunctionDef]:

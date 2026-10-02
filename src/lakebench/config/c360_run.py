@@ -1,10 +1,11 @@
-"""Customer 360 run rules read from the config, checked before Phase 1.
+"""Customer 360 run rules read from the config.
 
-Standard library only, so the CLI can call it before any cluster call.
+Standard library only, so the config schema imports it without a cycle.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 #: The config key the gold-finalize scripts read for a strategy override.
@@ -16,12 +17,12 @@ GOLD_STRATEGY_KEY = "spark.lb.gold.strategy"
 GOLD_STRATEGY_VALUES: tuple[str, ...] = ("auto", "simple_agg", "two_phase_agg")
 
 
-def gold_override_problem(cfg: Any) -> str | None:
-    """The refusal for a ``spark.lb.gold.strategy`` the gold scripts will
-    not run, or None. The scripts refuse the same values (exit 1 before any
-    write); this catches them before anything is deployed or submitted."""
-    conf = getattr(getattr(cfg, "spark", None), "conf", None) or {}
-    value = conf.get(GOLD_STRATEGY_KEY)
+def gold_override_problem(conf: Mapping[str, Any]) -> str | None:
+    """The refusal for a ``spark.lb.gold.strategy`` in *conf* (the config's
+    ``spark.conf``) the gold scripts will not run, or None. The scripts
+    refuse the same values (exit 1 before any write); the config load
+    (``schema.LakebenchConfig``) refuses them before anything deploys."""
+    value = (conf or {}).get(GOLD_STRATEGY_KEY)
     if value is None:
         return None
     norm = str(value).strip().lower()

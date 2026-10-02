@@ -107,9 +107,9 @@ def determine_gold_strategy(spark, silver_tbl: str) -> tuple[GoldStrategy, str]:
 
     ``cycle``: LB_GOLD_INCREMENTAL=true, which the CLI sets for cycles 2+ of
     a multi-cycle run only. ``override``: ``spark.lb.gold.strategy``.
-    ``auto``: ``select_gold_strategy`` on silver's size. The override is
-    read (and a refused value raises) before the cycle check, so a refused
-    value stops every cycle.
+    ``auto``: ``select_gold_strategy`` on silver's size. A refused
+    override raises ``GoldStrategyRefused`` here too, though ``main()``
+    checks it first, before any write.
     """
     override = get_strategy_override(spark)
     if os.environ.get("LB_GOLD_INCREMENTAL", "false").lower() == "true":

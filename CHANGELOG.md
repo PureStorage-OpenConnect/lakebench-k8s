@@ -278,13 +278,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Customer 360 gold is never silently incremental (workload version
   `c360-2`).** gold-finalize used to switch to its incremental strategy
   whenever gold already had rows and silver was over 1,000 GB, so a repeat
-  run at scale 100 or more aggregated only the last gold day and left the
+  run from about scale 100 aggregated only the last gold day and left the
   rest stale on a changed corpus, under the same identity. It now picks
   `simple_agg` below 500 GB of silver and `two_phase_agg` above, both full
   rebuilds; incremental gold runs only for multi-cycle cycles 2 and later.
-  `spark.lb.gold.strategy=incremental`, or a value that names no strategy,
-  is refused before the run (exit 2) and by the script before any write;
-  the unread `LB_GOLD_STRATEGY` environment fallback is gone. Each
+  In a Customer 360 config, `spark.lb.gold.strategy=incremental`, or a
+  value that names no strategy, is refused at load by the commands that
+  change data (exit 2), and by the script before any write; the
+  `LB_GOLD_STRATEGY` environment fallback, which nothing set, is gone. Each
   gold-finalize job records `gold_strategy` and `gold_strategy_source` in
   `jobs[].extra_metrics`. Customer 360 records now carry workload version
   `c360-2`, so they do not compare with `c360-1` records.

@@ -820,11 +820,14 @@ volume.
 silver: `auto` (the default: `simple_agg` below 500 GB of silver, else
 `two_phase_agg`), `simple_agg` or `two_phase_agg`. Both rebuild every gold
 day from all of silver. `incremental` and any other value are refused
-before the run starts: incremental gold runs only for cycles 2 and later
-of a multi-cycle run (see [Multi-Cycle Batch](#multi-cycle-batch)). The
-strategy that ran, and why (`auto`, `override` or `cycle`), is recorded per
-gold-finalize job in `metrics.json` as `jobs[].extra_metrics.gold_strategy`
-and `gold_strategy_source`.
+when a command that changes data (`deploy`, `run` and the others) loads a
+Customer 360 config: incremental gold runs only for cycles 2 and later of
+a multi-cycle run (see [Multi-Cycle Batch](#multi-cycle-batch)), and those
+cycles use it whatever the key says. The key is read by batch
+gold-finalize on the cluster only; `--local` runs do not pass `spark.conf`
+and use `auto`. The strategy that ran, and why (`auto`, `override` or
+`cycle`), is recorded per gold-finalize job in `metrics.json` as
+`jobs[].extra_metrics.gold_strategy` and `gold_strategy_source`.
 
 Executor counts auto-scale with the scale factor unless overridden by the
 `bronze_executors`, `silver_executors`, or `gold_executors` fields. Per-executor
