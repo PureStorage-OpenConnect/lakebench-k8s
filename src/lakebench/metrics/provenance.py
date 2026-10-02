@@ -17,8 +17,8 @@ identity. The ``provenance`` block holds:
   ``config_path``.
 - ``scripts_sha256``, ``scripts_maps`` and ``scripts_files_sha256``: the
   Spark scripts ConfigMaps the run applied and read back.
-- ``deps``: the dependency set the job manager recorded, or
-  ``"not_recorded"``.
+- ``deps``: the dependency set ``run`` checked at start (written once, then
+  the run-end pod check), else the job manager's, or ``"not_recorded"``.
 - ``images_observed``: the image digests this run's pods actually ran
   (``status.containerStatuses[].imageID``), first seen per role, with any
   later different value in ``images_observed_changed`` and any batch stage
@@ -269,18 +269,17 @@ def job_manager_fields(job_manager: Any) -> dict[str, Any]:
 
 
 def merge_job_manager_fields(prov: dict[str, Any], fields: Mapping[str, Any]) -> None:
-    """Update *prov* with :func:`job_manager_fields`, keeping a recorded
-    ``deps`` block on the same set: it carries the run-end pod check
-    (``pods_checked``, ``pod_mismatches``), which a rebuild from the job
-    manager's set would drop."""
+    """Update *prov* with :func:`job_manager_fields`. A recorded ``deps``
+    block is never replaced: ``run`` writes it from the set it checked at
+    start, and it carries the run-end pod check. The job manager's set only
+    fills a ``deps`` not recorded yet; one on another set than the block is
+    written into it as ``job_manager_pinset``, which fails the verdict."""
     new = dict(fields)
     have, want = prov.get("deps"), new.get("deps")
-    if (
-        isinstance(have, Mapping)
-        and isinstance(want, Mapping)
-        and have.get("pinset_sha256") == want.get("pinset_sha256")
-    ):
-        new.pop("deps")
+    if isinstance(have, dict):
+        new.pop("deps", None)
+        if isinstance(want, Mapping) and want.get("pinset_sha256") != have.get("pinset_sha256"):
+            have["job_manager_pinset"] = want.get("pinset_sha256")
     prov.update(new)
 
 

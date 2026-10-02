@@ -2505,8 +2505,8 @@ class MetricsCollector:
     def __init__(self):
         """Initialize metrics collector."""
         self.current_run: PipelineMetrics | None = None
-        # The run's job manager, read again at run end (provenance.deps may
-        # be recorded after the scripts ConfigMaps are applied).
+        # The run's job manager, read again at run end (the scripts maps are
+        # recorded once applied; provenance.deps only when run recorded none).
         self._job_manager: Any = None
 
     def start_run(

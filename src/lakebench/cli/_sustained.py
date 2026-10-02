@@ -4132,8 +4132,8 @@ def _run_sustained(
         # A signal from here on does not stop the record being written (a
         # third one still does, cli/_interrupt.py).
         _interrupt.begin_seal()
-        # Before the streams stop, while their drivers still exist; not after
-        # an interrupt or once the namespace is gone.
+        # The query engine pods (Thrift, DuckDB) against the run's set; not
+        # after an interrupt, once the namespace is gone, or without a cluster.
         _pods_skipped = (
             "interrupted"
             if _interrupted is not None

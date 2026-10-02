@@ -340,3 +340,33 @@ def test_the_record_keeps_the_pod_check_when_the_job_manager_is_read_again():
     coll.record_job_manager(SimpleNamespace(scripts_provenance=None, deps=handle))
     coll.end_run(success=True)
     assert run.provenance["deps"]["pods_checked"] == 2
+
+
+@pytest.mark.parametrize("other", ["none", "another-set"])
+def test_the_job_manager_never_replaces_the_recorded_block(other):
+    """A job manager without the set, or on another set, cannot turn a
+    mismatched run into a pass: the block stays, and another set fails the
+    verdict."""
+    from types import SimpleNamespace
+
+    from lakebench.metrics.collector import MetricsCollector
+    from lakebench.metrics.verdict import _deps_pods_reason
+
+    cfg = make_config()
+    handle = m.placeholder_handle(cfg)
+    coll = MetricsCollector()
+    run = coll.start_run("20261002-000000-eeeeee", "d", {})
+    block = {
+        **m.provenance_block(handle),
+        "pods_checked": 1,
+        "pod_mismatches": [{"pod": "thrift-0", "pinset": "f" * 64}],
+    }
+    run.provenance["deps"] = block
+    deps = None if other == "none" else m.DepsHandle("e" * 64, "r" * 64, "", "", handle.manifest)
+    coll.record_job_manager(SimpleNamespace(scripts_provenance=None, deps=deps))
+    coll.end_run(success=True)
+    got = run.provenance["deps"]
+    assert got["pinset_sha256"] == handle.pinset_sha256
+    assert got["pod_mismatches"] and _deps_pods_reason(run)
+    if other == "another-set":
+        assert got["job_manager_pinset"] == "e" * 64

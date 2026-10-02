@@ -409,6 +409,11 @@ def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
     deps = (getattr(metrics, "provenance", None) or {}).get("deps")
     if not isinstance(deps, dict):
         return None
+    if deps.get("job_manager_pinset"):
+        return (
+            f"the jobs were built on dependency set {str(deps['job_manager_pinset'])[:12]}, "
+            f"not the recorded {str(deps.get('pinset_sha256'))[:12]}"
+        )
     if "pods_checked" in deps and deps["pods_checked"] is None and deps.get("pods_check_error"):
         return (
             f"query engine pods not checked for their dependency set ({deps['pods_check_error']})"
