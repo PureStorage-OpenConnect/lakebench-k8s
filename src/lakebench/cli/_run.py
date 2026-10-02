@@ -453,6 +453,7 @@ def _save_local_metrics(
         "silver": cfg.platform.storage.s3.buckets.silver,
         "gold": cfg.platform.storage.s3.buckets.gold,
     }
+    client = None
     try:
         client = S3Client(
             endpoint=deployment.endpoint,
@@ -481,6 +482,11 @@ def _save_local_metrics(
     except Exception as e:  # noqa: BLE001
         console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
+    if client is not None:
+        # The local store's corpus, once, before the save (corpus id v2).
+        from lakebench.metrics.corpus_identity import record_corpus_observation
+
+        record_corpus_observation(run_metrics, cfg, client)
     try:
         return metrics_storage.save_run(run_metrics)
     except Exception as e:  # noqa: BLE001
@@ -3196,6 +3202,10 @@ def run(
                         )
                     )
 
+            # The corpus this run read, once, before the save (corpus id v2).
+            from lakebench.metrics.corpus_identity import record_corpus_observation
+
+            record_corpus_observation(run_metrics, cfg)
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
