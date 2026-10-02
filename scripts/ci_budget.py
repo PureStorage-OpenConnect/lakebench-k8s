@@ -36,6 +36,20 @@ def _stop(signum: int, _frame: object) -> None:
     raise _Stopped(signum)
 
 
+def _stop_group(child: subprocess.Popen) -> None:
+    """SIGTERM the command's process group, then SIGKILL it after 30 s."""
+    for sig, wait in ((signal.SIGTERM, 30.0), (signal.SIGKILL, 10.0)):
+        try:
+            os.killpg(child.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            child.wait(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def _summary(label: str, elapsed: float, budget: float, note: str = "") -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
@@ -61,28 +75,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("ci_budget.py: --seconds must be positive", file=sys.stderr)
         return 2
 
-    start = time.monotonic()
-    try:
-        child = subprocess.Popen(cmd)
-    except OSError as exc:
-        print(f"::error::{opts.label}: cannot run {cmd[0]}: {exc}")
-        return 127
-    # A cancel or a timeout-minutes kill signals this process: pass it on to
-    # the command and still record how long it ran, since the slowest runs
-    # are the ones that get killed.
+    # A cancel or a timeout-minutes kill signals this process (the runner
+    # sends SIGINT, then SIGTERM): the command, in its own process group so
+    # every process it started is reached, gets SIGTERM, and the time it ran
+    # is still recorded, since the slowest runs are the ones that get killed.
+    # The handlers go in before the command starts, so no signal can orphan
+    # it, and any later signal is ignored while the group is stopped.
     previous = {s: signal.signal(s, _stop) for s in (signal.SIGTERM, signal.SIGINT)}
+    start = time.monotonic()
+    child = None
     try:
+        try:
+            child = subprocess.Popen(cmd, start_new_session=True)
+        except OSError as exc:
+            print(f"::error::{opts.label}: cannot run {cmd[0]}: {exc}")
+            return 127
         rc = child.wait()
     except _Stopped as stop:
-        child.send_signal(stop.args[0])
-        try:
-            child.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
+        for s in previous:
+            signal.signal(s, signal.SIG_IGN)
         elapsed = time.monotonic() - start
         _summary(opts.label, elapsed, opts.seconds, " (stopped by a signal)")
         print(f"::error::{opts.label} stopped by signal {stop.args[0]} after {elapsed:.0f} s")
+        if child is not None:
+            _stop_group(child)
         return 128 + int(stop.args[0])
     finally:
         for s, handler in previous.items():

@@ -60,12 +60,15 @@ jobs:
       # index or read by code, tests or CI (tests/test_doc_readers.py runs
       # the same check with its planted cases).
       - name: Docs have readers
+        # Runs even when make check-fast fails, so one push reports both.
+        if: success() || failure()
         run: python scripts/check_doc_readers.py
 
       # Every action in .github/workflows is pinned by SHA and listed in
       # .github/action-runtimes.json with its runs.using value. This reads
       # each action.yml at its pinned SHA and fails if the map has drifted.
       - name: Action runtimes
+        if: success() || failure()
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/check_action_runtimes.py --verify
