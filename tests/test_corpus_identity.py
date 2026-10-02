@@ -1003,11 +1003,10 @@ class TestOwnerMarkerIsNotCorpus:
             o["Key"].startswith(".lakebench/") for o in cd.list_scope(marked, BUCKET, SCOPE)
         )
 
-    def test_a_listing_that_returns_a_reserved_key_drops_it(self):
-        """Even a backend that returns keys outside the prefix (or a scope
-        that matched one) never lets a reserved key in."""
-        assert not cd.is_corpus_object(".lakebench/owner.json", "")
-        assert cd.is_corpus_object(f"{SCOPE}part-0.parquet", SCOPE)
+    def test_empty_scope_has_no_digest(self):
+        ms = cd.read_corpus_markers(bucket(data=()), BUCKET, SCOPE)
+        assert ms.bronze_listing_sha256 is None
+        assert ms.problems == [f"no objects under {SCOPE}"]
 
     def test_scope_under_the_reserved_prefix_refused(self):
         with pytest.raises(ValueError, match="never under"):

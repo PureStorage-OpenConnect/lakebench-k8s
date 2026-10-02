@@ -128,24 +128,20 @@ def listing_sha256(objects: Iterable[Mapping[str, Any]]) -> str:
 RESERVED_PREFIX = ".lakebench/"
 
 
-def is_corpus_object(key: str, scope: str) -> bool:
-    """Whether *key* is corpus data under *scope*: inside the scope and not
-    one of Lakebench's own bucket objects."""
-    return key.startswith(scope) and not key.startswith(RESERVED_PREFIX)
-
-
 def list_scope(client: Any, bucket: str, scope: str) -> list[dict[str, Any]]:
-    """Every corpus object under *scope* in *bucket*, through the boto3
-    ``list_objects_v2`` paginator; Lakebench's own bucket objects
-    (``RESERVED_PREFIX``) are never counted. Errors propagate to the
-    caller."""
+    """Every object under *scope* in *bucket*, through the boto3
+    ``list_objects_v2`` paginator. Lakebench's own bucket objects (the
+    owner marker under ``RESERVED_PREFIX``, at the bucket root) are never
+    counted: a scope is never empty (``datagen_scope``) nor under that
+    prefix (refused here), and only keys inside the scope are kept, even
+    from a backend that returns others. Errors propagate to the caller."""
     if scope.startswith(RESERVED_PREFIX):
         raise ValueError(f"a corpus scope is never under {RESERVED_PREFIX}")
     out: list[dict[str, Any]] = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=scope):
         for obj in page.get("Contents") or []:
-            if is_corpus_object(str(obj.get("Key", "")), scope):
+            if str(obj.get("Key", "")).startswith(scope):
                 out.append(dict(obj))
     return out
 
@@ -289,6 +285,11 @@ def _read_into(out: MarkerSet, client: Any, bucket: str, prefix: str) -> None:
         out.error = f"listing {out.scope} failed: {_reason(e)}"
         return
     out.objects = len(objects)
+    if not objects:
+        # An empty scope is not a corpus: no digest, so two empty listings
+        # never read as one corpus (a series cannot inherit from one).
+        out.problems.append(f"no objects under {out.scope}")
+        return
     out.bronze_listing_sha256 = listing_sha256(objects)
 
     marker_dir = f"{out.scope}{MARKER_DIR}/"

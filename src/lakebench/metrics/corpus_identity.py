@@ -194,7 +194,10 @@ def _reason(exc: BaseException) -> str:
 def record_corpus_observation(run: Any, cfg: Any, s3: Any = None) -> None:
     """Persist ``observe_corpus`` into *run*'s
     ``config_snapshot.experiment_inputs.corpus_observation``, once, right
-    before the record is saved (after any datagen of the run has ended).
+    before the record is saved. Datagen has normally ended by then; a run
+    that ends while it still writes (a timeout, an interrupt) records an
+    incomplete marker set, which is a corpus problem, and a listing digest
+    a later repetition will not match, so nothing inherits from it.
     *s3* is the ``S3Client`` that reaches the run's bronze bucket (a local
     run passes its local store's); None builds one from the config. A
     record without ``experiment_inputs`` (from before them) is left alone.
