@@ -987,7 +987,8 @@ def _compare_pair(tmp_path, pair: str):
 
 
 def _scenario_compare_like_for_like(monkeypatch, tmp_path):
-    return _compare_pair(tmp_path, "P1")
+    # P3: P1's records read failed since ER-3 (W5 and W6 skipped, no watchlist).
+    return _compare_pair(tmp_path, "P3")
 
 
 def _scenario_compare_not_comparable(monkeypatch, tmp_path):

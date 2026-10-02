@@ -223,7 +223,7 @@ def test_an_unchecked_query_engine_fails_the_verdict():
         "deps": {"pods_checked": None, "pods_check_error": "500", "pod_mismatches": []}
     }
     v = compute_verdict(metrics)
-    assert v.gates.get("deps") == "FAIL" and any("not checked" in r for r in v.reasons)
+    assert v.gates.get("dependency_set") == "FAIL" and any("not checked" in r for r in v.reasons)
 
 
 def test_pod_set_mismatch_fails_verdict():
@@ -233,10 +233,10 @@ def test_pod_set_mismatch_fails_verdict():
     metrics.provenance = {"deps": {"pod_mismatches": [{"pod": "thrift-1", "pinset": "f" * 64}]}}
     v = compute_verdict(metrics)
     assert str(getattr(v.status, "value", v.status)) == "FAILED"
-    assert v.gates.get("deps") == "FAIL"
+    assert v.gates.get("dependency_set") == "FAIL"
     assert any("pods ran different dependency sets" in r for r in v.reasons)
     metrics.provenance = {"deps": {"pod_mismatches": []}}
-    assert compute_verdict(metrics).gates.get("deps") is None
+    assert compute_verdict(metrics).gates.get("dependency_set") is None
 
 
 def _pipeline_metrics():

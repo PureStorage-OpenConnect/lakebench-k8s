@@ -44,6 +44,7 @@ from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 from lakebench.k8s.target import ContextConflictError
+from lakebench.metrics.verdict import apply_save_gate
 
 logger = logging.getLogger(__name__)
 
@@ -489,6 +490,9 @@ def _save_local_metrics(
     except Exception as e:  # noqa: BLE001
         console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
+    # The exit code follows the verdict of the record as it is saved
+    # (the samples below write nothing the verdict reads).
+    apply_save_gate(run_metrics, run_metrics.success, print_error)
     from lakebench.metrics.system_identity import sample_run_end
 
     sample_run_end(run_metrics, cfg, local=True)
@@ -1435,6 +1439,8 @@ def _run_local_mode(
 
     sample_run_start(collector.current_run, cfg, local=True)
     if collector.current_run is not None:
+        # A single stage: the verdict judges that stage's layer only.
+        collector.current_run.stage_only = stage
         # Local mode runs no table maintenance.
         from lakebench.metrics.maintenance_policy import skipped_policy_id
 
@@ -1526,9 +1532,13 @@ def _run_local_mode(
             details={"run_id": run_id, "metrics_path": str(metrics_path), "local": True},
         )
 
-    _journal_safe(j.end_command, success=result.success)
+    # The saved record's success, once end_run has closed it: the save gate
+    # turns it False when the record does not read PASSED.
+    _run = collector.current_run
+    _ok = result.success and (_run is None or _run.end_time is None or _run.success)
+    _journal_safe(j.end_command, success=_ok)
 
-    if not result.success:
+    if not _ok:
         raise typer.Exit(ExitCode.FAILED)
 
 
@@ -2138,6 +2148,8 @@ def _run_once(
         collector.current_run.autosize_cuts = autosize_cuts
         # The per-job timeout every batch stage gets, for limits.headroom_pct.
         collector.current_run.job_timeout_seconds = int(timeout) if timeout else None
+        # A single stage: the verdict judges that stage's layer only.
+        collector.current_run.stage_only = stage
         # [] from the start: a run that ends before the maintenance phase is
         # then stamped "not run", never with the policy's request.
         collector.current_run.maintenance_outcomes = []
@@ -3673,6 +3685,9 @@ def _run_once(
                 pipeline_success = False
                 run_metrics.success = False
                 run_metrics.interrupted = _interrupted
+            # The exit code follows the verdict of the record as it is
+            # saved (the samples below write nothing the verdict reads).
+            pipeline_success = apply_save_gate(run_metrics, pipeline_success, print_error)
             # The end load sample, after an interrupt and after a lost
             # namespace too: bounded, never raises, and it reads the nodes and
             # the other namespaces' pods, not this run's namespace.
