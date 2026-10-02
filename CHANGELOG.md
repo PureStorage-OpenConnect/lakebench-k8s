@@ -172,7 +172,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `benchmark` and `query` say before they start, and do not add results to
   the latest run, when the query engine now runs another set than that run
   recorded or its set cannot be read.
-- Every Spark driver waits (up to 2 minutes) in an `lb-deps-ready` init
+- Every Spark driver waits (up to 2 minutes, plus one 5 s probe) in an `lb-deps-ready` init
   container until the dependency server serves its set, so a server restart
   delays a job instead of failing it, and a registered look is not lost to
   one. The Python path of a job changes: with `--packages` every resolved jar

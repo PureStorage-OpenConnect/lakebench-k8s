@@ -1410,7 +1410,8 @@ def _deps_ready_init(cfg: LakebenchConfig, deps: Any) -> dict[str, Any]:
     script = (
         "import sys, time, urllib.request\n"
         "got = ''\n"
-        "for _ in range(60):\n"
+        "end = time.monotonic() + 120\n"
+        "while time.monotonic() < end:\n"
         "    try:\n"
         f"        got = urllib.request.urlopen('{ready}', timeout=5).read().decode()\n"
         f"        if got == '{deps.pinset_sha256}':\n"

@@ -953,10 +953,18 @@ _RETRYABLE_FETCH = ("does not name the manifest's pinset", "does not hash to its
 
 
 def _consumer_init_failure(
-    core: Any, namespace: str, pod: Any, *, terminal_only: bool = False
+    core: Any,
+    namespace: str,
+    pod: Any,
+    *,
+    terminal_only: bool = False,
+    retried: list[str] | None = None,
 ) -> str | None:
     """A consumer pod's failed lb-deps-fetch, with its LB_DEPS_ERROR line.
-    With ``terminal_only``, a failure kubelet's retry may fix is None."""
+    With ``terminal_only``, a failure kubelet's retry may fix is None (and
+    noted in ``retried``): the server unreachable or a stale manifest mount,
+    for its first three restarts; a 404 (the server serves another set) is
+    never retried."""
     for cs in (pod.status.init_container_statuses or []) if pod.status is not None else []:
         term = DependencyServerDeployer._failed_termination(cs)
         if term is None:
@@ -977,12 +985,16 @@ def _consumer_init_failure(
             log = f"(log unavailable: {e})"
         lines = [ln.strip() for ln in log.splitlines() if ln.strip().startswith("LB_DEPS_ERROR")]
         detail = lines[-1] if lines else (log.strip().splitlines() or ["no log"])[-1]
-        retryable = term.exit_code == LB_DEPS_EXIT["missing"] or any(
+        transient = term.exit_code == LB_DEPS_EXIT["missing"] or any(
             r in detail for r in _RETRYABLE_FETCH
         )
+        retryable = transient and "HTTP Error 404" not in detail and (cs.restart_count or 0) < 3
+        message = f"{pod.metadata.name} init container {cs.name} exited {term.exit_code}: {detail}"
         if terminal_only and retryable:
+            if retried is not None:
+                retried.append(message)
             continue
-        return f"{pod.metadata.name} init container {cs.name} exited {term.exit_code}: {detail}"
+        return message
     return None
 
 
@@ -1027,13 +1039,15 @@ def wait_consumer_rolled(
     apps = k8s_client.AppsV1Api()
     core = k8s_client.CoreV1Api()
     terminal: list[str] = []
+    retried: list[str] = []
     if pinset is not None:
         try:
             dep0 = apps.read_namespaced_deployment(deployment, namespace)
             labels0 = dep0.spec.selector.match_labels or {}
-            _delete_stale_consumer_pods(
-                core, namespace, ",".join(f"{k}={v}" for k, v in labels0.items()), pinset
-            )
+            if labels0:  # never a namespace-wide list
+                _delete_stale_consumer_pods(
+                    core, namespace, ",".join(f"{k}={v}" for k, v in labels0.items()), pinset
+                )
         except _api_exception() as e:
             if _status(e) != 404:
                 raise
@@ -1064,7 +1078,9 @@ def wait_consumer_rolled(
         for pod in pods:
             ann = (pod.metadata.annotations or {}).get(m.POD_ANNOTATION_SET)
             if pinset is not None and ann == pinset:
-                failed = _consumer_init_failure(core, namespace, pod, terminal_only=True)
+                failed = _consumer_init_failure(
+                    core, namespace, pod, terminal_only=True, retried=retried
+                )
                 if failed:
                     terminal.append(failed)
                     raise WaitTerminal(failed)
@@ -1094,5 +1110,6 @@ def wait_consumer_rolled(
         raise RuntimeError(f"{what} cannot fetch the dependency set: {terminal[-1]}")
     # The caller clamped the timeout to the deploy deadline; a wait that ran
     # out with it is a deploy timeout, not a slow rollout.
-    deploy_deadline.check(f"{what} ({deployment}) to roll out", result.message)
-    raise RuntimeError(result.message)
+    last = f"; last fetch failure: {retried[-1]}" if retried else ""
+    deploy_deadline.check(f"{what} ({deployment}) to roll out", result.message + last)
+    raise RuntimeError(result.message + last)

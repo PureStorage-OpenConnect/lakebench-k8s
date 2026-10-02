@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2747,6 +2748,7 @@ def _run_sustained(
 
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.RUN, {"sustained": True, "duration": run_duration})
+    _deps_check_failed = False
 
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
@@ -3869,6 +3871,7 @@ def _run_sustained(
         # Before the streams stop, while their drivers still exist.
         if record_deps_pods(collector.current_run, cfg, deps_handle):
             pipeline_success = False
+            _deps_check_failed = True
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
         if _total_s3_objects is None:
@@ -3939,3 +3942,7 @@ def _run_sustained(
             write_run_report(metrics_storage, run_id)
 
         _journal_safe(j.end_command, success=pipeline_success)
+        if _deps_check_failed and sys.exc_info()[1] is None:
+            # The run-end dependency check failed after the pipeline itself
+            # finished: the exit code says so (exit 0 is not a pass).
+            raise typer.Exit(ExitCode.FAILED)

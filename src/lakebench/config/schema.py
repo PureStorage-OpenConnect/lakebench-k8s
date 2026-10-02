@@ -2459,11 +2459,15 @@ class SparkConfOverrides(ConfigModel):
 
     @field_validator("conf")
     @classmethod
-    def _no_lakebench_owned_keys(cls, value: dict[str, str]) -> dict[str, str]:
+    def _no_lakebench_owned_keys(
+        cls, value: dict[str, str], info: ValidationInfo
+    ) -> dict[str, str]:
+        """Refused for the commands that change data; destroy, status and the
+        read-only commands still load the config (a job build refuses too)."""
         from lakebench.deps.manifest import OWNED_SPARK_CONF_KEYS
 
         owned = sorted(OWNED_SPARK_CONF_KEYS & set(value))
-        if owned:
+        if owned and purpose_from_context(info.context) in CHANGES_DATA:
             raise ValueError(
                 f"spark.conf sets {', '.join(owned)}: Lakebench sets these from the "
                 "deployment's verified dependency set (the jars every job loads and their "

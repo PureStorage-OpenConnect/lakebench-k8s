@@ -1983,6 +1983,7 @@ def run(
     # block raised (e.g. 3 for the bronze refusal). Any specific code is
     # written here first so the finally can honour it.
     _pipeline_exit_code: int = ExitCode.FAILED
+    _exception_in_flight = False
     _datagen_elapsed = 0.0
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
@@ -3134,8 +3135,10 @@ def run(
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     except BaseException:
         # Anything else that ends the pipeline (a manifest that cannot be
-        # built, an API error, Ctrl-C) records a failed run, never a pass.
+        # built, an API error, Ctrl-C) records a failed run, never a pass,
+        # and still reaches the CLI's handler with its own code and message.
         pipeline_success = False
+        _exception_in_flight = True
         raise
     finally:
         # -- Phase 7/7: Results ----------------------------------------------------
@@ -3274,7 +3277,7 @@ def run(
             )
 
         _journal_safe(j.end_command, success=pipeline_success)
-        if not pipeline_success:
+        if not pipeline_success and not _exception_in_flight:
             # Metrics are saved above for diagnosis; the exit code must still
             # say the run did not succeed. A4 (v1.6): honour a specific code
             # (e.g. 3 for the bronze refusal) that the try block set before

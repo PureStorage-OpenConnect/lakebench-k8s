@@ -121,8 +121,20 @@ def test_lakebench_owned_spark_conf_keys_are_refused(key):
     a manifest is built from a config mutated after load."""
     from pydantic import ValidationError
 
-    with pytest.raises(ValidationError, match=re.escape(key)):
-        make_config(spark={"conf": {key: "x"}})
+    from lakebench.config import LakebenchConfig
+    from lakebench.config._load_context import LoadPurpose
+
+    data = {
+        "name": "t",
+        "platform": {"storage": {"s3": {"endpoint": "http://m:9000", "access_key": "k", "secret_key": "s"}}},
+        "spark": {"conf": {key: "x"}},
+    }  # fmt: skip
+    for purpose in (LoadPurpose.RUN, LoadPurpose.MUTATE):
+        with pytest.raises(ValidationError, match=re.escape(key)):
+            LakebenchConfig.model_validate(data, context={"purpose": purpose.value})
+    # destroy, status and the read-only commands still load it.
+    for purpose in set(LoadPurpose) - {LoadPurpose.RUN, LoadPurpose.MUTATE}:
+        LakebenchConfig.model_validate(data, context={"purpose": purpose.value})
     cfg = make_config()
     cfg.spark.conf[key] = "x"
     with pytest.raises(ValueError, match=re.escape(key)):
@@ -504,3 +516,17 @@ def test_an_unrelated_connection_error_is_not_blamed_on_the_set():
         "\tat org.apache.hadoop.hive.metastore.HiveMetaStoreClient.open\n"
     )
     assert classify_dependency_failure(log) is None
+
+
+def test_a_real_depth_fetch_trace_is_classified():
+    """Java 17 puts ~20 JDK frames between the exception and Spark's fetch."""
+    jdk = "".join(
+        f"\tat java.base/sun.net.www.protocol.http.Frame{i}(X.java:{i})\n" for i in range(22)
+    )
+    log = (
+        'Exception in thread "main" java.net.ConnectException: Connection refused\n'
+        + jdk
+        + "\tat org.apache.spark.util.Utils$.doFetchFile(Utils.scala:600)\n"
+        "\tat org.apache.spark.util.DependencyUtils$.downloadFile(DependencyUtils.scala:1)\n"
+    )
+    assert "unreachable" in classify_dependency_failure(log)

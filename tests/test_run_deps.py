@@ -185,7 +185,7 @@ def test_run_refuses_thrift_on_old_set(recording_k8s):
 # --- the run-end check and provenance -----------------------------------------------
 
 
-def test_pod_check_lists_mismatches_and_records_failures(recording_k8s):
+def test_pod_check_lists_mismatches_and_records_failures(recording_k8s, monkeypatch):
     """The run-end check reads the query engine pods (the drivers carry the
     run's own handle and cannot differ)."""
     cfg = _cfg("hive-iceberg-spark-duckdb")
@@ -207,6 +207,9 @@ def test_pod_check_lists_mismatches_and_records_failures(recording_k8s):
     out = runtime.check_pods(cfg, h, since=None)
     assert out["pods_checked"] == 2
     assert [p["pod"] for p in out["pod_mismatches"]] == ["duck-old"]
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    recording_k8s.fail("list", "pods", status=500, times=1)
+    assert runtime.check_pods(cfg, h, since=None)["pods_checked"] == 2  # a blip is retried
     recording_k8s.fail("list", "pods", status=500)
     broken = runtime.check_pods(cfg, h, since=None)
     assert broken["pods_checked"] is None and broken["pods_check_error"]

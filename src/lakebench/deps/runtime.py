@@ -66,7 +66,9 @@ def load_handle(cfg: LakebenchConfig, k8s: Any, config_path: Any = None) -> m.De
         return _load_handle(cfg, k8s)
     except LakebenchError:
         raise
-    except Exception as e:  # noqa: BLE001 -- an API or connection error, typed
+    except Exception as e:
+        if not _is_cluster_error(e):
+            raise  # a config or programming error is not a cluster read
         status = getattr(e, "status", None)
         reason = getattr(e, "reason", None) or type(e).__name__
         raise PrerequisiteError(
@@ -77,6 +79,20 @@ def load_handle(cfg: LakebenchConfig, k8s: Any, config_path: Any = None) -> m.De
             where=f"namespace {cfg.get_namespace()}",
             path="run.deps_stale",
         ) from e
+
+
+def _is_cluster_error(e: BaseException) -> bool:
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.k8s import K8sConnectionError
+
+    name = type(e).__name__
+    return isinstance(e, (ApiException, OSError, K8sConnectionError)) or name in (
+        "MaxRetryError",
+        "NewConnectionError",
+        "ProtocolError",
+        "ReadTimeoutError",
+    )
 
 
 def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
@@ -307,12 +323,21 @@ def check_pods(cfg: Any, handle: m.DepsHandle, since: Any) -> dict[str, Any]:
     """The run-end pod check: ``{"pods_checked", "pod_mismatches"}``. A
     failed listing records ``pods_checked: None`` and the error, never a
     silent pass."""
+    import time
+
     from kubernetes import client as k8s_client
 
-    try:
-        pods = pods_on_sets(k8s_client.CoreV1Api(), cfg.get_namespace(), cfg, since=since)
-    except Exception as e:  # noqa: BLE001 -- recorded, not swallowed
-        return {"pods_checked": None, "pods_check_error": str(e)[:300], "pod_mismatches": []}
+    last = ""
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 * attempt)  # an API blip at run end is retried
+        try:
+            pods = pods_on_sets(k8s_client.CoreV1Api(), cfg.get_namespace(), cfg, since=since)
+            break
+        except Exception as e:  # noqa: BLE001 -- recorded, not swallowed
+            last = (str(e) or type(e).__name__)[:300]
+    else:
+        return {"pods_checked": None, "pods_check_error": last, "pod_mismatches": []}
     return {
         "pods_checked": len(pods),
         "pod_mismatches": [p for p in pods if p["pinset"] != handle.pinset_sha256],

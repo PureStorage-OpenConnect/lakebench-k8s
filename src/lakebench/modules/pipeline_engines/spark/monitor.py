@@ -75,12 +75,21 @@ def classify_dependency_failure(log: str | None) -> str | None:
     m = _DEPS_SERVER_ERROR.search(text)
     if m:
         return f"dependency server error {m.group(1)} for {m.group(2)}"
-    # A connection error counts only with Spark's fetch frames right below
-    # it (the stack of that exception), not anywhere in the tail.
+    # A connection error counts only when Spark's fetch frames are in its
+    # own stack (the frame and "Caused by" lines right after it), not
+    # anywhere in the tail. The JDK puts about 20 frames above Spark's.
     lines = text.splitlines()
     for i, line in enumerate(lines):
         m = _DEPS_UNREACHABLE.search(line)
-        if m and any(f in ln for ln in lines[i + 1 : i + 12] for f in _FETCH_FRAMES):
+        if not m:
+            continue
+        stack = []
+        for ln in lines[i + 1 :]:
+            s = ln.strip()
+            if not (s.startswith("at ") or s.startswith("...") or s.startswith("Caused by")):
+                break
+            stack.append(s)
+        if any(f in s for s in stack for f in _FETCH_FRAMES):
             return f"dependency server unreachable ({m.group(1).strip()[:200]})"
     return None
 

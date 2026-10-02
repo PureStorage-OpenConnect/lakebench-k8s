@@ -705,7 +705,7 @@ def benchmark(
     _latest = _Storage().get_latest_run_for_deployment(cfg.name, writable=True)
     early_refusal = deps_runtime.attach_refusal(cfg, _latest) if _latest else None
     if early_refusal and _latest is not None:
-        print_warning(f"Results will not be added to run {_latest.run_id}: {early_refusal}")
+        print_warning(f"Results may not be added to run {_latest.run_id}: {early_refusal}")
 
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
@@ -817,7 +817,7 @@ def benchmark(
     latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
     from lakebench.deps import runtime as deps_runtime
 
-    refusal = early_refusal or deps_runtime.attach_refusal(cfg, latest_run) if latest_run else None
+    refusal = deps_runtime.attach_refusal(cfg, latest_run) if latest_run else None
     if refusal:
         print_warning(f"Benchmark metrics not appended: {refusal}")
         latest_run = None
