@@ -1459,6 +1459,7 @@ def destroy_all(
     force_legacy: bool = False,
     namespace_wait_timeout: int = DEFAULT_NAMESPACE_WAIT_TIMEOUT,
     delete_buckets: bool = True,
+    expected_incarnation: str | None = None,
 ) -> list[DeploymentResult]:
     """Destroy all deployed components.
 
@@ -1486,6 +1487,11 @@ def destroy_all(
             warning (status SKIPPED), never as deleted.
         delete_buckets: After emptying, delete the buckets this deployment
             provably owns (LB-159). False empties them and keeps them.
+        expected_incarnation: The ``uid#nonce`` the caller verified (a
+            nameless config's state check, or ``reproduce``'s own deploy).
+            When set and the namespace is not that incarnation at
+            start (another, or absent), destroy returns one FAILED result
+            with ``details["incarnation_mismatch"]`` before any delete.
 
     Returns:
         List of destruction results
@@ -1552,6 +1558,26 @@ def destroy_all(
             )
             report("ownership-check", DeploymentStatus.FAILED, msg)
             return results
+    if expected_incarnation is not None and namespace_token_at_start != expected_incarnation:
+        msg = (
+            f"Destroy NOT started: namespace {namespace} is not the deployment this "
+            f"command checked (expected {expected_incarnation}, found "
+            f"{namespace_token_at_start or 'no namespace'}). Nothing was changed."
+        )
+        results.append(
+            DeploymentResult(
+                component="ownership-check",
+                status=DeploymentStatus.FAILED,
+                message=msg,
+                details={
+                    "incarnation_mismatch": True,
+                    "expected": expected_incarnation,
+                    "found": namespace_token_at_start,
+                },
+            )
+        )
+        report("ownership-check", DeploymentStatus.FAILED, msg)
+        return results
     if namespace_present:
         identity = build_identity_from_config(
             engine.config,

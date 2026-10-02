@@ -166,10 +166,12 @@ class ConfigNameRequired(ConfigValidationError):
     some other config file). The teardown commands and the read commands
     that look at a deployment refuse one whose name comes from the v1.6
     ``.lakebench/state.json``: v1.6 gave every nameless config in the
-    directory that name, so nothing ties it to this one (a v1.6 directory
-    is refused; a ``--name`` way through is still to come). ``siblings`` lists the other
-    nameless configs found there, for the message (None when the directory
-    could not be listed).
+    directory that name, so nothing ties it to this one. ``destroy``,
+    ``stop``, ``status`` and ``logs`` take ``--name``, which loads the config
+    under that name and leaves the proof to the namespace's own stamps
+    (``config.deploy_state.check_nameless_target``). ``siblings`` lists the
+    other nameless configs found there, for the message (None when the
+    directory could not be listed).
     """
 
     def __init__(
@@ -195,14 +197,16 @@ class ConfigNameRequired(ConfigValidationError):
                 f"is the name v1.6 gave every nameless config in this directory{also}, "
                 "so nothing ties that deployment to this config. Fix: add "
                 f"'name: {name}' to the config that deployed it and run this command "
-                "with that config."
+                f"with that config, or pass --name {name} to destroy, stop, status or "
+                "logs, which then check the namespace's stamps."
             )
         elif teardown:
             msg = (
                 "config has no name and this directory has no readable v1.6 "
                 f"{resolution.legacy_state_path}, so no deployment can be its own; "
                 f"'{name}' is only a suggestion. Fix: add the deployment's name to the "
-                "config (the namespace's lakebench.deployment/name annotation holds it)."
+                "config (the namespace's lakebench.deployment/name annotation holds it), "
+                "or pass it with --name to destroy, stop, status or logs."
             )
         elif resolution.source == "legacy-state" and shared:
             msg = (
@@ -361,8 +365,8 @@ def _load_and_validate(
             # without --name. v1.6 gave every nameless config here this one
             # name, so destroy, stop, admin or status from any of them would
             # act on, or report, whichever deployment it names. Naming the
-            # config that deployed it (or, later, a --name with the stamp
-            # check) is the way through.
+            # config that deployed it, or a --name that the namespace's
+            # stamps then confirm, is the way through.
             raise ConfigNameRequired(resolution, teardown=True, siblings=siblings)
         data["name"] = resolution.name
 

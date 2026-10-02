@@ -78,6 +78,10 @@ ANNOTATION_ADOPTED_EMPTY_BUCKETS = "lakebench.deployment/adopted-empty-buckets"
 # and stops if it changes: that is a redeploy into the same namespace, which
 # the UID cannot show (same incarnation, or create_namespace=false).
 ANNOTATION_DEPLOY_NONCE = "lakebench.deployment/deploy-nonce"
+# Written beside the nonce by a v1.7 deploy that recorded the nonce in its
+# directory's state. A v1.6 directory with no state is refused a
+# nameless teardown of a namespace carrying it: the deployment moved on.
+ANNOTATION_STATE_SCHEMA = "lakebench.deployment/state-schema"
 
 # Namespace name max length (matches K8s + doubles as the bucket-tag length
 # guard: AWS caps tag values at 256, so 63 chars is well within bounds).
@@ -768,15 +772,24 @@ def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> 
     core_v1.patch_namespace(namespace, body)
 
 
-def write_deploy_nonce(core_v1: Any, namespace: str) -> str:
-    """Stamp a new deploy nonce on the namespace and return it."""
+def write_deploy_nonce(core_v1: Any, namespace: str, nonce: str | None = None) -> str:
+    """Stamp a deploy nonce on the namespace and return it.
+
+    ``nonce`` is the one ``deploy`` already recorded in the directory's state
+    so a nameless teardown can prove it; the namespace then also gets
+    ``state-schema: lb-state/1``, which
+    says a v1.7 deploy recorded this nonce in some directory. Without one a
+    fresh nonce is stamped and the schema annotation is left as it is.
+    """
     import uuid
 
-    nonce = uuid.uuid4().hex
-    core_v1.patch_namespace(
-        namespace, {"metadata": {"annotations": {ANNOTATION_DEPLOY_NONCE: nonce}}}
-    )
-    return nonce
+    annotations = {ANNOTATION_DEPLOY_NONCE: nonce or uuid.uuid4().hex}
+    if nonce:
+        from lakebench.config.deploy_state import STATE_SCHEMA
+
+        annotations[ANNOTATION_STATE_SCHEMA] = STATE_SCHEMA
+    core_v1.patch_namespace(namespace, {"metadata": {"annotations": annotations}})
+    return annotations[ANNOTATION_DEPLOY_NONCE]
 
 
 def forget_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:

@@ -40,7 +40,7 @@ platform:
 | `buckets.bronze` | string | `<name>-bronze` | Bucket name for the bronze (raw) data layer. When unset, derived from the deployment `name`. |
 | `buckets.silver` | string | `<name>-silver` | Bucket name for the silver (enriched) data layer. When unset, derived from the deployment `name`. |
 | `buckets.gold` | string | `<name>-gold` | Bucket name for the gold (aggregated) data layer. When unset, derived from the deployment `name`. |
-| `create_buckets` | bool | `true` | Automatically create buckets that do not exist. Set to `false` if buckets are pre-provisioned or if the credentials lack `CreateBucket` permission. |
+| `create_buckets` | bool | `true` | Automatically create buckets that do not exist. Set to `false` if buckets are pre-provisioned or if the credentials lack `CreateBucket` permission. `lakebench reproduce` refuses `false` (exit 2): it measures only against buckets it creates. |
 | `ca_cert` | string | `""` | Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs. At deploy time, the PEM content is read and embedded into a Kubernetes Secret for all components. Empty = system default CAs. |
 | `verify_ssl` | bool | `true` | Verify SSL certificates for HTTPS endpoints. Set `false` only for development when you don't have the CA certificate file. |
 

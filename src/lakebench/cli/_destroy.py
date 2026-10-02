@@ -20,7 +20,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
-from lakebench.exit_codes import ExitCode
+from lakebench.exit_codes import ExitCode, UsageError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
@@ -36,6 +36,7 @@ from ._helpers import (
     resolve_config_path,
     stdin_is_tty,
 )
+from ._nameless import NAME_OPTION_HELP, guard_nameless
 
 
 def _build_destroy_list(cfg) -> str:
@@ -195,6 +196,10 @@ def destroy(
             ),
         ),
     ] = 600,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
     keep_buckets: Annotated[
         bool,
         typer.Option(
@@ -210,6 +215,17 @@ def destroy(
             ),
         ),
     ] = False,
+    expect_incarnation: Annotated[
+        str | None,
+        typer.Option(
+            "--expect-incarnation",
+            hidden=True,
+            help=(
+                "Refuse unless the namespace is this incarnation (UID#NONCE). "
+                "For harnesses that deployed it; it only adds a refusal."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Tear down lakehouse infrastructure.
 
@@ -220,15 +236,74 @@ def destroy(
     """
     if force_short_f:
         force = deprecated_short_f_force("--force or -y", force)
+    if expect_incarnation is not None:
+        _check_incarnation_token(expect_incarnation)
+        if local:
+            raise UsageError(
+                "--expect-incarnation does not apply to --local: a local stack has no "
+                "namespace to check"
+            )
+    _destroy_impl(
+        resolve_config_path(config_file, file_option),
+        force=force,
+        local=local,
+        workdir=workdir,
+        remove_data=remove_data,
+        allow_unverified_cluster=allow_unverified_cluster,
+        force_legacy=force_legacy,
+        namespace_timeout=namespace_timeout,
+        name=name,
+        keep_buckets=keep_buckets,
+        expected_incarnation=expect_incarnation,
+    )
+
+
+def _check_incarnation_token(token: str) -> None:
+    """``UID#NONCE`` with both parts set, or a usage error (exit 2)."""
+    uid, sep, nonce = token.partition("#")
+    if not sep or not uid or not nonce or "#" in nonce:
+        raise UsageError(
+            f"--expect-incarnation {token!r} is not UID#NONCE",
+            next="pass the namespace's UID and its lakebench.deployment/deploy-nonce, "
+            "joined by '#'",
+            path="cli.bad_argument",
+        )
+
+
+def _destroy_impl(
+    config_file: Path,
+    *,
+    force: bool = False,
+    local: bool = False,
+    workdir: Path | None = None,
+    remove_data: bool = False,
+    allow_unverified_cluster: bool = False,
+    force_legacy: bool = False,
+    namespace_timeout: int = 600,
+    name: str | None = None,
+    keep_buckets: bool = False,
+    expected_incarnation: str | None = None,
+) -> None:
+    """The body of ``destroy``, callable with an expected incarnation.
+
+    ``expected_incarnation`` (``uid#nonce``) only adds a refusal: when the
+    namespace is not that incarnation, nothing is deleted and
+    ``SafetyRefusal`` (``destroy.incarnation_mismatch``, exit 3) is raised,
+    whatever ``force`` says. ``reproduce`` passes the incarnation it created.
+    """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
-    config_file = resolve_config_path(config_file, file_option)
+    if expected_incarnation is not None and local:
+        raise UsageError(
+            "--expect-incarnation does not apply to --local: a local stack has no "
+            "namespace to check"
+        )
 
     # Load configuration
     try:
         # A namespace too long to finish deploying (LB-153) still has to be
         # destroyable, so the derived-name length check is skipped here.
-        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)
+        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN, name_override=name)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
@@ -247,6 +322,21 @@ def destroy(
         return
 
     namespace = cfg.get_namespace()
+
+    # A nameless config destroys only a deployment it can prove is its own
+    # (its state or stamps); the incarnation it proved is the only one destroy may touch.
+    verified_incarnation = guard_nameless(cfg, config_file, allow_absent=False)
+    if expected_incarnation is not None:
+        if verified_incarnation is not None and verified_incarnation != expected_incarnation:
+            from lakebench.exit_codes import SafetyRefusal
+
+            raise SafetyRefusal(
+                f"Destroy NOT started: namespace {namespace} is {verified_incarnation}, "
+                f"not the expected {expected_incarnation}. Nothing was changed.",
+                next="check which deployment the namespace now holds before destroying it",
+                path="destroy.incarnation_mismatch",
+            )
+        verified_incarnation = expected_incarnation
 
     # Confirmation
     if not force:
@@ -364,11 +454,30 @@ def destroy(
             force_legacy=force_legacy,
             namespace_wait_timeout=namespace_timeout,
             delete_buckets=not keep_buckets,
+            expected_incarnation=verified_incarnation,
         )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
+
+    mismatch = next((r for r in results if (r.details or {}).get("incarnation_mismatch")), None)
+    if mismatch is not None:
+        # Nothing was deleted: a refusal (exit 3), not a partial teardown.
+        from lakebench.exit_codes import SafetyRefusal
+
+        _journal_safe(j.end_command, success=False, message=mismatch.message)
+        _journal_safe(j.close_session)
+        raise SafetyRefusal(
+            mismatch.message,
+            why=(
+                "the namespace was redeployed after this command checked it"
+                if (mismatch.details or {}).get("found")
+                else "the namespace is gone (another destroy may have finished it)"
+            ),
+            next="check which deployment the namespace now holds before destroying it",
+            path="destroy.incarnation_mismatch",
+        )
 
     # Summary
     destroy_elapsed = int(time.time() - destroy_start)
