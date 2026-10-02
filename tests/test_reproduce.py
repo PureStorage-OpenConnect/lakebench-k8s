@@ -776,7 +776,7 @@ class TestNoPreRunDestroy:
             mock.patch("lakebench.cli._reproduce._refuse_existing"),
             mock.patch(
                 "lakebench.cli._reproduce._own_incarnation",
-                side_effect=lambda cfg, path, own: f"uid#{own}",
+                side_effect=lambda cfg, path, own, **k: f"uid#{own}",
             ),
             mock.patch("lakebench.cli._helpers.journal_open"),
             mock.patch("lakebench.config.load_config", return_value=fake_cfg),

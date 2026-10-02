@@ -774,3 +774,47 @@ def test_plain_deploy_does_not_require_new(cfg_path, monkeypatch):
         res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes"])
     assert res.exit_code == 0, res.output
     assert seen == [False]
+
+
+def test_engine_require_new_refuses_a_matching_nonce_it_did_not_create():
+    """The nonce alone is not proof: the namespace must be one this engine
+    tried to create."""
+    eng, k8s = _engine(exists=True)
+    eng.deploy_nonce = "mine"
+    k8s.get_namespace_annotation.return_value = "mine"
+    with (
+        patch.object(eng, "_namespace_already_using_name", return_value=None),
+        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
+    ):
+        result = eng._deploy_namespace()
+    assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
+    stamp.assert_not_called()
+
+
+def test_own_incarnation_retries_one_failed_read(monkeypatch):
+    import lakebench.cli._reproduce as rep
+    from lakebench.config import deploy_state
+
+    monkeypatch.setattr(rep.time, "sleep", lambda s: None)
+    reads: list = []
+
+    def read(core, ns):
+        reads.append(ns)
+        if len(reads) == 1:
+            raise ConnectionResetError("blip")
+        return deploy_state.NamespaceIdentity("u1", "own", NAME, "", frozenset())
+
+    monkeypatch.setattr(deploy_state, "read_namespace_identity", read)
+    cfg = MagicMock()
+    cfg.get_namespace.return_value = NAME
+    with patch("kubernetes.client.CoreV1Api"):
+        assert rep._own_incarnation(cfg, Path("c.yaml"), "own", after="run") == "u1#own"
+    assert len(reads) == 2
+    reads.clear()
+    monkeypatch.setattr(
+        deploy_state,
+        "read_namespace_identity",
+        lambda core, ns: (_ for _ in ()).throw(ConnectionResetError("down")),
+    )
+    with patch("kubernetes.client.CoreV1Api"), pytest.raises(PrerequisiteError, match="after run"):
+        rep._own_incarnation(cfg, Path("c.yaml"), "own", after="run")

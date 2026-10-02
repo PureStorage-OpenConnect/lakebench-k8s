@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import math
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -793,7 +794,7 @@ def _find_reproduce_run(storage, deployment_name: str, start_watermark: datetime
     F4: list_runs is a global view -- a parallel `lakebench run` in another
     shell would poison a simple set-diff. We filter by two attributes we
     control end-to-end: the deployment_name from the config we ran against,
-    and a start_time strictly after the watermark we captured before deploy.
+    and a start_time strictly after the watermark taken just before the run step.
     Both are stable across the metrics.json round trip.
     """
     candidates: list[tuple[str, str]] = []
@@ -927,12 +928,14 @@ def _refuse_existing(cfg: Any, config_file: Path) -> None:
             )
 
 
-def _own_incarnation(cfg: Any, config_file: Path, own: str) -> str:
+def _own_incarnation(cfg: Any, config_file: Path, own: str, *, after: str = "deploy") -> str:
     """``uid#own`` when the namespace carries the nonce this reproduce deployed.
 
-    One ``read_namespace``. The comparison is against ``own``, never against
-    a value read back, so a deploy that replaced ours between our deploy and
-    this read is refused, not taken over.
+    One ``read_namespace`` (a failed read is tried once more, so an API blip
+    after a long run does not discard it). The comparison is against
+    ``own``, never against a value read back, so a deploy that replaced ours
+    is refused, not taken over. ``after`` names the step just finished, for
+    the messages.
     """
     from kubernetes import client
 
@@ -940,24 +943,30 @@ def _own_incarnation(cfg: Any, config_file: Path, own: str) -> str:
     from lakebench.exit_codes import PrerequisiteError, SafetyRefusal
 
     namespace = cfg.get_namespace()
-    try:
-        ident = read_namespace_identity(client.CoreV1Api(), namespace)
-    except Exception as e:  # noqa: BLE001
-        raise PrerequisiteError(
-            f"cannot read namespace {namespace} after deploy: {e}",
-            why="reproduce confirms the namespace carries its own nonce before it runs "
-            "or destroys anything",
-            next=f"reproduce generated, ran and destroyed nothing; check "
-            f"lakebench status {config_file}",
-            path="k8s.unreachable",
-        ) from e
+    done = "deployed" if after == "deploy" else "deployed, generated and ran"
+    for attempt in (1, 2):
+        try:
+            ident = read_namespace_identity(client.CoreV1Api(), namespace)
+            break
+        except Exception as e:  # noqa: BLE001
+            if attempt == 1:
+                time.sleep(5)
+                continue
+            raise PrerequisiteError(
+                f"cannot read namespace {namespace} after {after}: {e}",
+                why="reproduce confirms the namespace carries its own nonce before it "
+                "reports or destroys anything",
+                next=f"reproduce {done} and destroyed nothing; check "
+                f"lakebench status {config_file}",
+                path="k8s.unreachable",
+            ) from e
     if ident is None or not ident.uid or ident.nonce != own:
         found = "no namespace" if ident is None else (ident.nonce or "no nonce")
         raise SafetyRefusal(
             f"namespace {namespace} does not carry the nonce this reproduce deployed "
             f"({own}); found {found}",
             why="another deploy replaced the deployment after this reproduce made it",
-            next="reproduce generated, ran and destroyed nothing; check which deployment "
+            next=f"reproduce {done} and destroyed nothing; check which deployment "
             "the namespace holds before destroying it",
             path="reproduce.nonce_changed",
         )
@@ -1046,7 +1055,7 @@ def _run_pipeline(
         # The deployment must still be the one this reproduce made, --keep or
         # not: a redeploy during generate or run means the measurement may
         # not be ours, and nothing is destroyed.
-        _own_incarnation(cfg, config_file, own)
+        _own_incarnation(cfg, config_file, own, after="run")
         result = _find_reproduce_run(storage, deployment_name, start_watermark)
         if result is None:
             raise ReproduceError("Could not load the run this reproduce produced")
