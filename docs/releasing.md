@@ -66,14 +66,18 @@ The history scan reads `.gitleaks.toml` and `.gitleaksignore` from a
 trusted ref, the first of two that has the file. For a push to `main`, a
 pull request to `main` and a `v*` tag that is `origin/main`, then
 `origin/integrate/v1.5.0`; for every other branch it is
-`origin/integrate/v1.5.0`, then `origin/main`, the order the pre-push hook
-uses. So an allowlist or baseline change takes effect for lane and train
-branches when it merges to integrate, which only the main lane does (the
-train review and the list pinned in `tests/test_gitleaks_baseline.py` are
-the control), and for `main` and releases only once a pull request puts it
-on `main`; a finding it was meant to cover fails CI on `main` until then. A
-lane branch cannot allowlist itself. The second pass uses the branch's own
-config, so a new rule applies at once. Main's required checks should include "Secret scan (history)" and
+`origin/integrate/v1.5.0` (the ref the pre-push hook reads), then
+`origin/main`. So an allowlist or baseline change takes effect for lane and
+train branches when it merges to integrate (the train review and the list
+pinned in `tests/test_gitleaks_baseline.py` are the control; integrate has
+no branch protection, so that rests on only the main lane merging there),
+and for `main` and releases only once it is on `main`. The pull request
+that merges integrate to `main` is scanned with `main`'s config, so a
+`.gitleaks.toml` allowlist that integrate gained since the last merge must
+reach `main` first in its own pull request, branched from `main` and
+carrying only that change; otherwise the history scan fails on the
+integrate pull request for the commits the allowlist covers. The second
+pass uses the branch's own config, so a new rule applies at once. Main's required checks should include "Secret scan (history)" and
 "AML statistics (slow)".
 
 The version lives only in `src/lakebench/__init__.py`; `pyproject.toml`

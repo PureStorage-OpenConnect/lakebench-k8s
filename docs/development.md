@@ -314,8 +314,8 @@ baseline: two fingerprints of the old default Polaris secret that PyPI
 the baseline from a trusted ref, not from the branch, so a branch cannot
 allowlist its own finding. A push to `main`, a pull request to `main` and a
 release tag trust `origin/main` first, then `origin/integrate/v1.5.0`;
-every other branch trusts `origin/integrate/v1.5.0` first, then
-`origin/main`, as the pre-push hook does. A pull request to `main` uses its
+every other branch trusts `origin/integrate/v1.5.0` first (the ref the
+pre-push hook reads), then `origin/main`. A pull request to `main` uses its
 own baseline, which the owner reviews, and CI prints its baseline and config
 diff against `main`. The scan also runs with
 the branch's own config, so a new rule applies at once.
