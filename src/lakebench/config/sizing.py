@@ -252,12 +252,8 @@ def _resolved_copy(
     the copy tells user-set fields from defaults exactly as *cfg* does.
     Re-resolving a config that was already resolved against the same
     capacity gives the same plan
-    (``tests/test_sizing.py::test_resolved_config_sizes_the_same``). Not
-    every resolved field is a fixed point: a user-set ``executor.memory``
-    above the node cap gets a different ``memory_overhead`` on a second
-    pass, because the autosizer derives the overhead before it caps the
-    memory. No plan figure reads those fields; the Spark peak comes from
-    the job profiles.
+    (``tests/test_sizing.py::test_resolved_config_sizes_the_same``). The
+    Spark peak comes from the job profiles, not from autosized fields.
     """
     from lakebench.config.autosizer import resolve_auto_sizing
 

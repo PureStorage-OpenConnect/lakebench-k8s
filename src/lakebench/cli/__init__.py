@@ -1612,7 +1612,7 @@ def info(
     if guidance.warning:
         console.print(f"  [yellow]Warning: {esc(guidance.warning)}[/yellow]")
 
-    # Check cluster feasibility
+    # Check cluster feasibility, on the cluster the config names, as run does
     try:
         k8s = get_k8s_client(context=cfg.platform.kubernetes.context)
         cap = k8s.get_cluster_capacity()

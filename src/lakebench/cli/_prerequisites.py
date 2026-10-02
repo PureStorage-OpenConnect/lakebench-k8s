@@ -282,7 +282,7 @@ def _check_cluster_capacity(
     request against allocatable capacity turns that into an immediate,
     actionable error.
 
-    The decision is ``config.sizing.check_capacity`` (CC-22), the one
+    The decision is ``config.sizing.check_capacity``, the one
     sizing source ``info``, ``config show``, ``recommend`` and the
     docs tables also use. It checks that the floor (the Spark peak, or one
     batch datagen pod, plus the always-on pods and continuous datagen) fits
