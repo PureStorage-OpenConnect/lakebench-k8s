@@ -101,6 +101,12 @@ def test_interrupt_batch_seals_interrupted(tmp_path, monkeypatch, sentinel_sigte
     assert jobs[-1]["job_type"] == "silver-build"
     assert jobs[-1]["error_message"] == "interrupted"
     assert jobs[-1]["success"] is False
+    # The corpus observation still runs after an interrupt (it never raises):
+    # one listing of the datagen prefix, and the record carries it.
+    assert ["S3", "paginate list_objects_v2", "runchar-bronze", "customer/interactions/"] in [
+        c[:4] for c in rec.calls
+    ]
+    assert "corpus_observation" in record["config_snapshot"]["experiment_inputs"]
     _assert_handlers_restored(sentinel_sigterm)
 
 
@@ -561,3 +567,17 @@ def test_interrupt_continuous_skip_generate_stops_only_streams(
     assert [s for s in intr["stopped"] if s.startswith("Job/")] == []
     assert not _deletes(rec, "Job")
     assert len(intr["stopped"]) == 3
+
+
+def test_a_refusal_exit_in_continuous_is_never_a_success(tmp_path, monkeypatch, sentinel_sigterm):
+    """A continuous run that stops on a scripts-map failure exits 1, and its
+    record says failed (the flag used to stay set, so it saved PASSED)."""
+    from tests.harness import run_harness
+
+    monkeypatch.setattr(
+        run_harness.FakeJobManager, "deploy_scripts_configmap", lambda self, *a, **k: False
+    )
+    trace, rec, record = _run("continuous_c360", tmp_path, monkeypatch)
+    assert trace["exit_code"] == 1
+    assert record["success"] is False
+    assert record["verdict"]["status"] == "FAILED"

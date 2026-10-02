@@ -71,7 +71,7 @@ MEANINGS: dict[ExitCode, str] = {
         "Requirement unmet: a reproduction drifted outside its tolerance, was asked "
         "to verify at another commit, or could only be verified out of band."
     ),
-    ExitCode.INTERRUPTED: "Interrupted (SIGINT, Ctrl-C).",
+    ExitCode.INTERRUPTED: "Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM).",
 }
 
 
@@ -200,7 +200,8 @@ PATHS: tuple[ExitPath, ...] = (
         "run.namespace_gone",
         _C.FAILED,
         "the namespace was deleted, or deleted and deployed again, during a continuous "
-        "`run`; the record names it in abort_reason",
+        "`run`, or could not be read three times over a minute; the record names it "
+        "in abort_reason",
     ),
     ExitPath(
         "repeat.no_verified_corpus",
