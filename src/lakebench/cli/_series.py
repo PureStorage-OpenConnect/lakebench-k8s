@@ -20,10 +20,14 @@ per series (ch03 section 6 "Series corpus identity"):
   stops the series with exit 3, ``series.corpus_changed``.
 
 A repetition that fails its verdict does not stop the series. An interrupt
-stops it with exit 130. The manifest ``lakebench-output/series/<id>.json``
-is rewritten after every repetition. Exit: 0 when every repetition passed
-and is a member, 1 when any did not (or repetition 1 left no verified
-corpus to reuse), 3 when bronze changed, 130 on an interrupt.
+stops it with exit 130. A SparkApplication of the deployment still running
+before a repetition (or one that cannot be listed) stops it with exit 1. The
+manifest ``lakebench-output/series/<id>.json`` is rewritten after every
+repetition. Exit: 0 when every repetition passed and is a member, 1 when any
+did not (or repetition 1 left no verified corpus to reuse), 3 when bronze or
+the corpus changed, 130 on an interrupt. A repetition that stops before
+saving a record, and repetition 1 when it exits 2 to 5, stop the series
+with that repetition's own code.
 """
 
 from __future__ import annotations
@@ -34,7 +38,14 @@ from typing import Any
 
 import typer
 
-from lakebench.cli._helpers import console, print_error, print_info, print_success, print_warning
+from lakebench.cli._helpers import (
+    console,
+    esc,
+    print_error,
+    print_info,
+    print_success,
+    print_warning,
+)
 from lakebench.exit_codes import ExitCode, LakebenchError, SafetyRefusal
 
 logger = logging.getLogger(__name__)
@@ -50,13 +61,19 @@ LATER_REPETITION = {
 
 
 class _Stop(Exception):
-    """The series stops here with *code*; *reason* goes into the manifest."""
+    """The series stops here with *code*; *reason* goes into the manifest.
+    *corpus* marks a stop this module raised because bronze or the corpus
+    differs (exit 3, ``series.corpus_changed``)."""
 
-    def __init__(self, code: int, reason: str, error: LakebenchError | None = None) -> None:
+    def __init__(self, code: int, reason: str, *, corpus: bool = False) -> None:
         super().__init__(reason)
         self.code = code
         self.reason = reason
-        self.error = error
+        self.corpus = corpus
+
+
+def _corpus_stop(reason: str) -> _Stop:
+    return _Stop(ExitCode.REFUSED, f"series.corpus_changed: {reason}", corpus=True)
 
 
 def bronze_listing(cfg: Any) -> tuple[str | None, int, int, str]:
@@ -91,22 +108,54 @@ def _listing_or_stop(cfg: Any, when: str) -> tuple[str | None, int, int, str]:
     try:
         return bronze_listing(cfg)
     except Exception as e:  # noqa: BLE001 -- never assume bronze is unchanged
-        raise _Stop(
-            ExitCode.REFUSED,
-            f"series.corpus_changed: bronze could not be listed {when} ({e})",
-        ) from None
+        raise _corpus_stop(f"bronze could not be listed {when} ({e})") from None
 
 
-def _call(run_once: Any, *args: Any, **kwargs: Any) -> int:
-    """One repetition's exit code: 0 when it returned, else its typer.Exit
-    code; an interrupt that escaped it (before its handlers) is 130."""
+def _call(run_once: Any, *args: Any, **kwargs: Any) -> tuple[int, BaseException | None]:
+    """One repetition: its exit code (0 when it returned, else its
+    typer.Exit code; 130 for an interrupt that escaped its handlers) and an
+    error it raised, which the series records and then re-raises."""
     try:
         run_once(*args, **kwargs)
     except typer.Exit as e:
-        return int(e.exit_code or 0)
+        return int(e.exit_code or 0), None
     except KeyboardInterrupt:
-        return int(ExitCode.INTERRUPTED)
-    return 0
+        return int(ExitCode.INTERRUPTED), None
+    except Exception as e:  # noqa: BLE001 -- recorded in the manifest, then re-raised
+        code = e.code if isinstance(e, LakebenchError) else ExitCode.FAILED
+        return int(code), e
+    return 0, None
+
+
+def _unfinished_apps(cfg: Any) -> list[str] | None:
+    """This deployment's lakebench SparkApplications that have not ended
+    (a stage a timeout left running); None when they cannot be listed."""
+    try:
+        from kubernetes import client as k8s_client
+
+        resp = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
+            group="sparkoperator.k8s.io",
+            version="v1beta2",
+            namespace=cfg.get_namespace(),
+            plural="sparkapplications",
+            _request_timeout=(5, 30),
+        )
+    except Exception as e:  # noqa: BLE001 -- unknown is not "none running"
+        logger.warning("series: could not list SparkApplications: %s", e)
+        return None
+    out = []
+    for item in (resp or {}).get("items") or []:
+        name = str(((item or {}).get("metadata") or {}).get("name") or "")
+        state = (((item or {}).get("status") or {}).get("applicationState") or {}).get("state")
+        # SUCCEEDING and FAILING are the monitor's terminal states too.
+        if name.startswith("lakebench-") and state not in (
+            "COMPLETED",
+            "FAILED",
+            "SUCCEEDING",
+            "FAILING",
+        ):
+            out.append(name)
+    return out
 
 
 def _record(storage: Any, run_id: str | None) -> dict[str, Any] | None:
@@ -137,13 +186,17 @@ def run_series(
     config_sha256: str | None,
 ) -> None:
     """Run *n* repetitions of the loaded *cfg* as one series (module
-    docstring); ends with ``typer.Exit`` unless every repetition passed."""
+    docstring); ends with ``typer.Exit`` (or the stop's error) unless every
+    repetition passed and is a member."""
     from lakebench._constants import DEFAULT_OUTPUT_DIR
     from lakebench.cli._run import _run_once
     from lakebench.cli._run_args import RunArgs, validate_run_args
+    from lakebench.corpus_digest import is_sha256_hex
     from lakebench.metrics import MetricsStorage
     from lakebench.metrics.corpus_identity import inherited_corpus_from
     from lakebench.metrics.series import (
+        CHANGED_REASON,
+        ID_MISMATCH_PROBLEM,
         SeriesContext,
         SeriesManifest,
         bronze_verified,
@@ -156,7 +209,7 @@ def run_series(
     series_id = new_series_id()
     manifest = SeriesManifest(
         series_id=series_id,
-        config_path=str(config_file),
+        config_path=str(Path(config_file).resolve()),
         config_sha256=config_sha256,
         deployment_name=cfg.name,
         requested=n,
@@ -172,18 +225,29 @@ def run_series(
     d1: str | None = None
     all_passed = True
     code = 0
-    error: LakebenchError | None = None
+    stop: _Stop | None = None
+    path: Path | None = None
     try:
         d0 = None if generates else _listing_or_stop(pristine, "before repetition 1")[0]
         for index in range(1, n + 1):
             opts = dict(options)
+            # Never measure next to a stage still running (one a timeout
+            # left behind, from this series or an earlier run).
+            running = _unfinished_apps(pristine)
+            if running is None or running:
+                raise _Stop(
+                    ExitCode.FAILED,
+                    f"before repetition {index}: "
+                    + (
+                        "SparkApplications could not be listed"
+                        if running is None
+                        else f"still running: {', '.join(running)}"
+                    ),
+                )
             if index > 1:
                 digest = _listing_or_stop(pristine, f"before repetition {index}")[0]
                 if digest != d1:
-                    raise _Stop(
-                        ExitCode.REFUSED,
-                        f"series.corpus_changed: bronze changed before repetition {index}",
-                    )
+                    raise _corpus_stop(f"bronze changed before repetition {index}")
                 opts.update(LATER_REPETITION)
             plan = validate_run_args(RunArgs(**opts), pristine)
             ctx = SeriesContext(
@@ -195,8 +259,10 @@ def run_series(
                 d1=d1,
             )
             console.print()
-            console.print(f"[bold cyan]Series {series_id}: repetition {index}/{n}[/bold cyan]")
-            rep_code = _call(
+            console.print(
+                f"[bold cyan]Series {esc(series_id)}: repetition {esc(index)}/{esc(n)}[/bold cyan]"
+            )
+            rep_code, rep_error = _call(
                 _run_once,
                 pristine.model_copy(deep=True),
                 config_file,
@@ -207,12 +273,14 @@ def run_series(
             )
             record = _record(storage, ctx.run_id) if ctx.sealed else None
             verdict = verdict_of(record)
-            interrupted = rep_code == ExitCode.INTERRUPTED or bool(
-                record and record.get("interrupted")
+            interrupted = (
+                rep_code == ExitCode.INTERRUPTED
+                or ctx.signalled
+                or bool(record and record.get("interrupted"))
             )
             member, reason = True, None
             if record is None:
-                member, reason = False, "no record was saved"
+                member, reason = False, f"exited {rep_code} before saving a record"
             elif index > 1:
                 assert rep1 is not None and d1 is not None
                 member, reason = member_of_series(record, rep1, d1)
@@ -223,17 +291,24 @@ def run_series(
                 verdict=verdict,
                 member=member,
                 reason=reason,
+                corpus_changed=reason in (CHANGED_REASON, ID_MISMATCH_PROBLEM),
             )
             if verdict != "PASSED" or not member:
                 all_passed = False
             manifest.write(out_dir)
+            if rep_error is not None:
+                manifest.stopped_reason = f"repetition {index} raised {type(rep_error).__name__}"
+                raise rep_error
             if interrupted:
                 raise _Stop(ExitCode.INTERRUPTED, "interrupted")
+            if record is None:
+                # Not a corpus question: the repetition stopped before its save.
+                raise _Stop(rep_code or ExitCode.FAILED, f"repetition {index} {reason}")
 
             if index == 1:
                 if rep_code not in (0, 1):
                     raise _Stop(rep_code, f"repetition 1 exited {rep_code}")
-                if record is None or not bronze_verified(record):
+                if not bronze_verified(record):
                     raise _Stop(
                         ExitCode.FAILED,
                         "repeat.no_verified_corpus: repetition 1's bronze-verify did not pass",
@@ -253,8 +328,6 @@ def run_series(
                     )
                 inherited = inherited_corpus_from(record)
                 d1 = inherited.get("bronze_listing_sha256")
-                from lakebench.corpus_digest import is_sha256_hex
-
                 if not is_sha256_hex(d1) or not isinstance(inherited.get("corpus"), dict):
                     raise _Stop(
                         ExitCode.FAILED,
@@ -262,16 +335,10 @@ def run_series(
                         "corpus to reuse",
                     )
                 if not generates and d0 != d1:
-                    raise _Stop(
-                        ExitCode.REFUSED,
-                        "series.corpus_changed: bronze changed during repetition 1",
-                    )
+                    raise _corpus_stop("bronze changed during repetition 1")
                 now, objects, size, scope = _listing_or_stop(pristine, "after repetition 1")
                 if now != d1:
-                    raise _Stop(
-                        ExitCode.REFUSED,
-                        "series.corpus_changed: bronze changed after repetition 1 was saved",
-                    )
+                    raise _corpus_stop("bronze changed after repetition 1 was saved")
                 rep1 = record
                 corpus = (record.get("experiment") or {}).get("corpus") or {}
                 manifest.corpus = {
@@ -285,42 +352,31 @@ def run_series(
                 }
                 manifest.write(out_dir)
             elif not member:
-                raise _Stop(
-                    ExitCode.REFUSED,
-                    f"series.corpus_changed: repetition {index}: {reason}",
-                )
+                if reason in (CHANGED_REASON, ID_MISMATCH_PROBLEM):
+                    raise _corpus_stop(f"repetition {index}: {reason}")
+                raise _Stop(ExitCode.FAILED, f"repetition {index}: {reason}")
         code = 0 if all_passed else int(ExitCode.FAILED)
-    except _Stop as stop:
-        manifest.stopped_reason = stop.reason
-        code = int(stop.code)
-        if code == ExitCode.REFUSED:
-            error = SafetyRefusal(
-                "bronze changed between repetitions; the series stopped",
-                why=stop.reason,
-                next="regenerate the corpus or run a new series",
-                path="series.corpus_changed",
-            )
-        elif stop.reason.startswith("repeat.no_verified_corpus"):
-            error = LakebenchError(
-                "no verified corpus to reuse; the series stopped after repetition 1",
-                why=stop.reason,
-                path="repeat.no_verified_corpus",
-            )
-        elif code == ExitCode.FAILED:
-            print_error(f"Series {series_id} stopped: {stop.reason}")
+    except _Stop as s_:
+        stop = s_
+        manifest.stopped_reason = s_.reason
+        code = int(s_.code)
+        if s_.corpus and manifest.runs and "during repetition 1" in s_.reason:
+            # Repetition 1 read a corpus that did not hold still: not a member.
+            manifest.runs[0]["member"] = False
+            manifest.runs[0]["corpus_changed"] = True
+            manifest.runs[0]["not_member_reason"] = s_.reason
     except KeyboardInterrupt:
         manifest.stopped_reason = "interrupted"
         code = int(ExitCode.INTERRUPTED)
     except BaseException as e:
-        manifest.stopped_reason = f"error: {type(e).__name__}: {e}"[:300]
+        if manifest.stopped_reason is None:
+            manifest.stopped_reason = f"error: {type(e).__name__}: {e}"[:300]
         raise
     finally:
-        path: Path | None
         try:
             path = manifest.write(out_dir)
         except OSError as e:
             print_warning(f"Series manifest not written: {e}")
-            path = None
     summary = manifest.to_dict()
     line = (
         f"Series {series_id}: {summary['passed']} of {summary['requested']} passed"
@@ -328,7 +384,20 @@ def run_series(
         + (f"; manifest {path}" if path else "")
     )
     (print_success if code == 0 else print_warning)(line)
-    if error is not None:
-        raise error
+    if stop is not None and stop.corpus:
+        raise SafetyRefusal(
+            "bronze changed during or between repetitions; the series stopped",
+            why=stop.reason,
+            next="regenerate the corpus or start a new series",
+            path="series.corpus_changed",
+        )
+    if stop is not None and stop.reason.startswith("repeat.no_verified_corpus"):
+        raise LakebenchError(
+            "no verified corpus to reuse; the series stopped after repetition 1",
+            why=stop.reason,
+            path="repeat.no_verified_corpus",
+        )
+    if stop is not None and code == ExitCode.FAILED:
+        print_error(f"Series {series_id} stopped: {stop.reason}")
     if code:
         raise typer.Exit(code)

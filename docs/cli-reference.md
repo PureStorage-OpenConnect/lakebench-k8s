@@ -354,12 +354,16 @@ counted. A later repetition inherits repetition 1's corpus identity only
 under that check (`experiment.corpus.inherited_from`). A repetition that
 fails its verdict does not stop the series; Ctrl-C does (exit 130). The
 series stops after repetition 1 when its bronze-verify or silver-build did
-not pass, or when its datagen Job is still running or cannot be read. Each
-record carries `series {id, index, size}`, and
-`lakebench-output/series/<id>.json` lists the repetitions, which passed,
-and the corpus; only repetitions that passed and share the corpus count.
-Exit: 0 when every repetition passed, 1 when any did not, 3 when bronze
-changed, 130 on an interrupt.
+not pass, or when its datagen Job is still running or cannot be read; and
+before any repetition when one of the deployment's SparkApplications is
+still running or they cannot be listed. Each record carries `series {id, index, size}`, and
+`lakebench-output/series/<id>.json` lists the repetitions, which are members
+of the series' corpus, which passed, and the corpus. The manifest is the
+authority on membership: only repetitions that passed and are members
+count. Exit: 0 when every repetition passed, 1 when any did not, 3 when bronze or
+the corpus changed, 130 on an interrupt. A repetition that stops before
+saving a record, and repetition 1 when it exits 2 to 5, stop the series
+with that repetition's own code.
 
 **Refused arguments.** `run` checks every option before it makes any
 cluster call, and exits 2 (usage) naming the first refused one:

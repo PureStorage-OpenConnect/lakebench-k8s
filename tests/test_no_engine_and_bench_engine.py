@@ -77,7 +77,7 @@ def test_batch_run_applies_the_skip_before_the_benchmark_and_maintenance():
     skip_benchmark, and the maintenance record names the reason."""
     import lakebench.cli._run as run_mod
 
-    src = inspect.getsource(run_mod.run)
+    src = inspect.getsource(run_mod._run_once)
     call = src.index("no_query_engine_skip(cfg, skip_benchmark)")
     assert call < src.index("do_maintenance = (")
     assert call < src.index("Phase 6/7: Benchmark")

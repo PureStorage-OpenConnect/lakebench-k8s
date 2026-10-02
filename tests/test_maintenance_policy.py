@@ -96,7 +96,7 @@ def test_skip_maintenance_stamps_a_distinct_id():
     import lakebench.cli._run as run_mod
     import lakebench.cli._sustained as sus
 
-    for src in (inspect.getsource(run_mod.run), inspect.getsource(sus._run_sustained)):
+    for src in (inspect.getsource(run_mod._run_once), inspect.getsource(sus._run_sustained)):
         assert "if skip_maintenance and collector.current_run is not None:" in src
         assert "collector.current_run.maintenance_policy_id = skipped_policy_id()" in src
     assert skipped_policy_id() == MAINTENANCE_POLICY_ID + "+skipped"
