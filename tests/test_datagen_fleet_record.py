@@ -264,7 +264,7 @@ def test_multi_cycle_run_never_borrows_an_older_sidecar(argv, tmp_path, monkeypa
     scenario = dataclasses.replace(SCENARIOS["batch_c360"], argv=argv, config=config)
     trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
     # --generate passes the gate once, before its Job (the cycles skip it).
-    assert seen == [True] if "--generate" in argv else [False]
+    assert seen == ([True] if "--generate" in argv else [False])
     assert ["Datagen", "deploy_cycle"] in trace["calls"]
     assert not _sidecar(tmp_path).exists()
     record = saved_record(tmp_path)
