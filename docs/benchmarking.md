@@ -80,13 +80,35 @@ differ, so compare, the perf gate and reproduce refuse them).
 | `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
 | `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of the whole corpus taken by the window's end. About 0.8 on a default run, whose trickle is sized to outlast the window; not a saturation signal. |
 | `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when bronze fell behind the rows the trickle released. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
-| `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up). |
+| `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up: `ingest_ratio >= 0.95`). Whether the trickle held intake is `experiment.limits.trickle_bound`, below. |
 | `corpus_drain_seconds` | `datagen_rows / sustained_throughput_rps` | Set when `intake_limit` is `trickle_rate`: the window that would drain the corpus at the rate held. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage rows taken in inside the window)` (gold: its re-reads of silver) | Total volume processed during the measurement window. |
 | `total_s3_objects` | `sum(bucket_object_count)` | Total S3 objects across bronze/silver/gold at end of run. If this grows faster than retention can clean, metadata ops degrade. |
 | `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
+
+**BOUNDED BY trickle.** A continuous run feeds bronze at most
+`max_files_per_trigger` files per trigger. When that trickle was set and the
+pipeline kept pace, the throughput figures (`sustained_throughput_rps`,
+`pipeline_throughput_gb_per_second` and compute efficiency in a continuous
+run) are the offered load, not what the infrastructure can do. Kept pace
+means ingested rows over offered rows is at least 0.99 and the lag at window
+end (window seconds minus bronze's last write) is at most one trigger
+interval. Offered rows are the rows the trickle had released less the last
+trigger's batch, which that one-interval lag lets be in flight; when bronze
+took the whole corpus the lag is not tested. The experiment block records
+`limits.trickle_bound` (`{kind, value, source, kept_pace, ratio, lag_s,
+trigger_s, offered_rows, ingested_rows}`, or null when the trickle did not
+hold intake) and adds a line `trickle: max_files_per_trigger N (auto), the
+pipeline kept pace` to `limits.bound`. When an input was not recorded,
+`kept_pace` is null and the line says so; the throughput is still not shown
+as a capacity. The trickle is not one of `limits.bound_kinds`, so it is not
+part of the experiment identity. The report labels the throughput and
+efficiency figures "BOUNDED BY: trickle N files per trigger; this is the
+offered load, not infrastructure capacity", and `compare` shows those rows
+as `capped`. A record written before 1.7 gets the same answer, computed when
+it is read.
 
 ### Per-Stage Metrics
 

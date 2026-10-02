@@ -154,6 +154,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **BOUNDED BY trickle.** A continuous run whose trickle
+  (`max_files_per_trigger`) held intake, meaning ingested over offered rows
+  of at least 0.99 and a lag at window end of at most one trigger, records
+  `experiment.limits.trickle_bound` and a `trickle:` line in `limits.bound`.
+  The report labels the continuous throughput and efficiency figures as the
+  offered load, not capacity, and `compare` marks those rows `capped`; QpH,
+  freshness and time to detect are not labelled. Stored records get the same
+  answer when read. The trickle is not a bound kind, so no experiment
+  identity moves. The `intake_limit` description now says `none` means
+  `ingest_ratio >= 0.95` and points at `trickle_bound`.
 - **Run provenance is complete.** `metrics.json` `provenance` now says how
   lakebench was installed (`install`), and a pip-installed run names the
   commit its wheel was built from (the build writes it into the package;

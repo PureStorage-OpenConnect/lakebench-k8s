@@ -569,6 +569,30 @@ def _build_comparison(
         verdict = "comparable"
     comparable = verdict == "comparable"
 
+    # Which rows a Lakebench limit holds down. A bound kind on either side
+    # caps every row, as before; the trickle (not a bound kind) caps only the
+    # metrics whose registry entry depends on it (metrics/bounds.py).
+    from lakebench.metrics.bounds import BOUND_TRICKLE, record_trickle_bound
+    from lakebench.metrics.metric_registry import capped_by
+
+    def _kinds_of(m: dict) -> list[str]:
+        if "error" in m:
+            return []
+        kinds = ((experiment_of(m) or {}).get("limits") or {}).get("bound_kinds") or []
+        return list(kinds) if isinstance(kinds, list) else []
+
+    def _trickle_of(m: dict) -> dict | None:
+        if "error" in m:
+            return None
+        try:
+            return record_trickle_bound(m)
+        except Exception:  # noqa: BLE001 -- a malformed record is shown, never capped by guess
+            return None
+
+    other_caps = bool(_kinds_of(metrics_a) or _kinds_of(metrics_b))
+    trickle_a, trickle_b = _trickle_of(metrics_a), _trickle_of(metrics_b)
+    pair_mode = _pipeline_mode(metrics_a) or _pipeline_mode(metrics_b)
+
     rows = []
     for key in all_keys:
         val_a = scores_a.get(key)
@@ -576,6 +600,10 @@ def _build_comparison(
         row: dict[str, Any] = {"metric": key, "config_a": val_a, "config_b": val_b}
         if not comparable:
             row["not_comparable"] = True
+        trickle_capped = bool(
+            (trickle_a or trickle_b) and capped_by(key, [], pair_mode, extra=[BOUND_TRICKLE])
+        )
+        row["capped"] = other_caps or trickle_capped
         rows.append(row)
 
     warnings = []
@@ -633,6 +661,8 @@ def _build_comparison(
         "support": {"config_a": support_of(metrics_a), "config_b": support_of(metrics_b)},
         "caps_bound_a": caps_bound_a,
         "caps_bound_b": caps_bound_b,
+        "trickle_bound_a": trickle_a,
+        "trickle_bound_b": trickle_b,
         "refusals": {"provenance": provenance_refusals, "results": result_refusals},
         "warnings": warnings,
         "config_a": {
@@ -808,7 +838,8 @@ def _print_comparison_table(comparison: dict) -> None:
                 higher_is_better=_higher_is_better(row["metric"], mode),
                 pct=pct,
                 within_noise=within_noise,
-                capped=_capped_either_side,
+                # A comparison built before per-row caps: any cap, every row.
+                capped=row.get("capped", _capped_either_side),
             )
             glyph = _TOKEN_GLYPH.get(token, "=")
             if token == DELTA_TOKEN_CAPPED:

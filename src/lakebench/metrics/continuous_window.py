@@ -531,3 +531,65 @@ def settle_state(
     if not any(e.kind == "refreshed" and e.ident in read_after for e in gold):
         return False, "no gold refresh has read silver since its last commit"
     return True, "settled"
+
+
+#: SPEC section 8: BOUNDED BY trickle needs ingested / offered rows at or
+#: above this, and lag at window end within one trigger interval.
+TRICKLE_KEPT_PACE_RATIO = 0.99
+#: Window seconds are recorded to 0.1 s; the last write is not.
+_LAG_ROUNDING_S = 0.05
+
+
+def trickle_kept_pace(
+    *,
+    ingested_rows: float | None,
+    released_rows: float | None,
+    rows_per_trigger: float | None,
+    corpus_taken: bool,
+    window_s: float | None,
+    last_write_offset_s: float | None,
+    trigger_s: float | None,
+) -> dict[str, Any]:
+    """Whether bronze kept pace with what the trickle offered (SPEC section
+    8): ingested / offered rows >= TRICKLE_KEPT_PACE_RATIO and lag at window
+    end <= one trigger interval.
+
+    Offered rows are what the trickle had released (``released_rows``) less
+    the last trigger's batch, which the lag allowance lets be in flight at
+    window end; without that, whether a run clears 0.99 would turn on where
+    the window edge fell between two triggers. When bronze had taken the
+    whole corpus there is nothing left to offer and the lag is not tested.
+    ``kept_pace`` is True, False, or None with ``not_measured`` saying which
+    input was missing.
+    """
+    out: dict[str, Any] = {
+        "kept_pace": None,
+        "ingested_rows": ingested_rows,
+        "offered_rows": None,
+        "ratio": None,
+        "lag_s": None,
+        "trigger_s": trigger_s,
+    }
+    if ingested_rows is None or not released_rows:
+        out["not_measured"] = "the rows the trickle offered are not known"
+        return out
+    offered = float(released_rows) - float(rows_per_trigger or 0.0)
+    if offered <= 0:
+        offered = float(released_rows)
+    out["offered_rows"] = round(offered)
+    ratio = float(ingested_rows) / offered
+    out["ratio"] = round(ratio, 4)
+    if ratio < TRICKLE_KEPT_PACE_RATIO:
+        out["kept_pace"] = False
+        return out
+    if corpus_taken:
+        out["kept_pace"] = True
+        out["lag_note"] = "bronze took the whole corpus; nothing was left to offer"
+        return out
+    if window_s is None or last_write_offset_s is None or not trigger_s:
+        out["not_measured"] = "the lag at window end is not known"
+        return out
+    lag = float(window_s) - float(last_write_offset_s)
+    out["lag_s"] = round(lag, 1)
+    out["kept_pace"] = lag <= float(trigger_s) + _LAG_ROUNDING_S
+    return out

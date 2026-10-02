@@ -361,8 +361,11 @@ class ReportGenerator:
         scale = corpus.get("scale")
         corpus_label = f"{corpus_role} (id {corpus_id[:12]}, scale {scale})"
 
+        from lakebench.reports.formatter import trickle_caps_from
+
         caps_bound = caps_bound_from(metrics)
-        n_limits = len(caps_bound)
+        # The trickle counts once, whether the stored block lists it or not.
+        n_limits = len(caps_bound) + len(trickle_caps_from(metrics))
 
         if passed and not warnings:
             verdict_word = "PASSED"
@@ -1558,6 +1561,7 @@ class ReportGenerator:
             caps_bound_from,
             format_measurement,
             support_state_of,
+            trickle_caps_from,
         )
 
         total_time = metrics.total_elapsed_seconds
@@ -1610,10 +1614,13 @@ class ReportGenerator:
             qph_note = "no benchmark rounds completed"
 
         throughput_raw = f"{throughput:,.0f} rows/s"
+        # The trickle bounds intake: the rows/s, GB/s and efficiency figures
+        # are the offered load, not capacity (metrics/bounds.py).
+        intake_caps = caps_bound + trickle_caps_from(metrics)
         throughput_display = format_measurement(
             throughput_raw,
             "",
-            caps_bound=caps_bound if throughput > 0 else None,
+            caps_bound=intake_caps if throughput > 0 else None,
             n_runs=1 if throughput > 0 else None,
             support_state=support_state if throughput > 0 else None,
         )
@@ -1662,7 +1669,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{efficiency:.2f} GB/core-hr</div>
+                <div class="card-value">{format_measurement(f"{efficiency:.2f} GB/core-hr", "", caps_bound=intake_caps if efficiency > 0 else None)}</div>
                 <div class="card-hint">GB processed per core-hour requested</div>
                 <div class="card-hint2">{efficiency_hint2}</div>
             </div>
@@ -1682,7 +1689,7 @@ class ReportGenerator:
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Duration: {duration_m}m {duration_s}s</span>
             <span>Data Processed: {data_gb:.2f} GB</span>
-            <span>Avg Pipeline Throughput: {avg_throughput:.2f} GB/s</span>
+            <span>Avg Pipeline Throughput: {format_measurement(f"{avg_throughput:.2f} GB/s", "", caps_bound=intake_caps if avg_throughput > 0 else None)}</span>
         </div>
         """
 
