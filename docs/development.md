@@ -242,7 +242,10 @@ before the 2026-09-30 history rewrite, and scans the pushed commits and
 their messages with gitleaks using the `.gitleaks.toml` and `.gitleaksignore`
 from `origin/integrate/v1.5.0` rather than the branch's own copies. It also
 scans what merge commits change and ignores inline `gitleaks:allow`
-comments. Install it by copying it, not through
+comments. It refuses the push when git cannot run `--remerge-diff` (git
+older than 2.36) or when gitleaks logs an error, because gitleaks exits 0
+when the git log it runs fails and has then scanned nothing; a relative
+`GIT_DIR` (`git --git-dir=.git push`) is made absolute first. Install it by copying it, not through
 pre-commit (the pre-commit framework would read the pushing branch's config,
 which an old branch may lack):
 
