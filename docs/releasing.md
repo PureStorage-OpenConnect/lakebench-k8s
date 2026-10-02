@@ -103,6 +103,45 @@ committed, so for the check to pass in the release workflow the cited runs'
 `metrics.json` must be checked in under `uat/runs/` (or `uat/perf/`). The
 maintainer who tags is still responsible for the content.
 
+### Release evidence
+
+Four checks read the cited run records themselves
+(`src/lakebench/metrics/release_record.py`). They are skipped until the
+freeze is declared in `uat/freeze-<version>` (one line, the 40-hex sha of
+the freeze commit), so `--require-all` fails them before then.
+
+- `records`: every run cited in the UAT results table is release evidence.
+  A record is refused when it has no experiment block; did not pass; did not
+  measure rows in every layer (the verdict's `layer_rows` gate; refused until
+  the verdict computes it); missed an expected stage (bronze, silver, gold
+  and the benchmark, unless the recipe has no query engine; AML batch also
+  scoring; C360 continuous also the result check) or skipped one; for AML,
+  ran a rule set other than the expected one or errored a rule; returned
+  results other than `uat/expected-results-<version>.json`'s (batch: each
+  query's result fingerprint and the alert set; continuous: the set of query
+  sets its rounds ran); was not run by the freeze commit from a clean tree
+  whose code did not change during the run; read a held-out corpus; is not
+  exp2 from the release datagen image (the digest `ImagesConfig.datagen`
+  pins, with that image's lineage entry); or was bound by an evaluation
+  sizing profile or any Lakebench limit in `limits.bound_kinds` the row does
+  not allow (none is allowed today).
+- `support-record` (with `--tag`): `validated_combinations.yaml` lists every
+  release-matrix row, and every run it lists is in `uat/runs/`, is release
+  evidence and is the workload, recipe and mode of its entry.
+- `freeze`: the freeze commit is an ancestor of `HEAD`, the tree is clean,
+  and every change after it is in `uat/`, `validated_combinations.yaml`,
+  `benchmarks/perf/baselines.yaml` or `docs/benchmarks/examples/`, the
+  `CHANGELOG.md` release heading, or a generated block of `README.md` or a
+  top-level `docs/*.md` file that equals what its generator writes.
+- `expected-results`: `uat/expected-results-<version>.json` exists and its
+  last commit comes before the freeze commit; a fingerprint set newer than
+  the freeze is refused.
+
+The perf gate refuses the same bound runs: a run an evaluation profile or a
+Lakebench limit bound is never recorded as a baseline or compared with one.
+The release workflow runs the gate with `--only` and does not list these
+four yet; run the whole gate locally before tagging.
+
 ### Performance baselines
 
 The `perf-baselines` check fails when a required pinned perf config

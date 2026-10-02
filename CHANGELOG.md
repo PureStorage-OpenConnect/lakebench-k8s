@@ -255,6 +255,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   answer when read. The trickle is not a bound kind, so no experiment
   identity moves. The `intake_limit` description now says `none` means
   `ingest_ratio >= 0.95` and points at `trickle_bound`.
+- **The release gate reads the evidence.** `scripts/release_gate.py` gains
+  `records`, `support-record`, `freeze` and `expected-results`: every cited
+  run record must have passed, measured every layer, run the expected stages
+  and rules, matched the expected results, come from the declared freeze
+  commit on a clean tree from the release datagen image, and been bound by no
+  Lakebench limit; changes after the freeze are limited to evidence and
+  generated blocks. They are skipped until `uat/freeze-<version>` exists. The
+  perf gate now refuses a run an evaluation profile or a Lakebench limit
+  bound. See `docs/releasing.md`, "Release evidence".
 - **Run provenance is complete.** `metrics.json` `provenance` now says how
   lakebench was installed (`install`), and a pip-installed run names the
   commit its wheel was built from (the build writes it into the package;
