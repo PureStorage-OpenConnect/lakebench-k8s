@@ -785,6 +785,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SHA256SUMS` is refused, and so is a checksum mismatch on any release.
 - The package ships a `py.typed` marker, so type checkers read its
   annotations.
+- **`logs`, `stop` and `status` cover what Lakebench started and exit
+  non-zero when something is wrong.** All three use the Kubernetes
+  API in the config's context; `logs` no longer runs `kubectl`.
+  - `logs` takes `CONFIG COMPONENT` (the 1.6 order `COMPONENT CONFIG` still
+    works and prints one warning) and reads `datagen`, each pipeline stage's
+    Spark driver (`silver-build`, `gold-refresh`, `score-financial` and the
+    rest), `trino-worker`, `thrift` and `duckdb` as well as the five 1.6
+    components. `--previous` reads a restarted container. With several
+    matching pods it prints each one under a header on stderr; `--follow`
+    follows the newest. It exits 1 when no pod matches or none has a log to
+    read yet (was 0) and 4 on an API error (was 0).
+  - `stop` deletes every `lakebench-*` SparkApplication in the namespace
+    that has not finished, batch stages included, and the datagen Job while
+    it runs (1.6 deleted only the three continuous streams). Finished ones
+    are left in place, so a failed stage's logs survive. `--dry-run` lists
+    without deleting. A deletion that fails is reported and the rest still
+    run; the exit is then 1 (1.6 reported every error as "not running" and
+    exited 0).
+  - `status` exits 1 when the namespace does not exist or a component is not
+    ready, scaled to zero or missing, and 4 when the cluster cannot be read
+    (all were 0).
 - **Exit codes follow one table.** `lakebench` has a single
   exit-code enum, `lakebench.exit_codes.ExitCode`, importable without loading
   the CLI, and the table in `docs/exit-codes.md` is generated from it. Every

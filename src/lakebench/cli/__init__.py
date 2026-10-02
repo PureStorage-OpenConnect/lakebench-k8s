@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -56,8 +55,6 @@ from lakebench.k8s import (
     PlatformType,
     SecurityVerifier,
     get_k8s_client,
-    pinned_kubectl,
-    pinned_kubectl_popen,
 )
 from lakebench.s3 import test_s3_connectivity
 
@@ -882,111 +879,140 @@ def status(
 
     console.print(Panel(f"Status for namespace: [bold]{esc(ns)}[/bold]", expand=False))
 
+    from kubernetes import client as k8s_client
+
+    from lakebench.cli import _cluster_ops as ops
+    from lakebench.exit_codes import LakebenchError
+
+    def _unreachable(detail: object) -> typer.Exit:
+        print_error(f"Kubernetes connection failed: {detail}")
+        return typer.Exit(ExitCode.PREREQUISITE)
+
+    def _unreadable(detail: object) -> typer.Exit:
+        print_error(f"Kubernetes API error: {detail}")
+        return typer.Exit(ExitCode.PREREQUISITE)
+
     try:
         # The config's context, or (status --namespace with no config) the
         # kubeconfig's current context resolved by name and printed.
+        # get_k8s_client pins the process; the API objects below follow it.
         if cfg is not None:
-            k8s = get_k8s_client(context=cfg.platform.kubernetes.context, namespace=ns)
+            get_k8s_client(context=cfg.platform.kubernetes.context, namespace=ns)
         else:
             from lakebench.k8s.target import ClusterTarget
 
             target = ClusterTarget.current()
             print_info(f"Cluster context: {escape(target.label)}")
-            k8s = get_k8s_client(target=target, namespace=ns)
-
-        # Check if namespace exists
-        if not k8s.namespace_exists(ns):
-            print_warning(f"Namespace '{ns}' does not exist")
-            print_info("Run 'lakebench deploy' to create the deployment")
-            return
-
-        # Check components
-        from kubernetes import client as k8s_client
-
-        apps_v1 = k8s_client.AppsV1Api()
-
-        table = Table(title="Components")
-        table.add_column("Component", style="cyan")
-        table.add_column("Type", style="dim")
-        table.add_column("Status", style="bold")
-        table.add_column("Ready", justify="center")
-
-        # Build component list -- config-aware when a config file was loaded
-        if cfg is not None:
-            components: list[tuple[str, str]] = [("lakebench-postgres", "StatefulSet")]
-            cat = cfg.architecture.catalog.type.value
-            if cat == "hive":
-                components.append(("lakebench-hive-metastore-default", "StatefulSet"))
-            elif cat == "polaris":
-                components.append(("lakebench-polaris", "Deployment"))
-            engine = cfg.architecture.query_engine.type.value
-            if engine == "trino":
-                components.append(("lakebench-trino-coordinator", "Deployment"))
-                components.append(("lakebench-trino-worker", "StatefulSet"))
-            elif engine == "spark-thrift":
-                components.append(("lakebench-spark-thrift", "Deployment"))
-            elif engine == "duckdb":
-                components.append(("lakebench-duckdb", "Deployment"))
-            # Observability is a shared stack in its own namespace
-            # (deploy/observability.py), not a component of this deployment.
-        else:
-            # Namespace-only mode (no config loaded) -- show all possible components
-            components = [
-                ("lakebench-postgres", "StatefulSet"),
-                ("lakebench-hive-metastore-default", "StatefulSet"),
-                ("lakebench-polaris", "Deployment"),
-                ("lakebench-trino-coordinator", "Deployment"),
-                ("lakebench-trino-worker", "StatefulSet"),
-                ("lakebench-spark-thrift", "Deployment"),
-                ("lakebench-duckdb", "Deployment"),
-                ("prometheus-lakebench-observability-ku-prometheus", "StatefulSet"),
-                ("lakebench-observability-grafana", "Deployment"),
-            ]
-
-        for name, kind in components:
-            try:
-                if kind == "StatefulSet":
-                    sts = apps_v1.read_namespaced_stateful_set(name, ns)
-                    ready = sts.status.ready_replicas or 0
-                    desired = sts.spec.replicas or 1
-                    status_str = f"{ready}/{desired} replicas"
-                    ready_str = "[green]OK[/green]" if ready >= desired else "[yellow]--[/yellow]"
-                else:
-                    dep = apps_v1.read_namespaced_deployment(name, ns)
-                    ready = dep.status.ready_replicas or 0
-                    desired = dep.spec.replicas or 1
-                    status_str = f"{ready}/{desired} replicas"
-                    ready_str = "[green]OK[/green]" if ready >= desired else "[yellow]--[/yellow]"
-
-                table.add_row(name, kind, status_str, ready_str)
-            except k8s_client.rest.ApiException as e:
-                if e.status == 404:
-                    table.add_row(name, kind, "Not found", "[dim]-[/dim]")
-                else:
-                    table.add_row(name, kind, f"Error: {esc(e.reason)}", "[red]ERROR[/red]")
-
-        console.print(table)
-
-        # Check for datagen job status
-        try:
-            batch_v1 = k8s_client.BatchV1Api()
-            job = batch_v1.read_namespaced_job("lakebench-datagen", ns)
-            active = job.status.active or 0
-            succeeded = job.status.succeeded or 0
-            completions = job.spec.completions or 1
-            if active > 0 or succeeded < completions:
-                console.print()
-                console.print(
-                    f"[bold]Datagen:[/bold] {esc(succeeded)}/{esc(completions)} pods completed, "
-                    f"{esc(active)} active"
-                )
-        except k8s_client.rest.ApiException as e:
-            if e.status != 404:
-                logger.debug("Could not check datagen job: %s", e)
-
+            get_k8s_client(target=target, namespace=ns)
     except (K8sConnectionError, ConfigException) as e:
-        print_error(f"Kubernetes connection failed: {e}")
-        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+        raise _unreachable(e)  # noqa: B904
+
+    deploy_hint = f"lakebench deploy {config_file}" if config_file else "lakebench deploy CONFIG"
+    try:
+        exists = ops.namespace_exists(k8s_client.CoreV1Api(), ns)
+    except ops.ClusterReadError as e:
+        raise _unreadable(e)  # noqa: B904
+    if not exists:
+        raise LakebenchError(
+            f"namespace {ns} does not exist",
+            next=deploy_hint,
+            path="status.namespace_missing",
+            code=ExitCode.FAILED,
+        )
+
+    apps_v1 = k8s_client.AppsV1Api()
+
+    table = Table(title="Components")
+    table.add_column("Component", style="cyan")
+    table.add_column("Type", style="dim")
+    table.add_column("Status", style="bold")
+    table.add_column("Ready", justify="center")
+
+    # Build component list -- config-aware when a config file was loaded
+    if cfg is not None:
+        components: list[tuple[str, str]] = [("lakebench-postgres", "StatefulSet")]
+        cat = cfg.architecture.catalog.type.value
+        if cat == "hive":
+            components.append(("lakebench-hive-metastore-default", "StatefulSet"))
+        elif cat == "polaris":
+            components.append(("lakebench-polaris", "Deployment"))
+        engine = cfg.architecture.query_engine.type.value
+        if engine == "trino":
+            components.append(("lakebench-trino-coordinator", "Deployment"))
+            components.append(("lakebench-trino-worker", "StatefulSet"))
+        elif engine == "spark-thrift":
+            components.append(("lakebench-spark-thrift", "Deployment"))
+        elif engine == "duckdb":
+            components.append(("lakebench-duckdb", "Deployment"))
+        # Observability is a shared stack in its own namespace
+        # (deploy/observability.py), not a component of this deployment.
+    else:
+        # Namespace-only mode (no config loaded) -- show all possible components
+        components = [
+            ("lakebench-postgres", "StatefulSet"),
+            ("lakebench-hive-metastore-default", "StatefulSet"),
+            ("lakebench-polaris", "Deployment"),
+            ("lakebench-trino-coordinator", "Deployment"),
+            ("lakebench-trino-worker", "StatefulSet"),
+            ("lakebench-spark-thrift", "Deployment"),
+            ("lakebench-duckdb", "Deployment"),
+            ("prometheus-lakebench-observability-ku-prometheus", "StatefulSet"),
+            ("lakebench-observability-grafana", "Deployment"),
+        ]
+
+    marks = {
+        "ok": "[green]OK[/green]",
+        "unready": "[yellow]--[/yellow]",
+        "missing": "[dim]-[/dim]",
+        "error": "[red]ERROR[/red]",
+    }
+    rows = []
+    try:
+        for name, kind in components:
+            row = ops.read_component(apps_v1, ns, name, kind)
+            rows.append(row)
+            table.add_row(name, kind, esc(row.detail), marks[row.state])
+    except ops.ClusterReadError as e:
+        raise _unreachable(e)  # noqa: B904
+
+    console.print(table)
+
+    # Datagen job progress, while it runs (informational, never drift)
+    try:
+        batch_v1 = k8s_client.BatchV1Api()
+        job = batch_v1.read_namespaced_job(
+            "lakebench-datagen", ns, _request_timeout=ops.API_TIMEOUT
+        )
+        active = job.status.active or 0
+        succeeded = job.status.succeeded or 0
+        completions = job.spec.completions or 1
+        if active > 0 or succeeded < completions:
+            console.print()
+            console.print(
+                f"[bold]Datagen:[/bold] {esc(succeeded)}/{esc(completions)} pods completed, "
+                f"{esc(active)} active"
+            )
+    except k8s_client.rest.ApiException as e:
+        if e.status != 404:
+            logger.debug("Could not check datagen job: %s", e)
+    except Exception as e:  # noqa: BLE001 -- informational line only
+        logger.debug("Could not check datagen job: %s", e)
+
+    verdict, names = ops.status_exit(rows, config_known=cfg is not None)
+    if verdict == "drift":
+        print_error(f"Drift: {', '.join(names)} not ready or not found")
+        log_names = [ops.STATUS_LOG_COMPONENT[n] for n in names if n in ops.STATUS_LOG_COMPONENT]
+        cfg_arg = str(config_file) if config_file else "CONFIG"
+        if log_names:
+            print_info(f"Next: lakebench logs {cfg_arg} {log_names[0]}, or {deploy_hint}")
+        else:
+            print_info(f"Next: {deploy_hint}")
+        raise typer.Exit(ExitCode.FAILED)
+    if verdict == "unverified":
+        raise _unreadable(f"could not read {', '.join(names)}")
+    print_success(
+        "Every listed component is ready" if cfg is not None else "Every component found is ready"
+    )
 
 
 @app.command()
@@ -1009,12 +1035,24 @@ def stop(
         str | None,
         typer.Option("--name", help=NAME_OPTION_HELP),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="List what would be stopped without deleting anything",
+        ),
+    ] = False,
 ) -> None:
-    """Stop running continuous-mode jobs.
+    """Stop every job Lakebench started in the deployment.
 
-    Deletes the continuous-mode SparkApplications (bronze-ingest,
-    silver-stream, gold-refresh) from the cluster.
+    Deletes every SparkApplication named lakebench-* in the namespace that
+    has not finished (the continuous streams and any batch stage left
+    running) and the datagen Job while it runs. Finished ones stay, with
+    their logs. Exits 1 when anything could not be deleted.
     """
+    from kubernetes import client as k8s_client
+
+    from lakebench.cli import _cluster_ops as ops
 
     config_file = resolve_config_path(config_file, file_option)
     try:
@@ -1028,50 +1066,82 @@ def stop(
     # A nameless config stops only a deployment it can prove is its own.
     guard_nameless(cfg, config_file, allow_absent=False)
     namespace = cfg.get_namespace()
-    k8s = get_k8s_client(
-        context=cfg.platform.kubernetes.context,
-        namespace=namespace,
-    )
+    try:
+        k8s = get_k8s_client(
+            context=cfg.platform.kubernetes.context,
+            namespace=namespace,
+        )
+    except (K8sConnectionError, ConfigException) as e:
+        print_error(f"Kubernetes connection failed: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+
+    verb = "Would stop" if dry_run else "Stopping"
+    console.print(Panel(f"{esc(verb)} jobs for: [bold]{esc(cfg.name)}[/bold]", expand=False))
+
+    try:
+        exists = ops.namespace_exists(k8s_client.CoreV1Api(), namespace)
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes API error: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    if not exists:
+        print_info(f"Namespace {namespace} does not exist; nothing to stop")
+        return
+
+    custom = k8s_client.CustomObjectsApi()
+    batch = k8s_client.BatchV1Api()
+    out = ops.StopOutcome()
+    try:
+        ops.stop_targets(custom, batch, namespace, out)
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes connection failed: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+
+    for ref in out.finished:
+        print_info(f"Already finished, left in place: {ref}")
+    if dry_run:
+        for ref in out.found:
+            print_info(f"Would delete {ref}")
+        if not out.found:
+            print_info("Nothing is running")
+        for failure in out.failures:
+            print_error(failure)
+        raise typer.Exit(ExitCode.FAILED if out.failures else ExitCode.OK)
 
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.STOP, {})
 
-    streaming_names = ["bronze-ingest", "silver-stream", "gold-refresh"]
-    stopped = 0
-
-    console.print(
-        Panel(
-            f"Stopping streaming jobs for: [bold]{esc(cfg.name)}[/bold]",
-            expand=False,
-        )
-    )
-
-    for name in streaming_names:
+    if out.found:
         try:
-            k8s.delete_custom_resource(
-                group="sparkoperator.k8s.io",
-                version="v1beta2",
-                plural="sparkapplications",
-                name=f"lakebench-{name}",
-                namespace=namespace,
-            )
-            print_success(f"Stopped: lakebench-{name}")
-            stopped += 1
-        except Exception as e:
-            print_info(f"lakebench-{name}: not running ({e})")
+            ops.pre_stop(cfg, k8s)
+        except Exception as e:  # noqa: BLE001 -- a failed drain must not block the stop
+            print_warning(f"Pre-stop step failed, stopping anyway: {e}")
+        ops.stop_delete(custom, batch, namespace, out)
 
-    if stopped > 0:
-        print_success(f"Stopped {stopped} continuous job(s)")
-    else:
-        print_info("No continuous jobs were running")
+    for ref in out.deleted:
+        print_success(f"Stopped: {ref}")
+    for ref in out.not_running:
+        print_info(f"{ref}: not running")
+    for failure in out.failures:
+        print_error(failure)
+    if out.deleted:
+        print_success(f"Stopped {len(out.deleted)} job(s)")
+    elif not out.failures:
+        print_info("Nothing was running")
 
     _journal_safe(
         j.record,
         EventType.STREAMING_STOP,
-        message=f"Stopped {stopped} streaming jobs",
-        details={"stopped": stopped},
+        message=f"Stopped {len(out.deleted)} jobs",
+        details={
+            "stopped": len(out.deleted),
+            "deleted": out.deleted,
+            "finished": out.finished,
+            "failures": out.failures,
+        },
     )
-    _journal_safe(j.end_command, success=True)
+    _journal_safe(j.end_command, success=not out.failures)
+    if out.failures:
+        raise typer.Exit(ExitCode.FAILED)
 
 
 # The customer360 generator's own timestamp defaults (datagen_rs generate.rs).
@@ -1748,18 +1818,29 @@ def results(
     console.print()
 
 
+_LOGS_HELP_COMPONENTS = (
+    "datagen, a stage (bronze-verify, silver-build, gold-finalize, bronze-ingest, "
+    "silver-stream, gold-refresh, score-financial, ...), spark-driver, trino, "
+    "trino-worker, thrift, duckdb, hive, polaris, postgres"
+)
+
+
 @app.command()
 def logs(
-    component: Annotated[
-        str,
+    first: Annotated[
+        str | None,
         typer.Argument(
-            help="Component to show logs for (postgres, hive, polaris, trino, spark-driver)",
-        ),
-    ],
-    config_file: Annotated[
-        Path | None,
-        typer.Argument(
+            metavar="CONFIG",
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
+            show_default=False,
+        ),
+    ] = None,
+    second: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="COMPONENT",
+            help=f"Component to read: {_LOGS_HELP_COMPONENTS}",
+            show_default=False,
         ),
     ] = None,
     file_option: Annotated[
@@ -1774,7 +1855,7 @@ def logs(
         typer.Option(
             "--follow",
             "-F",
-            help="Follow log output",
+            help="Follow log output (the newest matching pod)",
         ),
     ] = False,
     follow_short_f: Annotated[
@@ -1786,39 +1867,60 @@ def logs(
         typer.Option(
             "--lines",
             "-n",
-            help="Number of lines to show",
+            min=1,
+            help="Number of lines to show per pod",
         ),
     ] = 100,
     name: Annotated[
         str | None,
         typer.Option("--name", help=NAME_OPTION_HELP),
     ] = None,
+    previous: Annotated[
+        bool,
+        typer.Option(
+            "--previous",
+            help="Read the previous (crashed or restarted) container instead",
+        ),
+    ] = False,
 ) -> None:
-    """Stream logs from a component.
+    """Show logs from a component of the deployment.
 
-    Shows logs from the specified Lakebench component.
-
-    Valid components: postgres, hive, polaris, trino, spark-driver
+    `lakebench logs CONFIG COMPONENT`. The 1.6 order, COMPONENT first, still
+    works. Log text goes to stdout, unformatted; pod headers and notices go
+    to stderr.
     """
+    from kubernetes import client as k8s_client
+
+    from lakebench.cli import _cluster_ops as ops
+    from lakebench.exit_codes import LakebenchError
+
     if follow_short_f:
         warn_deprecated_short_f("--follow / -F")
         follow = True
-    # Map component names to pod selectors
-    COMPONENT_SELECTORS = {
-        "postgres": ("app.kubernetes.io/component=postgres", None),
-        "hive": ("app.kubernetes.io/component=metastore", None),
-        "polaris": ("app.kubernetes.io/component=polaris", None),
-        "trino": ("app.kubernetes.io/component=trino-coordinator", None),
-        "spark-driver": ("spark-role=driver", None),
-    }
 
-    if component not in COMPONENT_SELECTORS:
-        print_error(f"Unknown component: {component}")
-        print_info(f"Valid components: {', '.join(COMPONENT_SELECTORS.keys())}")
+    try:
+        component, config_arg, legacy = ops.resolve_logs_args(
+            first, second, file_option is not None
+        )
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    valid = ", ".join(ops.LOG_COMPONENTS)
+    if component is None:
+        print_error("Name a component: lakebench logs CONFIG COMPONENT")
+        print_info(f"Valid components: {valid}")
         raise typer.Exit(ExitCode.USAGE)
+    if component not in ops.LOG_COMPONENTS:
+        print_error(f"Unknown component: {component}")
+        print_info(f"Valid components: {valid}")
+        raise typer.Exit(ExitCode.USAGE)
+    if legacy:
+        print_warning(
+            f"`logs {component} {config_arg}` is the 1.6 argument order; "
+            f"use `lakebench logs {config_arg} {component}`"
+        )
 
-    config_file = resolve_config_path(config_file, file_option)
-
+    config_file = resolve_config_path(Path(config_arg) if config_arg else None, file_option)
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.READ, name_override=name)
     except ConfigError as e:
@@ -1828,78 +1930,67 @@ def logs(
     # A nameless config reads only a deployment it can prove is its own.
     guard_nameless(cfg, config_file, allow_absent=True)
     namespace = cfg.get_namespace()
-    label_selector, container = COMPONENT_SELECTORS[component]
-    # logs runs only kubectl; pin the context before the first call so it names one cluster.
-    from lakebench.k8s.target import pin_command
+    source = ops.LOG_COMPONENTS[component]
+    try:
+        get_k8s_client(context=cfg.platform.kubernetes.context, namespace=namespace)
+    except (K8sConnectionError, ConfigException) as e:
+        print_error(f"Kubernetes connection failed: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    core = k8s_client.CoreV1Api()
 
     try:
-        pin_command(cfg)
-    except ConfigException as e:
-        print_error(f"Kubernetes context: {e}")
-        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
-
-    console.print(
-        f"Fetching logs for [bold]{esc(component)}[/bold] in namespace [bold]{esc(namespace)}[/bold]"
-    )
-
-    # Build kubectl logs args (the "kubectl" itself is added by the pinned
-    # helper along with --context=<configured>).
-    cmd = [
-        "logs",
-        "-l",
-        label_selector,
-        "-n",
-        namespace,
-        f"--tail={lines}",
-    ]
-    if container:
-        cmd.extend(["-c", container])
-    if follow:
-        cmd.append("-f")
+        pods = ops.list_pods(core, namespace, source.selector)
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes API error: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    if not pods:
+        raise LakebenchError(
+            f"no pod for {component} ({source.what}) in namespace {namespace}",
+            next=f"lakebench status {config_file}",
+            path="logs.no_pod",
+            code=ExitCode.FAILED,
+        )
+    if follow and len(pods) > 1:
+        print_info(
+            f"Following {pods[-1].metadata.name}, the newest of {len(pods)} pods; "
+            "leave out --follow to read them all"
+        )
 
     try:
-        if follow:
-            # Stream logs
-            process = pinned_kubectl_popen(
-                cfg,
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            try:
-                if process.stdout:
-                    for line in iter(process.stdout.readline, ""):
-                        console.print(_strip_ansi(line), end="")
-            except KeyboardInterrupt:
-                process.terminate()
-                print_info("\nLog streaming stopped")
-        else:
-            # One-shot log fetch
-            result = pinned_kubectl(
-                cfg,
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                if "not found" in result.stderr.lower() or not result.stderr.strip():
-                    print_warning(f"No pods found for {component}")
-                    print_info("Is the component deployed? Run: lakebench status")
-                else:
-                    print_error(result.stderr.strip())
-                return
+        outcome = ops.read_logs(
+            core,
+            namespace,
+            pods,
+            source,
+            lines=lines,
+            previous=previous,
+            follow=follow,
+            write=lambda text: emit_data(_strip_ansi(text)),
+            header=print_info,
+        )
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes API error: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    except KeyboardInterrupt:
+        print_info("Log streaming stopped")
+        raise typer.Exit(ExitCode.INTERRUPTED)  # noqa: B904
 
-            if result.stdout:
-                console.print(_strip_ansi(result.stdout))
-            else:
-                print_warning(f"No logs available for {component}")
-
-    except subprocess.TimeoutExpired:
-        print_error("Timed out fetching logs")
-    except FileNotFoundError:
-        print_error("kubectl not found on PATH")
+    for name in outcome.empty:
+        print_warning(f"No log output from pod {name}")
+    for line in outcome.unavailable:
+        print_warning(f"No log: {line}")
+    for error in outcome.errors:
+        print_error(f"Kubernetes API error: {error}")
+    if outcome.errors:
+        raise typer.Exit(ExitCode.PREREQUISITE)
+    if not outcome.pods:
+        raise LakebenchError(
+            f"no pod of {component} has a log to read"
+            + (" from a previous container" if previous else ""),
+            next=f"lakebench status {config_file}",
+            path="logs.no_pod",
+            code=ExitCode.FAILED,
+        )
 
 
 @app.command()

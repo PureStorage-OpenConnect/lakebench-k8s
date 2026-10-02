@@ -537,16 +537,27 @@ continuous mode.
 
 ### stop
 
-Stop running continuous-mode jobs.
+Stop every job Lakebench started in the deployment.
 
 ```
-lakebench stop [CONFIG_FILE]
+lakebench stop [CONFIG_FILE] [OPTIONS]
 ```
 
-Deletes the continuous-mode SparkApplications (`bronze-ingest`, `silver-stream`,
-`gold-refresh`) from the cluster. `--file` / `-f` points at the config the
-same way it does on the other commands; `--name` names the deployment of a
-nameless config, as for `destroy`.
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--file` | `-f` | `./lakebench.yaml` | Path to the config (alternative to the positional argument) |
+| `--dry-run` | | `false` | List what would be stopped without deleting anything |
+| `--name` | | | For a config with no name: the deployment name, as for `destroy`. See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
+
+Deletes every SparkApplication named `lakebench-*` in the deployment's
+namespace that has not finished (the continuous streams and any batch stage
+left running by a CLI that died) and the datagen Job `lakebench-datagen`,
+with its pods, while it runs. A SparkApplication that has `COMPLETED` or
+`FAILED`, and a datagen Job that has finished, are left in place and listed,
+so the logs of a failed stage stay readable with `lakebench logs`. A job
+already gone is reported as not running. When a deletion fails, `stop` still
+tries every other one, prints one line per failure and exits 1. A missing
+namespace means nothing to stop (exit 0).
 
 ### benchmark
 
@@ -617,6 +628,12 @@ catalog and query engine) with their readiness and replica counts, and the
 datagen job's progress while it runs. With only `--namespace` and no config,
 it lists every component lakebench can deploy, plus the shared Prometheus and
 Grafana.
+
+Exit codes: 0 when every component of the config is ready; 1 when the
+namespace does not exist, or a component is not ready, scaled to zero or not
+found (drift). With only `--namespace`, a component that is absent is not
+drift, but one that is not ready is, and so is a namespace with none of
+them. 4 when the cluster is unreachable or a read is refused.
 
 ### info
 
@@ -833,19 +850,36 @@ volumes, executor counts, and timing for each stage.
 
 ### logs
 
-Stream logs from a deployed component.
+Show logs from a component of the deployment.
 
 ```
-lakebench logs COMPONENT [CONFIG_FILE] [OPTIONS]
+lakebench logs CONFIG_FILE COMPONENT [OPTIONS]
 ```
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--follow` | `-F` | `false` | Follow log output (like `tail -f`; `-f` is deprecated here) |
-| `--lines` | `-n` | `100` | Number of lines to show |
+| `--file` | | `./lakebench.yaml` | Path to the config (then give only `COMPONENT`) |
+| `--follow` | `-F` | `false` | Follow log output of the newest matching pod (like `tail -f`; `-f` is deprecated here) |
+| `--lines` | `-n` | `100` | Number of lines to show per pod |
 | `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
+| `--previous` | | `false` | Read the previous container of each pod (after a crash or restart) |
 
-Valid components: `postgres`, `hive`, `polaris`, `trino`, `spark-driver`.
+Components: `datagen` (the datagen Job pods); each pipeline stage's Spark
+driver (`bronze-verify`, `silver-build`, `gold-finalize`, `bronze-ingest`,
+`silver-stream`, `gold-refresh`, `replay-financial`, `reproduce-financial`,
+`score-financial`, `score-financial-reference`); `spark-driver` (every Spark
+driver); `trino` (coordinator), `trino-worker`, `thrift`, `duckdb`, `hive`,
+`polaris` and `postgres`.
+
+`logs` reads through the Kubernetes API, not `kubectl`. Log text goes to
+stdout unformatted; when several pods match, each pod's lines follow a
+header on stderr. `lakebench logs COMPONENT` alone uses `./lakebench.yaml`,
+and the 1.6 order `lakebench logs COMPONENT CONFIG_FILE` still works with a
+one-line warning. A pod the API has no log for yet (a container still
+starting, or no previous container with `--previous`) gets a warning with
+the API's message and the other pods are still read. Exit codes: 1 when no
+pod matches or none has a log to read, 2 for an unknown component, 4 for an
+API error (a refused read, a server error) or an unreachable cluster.
 
 ### journal
 

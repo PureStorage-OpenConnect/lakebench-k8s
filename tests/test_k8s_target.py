@@ -560,7 +560,9 @@ def test_status_uses_config_context(kubeconfig, hosts, tmp_path) -> None:
     from lakebench.cli import app
 
     res = CliRunner().invoke(app, ["status", str(_config_file(tmp_path))])
-    assert res.exit_code == 0, res.output
+    # The fake answers 404: the namespace is missing (status.namespace_missing).
+    assert res.exit_code == 1, res.output
+    assert "does not exist" in res.output
     assert hosts and set(hosts) == {SERVER_A}
 
 
@@ -571,7 +573,7 @@ def test_status_namespace_without_config_names_the_context(
 
     monkeypatch.chdir(tmp_path)
     res = CliRunner().invoke(app, ["status", "--namespace", "some-ns"])
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 1, res.output  # 404: no namespace
     assert "Cluster context: B" in res.output
     assert hosts and set(hosts) == {SERVER_B}
 
@@ -584,16 +586,14 @@ def test_stop_uses_config_context(kubeconfig, hosts, tmp_path) -> None:
     assert hosts and set(hosts) == {SERVER_A}, res.output
 
 
-@pytest.mark.parametrize(("context", "expected"), [("A", "A"), ("", "B")])
-def test_logs_uses_config_context(kubeconfig, tmp_path, context, expected) -> None:
+@pytest.mark.parametrize(("context", "expected"), [("A", SERVER_A), ("", SERVER_B)])
+def test_logs_uses_config_context(kubeconfig, hosts, tmp_path, context, expected) -> None:
     from lakebench.cli import app
 
-    with patch("lakebench.k8s._pinned.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        res = CliRunner().invoke(app, ["logs", "hive", str(_config_file(tmp_path, context))])
-    assert res.exit_code == 0, res.output
-    argv = run.call_args[0][0]
-    assert argv[:3] == ["kubectl", "--context", expected]
+    res = CliRunner().invoke(app, ["logs", str(_config_file(tmp_path, context)), "hive"])
+    # The fake answers the pod list with 404: an API error (4).
+    assert res.exit_code == 4, res.output
+    assert hosts and set(hosts) == {expected}
 
 
 def test_admin_status_names_and_uses_the_resolved_context(kubeconfig, hosts) -> None:
