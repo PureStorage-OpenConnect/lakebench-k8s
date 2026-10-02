@@ -307,15 +307,20 @@ class K8sClient:
             )
         return None
 
-    def test_connectivity(self) -> tuple[bool, str]:
+    def test_connectivity(self, timeout: Any = None) -> tuple[bool, str]:
         """Test connectivity to the Kubernetes cluster.
+
+        Args:
+            timeout: ``_request_timeout`` for the probe (seconds, or a
+                ``(connect, read)`` pair); None keeps the client default.
 
         Returns:
             Tuple of (success, message)
         """
         try:
             # Try to get API versions - lightweight call
-            version = client.VersionApi().get_code()
+            kw = {} if timeout is None else {"_request_timeout": timeout}
+            version = client.VersionApi().get_code(**kw)
             return True, f"Connected to Kubernetes {version.git_version}"
         except ApiException as e:
             return False, f"API error: {e.reason}"

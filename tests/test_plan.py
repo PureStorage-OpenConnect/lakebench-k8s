@@ -376,3 +376,30 @@ def test_plan_nameless_config_takes_name(tmp_path):
     path.write_text(yaml.safe_dump(data))
     (p,) = _plan_json(path, "--name", "given-n")["plans"]
     assert p["name"] == "given-n"
+
+
+def test_plan_nameless_config_gets_deploys_validation(tmp_path):
+    """A nameless config is validated under its resolved name, so deploy's
+    load refusals still apply."""
+    path = _write(tmp_path, name="n" * 60)
+    data = yaml.safe_load(path.read_text())
+    del data["name"]
+    path.write_text(yaml.safe_dump(data))
+    res = runner.invoke(app, ["plan", str(path), "--offline", "--name", "n" * 60])
+    assert res.exit_code == 2, res.output
+    assert "deploy refuses this config" in res.output
+
+
+def test_plan_partial_variable_secret_says_so(tmp_path, monkeypatch):
+    monkeypatch.setenv("LB_PLAN_REF", "x")
+    res = runner.invoke(app, ["plan", str(_polaris(tmp_path, "pre-${LB_PLAN_REF}")), "--offline"])
+    assert "from ${LB_PLAN_REF} (with literal text in the file around it)" in " ".join(
+        res.stdout.split()
+    )
+
+
+def test_plan_connectivity_probe_has_a_timeout(tmp_path, monkeypatch):
+    k8s = mock.MagicMock()
+    _online(monkeypatch, _outcomes(), k8s)
+    runner.invoke(app, ["plan", str(_write(tmp_path))])
+    k8s.test_connectivity.assert_called_with(timeout=(5, 10))

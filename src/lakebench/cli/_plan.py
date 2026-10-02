@@ -177,7 +177,8 @@ def polaris_secret_line(cfg: Any, path: Path, k8s: Any = None) -> str | None:
         return None
     raw = _raw_polaris_secret(path)
     if isinstance(raw, str) and (m := _ENV_PATTERN.search(raw)):
-        return f"client secret: from ${{{m.group(1)}}}"
+        partly = "" if raw.strip() == m.group(0) else " (with literal text in the file around it)"
+        return f"client secret: from ${{{m.group(1)}}}{partly}"
     if raw:
         return "client secret: set in the config file (plaintext)"
     if not _deploy_generates_polaris_secret():
@@ -273,7 +274,7 @@ def plan_one(
         from lakebench.k8s import K8sConnectionError, get_k8s_client
 
         k8s = get_k8s_client(context=cfg.platform.kubernetes.context, namespace=cfg.get_namespace())
-        reachable, why = k8s.test_connectivity()
+        reachable, why = k8s.test_connectivity(timeout=(5, 10))
         if not reachable:
             raise K8sConnectionError(why)
         # As run sizes it: against the allocatable total it reads.
@@ -440,10 +441,37 @@ def _deploy_refusal(path: Path, name: str | None) -> str | None:
     except ConfigNameRequired:
         # A nameless config plans under --name or its resolved name (the
         # READ rules); writing name: into the file is deploy's own refusal.
-        return None
+        # Validate the rest as deploy would, under that name.
+        return _nameless_refusal(path, name)
     except ConfigError as e:
         lines = [ln.strip(" -") for ln in str(e).splitlines() if ln.strip()]
         return "; ".join(ln for ln in lines if ln != "Configuration validation failed:")
+    return None
+
+
+def _nameless_refusal(path: Path, name: str | None) -> str | None:
+    import warnings
+
+    from pydantic import ValidationError
+
+    from lakebench.config._load_context import LoadPurpose, collecting_notes
+    from lakebench.config.loader import _apply_flat_fields, load_yaml
+    from lakebench.config.schema import LakebenchConfig
+
+    if not name:
+        return None
+    try:
+        with collecting_notes(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            data = _apply_flat_fields(load_yaml(path))
+            data["name"] = name
+            LakebenchConfig.model_validate(
+                data, context={"purpose": LoadPurpose.MUTATE, "allow_long_names": False}
+            )
+    except ValidationError as e:
+        return "; ".join(str(err["msg"]).removeprefix("Value error, ") for err in e.errors())
+    except Exception as e:  # noqa: BLE001
+        return f"{type(e).__name__}: {e}"
     return None
 
 
@@ -493,16 +521,21 @@ def plan(
     configs, plans, code = [], [], int(ExitCode.OK)
     for path in config_files:
         try:
-            cfg = load_config(path, purpose=LoadPurpose.READ, name_override=name)
+            cfg = load_config(path, purpose=LoadPurpose.READ, name_override=name, print_notes=False)
         except ConfigError as e:
             print_error(f"{path}: {e}")
             raise typer.Exit(ExitCode.USAGE) from None
-        refusal = _deploy_refusal(path, name)
+        # Under the resolved name, so a nameless config gets deploy's full
+        # validation too.
+        refusal = _deploy_refusal(path, cfg.name)
         if refusal:
             # READ skips what only deploy checks (derived name lengths,
             # removed keys); plan must not call a config deploy refuses fine.
             print_error(f"{path}: deploy refuses this config: {refusal}")
             raise typer.Exit(ExitCode.USAGE)
+        from lakebench.config.loader import _print_load_notes, load_notes
+
+        _print_load_notes(path, load_notes(cfg))
         try:
             one, one_code = plan_one(cfg, path, offline=offline, capacity=capacity)
         except (ClusterUnreachable, K8sConnectionError) as e:
