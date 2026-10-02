@@ -131,9 +131,9 @@ all four with the repository's full history.
   sizing profile or any Lakebench limit in `limits.bound_kinds` the row does
   not allow (none is allowed today). A continuous record must also say which
   query set each round executed (a round with no QpH, every query failed,
-  is left out, and a record with no such round is refused); a C360 continuous record must also have a
-  result check in which no query failed and that matches the expected file's
-  fingerprints, which its continuous entry must list; a corpus with
+  is left out, and a record in which no round measured a QpH is refused);
+  a C360 continuous record must also have a result check in which no query
+  failed and that matches the expected file's fingerprints, which its continuous entry must list; a corpus with
   recorded problems (such as datagen pods on different images) is refused.
 - `support-record` (with `--tag`): `validated_combinations.yaml` lists every
   release-matrix row and was validated on the freeze tree; every run it lists

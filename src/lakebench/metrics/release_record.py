@@ -206,7 +206,7 @@ def _results_problems(
                 or record.get("benchmark_rounds")
                 or []
             )
-            if isinstance(r, dict) and (r.get("qph") or 0) > 0
+            if isinstance(r, dict) and isinstance(r.get("qph"), (int, float)) and r["qph"] > 0
         ]
         if not rounds:
             return ["no in-stream round measured a QpH"]
