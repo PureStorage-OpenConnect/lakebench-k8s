@@ -425,8 +425,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the generator image digest instead of "no datagen fleet record for this
   run". Before, only `lakebench generate` wrote the sidecar, and a batch
   `run --generate` attached whatever an older generate had left, which could
-  describe a corpus the run had replaced. A run that generates now removes
-  that sidecar before it starts; a run that does not generate still takes it.
+  describe a corpus the run had replaced. `lakebench generate` and a run
+  that generates now remove that sidecar before they replace the corpus, so
+  a generate that fails leaves none; a batch run that does not generate
+  still takes it.
 
 - **The capacity check counts the Spark driver's memory overhead.**
   The driver pod requests its heap plus the overhead Spark on Kubernetes

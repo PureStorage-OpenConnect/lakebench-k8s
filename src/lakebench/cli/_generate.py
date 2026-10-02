@@ -217,6 +217,11 @@ def generate(
         # A4 (v1.6): refuse to over-write an existing bronze prefix unless
         # --regenerate was passed; with --regenerate, empty the bucket first.
         enforce_bronze_regenerate(cfg, regenerate)
+        # The namespace's fleet sidecar describes the corpus this generate
+        # replaces; the new one is written when its pods are read.
+        from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+        drop_sidecar(cfg.get_namespace())
 
         engine = DeploymentEngine(cfg)
         datagen = DatagenDeployer(engine)
@@ -380,10 +385,6 @@ def generate(
                 print_info(f"  written to {out_path}")
             except Exception as e:
                 logger.warning("failed to collect per-pod datagen metrics: %s", e)
-                # The old sidecar describes the corpus this generate replaced.
-                from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-                drop_sidecar(cfg.get_namespace())
 
             _journal_safe(
                 j.record,

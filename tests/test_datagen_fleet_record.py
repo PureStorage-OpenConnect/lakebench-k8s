@@ -126,7 +126,35 @@ def test_continuous_drops_the_old_sidecar_when_datagen_starts(tmp_path, monkeypa
     assert not _sidecar(tmp_path).exists()
 
 
-def test_generate_drops_the_old_sidecar_when_its_fleet_cannot_be_read(tmp_path, monkeypatch):
+def test_generate_drops_the_old_sidecar_before_it_replaces_the_corpus(tmp_path, monkeypatch):
+    """`lakebench generate --regenerate` empties bronze, then submits: when
+    the submit (or anything after it) fails, the old sidecar no longer
+    claims the corpus."""
+    from unittest.mock import MagicMock
+
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from lakebench.config import load_config
+    from lakebench.s3.client import BucketInfo
+    from tests.test_datagen_timeout_and_regenerate import _FakeS3, _stub_run_deps, _write_cfg
+
+    monkeypatch.chdir(tmp_path)
+    cfg_file = _write_cfg(tmp_path)
+    namespace = load_config(cfg_file).get_namespace()
+    side = tmp_path / "lakebench-output" / "datagen" / f"{namespace}-datagen-metrics.json"
+    side.parent.mkdir(parents=True)
+    side.write_text(json.dumps({"namespace": namespace, "image_ids": [STALE_ID]}))
+    _stub_run_deps(monkeypatch)
+    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
+    _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=5, size_bytes=1_000_000)
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", MagicMock(side_effect=SystemExit(7)))
+    res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes", "--regenerate"])
+    assert res.exit_code == 7, (res.output, repr(res.exception))
+    assert not side.exists()
+
+
+def test_sidecar_helpers_never_raise(tmp_path, monkeypatch):
     from lakebench.metrics import datagen_aggregator
 
     monkeypatch.chdir(tmp_path)

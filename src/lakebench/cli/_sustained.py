@@ -3069,6 +3069,12 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(ExitCode.REFUSED)
         _stop_leftover_streams(job_manager, cfg.get_namespace())
+        if not skip_generate:
+            # The namespace's fleet sidecar describes the corpus this run
+            # clears and regenerates.
+            from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+            drop_sidecar(cfg.get_namespace())
         _reset_continuous_state(cfg, clear_raw=not skip_generate)
         # Deploy the scripts ConfigMaps (includes streaming scripts) -- must
         # succeed. After the leftover streams are stopped: a changed map is not
@@ -3096,11 +3102,6 @@ def _run_sustained(
             console.print()
             console.print("[bold]Starting datagen...[/bold]")
             datagen = DatagenDeployer(engine)
-            # The namespace's fleet sidecar describes the corpus this run
-            # replaces.
-            from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-            drop_sidecar(cfg.get_namespace())
             _interrupt.creating("Job", "lakebench-datagen")
             datagen_result = datagen.deploy()
             if datagen_result.status != DeploymentStatus.SUCCESS:

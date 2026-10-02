@@ -70,9 +70,12 @@ a `lakebench run` that generates its own corpus (batch `--generate`, or a
 continuous run without `--skip-generate`): that run records the fleet
 of its own pods as `datagen_fleet`, and `experiment.corpus.datagen` reads
 the generator image digest from it. A run that does not generate takes the
-namespace's sidecar, the record of the generate that wrote its corpus. A
-run that generates removes the sidecar first, so a corpus it replaced is
-never attributed to it, even when its own pods cannot be read.
+namespace's sidecar, the record of the generate that wrote its corpus
+(batch only: a continuous `--skip-generate` run records no fleet).
+`lakebench generate` and a run that generates remove the sidecar before
+they empty or regenerate the corpus, so a corpus they replaced is never
+attributed to a later run, even when their own pods cannot be read or the
+generate fails.
 
 `lakebench run`, when it builds the pipeline scorecard, uses that fleet
 record and enriches the datagen
