@@ -80,6 +80,9 @@ dev = [
     "pytest-cov==7.0.0",
     "coverage==7.13.2",
     "pytest-asyncio>=0.23.0",
+    # Parallel unit tier (make check-fast, the CI unit legs). Pinned like
+    # ruff: a new release can change how tests are scheduled.
+    "pytest-xdist==3.8.0",
     "ruff==0.15.1",
     # Pinned like ruff, together with everything mypy reads (stubs and the
     # pydantic plugin), so a stub or plugin release cannot turn CI red on a
