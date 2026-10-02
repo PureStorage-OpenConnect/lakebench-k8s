@@ -79,7 +79,7 @@ On `deploy`, `_deploy_namespace` writes these identity annotations to the namesp
 
 - `lakebench.deployment/name: <cfg.name>`
 - `lakebench.deployment/api-server: <sha256(cluster-CA-cert)>` -- workstation and in-cluster paths to the same cluster produce the same fingerprint because they read the same CA
-- `lakebench.deployment/committed-sha: <git rev-parse HEAD>` (best-effort, informational)
+- `lakebench.deployment/committed-sha: <short commit of the lakebench checkout that deployed>` (informational; absent outside a checkout, never the shell's working directory)
 - `lakebench.deployment/stamped-at: <ISO 8601 timestamp>`
 
 Deploy also writes three bookkeeping annotations to the same namespace:

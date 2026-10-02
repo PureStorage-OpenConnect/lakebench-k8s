@@ -1396,21 +1396,22 @@ class DeploymentIdentity:
 
 
 def build_identity_from_config(cfg: Any, context: str | None = None) -> DeploymentIdentity:
-    """Assemble a DeploymentIdentity from a loaded LakebenchConfig."""
-    import subprocess
+    """Assemble a DeploymentIdentity from a loaded LakebenchConfig.
+
+    The committed sha is the commit of the checkout the lakebench package
+    runs from (found from the package's own path, the same reading as the
+    run record's ``provenance.git_sha``), never the working directory's
+    repository; outside a checkout it is None."""
+    from lakebench.metrics.provenance import INSTALL_CHECKOUT, sample
 
     committed_sha: str | None = None
     try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short=7", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        committed_sha = out.stdout.strip() or None
-    except (FileNotFoundError, subprocess.SubprocessError):
-        pass
+        code = sample()
+    except Exception:  # noqa: BLE001 -- a stamp, never a reason to fail the caller
+        code = {}
+    sha = code.get("git_sha")
+    if code.get("install") == INSTALL_CHECKOUT and isinstance(sha, str) and sha:
+        committed_sha = sha[:7]
 
     workload_schema: str | None = None
     try:
