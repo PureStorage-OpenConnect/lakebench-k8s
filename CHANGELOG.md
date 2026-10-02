@@ -97,6 +97,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SHA256SUMS` is refused, and so is a checksum mismatch on any release.
 - The package ships a `py.typed` marker, so type checkers read its
   annotations.
+- `pydantic-settings` is no longer a dependency: nothing imported it, so
+  every install pulled it in for nothing and the binary bundled it.
 ### Fixed
 
 - Trino compaction of the Customer 360 silver table no longer fails with
