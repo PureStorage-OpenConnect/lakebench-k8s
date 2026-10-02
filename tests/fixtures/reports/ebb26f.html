@@ -264,7 +264,7 @@
             </div>
             <div class="card">
                 <div class="card-label">In-Stream QpH</div>
-                <div class="card-value">409.3<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=4</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-value">409.3<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
                 <div class="card-hint">median of <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</div>
                 <div class="card-hint2">&#8593; higher is better | ~7 queries/min</div>
             </div>
@@ -315,7 +315,7 @@
         <section>
             <h2>Data Validity</h2>
             <div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">
-                <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Ingest Ratio:</strong> 1.05 Healthy</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Streaming Jobs:</strong> <span data-lb-derived="count" data-lb-inputs="truthy(streaming[*].success)" data-lb-fmt=",d">3</span>/<span data-lb-derived="count" data-lb-inputs="count(streaming)" data-lb-fmt=",d">3</span> passed</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Query Failures:</strong> <span data-lb-derived="count" data-lb-inputs="falsy(benchmark.queries[*].success)" data-lb-fmt=",d">0</span> failed</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #fef3c7; color: var(--warning);"><strong>Benchmark Rounds:</strong> <span data-lb-derived="count" data-lb-inputs="count(pipeline_benchmark.benchmark_rounds)" data-lb-fmt=",d">4</span> rounds completed (minimum 5 for trend analysis)</div>
+                <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Ingest Ratio:</strong> 1.05 Healthy</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Streaming Jobs:</strong> <span data-lb-derived="count" data-lb-inputs="truthy(streaming[*].success)" data-lb-fmt=",d">3</span>/<span data-lb-derived="count" data-lb-inputs="count(streaming)" data-lb-fmt=",d">3</span> passed</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Query Failures:</strong> <span data-lb-derived="count" data-lb-inputs="falsy(benchmark.queries[*].success)" data-lb-fmt=",d">0</span> failed</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Benchmark Rounds:</strong> <span data-lb-derived="count" data-lb-inputs="count(pipeline_benchmark.benchmark_rounds)" data-lb-fmt=",d">4</span> rounds completed</div>
             </div>
         </section>
         
@@ -551,7 +551,7 @@
 
         
         <section>
-            <h2>Trino Query Benchmark</h2>
+            <h2>Trino query benchmark</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
                 <span data-lb-derived="count" data-lb-inputs="truthy(benchmark.queries[*].success)" data-lb-fmt=",d">8</span>/<span data-lb-derived="count" data-lb-inputs="count(benchmark.queries)" data-lb-fmt=",d">8</span> queries passed |
                 QpH: <strong>409.3</strong> |
@@ -683,7 +683,7 @@
                 X-axis: round index
             </p>
             <svg viewBox="0 0 700 200" xmlns="http://www.w3.org/2000/svg" style="width: 100%; max-width: 700px; height: auto;"><rect x="60" y="20" width="580" height="140" fill="none" stroke="#e2e8f0"/><text x="52" y="164.0" text-anchor="end" fill="#2563eb" font-size="10">400</text><text x="52" y="94.0" text-anchor="end" fill="#2563eb" font-size="10">436</text><text x="52" y="24.0" text-anchor="end" fill="#2563eb" font-size="10">472</text><text x="60.0" y="178" text-anchor="middle" fill="#64748b" font-size="10">0</text><text x="253.33333333333331" y="178" text-anchor="middle" fill="#64748b" font-size="10">1</text><text x="446.66666666666663" y="178" text-anchor="middle" fill="#64748b" font-size="10">2</text><text x="640.0" y="178" text-anchor="middle" fill="#64748b" font-size="10">3</text><polyline points="60.0,128.6 253.3,20.0 446.7,160.0 640.0,155.3" fill="none" stroke="#2563eb" stroke-width="2"/><circle cx="60.0" cy="128.6" r="3" fill="#2563eb"/><circle cx="253.3" cy="20.0" r="3" fill="#2563eb"/><circle cx="446.7" cy="160.0" r="3" fill="#2563eb"/><circle cx="640.0" cy="155.3" r="3" fill="#2563eb"/><text x="60" y="198" fill="#2563eb" font-size="11">QpH</text></svg>
-            <p style="color: var(--text-muted); font-style: italic; margin-top: 0.75rem;">Insufficient data for trend analysis (minimum 5 rounds required).</p>
+            <p style="color: var(--text-muted); font-style: italic; margin-top: 0.75rem;">QpH degradation, first-half to second-half median: <span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.qph_degradation_pct" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="1">9.7%</span> (positive is slower; recorded).</p>
         </section>
         
 

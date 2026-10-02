@@ -10,8 +10,8 @@
       "from": "jobs[*].success: 3 of 3 true"
     },
     {
-      "text": "QpH improvement +12.1%",
-      "from": "pipeline_benchmark.scores.maintenance_value_pct 12.1"
+      "text": "QpH change, paired over 8 queries +12.1%",
+      "from": "pipeline_benchmark.scores.maintenance_value_pct 12.1, maintenance_paired_queries 8"
     },
     {
       "text": "Compaction ratio 1.1x",

@@ -21,10 +21,8 @@ rewrites a golden. A change that moves a page:
    change is ready (SPEC section 6 rule 4).
 
 Known misleading numbers the goldens still carry (each a later RPT-1 fix):
-R2 (1320bd pre and post QpH over different query sets), R3 (``n=3`` and
-``n=4`` from samples and rounds), R7 (be2b70 111.4% shown "Complete"), R21
-(the bottleneck caption); the continuous bottleneck tables show the query
-stage's seconds as milliseconds and sum them into the latency share
+R21 (the bottleneck caption); the continuous bottleneck tables show the
+query stage's seconds as milliseconds and sum them into the latency share
 (ebb26f, 1d17f4), and 233b69's query CPU share counts Trino cores on a
 Spark Thrift run.
 """

@@ -273,7 +273,7 @@
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
-                <div class="card-value"><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.scale_ratio" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">111.4%</span></div>
+                <div class="card-value"><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.scale_ratio" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">111.4%</span> <span style="color: var(--warning);">ABOVE SCALE</span></div>
                 <div class="card-hint">actual vs expected data volume</div>
                 <div class="card-hint2">1.0 = complete</div>
             </div>
@@ -317,7 +317,7 @@
         <section>
             <h2>Data Validity</h2>
             <div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">
-                <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Scale Ratio:</strong> <span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.scale_ratio" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">111.4%</span> Complete</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #fecaca; color: var(--danger);"><strong>Batch Jobs:</strong> <span data-lb-derived="count" data-lb-inputs="truthy(jobs[*].success)" data-lb-fmt=",d">2</span>/<span data-lb-derived="count" data-lb-inputs="count(jobs)" data-lb-fmt=",d">3</span> passed</div>
+                <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #fef3c7; color: var(--warning);"><strong>Scale Ratio:</strong> <span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.scale_ratio" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">111.4%</span> above the scale (more data than the scale asks for)</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #fecaca; color: var(--danger);"><strong>Batch Jobs:</strong> <span data-lb-derived="count" data-lb-inputs="truthy(jobs[*].success)" data-lb-fmt=",d">2</span>/<span data-lb-derived="count" data-lb-inputs="count(jobs)" data-lb-fmt=",d">3</span> passed</div>
             </div>
         </section>
         

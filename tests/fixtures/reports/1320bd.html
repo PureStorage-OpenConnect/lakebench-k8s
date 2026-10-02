@@ -267,7 +267,7 @@
             </div>
             <div class="card">
                 <div class="card-label">QpH</div>
-                <div class="card-value">421.3<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=3</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-value">421.3<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, 3 samples/query</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
                 <div class="card-hint">queries per hour -- higher is better</div>
                 <div class="card-hint2">&#8593; higher is better | ~7 queries/min</div>
             </div>
@@ -335,9 +335,10 @@
                     <tr><td>Files after</td><td>61</td></tr>
                     <tr><td>Compaction ratio</td><td><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.scores.pre_compaction_file_count;pipeline_benchmark.scores.post_compaction_file_count" data-lb-fmt=".1f" data-lb-suffix="x">1.1x</span></td></tr>
                     <tr><td>Maintenance time</td><td>250s</td></tr>
-                    <tr><td>Pre-compaction QpH</td><td>305.9</td></tr>
-                    <tr><td>Post-compaction QpH</td><td>421.3</td></tr>
-                    <tr><td>QpH improvement</td><td style="color: var(--success); font-weight: 600"><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.maintenance_value_pct" data-lb-fmt="+.1f" data-lb-suffix="%" data-lb-scale="1">+12.1%</span></td></tr>
+                    <tr><td>Pre-compaction QpH (over <span data-lb-derived="count" data-lb-inputs="truthy(pipeline_benchmark.pre_compaction_benchmark.queries[*].success)" data-lb-fmt=",d">8</span> queries)</td><td>305.9</td></tr>
+                    <tr><td>Post-compaction QpH (over <span data-lb-derived="count" data-lb-inputs="truthy(pipeline_benchmark.query_benchmark.queries[*].success)" data-lb-fmt=",d">12</span> queries)</td><td>421.3</td></tr>
+                    <tr><td>Pre and post QpH</td><td>unpaired: the two rounds' successful queries differ, so the ratio of these two QpH figures is not the maintenance effect; only a paired change is</td></tr>
+                    <tr><td>QpH change, paired over 8 queries</td><td style="color: var(--success); font-weight: 600"><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.maintenance_value_pct" data-lb-fmt="+.1f" data-lb-suffix="%" data-lb-scale="1">+12.1%</span></td></tr>
                     <tr><td>Storage settle wait</td><td>settled after 151s; not counted in time to value</td></tr>
                     <tr><td>Settle probes (FQ1_txn_full_scan)</td><td>17.9s, 15.9s, 15.4s</td></tr>
                 </tbody>
@@ -564,7 +565,7 @@
 
         
         <section>
-            <h2>Trino Query Benchmark</h2>
+            <h2>Trino query benchmark</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
                 <span data-lb-derived="count" data-lb-inputs="truthy(benchmark.queries[*].success)" data-lb-fmt=",d">12</span>/<span data-lb-derived="count" data-lb-inputs="count(benchmark.queries)" data-lb-fmt=",d">12</span> queries passed |
                 QpH: <strong>421.3</strong> |
@@ -712,6 +713,7 @@
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
                 Platform metrics collected over 2425s | <span data-lb-derived="count" data-lb-inputs="count(platform_metrics.pods)" data-lb-fmt=",d">27</span> pods observed | <span data-lb-derived="total" data-lb-inputs="count(platform_metrics.pods[0].pod_name)|count(platform_metrics.pods[1].pod_name)|count(platform_metrics.pods[2].pod_name)|count(platform_metrics.pods[3].pod_name)|count(platform_metrics.pods[4].pod_name)|count(platform_metrics.pods[5].pod_name)|count(platform_metrics.pods[6].pod_name)|count(platform_metrics.pods[7].pod_name)|count(platform_metrics.pods[8].pod_name)|count(platform_metrics.pods[9].pod_name)|count(platform_metrics.pods[10].pod_name)|count(platform_metrics.pods[11].pod_name)|count(platform_metrics.pods[12].pod_name)|count(platform_metrics.pods[13].pod_name)|count(platform_metrics.pods[14].pod_name)|count(platform_metrics.pods[15].pod_name)|count(platform_metrics.pods[16].pod_name)|count(platform_metrics.pods[17].pod_name)|count(platform_metrics.pods[18].pod_name)|count(platform_metrics.pods[19].pod_name)|count(platform_metrics.pods[20].pod_name)|count(platform_metrics.pods[21].pod_name)|count(platform_metrics.pods[22].pod_name)|count(platform_metrics.pods[23].pod_name)|count(platform_metrics.pods[24].pod_name)|count(platform_metrics.pods[25].pod_name)|count(platform_metrics.pods[26].pod_name)" data-lb-fmt=",d">27</span> active
             </div>
+            <p style="color: var(--warning); font-size: 0.875rem;">Collected by an older Lakebench whose queries summed each pod's own total, its pause container and any duplicate scrape with its containers: the CPU and memory figures below count containers more than once and overstate use by an unknown factor.</p>
             
             <div style="margin-bottom: 1rem; padding: 0.75rem; background: var(--bg); border-radius: 0.25rem; font-size: 0.85rem;"><strong>Engine Metrics (Tier 2):</strong> Trino queries completed: 187</div>
             
@@ -720,10 +722,10 @@
                     <tr>
                         <th>Stage</th>
                         <th>Pods</th>
-                        <th>CPU Avg (cores)</th>
-                        <th>CPU Max (cores)</th>
-                        <th>Mem Avg</th>
-                        <th>Mem Max</th>
+                        <th title="Sum of each pod's average">CPU Avg (cores, sum of per-pod averages)</th>
+                        <th title="Each pod's peak, taken at its own moment, summed; not a concurrent peak">CPU Max (cores, sum of per-pod peaks)</th>
+                        <th title="Sum of each pod's average">Mem Avg (sum of per-pod averages)</th>
+                        <th title="Each pod's peak, taken at its own moment, summed; not a concurrent peak">Mem Max (sum of per-pod peaks)</th>
                     </tr>
                 </thead>
                 <tbody>

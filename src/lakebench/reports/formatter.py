@@ -83,6 +83,9 @@ def format_measurement(
     n_runs: int | None = None,
     spread: float | None = None,
     support_state: str | None = None,
+    samples: int | None = None,
+    rounds: int | None = None,
+    rounds_html: str | None = None,
 ) -> str:
     """Render a headline value with qualifiers.
 
@@ -92,9 +95,15 @@ def format_measurement(
         unit: Optional unit suffix (``"rows/s"``, ``"GB/s"``, ``"QpH"``).
         caps_bound: The ``limits.bound`` entries from ``experiment_block``;
             when non-empty a ``BOUNDED BY: <cap>`` tag is appended.
-        n_runs: The number of independent samples behind the value. ``1``
+        n_runs: The number of independent runs behind the value. ``1``
             renders as ``n=1``; ``>=2`` renders as ``n=N``; ``None`` and
-            ``0`` add no tag.
+            ``0`` add no tag. Samples within a run are never passed here.
+        samples: Samples per query inside the run(s) (a power benchmark's
+            iterations). With it the tag reads ``n=1 run, 3 samples/query``,
+            so within-run repetition is not read as independent runs.
+        rounds: In-stream benchmark rounds inside the run. The tag reads
+            ``n=1 run, 4 rounds``; *rounds_html*, when given, is the same
+            count already rendered (a derived count) and is shown instead.
         spread: Optional coefficient of variation, as a decimal fraction
             (``0.008`` for 0.8%). Ignored today; kept in the signature so
             the confidence chip can grow into it without a fan-out change.
@@ -123,9 +132,18 @@ def format_measurement(
         )
 
     if n_runs and n_runs > 0:
+        n = int(n_runs)
+        n_html = f"n={n}"
+        if (samples and samples > 0) or rounds:
+            n_html += " run" if n == 1 else " runs"
+            if samples and samples > 0:
+                n_html += f", {int(samples)} sample{'' if int(samples) == 1 else 's'}/query"
+            else:
+                shown = rounds_html or str(int(rounds or 0))
+                n_html += f", {shown} round{'' if rounds == 1 else 's'}"
         tags.append(
             f'<span class="qual qual-n" style="color: var(--text-muted); '
-            f'font-size: 0.55em; margin-left: 0.4em;">n={int(n_runs)}</span>'
+            f'font-size: 0.55em; margin-left: 0.4em;">{n_html}</span>'
         )
 
     if support_state:

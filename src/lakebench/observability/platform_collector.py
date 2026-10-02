@@ -59,6 +59,9 @@ class EngineMetrics:
         return any(v is not None for v in self.__dict__.values())
 
 
+POD_QUERY_VERSION = 2
+
+
 @dataclass
 class PlatformMetrics:
     """Platform-level metrics collected from Prometheus."""
@@ -71,6 +74,10 @@ class PlatformMetrics:
     s3_avg_latency_ms: float = 0.0
     engine: EngineMetrics = field(default_factory=EngineMetrics)
     collection_error: str | None = None
+    # How the per-pod CPU and memory were queried. 2: containers only, each
+    # (pod, container) once. Records without it summed the pod-level total,
+    # the pause container and any duplicate scrape into each pod.
+    query_version: int = POD_QUERY_VERSION
 
     @property
     def duration_seconds(self) -> float:
@@ -99,6 +106,7 @@ class PlatformMetrics:
             "s3_avg_latency_ms": round(self.s3_avg_latency_ms, 2),
             "engine": self.engine.to_dict() if self.engine.has_data else None,
             "collection_error": self.collection_error,
+            "query_version": self.query_version,
         }
 
 
@@ -138,7 +146,8 @@ class PlatformCollector:
             # Collect CPU usage per pod
             cpu_pods = self._query_range(
                 client,
-                f'sum by (pod) (rate(container_cpu_usage_seconds_total{{namespace="{self.namespace}"}}[1m]))',
+                "sum by (pod) (max by (pod, container) "
+                f"(rate(container_cpu_usage_seconds_total{{{self._container_selector()}}}[1m])))",
                 start_time,
                 end_time,
             )
@@ -159,7 +168,8 @@ class PlatformCollector:
             # Collect memory usage per pod
             mem_pods = self._query_range(
                 client,
-                f'sum by (pod) (container_memory_working_set_bytes{{namespace="{self.namespace}"}})',
+                "sum by (pod) (max by (pod, container) "
+                f"(container_memory_working_set_bytes{{{self._container_selector()}}}))",
                 start_time,
                 end_time,
             )
@@ -209,6 +219,22 @@ class PlatformCollector:
             logger.warning("Failed to collect platform metrics: %s", e)
 
         return metrics
+
+    def _container_selector(self) -> str:
+        """Label selector for per-container cAdvisor series in the namespace.
+
+        cAdvisor also exports a pod-level series (``container=""``, the pod
+        cgroup total, which already holds its containers) and the pause
+        container (``container="POD"``); both are left out. The queries then
+        take ``max by (pod, container)`` before summing by pod, so a
+        container scraped more than once (two kubelet ServiceMonitors, as
+        when the cluster's own monitoring and kube-prometheus-stack both
+        scrape the kubelet) is counted once. The cost: for up to the 1m rate
+        window after a container restarts, its old and new series overlap
+        and max keeps only the larger, so that minute's CPU is undercounted.
+        Spark pods do not restart (restartPolicy Never).
+        """
+        return f'namespace="{self.namespace}", container!="", container!="POD"'
 
     def _query_range(
         self,

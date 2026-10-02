@@ -267,7 +267,7 @@
             </div>
             <div class="card">
                 <div class="card-label">QpH</div>
-                <div class="card-value">855.6<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=3</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-value">855.6<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, 3 samples/query</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
                 <div class="card-hint">queries per hour -- higher is better</div>
                 <div class="card-hint2">&#8593; higher is better | ~14 queries/min</div>
             </div>
@@ -335,9 +335,9 @@
                     <tr><td>Files after</td><td>1,098</td></tr>
                     <tr><td>Compaction ratio</td><td><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.scores.pre_compaction_file_count;pipeline_benchmark.scores.post_compaction_file_count" data-lb-fmt=".1f" data-lb-suffix="x">1.1x</span></td></tr>
                     <tr><td>Maintenance time</td><td>254s</td></tr>
-                    <tr><td>Pre-compaction QpH</td><td>816.4</td></tr>
-                    <tr><td>Post-compaction QpH</td><td>855.6</td></tr>
-                    <tr><td>QpH improvement</td><td>not reported (within noise: +4.8% is inside the within-round spread (pre 12.1%, post 8.3% of median seconds))</td></tr>
+                    <tr><td>Pre-compaction QpH (over <span data-lb-derived="count" data-lb-inputs="truthy(pipeline_benchmark.pre_compaction_benchmark.queries[*].success)" data-lb-fmt=",d">8</span> queries)</td><td>816.4</td></tr>
+                    <tr><td>Post-compaction QpH (over <span data-lb-derived="count" data-lb-inputs="truthy(pipeline_benchmark.query_benchmark.queries[*].success)" data-lb-fmt=",d">8</span> queries)</td><td>855.6</td></tr>
+                    <tr><td>QpH change, paired over 8 queries</td><td>not reported (within noise: +4.8% is inside the within-round spread (pre 12.1%, post 8.3% of median seconds))</td></tr>
                     <tr><td>Storage settle wait</td><td>settled after 133s; not counted in time to value</td></tr>
                     <tr><td>Settle probes (Q1_full_aggregation_scan)</td><td>9.9s, 5.7s, 5.8s</td></tr>
                 </tbody>
@@ -531,7 +531,7 @@
 
         
         <section>
-            <h2>Trino Query Benchmark</h2>
+            <h2>Trino query benchmark</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
                 <span data-lb-derived="count" data-lb-inputs="truthy(benchmark.queries[*].success)" data-lb-fmt=",d">8</span>/<span data-lb-derived="count" data-lb-inputs="count(benchmark.queries)" data-lb-fmt=",d">8</span> queries passed |
                 QpH: <strong>855.6</strong> |

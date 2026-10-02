@@ -1087,6 +1087,11 @@ Job Status (pass/fail count).
 Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
 CPU-hours.
 
+The tag beside a QpH counts independent runs and, separately, the repetition
+inside the run: `n=1 run, 3 samples/query` for a batch power benchmark,
+`n=1 run, 4 rounds` for continuous in-stream rounds. Samples and rounds are
+never counted as runs.
+
 ### Bottleneck Identification (batch and continuous)
 
 A stacked bar chart showing time and compute distribution across pipeline
@@ -1097,18 +1102,32 @@ elapsed seconds.
 
 ### Data Validity (batch and continuous)
 
-Green/red status indicators for data quality checks:
+Green, amber and red status indicators for data quality checks:
 
 - **Scale Ratio** (batch) or **Ingest Ratio** (continuous) -- confirms the run
-  processed the expected data volume. Red when below 0.95 or above 1.05.
+  processed the expected data volume. A scale ratio is red below 0.95 and
+  amber above 1.05 (more data than the scale asks for, not shown as
+  "Complete"). An ingest ratio is red below 0.95 (amber when the trickle held
+  intake rather than the pipeline falling behind) and amber above 1.05,
+  which usually means gold re-read silver across refreshes.
 - **Job Success** -- counts of passed and failed batch and continuous jobs.
 
 If any indicator is red, cross-run comparisons are unreliable.
 
 ### Stability Over Time (continuous only)
 
-A line chart showing the QpH trend across in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
-Helps identify performance degradation over time as table state grows.
+A line chart of QpH across in-stream benchmark rounds, with the recorded QpH
+degradation (`qph_degradation_pct`: the second-half median QpH against the
+first-half median, positive when slower; recorded when at least 4 rounds
+ran). The page computes no trend of its own.
+
+### Table Maintenance
+
+The maintenance policy, file counts before and after, and QpH before and
+after maintenance, each with the number of queries its round ran. The change
+is the paired figure, over the queries both rounds ran ("QpH change, paired
+over 8 queries"); when the two rounds ran different query sets the table
+says the unpaired QpH figures are not the maintenance effect.
 
 ### Q9 Contention (continuous only)
 
@@ -1137,7 +1156,8 @@ In continuous mode: rows/s, micro-batch latency, freshness.
 ### Query Performance (batch and continuous)
 
 Performance table for the engine benchmark (8 queries for Customer 360,
-12 for AML). Columns: query name,
+12 for AML), titled with the query engine the record names ("Trino query
+benchmark", "Spark Thrift query benchmark"). Columns: query name,
 display name, category, elapsed time, rows returned, and pass/fail status.
 The benchmark mode (power, throughput, composite), stream count, and final QpH
 appear in a summary row.
@@ -1158,7 +1178,13 @@ executor specifications, catalog type, table format, and query engine settings.
 
 Per-stage pod resource summary: CPU average/max, memory average/max, and pod
 counts. Infrastructure pods (Hive, Polaris, Trino, Postgres) are shown
-separately from pipeline pods.
+separately from pipeline pods. Each pod's figures sum its containers only:
+the pod-level cgroup series and the pause container are excluded, and a
+container scraped twice (for example by both the cluster's own kubelet
+monitor and kube-prometheus-stack's) is taken once. A stage's max columns
+are the sum of each pod's own peak, taken at different moments, not a
+concurrent peak. A record collected before these queries says its figures
+count containers more than once.
 
 ---
 
