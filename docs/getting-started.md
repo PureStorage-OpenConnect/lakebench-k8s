@@ -85,7 +85,8 @@ How to read it:
   fit at once the preflight passes with a warning that some pods queue.
 - **Always on** is the query engine (here Trino, sized by scale tier), the
   Hive Metastore and Postgres (their memory requests, and one core between
-  them as the autosizer budgets it). Other recipes change this line;
+  them as the autosizer budgets it), and the deployment's dependency server
+  (`lb-deps`, 1 core and 2 GiB). Other recipes change this line;
   `lakebench config show` prints it for your config.
 - **Scratch PVC** is the Spark scratch request when
   `platform.storage.scratch` is enabled (AML batch at scale 100 sets it with

@@ -321,7 +321,7 @@ def test_pod_reservation_is_the_rendered_effective_request(over):
 
 
 def test_co_resident_sum_counts_lb_deps():
-    from lakebench.cli._prerequisites import _co_resident_request
+    from lakebench.config import sizing
     from lakebench.config.autosizer import _co_resident_cpu_m, _co_resident_label
 
     cfg = make_config(**C360)
@@ -329,11 +329,12 @@ def test_co_resident_sum_counts_lb_deps():
     coord = _cpu_m(str(trino.coordinator.cpu))
     workers = trino.worker.replicas * _cpu_m(str(trino.worker.cpu))
     assert _co_resident_cpu_m(cfg) == coord + workers + 1000 + m.POD_REQUEST_CPU_M
-    cores, gb, label = _co_resident_request(cfg, False)
-    assert "lb-deps" in label and "lb-deps" in _co_resident_label(cfg)
-    mem = _mi(trino.coordinator.memory) + trino.worker.replicas * _mi(trino.worker.memory)
-    assert gb == -(-(mem + m.POD_REQUEST_MEMORY_MI) // 1024)
-    assert cores == -(-(coord + workers + 1000 + m.POD_REQUEST_CPU_M) // 1000)
+    co = sizing.co_resident_request(cfg, False)
+    assert "lb-deps" in co.label and "lb-deps" in _co_resident_label(cfg)
+    # Memory: the engine pods, the catalog and Postgres, and lb-deps once.
+    others = sum(mem for _, _, mem in sizing._engine_pods(cfg)) + sizing._catalog_memory_gi(cfg)
+    assert co.memory_gb == sizing._ceil(others + m.POD_REQUEST_MEMORY_MI / 1024)
+    assert co.cpu_cores == -(-(coord + workers + 1000 + m.POD_REQUEST_CPU_M) // 1000)
 
 
 def test_lb_deps_reservation_can_lower_datagen_on_a_binding_cluster():
