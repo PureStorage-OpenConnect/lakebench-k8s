@@ -606,14 +606,13 @@ def test_readonly_commands_create_no_files(tmp_path, fake_cluster, monkeypatch):
     runner = CliRunner()
     codes = [runner.invoke(app, ["status", str(cfg)]).exit_code]
     codes.append(runner.invoke(app, ["status", str(cfg), "--name", NAME]).exit_code)
-    with patch("lakebench.k8s._pinned.subprocess.run"):
-        codes.append(runner.invoke(app, ["logs", "hive", str(cfg), "--name", NAME]).exit_code)
+    codes.append(runner.invoke(app, ["logs", str(cfg), "hive", "--name", NAME]).exit_code)
     after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     assert after == before
     # Without --name a v1.6 directory is refused at load (2); with it the
-    # guard passes and status goes on to its own read of the (unreachable)
-    # test server, while logs, its kubectl mocked, completes.
-    assert codes[0] == 2 and codes[1] not in (0, 2, 3) and codes[2] == 0, codes
+    # guard passes and status and logs go on to their own reads of the
+    # (unreachable) test server, which exit 4.
+    assert codes == [2, 4, 4], codes
 
 
 def _named(d: Path) -> Path:
