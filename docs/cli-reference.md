@@ -257,6 +257,45 @@ profiles'. Before the first deploy, a
 namespace the Spark Operator does not watch yet is reported as advisory:
 `deploy` adds it to the watch list under the cluster lock.
 
+### plan
+
+Show what each config needs before anything is deployed. Read-only.
+
+```
+lakebench plan CONFIG... [OPTIONS]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--offline` | | `false` | Make no cluster call: size without a cluster |
+| `--cores` | | | Cluster CPU cores to size against (with `--memory`; implies offline) |
+| `--memory` | | | Cluster memory in GB to size against (with `--cores`) |
+| `--name` | | | The deployment name for a config that sets none |
+| `--json` | | `false` | Print the plan as JSON (always offline) |
+
+For each config `plan` prints the components and recipe with their support
+state; the minimum cluster from the same sizing function the `run` capacity
+preflight and the README tables use, with the scratch request ("not
+requested (scratch disabled)" when off); the cluster prerequisites from the
+registry `deploy` checks (`docs/prerequisites.md`) and the run's free
+capacity check; where the Polaris client secret comes from (never its
+value); and the hosts the deploy contacts outside the cluster (Maven and
+PyPI for the dependency resolve, the image registries). With several
+configs it then names the experiment-identity and execution-condition
+differences between each one and the first.
+
+Online, a missing scratch StorageClass, Spark Operator or Stackable ends
+with exit 4 and `Next: (cluster admin) lakebench admin install --component
+<component>`; an unreachable cluster is exit 4 with "use --offline". With
+`--offline`, `--cores/--memory` or `--json` there is no cluster call and
+prerequisites read "not checked (offline)"; `--cores/--memory` too small
+for the config is exit 4. A config that does not load is exit 2.
+
+```bash
+lakebench plan lakebench.yaml --offline
+lakebench plan hive.yaml polaris.yaml --cores 434 --memory 4349
+```
+
 ### deploy
 
 Deploy lakehouse infrastructure to Kubernetes.
@@ -868,6 +907,7 @@ No flags. Prints the installed lakebench version.
 
 ```bash
 lakebench init                        # create config
+lakebench plan                        # what it needs: sizing, prerequisites, egress
 lakebench config validate             # check connectivity
 lakebench deploy --yes                # deploy infrastructure
 lakebench generate --timeout 14400    # generate data (large scales need hours)
