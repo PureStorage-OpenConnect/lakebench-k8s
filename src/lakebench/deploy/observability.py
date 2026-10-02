@@ -711,7 +711,9 @@ class ObservabilityDeployer:
             "prometheus.prometheusSpec.retention": obs.retention,
             "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage": obs.storage,
             "grafana.enabled": str(obs.dashboards_enabled).lower(),
-            "grafana.adminPassword": "lakebench",
+            # No grafana.adminPassword: the chart generates one per
+            # install into the Secret <release>-grafana. An existing install
+            # keeps the value it was installed with.
             # The dashboard ConfigMap lives in the shared observability
             # namespace (LB-192); ALL also picks up older per-namespace ones.
             "grafana.sidecar.dashboards.searchNamespace": "ALL",

@@ -723,18 +723,12 @@ class TestComponentValidation:
         assert config.architecture.catalog.polaris.resources.memory == "2Gi"
 
     def test_polaris_without_secret_loads_but_deploy_rejects(self):
-        """LB-090: config load succeeds so `lakebench validate` / `info`
-        can inspect a Polaris config even before a secret is set. The
-        deploy-time gate (`require_polaris_client_secret`) is what
-        refuses the empty value. This split matters: auto-generating at
-        load time would give `deploy` and `run` different secrets on
-        independent CLI invocations, breaking OAuth2. A hardcoded
-        default (pre-LB-090) would share one secret across every install.
-        """
-        from lakebench.config.schema import (
-            PolarisClientSecretMissing,
-            require_polaris_client_secret,
-        )
+        """LB-090 and SAF-8: config load succeeds with no secret, and nothing
+        generates one at load. A run with neither a config value nor the
+        Secret deploy stores refuses, naming deploy."""
+        from lakebench.config.schema import PolarisClientSecretMissing
+        from lakebench.deploy.deployment_secrets import polaris_client_secret
+        from tests.test_deployment_secrets import FakeCore
 
         cfg = LakebenchConfig(
             name="a",
@@ -744,38 +738,15 @@ class TestComponentValidation:
                 "query_engine": {"type": "trino"},
             },
         )
-        # Load succeeds -- validate/info work.
         assert cfg.architecture.catalog.polaris.client_secret == ""
-        # Deploy-time gate refuses with an actionable message.
-        with pytest.raises(PolarisClientSecretMissing, match="polaris.client_secret is required"):
-            require_polaris_client_secret(cfg)
-
-    def test_polaris_missing_secret_error_names_generator_command(self):
-        from lakebench.config.schema import (
-            PolarisClientSecretMissing,
-            require_polaris_client_secret,
-        )
-
-        cfg = LakebenchConfig(
-            name="a",
-            architecture={
-                "catalog": {"type": "polaris"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        try:
-            require_polaris_client_secret(cfg)
-        except PolarisClientSecretMissing as e:
-            assert "token_urlsafe" in str(e), "error must show the user how to generate a secret"
-        else:
-            pytest.fail("expected PolarisClientSecretMissing")
+        with pytest.raises(PolarisClientSecretMissing, match="run lakebench deploy first"):
+            polaris_client_secret(cfg, FakeCore())
 
     def test_polaris_supplied_secret_survives_reload(self):
         """The LB-090 core invariant: two independent loads of the same
-        config produce the same secret, so `deploy` and `run` never
-        diverge."""
-        from lakebench.config.schema import require_polaris_client_secret
+        config give the same secret, so `deploy` and `run` never diverge."""
+        from lakebench.deploy.deployment_secrets import polaris_client_secret
+        from tests.test_deployment_secrets import FakeCore
 
         args = {
             "name": "a",
@@ -790,8 +761,8 @@ class TestComponentValidation:
         }
         cfg_a = LakebenchConfig(**args)
         cfg_b = LakebenchConfig(**args)
-        assert require_polaris_client_secret(cfg_a) == "user-supplied-value"
-        assert require_polaris_client_secret(cfg_a) == require_polaris_client_secret(cfg_b)
+        assert polaris_client_secret(cfg_a, FakeCore()) == "user-supplied-value"
+        assert polaris_client_secret(cfg_b, FakeCore()) == "user-supplied-value"
 
     def test_polaris_hardcoded_default_removed(self):
         """The pre-LB-090 shared default must not slip back in."""

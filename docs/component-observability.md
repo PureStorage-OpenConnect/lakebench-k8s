@@ -89,7 +89,7 @@ lakebench deploy test-config.yaml
 
 ## Grafana
 
-Grafana is included in the kube-prometheus-stack install when `dashboards_enabled` is `true`. Default credentials are `admin` / `lakebench`.
+Grafana is included in the kube-prometheus-stack install when `dashboards_enabled` is `true`. The user is `admin`; the chart generates the password per install into the Secret `lakebench-observability-grafana` (key `admin-password`). An install made by 1.6 keeps its `lakebench` password.
 
 One built-in dashboard, **Lakebench Overview**, is provisioned from a single
 ConfigMap in the shared `lakebench-observability` namespace, applied on every

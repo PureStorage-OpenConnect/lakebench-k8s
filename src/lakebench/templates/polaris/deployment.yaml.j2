@@ -54,7 +54,10 @@ spec:
             - name: QUARKUS_DATASOURCE_USERNAME
               value: "polaris"
             - name: QUARKUS_DATASOURCE_PASSWORD
-              value: "lakebench-polaris-2024"
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-polaris-db
+                  key: password
             - name: QUARKUS_DATASOURCE_JDBC_URL
               value: "jdbc:postgresql://lakebench-postgres.{{ namespace }}.svc.cluster.local:5432/polaris"
             # S3 credentials for server-side file I/O

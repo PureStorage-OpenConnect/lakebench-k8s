@@ -14,7 +14,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from lakebench._constants import POLARIS_CLIENT_ID, SPARK_SERVICE_ACCOUNT
-from lakebench.config.schema import require_polaris_client_secret
 from lakebench.modules.pipeline_engines.spark.conf_keys import (  # noqa: F401 -- job.py's names
     LAKEBENCH_OWNED_SPARK_KEYS,
     SPARK_CONF_DEFAULTS,
@@ -25,6 +24,21 @@ if TYPE_CHECKING:
     from lakebench.k8s import K8sClient
 
 logger = logging.getLogger(__name__)
+
+# Spark's default spark.redaction.regex plus `credential`.
+SPARK_REDACTION_REGEX = "(?i)secret|password|token|access[.]?key|credential"
+
+
+def redaction_regex(user: str | None) -> str:
+    """``spark.redaction.regex`` for a job: Lakebench's, or the user's with
+    Lakebench's terms in front, so it always hides the catalog ``credential``
+    key (the Polaris client secret in sparkConf). The terms go first so a
+    ``(?x)`` comment or an open ``\\Q`` in the user's part cannot swallow
+    them; Spark compiles the result with Java regex, which accepts the user's
+    inline flags after the alternation."""
+    if not user or user == SPARK_REDACTION_REGEX:
+        return SPARK_REDACTION_REGEX
+    return f"(?i:secret|password|token|access[.]?key|credential)|{user}"
 
 
 def _one_line(e: BaseException) -> str:
@@ -1550,6 +1564,16 @@ class SparkJobManager:
             logger.warning("Could not get cluster capacity for streaming budget: %s", e)
             self._cluster_cpu_m = None
 
+    def _polaris_client_secret(self) -> str:
+        """The Polaris client secret, read once per manager."""
+        cached = getattr(self, "_polaris_secret_cache", None)
+        if cached is None:
+            from lakebench.deploy.deployment_secrets import polaris_client_secret
+
+            cached = polaris_client_secret(self.config)
+            self._polaris_secret_cache = cached
+        return cached
+
     def submit_job(
         self,
         job_type: JobType,
@@ -1976,6 +2000,12 @@ class SparkJobManager:
         # Spark conf in three layers: the defaults, the user's spark.conf, then
         # the keys Lakebench owns (the config refuses a user value for one).
         spark_conf = {**SPARK_CONF_DEFAULTS, **cfg.spark.conf}
+        # Spark's default redaction misses `...catalog.<name>.credential`
+        # (the Polaris client secret); add it so the UI and event log hide it.
+        # A user's own regex is kept but always widened to cover it.
+        spark_conf["spark.redaction.regex"] = redaction_regex(
+            spark_conf.get("spark.redaction.regex")
+        )
 
         # Apply per-job shuffle partition count (scales with executor count)
         spark_conf["spark.sql.shuffle.partitions"] = shuffle_partitions
@@ -2138,11 +2168,12 @@ class SparkJobManager:
                 f"spark.sql.catalog.{catalog_name}.s3.path-style-access": str(
                     s3.path_style
                 ).lower(),
-                # OAuth2 credential (client_id:client_secret).
-                # `require_polaris_client_secret` refuses an empty value
-                # (LB-090) -- a Spark job that submits with an empty
-                # secret would fail OAuth2 far from the config file.
-                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{require_polaris_client_secret(cfg)}",
+                # OAuth2 credential (client_id:client_secret): the config
+                # value, else the one deploy stored in the Secret
+                # lakebench-polaris-client. None stored raises,
+                # because a job with an empty secret fails OAuth2 far
+                # from the config. Literal in sparkConf until v1.8.
+                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{self._polaris_client_secret()}",
                 f"spark.sql.catalog.{catalog_name}.scope": "PRINCIPAL_ROLE:ALL",
                 f"spark.sql.catalog.{catalog_name}.token-refresh-enabled": "true",
                 # FlashBlade: static S3 credentials on catalog (no STS vending)

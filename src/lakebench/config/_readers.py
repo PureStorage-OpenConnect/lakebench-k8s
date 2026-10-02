@@ -126,7 +126,7 @@ READERS: dict[str, str] = {
     ),
     "architecture.catalog.polaris.port": "lakebench.deploy.engine:DeploymentEngine._build_context",
     "architecture.catalog.polaris.client_secret": (
-        "lakebench.config.schema:require_polaris_client_secret"
+        "lakebench.deploy.deployment_secrets:ensure_polaris_client_secret"
     ),
     "architecture.catalog.polaris.resources.cpu": (
         "lakebench.deploy.engine:DeploymentEngine._build_context"

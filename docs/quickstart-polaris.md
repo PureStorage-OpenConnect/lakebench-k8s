@@ -5,9 +5,9 @@ alternative to Hive Metastore for Iceberg catalog management. Polaris is an
 open-source REST catalog that provides OAuth2 authentication, fine-grained
 access control, and a standards-based Iceberg REST API.
 
-Switching to Polaris takes two configuration changes: the catalog type and an
-OAuth2 client secret. The rest of the workflow -- deploy, generate, run,
-destroy -- stays exactly the same.
+Switching to Polaris takes one configuration change: the catalog type. The
+rest of the workflow -- deploy, generate, run, destroy -- stays exactly the
+same.
 
 ---
 
@@ -37,20 +37,20 @@ native S3 file system required for current Trino releases.
 ## Configuration
 
 Start from an existing config file (or generate one with `lakebench init`).
-Set the catalog type and a client secret:
+Set the catalog type:
 
 ```yaml
 architecture:
   catalog:
     type: polaris
-    polaris:
-      client_secret: "${LAKEBENCH_POLARIS_CLIENT_SECRET}"
 ```
 
-The client secret has no default: `deploy` and `run` refuse a Polaris config
-without it, and it must be the same for `deploy`, `run` and `destroy`.
-Generate one with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`
-and export it, or write it into the file. Lakebench uses the default Polaris
+`deploy` generates the OAuth2 client secret for this deployment and stores it
+in the Secret `lakebench-polaris-client` in the namespace, where `run` and
+the query engines read it. To choose your own, set
+`architecture.catalog.polaris.client_secret` (for example
+`"${LAKEBENCH_POLARIS_CLIENT_SECRET}"`) before the first deploy; a deployed
+Polaris keeps the secret it was bootstrapped with. Lakebench uses the default Polaris
 image (1.6.0) and Trino version (483), both of which satisfy the minimum
 requirements above.
 
@@ -100,8 +100,6 @@ platform:
 architecture:
   catalog:
     type: polaris    # <-- changed from the default
-    polaris:
-      client_secret: "${LAKEBENCH_POLARIS_CLIENT_SECRET}"   # required
 
 workload:
   datagen:

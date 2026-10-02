@@ -13,12 +13,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from lakebench.config import LakebenchConfig
-from lakebench.config.schema import (
-    STACKABLE_HIVE_VERSION,
-    CatalogType,
-    QueryEngineType,
-    require_polaris_client_secret,
-)
+from lakebench.config.schema import STACKABLE_HIVE_VERSION, QueryEngineType
 from lakebench.exit_codes import REFUSAL_DETAIL
 from lakebench.k8s import K8sClient, K8sResourceError
 
@@ -625,16 +620,9 @@ class DeploymentEngine:
             "polaris_port": cfg.architecture.catalog.polaris.port,
             "polaris_cpu": cfg.architecture.catalog.polaris.resources.cpu,
             "polaris_memory": cfg.architecture.catalog.polaris.resources.memory,
-            # LB-090: only require the secret when we're actually deploying
-            # Polaris; hive/unity deploys never touch the templates that
-            # consume it, and `lakebench validate` / `info` on a Polaris
-            # config without a secret would otherwise be blocked from ever
-            # printing the config that names the missing field.
-            "polaris_client_secret": (
-                require_polaris_client_secret(cfg)
-                if cfg.architecture.catalog.type == CatalogType.POLARIS
-                else ""
-            ),
+            # The Polaris client secret is not in the context. Every
+            # consumer reads it from the Secret lakebench-polaris-client
+            # (secretKeyRef), which the Polaris step writes.
             # Unity
             "unity_image": cfg.images.unity,
             "unity_port": cfg.architecture.catalog.unity.port,
@@ -1169,6 +1157,44 @@ class DeploymentEngine:
             )
 
         namespace = self.config.get_namespace()
+
+        # The Hive metastore DB password is this deployment's own: the
+        # stored one, the v1.6 default when only the Postgres PVC survives,
+        # or a new one. Rendered into the Secret and hive-site below.
+        from kubernetes import client as k8s_client
+
+        from .deployment_secrets import (
+            HIVE_DB_KEY,
+            HIVE_DB_SECRET,
+            DeploymentSecretError,
+            create_secret,
+            hive_db_password,
+            read_secret_key,
+        )
+
+        try:
+            core_v1 = k8s_client.CoreV1Api()
+            password = hive_db_password(core_v1, namespace)
+            if read_secret_key(core_v1, namespace, HIVE_DB_SECRET, HIVE_DB_KEY) is None:
+                # Create first (409-safe): two overlapping deploys of one
+                # config end with one value, the one Postgres initialises.
+                password = create_secret(
+                    core_v1,
+                    self.config,
+                    namespace,
+                    HIVE_DB_SECRET,
+                    HIVE_DB_KEY,
+                    password,
+                    "postgres",
+                )
+            self.context["postgres_password"] = password
+        except DeploymentSecretError as e:
+            return DeploymentResult(
+                component="secrets",
+                status=DeploymentStatus.FAILED,
+                message=str(e),
+                elapsed_seconds=time.time() - start,
+            )
 
         # Render and apply secrets
         yaml_content = self.renderer.render("secrets.yaml.j2", self.context)

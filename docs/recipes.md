@@ -9,11 +9,10 @@ Instead of setting `catalog`, `table_format`, `pipeline_engine`, and `query_engi
 ```yaml
 name: my-lakehouse
 recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query engine in one line
-architecture:
-  catalog:
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # every Polaris recipe needs one
 ```
+
+Polaris recipes need no `client_secret`: `deploy` generates one per
+deployment and stores it in the namespace.
 
 Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
 
@@ -28,10 +27,10 @@ The short names in the first column are the section headings below; the
 | **Standard Headless** | `hive-iceberg-spark-none` | hive | iceberg | none | ETL-only workloads | Stackable Hive Operator |
 | **Spark SQL** | `hive-iceberg-spark-thrift` | hive | iceberg | spark-thrift | Spark-native analytics | Stackable Hive Operator |
 | **DuckDB** | `hive-iceberg-spark-duckdb` | hive | iceberg | duckdb | Lightweight single-node analytics | Stackable Hive Operator |
-| **Polaris** | `polaris-iceberg-spark-trino` | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | `polaris.client_secret` (Lakebench deploys Polaris) |
-| **Polaris Headless** | `polaris-iceberg-spark-none` | polaris | iceberg | none | REST catalog ETL | `polaris.client_secret` (Lakebench deploys Polaris) |
-| **Polaris Spark SQL** | `polaris-iceberg-spark-thrift` | polaris | iceberg | spark-thrift | Spark-native with REST catalog | `polaris.client_secret` (Lakebench deploys Polaris) |
-| **Polaris DuckDB** | `polaris-iceberg-spark-duckdb` | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Polaris** | `polaris-iceberg-spark-trino` | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | None (Lakebench deploys Polaris) |
+| **Polaris Headless** | `polaris-iceberg-spark-none` | polaris | iceberg | none | REST catalog ETL | None (Lakebench deploys Polaris) |
+| **Polaris Spark SQL** | `polaris-iceberg-spark-thrift` | polaris | iceberg | spark-thrift | Spark-native with REST catalog | None (Lakebench deploys Polaris) |
+| **Polaris DuckDB** | `polaris-iceberg-spark-duckdb` | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | None (Lakebench deploys Polaris) |
 | **Hive Delta Trino** | `hive-delta-spark-trino` | hive | delta | trino | Databricks-comparable analytics | Stackable Hive Operator |
 | **Hive Delta Spark SQL** | `hive-delta-spark-thrift` | hive | delta | spark-thrift | Delta + Spark-native analytics | Stackable Hive Operator |
 | **Hive Delta Headless** | `hive-delta-spark-none` | hive | delta | none | Delta ETL-only workloads | Stackable Hive Operator |
@@ -165,7 +164,7 @@ architecture:
 
 **Does not deploy:** Hive Metastore.
 
-**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0), Trino 454+, and `architecture.catalog.polaris.client_secret` set in the config (every Polaris recipe; `deploy` and `run` refuse a Polaris config without it).
+**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0) and Trino 454+. The client secret is generated per deployment unless `architecture.catalog.polaris.client_secret` sets one.
 
 **Caveats:** The bootstrap Job always creates the catalog with `stsUnavailable=true` and `pathStyleAccess=true` (needed on FlashBlade and other non-AWS S3). Each client (Spark, Trino) maintains its own static S3 credentials rather than using credential vending.
 
@@ -316,9 +315,6 @@ platform:
       gold_executors: 12
 
 architecture:
-  catalog:
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
   query_engine:
     trino:
       worker:

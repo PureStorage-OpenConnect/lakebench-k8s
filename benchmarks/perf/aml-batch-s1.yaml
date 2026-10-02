@@ -13,7 +13,8 @@
 #
 # Run it as-is. Identity and credentials come from the environment:
 #   LAKEBENCH_PERF_NAME, LAKEBENCH_S3_ENDPOINT, LAKEBENCH_S3_ACCESS_KEY,
-#   LAKEBENCH_S3_SECRET_KEY, LAKEBENCH_POLARIS_CLIENT_SECRET
+#   LAKEBENCH_S3_SECRET_KEY. The Polaris client secret is generated per
+#   deployment by deploy (SAF-8).
 
 name: ${LAKEBENCH_PERF_NAME:-perf-aml-batch-s1}
 recipe: polaris-iceberg-spark-thrift
@@ -61,8 +62,6 @@ platform:
 architecture:
   catalog:
     type: polaris
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
 
   pipeline:
     mode: batch

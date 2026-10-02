@@ -594,7 +594,8 @@ class TestObservabilityDeployerBuildHelmValues:
                 "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage"
             ]
         )
-        assert values["grafana.adminPassword"] == "lakebench"
+        # SAF-8: no fixed Grafana password; the chart generates one per install.
+        assert "grafana.adminPassword" not in values
 
     def test_build_helm_values_grafana_disabled(self):
         from lakebench.deploy.observability import ObservabilityDeployer

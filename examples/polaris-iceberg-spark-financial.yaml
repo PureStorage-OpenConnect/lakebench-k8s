@@ -54,10 +54,8 @@ platform:
 architecture:
   catalog:
     type: polaris
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
-      # Generate one with:
-      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+    # polaris.client_secret is optional: deploy generates one per deployment
+    # and stores it in the Secret lakebench-polaris-client.
 
   pipeline:
     mode: batch

@@ -108,6 +108,13 @@ spec:
                 secretKeyRef:
                   name: lakebench-s3-credentials
                   key: secretKey
+{% if catalog_type == "polaris" %}
+            - name: POLARIS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-polaris-client
+                  key: clientSecret
+{% endif %}
           command:
             - /bin/bash
             - -c
@@ -140,7 +147,7 @@ spec:
 {% elif catalog_type == "polaris" %}
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.type=rest \
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.uri=http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port }}/api/catalog \
-                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.credential=lakebench:{{ polaris_client_secret }} \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.credential="lakebench:$POLARIS_CLIENT_SECRET" \
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.warehouse={{ spark_thrift_catalog_name }} \
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.scope=PRINCIPAL_ROLE:ALL \
 {% endif %}
@@ -152,8 +159,8 @@ spec:
 {% endif %}
                 --conf spark.hadoop.fs.s3a.endpoint={{ s3_endpoint }} \
                 --conf spark.hadoop.fs.s3a.endpoint.region={{ s3_region }} \
-                --conf spark.hadoop.fs.s3a.access.key={{ s3_access_key }} \
-                --conf spark.hadoop.fs.s3a.secret.key={{ s3_secret_key }} \
+                --conf spark.hadoop.fs.s3a.access.key="$AWS_ACCESS_KEY_ID" \
+                --conf spark.hadoop.fs.s3a.secret.key="$AWS_SECRET_ACCESS_KEY" \
                 --conf spark.hadoop.fs.s3a.path.style.access={{ s3_path_style | lower }} \
                 --conf spark.hadoop.fs.s3a.connection.ssl.enabled={{ s3_use_ssl | lower }} \
                 --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
@@ -161,6 +168,7 @@ spec:
     s3:// implementation remove_orphan_files fails with 'No FileSystem for
     scheme "s3"'. Same mapping as the Spark jobs (spark/job.py). #}
                 --conf spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+                --conf "spark.redaction.regex=(?i)secret|password|token|access[.]?key|credential" \
                 --conf spark.hive.server2.thrift.port=10000 \
                 --conf spark.driver.memory={{ spark_thrift_memory }} \
                 --conf spark.driver.cores={{ spark_thrift_cores }} \

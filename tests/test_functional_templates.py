@@ -106,6 +106,8 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     # The Prometheus and Grafana deployers that injected image, retention and
     # storage-class variables are gone (the kube-prometheus-stack chart
     # deploys both); no template reads those variables.
+    # The secrets step injects the per-deployment Hive DB password (SAF-8)
+    ctx.setdefault("postgres_password", "test-hive-db-password")
     ctx.setdefault("prometheus_retention", cfg.observability.retention)
     ctx.setdefault("prometheus_storage", cfg.observability.storage)
     # Both grafana and prometheus templates use ``pull_policy`` (not image_pull_policy)

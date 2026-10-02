@@ -198,6 +198,8 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
     *_named("core_v1", "serviceaccounts", "rbac", "lakebench-spark-runner"),
     *_named("rbac_v1", "roles", "rbac", "lakebench-spark-runner"),
     *_named("rbac_v1", "rolebindings", "rbac", "lakebench-spark-runner"),
+    # The rbac step keeps the three DB and Polaris client Secrets while the
+    # Postgres PVC survives, because they belong to the data in it.
     *_named(
         "core_v1",
         "secrets",
@@ -205,6 +207,8 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         "lakebench-s3-credentials",
         "lakebench-postgres-secret",
         "lakebench-ca-certificate",
+        "lakebench-polaris-db",
+        "lakebench-polaris-client",
     ),
     # The category1 step: objects no component step deleted. The
     # deletes do not wait; a claim still mounted by a terminating pod is held

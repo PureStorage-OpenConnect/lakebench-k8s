@@ -108,9 +108,6 @@ platform:
       access_key: ${S3_ACCESS_KEY}   # env var substitution
       secret_key: ${S3_SECRET_KEY}
 architecture:
-  catalog:
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
   pipeline:
     mode: batch
 workload:
@@ -121,6 +118,9 @@ workload:
 The flat top-level spellings (`endpoint:`, `scale:` and the others in
 [Configuration](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md#flat-fields-deprecated))
 still load, with a deprecation note naming the nested key.
+
+Polaris needs no client secret in the config: `deploy` generates one per
+deployment and stores it in the namespace.
 
 Eleven recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
 for the full list. Support is judged per workload x recipe x mode:

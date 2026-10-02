@@ -95,23 +95,16 @@ def test_polaris_image_matches_schema_default() -> None:
     )
 
 
-def test_polaris_client_secret_uses_env_var() -> None:
-    """The Polaris client_secret must use ${...} env-var substitution.
-
-    A literal placeholder (``client_secret: your-secret``) trains users to
-    commit real secrets into the file.
-    """
+def test_polaris_client_secret_not_literal() -> None:
+    """SAF-8: the root yaml sets no Polaris client_secret (deploy generates
+    one per deployment). If a line ever sets one, it must be an env var: a
+    literal trains users to commit real secrets into the file."""
     text = _yaml_text()
-    match = re.search(r"^\s*client_secret:\s*(\S.*)$", text, re.MULTILINE)
-    assert match is not None, "no `client_secret:` line found in root lakebench.yaml"
-    value = match.group(1).strip()
-    assert value.startswith("${") and value.endswith("}"), (
-        f"client_secret is {value!r}; must use ${{VAR}} env-var substitution"
-    )
-    assert "LAKEBENCH_POLARIS_CLIENT_SECRET" in value, (
-        f"client_secret {value!r} should reference LAKEBENCH_POLARIS_CLIENT_SECRET "
-        "to match the other polaris-*.yaml examples"
-    )
+    for m in re.finditer(r"^\s*client_secret:\s*(\S.*)$", text, re.MULTILINE):
+        value = m.group(1).strip()
+        assert value.startswith("${") and value.endswith("}"), (
+            f"client_secret is {value!r}; must use ${{VAR}} env-var substitution"
+        )
 
 
 def test_no_dead_recipe_names() -> None:
@@ -145,7 +138,8 @@ def test_root_yaml_loads_cleanly(monkeypatch, tmp_path) -> None:
         cfg = load_config(ROOT_YAML)
     assert cfg.name
     assert cfg.architecture.catalog.type.value == "polaris"
-    assert cfg.architecture.catalog.polaris.client_secret == "placeholder-secret"
+    # SAF-8: no client_secret in the file; deploy generates one per deployment.
+    assert cfg.architecture.catalog.polaris.client_secret == ""
     assert cfg.architecture.table_format.type.value == "iceberg"
     assert cfg.architecture.query_engine.type.value == "trino"
     assert cfg.architecture.pipeline_engine.value == "spark"

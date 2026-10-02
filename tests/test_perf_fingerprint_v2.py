@@ -575,6 +575,8 @@ _GOLDEN_SILVER_CONF = {
     "spark.memory.fraction": "0.8",
     "spark.memory.storageFraction": "0.3",
     "spark.network.timeout": "600s",
+    # SAF-8: the jobs hide credential keys in the Spark UI and event log.
+    "spark.redaction.regex": "(?i)secret|password|token|access[.]?key|credential",
     "spark.rpc.askTimeout": "300s",
     "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
     "spark.sql.adaptive.advisoryPartitionSizeInBytes": "268435456",

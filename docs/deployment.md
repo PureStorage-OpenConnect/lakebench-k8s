@@ -145,8 +145,11 @@ lakebench status --namespace my-lakehouse
 ## Accessing Monitoring (Observability Stack)
 
 With `observability.enabled: true`, Prometheus and Grafana run in
-the shared `lakebench-observability` namespace (Grafana credentials:
-`admin` / `lakebench`). The chart shortens service names, so list them:
+the shared `lakebench-observability` namespace. Grafana's user is `admin`; the
+chart generates its password per install, and `deploy` prints the command
+that reads it (`kubectl get secret -n lakebench-observability
+lakebench-observability-grafana -o jsonpath='{.data.admin-password}' | base64
+-d`). The chart shortens service names, so list them:
 
 ```bash
 kubectl get svc -n lakebench-observability -l release=lakebench-observability
