@@ -202,7 +202,8 @@ def test_clean_unregisters_each_layer_before_emptying_it(tmp_path):
     ]
 
 
-def test_a_table_left_registered_fails_the_clean(tmp_path):
+def test_a_table_left_registered_keeps_the_bucket_and_fails_the_clean(tmp_path):
+    """Emptying it anyway left an entry no engine could drop on a re-run."""
     from lakebench.deploy.unregister import LayerUnregister
 
     order, code = _clean(
@@ -210,5 +211,79 @@ def test_a_table_left_registered_fails_the_clean(tmp_path):
         lambda layer: LayerUnregister(failed=[(f"t.{layer}", "Access Denied")]),
         target="silver",
     )
+    assert order == [("unregister", "my-clean-silver")]
+    assert code not in (None, 0)
+
+
+def test_an_entry_whose_files_are_gone_still_empties_but_fails(tmp_path):
+    from lakebench.deploy.unregister import LayerUnregister
+
+    order, code = _clean(
+        tmp_path,
+        lambda layer: LayerUnregister(stuck=[(f"t.{layer}", "NotFoundException")]),
+        target="silver",
+    )
     assert ("empty", "my-clean-silver") in order
     assert code not in (None, 0)
+
+
+def test_no_engine_pod_empties_with_a_warning(tmp_path):
+    from lakebench.deploy.unregister import LayerUnregister
+
+    order, code = _clean(tmp_path, lambda layer: LayerUnregister(skipped="no pod"), target="gold")
+    assert ("empty", "my-clean-gold") in order and code in (None, 0)
+
+
+def test_an_unreadable_delta_location_is_a_failure_not_kept():
+    res, sent = _run(
+        _cfg("delta"),
+        "silver",
+        "my-clean-silver",
+        ("spark-thrift", "pod", "spark_catalog"),
+        detail=lambda sql: RuntimeError("exec_sql failed (rc=1): timed out reading"),
+    )
+    assert res.failed and not res.kept and not res.may_empty
+    assert not any(s.startswith("DROP") for s in sent)
+
+
+def test_a_logless_delta_entry_is_dropped():
+    """What a clean by older code left: DESCRIBE DETAIL cannot load it."""
+    res, sent = _run(
+        _cfg("delta"),
+        "silver",
+        "my-clean-silver",
+        ("spark-thrift", "pod", "spark_catalog"),
+        detail=lambda sql: RuntimeError(
+            "[DELTA_TABLE_NOT_FOUND] Delta table `silver`.`t` doesn't exist."
+        ),
+    )
+    assert res.unregistered and sent[-1].startswith("DROP TABLE")
+
+
+def test_an_iceberg_entry_with_its_metadata_gone_is_stuck_not_blocking():
+    err = lambda sql: RuntimeError(  # noqa: E731
+        "exec_sql failed (rc=1): org.apache.iceberg.exceptions.NotFoundException: "
+        "Failed to open input stream for file: s3a://my-clean-silver/x/metadata/1.metadata.json"
+    )
+    res, _ = _run(
+        _cfg(),
+        "silver",
+        "my-clean-silver",
+        ("spark-thrift", "pod", "spark_catalog"),
+        exec_error=err,
+    )
+    assert res.stuck and res.may_empty
+
+
+def test_a_stuck_engine_stops_at_the_first_timeout():
+    from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
+
+    cfg = _cfg(schema="financial")
+    res, sent = _run(
+        cfg,
+        "gold",
+        "my-clean-gold",
+        ("trino", "pod", "lakehouse"),
+        exec_error=lambda sql: ExecSqlTimeout("exec_sql timed out after 120s"),
+    )
+    assert len(sent) == 1 and len(res.failed) == 1 and not res.may_empty

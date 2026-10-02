@@ -354,8 +354,11 @@ All `clean` targets prompt for confirmation unless `--force` is passed.
 Kubernetes resources are not affected by `clean`. Before it empties a
 layer's bucket, `clean` removes that layer's workload tables from the
 catalog, so the next run creates them afresh instead of failing on entries
-whose files are gone. It uses the deployment's Trino pod
-(`system.unregister_table`, the catalog entry only) or, without Trino, its
-Spark Thrift pod (`DROP TABLE`; a Delta table only when its data is in the
-bucket being emptied). With neither running it warns and leaves the entries;
-a statement that fails makes `clean` exit 1.
+whose files are gone. It uses the deployment's query engine pod, the
+configured one first: Trino runs `system.unregister_table` (the catalog
+entry only), Spark Thrift runs `DROP TABLE` (for a Delta table only when its
+data is in the bucket being emptied). With neither running (DuckDB or no
+query engine) it warns and leaves the entries. When a table that still has
+its files cannot be unregistered, `clean` leaves that bucket as it is and
+exits 1, so a re-run can finish; an entry whose files are already gone is
+reported (exit 1) and the bucket is emptied.

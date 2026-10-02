@@ -492,7 +492,12 @@ def clean(
                     # The layer's catalog entries go first, while their
                     # metadata is still there: left behind, the next run met
                     # tables whose files were gone and failed on them.
-                    _unregister_before_empty(cfg, layer, bucket, errors)
+                    if not _unregister_before_empty(cfg, layer, bucket, errors):
+                        print_error(
+                            f"Not emptying {layer}: a table there is still registered with "
+                            "its files; re-run clean once the engine can unregister it"
+                        )
+                        continue
                     deleted = s3.empty_bucket(bucket, progress_callback=_clean_progress)
                     total_deleted += deleted
                     if deleted > 0:
@@ -575,11 +580,15 @@ def clean(
         raise typer.Exit(ExitCode.REFUSED if refusals == len(errors) else ExitCode.FAILED)
 
 
-def _unregister_before_empty(cfg, layer: str, bucket: str, errors: list[str]) -> None:
+def _unregister_before_empty(cfg, layer: str, bucket: str, errors: list[str]) -> bool:
     """Unregister ``layer``'s tables before its bucket is emptied; report.
+    Returns whether the bucket may be emptied.
 
-    A statement that fails is an error (the entry stays, and the next run
-    fails on it); no engine pod is a warning, as before this step existed.
+    A table still registered with its files in place is an error and keeps
+    the bucket, so a re-run can finish (emptying it first left an entry no
+    engine could drop). An entry whose files are already gone is an error
+    too, but the bucket is emptied. No engine pod is a warning, as before
+    this step existed.
     """
     try:
         from lakebench.deploy.unregister import unregister_layer_tables
@@ -592,7 +601,7 @@ def _unregister_before_empty(cfg, layer: str, bucket: str, errors: list[str]) ->
     except Exception as e:  # noqa: BLE001
         errors.append(f"{layer}: could not unregister its tables ({e})")
         print_error(f"{layer}: could not unregister its tables before emptying: {e}")
-        return
+        return False
     if res.skipped:
         print_warning(
             f"{layer}: {res.skipped}, so its tables stay registered with no files; "
@@ -605,3 +614,11 @@ def _unregister_before_empty(cfg, layer: str, bucket: str, errors: list[str]) ->
     for table, why in res.failed:
         errors.append(f"{layer}: {table} still registered ({why})")
         print_error(f"{layer}: could not unregister {table}: {why}")
+    for table, why in res.stuck:
+        errors.append(f"{layer}: {table} still registered with its files gone ({why})")
+        print_error(
+            f"{layer}: {table} is registered but its files are already gone, and this "
+            f"engine cannot drop it ({why}); unregister it through Trino "
+            "(CALL <catalog>.system.unregister_table)"
+        )
+    return res.may_empty

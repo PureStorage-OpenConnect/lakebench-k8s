@@ -22,10 +22,20 @@ It runs only after `clean` has proved the bucket is this deployment's.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# An entry whose files are already gone. Delta: the log is missing. Iceberg:
+# the metadata file is missing, which Spark's DROP cannot get past (it loads
+# the table first), so the entry is stuck until a Trino unregister.
+_FILES_GONE_RE = re.compile(
+    r"DELTA_TABLE_NOT_FOUND|DELTA_PATH_DOES_NOT_EXIST|\bPath does not exist:"
+    r"|NotFoundException|Failed to open input stream for file"
+)
 
 
 @dataclass
@@ -33,12 +43,21 @@ class LayerUnregister:
     """What happened to one layer's catalog entries."""
 
     unregistered: list[str] = field(default_factory=list)
-    #: (table, reason): left registered on purpose (another bucket).
+    #: (table, reason): left registered on purpose, its data in another bucket.
     kept: list[tuple[str, str]] = field(default_factory=list)
-    #: (table, error): the statement failed; the entry is still there.
+    #: (table, error): still registered with its files in place; the bucket
+    #: must not be emptied, so a re-run can finish.
     failed: list[tuple[str, str]] = field(default_factory=list)
+    #: (table, error): still registered, its files already gone; emptying
+    #: the bucket changes nothing for it.
+    stuck: list[tuple[str, str]] = field(default_factory=list)
     #: Set when no statement could run at all (no engine pod).
     skipped: str = ""
+
+    @property
+    def may_empty(self) -> bool:
+        """Whether the bucket may be emptied: no entry still has its files."""
+        return not self.failed
 
 
 def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> LayerUnregister:
@@ -55,6 +74,7 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
         _trino_unregister_sql,
     )
     from lakebench.modules.table_formats.iceberg.maintenance import (
+        ExecSqlTimeout,
         build_drop_table_sql,
         exec_sql,
         find_maintenance_engine,
@@ -86,22 +106,26 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
                 )
                 if why == "missing":
                     continue
-                if why != "gone" and where != bucket:
-                    # DROP would delete a managed table's directory: only in
-                    # the bucket being emptied.
-                    reason = (
-                        f"its data is in {where}, not {bucket}"
-                        if where
-                        else f"its location could not be read ({why})"
-                    )
-                    out.kept.append((table, reason))
+                gone = why == "gone" or bool(_FILES_GONE_RE.search(why))
+                if not gone and where is None:
+                    # Cannot tell where its files are: neither drop it (DROP
+                    # deletes a managed table's directory) nor empty the bucket.
+                    out.failed.append((table, f"its location could not be read ({why})"))
+                    continue
+                if not gone and where != bucket:
+                    out.kept.append((table, f"its data is in {where}, not {bucket}"))
                     continue
         try:
             exec_sql(maint_engine, k8s, pod_name, namespace, sql, timeout=120)
+        except ExecSqlTimeout as e:
+            # The engine is stuck; the rest would wait as long. Stop here.
+            out.failed.append((table, str(e)))
+            break
         except Exception as e:  # noqa: BLE001
             if _is_table_missing(e) or _is_schema_missing(e):
                 continue
-            out.failed.append((table, " ".join(str(e).split())[:200]))
+            text = " ".join(str(e).split())[:200]
+            (out.stuck if _FILES_GONE_RE.search(str(e)) else out.failed).append((table, text))
             continue
         out.unregistered.append(table)
         logger.info("unregistered %s via %s before emptying %s", table, maint_engine, bucket)
