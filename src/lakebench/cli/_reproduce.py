@@ -1096,7 +1096,12 @@ def _run_pipeline(
     from lakebench.cli._generate import generate as _generate_cmd
     from lakebench.cli._helpers import _journal_safe, journal_open
     from lakebench.cli._run import run as _run_cmd
-    from lakebench.config import ConfigError, LoadPurpose, load_config
+    from lakebench.config import (
+        ConfigError,
+        ConfigProtectedCorpusError,
+        LoadPurpose,
+        load_config,
+    )
     from lakebench.exit_codes import SafetyRefusal
     from lakebench.journal import EventType
     from lakebench.metrics import MetricsStorage
@@ -1107,8 +1112,15 @@ def _run_pipeline(
     # and that refusal comes before any cluster read.
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.RUN)
+    except ConfigProtectedCorpusError as e:
+        from lakebench.aml.look_guard import PATH
+
+        raise UsageError(f"Refused: {e}", path=PATH) from None
     except ConfigError as e:
         raise ReproduceError(str(e)) from None
+    from lakebench.aml.look_guard import refuse_if_protected
+
+    refuse_if_protected(cfg, "reproduce")
 
     # The run below would refuse a bad timeout, but only after the deploy
     # and generate: check it first.
@@ -1301,25 +1313,6 @@ def _redact_seed_text(text: str) -> str:
     )
 
 
-def _config_held_out(cfg: Any) -> bool:
-    """Whether the config that would run declares a held-out role or names
-    a held-out seed (the package may describe another corpus than the
-    config generates)."""
-    from lakebench.config import datagen_seed
-
-    workload = cfg.architecture.workload
-    dg = workload.datagen
-    if getattr(dg, "corpus_role", None) in datagen_seed.PROTECTED_ROLES:
-        return True
-    seed = getattr(dg, "seed", None)
-    if workload.schema_type.value != "financial" or not isinstance(seed, int):
-        return False
-    try:
-        return datagen_seed.heldout_role(seed) is not None or seed in datagen_seed.spent_seeds()
-    except Exception:  # noqa: BLE001 -- unreadable: fail closed
-        return True
-
-
 def _verify_spent_look(entry: Any, role: Any, report: Path | None) -> None:
     """A registered look's package: compare ``--report``'s sha256 with the
     look record's ``report_sha256``; nothing is deployed or run."""
@@ -1433,12 +1426,12 @@ def _verify(
     except ConfigError as e:
         print_error(_redact_seed_text(str(e)))
         raise typer.Exit(ExitCode.USAGE) from None
-    if _config_held_out(_cfg):
-        print_error(
-            "Refused: the config would generate a held-out corpus; reproduce never "
-            "regenerates one (a registered look is verified with --report instead)."
-        )
-        raise typer.Exit(ExitCode.REFUSED)
+    # The config may describe another corpus than the package: one that names
+    # a protected corpus is refused (exit 2); a registered look is verified
+    # with --report instead, never regenerated.
+    from lakebench.aml.look_guard import refuse_if_protected
+
+    refuse_if_protected(_cfg, "reproduce")
     _iterations = _cfg.architecture.benchmark.iterations
     _mismatch = _sample_mismatch(meta, _iterations)
     if _mismatch:

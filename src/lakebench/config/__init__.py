@@ -6,6 +6,7 @@ from .loader import (
     ConfigFileNotFoundError,
     ConfigNameRequired,
     ConfigParseError,
+    ConfigProtectedCorpusError,
     ConfigValidationError,
     LoadPurpose,
     generate_default_config,
@@ -74,5 +75,6 @@ __all__ = [
     "ConfigFileNotFoundError",
     "ConfigNameRequired",
     "ConfigParseError",
+    "ConfigProtectedCorpusError",
     "ConfigValidationError",
 ]

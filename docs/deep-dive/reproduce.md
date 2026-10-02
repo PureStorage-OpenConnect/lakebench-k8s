@@ -102,9 +102,10 @@ or `ingest_ratio` (continuous).
    `architecture.benchmark.iterations` differs from
    `benchmark_samples_per_query` (batch packages with QpH), if the
    package's maintenance policy differs from the running version's,
-   or if the package has no `experiment_identity`, and refuses (exit 3)
-   a config that would generate a held-out corpus (an evaluation or
-   robustness role, or a held-out or spent financial seed), whatever the
+   or if the package has no `experiment_identity`, and refuses (exit 2,
+   `run.protected_corpus`) a config that names a protected AML corpus (an
+   evaluation or robustness role, or a seed that hashes to a held-out
+   one; a spent seed is refused when the config loads), whatever the
    package says. `--dry-run` stops here.
 5. Refuses (exit 3) when the config's namespace or any of its three
    buckets already exists, and exits 2 when the config sets

@@ -1695,6 +1695,12 @@ def run(
         print_error(f"{config_file} changed while it was loaded; run again")
         raise typer.Exit(ExitCode.USAGE)
 
+    # A protected AML corpus (evaluation or robustness, by role or by seed)
+    # is scored only as its registered look: refused before any cluster call.
+    from lakebench.aml.look_guard import refuse_if_protected
+
+    refuse_if_protected(cfg, "run")
+
     # Every argument and combination is checked before anything else, so a
     # refused one exits 2 with no cluster call made (cli/_run_args.py).
     from lakebench.cli._interrupt import interrupt_scope
