@@ -296,6 +296,26 @@ def test_unreadable_cluster_entry_at_first_activation_falls_back_to_a_read(
     assert api_server_fingerprint(None) == expected
 
 
+def test_fallback_fingerprint_refuses_an_entry_rewritten_to_another_server(
+    tmp_path, monkeypatch
+) -> None:
+    """With the CA unread at activation, a later read must not hash the CA of
+    a kubeconfig that now points the pinned name at another cluster."""
+    from lakebench.deploy.ownership import api_server_fingerprint
+
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A}, current="A")
+    _with_ca(path, b"CA-ONE")
+    point_kubeconfig_at(monkeypatch, path)
+    with patch.object(target_mod, "_kubeconfig_cluster_block", return_value=None):
+        t = ClusterTarget.resolve(None).activate()
+    assert not t.ca_fp_known
+    write_kubeconfig(path, {"A": SERVER_B}, current="A")
+    _with_ca(path, b"CA-TWO")
+    assert api_server_fingerprint("A") is None
+    assert api_server_fingerprint(None) is None
+
+
 def test_activate_refuses_a_server_that_changed_during_the_load(kubeconfig) -> None:
     moved = {"server": "https://127.0.0.1:9"}
     with patch.object(target_mod, "_kubeconfig_cluster_block", return_value=moved):

@@ -176,9 +176,22 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
     if pinned is not None and (not context or context == pinned.context):
         if pinned.ca_fp_known:
             return pinned.ca_fingerprint
-        # The cluster entry could not be read at activation: read it now.
+        # The cluster entry could not be read at activation: read it now,
+        # but only from an entry that still names the pinned server; a
+        # rewritten one would hash another cluster's CA.
         if pinned.in_cluster:
             return _try_incluster_fingerprint()
+        from lakebench.k8s.target import _kubeconfig_cluster_block
+
+        block = _kubeconfig_cluster_block(str(pinned.context))
+        server = str((block or {}).get("server") or "").rstrip("/")
+        if block is None or (pinned.api_server and server != pinned.api_server):
+            logger.debug(
+                "api_server_fingerprint: context %r no longer names %s",
+                pinned.context,
+                pinned.api_server,
+            )
+            return None
         context = pinned.context
 
     try:

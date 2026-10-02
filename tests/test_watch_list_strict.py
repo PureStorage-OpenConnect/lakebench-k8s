@@ -356,6 +356,26 @@ class TestPinnedContext:
         pin.assert_called_once()
         impl.assert_called_once()
 
+    def test_add_conflict_after_the_upgrade_fails_closed_and_names_repair(self, caplog):
+        """A kubeconfig rewritten after the helm upgrade (before the
+        OpenShift patches) must not escape as a raw error."""
+        from lakebench.k8s.target import ContextConflictError
+
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_acquire_watch_lease", return_value=(None, "unlocked")),
+            patch("lakebench.k8s.target.cli_args", return_value=[]),
+            patch.object(
+                mgr,
+                "_add_namespace_to_watch_impl",
+                side_effect=ContextConflictError("one cluster context per process"),
+            ),
+            caplog.at_level("ERROR"),
+        ):
+            assert mgr._add_namespace_to_watch("my-ns") is False
+        assert "admin repair-operator" in caplog.text
+        assert "partly modified" in caplog.text
+
     def test_conflict_mid_sequence_names_repair_operator(self):
         from lakebench.k8s.target import ContextConflictError
 

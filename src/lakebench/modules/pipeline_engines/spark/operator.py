@@ -1132,6 +1132,18 @@ class SparkOperatorManager:
                     "Adding %s to the watch list stopped inside the cluster lease: %s", namespace, e
                 )
                 return False
+            except ContextConflictError as e:
+                # The kubeconfig changed after the helm upgrade: the operator
+                # may be upgraded without its OpenShift patches or restart.
+                logger.error(
+                    "spark-operator watch-list: adding %r stopped -- %s. The operator's "
+                    "watch list may be partly modified; once the kubeconfig names the "
+                    "deployment's cluster again, run `lakebench admin repair-operator` "
+                    "against it.",
+                    namespace,
+                    e,
+                )
+                return False
         finally:
             if lease_cm is not None:
                 try:

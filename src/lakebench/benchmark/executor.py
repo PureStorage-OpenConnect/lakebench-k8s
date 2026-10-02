@@ -55,10 +55,10 @@ from lakebench.modules.query_engines.trino.executor import TrinoExecutor  # noqa
 def get_executor(config: LakebenchConfig, namespace: str | None = None) -> QueryExecutor:
     """Factory: return the appropriate QueryExecutor for the configured engine.
 
-    Pins the process to the config's cluster context first, so no query
-    lands on another cluster: every query runs as a ``kubectl exec``
-    subprocess, and without an active target each one would read the
-    kubeconfig's current context afresh.
+    Pins the process to the config's cluster context first, so a
+    current-context switch does not move the queries: every query runs as a
+    ``kubectl exec`` subprocess, and without an active target each one would
+    read the kubeconfig's current context afresh.
     """
     from kubernetes.config import ConfigException
 

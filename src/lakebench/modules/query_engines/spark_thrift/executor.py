@@ -99,7 +99,8 @@ class SparkThriftExecutor:
         """The ``kubectl`` argv prefix with the configured context pinned.
 
         With no configured context, the process's active cluster target
-        supplies it (``k8s/target.py``), so queries never follow a context switch.
+        supplies it (``k8s/target.py``), so a current-context switch
+        mid-run does not move the queries.
         """
         from lakebench.k8s.target import cli_args
 
