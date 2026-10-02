@@ -56,10 +56,22 @@ pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("loa
 def test_batch_stream_parity_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=900)
     out = json.loads(res.stdout.strip().splitlines()[-1])
-    assert out["statements_row_hash_batch"] == out["statements_row_hash_stream"], out
-    assert out["current_balance_batch"] == out["current_balance_stream"], out
-    assert out["batch_row_count"] == out["stream_row_count"], out
-    assert out["batch_row_count"] > 0, out
+    assert not problems(out), out
+
+
+def problems(out):
+    """The guard's checks on the child's JSON, as named failures (the parity
+    mutation check reads them too)."""
+    found = []
+    if out["statements_row_hash_batch"] != out["statements_row_hash_stream"]:
+        found.append("statements_row_hash")
+    if out["current_balance_batch"] != out["current_balance_stream"]:
+        found.append("current_balance")
+    if out["batch_row_count"] != out["stream_row_count"]:
+        found.append("row_count")
+    if not out["batch_row_count"] > 0:
+        found.append("no_rows")
+    return found
 
 
 def _run(jars):
@@ -186,4 +198,7 @@ def _copy_accounts(spark, src, dst):
 if __name__ == "__main__":
     # Run by spark_subprocess, which puts the scripts and tests/spark on
     # PYTHONPATH and passes the jar classpath.
+    import _parity_mutation
+
+    _parity_mutation.install()
     _run(sys.argv[1])

@@ -149,6 +149,13 @@ A test that calls a stream's micro-batch handler directly wraps the call in
 `foreachBatch` sets (the streaming query id the writers read) and restores
 them afterwards; with several writer threads, each thread enters
 `inside_foreach_batch` itself.
+The four AML batch/stream protocol guards (statements, profiles,
+dimensions, replay idempotency) have a mutation check,
+`tests/spark/test_parity_guard_mutations.py`: it reruns each guard's Spark
+child with `LB_PARITY_MUTATE` set, which makes `tests/spark/_parity_mutation.py`
+null one business column in that MERGE's source, and asserts the guard
+names the failure. A new guard child calls `_parity_mutation.install()`
+before it imports the stream script.
 `--lb-reverse` is defined in `tests/spark/conftest.py`, so pass it with
 `tests/spark` (or a file in it) on the command line.
 

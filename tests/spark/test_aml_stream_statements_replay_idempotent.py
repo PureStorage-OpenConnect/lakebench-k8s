@@ -28,13 +28,21 @@ pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("loa
 def test_replay_is_idempotent_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
-    # Row count unchanged across the replay.
-    assert out["row_count_after_first"] == out["row_count_after_replay"], out
-    # Per-iban running-balance state unchanged: the row-hash of every entry
-    # (iban, entry_seq, bal_before, bal_after, txn_id, cdt_dbt_ind) matches.
-    assert out["row_hash_after_first"] == out["row_hash_after_replay"], out
-    # current_balance unchanged.
-    assert out["current_balance_after_first"] == out["current_balance_after_replay"], out
+    assert not problems(out), out
+
+
+def problems(out):
+    """The guard's checks on the child's JSON, as named failures: the row
+    count, the row hash of every entry (iban, entry_seq, bal_before,
+    bal_after, txn_id, cdt_dbt_ind) and current_balance are unchanged by the
+    replay. The parity mutation check reads them too."""
+    found = []
+    for name in ("row_count", "row_hash", "current_balance"):
+        if out[f"{name}_after_first"] != out[f"{name}_after_replay"]:
+            found.append(name)
+    if not out["row_count_after_first"]:
+        found.append("no_rows")
+    return found
 
 
 def _run(jars):
@@ -122,4 +130,7 @@ def _snapshot(spark):
 if __name__ == "__main__":
     # Run by spark_subprocess, which puts the scripts and tests/spark on
     # PYTHONPATH and passes the jar classpath.
+    import _parity_mutation
+
+    _parity_mutation.install()
     _run(sys.argv[1])

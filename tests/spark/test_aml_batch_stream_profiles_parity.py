@@ -107,8 +107,14 @@ def spark(spark_session, iceberg_catalog, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def profiles(spark, load_script_module):
+    return build_profiles(spark)
+
+
+def build_profiles(spark):
     """(batch rows, stream rows) of silver.entity_profiles by entity_id,
-    for one bronze corpus built once by each path."""
+    for one bronze corpus built once by each path, in catalog lh. Run by
+    the fixture above and, as a Spark child, by the parity mutation check
+    (tests/spark/test_parity_guard_mutations.py)."""
     import silver_stream_financial as ss
 
     # Build a shared bronze corpus: 13 transactions among six entities;
@@ -194,97 +200,128 @@ def profiles(spark, load_script_module):
     return batch_rows, stream_rows
 
 
-def test_batch_and_stream_profile_the_same_entities(profiles):
-    batch_rows, stream_rows = profiles
-    assert set(batch_rows) == set(stream_rows), (
-        f"entity coverage drift: batch={set(batch_rows)}, stream={set(stream_rows)}"
-    )
+def coverage_problems(batch_rows, stream_rows):
+    if set(batch_rows) == set(stream_rows):
+        return []
+    return [f"entity coverage drift: batch={set(batch_rows)}, stream={set(stream_rows)}"]
 
 
-def test_batch_and_stream_profile_sums_match(profiles):
+def sum_problems(batch_rows, stream_rows):
     """total_sent_usd and total_received_usd, Decimal(38,2), compared
-    exactly as amounts, with NULL read as 0.00 (see the next test)."""
-    batch_rows, stream_rows = profiles
+    exactly as amounts, with NULL read as 0.00 (null_problems compares the
+    NULLs)."""
     zero = Decimal("0.00")
+    out = []
     for eid, b in batch_rows.items():
-        s = stream_rows[eid]
+        s = stream_rows.get(eid)
+        if s is None:
+            continue  # coverage_problems names it
         for c in ("total_sent_usd", "total_received_usd"):
             b_v = zero if b[c] is None else b[c]
             s_v = zero if s[c] is None else s[c]
-            assert b_v == s_v, f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
+            if b_v != s_v:
+                out.append(f"{eid}.{c}: batch={b[c]}, stream={s[c]}")
+    return out
 
 
-def test_batch_and_stream_profile_sums_agree_on_null(profiles):
-    """A side the entity never used is NULL in both paths, or 0.00 in both."""
-    batch_rows, stream_rows = profiles
+def null_problems(batch_rows, stream_rows):
+    """A side the entity never used is NULL in both paths."""
+    out = []
     for eid, b in batch_rows.items():
-        s = stream_rows[eid]
+        s = stream_rows.get(eid)
+        if s is None:
+            continue
         for c in ("total_sent_usd", "total_received_usd"):
-            assert (b[c] is None) == (s[c] is None), f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
+            if (b[c] is None) != (s[c] is None):
+                out.append(f"{eid}.{c}: batch={b[c]}, stream={s[c]}")
+    return out
 
 
-def test_batch_and_stream_produce_equivalent_profiles(profiles):
+def _close(b, s):
+    if b is None or s is None:
+        return b is None and s is None
+    return math.isclose(float(b), float(s), rel_tol=1e-9, abs_tol=1e-9)
+
+
+def value_problems(batch_rows, stream_rows):
     """Every other compared column: counts exact, LEAST/GREATEST timestamps
-    exact, Welford accumulators and means within a tight tolerance."""
-    batch_rows, stream_rows = profiles
+    exact, the derived columns, the Welford accumulators and the mean within
+    a tight tolerance (incremental merges accrue rounding error compared
+    with one pass)."""
+    out = []
     for eid, b in batch_rows.items():
-        s = stream_rows[eid]
-        # Additive + count columns must be exact.
+        s = stream_rows.get(eid)
+        if s is None:
+            continue
+        # Additive and count columns, LEAST / GREATEST timestamps, and
+        # active_span_days (DATEDIFF, integer as DOUBLE): exact.
         for c in (
             "txn_count_out",
             "txn_count_in",
             "txn_count_total",
             "distinct_counterparties_out",
             "distinct_counterparties_in",
+            "first_seen_ts",
+            "last_seen_ts",
+            "active_span_days",
         ):
-            assert b[c] == s[c], f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
-        # LEAST / GREATEST timestamps must be exact.
-        for c in ("first_seen_ts", "last_seen_ts"):
-            assert b[c] == s[c], f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
-        for c in ("active_span_days",):
-            # DATEDIFF returns integer -> DOUBLE; exact-eq is safe.
-            assert b[c] == s[c] or (b[c] is None and s[c] is None), (
-                f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
-            )
+            if b[c] != s[c]:
+                out.append(f"{eid}.{c}: batch={b[c]}, stream={s[c]}")
         # W4 reads passthrough_ratio and W8 avg_gap_days; both are derived.
-        for c in ("passthrough_ratio", "avg_gap_days"):
-            if b[c] is None:
-                assert s[c] is None, f"{eid}.{c}: batch NULL vs stream {s[c]}"
-            else:
-                assert s[c] is not None and math.isclose(
-                    float(b[c]), float(s[c]), rel_tol=1e-9, abs_tol=1e-9
-                ), f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
-        # Welford accumulators: within a small relative tolerance because
-        # incremental merges accrue rounding error compared with a single
-        # pass. Corpus is small so absolute tolerance suffices too.
-        b_m2 = float(b["_m2"] or 0.0)
-        s_m2 = float(s["_m2"] or 0.0)
-        assert math.isclose(b_m2, s_m2, rel_tol=1e-9, abs_tol=1e-9), (
-            f"{eid}._m2 drifted: batch={b_m2}, stream={s_m2}"
-        )
-        if b["stddev_amount_usd"] is None:
-            assert s["stddev_amount_usd"] is None, (
-                f"{eid}.stddev: batch NULL vs stream {s['stddev_amount_usd']}"
-            )
-        else:
-            assert math.isclose(
-                float(b["stddev_amount_usd"]),
-                float(s["stddev_amount_usd"]),
-                rel_tol=1e-9,
-                abs_tol=1e-9,
-            ), (
-                f"{eid}.stddev drifted: batch={b['stddev_amount_usd']}, "
-                f"stream={s['stddev_amount_usd']}"
-            )
-        # avg_amount_usd is a mean; tolerance same as stddev.
-        if b["avg_amount_usd"] is None:
-            assert s["avg_amount_usd"] is None, (
-                f"{eid}.avg: batch NULL vs stream {s['avg_amount_usd']}"
-            )
-        else:
-            assert math.isclose(
-                float(b["avg_amount_usd"]),
-                float(s["avg_amount_usd"]),
-                rel_tol=1e-9,
-                abs_tol=1e-9,
-            ), f"{eid}.avg drifted: batch={b['avg_amount_usd']}, stream={s['avg_amount_usd']}"
+        for c in ("passthrough_ratio", "avg_gap_days", "stddev_amount_usd", "avg_amount_usd"):
+            if not _close(b[c], s[c]):
+                out.append(f"{eid}.{c}: batch={b[c]}, stream={s[c]}")
+        if not _close(float(b["_m2"] or 0.0), float(s["_m2"] or 0.0)):
+            out.append(f"{eid}._m2: batch={b['_m2']}, stream={s['_m2']}")
+    return out
+
+
+def test_batch_and_stream_profile_the_same_entities(profiles):
+    assert not coverage_problems(*profiles)
+
+
+def test_batch_and_stream_profile_sums_match(profiles):
+    problems = sum_problems(*profiles)
+    assert not problems, problems
+
+
+def test_batch_and_stream_profile_sums_agree_on_null(profiles):
+    problems = null_problems(*profiles)
+    assert not problems, problems
+
+
+def test_batch_and_stream_produce_equivalent_profiles(profiles):
+    problems = value_problems(*profiles)
+    assert not problems, problems
+
+
+def _child(jars):
+    """Spark child for the mutation check: the same corpus and comparison,
+    with the parity mutation shim installed before the scripts load."""
+    import json
+    import os
+    import tempfile
+
+    os.environ["LB_ICEBERG_CATALOG"] = _CATALOG
+    import _parity_mutation
+
+    _parity_mutation.install()
+    from _d_full_helpers import build_spark
+
+    with tempfile.TemporaryDirectory() as work:
+        spark = build_spark(work, jars)
+        batch_rows, stream_rows = build_profiles(spark)
+        out = {
+            "coverage": coverage_problems(batch_rows, stream_rows),
+            "sums": sum_problems(batch_rows, stream_rows),
+            "nulls": null_problems(batch_rows, stream_rows),
+            "values": value_problems(batch_rows, stream_rows),
+        }
+        print(json.dumps(out, default=str))
+        spark.stop()
+
+
+if __name__ == "__main__":
+    import sys
+
+    _child(sys.argv[1])
