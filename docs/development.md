@@ -54,8 +54,11 @@ make check-fast
 That is ruff, the format check and mypy, then the unit tests in parallel
 (`pytest-xdist`, one test file per worker) without the Spark tier and
 without the AML statistics tests marked `slow`, which CI runs in their own
-job. `make test` is the same pytest command without the lint and type
-checks. To run the whole unit suite serially, slow tests included, and stop
+job. The tests import `src/` of this checkout (`PYTHONPATH=src`), whatever
+is installed, with one worker per CPU; `make check-fast XDIST_WORKERS=8`
+caps the workers on a shared machine, and `PYTHON=python3.11` picks the
+interpreter. `make test` is the same pytest command without the lint and
+type checks. To run the whole unit suite serially, slow tests included, and stop
 at the first failure:
 
 ```bash
@@ -234,7 +237,7 @@ to see the full list.
 
 | Target | Description |
 |--------|-------------|
-| `make check-fast` | Ruff, format check and mypy on `src/`, `tests/` and `scripts/`, then the unit tests in parallel without `tests/spark` and the `slow` tests (CI's first job, budget 8 minutes) |
+| `make check-fast` | Ruff, format check and mypy on `src/`, `tests/` and `scripts/`, then the unit tests in parallel without `tests/spark` and the `slow` tests (run by CI's Lint job, budget 8 minutes) |
 | `make test` | The pytest command of `make check-fast` alone |
 | `make test-unit` | Run every test not marked `integration` or `e2e` (`-m "not integration and not e2e"`), serially, `slow` tests included |
 | `make test-integration` | Run integration tests (requires K8s and S3) |
@@ -321,8 +324,8 @@ none of which a reader of the package can look up; state the reason in
 words instead. A change to `tests/fixtures/citation_counts.json` that raises
 a count is a review blocker, except in the commit that lands the ratchet on
 a merge-train tree (`python tests/test_citations.py` retakes it there). The
-"Check fast" job runs `make check-fast` on Python 3.11 under an 8-minute
-budget: `scripts/ci_budget.py` fails the step when a command runs over its
+Lint job runs `make check-fast` on Python 3.11 under an 8-minute budget,
+alongside the docs and other static checks: `scripts/ci_budget.py` fails the step when a command runs over its
 budget, records the time in the step summary, and leaves the job's
 `timeout-minutes` (1.5 times the budget) as a backstop. The test job runs
 the same parallel unit tests (`-n auto --dist loadfile`, without

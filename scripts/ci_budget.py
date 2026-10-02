@@ -21,10 +21,26 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import time
 from collections.abc import Sequence
+
+
+class _Stopped(Exception):
+    """SIGTERM or SIGINT arrived (a cancelled run or a job timeout)."""
+
+
+def _stop(signum: int, _frame: object) -> None:
+    raise _Stopped(signum)
+
+
+def _summary(label: str, elapsed: float, budget: float, note: str = "") -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{label}: {elapsed:.0f} s (budget {budget:.0f} s){note}\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -47,16 +63,33 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     start = time.monotonic()
     try:
-        rc = subprocess.run(cmd).returncode
+        child = subprocess.Popen(cmd)
     except OSError as exc:
         print(f"::error::{opts.label}: cannot run {cmd[0]}: {exc}")
         return 127
+    # A cancel or a timeout-minutes kill signals this process: pass it on to
+    # the command and still record how long it ran, since the slowest runs
+    # are the ones that get killed.
+    previous = {s: signal.signal(s, _stop) for s in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        rc = child.wait()
+    except _Stopped as stop:
+        child.send_signal(stop.args[0])
+        try:
+            child.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+        elapsed = time.monotonic() - start
+        _summary(opts.label, elapsed, opts.seconds, " (stopped by a signal)")
+        print(f"::error::{opts.label} stopped by signal {stop.args[0]} after {elapsed:.0f} s")
+        return 128 + int(stop.args[0])
+    finally:
+        for s, handler in previous.items():
+            signal.signal(s, handler)
     elapsed = time.monotonic() - start
 
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a", encoding="utf-8") as fh:
-            fh.write(f"{opts.label}: {elapsed:.0f} s (budget {opts.seconds:.0f} s)\n")
+    _summary(opts.label, elapsed, opts.seconds)
     if rc != 0:
         return rc
     if elapsed > opts.seconds:
