@@ -348,14 +348,14 @@ def write_run_report(metrics_storage, run_id: str) -> Path | None:
     return path
 
 
-def load_deps_handle(cfg):
+def load_deps_handle(cfg, config_file=None):
     """The deployment's verified dependency set for the Spark jobs:
     called before anything is recorded or submitted. A typed refusal
     (``run.deps_missing``, ``run.deps_stale``, ``run.deps_mismatch``)
     propagates to the CLI's error handler."""
     from lakebench.deps import runtime
 
-    handle = runtime.load_handle(cfg, None)
+    handle = runtime.load_handle(cfg, None, config_path=config_file)
     print_info(f"Dependency set {handle.pinset_sha256[:12]} verified")
     return handle
 
@@ -368,11 +368,21 @@ def record_deps_provenance(run, handle) -> None:
         run.provenance = {**(run.provenance or {}), "deps": provenance_block(handle)}
 
 
-def record_deps_pods(run, cfg, handle) -> None:
-    """The run-end check that every pod of this run named the set
-    (``provenance.deps.pods_checked`` and ``pod_mismatches``)."""
+def record_deps_pods(run, cfg, handle) -> bool:
+    """The run-end check that the query engine pods ran the run's set
+    (``provenance.deps.pods_checked`` and ``pod_mismatches``). True when the
+    run must fail: a pod on another set, or pods that could not be read."""
     from lakebench.deps import runtime
 
     if run is None or handle is None or not (run.provenance or {}).get("deps"):
-        return
-    run.provenance["deps"].update(runtime.check_pods(cfg, handle, run.start_time))
+        return False
+    result = runtime.check_pods(cfg, handle, run.start_time)
+    run.provenance["deps"].update(result)
+    if result.get("pods_checked") is None:
+        print_warning(f"Query engine dependency set not checked: {result.get('pods_check_error')}")
+    elif result.get("pod_mismatches"):
+        print_error(
+            "Pods ran different dependency sets: "
+            + ", ".join(f"{p['pod']} on {p['pinset'][:12]}" for p in result["pod_mismatches"])
+        )
+    return bool(result.get("pod_mismatches")) or result.get("pods_checked") is None

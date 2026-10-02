@@ -338,6 +338,12 @@ OWNED_SPARK_CONF_KEYS: frozenset[str] = frozenset(
         "spark.jars.ivySettings",
         "spark.driver.extraClassPath",
         "spark.executor.extraClassPath",
+        # They change which of two jars' classes load first, which the
+        # pinset's jar order describes, or replace the pod templates.
+        "spark.driver.userClassPathFirst",
+        "spark.executor.userClassPathFirst",
+        "spark.kubernetes.driver.podTemplateFile",
+        "spark.kubernetes.executor.podTemplateFile",
     }
 )
 
@@ -410,11 +416,17 @@ def consumer_context(handle: DepsHandle) -> dict[str, Any]:
         "deps_manifest_configmap": MANIFEST_CONFIGMAP,
         "deps_tools_mount": TOOLS_MOUNT,
         "deps_manifest_mount": MANIFEST_MOUNT,
-        # The image's jars first, as the jobs' parent-first loader sees them,
-        # then the set in its jar order (an overlapping image jar wins, as in
-        # the jobs; the set's own duplicates resolve in jar order).
+        # The conf dir and the image's jars first, as the jobs' parent-first
+        # loader sees them, then the set in its jar order (an overlapping image
+        # jar wins, as in the jobs; the set's own duplicates resolve in jar
+        # order). The launcher drops its own later conf and jars entries as
+        # duplicates.
         "deps_thrift_classpath": ":".join(
-            ["/opt/spark/jars/*", *(f"/extra-jars/{f}" for f in handle.manifest["jar_order"])]
+            [
+                "/opt/spark/conf",
+                "/opt/spark/jars/*",
+                *(f"/extra-jars/{f}" for f in handle.manifest["jar_order"]),
+            ]
         ),
     }
 

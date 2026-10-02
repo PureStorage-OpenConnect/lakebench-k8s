@@ -94,9 +94,6 @@ spec:
           env:
             - name: SPARK_HOME
               value: /opt/spark
-            # The launcher logs the java command line, classpath included.
-            - name: SPARK_PRINT_LAUNCH_COMMAND
-              value: "1"
             - name: SPARK_USER_NAME
               value: spark
             - name: AWS_REGION
@@ -118,6 +115,7 @@ spec:
             - -c
             - |
               mkdir -p /tmp/spark-local /tmp/spark-warehouse
+              echo "driver classpath: {{ deps_thrift_classpath }}"
               /opt/spark/bin/spark-submit \
                 --class org.apache.spark.sql.hive.thriftserver.HiveThriftServer2 \
                 --deploy-mode client \

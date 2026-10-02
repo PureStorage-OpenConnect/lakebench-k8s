@@ -273,14 +273,24 @@ def reference_score(
     whose precision/recall diverges sharply from the reference is scoring
     against label knowledge it should not have. The job installs scikit-learn
     and its pinned dependencies for the GBT half in an init container on each
-    run; if that is unavailable the leakage gate still runs and the model
-    verdict is reported as no_sklearn.
+    run, from the deployment's dependency set (each wheel hash-checked); if
+    that install fails after its retries, the driver does not start and the
+    job fails. The dependency set's pinset is printed with the submission.
     """
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
     cfg = _load_config(config)
     console.print("[bold]lakebench financial reference-score[/bold]")
     job_manager = _get_job_manager(cfg)
+    deps = job_manager.deps
+    console.print(
+        f"  dependency set {deps.pinset_sha256} (request {deps.request_sha256}); "
+        "reference wheels: "
+        + ", ".join(
+            f"{e['file']}@{e['sha256'][:12]}"
+            for e in deps.manifest["groups"].get("py-reference", [])
+        )
+    )
     status = job_manager.submit_job(
         JobType.SCORE_FINANCIAL_REFERENCE,
         arguments=[

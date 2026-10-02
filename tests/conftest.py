@@ -298,7 +298,7 @@ def _offline_deps_set(request, monkeypatch):
     from lakebench.modules.pipeline_engines.spark import job
 
     # The CLI's run-start check reads the cluster; CLI tests run offline.
-    monkeypatch.setattr(runtime, "load_handle", lambda cfg, k8s: placeholder_handle(cfg))
+    monkeypatch.setattr(runtime, "load_handle", lambda cfg, k8s, **kw: placeholder_handle(cfg))
     monkeypatch.setattr(
         runtime, "check_pods", lambda cfg, handle, since: {"pods_checked": 0, "pod_mismatches": []}
     )

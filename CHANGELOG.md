@@ -21,9 +21,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (4) is live. Redeploy once after upgrading.
 - `spark.conf` may no longer set `spark.jars`, `spark.submit.pyFiles`,
   `spark.jars.packages`, `spark.jars.repositories`, `spark.jars.ivy`,
-  `spark.jars.ivySettings` or `spark.driver.extraClassPath` /
-  `spark.executor.extraClassPath`: Lakebench sets the jars from the verified
-  set, and a run that sets one is refused when its manifest is built.
+  `spark.jars.ivySettings`, `spark.driver.extraClassPath` /
+  `spark.executor.extraClassPath`, `spark.driver.userClassPathFirst` /
+  `spark.executor.userClassPathFirst` or the pod template file keys:
+  Lakebench sets the jars and their order from the verified set. Such a
+  config is refused at load (exit 2).
 
 ### Added
 - **Each deployment gets a dependency server.** `deploy` runs a new
@@ -163,11 +165,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   strategy, and deploy waits until their pod runs the deployment's set.
   Every job, Thrift and DuckDB pod carries `lakebench.io/deps-set`.
 - A run records `provenance.deps` (the set's pinset, request, repositories,
-  files and Python versions) and, at the end, checks the pinset of this
-  run's driver pods and the query engine pods (`pods_checked`,
-  `pod_mismatches`); a mismatch fails the verdict with "pods ran different
-  dependency sets". `benchmark` and `query` do not add results to the latest
-  run when the query engine now runs another set than that run recorded.
+  files and Python versions) and, at the end, checks the pinset the Spark
+  Thrift or DuckDB pods run (`pods_checked`, `pod_mismatches`; the jobs are
+  all built from the run's one set). A mismatch, or pods that could not be
+  read, fails the run (exit 1, "pods ran different dependency sets").
+  `benchmark` and `query` say before they start, and do not add results to
+  the latest run, when the query engine now runs another set than that run
+  recorded or its set cannot be read.
+- Every Spark driver waits (up to 2 minutes) in an `lb-deps-ready` init
+  container until the dependency server serves its set, so a server restart
+  delays a job instead of failing it, and a registered look is not lost to
+  one. The Python path of a job changes: with `--packages` every resolved jar
+  was on `sys.path` and the executors' Python path; now only the Delta jar is
+  (through `spark.submit.pyFiles`), the only one that ships Python, so imports
+  are the same and Python workers start with a shorter path.
 - A Spark stage that fails fetching a jar from the dependency server says so
   (not served, server error, unreachable), and a failed driver init
   container is named in the stage failure.

@@ -45,7 +45,8 @@ CA-import container when `platform.storage.s3.ca_cert` is set):
 ### Health checks
 
 - **Readiness/Liveness**: TCP socket probe on port 10000
-- Startup can take 3-5 minutes due to JAR downloads and JVM initialization
+- Startup is the jar copy from the in-namespace dependency server plus JVM
+  initialization (not measured on this release yet)
 
 ### Cache behavior
 
@@ -92,9 +93,9 @@ architecture:
 
 - **Single pod.** Runs as a driver-only process with no executor distribution.
   All query work happens in one JVM.
-- **Startup time.** About a minute: the jars come from the in-namespace
-  dependency server, then the JVM warms up. A new dependency set (a changed
-  image or format version) restarts the pod once.
+- **Startup time.** The jars come from the in-namespace dependency server,
+  then the JVM warms up. A new dependency set (a changed image or format
+  version) restarts the pod once.
 - **No concurrent query streams.** Benchmark throughput mode (concurrent
   streams) runs serially through the single Thrift connection.
 - **Shared image with pipeline.** Uses the same `apache/spark` image as

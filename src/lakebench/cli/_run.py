@@ -1931,7 +1931,7 @@ def run(
 
     # Before anything is recorded: the jobs need the deployment's verified
     # dependency set; a refusal exits 3 or 4 with no run saved.
-    deps_handle = load_deps_handle(cfg)
+    deps_handle = load_deps_handle(cfg, config_file)
 
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
     console.print()
@@ -3132,6 +3132,11 @@ def run(
         _pipeline_exit_code = ExitCode.PREREQUISITE
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    except BaseException:
+        # Anything else that ends the pipeline (a manifest that cannot be
+        # built, an API error, Ctrl-C) records a failed run, never a pass.
+        pipeline_success = False
+        raise
     finally:
         # -- Phase 7/7: Results ----------------------------------------------------
         console.print()
@@ -3161,7 +3166,8 @@ def run(
             console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
 
         # Always save metrics, even on failure
-        record_deps_pods(collector.current_run, cfg, deps_handle)
+        if record_deps_pods(collector.current_run, cfg, deps_handle):
+            pipeline_success = False
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
             # LB-123: attach folded-in financial recall scoring (if any) so it

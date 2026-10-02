@@ -2457,6 +2457,20 @@ class SparkConfOverrides(ConfigModel):
         }
     )
 
+    @field_validator("conf")
+    @classmethod
+    def _no_lakebench_owned_keys(cls, value: dict[str, str]) -> dict[str, str]:
+        from lakebench.deps.manifest import OWNED_SPARK_CONF_KEYS
+
+        owned = sorted(OWNED_SPARK_CONF_KEYS & set(value))
+        if owned:
+            raise ValueError(
+                f"spark.conf sets {', '.join(owned)}: Lakebench sets these from the "
+                "deployment's verified dependency set (the jars every job loads and their "
+                "order); remove them"
+            )
+        return value
+
 
 # =============================================================================
 # Root Configuration

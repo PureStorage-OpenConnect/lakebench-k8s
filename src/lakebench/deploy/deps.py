@@ -939,8 +939,24 @@ def consumer_context(engine: DeploymentEngine, what: str) -> dict[str, Any]:
     return {**engine.context, **m.consumer_context(handle)}
 
 
-def _consumer_init_failure(core: Any, namespace: str, pod: Any) -> str | None:
-    """A consumer pod's failed lb-deps-fetch, with its LB_DEPS_ERROR line."""
+def live_pod(pod: Any) -> bool:
+    """Not terminating and not finished (an evicted pod stays listed in
+    phase Failed until it is garbage collected)."""
+    phase = pod.status.phase if pod.status is not None else None
+    return not pod.metadata.deletion_timestamp and phase not in ("Failed", "Succeeded")
+
+
+# A consumer fetch failure kubelet's own retry can fix: the server was
+# unreachable or restarting (exit 3), or the pod mounted the manifest
+# ConfigMap a moment before the deploy rewrote it.
+_RETRYABLE_FETCH = ("does not name the manifest's pinset", "does not hash to its pinset")
+
+
+def _consumer_init_failure(
+    core: Any, namespace: str, pod: Any, *, terminal_only: bool = False
+) -> str | None:
+    """A consumer pod's failed lb-deps-fetch, with its LB_DEPS_ERROR line.
+    With ``terminal_only``, a failure kubelet's retry may fix is None."""
     for cs in (pod.status.init_container_statuses or []) if pod.status is not None else []:
         term = DependencyServerDeployer._failed_termination(cs)
         if term is None:
@@ -961,8 +977,35 @@ def _consumer_init_failure(core: Any, namespace: str, pod: Any) -> str | None:
             log = f"(log unavailable: {e})"
         lines = [ln.strip() for ln in log.splitlines() if ln.strip().startswith("LB_DEPS_ERROR")]
         detail = lines[-1] if lines else (log.strip().splitlines() or ["no log"])[-1]
+        retryable = term.exit_code == LB_DEPS_EXIT["missing"] or any(
+            r in detail for r in _RETRYABLE_FETCH
+        )
+        if terminal_only and retryable:
+            continue
         return f"{pod.metadata.name} init container {cs.name} exited {term.exit_code}: {detail}"
     return None
+
+
+def _delete_stale_consumer_pods(core: Any, namespace: str, selector: str, pinset: str) -> None:
+    """A re-run after a failed fetch gets a fresh pod at once, instead of
+    waiting out kubelet's back-off on the old one (same pinset, so the
+    unchanged template would not roll it)."""
+    for pod in core.list_namespaced_pod(namespace, label_selector=selector).items:
+        if pod.metadata.deletion_timestamp:
+            continue
+        if (pod.metadata.annotations or {}).get(m.POD_ANNOTATION_SET) != pinset:
+            continue
+        st = pod.status
+        evicted = st is not None and st.phase == "Failed"
+        inits = list(st.init_container_statuses or []) if st is not None else []
+        failing = any(DependencyServerDeployer._failed_termination(cs) for cs in inits)
+        if not (evicted or failing):
+            continue
+        try:
+            core.delete_namespaced_pod(pod.metadata.name, namespace)
+        except _api_exception() as e:
+            if _status(e) != 404:
+                raise
 
 
 def wait_consumer_rolled(
@@ -984,6 +1027,16 @@ def wait_consumer_rolled(
     apps = k8s_client.AppsV1Api()
     core = k8s_client.CoreV1Api()
     terminal: list[str] = []
+    if pinset is not None:
+        try:
+            dep0 = apps.read_namespaced_deployment(deployment, namespace)
+            labels0 = dep0.spec.selector.match_labels or {}
+            _delete_stale_consumer_pods(
+                core, namespace, ",".join(f"{k}={v}" for k, v in labels0.items()), pinset
+            )
+        except _api_exception() as e:
+            if _status(e) != 404:
+                raise
 
     def check() -> tuple[bool, str]:
         try:
@@ -1006,12 +1059,12 @@ def wait_consumer_rolled(
         pods = [
             p
             for p in core.list_namespaced_pod(namespace, label_selector=selector).items
-            if not p.metadata.deletion_timestamp
+            if live_pod(p)
         ]
         for pod in pods:
             ann = (pod.metadata.annotations or {}).get(m.POD_ANNOTATION_SET)
             if pinset is not None and ann == pinset:
-                failed = _consumer_init_failure(core, namespace, pod)
+                failed = _consumer_init_failure(core, namespace, pod, terminal_only=True)
                 if failed:
                     terminal.append(failed)
                     raise WaitTerminal(failed)

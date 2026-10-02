@@ -2743,7 +2743,7 @@ def _run_sustained(
 
     # Before anything is recorded: the streams need the deployment's verified
     # dependency set; a refusal exits 3 or 4 with no run saved.
-    deps_handle = load_deps_handle(cfg)
+    deps_handle = load_deps_handle(cfg, config_file)
 
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.RUN, {"sustained": True, "duration": run_duration})
@@ -3867,7 +3867,8 @@ def _run_sustained(
         raise
     finally:
         # Before the streams stop, while their drivers still exist.
-        record_deps_pods(collector.current_run, cfg, deps_handle)
+        if record_deps_pods(collector.current_run, cfg, deps_handle):
+            pipeline_success = False
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
         if _total_s3_objects is None:

@@ -86,7 +86,12 @@ The deployment engine follows this fixed sequence:
     (StatefulSet) with the connector configured to point at the catalog.
     Skipped unless `architecture.query_engine.type` is `trino`.
 12. **Spark Thrift Server** -- Deployed when the query engine is `spark-thrift`.
-13. **DuckDB** -- Deployed when the query engine is `duckdb`.
+    Its init container copies the dependency set from `lb-deps`, checking
+    each file's sha256; deploy waits until the rollout is complete and the
+    pod runs this deploy's set (Recreate: one pod at a time), and fails at
+    once on a fetch that cannot recover by retrying.
+13. **DuckDB** -- Deployed when the query engine is `duckdb`; its wheel and
+    extensions come from the dependency set the same way.
 14. **Observability** -- Only when `observability.enabled` is true.
     Prometheus and Grafana come from
     one shared `kube-prometheus-stack` release in the `lakebench-observability`

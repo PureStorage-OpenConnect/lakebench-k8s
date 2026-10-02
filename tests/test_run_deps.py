@@ -186,31 +186,41 @@ def test_run_refuses_thrift_on_old_set(recording_k8s):
 
 
 def test_pod_check_lists_mismatches_and_records_failures(recording_k8s):
-    cfg = _cfg()
+    """The run-end check reads the query engine pods (the drivers carry the
+    run's own handle and cannot differ)."""
+    cfg = _cfg("hive-iceberg-spark-duckdb")
     h = m.placeholder_handle(cfg)
     recording_k8s.for_config(cfg)
     recording_k8s.add_namespace(NS)
-    for name, pinset in (("drv-ok", h.pinset_sha256), ("drv-old", "e" * 64)):
+    labels = {"app.kubernetes.io/component": "duckdb"}
+    recording_k8s.add(
+        "deployments",
+        {"metadata": {"name": "lakebench-duckdb"}, "spec": {"selector": {"matchLabels": labels}, "template": {}}},
+        namespace=NS,
+    )  # fmt: skip
+    for name, pinset in (("duck-ok", h.pinset_sha256), ("duck-old", "e" * 64)):
         recording_k8s.add(
             "pods",
-            {
-                "metadata": {
-                    "name": name,
-                    "labels": {
-                        "spark-role": "driver",
-                        "sparkoperator.k8s.io/app-name": "lakebench-x",
-                    },
-                    "annotations": {m.POD_ANNOTATION_SET: pinset},
-                }
-            },
+            {"metadata": {"name": name, "labels": labels, "annotations": {m.POD_ANNOTATION_SET: pinset}}},
             namespace=NS,
-        )
+        )  # fmt: skip
     out = runtime.check_pods(cfg, h, since=None)
     assert out["pods_checked"] == 2
-    assert [p["pod"] for p in out["pod_mismatches"]] == ["drv-old"]
+    assert [p["pod"] for p in out["pod_mismatches"]] == ["duck-old"]
     recording_k8s.fail("list", "pods", status=500)
     broken = runtime.check_pods(cfg, h, since=None)
     assert broken["pods_checked"] is None and broken["pods_check_error"]
+
+
+def test_an_unchecked_query_engine_fails_the_verdict():
+    from lakebench.metrics.verdict import compute_verdict
+
+    metrics = _pipeline_metrics()
+    metrics.provenance = {
+        "deps": {"pods_checked": None, "pods_check_error": "500", "pod_mismatches": []}
+    }
+    v = compute_verdict(metrics)
+    assert v.gates.get("deps") == "FAIL" and any("not checked" in r for r in v.reasons)
 
 
 def test_pod_set_mismatch_fails_verdict():

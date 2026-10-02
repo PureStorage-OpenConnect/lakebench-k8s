@@ -365,7 +365,13 @@ def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
     """A FAIL reason when a pod of the run ran another dependency set than
     the run recorded (``provenance.deps.pod_mismatches``)."""
     deps = (getattr(metrics, "provenance", None) or {}).get("deps")
-    mismatches = (deps or {}).get("pod_mismatches") if isinstance(deps, dict) else None
+    if not isinstance(deps, dict):
+        return None
+    if "pods_checked" in deps and deps["pods_checked"] is None and deps.get("pods_check_error"):
+        return (
+            f"query engine pods not checked for their dependency set ({deps['pods_check_error']})"
+        )
+    mismatches = deps.get("pod_mismatches")
     if not mismatches:
         return None
     pods = ", ".join(f"{p.get('pod')} on {str(p.get('pinset'))[:12]}" for p in mismatches[:5])

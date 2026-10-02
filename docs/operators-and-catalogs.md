@@ -29,7 +29,8 @@ lakebench admin install-spark-operator \
 ```
 
 `--controller-tmp-size` sets the sizeLimit of the controller's `/tmp`
-emptyDir, which holds spark-submit's Ivy jar cache. The default is 8Gi, the
+emptyDir, which holds spark-submit's Ivy jar cache for applications that set
+`spark.jars.packages` (Lakebench's own jobs set none since 1.7). The default is 8Gi, the
 floor is 4Gi, and an upgrade without the flag keeps a larger size already
 set. The command runs under the cluster lease, and an upgrade keeps the
 stored Helm values, including the watch list.
@@ -154,8 +155,13 @@ minor version -- see the Version Matrix below. Iceberg 1.11 needs Java 17, so
 with the default Iceberg version a Java 11 Spark 3.5 image falls back to
 Iceberg 1.10.1 with a warning; a java17 Spark 3.5 tag gets 1.11.0.
 
+The jars are resolved once at deploy by the deployment's dependency server
+(`lb-deps`) and named by URL, so the coordinates below are what it resolves:
+`org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1` and
+`org.apache.hadoop:hadoop-aws:3.3.4`.
+
 ```yaml
-spark.jars.packages: org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1,org.apache.hadoop:hadoop-aws:3.3.4
+spark.jars: http://lb-deps.<namespace>.svc.cluster.local:8080/sets/<pinset>/jars/org.apache.iceberg_iceberg-spark-runtime-3.5_2.12-1.10.1.jar,...
 spark.sql.catalog.lakehouse: org.apache.iceberg.spark.SparkCatalog
 spark.sql.catalog.lakehouse.type: hive
 spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
@@ -169,18 +175,18 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 |-----------|---------|--------|
 | Spark Operator | 2.5.1 | Kubeflow helm chart |
 | Apache Spark | 3.5.x / 4.0.x / 4.1.x (default image 4.0.2; 4.2 unsupported) | apache/spark image |
-| Iceberg | 1.11.0 (1.10.1 on a Java 11 Spark 3.5 image) | spark.jars.packages |
-| Delta Lake | 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 (none on 3.5) | spark.jars.packages |
+| Iceberg | 1.11.0 (1.10.1 on a Java 11 Spark 3.5 image) | resolved by lb-deps |
+| Delta Lake | 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 (none on 3.5) | resolved by lb-deps |
 | Apache Polaris | 1.6.0 | apache/polaris image |
 | Stackable Hive Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Commons Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Secret Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Listener Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Hive Metastore | 3.1.3 | Managed by Stackable |
-| Hadoop AWS | 3.3.4 / 3.4.1 / 3.4.2 (by Spark minor) | spark.jars.packages |
+| Hadoop AWS | 3.3.4 / 3.4.1 / 3.4.2 (by Spark minor) | resolved by lb-deps |
 | PostgreSQL | 17 | postgres:17 |
 | Trino | 483 | trinodb/trino image |
-| DuckDB | 1.5.5 | pip package in python:3.11-slim |
+| DuckDB | 1.5.5 | wheel resolved by lb-deps, run on python:3.11-slim |
 
 ## Stackable Installation
 

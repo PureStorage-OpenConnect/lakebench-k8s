@@ -1396,6 +1396,39 @@ class JobType(Enum):
     SCORE_FINANCIAL_REFERENCE = "score-financial-reference"
 
 
+def _deps_ready_init(cfg: LakebenchConfig, deps: Any) -> dict[str, Any]:
+    """A driver init container that waits (up to 2 min) until the
+    deployment's dependency server serves this job's set. The driver's jar
+    fetch does not retry, and a registered look runs once: a server that is
+    restarting delays the job instead of failing it, and a server on another
+    set fails it here with a clear line."""
+    from urllib.parse import urlsplit
+
+    from lakebench.deps.manifest import PORT
+
+    ready = f"http://{urlsplit(deps.base_url).hostname}:{PORT}/ready"
+    script = (
+        "import sys, time, urllib.request\n"
+        "got = ''\n"
+        "for _ in range(60):\n"
+        "    try:\n"
+        f"        got = urllib.request.urlopen('{ready}', timeout=5).read().decode()\n"
+        f"        if got == '{deps.pinset_sha256}':\n"
+        "            sys.exit(0)\n"
+        "    except Exception as e:\n"
+        "        got = str(e)\n"
+        "    time.sleep(2)\n"
+        f"sys.exit('LB_DEPS_ERROR lb-deps does not serve set {deps.pinset_sha256}: ' + got)\n"
+    )
+    return {
+        "name": "lb-deps-ready",
+        "image": cfg.images.spark,
+        "imagePullPolicy": cfg.images.pull_policy.value,
+        "securityContext": {"runAsUser": 185, "runAsGroup": 185},
+        "command": ["python3", "-c", script],
+    }
+
+
 # Jobs whose driver installs the reference wheels (py-reference group) from
 # the deployment's dependency set into REFERENCE_PY_DEPS_DIR.
 REFERENCE_SET_JOB_TYPES: tuple[JobType, ...] = (JobType.SCORE_FINANCIAL_REFERENCE,)
@@ -1555,12 +1588,15 @@ class SparkJobManager:
             Initial JobStatus
         """
         job_name = f"lakebench-{job_type.value}"
-        if self.deps is None:
-            # Before the delete: a missing set must not cost the previous
-            # application its record.
-            from lakebench.deps.manifest import DepsSetMissing
-
-            raise DepsSetMissing(f"submit {job_name}")
+        # Built before the delete: a manifest that cannot be built (no
+        # verified set, a refused key) must not cost the previous application
+        # its record.
+        manifest = self._build_manifest(
+            job_type,
+            extra_conf,
+            cycle_env=cycle_env,
+            arguments=arguments,
+        )
         # Delete existing job if present
         self._delete_job(job_name)
         # A later stage is not submitted on scripts other than the ones this
@@ -1570,14 +1606,6 @@ class SparkJobManager:
         if changed:
             logger.error("%s: %s", job_name, changed)
             return JobStatus(name=job_name, state=JobState.FAILED, message=changed)
-
-        # Build SparkApplication manifest
-        manifest = self._build_manifest(
-            job_type,
-            extra_conf,
-            cycle_env=cycle_env,
-            arguments=arguments,
-        )
 
         # Apply manifest
         from kubernetes import client as k8s_client
@@ -2329,7 +2357,7 @@ class SparkJobManager:
                     # into java.io.tmpdir; bounded as the Ivy cache it replaces.
                     {"name": "lb-deps-dl", "emptyDir": {"sizeLimit": "5Gi"}},
                 ],
-                "initContainers": [],
+                "initContainers": [_deps_ready_init(cfg, deps)],
                 "containers": [
                     {
                         "name": "spark-kubernetes-driver",
@@ -2465,8 +2493,6 @@ class SparkJobManager:
             )
             for container in driver_pod_template["spec"]["containers"]:
                 container["volumeMounts"] = [*container["volumeMounts"], _deps_mount]
-        if not driver_pod_template["spec"]["initContainers"]:
-            del driver_pod_template["spec"]["initContainers"]
 
         # Check for scratch storage (Portworx) configuration
         scratch = cfg.platform.storage.scratch

@@ -36,8 +36,16 @@ REDEPLOY = "run `lakebench deploy {config}` (it resolves and serves the set), th
 QUERY_ENGINE_DEPLOYMENTS = {"spark-thrift": "lakebench-spark-thrift", "duckdb": "lakebench-duckdb"}
 
 
+_CONFIG_PATH: list[str] = []
+
+
 def _fix(cfg: Any) -> str:
-    return REDEPLOY.format(config=f"<config for {cfg.name}>")
+    return REDEPLOY.format(config=_CONFIG_PATH[-1] if _CONFIG_PATH else "<config>")
+
+
+def _live(pod: Any) -> bool:
+    phase = pod.status.phase if pod.status is not None else None
+    return not pod.metadata.deletion_timestamp and phase not in ("Failed", "Succeeded")
 
 
 def _request_diff(deployed: dict[str, Any], current: DepsRequest) -> list[str]:
@@ -47,8 +55,31 @@ def _request_diff(deployed: dict[str, Any], current: DepsRequest) -> list[str]:
     return [k for k in sorted(set(deployed) | set(now)) if deployed.get(k) != now.get(k)]
 
 
-def load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
-    """The deployment's verified dependency set, or a typed refusal."""
+def load_handle(cfg: LakebenchConfig, k8s: Any, config_path: Any = None) -> m.DepsHandle:
+    """The deployment's verified dependency set, or a typed refusal. A
+    cluster read that fails is a refusal too (exit 4, named), never an
+    unclassified error."""
+    from lakebench.exit_codes import LakebenchError
+
+    _CONFIG_PATH[:] = [str(config_path)] if config_path else []
+    try:
+        return _load_handle(cfg, k8s)
+    except LakebenchError:
+        raise
+    except Exception as e:  # noqa: BLE001 -- an API or connection error, typed
+        status = getattr(e, "status", None)
+        reason = getattr(e, "reason", None) or type(e).__name__
+        raise PrerequisiteError(
+            "cannot read the deployment's dependency set",
+            why=f"{status} {reason}".strip() if status else f"{reason}: {str(e)[:200]}",
+            next="check the kube-context and that you may read pods, ConfigMaps, "
+            "Deployments and the namespace in it",
+            where=f"namespace {cfg.get_namespace()}",
+            path="run.deps_stale",
+        ) from e
+
+
+def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
     from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
 
@@ -140,7 +171,15 @@ def load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
             path="run.deps_stale",
         )
     if server.metadata.uid != data.get("server-pod-uid"):
-        served = _served_pinset(k8s, ns, server, request.request_sha256)
+        served, err = _served_pinset(k8s, ns, server, request.request_sha256)
+        if served is None:
+            raise PrerequisiteError(
+                f"cannot read the set the restarted dependency server {server.metadata.name} serves",
+                why=err,
+                next=f"check that you may exec into pods in {ns}, or {_fix(cfg)}",
+                where=where,
+                path="run.deps_stale",
+            )
         if served != pinset:
             raise SafetyRefusal(
                 "the dependency server was replaced and serves another set",
@@ -192,19 +231,20 @@ def _ready_server_pod(core: Any, ns: str, request_sha: str) -> Any | None:
     return None
 
 
-def _served_pinset(k8s: Any, ns: str, pod: Any, request_sha: str) -> str | None:
-    """The pinset a replaced server pod verified, recomputed from its entries."""
+def _served_pinset(k8s: Any, ns: str, pod: Any, request_sha: str) -> tuple[str | None, str]:
+    """The pinset a replaced server pod verified, recomputed from its
+    entries, or None with why it could not be read."""
     cmd = ["python3", f"{m.TOOLS_MOUNT}/lb_deps.py", "show", "--request", request_sha]
-    rc, out, _err = k8s.exec_in_pod(
+    rc, out, err = k8s.exec_in_pod(
         pod.metadata.name, cmd, namespace=ns, container=m.SERVE_CONTAINER, timeout=120
     )
     if rc != 0:
-        return None
+        return None, f"lb_deps.py show exited {rc}: {(err or out).strip()[:300]}"
     try:
         shown = json.loads(out)
-        return pinset_sha256(shown["groups"], shown["jar_order"])
-    except (KeyError, TypeError, ValueError):
-        return None
+        return pinset_sha256(shown["groups"], shown["jar_order"]), ""
+    except (KeyError, TypeError, ValueError) as e:
+        return None, f"lb_deps.py show printed no manifest: {e}"
 
 
 def _consumer_mismatches(core: Any, ns: str, cfg: Any, pinset: str) -> list[dict[str, str]]:
@@ -213,13 +253,25 @@ def _consumer_mismatches(core: Any, ns: str, cfg: Any, pinset: str) -> list[dict
     if name is None:
         return []
     from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
 
-    dep = k8s_client.AppsV1Api().read_namespaced_deployment(name, ns)
+    try:
+        dep = k8s_client.AppsV1Api().read_namespaced_deployment(name, ns)
+    except ApiException as e:
+        if e.status == 404:
+            raise PrerequisiteError(
+                f"the deployment's query engine ({name}) is missing",
+                why="the last deploy stopped after its dependency server step",
+                next=_fix(cfg),
+                where=f"namespace {ns}",
+                path="run.deps_stale",
+            ) from e
+        raise
     labels = dep.spec.selector.match_labels or {}
     selector = ",".join(f"{k}={v}" for k, v in labels.items())
     out = []
     for pod in core.list_namespaced_pod(ns, label_selector=selector).items:
-        if pod.metadata.deletion_timestamp:
+        if not _live(pod):
             continue
         got = (pod.metadata.annotations or {}).get(m.POD_ANNOTATION_SET) or "none"
         if got != pinset:
@@ -228,42 +280,27 @@ def _consumer_mismatches(core: Any, ns: str, cfg: Any, pinset: str) -> list[dict
 
 
 def pods_on_sets(core: Any, ns: str, cfg: Any, since: Any = None) -> list[dict[str, str]]:
-    """Every pod of this deployment that names a dependency set: this run's
-    Spark drivers (created at or after ``since``) and the query engine pods.
-    For the run-end check (``provenance.deps.pods_checked``)."""
-    out = []
-    for pod in core.list_namespaced_pod(ns, label_selector="spark-role=driver").items:
-        app = (pod.metadata.labels or {}).get("sparkoperator.k8s.io/app-name", "")
-        if not app.startswith("lakebench-"):
-            continue
-        created = pod.metadata.creation_timestamp
-        if since is not None and created is not None and created < since:
-            continue
-        out.append(
-            {
-                "pod": pod.metadata.name,
-                "role": "spark-driver",
-                "pinset": (pod.metadata.annotations or {}).get(m.POD_ANNOTATION_SET) or "none",
-            }
-        )
+    """The query engine pods (Spark Thrift, DuckDB) with the set each names,
+    for the run-end check. The Spark drivers are not listed: every job of a
+    run is built from the run's one handle, so their annotation cannot
+    differ; the long-lived query engine pods can (a redeploy mid-run)."""
     name = QUERY_ENGINE_DEPLOYMENTS.get(cfg.architecture.query_engine.type.value)
-    if name is not None:
-        from kubernetes import client as k8s_client
+    if name is None:
+        return []
+    from kubernetes import client as k8s_client
 
-        dep = k8s_client.AppsV1Api().read_namespaced_deployment(name, ns)
-        labels = dep.spec.selector.match_labels or {}
-        selector = ",".join(f"{k}={v}" for k, v in labels.items())
-        for pod in core.list_namespaced_pod(ns, label_selector=selector).items:
-            if pod.metadata.deletion_timestamp:
-                continue
-            out.append(
-                {
-                    "pod": pod.metadata.name,
-                    "role": name,
-                    "pinset": (pod.metadata.annotations or {}).get(m.POD_ANNOTATION_SET) or "none",
-                }
-            )
-    return out
+    dep = k8s_client.AppsV1Api().read_namespaced_deployment(name, ns)
+    labels = dep.spec.selector.match_labels or {}
+    selector = ",".join(f"{k}={v}" for k, v in labels.items())
+    return [
+        {
+            "pod": pod.metadata.name,
+            "role": name,
+            "pinset": (pod.metadata.annotations or {}).get(m.POD_ANNOTATION_SET) or "none",
+        }
+        for pod in core.list_namespaced_pod(ns, label_selector=selector).items
+        if _live(pod)
+    ]
 
 
 def check_pods(cfg: Any, handle: m.DepsHandle, since: Any) -> dict[str, Any]:
@@ -285,19 +322,22 @@ def check_pods(cfg: Any, handle: m.DepsHandle, since: Any) -> dict[str, Any]:
 def attach_refusal(cfg: Any, run: Any) -> str | None:
     """Why ``benchmark`` or ``query`` must not add results to ``run``: the
     query engine's pods now run another dependency set than the run
-    recorded (a redeploy since). None when they match, when the run records
-    no set, or when the pods cannot be read (the caller warns)."""
+    recorded (a redeploy since), or cannot be read. None when they match or
+    the run records no set."""
     deps = ((getattr(run, "provenance", None) or {}).get("deps")) or {}
     recorded = deps.get("pinset_sha256") if isinstance(deps, dict) else None
     if not recorded or cfg.architecture.query_engine.type.value not in QUERY_ENGINE_DEPLOYMENTS:
         return None
     from kubernetes import client as k8s_client
 
+    from lakebench.k8s import get_k8s_client
+
     try:
+        # Loads the config's kube-context for the API class below.
+        get_k8s_client(context=cfg.platform.kubernetes.context, namespace=cfg.get_namespace())
         stale = _consumer_mismatches(k8s_client.CoreV1Api(), cfg.get_namespace(), cfg, recorded)
-    except Exception as e:  # noqa: BLE001 -- reported by the caller
-        logger.warning("cannot read the query engine's dependency set: %s", e)
-        return None
+    except Exception as e:  # noqa: BLE001 -- an unread set is not a matching one
+        return f"the query engine's dependency set could not be read ({str(e)[:200]})"
     if not stale:
         return None
     return (

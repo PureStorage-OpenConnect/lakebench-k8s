@@ -60,7 +60,7 @@ _DEPS_UNREACHABLE = re.compile(
     r"(java\.net\.ConnectException[^\n]*|java\.net\.UnknownHostException: lb-deps\.\S+"
     r"|java\.net\.SocketTimeoutException[^\n]*)"
 )
-_FETCH_FRAMES = ("doFetchFile", "DependencyUtils", "downloadFile", "lb-deps.")
+_FETCH_FRAMES = ("Utils$.doFetchFile", "Utils.doFetchFile", "DependencyUtils", "downloadFile")
 
 
 def classify_dependency_failure(log: str | None) -> str | None:
@@ -75,9 +75,13 @@ def classify_dependency_failure(log: str | None) -> str | None:
     m = _DEPS_SERVER_ERROR.search(text)
     if m:
         return f"dependency server error {m.group(1)} for {m.group(2)}"
-    m = _DEPS_UNREACHABLE.search(text)
-    if m and any(f in text for f in _FETCH_FRAMES):
-        return f"dependency server unreachable ({m.group(1).strip()[:200]})"
+    # A connection error counts only with Spark's fetch frames right below
+    # it (the stack of that exception), not anywhere in the tail.
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = _DEPS_UNREACHABLE.search(line)
+        if m and any(f in ln for ln in lines[i + 1 : i + 12] for f in _FETCH_FRAMES):
+            return f"dependency server unreachable ({m.group(1).strip()[:200]})"
     return None
 
 
