@@ -100,16 +100,19 @@ def test_built_conf_has_no_packages(name, cfg):
 def test_jar_order_is_the_manifest_order():
     cfg = make_config(recipe="hive-iceberg-spark-trino")
     h = m.placeholder_handle(cfg)
+    order = list(h.manifest["jar_order"])
+    rotated = order[1:] + order[:1]  # neither sorted nor reverse-sorted
     flipped = m.DepsHandle(
         h.pinset_sha256,
         h.request_sha256,
         h.base_url,
         "",
-        {**h.manifest, "jar_order": list(reversed(h.manifest["jar_order"]))},
+        {**h.manifest, "jar_order": rotated},
     )
     conf = _manager(cfg, flipped)._build_manifest(JobType.SILVER_BUILD)["spec"]["sparkConf"]
     names = [unquote(u.rsplit("/", 1)[1]) for u in conf["spark.jars"].split(",")]
-    assert names == list(reversed(h.manifest["jar_order"]))
+    assert names == rotated
+    assert rotated not in (sorted(rotated), sorted(rotated, reverse=True))
 
 
 @pytest.mark.parametrize("key", OWNED)
