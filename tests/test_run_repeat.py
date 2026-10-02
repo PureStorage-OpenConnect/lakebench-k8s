@@ -277,6 +277,8 @@ def test_series_config_loaded_once(tmp_path, monkeypatch):
     assert 5 not in iterations
     hashes = {r["config_snapshot"]["config_sha256"] for r in records}
     assert hashes == {manifest["config_sha256"]}
+    # Provenance copies the snapshot's hash at start_run: the loaded bytes too.
+    assert {r["provenance"]["config_sha256"] for r in records} == hashes
 
 
 def test_repeat_interrupt_stops_series(tmp_path, monkeypatch, sentinel_sigterm):
