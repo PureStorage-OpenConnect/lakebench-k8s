@@ -419,6 +419,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   since it now describes another benchmark.
 ### Fixed
 
+- `lakebench financial replay` runs on Spark 4.1 with Iceberg 1.11. It read
+  silver at the replay snapshot with the `snapshot-id` read option, which
+  Iceberg 1.11 removed, so it failed before running any rule; it now reads
+  with `VERSION AS OF`.
 - **The capacity check counts the Spark driver's memory overhead.**
   The driver pod requests its heap plus the overhead Spark on Kubernetes
   adds to a Python driver, 40% of the heap (12.8 GiB for the 32 GiB
