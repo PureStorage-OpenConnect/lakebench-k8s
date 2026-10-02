@@ -279,7 +279,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-generate` | | `false` | Skip datagen even with `--generate` |
 | `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. No effect without `--generate`. |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
-| `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace |
+| `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. On Delta the silver table's own log has the last word: the rebuild writes under an epoch above every one the table has used, even if the counter reads lower |
 | `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
 | `--deploy-only` | | `false` | Deploy infrastructure and exit |
 | `--generate-only` | | `false` | Deploy + generate data and exit |

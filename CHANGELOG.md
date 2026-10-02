@@ -206,6 +206,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   versions as before.
 ### Fixed
 
+- A multi-cycle Customer 360 batch run no longer loses silver rows when a
+  later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
+  tagged every row with that cycle, so an operator retry of the cycle, which
+  deletes the cycle's rows before appending them again, deleted the whole
+  rebuild and kept only that cycle, and the run exited 0. Rebuilt rows now
+  take the cycle in their bronze file's name. The rebuild, on Iceberg and
+  Delta, also reads only this run's bronze files (cycle 0 up to the current
+  cycle, the files bronze-verify counts), not the later cycles' files an
+  earlier run with more cycles left under the prefix. On Iceberg, a rebuild
+  whose own cycle's files are not named as datagen names them is refused.
+- Silver-build no longer rebuilds a populated table without
+  `--force-rebuild` when its check for existing rows fails. A failed read
+  counted as an empty table; it is now a refusal that names the error. On
+  Iceberg the check that the table exists also no longer counts any error
+  as "no table"; only a table the catalog does not have is missing.
+- A Delta Customer 360 multi-cycle batch run no longer loses cycles when the
+  deployment's rebuild epoch reads lower than one the silver table already
+  used: the `lakebench-silver-state` ConfigMap lost or recreated while the
+  table survived, or the epoch read at job submission falling back to 0.
+  Delta skipped the new run's cycles 1..N as already committed under the
+  old (txnAppId, txnVersion) keys, so silver held only the new cycle 0 and
+  the run exited 0. Silver-build now takes the epoch from the table's Delta
+  log: a full build writes under an epoch above every one in the log, and
+  each append continues the newest. An operator retry of a committed cycle
+  is still skipped, and now also when that cycle found no table and built
+  it from every cycle's files (the retry appended the cycle a second time).
+  The build refuses when it cannot read the log's transaction ids, and when
+  a later cycle of its epoch is already committed (a manual re-run of an
+  earlier cycle, which was a silent no-op). When the metastore is lost and
+  the table files are kept, cycle 0 on the Hive catalog already refused to
+  adopt the old Delta log; that is unchanged.
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one

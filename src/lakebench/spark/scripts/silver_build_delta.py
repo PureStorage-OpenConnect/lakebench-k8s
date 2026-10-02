@@ -13,6 +13,7 @@ Automatically selects the optimal processing strategy based on data size:
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -20,15 +21,20 @@ from enum import Enum
 
 from common import (
     SilverAbort,
+    _is_unity_catalog,
+    _s3_table_path,
     apply_silver_transformations_anchored,
     assert_progress,
     c360_bronze_path,
+    c360_bronze_run_path,
     cluster_by_partition,
     delta_batch_txn_options,
     env,
     files_added_by_last_commit,
     log,
+    one_line,
     path_size_gb_strict,
+    refuse_orphan_delta_log,
     resolve_data_clock,
     sample_key_profile,
     set_utc_session,
@@ -300,6 +306,82 @@ def rows_added_by_last_commit(spark, silver_tbl):
     return None
 
 
+_TXN_APP = "lb-silver-build"
+_TXN_APP_ID = re.compile(r"^lb-silver-build-rebuild-(\d+)$")
+
+
+def committed_epochs(spark, silver_tbl):
+    """{rebuild epoch: last committed cycle} from the table's Delta log.
+
+    Reads the SetTransaction entries Delta keeps for every txnAppId that has
+    written to the table (they survive overwrites, and nothing sets
+    delta.setTransactionRetentionDuration, so a table holds the keys of every
+    epoch that ever wrote to it; a key that did expire would not be skipped
+    by Delta either). Only this build's app ids
+    (``delta_batch_txn_options``) are returned. Any failure to read them
+    raises: without them a write cannot be shown not to be skipped.
+    """
+    try:
+        location = spark.sql(f"DESCRIBE DETAIL {silver_tbl}").collect()[0]["location"]
+        jvm = spark._jvm
+        snapshot = jvm.org.apache.spark.sql.delta.DeltaLog.forTableWithSnapshot(
+            spark._jsparkSession, location
+        )._2()
+        it = snapshot.transactions().iterator()
+        txns = {}
+        while it.hasNext():
+            kv = it.next()
+            txns[str(kv._1())] = int(kv._2())
+    except Exception as e:  # noqa: BLE001
+        raise SilverAbort(
+            f"silver-build: cannot read the Delta transaction ids of {silver_tbl} ({e}); "
+            "refusing to write, because a write whose id the log already holds is "
+            "skipped without error"
+        ) from e
+    out = {}
+    for app_id, version in txns.items():
+        m = _TXN_APP_ID.match(app_id)
+        if m:
+            out[int(m.group(1))] = version
+    return out
+
+
+def resolve_txn_epoch(committed, configured, appending, cycle):
+    """The rebuild epoch this cycle's Delta txnAppId uses.
+
+    The configured epoch (``LB_REBUILD_EPOCH``, from the
+    ``lakebench-silver-state`` ConfigMap) does not live as long as the table:
+    when it reads lower than an epoch the table's log already holds, Delta
+    skips this run's cycles as already committed. So the table decides:
+
+    - a full build (cycle 0, a --force-rebuild, or a later cycle that found
+      no table) takes an epoch above every epoch in the log, so its key is
+      new by construction and it starts the newest epoch;
+    - an append continues the newest epoch in the log, which is the one this
+      run's full build started (a full build over a log the catalog does not
+      know is refused, so it never resumes an old epoch), whatever the
+      configured epoch reads. Its own
+      cycle already committed there is an operator retry, which Delta skips
+      as intended; a later cycle already committed there cannot be this
+      run's (a manual re-run of an earlier cycle) and is refused.
+
+    ``committed`` maps epoch to last committed cycle (``committed_epochs``).
+    The configured epoch is used as is only by a table with no such keys.
+    """
+    newest = max(committed) if committed else None
+    if not appending:
+        return configured if newest is None else max(configured, newest + 1)
+    epoch = configured if newest is None else newest
+    last = committed.get(epoch)
+    if last is not None and last > cycle:
+        raise SilverAbort(
+            f"silver-build: epoch {epoch} of this table already committed cycle {last}, "
+            f"after this cycle ({cycle}); Delta would skip this write. Rebuild silver "
+            "with --force-rebuild"
+        )
+    return epoch
+
+
 def cluster_silver(spark, silver_df):
     """Cluster silver rows by interaction_date before the Delta write.
 
@@ -322,11 +404,11 @@ def log_silver_files(spark, silver_tbl):
 def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0, rebuild_epoch=0):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB.
 
-    B1: every append carries a (txnAppId, txnVersion) via
+    B1: every write carries a (txnAppId, txnVersion) via
     ``delta_batch_txn_options`` so Delta short-circuits a re-submission of
-    the same (rebuild_epoch, cycle) at the transaction log. The full
-    rebuild (cycle 0, non-append) does not use it: overwriteSchema/writes-
-    from-scratch semantically defeat idempotency-on-a-committed-log.
+    the same (rebuild_epoch, cycle) at the transaction log. ``rebuild_epoch``
+    comes from ``resolve_txn_epoch``: a full build's key is one the log has
+    never held, so only an append can be skipped, and only as a retry.
     """
     log("Executing SIMPLE strategy...")
 
@@ -345,7 +427,7 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0, 
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     if appending:
         log(f"Appending to existing table (incremental mode, cycle={cycle})")
-        txn_opts = delta_batch_txn_options("lb-silver-build", rebuild_epoch, cycle)
+        txn_opts = delta_batch_txn_options(_TXN_APP, rebuild_epoch, cycle)
         write_delta_table(
             spark, silver_df, silver_tbl, silver_bucket, mode="append", options=txn_opts
         )
@@ -354,6 +436,9 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0, 
         write_mode = "overwrite" if table_exists else "append"
         opts = {"overwriteSchema": "true", "compression": "snappy"}
         opts.update(_delta_write_props())
+        # The full build records its epoch in the log (a key no commit has
+        # used, resolve_txn_epoch), so the cycles that follow find it.
+        opts.update(delta_batch_txn_options(_TXN_APP, rebuild_epoch, cycle))
         write_delta_table(
             spark,
             silver_df,
@@ -402,7 +487,7 @@ def silver_streaming(
     log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
     if appending:
         log(f"Appending to existing table (incremental mode, cycle={cycle})")
-        txn_opts = delta_batch_txn_options("lb-silver-build", rebuild_epoch, cycle)
+        txn_opts = delta_batch_txn_options(_TXN_APP, rebuild_epoch, cycle)
         write_delta_table(
             spark, silver_df, silver_tbl, silver_bucket, mode="append", options=txn_opts
         )
@@ -411,6 +496,9 @@ def silver_streaming(
         write_mode = "overwrite" if table_exists else "append"
         opts = {"overwriteSchema": "true", "compression": "snappy"}
         opts.update(_delta_write_props())
+        # The full build records its epoch in the log (a key no commit has
+        # used, resolve_txn_epoch), so the cycles that follow find it.
+        opts.update(delta_batch_txn_options(_TXN_APP, rebuild_epoch, cycle))
         write_delta_table(
             spark,
             silver_df,
@@ -479,14 +567,20 @@ if incremental_mode:
 # B1: cycle number (0-based) and rebuild epoch (bumped by --force-rebuild
 # via the lakebench-silver-state ConfigMap). Both are threaded into
 # delta_batch_txn_options so Delta short-circuits duplicate commits at the
-# transaction log for the same (rebuild_epoch, cycle).
+# transaction log for the same (rebuild_epoch, cycle). The epoch written is
+# resolve_txn_epoch's, checked against the table's log below.
 _cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
 _rebuild_epoch = int(os.environ.get("LB_REBUILD_EPOCH", "0"))
 
-# Cycles 2+ of a multi-cycle run append only their own bronze files; a full
-# build reads every file. Profile, size and read the same path.
 appending = incremental_mode and _table_exists(spark, silver_tbl)
-bronze_source = c360_bronze_path(bronze_uri, appending)
+# Later cycles of a multi-cycle run append only their own bronze files. A
+# full build reads this run's files: every file in a single-cycle run, else
+# cycle 0's and cycles 1..k's (a later cycle that found no table), as
+# bronze-verify counts them, not files of later cycles an earlier run with
+# more cycles left under the prefix. Profile, size and read the same path.
+bronze_source = (
+    c360_bronze_path(bronze_uri, True) if appending else c360_bronze_run_path(bronze_uri)
+)
 log(f"Bronze source: {bronze_source}")
 
 # B1 full-rebuild epoch guard: cycle 0 with an already-populated silver
@@ -498,13 +592,42 @@ _force_rebuild = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
 if not appending and _table_exists(spark, silver_tbl):
     try:
         _has_rows = spark.table(silver_tbl).limit(1).count() > 0
-    except Exception:  # noqa: BLE001
-        _has_rows = False
+    except Exception as e:  # noqa: BLE001
+        # A read that fails says nothing about the rows: counting it as
+        # empty rebuilt a populated table without --force-rebuild.
+        if not _force_rebuild:
+            raise SilverAbort(
+                f"silver-build: cannot tell whether {silver_tbl} holds rows ({one_line(e)}); "
+                "refusing a full rebuild without --force-rebuild"
+            ) from e
+        _has_rows = True
     if _has_rows and not _force_rebuild:
         raise SilverAbort(
             f"silver-build: refusing full rebuild of populated {silver_tbl}; "
             "re-run with --force-rebuild to opt in"
         )
+
+# The ConfigMap epoch can read lower than one this table's log already holds
+# (the ConfigMap was lost or recreated while the table survived, or job.py's
+# read fell back to 0), and Delta would then skip this run's cycles as
+# committed: silver short, exit 0. The table's own log decides the epoch.
+if _is_unity_catalog() and not _table_exists(spark, silver_tbl):
+    # write_delta_table checks for a surviving log only on the Hive path;
+    # on Unity a build would append under a key the old log may hold.
+    refuse_orphan_delta_log(
+        spark, silver_tbl, _s3_table_path(silver_uri, silver_tbl.split(".", 1)[-1])
+    )
+_committed = committed_epochs(spark, silver_tbl) if _table_exists(spark, silver_tbl) else {}
+_txn_epoch = resolve_txn_epoch(_committed, _rebuild_epoch, appending, _cycle)
+log(
+    f"Rebuild epoch: {_txn_epoch} (configured {_rebuild_epoch}; "
+    f"epochs in the table log, with last cycle: {_committed or 'none'})"
+)
+if appending and _committed.get(_txn_epoch) == _cycle:
+    log(
+        f"Cycle {_cycle} is already committed under epoch {_txn_epoch}: "
+        "a retry of this cycle, which Delta skips"
+    )
 
 # Check for size override first (skip profiling entirely for faster startup)
 size_override = get_size_override(spark)
@@ -550,7 +673,7 @@ if strategy == SilverStrategy.SIMPLE:
         catalog,
         appending=appending,
         cycle=_cycle,
-        rebuild_epoch=_rebuild_epoch,
+        rebuild_epoch=_txn_epoch,
     )
 elif strategy == SilverStrategy.STREAMING:
     silver_count = silver_streaming(
@@ -561,7 +684,7 @@ elif strategy == SilverStrategy.STREAMING:
         profile,
         appending=appending,
         cycle=_cycle,
-        rebuild_epoch=_rebuild_epoch,
+        rebuild_epoch=_txn_epoch,
     )
 elif strategy == SilverStrategy.SALTED:
     # G1: SALTED is deferred to v1.7 (plan Block J). `get_strategy_override`
