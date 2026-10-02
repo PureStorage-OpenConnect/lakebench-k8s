@@ -65,7 +65,6 @@ from lakebench.s3 import test_s3_connectivity
 
 if TYPE_CHECKING:
     from lakebench.config.schema import LakebenchConfig
-    from lakebench.modules.pipeline_engines.spark.job import PeakRequirement
 
 logger = logging.getLogger(__name__)
 
@@ -1436,30 +1435,6 @@ def info_date_range(cfg: LakebenchConfig, scale_days: int) -> str:
     return f"{days} days ({start} to {end})"
 
 
-def info_peak_request(
-    cfg: LakebenchConfig, scale: float, sustained: bool
-) -> tuple[PeakRequirement, int, int, str]:
-    """Peak requested resources for ``info``: ``(peak, co_cores, co_gb, label)``.
-
-    ``peak`` comes from ``compute_peak_requirements()``, the single source
-    of truth ``run``'s capacity preflight also uses; the co-resident
-    request (query engine, catalog, Postgres, continuous datagen) comes
-    from the same preflight helper, so ``info`` and ``run`` cannot
-    disagree about how big a cluster the config needs. The caller applies
-    ``resolve_auto_sizing`` first, as ``run`` does. These are requested
-    resources, not measured utilisation.
-    """
-    from lakebench.cli._prerequisites import _co_resident_request
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-    mode = "sustained" if sustained else "batch"
-    raw_schema = getattr(cfg.architecture.workload, "schema_type", None)
-    schema = getattr(raw_schema, "value", raw_schema)
-    peak = compute_peak_requirements(scale, mode, schema)
-    co_cores, co_gb, co_label = _co_resident_request(cfg, sustained)
-    return peak, co_cores, co_gb, co_label
-
-
 @app.command(hidden=True, deprecated=True)
 def info(
     config_file: Annotated[
@@ -1597,25 +1572,16 @@ def info(
             ("Executors", ", ".join(executor_parts)),
         ]
 
-    # Peak requested resources: the single source of truth is
-    # compute_peak_requirements() (the same figure run's capacity
-    # preflight uses), plus the co-resident query engine / catalog pods.
-    peak, co_cores, co_gb, co_label = info_peak_request(cfg, scale, is_sustained)
+    # Peak requested resources from the one sizing source: the same
+    # plan_requirements() that config show, recommend and run's capacity
+    # preflight use. Offline, so batch datagen is before cluster scaling.
+    from lakebench.config.sizing import breakdown_text, floor_text, plan_requirements
+
+    plan = plan_requirements(cfg)
     lines += [
-        (
-            "Peak requested",
-            f"{peak.cpu_cores + co_cores} cores / {peak.memory_gb + co_gb} GB memory / "
-            f"{peak.scratch_gb} GB scratch",
-        ),
-        (
-            "  of which",
-            f"{peak.cpu_cores} cores / {peak.memory_gb} GB pipeline ({peak.driving_job}), "
-            f"{co_cores} cores / {co_gb} GB {co_label}",
-        ),
+        ("Peak requested", floor_text(plan)),
+        ("  of which", breakdown_text(plan)),
     ]
-    _overrides = (streaming_override_map if is_sustained else override_map).values()
-    if any(v is not None for v in _overrides):
-        lines.append(("", "peak uses profile executor counts; per-job overrides are not included"))
 
     lines += [
         ("S3 endpoint", s3.endpoint or "(not set)"),
@@ -1654,22 +1620,33 @@ def info(
             raise ValueError("Could not detect cluster capacity")
         cluster_cores = cap.total_cpu_millicores // 1000
         cluster_gb = cap.total_memory_bytes // (1024**3)
-        needed_cores = peak.cpu_cores + co_cores
-        needed_gb = peak.memory_gb + co_gb
+        # The run preflight's decision for run --generate: datagen and
+        # Trino sized against this cluster, as run sizes them. A plain batch
+        # run creates no datagen pod and is checked without one.
+        from lakebench.config.sizing import check_capacity
 
-        if cluster_cores >= needed_cores and cluster_gb >= needed_gb:
+        verdict = check_capacity(cfg, cap)
+        fitted = verdict.plan.floor
+        request = (
+            f"{cluster_cores} cores / {cluster_gb} GB allocatable; "
+            f"peak request {fitted.cpu_cores} cores / {fitted.memory_gb} GB on this cluster "
+            "(with datagen)"
+        )
+        if verdict.status == "fits":
+            console.print(f"  [green]Cluster OK:[/green] {esc(request)}")
+        elif verdict.status == "degraded":
+            capped = verdict.capped_request or fitted
             console.print(
-                f"  [green]Cluster OK:[/green] {esc(cluster_cores)} cores / {esc(cluster_gb)} GB "
-                f"allocatable; peak request {esc(needed_cores)} cores / {esc(needed_gb)} GB"
+                f"  [yellow]Cluster below the full request:[/yellow] {esc(request)}; runs degraded "
+                f"at ~{esc(capped.cpu_cores)} cores / {esc(capped.memory_gb)} GB with capped streams"
             )
         else:
-            console.print(
-                f"  [red]Cluster undersized:[/red] {esc(cluster_cores)} cores / {esc(cluster_gb)} GB "
-                f"allocatable; peak request {esc(needed_cores)} cores / {esc(needed_gb)} GB"
-            )
+            console.print(f"  [red]Cluster undersized:[/red] {esc(request)}")
             console.print(
                 "  [dim]Run 'lakebench config recommend' to find max feasible scale[/dim]"
             )
+        for note in (*verdict.plan.cuts, *verdict.warnings):
+            console.print(f"  [yellow]{esc(note)}[/yellow]")
     except Exception as e:
         logger.debug("Could not check cluster feasibility: %s", e)
 
@@ -2363,6 +2340,7 @@ def recommend(
         typer.Option(
             "--scale",
             "-s",
+            min=1,
             help="Target scale factor to check requirements for",
         ),
     ] = None,
@@ -2379,7 +2357,7 @@ def recommend(
         bool,
         typer.Option(
             "--slow-datagen",
-            help="Reduce datagen parallelism to fit smaller clusters (slower generation, same Spark resources).",
+            help="Ignored: datagen pods that do not fit queue, so datagen never limits the scale.",
         ),
     ] = False,
     mode: Annotated[
@@ -2403,416 +2381,42 @@ def recommend(
     - "I have cluster X -- what scale can I run?"
     - "I want to run scale X -- what cluster do I need?"
 
-    Without arguments, auto-detects connected cluster capacity and shows
-    the maximum feasible scale. Use --scale to check requirements for
-    a specific target (any scale from 1 to 100,000,000+ is supported).
-
-    Scale maps linearly to data volume: scale 1 = ~10 GB, scale 100 = ~1 TB,
-    scale 100,000 = ~1 PB.
+    Every figure comes from the one sizing source that ``run``'s capacity
+    preflight and ``config show`` use, for the default recipe
+    (hive-iceberg-spark-trino) of the workload and mode. Without
+    arguments it auto-detects the connected cluster and shows the largest
+    scale that fits, up to the workload's datagen ceiling. Use --scale to
+    see what one scale requests.
 
     Examples:
 
         lakebench recommend                     # auto-detect cluster, find max scale
         lakebench recommend --cores 64 --memory 256
         lakebench recommend --scale 100         # what do I need for scale 100?
-        lakebench recommend --scale 100000      # what do I need for 1 PB?
     """
-    from lakebench.config.scale import customer360_dimensions, full_compute_guidance
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-    from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
+    from lakebench.cli._recommend import recommend_impl
 
-    # Resolve --extended -> --slow-datagen
-    use_slow_datagen = slow_datagen or extended
     if extended:
         console.print("[yellow]--extended is deprecated, use --slow-datagen instead[/yellow]\n")
 
-    # Resolve pipeline mode
-    pipeline_mode = mode or "batch"
-    is_sustained = is_continuous_mode(pipeline_mode)
+    def _detect():
+        from lakebench.k8s.target import ClusterTarget
 
-    def format_data_size(gb: float) -> str:
-        """Format data size in human-readable units."""
-        if gb >= 1_000_000_000:  # 1 EB = 10^9 GB
-            return f"{gb / 1_000_000_000:.1f} EB"
-        if gb >= 1_000_000:  # 1 PB = 10^6 GB
-            return f"{gb / 1_000_000:.1f} PB"
-        if gb >= 1_000:
-            return f"{gb / 1_000:.1f} TB"
-        return f"{gb:.0f} GB"
+        target = ClusterTarget.current()
+        console.print(f"[dim]Cluster context: {esc(target.label)}[/dim]")
+        return get_k8s_client(target=target).get_cluster_capacity()
 
-    def _streaming_resources(scale: int) -> tuple[int, int]:
-        """Streaming cores and memory requested in sustained mode.
-
-        From compute_peak_requirements(), the single source of truth, so
-        executor memory overhead and drivers are counted (heap alone
-        under-reported the request).
-        """
-        peak = compute_peak_requirements(scale, "sustained", schema_type)
-        return peak.cpu_cores, peak.memory_gb
-
-    def _batch_spark_resources(scale: int, guidance) -> tuple[int, int]:
-        """Batch Spark cores and memory used for sizing: never below the peak request.
-
-        compute_guidance() is advisory and under-reported the request (8
-        cores at scale 1 against 36 requested by silver-build). The floor is
-        compute_peak_requirements(); above the executor cap the jobs request
-        no more, but guidance keeps growing, and it is kept as sizing
-        headroom so the max-scale search stays bounded. The output labels
-        the two figures separately.
-        """
-        peak = compute_peak_requirements(scale, "batch", schema_type)
-        g_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
-        g_mem = guidance.spark.recommended_executors * int(
-            guidance.spark.recommended_memory.rstrip("g")
-        )
-        return max(peak.cpu_cores, g_cores), max(peak.memory_gb, g_mem)
-
-    def _batch_spark_request(scale: int) -> tuple[int, int]:
-        peak = compute_peak_requirements(scale, "batch", schema_type)
-        return peak.cpu_cores, peak.memory_gb
-
-    def compute_cluster_requirements(scale: int) -> dict:
-        """Compute minimum cluster requirements for a given scale."""
-        from lakebench.config.autosizer import _parse_cpu_millicores
-
-        dims = customer360_dimensions(scale)
-        guidance = full_compute_guidance(scale)
-
-        # Datagen
-        datagen_cores = (
-            guidance.datagen.parallelism * _parse_cpu_millicores(guidance.datagen.cpu) // 1000
-        )
-        datagen_mem_gi = guidance.datagen.parallelism * int(
-            guidance.datagen.memory.rstrip("Gi").rstrip("gi")
-        )
-
-        # Trino (always running)
-        trino_cores = (
-            _parse_cpu_millicores(guidance.trino.coordinator_cpu) // 1000
-            + guidance.trino.worker_replicas
-            * _parse_cpu_millicores(guidance.trino.worker_cpu)
-            // 1000
-        )
-        trino_mem_gi = int(
-            guidance.trino.coordinator_memory.rstrip("Gi")
-        ) + guidance.trino.worker_replicas * int(guidance.trino.worker_memory.rstrip("Gi"))
-
-        # Infra overhead (Hive/Polaris, Postgres) ~4 cores, 8 Gi
-        infra_cores = 4
-        infra_mem_gi = 8
-
-        if is_sustained:
-            streaming_cores, streaming_mem = _streaming_resources(scale)
-            peak_cores = datagen_cores + streaming_cores + trino_cores + infra_cores
-            peak_mem = datagen_mem_gi + streaming_mem + trino_mem_gi + infra_mem_gi
-        else:
-            spark_cores, spark_mem_gi = _batch_spark_resources(scale, guidance)
-            peak_cores = max(spark_cores, datagen_cores) + trino_cores + infra_cores
-            peak_mem = max(spark_mem_gi, datagen_mem_gi) + trino_mem_gi + infra_mem_gi
-
-        # Add 15% headroom for system pods
-        total_cores = int(peak_cores * 1.15)
-        total_mem_gi = int(peak_mem * 1.15)
-
-        result = {
-            "scale": scale,
-            "data_gb": dims.approx_bronze_gb,
-            "tier": guidance.spark.tier_name,
-            "datagen_pods": guidance.datagen.parallelism,
-            "trino_workers": guidance.trino.worker_replicas,
-            "total_cores": total_cores,
-            "total_mem_gi": total_mem_gi,
-        }
-
-        if is_sustained:
-            streaming_cores, _ = _streaming_resources(scale)
-            result["streaming_executors"] = sum(
-                _scale_executor_count(_JOB_PROFILES[j], scale)
-                for j in ("bronze-ingest", "silver-stream", "gold-refresh")
-            )
-            result["streaming_cores"] = streaming_cores
-        else:
-            result["spark_cores"] = spark_cores
-            result["spark_mem_gi"] = spark_mem_gi
-            result["spark_req_cores"], result["spark_req_mem_gi"] = _batch_spark_request(scale)
-
-        return result
-
-    def is_feasible(scale: int, cores: int, mem_gb: int) -> bool:
-        reqs = compute_cluster_requirements(scale)
-        return cores >= reqs["total_cores"] and mem_gb >= reqs["total_mem_gi"]
-
-    def compute_slow_datagen_requirements(scale: int) -> dict:
-        dims = customer360_dimensions(scale)
-        guidance = full_compute_guidance(scale)
-
-        trino_cores = int(guidance.trino.coordinator_cpu) + guidance.trino.worker_replicas * int(
-            guidance.trino.worker_cpu
-        )
-        trino_mem_gi = int(
-            guidance.trino.coordinator_memory.rstrip("Gi")
-        ) + guidance.trino.worker_replicas * int(guidance.trino.worker_memory.rstrip("Gi"))
-
-        infra_cores = 4
-        infra_mem_gi = 8
-
-        if is_sustained:
-            streaming_cores, streaming_mem = _streaming_resources(scale)
-            total_cores = streaming_cores + trino_cores + infra_cores
-            total_mem_gi = streaming_mem + trino_mem_gi + infra_mem_gi
-        else:
-            spark_cores, spark_mem_gi = _batch_spark_resources(scale, guidance)
-            total_cores = spark_cores + trino_cores + infra_cores
-            total_mem_gi = spark_mem_gi + trino_mem_gi + infra_mem_gi
-
-        total_cores = int(total_cores * 1.15)
-        total_mem_gi = int(total_mem_gi * 1.15)
-
-        result = {
-            "scale": scale,
-            "data_gb": dims.approx_bronze_gb,
-            "tier": guidance.spark.tier_name,
-            "datagen_pods": guidance.datagen.parallelism,
-            "trino_workers": guidance.trino.worker_replicas,
-            "total_cores": total_cores,
-            "total_mem_gi": total_mem_gi,
-        }
-
-        if is_sustained:
-            streaming_cores, _ = _streaming_resources(scale)
-            result["streaming_executors"] = sum(
-                _scale_executor_count(_JOB_PROFILES[j], scale)
-                for j in ("bronze-ingest", "silver-stream", "gold-refresh")
-            )
-            result["streaming_cores"] = streaming_cores
-        else:
-            result["spark_cores"] = spark_cores
-            result["spark_mem_gi"] = spark_mem_gi
-            result["spark_req_cores"], result["spark_req_mem_gi"] = _batch_spark_request(scale)
-
-        return result
-
-    def is_feasible_slow_datagen(scale: int, cores: int, mem_gb: int) -> bool:
-        reqs = compute_slow_datagen_requirements(scale)
-        return cores >= reqs["total_cores"] and mem_gb >= reqs["total_mem_gi"]
-
-    def find_max_scale(cores: int, mem_gb: int, use_slow_datagen: bool = False) -> int:
-        check_fn = is_feasible_slow_datagen if use_slow_datagen else is_feasible
-        if not check_fn(1, cores, mem_gb):
-            return 0
-
-        lo, hi = 1, 100_000_000
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if check_fn(mid, cores, mem_gb):
-                lo = mid
-            else:
-                hi = mid - 1
-        return lo
-
-    # Case 1: User wants to know requirements for a specific scale
-    if target_scale is not None:
-        reqs = compute_cluster_requirements(target_scale)
-        dims = customer360_dimensions(target_scale)
-
-        mode_label = "continuous" if is_sustained else "batch"
-        if is_sustained:
-            workload_line = (
-                f"  Streaming:       {reqs['streaming_executors']} executors "
-                f"({reqs['streaming_cores']} cores)"
-            )
-        else:
-            workload_line = (
-                f"  Spark:           {reqs['spark_req_cores']} cores, "
-                f"{reqs['spark_req_mem_gi']} GB requested at peak"
-            )
-            if (reqs["spark_cores"], reqs["spark_mem_gi"]) != (
-                reqs["spark_req_cores"],
-                reqs["spark_req_mem_gi"],
-            ):
-                workload_line += (
-                    f"\n                   sized for {reqs['spark_cores']} cores, "
-                    f"{reqs['spark_mem_gi']} GB (headroom above the executor cap)"
-                )
-
-        console.print(
-            Panel(
-                f"[bold]Scale {target_scale:,}[/bold] ({esc(format_data_size(reqs['data_gb']))})\n\n"
-                f"[dim]Tier:[/dim]             {esc(reqs['tier'])}\n"
-                f"[dim]Rows:[/dim]             {dims.approx_rows:,}\n"
-                f"[dim]Mode:[/dim]             {esc(mode_label)}\n\n"
-                f"[yellow]Minimum Cluster Requirements:[/yellow]\n"
-                f"  CPU cores:       [bold]{reqs['total_cores']:,}[/bold]\n"
-                f"  Memory:          [bold]{reqs['total_mem_gi']:,} GB[/bold]\n\n"
-                f"[dim]Breakdown:[/dim]\n"
-                f"{esc(workload_line)}\n"
-                f"  Datagen:         {esc(reqs['datagen_pods'])} pods\n"
-                f"  Trino:           {esc(reqs['trino_workers'])} workers\n"
-                f"  + infra overhead",
-                title="Cluster Requirements",
-                expand=False,
-            )
-        )
-        return
-
-    # Case 2: Auto-detect cluster or use provided specs
-    detected_cores = cluster_cores
-    detected_mem = cluster_memory_gb
-    cluster_source = "user-provided"
-
-    if detected_cores is None or detected_mem is None:
-        try:
-            from lakebench.k8s.target import ClusterTarget
-
-            target = ClusterTarget.current()
-            console.print(f"[dim]Cluster context: {escape(target.label)}[/dim]")
-            k8s = get_k8s_client(target=target)
-            cap = k8s.get_cluster_capacity()
-            if cap is not None:
-                if detected_cores is None:
-                    detected_cores = cap.total_cpu_millicores // 1000
-                if detected_mem is None:
-                    detected_mem = int(cap.total_memory_bytes / (1024**3))
-                cluster_source = f"detected ({cap.node_count} nodes)"
-        except Exception as e:
-            console.print(f"[yellow]Could not detect cluster capacity: {esc(e)}[/yellow]")
-            console.print("[dim]Use --cores and --memory to specify manually[/dim]\n")
-
-    if detected_cores is None or detected_mem is None:
-        mode_label = "continuous" if is_sustained else "batch"
-        console.print(f"[bold]Cluster Sizing Reference[/bold] (mode: {esc(mode_label)})\n")
-        console.print(
-            "[dim]Tip: Connect to a cluster or use --cores/--memory for max scale calculation[/dim]\n"
-        )
-        console.print("[dim]Use --scale N to see requirements for any specific scale[/dim]\n")
-
-        table = Table(title="Common Scale Points")
-        table.add_column("Scale", justify="right", style="cyan")
-        table.add_column("Data Size", justify="right")
-        table.add_column("Min Cores", justify="right")
-        table.add_column("Min Memory", justify="right")
-
-        for scale in [1, 10, 100, 500, 1000, 10000, 100000]:
-            reqs = compute_cluster_requirements(scale)
-            table.add_row(
-                f"{scale:,}",
-                format_data_size(reqs["data_gb"]),
-                f"{reqs['total_cores']:,}",
-                f"{reqs['total_mem_gi']:,} GB",
-            )
-
-        console.print(table)
-        return
-
-    # Case 3: Find max feasible scale for this cluster
-    max_scale = find_max_scale(detected_cores, detected_mem, use_slow_datagen=use_slow_datagen)
-    max_scale_standard = find_max_scale(detected_cores, detected_mem, use_slow_datagen=False)
-    max_scale_slow = find_max_scale(detected_cores, detected_mem, use_slow_datagen=True)
-
-    mode_label = "continuous" if is_sustained else "batch"
-    console.print(f"[bold]Cluster Capacity[/bold] ({esc(cluster_source)}, mode: {esc(mode_label)})")
-    console.print(f"  CPU cores: [bold]{esc(detected_cores)}[/bold]")
-    console.print(f"  Memory:    [bold]{esc(detected_mem)} GB[/bold]\n")
-
-    if max_scale == 0:
-        console.print("[yellow]Cluster is below minimum requirements for scale 1.[/yellow]")
-        reqs = compute_cluster_requirements(1)
-        console.print(
-            f"[dim]Minimum for scale 1: {esc(reqs['total_cores'])} cores, {esc(reqs['total_mem_gi'])} GB RAM[/dim]"
-        )
-        return
-
-    # Show both datagen modes
-    std_reqs = compute_cluster_requirements(max_scale_standard)
-    slow_reqs = compute_slow_datagen_requirements(max_scale_slow)
-
-    if use_slow_datagen:
-        console.print(
-            "[bold yellow]Slow datagen:[/bold yellow] Datagen runs with reduced parallelism (slower generation, same compute resources)\n"
-        )
-        console.print(
-            f"[green]Maximum scale (slow datagen):[/green] [bold]{max_scale_slow:,}[/bold] ({esc(format_data_size(slow_reqs['data_gb']))})"
-        )
-        console.print(
-            f"[dim]Standard max:              {max_scale_standard:,} ({esc(format_data_size(std_reqs['data_gb']))})[/dim]\n"
-        )
-    else:
-        console.print(
-            f"[green]Maximum scale:[/green] [bold]{max_scale_standard:,}[/bold] ({esc(format_data_size(std_reqs['data_gb']))})"
-        )
-        if max_scale_slow > max_scale_standard:
-            console.print(
-                f"[dim]With --slow-datagen:        {max_scale_slow:,} ({esc(format_data_size(slow_reqs['data_gb']))})[/dim]"
-            )
-        console.print()
-
-    # Use appropriate requirements function based on datagen mode
-    req_fn = compute_slow_datagen_requirements if use_slow_datagen else compute_cluster_requirements
-    check_fn = is_feasible_slow_datagen if use_slow_datagen else is_feasible
-
-    # Build a cleaner table: only show FEASIBLE milestones + max + next infeasible tier
-    scale_points = []
-    milestones = [1, 10, 50, 100, 500, 1000, 5000, 10000, 50000, 100000]
-
-    for s in milestones:
-        if s < max_scale and check_fn(s, detected_cores, detected_mem):
-            scale_points.append(s)
-
-    scale_points.append(max_scale)
-
-    for s in milestones:
-        if s > max_scale:
-            scale_points.append(s)
-            break
-    if (
-        len(scale_points)
-        == len(
-            [s for s in milestones if s < max_scale and check_fn(s, detected_cores, detected_mem)]
-        )
-        + 1
-    ):
-        scale_points.append(max_scale * 2)
-
-    table = Table(title="Scale Options")
-    table.add_column("Scale", justify="right", style="cyan")
-    table.add_column("Data", justify="right")
-    table.add_column("Cores", justify="right")
-    table.add_column("Memory", justify="right")
-    table.add_column("Status")
-
-    for scale in scale_points:
-        reqs = req_fn(scale)
-        feasible = check_fn(scale, detected_cores, detected_mem)
-
-        if scale == max_scale:
-            status = "[green bold]<- MAX[/green bold]"
-        elif feasible:
-            status = "[green]OK[/green]"
-        else:
-            cores_need = max(0, reqs["total_cores"] - detected_cores)
-            mem_need = max(0, reqs["total_mem_gi"] - detected_mem)
-            parts = []
-            if cores_need > 0:
-                parts.append(f"+{cores_need:,} cores")
-            if mem_need > 0:
-                parts.append(f"+{mem_need:,} GB")
-            status = f"[red]needs {', '.join(parts)}[/red]"
-
-        table.add_row(
-            f"{scale:,}",
-            format_data_size(reqs["data_gb"]),
-            f"{reqs['total_cores']:,}",
-            f"{reqs['total_mem_gi']:,} GB",
-            status,
-        )
-
-    console.print(table)
-
-    # Show next steps
-    console.print()
-    if use_slow_datagen:
-        console.print("[dim]Slow datagen: generation runs slower to fit cluster resources[/dim]")
-    console.print(f"[dim]Next: lakebench init --scale {esc(max_scale)}[/dim]")
+    code = recommend_impl(
+        cluster_cores=cluster_cores,
+        cluster_memory_gb=cluster_memory_gb,
+        target_scale=target_scale,
+        slow_datagen=slow_datagen or extended,
+        mode=mode,
+        schema_type=schema_type,
+        detect_capacity=_detect,
+    )
+    if code:
+        raise typer.Exit(code)
 
 
 # =============================================================================
