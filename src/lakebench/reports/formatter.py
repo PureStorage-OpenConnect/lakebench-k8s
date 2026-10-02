@@ -50,6 +50,8 @@ def _cap_short_name(cap_line: str) -> str:
         # The bound line ("trickle: max_files_per_trigger 2 ...") and the
         # card label ("trickle 2 files per trigger; ...") both name the
         # trickle; the card keeps its sentence in the tooltip.
+        if "not shown to keep pace" in text:
+            return "trickle (not a capacity)"
         return "trickle (offered load, not capacity)"
     if "executor cap" in text:
         m = _re.search(r"executor cap\s+(\d+)", text)

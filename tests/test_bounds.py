@@ -454,3 +454,15 @@ def test_cli_rows_per_second_carries_the_note():
     m = sr.load_metrics("011043-e338c5")
     assert bounds.trickle_note(m) == " (BOUNDED BY trickle: offered load, not capacity)"
     assert bounds.trickle_note(sr.load_metrics("231711-6dd3bc")) == ""
+
+
+def test_card_tag_names_the_trickle_without_overclaiming():
+    from lakebench.reports.formatter import _cap_short_name
+
+    kept = bounds.trickle_label({"value": 2, "kept_pace": True})
+    unshown = bounds.trickle_label({"value": 2, "kept_pace": None})
+    assert _cap_short_name(kept) == "trickle (offered load, not capacity)"
+    assert _cap_short_name(unshown) == "trickle (not a capacity)"
+    assert _cap_short_name(bounds.trickle_line({"value": 2, "kept_pace": None})) == (
+        "trickle (not a capacity)"
+    )
