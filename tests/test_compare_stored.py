@@ -503,6 +503,20 @@ def test_equal_names_from_a_v16_state_refused(tmp_path: Path, monkeypatch) -> No
     assert sorted(str(p) for p in tmp_path.rglob("*")) == before  # no state written
 
 
+def test_the_side_that_holds_the_conflict_is_named(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    base = sr.load_record("5105a0")
+    runs = _runs(tmp_path, _with_id(base, "20260101-000000-000001"))
+    name = base["deployment_name"]
+    (tmp_path / "a.yaml").write_text(f"name: {name}\n")
+    (tmp_path / "c.yaml").write_text(f"name: {name}\n")
+    (tmp_path / "d.yaml").write_text(f"name: {name}\n# changed\n")
+    a = cm.resolve_side("A", "a.yaml", [runs])
+    b = cm.resolve_side("B", "c.yaml,d.yaml", [runs])
+    problem = cm.equal_name_problem(a, b)
+    assert problem is not None and problem.startswith("B lists c.yaml and d.yaml")
+
+
 def test_one_config_twice_or_byte_equal_copies_are_not_an_equal_name(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -458,25 +458,30 @@ def equal_name_problem(*sides: Side) -> str | None:
     """Why the config refs cannot all be used, or None. A
     deployment name is one deployment, so two configs whose contents differ
     and that resolve to one name are refused, on two sides or within one
-    (where the second config would silently add nothing: both resolve to
-    the same deployment's records). The same config given twice, or two
+    (where the second config adds nothing: both resolve to the same
+    deployment's records). The same config given twice, or two
     copies with equal bytes, is a repeat and passes. Run-id, run-dir and
-    series refs are exempt: one deployment changes config over time."""
+    series refs are exempt: one deployment changes config over time. Each
+    side is checked on its own first, so the message names the side that
+    holds the conflict."""
+    for side in sides:
+        first: dict[str, tuple[Path, str]] = {}
+        for path, name, sha in side.configs:
+            prior = first.setdefault(name, (path, sha))
+            if prior[1] != sha:
+                return (
+                    f"{side.label} lists {prior[0]} and {path}, which both resolve to {name}; "
+                    "a name is one deployment (pass one config, or its run ids)"
+                )
     seen: dict[str, tuple[str, Path, str]] = {}
     for side in sides:
         for path, name, sha in side.configs:
-            prior = seen.setdefault(name, (side.label, path, sha))
-            if prior[2] == sha:
-                continue
-            if prior[0] != side.label:
+            prior3 = seen.setdefault(name, (side.label, path, sha))
+            if prior3[2] != sha:
                 return (
-                    f"{prior[0]} and {side.label} both resolve to {name}; a name is one "
-                    f"deployment ({prior[1]} and {path} differ)"
+                    f"{prior3[0]} and {side.label} both resolve to {name}; a name is one "
+                    f"deployment ({prior3[1]} and {path} differ; pass run ids instead)"
                 )
-            return (
-                f"{side.label} lists {prior[1]} and {path}, which both resolve to {name}; "
-                "a name is one deployment"
-            )
     return None
 
 

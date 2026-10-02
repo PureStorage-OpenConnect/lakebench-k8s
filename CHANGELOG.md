@@ -88,7 +88,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (was 0), 12 NOT LIKE-FOR-LIKE and 13 CONFOUNDED (both were 0); 2 for a ref
   that resolves to no record, the same runs on both sides, an unreadable
   record or two configs with one name and different contents (on two
-  sides or within one; the same config twice is allowed). Every
+  sides or listed on one). Every
   verdict prints the one condition the pair is missing and, where one
   exists, the command that supplies it. Each score shows each side's median, range and n; no
   winner is named and no delta is coloured (the winner rule is not in this

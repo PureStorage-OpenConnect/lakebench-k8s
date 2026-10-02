@@ -119,7 +119,9 @@ written before the experiment block is not excluded: the pair is refused
 on it. Two sides that resolve to the same runs, or share a run, are
 refused, as are two configs with one deployment name and different
 contents, whether on two sides or listed on one ("a name is one
-deployment"). The same config given twice is allowed.
+deployment"). The same config, or a byte-equal copy, given twice is not an
+equal-name refusal; given as both sides it is the same runs, refused as
+such.
 
 **Verdicts.** The pair is decided by the comparability ladder over the
 passed members, and the exit code is the verdict:
