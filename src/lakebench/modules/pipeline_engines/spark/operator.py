@@ -41,10 +41,10 @@ class _DeploymentReadError(Exception):
 _WATCH_LIST_LOCK_TIMEOUT_S = 600
 # Waits after a shared mutation is committed (helm upgrade done, operator
 # restarted). They are bounded by their own timeout, never cut by the deploy
-# deadline (DEP-6): stopping half way would release the lease with the shared
+# deadline: stopping half way would release the lease with the shared
 # operator mid-restart and its watch list unverified, which every other
 # deployment then works against. Today only these bounds and the lease TTL
-# hold them; SD-12 adds a lease hold budget.
+# hold them; a lease hold budget is planned.
 _POST_UPGRADE_ROLLOUT_S = 180
 _POST_UPGRADE_RESTART_S = 120
 _POST_UPGRADE_READY_S = 120
@@ -1197,7 +1197,7 @@ class SparkOperatorManager:
             return None, "unlocked"
 
         # No shared mutation starts once the deploy deadline has passed, and
-        # the wait for the lease counts against it (DEP-6).
+        # the wait for the lease counts against it.
         deploy_deadline.check("the cluster lease for the Spark Operator watch list")
         lease_cm = cluster_lock(core_v1, timeout=deploy_deadline.clamp(_WATCH_LIST_LOCK_TIMEOUT_S))
         try:
@@ -1326,7 +1326,7 @@ class SparkOperatorManager:
             ns_set = ",".join(new_list)
 
             if _deadline_gate:
-                # Before the shared mutation, never after it (DEP-6).
+                # Before the shared mutation, never after it.
                 deploy_deadline.check("helm upgrade of the Spark Operator watch list")
 
             cmd = [
@@ -1732,7 +1732,7 @@ class SparkOperatorManager:
     def _rollout_status_after_upgrade(self) -> bool:
         """Wait for both operator Deployments to finish rolling out after a
         committed helm upgrade: bounded by _POST_UPGRADE_ROLLOUT_S, never cut
-        by the deploy deadline (DEP-6)."""
+        by the deploy deadline."""
         for deploy in (self.CONTROLLER_DEPLOYMENT, "spark-operator-webhook"):
             result = self._run(
                 [
@@ -1878,7 +1878,7 @@ class SparkOperatorManager:
             logger.info("OpenShift detected -- will assign anyuid SCC after install")
 
         # A fresh install or upgrade of the shared operator does not start
-        # after the deploy deadline (DEP-6).
+        # after the deploy deadline.
         deploy_deadline.check("helm install of the Spark Operator")
         try:
             # Add Helm repo

@@ -1,4 +1,4 @@
-"""The deploy timeout inside every wait (DEP-6, ch01 s8).
+"""The deploy timeout inside every wait.
 
 ``deploy_all`` used to check ``--timeout`` only between steps, while each
 wait inside a step kept its own timeout (Thrift 300 s, DuckDB 900 s, Polaris

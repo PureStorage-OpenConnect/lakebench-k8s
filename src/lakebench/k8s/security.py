@@ -208,16 +208,22 @@ def ensure_scc_rolebinding(
 
     # The authorizer reads RoleBindings from an informer cache on each
     # apiserver, so a fresh binding can take a moment to count. Poll before
-    # concluding the grant did not take effect.
-    deadline = time.monotonic() + SCC_VERIFY_TIMEOUT_S
+    # concluding the grant did not take effect, within the deploy deadline
+    # (the binding is this namespace's own, so cutting the poll is safe).
+    from lakebench.deploy import deadline as deploy_deadline
+
+    budget = deploy_deadline.clamp(SCC_VERIFY_TIMEOUT_S)
+    until = time.monotonic() + budget
     delay = 0.5
     while True:
         verdict = _sa_can_use_scc(authz_api, namespace, sa, scc)
-        if verdict is not False or time.monotonic() >= deadline:
+        if verdict is not False or time.monotonic() >= until:
             break
-        time.sleep(delay)
+        time.sleep(min(delay, max(0.0, until - time.monotonic())))
         delay = min(delay * 2, 2.0)
     if verdict is False:
+        if budget < SCC_VERIFY_TIMEOUT_S:
+            deploy_deadline.check(f"SCC {scc} grant to {namespace}/{sa} to take effect")
         raise SCCGrantError(
             f"{prefix}: RoleBinding {role} is in place but the SA still may not use SCC "
             f"{scc} (is ClusterRole {role} missing? OpenShift before 4.10 is not "

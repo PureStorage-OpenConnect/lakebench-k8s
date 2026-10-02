@@ -661,7 +661,7 @@ class DeploymentEngine:
             progress_callback: Optional callback for progress updates
                                (component, status, message)
             timeout: Global deployment timeout in seconds (0 = no timeout).
-                     Every wait inside a step is clamped to it (DEP-6); a wait
+                     Every wait inside a step is clamped to it; a wait
                      it cuts short fails the step with a message naming the
                      component and what it was waiting for. Helm and API
                      calls are not interrupted.
@@ -728,7 +728,7 @@ class DeploymentEngine:
             ("observability", "Deploying Observability Stack", observability.deploy),
         ]
 
-        # DEP-6: the deadline bounds every wait inside every step, not only
+        # The deadline bounds every wait inside every step, not only
         # the gaps between steps.
         with deploy_deadline.deploy_deadline(timeout):
             return self._run_steps(steps, progress_callback)

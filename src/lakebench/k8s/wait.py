@@ -76,7 +76,7 @@ def wait_for_condition(
         WaitResult with outcome
 
     Raises:
-        DeployTimeout: the deploy deadline (DEP-6), not ``timeout_seconds``,
+        DeployTimeout: the deploy deadline, not ``timeout_seconds``,
             ended the wait. Every ``wait_for_*`` here goes through this
             function, so each is bounded by ``lakebench deploy --timeout``.
     """
