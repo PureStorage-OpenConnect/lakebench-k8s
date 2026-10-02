@@ -1453,3 +1453,12 @@ def test_package_mode_validated(tmp_path):
     with pytest.raises(ReproduceError, match="disagrees"):
         _load_package(pkg("sustained", "batch"))
     _load_package(pkg("continuous", "sustained"))
+
+
+def test_config_error_text_hides_held_out_seeds(monkeypatch):
+    from lakebench.cli._reproduce import _redact_seed_text
+
+    _stub_looks(monkeypatch, [], {321})
+    _stub_protected(monkeypatch, {654: "robustness"})
+    out = _redact_seed_text("seed 654 is held out; seed 321 is listed as spent; scale 10")
+    assert "654" not in out and "321" not in out and "scale 10" in out
