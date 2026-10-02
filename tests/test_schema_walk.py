@@ -178,10 +178,12 @@ def reads(fn: ast.AST, owner: str | None, model: str, parent: str, leaf: str) ->
 
 @cache
 def _rendered_context_keys() -> frozenset[str]:
-    """Every identifier the Jinja templates use."""
+    """Every identifier inside a Jinja expression or statement in a template."""
     words: set[str] = set()
     for f in TEMPLATES.rglob("*.j2"):
-        words.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", f.read_text()))
+        for block in re.findall(r"\{\{(.*?)\}\}|\{%(.*?)%\}", f.read_text(), re.S):
+            for part in block:
+                words.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", part))
     return frozenset(words)
 
 

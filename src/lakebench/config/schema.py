@@ -2126,10 +2126,6 @@ def _drop_default_medallion(data: dict) -> dict:
     pipeline = data.get("pipeline")
     if not isinstance(pipeline, dict) or "medallion" not in pipeline:
         return data
-    if pipeline["medallion"] is None:  # "medallion:" with nothing under it
-        data = dict(data)
-        data["pipeline"] = {k: v for k, v in pipeline.items() if k != "medallion"}
-        return data
     workload = data.get("workload")
     schema = None
     if isinstance(workload, dict):
