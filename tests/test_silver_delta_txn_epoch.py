@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import ast
 import re
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(_SCRIPTS))
 
 
 class _Abort(RuntimeError):
@@ -80,8 +78,8 @@ def test_append_on_a_table_without_build_keys_uses_the_configured_epoch():
     assert resolve({}, 2, True, 1) == 2
 
 
-def test_app_id_pattern_matches_the_written_keys_only():
-    from common import delta_batch_txn_options
+def test_app_id_pattern_matches_the_written_keys_only(load_script):
+    delta_batch_txn_options = load_script("common").delta_batch_txn_options
 
     pattern = NS["_TXN_APP_ID"]
     app = delta_batch_txn_options(NS["_TXN_APP"], 12, 3)["txnAppId"]

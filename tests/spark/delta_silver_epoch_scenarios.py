@@ -1,7 +1,8 @@
 """Rebuild-epoch scenarios for the Delta c360 silver build, run in fresh JVMs.
 
 Not collected by pytest (no ``test_`` prefix).
-``test_silver_build_delta_epoch_spark`` runs it as a subprocess.
+``test_silver_build_delta_epoch_spark`` runs it with ``spark_subprocess``, which
+puts the Spark scripts and tests/spark on its PYTHONPATH.
 
 Every silver job is the real ``silver_build_delta.py``, started as its own
 process the way the Spark Operator starts one driver per cycle. The jobs
@@ -15,7 +16,7 @@ later cycles append with ``LB_SILVER_INCREMENTAL=true``. Each cycle's
 bronze rows carry event ids no other cycle or run uses, so the scenario can
 report which cycles silver holds, not only how many rows.
 
-Usage: python delta_silver_epoch_scenarios.py <jar_dir> <work_dir>
+Usage: python delta_silver_epoch_scenarios.py <jars> <work_dir>  (jars: comma-separated)
 Prints one JSON object on the last stdout line.
 """
 
@@ -29,18 +30,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from c360_stream_scenarios import bronze_df
 
-from c360_stream_scenarios import bronze_df  # noqa: E402
+_SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 
 TABLE = "spark_catalog.silver.customer_interactions_enriched"
 ROWS_PER_CYCLE = 10  # bronze rows; every 10th is filtered, so 9 reach silver
 SILVER_PER_CYCLE = 9
 
 
-def _submit_args(jar_dir, work):
-    jars = ",".join(sorted(glob.glob(os.path.join(jar_dir, "*.jar"))))
+def _submit_args(jars, work):
     confs = {
         "spark.ui.enabled": "false",
         "spark.sql.shuffle.partitions": "2",
@@ -77,13 +76,13 @@ def stage_bronze(spark, work, run, cycle):
     shutil.rmtree(tmp)
 
 
-def silver_job(jar_dir, work, cycle, epoch, force=False, strategy="simple", log=None):
+def silver_job(jars, work, cycle, epoch, force=False, strategy="simple", log=None):
     """Run silver_build_delta.py as one driver; return its exit code."""
     ckpts_before = checkpoints(work)
     env = dict(os.environ)
     env.update(
         {
-            "PYSPARK_SUBMIT_ARGS": _submit_args(jar_dir, work),
+            "PYSPARK_SUBMIT_ARGS": _submit_args(jars, work),
             "LB_ICEBERG_CATALOG": "spark_catalog",
             "LB_BRONZE_URI": f"file://{work}/bronze/",
             "LB_SILVER_URI": f"file://{work}/silver/",
@@ -136,14 +135,14 @@ def silver_cycles(spark, work):
     return dict(sorted(held.items()))
 
 
-def run(spark, jar_dir, work, run_no, epochs, force_cycle0=False, strategy="simple", log=None):
+def run(spark, jars, work, run_no, epochs, force_cycle0=False, strategy="simple", log=None):
     """Cycles 0..n-1 of one `lakebench run`; ``epochs`` is LB_REBUILD_EPOCH per cycle."""
     rcs = []
     for cycle, epoch in enumerate(epochs):
         stage_bronze(spark, work, run_no, cycle)
         rcs.append(
             silver_job(
-                jar_dir,
+                jars,
                 work,
                 cycle,
                 epoch,
@@ -171,8 +170,7 @@ def _clear_bronze(work):
 def main():
     from pyspark.sql import SparkSession
 
-    jar_dir, root = sys.argv[1], sys.argv[2]
-    jars = ",".join(sorted(glob.glob(os.path.join(jar_dir, "*.jar"))))
+    jars, root = sys.argv[1], sys.argv[2]
     spark = (
         SparkSession.builder.master("local[1]")
         .config("spark.ui.enabled", "false")
@@ -192,9 +190,9 @@ def main():
     #    cycle 1, so run 1's cycle 1 reuses that (appId, version) key.
     work = _fresh(root, "epoch-reset")
     log = []
-    first = run(spark, jar_dir, work, 0, [0, 0], log=log)
+    first = run(spark, jars, work, 0, [0, 0], log=log)
     _clear_bronze(work)
-    second = run(spark, jar_dir, work, 1, [0, 0], force_cycle0=True, log=log)
+    second = run(spark, jars, work, 1, [0, 0], force_cycle0=True, log=log)
     out["epoch_reset"] = {
         "rcs": [first, second],
         "held": silver_cycles(spark, work),
@@ -206,14 +204,12 @@ def main():
     #    STREAMING strategy, so both write functions are covered.
     work = _fresh(root, "stale-cycle")
     log = []
-    first = run(spark, jar_dir, work, 0, [0, 0, 0], strategy="streaming", log=log)
+    first = run(spark, jars, work, 0, [0, 0, 0], strategy="streaming", log=log)
     _clear_bronze(work)
-    second = run(
-        spark, jar_dir, work, 1, [1, 0, 1], force_cycle0=True, strategy="streaming", log=log
-    )
+    second = run(spark, jars, work, 1, [1, 0, 1], force_cycle0=True, strategy="streaming", log=log)
     held_after_run = silver_cycles(spark, work)
     # An operator retry of the last cycle (same env): Delta must skip it.
-    retry_rc = silver_job(jar_dir, work, 2, 1, strategy="streaming", log=log)
+    retry_rc = silver_job(jars, work, 2, 1, strategy="streaming", log=log)
     out["stale_cycle"] = {
         "rcs": [first, second],
         "held": held_after_run,
@@ -226,10 +222,10 @@ def main():
     #    bucket kept) and the next deployment starts again at epoch 0.
     work = _fresh(root, "catalog-lost")
     log = []
-    first = run(spark, jar_dir, work, 0, [0, 0], log=log)
+    first = run(spark, jars, work, 0, [0, 0], log=log)
     shutil.rmtree(os.path.join(work, "metastore_db"))
     _clear_bronze(work)
-    second = run(spark, jar_dir, work, 1, [0, 0], log=log)
+    second = run(spark, jars, work, 1, [0, 0], log=log)
     refused = "already holds a Delta log" in log[-1]["tail"]
     held_after_refusal = silver_cycles(spark, work)
     # The refusal's remedy: delete the table directory. Cycle 1 then finds
@@ -237,9 +233,9 @@ def main():
     # 1), a create carrying the key (0, 1); its operator retry is skipped.
     shutil.rmtree(_table_dir(work))
     stage_bronze(spark, work, 1, 1)
-    rebuild_rc = silver_job(jar_dir, work, 1, 0, log=log)
+    rebuild_rc = silver_job(jars, work, 1, 0, log=log)
     held_after_rebuild = silver_cycles(spark, work)
-    retry_rc = silver_job(jar_dir, work, 1, 0, log=log)
+    retry_rc = silver_job(jars, work, 1, 0, log=log)
     out["catalog_lost"] = {
         "rcs": [first, second],
         "refused_orphan_log": refused,

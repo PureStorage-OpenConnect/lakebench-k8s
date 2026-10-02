@@ -8,58 +8,27 @@ the counter reads lower than an epoch the table already used, the new run's
 cycles are skipped, silver is short and the run still exits 0. The build now
 takes the epoch from the table's own transaction log.
 
-Runs ``delta_silver_epoch_scenarios.py`` in fresh JVMs with the Delta jars on
-the classpath. Set ``LB_SPARK_TEST_JARS`` to a directory holding the
-delta-spark and delta-storage jars for the installed Spark; the test is
-skipped without it, and fails instead when ``LB_REQUIRE_JARS=1``.
+Runs ``delta_silver_epoch_scenarios.py`` in fresh JVMs with the Delta jars
+from ``LB_SPARK_TEST_JARS`` on the classpath.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_JARS = os.environ.get("LB_SPARK_TEST_JARS", "")
-_NEEDED = ("delta-spark", "delta-storage")
-
-
-def _have_jars() -> bool:
-    if not _JARS or not Path(_JARS).is_dir():
-        return False
-    names = [p.name for p in Path(_JARS).glob("*.jar")]
-    return all(any(n.startswith(k) for n in names) for k in _NEEDED)
-
-
-_REQUIRED = os.environ.get("LB_REQUIRE_JARS") == "1"
-
-pytestmark = pytest.mark.skipif(
-    not _have_jars() and not _REQUIRED, reason="LB_SPARK_TEST_JARS with Delta jars not set"
-)
+pytestmark = pytest.mark.requires_jars("delta")
 
 
 @pytest.fixture(scope="module")
-def result(tmp_path_factory):
-    if not _have_jars():
-        pytest.fail("LB_REQUIRE_JARS=1 but LB_SPARK_TEST_JARS has no Delta jars")
+def result(tmp_path_factory, spark_subprocess, spark_jars):
     work = tmp_path_factory.mktemp("delta-epoch")
-    env = dict(os.environ)
-    env.setdefault("PYSPARK_PYTHON", sys.executable)
     script = Path(__file__).with_name("delta_silver_epoch_scenarios.py")
-    proc = subprocess.run(
-        [sys.executable, str(script), _JARS, str(work)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=1800,
-    )
-    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+    proc = spark_subprocess(script, spark_jars.classpath, work, timeout=1800)
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
