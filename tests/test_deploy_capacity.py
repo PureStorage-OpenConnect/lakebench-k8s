@@ -41,7 +41,11 @@ def _node(name, cpu, memory, control_plane=False):
         "kind": "Node",
         "metadata": {"name": name, "labels": labels},
         "spec": {},
-        "status": {"allocatable": {"cpu": cpu, "memory": memory}},
+        "status": {
+            "allocatable": {"cpu": cpu, "memory": memory},
+            # Ready: the capacity check counts schedulable nodes only (CC-24).
+            "conditions": [{"type": "Ready", "status": "True"}],
+        },
     }
 
 
@@ -208,4 +212,4 @@ def test_deploy_check_leaves_datagen_out(cfg_file):
     cfg = load_config(cfg_file, purpose=LoadPurpose.MUTATE, print_notes=False)
     with mock.patch.object(_prerequisites, "_check_cluster_capacity") as check:
         _prerequisites.deploy_capacity_check(cfg)
-    check.assert_called_once_with(cfg, datagen_runs=False)
+    check.assert_called_once_with(cfg, datagen_runs=False, fail_closed=False)

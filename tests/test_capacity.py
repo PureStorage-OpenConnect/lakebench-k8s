@@ -21,6 +21,20 @@ from lakebench.modules.pipeline_engines.spark.job import (
 GIB = 1024**3
 
 
+def _free_from_total(k8s_mock):
+    """The preflight reads free capacity: make the mock report the capacity
+    its get_cluster_capacity returns as both free and allocatable, with no
+    published scratch capacity."""
+    from lakebench.k8s.client import FreeCapacity, ScratchCapacity
+
+    def _free(**_kw):
+        cap = k8s_mock.get_cluster_capacity.return_value
+        return FreeCapacity(free=cap, allocatable=cap)
+
+    k8s_mock.get_free_capacity.side_effect = _free
+    k8s_mock.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")
+
+
 class TestComputePeakRequirements:
     """Peak resource derivation from _JOB_PROFILES."""
 
@@ -118,6 +132,7 @@ def patched_capacity():
     def _run(capacity, cfg=None):
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = capacity
+            _free_from_total(get_client.return_value)
             return _check_cluster_capacity(cfg or _cfg())
 
     return _run
@@ -150,18 +165,26 @@ class TestClusterCapacityCheck:
         result = patched_capacity(ClusterCapacity(8_000, 32 * GIB, 2, 4_000, 16 * GIB))
         assert "silver-build" in result.message
 
-    def test_unknown_capacity_does_not_block(self, patched_capacity):
-        """No permission to list nodes must not fail the deploy."""
-        result = patched_capacity(None)
-        assert result.passed
-        assert "skipping" in result.message.lower()
+    def test_unreadable_capacity_refuses(self):
+        """Fail closed: capacity that cannot be read is a failed check, with
+        the read-access or --skip-preflight way through (it used to pass)."""
+        from lakebench.k8s.client import CapacityUnknown
 
-    def test_check_never_raises(self):
-        """A broken capacity estimate must not block a deploy."""
+        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+            get_client.return_value.get_free_capacity.return_value = CapacityUnknown(
+                "listing nodes failed (403 Forbidden)"
+            )
+            result = _check_cluster_capacity(_cfg())
+        assert not result.passed
+        assert result.message == "capacity could not be read: listing nodes failed (403 Forbidden)"
+        assert "--skip-preflight" in result.hint and "node and pod read access" in result.hint
+
+    def test_unreachable_cluster_refuses(self):
+        """A client that cannot be built is unreadable capacity, not a pass."""
         with mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("boom")):
             result = _check_cluster_capacity(_cfg())
-        assert result.passed
-        assert "skipped" in result.message.lower()
+        assert not result.passed
+        assert "capacity could not be read: RuntimeError: boom" in result.message
 
     def test_sustained_mode_uses_streaming_profiles(self, patched_capacity):
         result = patched_capacity(
@@ -188,6 +211,7 @@ class TestClusterCapacityCheck:
             get_client.return_value.get_cluster_capacity.return_value = ClusterCapacity(
                 652_000, 4000 * GIB, 20, 64_000, 256 * GIB
             )
+            _free_from_total(get_client.return_value)
             result = _check_cluster_capacity(cfg)
         assert result.passed, result.message
         assert peak.called
@@ -215,6 +239,7 @@ class TestCoResidentPodsAreCounted:
         cap = ClusterCapacity(cores * 1000, memory_gb * GIB, 8, 64_000, 256 * GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             return _check_cluster_capacity(cfg)
 
     def test_c360_continuous_s10_needs_more_than_its_pipeline(self):
@@ -255,6 +280,7 @@ class TestCoResidentPodsAreCounted:
         cap = ClusterCapacity(40_000, 4000 * GIB, 8, 64_000, 256 * GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             res = _check_cluster_capacity(cfg, sustained=True)
         assert not res.passed and "(continuous)" in res.message
 
@@ -269,6 +295,7 @@ class TestCoResidentPodsAreCounted:
         cap = ClusterCapacity(cores * 1000, 4000 * GIB, 8, 64_000, 256 * GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             assert _check_cluster_capacity(cfg, datagen_runs=False).passed
             assert not _check_cluster_capacity(cfg).passed
 

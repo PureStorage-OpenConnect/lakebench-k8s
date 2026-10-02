@@ -120,10 +120,21 @@ that does not fit, or when a single pod fits no node. An explicit
 `*_executors` count is not capped and is counted as set.
 
 Lakebench checks this for you. The prerequisite phase of `lakebench run`
-compares the minimum against your cluster's allocatable capacity and fails
-immediately with the specific shortfall, rather than leaving pods `Pending`
-until the job times out. `run` skips it only with `--skip-preflight`
-(`--skip-deploy` still runs it). A batch
+compares the minimum against what the cluster can still take: the
+allocatable capacity of the schedulable nodes (Ready, not cordoned, no
+`NoSchedule` or `NoExecute` taint; an untainted control-plane node counts)
+minus what pods in other namespaces already request. It fails immediately
+with the specific shortfall, naming the need, the free amount and the
+allocatable one, rather than leaving pods `Pending` until the job times
+out. It fails closed: when the node or pod list cannot be read (no
+permission, an error, a pod on a node the list does not show) the run is
+refused with exit 4, "capacity could not be read". With scratch enabled it
+also compares the scratch request with the `CSIStorageCapacity` the
+StorageClass publishes; when none is published the run goes ahead with a
+warning, and the record's `provenance.preflight.scratch` says
+`not_measurable`. `run` skips it only with `--skip-preflight`
+(`--skip-deploy` still runs it); the record then says
+`capacity: skipped` and the verdict carries "capacity not checked". A batch
 `run` counts datagen only when it creates datagen pods: with `--generate`
 (and not `--skip-generate`), or in a multi-cycle run. A plain batch `run`
 over data from an earlier `lakebench generate` checks the Spark peak and the

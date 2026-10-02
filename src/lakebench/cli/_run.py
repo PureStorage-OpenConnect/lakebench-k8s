@@ -1597,7 +1597,10 @@ def run(
         bool,
         typer.Option(
             "--skip-preflight",
-            help="Skip prerequisite checks and infrastructure validation",
+            help=(
+                "Skip prerequisite checks (including the capacity check) and "
+                "infrastructure validation; the record says capacity not checked"
+            ),
         ),
     ] = False,
     skip_infra: Annotated[
@@ -1908,6 +1911,10 @@ def run(
     console.print()
     console.print("[bold dim]Phase 1/7: Prerequisites[/bold dim]")
 
+    # What the record's provenance.preflight says about the capacity check.
+    from lakebench.cli._prerequisites import PREFLIGHT_SKIPPED
+
+    preflight_record: dict[str, Any] | None = dict(PREFLIGHT_SKIPPED)
     if not skip_deploy:
         from lakebench.cli._prerequisites import run_prerequisites
 
@@ -1947,6 +1954,7 @@ def run(
             print_error("Prerequisites not met -- cannot proceed")
             raise typer.Exit(ExitCode.PREREQUISITE)
         print_success("All prerequisites passed")
+        preflight_record = getattr(prereq_report, "preflight", None)
     else:
         print_info("Skipping prerequisites (--skip-preflight)")
 
@@ -1990,6 +1998,7 @@ def run(
             skip_maintenance=skip_maintenance,
             force_reset=force_reset,
             autosize_cuts=autosize_cuts,
+            preflight=preflight_record,
         )
         return
 
@@ -2028,6 +2037,7 @@ def run(
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
     record_deps_provenance(collector.current_run, deps_handle)
+    collector.record_preflight(preflight_record)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
 

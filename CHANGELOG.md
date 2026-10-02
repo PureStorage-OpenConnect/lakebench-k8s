@@ -411,6 +411,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   financial package while the look record cannot be read are refused (3).
   A package whose `pipeline_mode` is unknown or disagrees with its
   experiment identity is refused (2).
+- **The run capacity preflight counts free capacity and fails closed.** It
+  compares the request with what the schedulable nodes can still take
+  (allocatable minus what pods in other namespaces request), not with total
+  allocatable, so a busy cluster that fits only on paper is refused. A
+  node or pod list that cannot be read, a pod on a node the list does not
+  show, or no schedulable node now refuses the run (exit 4, "capacity could
+  not be read") where it used to pass. An untainted control-plane node
+  counts, so a single-node cluster is checked rather than skipped. With
+  scratch enabled the scratch request is compared with the StorageClass's
+  `CSIStorageCapacity`; none published is a warning, recorded as
+  `provenance.preflight.scratch: not_measurable`. Every run records
+  `provenance.preflight` (provenance, not identity), and a run with
+  `--skip-preflight` records `capacity: skipped` with the verdict qualifier
+  "capacity not checked".
+- **`recommend` exits 3 on a context conflict** while reading capacity,
+  instead of falling back to the reference table and exiting 0.
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets

@@ -2687,6 +2687,16 @@ class MetricsCollector:
             run.provenance = {}
         return run.provenance
 
+    def record_preflight(self, preflight: dict[str, Any] | None) -> None:
+        """Record the run preflight's capacity outcome as
+        ``provenance.preflight`` (provenance, not identity):
+        ``{capacity: checked|skipped, scratch: checked|not_measurable|
+        disabled|skipped, scratch_reason, storage_class}``. None records
+        nothing (a caller that ran no preflight)."""
+        prov = self._run_provenance()
+        if prov is not None and preflight is not None:
+            prov["preflight"] = dict(preflight)
+
     def record_job_manager(self, job_manager: Any) -> None:
         """Record the scripts ConfigMaps and dependency set *job_manager*
         holds (call after ``deploy_scripts_configmap``); read again at run
