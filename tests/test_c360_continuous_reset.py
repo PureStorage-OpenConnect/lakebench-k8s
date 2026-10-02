@@ -185,7 +185,7 @@ def _drive_sustained(
         return MagicMock(status=_sustained_status_success())
 
     dg.deploy.side_effect = dg_deploy
-    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e: dg)
+    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
 
     def ownership(c):
         events.append("ownership")
