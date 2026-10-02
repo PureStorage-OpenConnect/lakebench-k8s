@@ -119,23 +119,51 @@ def _cycles(exp: Mapping[str, Any], record: Mapping[str, Any] | None) -> int:
     return 1
 
 
+#: config_snapshot.spark.executor_overrides keys a run of each mode applies
+#: (job.EXECUTOR_OVERRIDE_FIELDS; standard library only here).
+_OVERRIDE_KEYS_BY_MODE = {
+    "batch": {"bronze-verify": "bronze", "silver-build": "silver", "gold-finalize": "gold"},
+    "continuous": {
+        "bronze-ingest": "bronze_ingest",
+        "silver-stream": "silver_stream",
+        "gold-refresh": "gold_refresh",
+    },
+}
+
+
 def _executor_overrides(exp: Mapping[str, Any], record: Mapping[str, Any] | None) -> dict:
-    """User-set executor counts: the block's ``architecture.
-    spark_executor_overrides`` (when user-set overrides are recorded), else the non-null entries of the
-    record's ``config_snapshot.spark.executor_overrides``, else the
-    ``override`` of each ``limits.executors`` entry."""
+    """User-set executor counts the run applied, keyed as in
+    ``config_snapshot.spark.executor_overrides``: the block's
+    ``architecture.spark_executor_overrides`` when recorded (v1.7), else
+    the non-null entries of the record's snapshot for the run's mode, else
+    the ``override`` of each ``limits.executors`` entry. One key space and
+    one mode filter, so a v1.6 record and a v1.7 record of the same config
+    read the same."""
     stored = (exp.get("architecture") or {}).get("spark_executor_overrides")
     if isinstance(stored, Mapping):
         return {str(k): v for k, v in sorted(stored.items()) if v is not None}
+    mode = "continuous" if exp.get("mode") in ("continuous", "sustained") else "batch"
+    keys = _OVERRIDE_KEYS_BY_MODE[mode]
     snap = ((record or {}).get("config_snapshot") or {}).get("spark") or {}
     overrides = snap.get("executor_overrides")
     if isinstance(overrides, Mapping):
-        return {str(k): v for k, v in sorted(overrides.items()) if v is not None}
+        wanted = set(keys.values())
+        return {str(k): v for k, v in sorted(overrides.items()) if v is not None and k in wanted}
     out = {}
     for entry in (exp.get("limits") or {}).get("executors") or []:
         if isinstance(entry, Mapping) and entry.get("override") is not None:
-            out[str(entry.get("job_type"))] = entry["override"]
+            key = keys.get(str(entry.get("job_type")))
+            if key:
+                out[key] = entry["override"]
     return dict(sorted(out.items()))
+
+
+def _driver_overrides(exp: Mapping[str, Any], record: Mapping[str, Any] | None) -> dict:
+    """The global driver overrides the run applied: the block's
+    ``architecture.spark_driver_overrides`` (v1.7; a v1.6 record did not
+    record them)."""
+    stored = (exp.get("architecture") or {}).get("spark_driver_overrides")
+    return dict(sorted(stored.items())) if isinstance(stored, Mapping) else {}
 
 
 def _spark_conf(exp: Mapping[str, Any], record: Mapping[str, Any] | None) -> dict:
@@ -160,6 +188,9 @@ OPTIONAL_IDENTITY_KEYS: dict[str, OptionalKey] = {
         ARCHITECTURE, {}, _executor_overrides, "user executor overrides"
     ),
     "spark conf": OptionalKey(ARCHITECTURE, {}, _spark_conf, "user Spark conf"),
+    "spark driver overrides": OptionalKey(
+        ARCHITECTURE, {}, _driver_overrides, "user driver overrides"
+    ),
     "investigator sessions": OptionalKey(
         CONDITIONS, None, _investigator_sessions, "AML investigators under load"
     ),

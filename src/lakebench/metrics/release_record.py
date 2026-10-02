@@ -400,6 +400,36 @@ def bound_problems(record: Mapping[str, Any]) -> list[str]:
             problems.append("evaluation profile runs are not release evidence")
         elif kind not in allowed:
             problems.append(f"{kind} bound this run; its numbers measure the cap")
+    return problems + override_problems(record)
+
+
+def override_problems(record: Mapping[str, Any]) -> list[str]:
+    """Sizing overrides that make a record measure something other than the
+    proven profile: an executor count that differs from what the profile asks
+    at the run's scale (``limits.executors``; a count below it also binds and
+    is labelled, one above it is not, but neither is the proven sizing), or
+    any driver override (``architecture.spark_driver_overrides``)."""
+    exp = _exp(record)
+    if exp is None:
+        return []
+    problems = []
+    for x in (exp.get("limits") or {}).get("executors") or []:
+        override = x.get("override")
+        if override is None:
+            continue
+        asks = min(int(x.get("scale_derived") or 0), int(x.get("cap") or 0))
+        if int(override) != asks:
+            problems.append(
+                f"{x.get('job_type')}: executor override {override} "
+                f"(profile asks {asks}); not the proven sizing"
+            )
+    drivers = (exp.get("architecture") or {}).get("spark_driver_overrides") or {}
+    if drivers:
+        problems.append(
+            "driver override "
+            + ", ".join(f"{k} {v}" for k, v in sorted(drivers.items()))
+            + "; not the proven sizing"
+        )
     return problems
 
 

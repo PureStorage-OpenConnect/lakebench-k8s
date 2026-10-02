@@ -513,7 +513,7 @@ class TestPerJobExecutorOverridesInManifest:
                         },
                     },
                 },
-                "compute": {"spark": {"silver_executors": 30}},
+                "compute": {"spark": {"silver_executors": 24}},
             },
         )
         k8s = _mock_k8s()
@@ -526,7 +526,7 @@ class TestPerJobExecutorOverridesInManifest:
         assert executor["cores"] == 4
         assert executor["memory"] == "48g"
         assert executor["memoryOverhead"] == "12g"
-        assert executor["instances"] == 30
+        assert executor["instances"] == 24
 
 
 class TestDriverResourceOverrides:
@@ -668,8 +668,9 @@ class TestMaxResultSizeScaling:
         spark_conf = manifest["spec"]["sparkConf"]
         assert spark_conf["spark.driver.maxResultSize"] == "12g"
 
-    def test_max_result_size_capped_at_16g(self):
-        """Even at extreme executor counts, cap at 16g."""
+    def test_max_result_size_at_the_override_ceiling(self):
+        """At the 28-executor override ceiling on Spark 4: max(8, 28 // 2) = 14g
+        (the 16g cap needs 32 executors, which no config can set)."""
         config = _make_config(
             platform={
                 "storage": {
@@ -684,15 +685,14 @@ class TestMaxResultSizeScaling:
                         },
                     }
                 },
-                "compute": {"spark": {"silver_executors": 60}},
+                "compute": {"spark": {"silver_executors": 28}},
             }
         )
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
         manifest = mgr._build_manifest(JobType.SILVER_BUILD)
         spark_conf = manifest["spec"]["sparkConf"]
-        # min(16, max(4, 60//3)) = min(16, 20) = 16
-        assert spark_conf["spark.driver.maxResultSize"] == "16g"
+        assert spark_conf["spark.driver.maxResultSize"] == "14g"
 
     def test_user_spark_conf_override_takes_precedence(self):
         """If user sets maxResultSize in spark.conf, it wins."""

@@ -78,18 +78,6 @@ BEFORE_CLUSTER_SCALING = "before cluster scaling"
 #: PostgreSQL pod memory request (templates/postgres/statefulset.yaml.j2).
 POSTGRES_MEMORY_GI = 1.0
 
-#: The Spark overrides the peak does not count yet: the per-job executor
-#: counts, by pipeline mode. A plan whose config sets one says so. The
-#: global driver overrides are counted (``job.effective_driver``).
-_OVERRIDE_FIELDS = {
-    "batch": ("bronze_executors", "silver_executors", "gold_executors"),
-    "continuous": (
-        "bronze_ingest_executors",
-        "silver_stream_executors",
-        "gold_refresh_executors",
-    ),
-}
-
 #: Passed as ``sizing_capacity`` to mean "size against the same capacity
 #: the plan is checked against".
 SAME_CAPACITY = object()
@@ -163,9 +151,6 @@ class SizingPlan:
     scratch_gb: int
     scratch_enabled: bool
     scratch_storage_class: str
-    #: The config sets a per-job executor count or a driver override the
-    #: Spark peak does not count yet.
-    overrides_not_counted: bool
     #: Auto-sizing cuts made to fit ``capacity`` (empty offline).
     cuts: tuple[str, ...]
     basis: tuple[str, ...]
@@ -266,9 +251,8 @@ def peak_for_config(cfg: LakebenchConfig, *, mode: str | None = None) -> PeakReq
 
     *mode* overrides the config's pipeline mode (``run --sustained`` on a
     batch config). The drivers are the ones *cfg*'s manifests request
-    (driver overrides, the Spark 3 driver size). Per-job executor overrides
-    are not counted yet; ``SizingPlan.overrides_not_counted`` flags a
-    config that sets one.
+    (driver overrides, the Spark 3 driver size), and an executor override
+    replaces the scale count of its job (``job.executor_override``).
     """
     from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
 
@@ -480,10 +464,15 @@ def _plan(
     if not scratch.enabled:
         basis.append("scratch: not requested (scratch disabled)")
 
-    spark_cfg = resolved.platform.compute.spark
-    overrides = any(getattr(spark_cfg, f, None) is not None for f in _OVERRIDE_FIELDS[mode])
-    if overrides:
-        basis.append("spark: per-job executor overrides are not counted in the peak yet")
+    from lakebench.modules.pipeline_engines.spark.job import executor_override
+
+    counted = [
+        f"{r.job_type} {executor_override(r.job_type, resolved)}"
+        for r in spark.per_job
+        if executor_override(r.job_type, resolved) is not None
+    ]
+    if counted:
+        basis.append(f"spark: executor overrides counted: {', '.join(counted)}")
 
     plan = SizingPlan(
         workload=_schema_of(resolved),
@@ -498,7 +487,6 @@ def _plan(
         scratch_gb=spark.scratch_gb,
         scratch_enabled=bool(scratch.enabled),
         scratch_storage_class=str(scratch.storage_class),
-        overrides_not_counted=overrides,
         cuts=tuple(c for c in cuts if not c.startswith("datagen.mode=")),
         basis=tuple(basis),
     )
@@ -573,8 +561,6 @@ def breakdown_text(plan: SizingPlan) -> str:
         parts.append(
             f"every datagen pod at once {plan.full.cpu_cores} cores / {plan.full.memory_gb} GB"
         )
-    if plan.overrides_not_counted:
-        parts.append("per-job executor overrides not counted")
     return "; ".join(parts)
 
 

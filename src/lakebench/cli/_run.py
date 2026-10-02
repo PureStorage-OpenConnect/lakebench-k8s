@@ -2577,12 +2577,11 @@ def run(
                     _expected_executors = get_executor_count(stage_name, _scale, _schema)
 
                     # Check per-job executor override
-                    _override_map = {
-                        "bronze-verify": cfg.platform.compute.spark.bronze_executors,
-                        "silver-build": cfg.platform.compute.spark.silver_executors,
-                        "gold-finalize": cfg.platform.compute.spark.gold_executors,
-                    }
-                    _override = _override_map.get(stage_name)
+                    from lakebench.modules.pipeline_engines.spark.job import (
+                        executor_override,
+                    )
+
+                    _override = executor_override(stage_name, cfg)
                     if _override is not None:
                         _expected_executors = _override
 

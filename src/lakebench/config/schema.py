@@ -682,6 +682,14 @@ class SparkOperatorConfig(ConfigModel):
 _SPARK_MEMORY_SIZE = re.compile(r"[1-9][0-9]*[kmgt]b?", re.IGNORECASE)
 
 
+#: The largest per-job executor override: the proven executor ceiling (32
+#: and more cause Kubernetes API polling storms). Held equal to the job
+#: module's ``_MAX_EXECUTORS_SAFE`` by a test.
+MAX_EXECUTOR_OVERRIDE = 28
+#: The largest driver_cores override.
+MAX_DRIVER_CORES = 16
+
+
 class SparkComputeConfig(ConfigModel):
     """Spark compute configuration."""
 
@@ -714,34 +722,34 @@ class SparkComputeConfig(ConfigModel):
     bronze_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override bronze-verify executor count. Null = auto from scale.",
+        description="Override bronze-verify executor count (1--28). Null = auto from scale.",
     )
     silver_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override silver-build executor count. Null = auto from scale.",
+        description="Override silver-build executor count (1--28). Null = auto from scale.",
     )
     gold_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override gold-finalize executor count. Null = auto from scale.",
+        description="Override gold-finalize executor count (1--28). Null = auto from scale.",
     )
 
     # Streaming job executor count overrides (None = auto from scale).
     bronze_ingest_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override bronze-ingest executor count. Null = auto from scale.",
+        description="Override bronze-ingest executor count (1--28). Null = auto from scale.",
     )
     silver_stream_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override silver-stream executor count. Null = auto from scale.",
+        description="Override silver-stream executor count (1--28). Null = auto from scale.",
     )
     gold_refresh_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override gold-refresh executor count. Null = auto from scale.",
+        description="Override gold-refresh executor count (1--28). Null = auto from scale.",
     )
 
     # Driver resource overrides (None = use profile defaults).
@@ -754,7 +762,7 @@ class SparkComputeConfig(ConfigModel):
     driver_cores: int | None = Field(
         default=None,
         ge=1,
-        description="Override driver cores. Null = profile default (typically 4).",
+        description="Override driver cores (1--16). Null = profile default (typically 4).",
     )
 
     @field_validator("driver_memory", mode="after")
@@ -774,6 +782,37 @@ class SparkComputeConfig(ConfigModel):
         if purpose is None or purpose in CHANGES_DATA:
             raise ValueError(text)
         emit_note(text + "; ignored. Commands that change data refuse it.", kind="removed")
+        return None
+
+    @field_validator(
+        "bronze_executors",
+        "silver_executors",
+        "gold_executors",
+        "bronze_ingest_executors",
+        "silver_stream_executors",
+        "gold_refresh_executors",
+        "driver_cores",
+        mode="after",
+    )
+    @classmethod
+    def _override_within_bounds(cls, value: int | None, info: ValidationInfo) -> int | None:
+        """An executor count above the proven ceiling (``MAX_EXECUTOR_OVERRIDE``,
+        the job module's 28) or a driver above 16 cores is refused by the
+        commands that change data; teardown and read commands drop it with a
+        note, so an old config can still be destroyed."""
+        limit = MAX_DRIVER_CORES if info.field_name == "driver_cores" else MAX_EXECUTOR_OVERRIDE
+        if value is None or value <= limit:
+            return value
+        what = "driver cores" if info.field_name == "driver_cores" else "executors"
+        text = (
+            f"platform.compute.spark.{info.field_name}: {value} {what} is above the "
+            f"proven ceiling of {limit}; set {limit} or less, or leave it unset for "
+            "the scale-derived count"
+        )
+        purpose = purpose_from_context(info.context)
+        if purpose is None or purpose in CHANGES_DATA:
+            raise ValueError(text)
+        emit_note(text + ". Ignored; commands that change data refuse it.", kind="removed")
         return None
 
 

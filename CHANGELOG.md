@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **Executor overrides are bounded, counted and kept out of evidence.**
+  `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
+  16; a larger value is refused by the commands that change data (a v1.6
+  config with `silver_executors: 40` no longer runs) and dropped with a note
+  by `destroy`, `status` and the read-only commands. The capacity check
+  (`run` and `deploy`), `config show` and `info` now count executor
+  overrides, so a config that was admitted before may be refused. An override below the profile's count is labelled
+  in `limits.bound` and enters the identity's bound limits; every override
+  is recorded in `experiment.architecture` (`spark_executor_overrides`,
+  `spark_driver_overrides`) as an architecture difference. A run whose
+  overrides differ from the profile's counts, or that sets a driver
+  override, is not release evidence or a perf baseline, and a pinned
+  perf-gate config must pin the profile's counts. The financial operations
+  jobs (`replay-financial`, `reproduce-financial`,
+  `score-financial-reference`) have their own sizing profiles, equal to
+  silver-build's; a Spark job with no profile is now an error rather than a
+  silent fallback.
 - **`run` needs a 1.7 deploy.** Spark jobs, Spark Thrift and DuckDB now take
   every jar and wheel from the deployment's dependency server, so `run`,
   continuous runs and the `financial` commands check the deployment's set

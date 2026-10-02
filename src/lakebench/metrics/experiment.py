@@ -84,14 +84,6 @@ DATAGEN_MODEL_VERSIONS: dict[str, str | None] = {
 NO_PROVENANCE = "not comparable: no provenance"
 
 # Batch and continuous Spark job types -> snapshot executor-override key.
-_OVERRIDE_KEY = {
-    "bronze-verify": "bronze",
-    "silver-build": "silver",
-    "gold-finalize": "gold",
-    "bronze-ingest": "bronze_ingest",
-    "silver-stream": "silver_stream",
-    "gold-refresh": "gold_refresh",
-}
 
 
 def _short_hash(obj: Any) -> str:
@@ -270,6 +262,42 @@ def experiment_inputs(
         else {}
     )
 
+    # The executor and driver overrides the run applies (identity keys
+    # "spark executor overrides" and "spark driver overrides"), only when set
+    # and not for --local (no executors). Executor counts are keyed as in
+    # config_snapshot.spark.executor_overrides, for the run's mode only.
+    from lakebench.modules.pipeline_engines.spark.job import (
+        BATCH_JOB_TYPES,
+        EXECUTOR_OVERRIDE_FIELDS,
+        STREAMING_JOB_TYPES,
+        executor_override,
+    )
+
+    mode_of_run = _canonical_mode(run_mode) if run_mode else _canonical_mode(arch.pipeline.mode)
+    job_types = STREAMING_JOB_TYPES if mode_of_run == "continuous" else BATCH_JOB_TYPES
+    executor_overrides = (
+        {
+            EXECUTOR_OVERRIDE_FIELDS[jt][1]: n
+            for jt in sorted(job_types)
+            if (n := executor_override(jt, cfg)) is not None
+        }
+        if system != "local"
+        else {}
+    )
+    spark_compute = cfg.platform.compute.spark
+    driver_overrides = (
+        {
+            k: v
+            for k, v in (
+                ("driver_cores", spark_compute.driver_cores),
+                ("driver_memory", spark_compute.driver_memory),
+            )
+            if v is not None
+        }
+        if system != "local"
+        else {}
+    )
+
     corpus = {
         "schema": schema,
         "generator_image": images.datagen,
@@ -365,6 +393,12 @@ def experiment_inputs(
             # The user's Spark conf over the job defaults, only when it
             # changes something, so a default config's block is unchanged.
             **({"spark_conf_user": user_conf} if user_conf else {}),
+            **(
+                {"spark_executor_overrides": dict(sorted(executor_overrides.items()))}
+                if executor_overrides
+                else {}
+            ),
+            **({"spark_driver_overrides": driver_overrides} if driver_overrides else {}),
         },
         "maintenance_config": {
             "pre_benchmark_maintenance": arch.pipeline.pre_benchmark_maintenance,
@@ -414,7 +448,11 @@ def experiment_inputs(
 
 
 def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> list[dict]:
-    from lakebench.modules.pipeline_engines.spark.job import get_job_profile
+    from lakebench.modules.pipeline_engines.spark.job import (
+        EXECUTOR_OVERRIDE_FIELDS,
+        executor_count,
+        get_job_profile,
+    )
 
     scale = float(snapshot.get("scale") or 0)
     overrides = ((snapshot.get("spark") or {}).get("executor_overrides")) or {}
@@ -424,13 +462,8 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
         profile = get_job_profile(job_type, schema)
         if not profile or "base_executors" not in profile:
             continue
-        base = int(profile["base_executors"])
-        uncapped = (
-            base
-            if scale <= 10
-            else base + int((scale - 10) * profile["executors_per_100_scale"] // 100)
-        )
-        override = overrides.get(_OVERRIDE_KEY.get(job_type, ""))
+        uncapped = executor_count(profile, scale, capped=False)
+        override = overrides.get(EXECUTOR_OVERRIDE_FIELDS.get(job_type, ("", ""))[1])
         cap = int(profile["max_executors"])
         observed = next(
             (j.executor_count for j in metrics.jobs if j.job_type == job_type and j.executor_count),
@@ -451,6 +484,10 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
             "cap_hit": override is None and uncapped > cap,
             "observed": observed,
         }
+        if override is not None and override < min(uncapped, cap):
+            # The config gave the job fewer executors than its proven
+            # profile asks for at this scale: the run measures the override.
+            entry["override_bound"] = True
         if streaming and override is None and observed is not None and observed < wanted:
             # Continuous streams share a concurrent executor budget
             # (job.py): the cluster granted fewer than the profile asks.

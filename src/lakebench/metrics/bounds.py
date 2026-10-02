@@ -103,6 +103,15 @@ def bound_entries(
                 )
             )
     for x in executors:
+        if x.get("override_bound"):
+            asks = min(int(x.get("scale_derived") or 0), int(x.get("cap") or 0))
+            out.append(
+                (
+                    f"{x['job_type']}: executor override",
+                    f"{x['job_type']}: executor override {x.get('override')} (profile asks {asks})",
+                )
+            )
+    for x in executors:
         if x.get("budget_cap"):
             out.append(
                 (
