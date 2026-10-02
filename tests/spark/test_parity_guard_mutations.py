@@ -11,8 +11,12 @@ and asserts three things:
   crashing;
 - the guard's own ``problems()`` names the failure the mutation must cause.
 
-The guards' own tests are the unmutated controls: their children call the
-same ``install()`` with the variable unset.
+The guards' own tests are the unmutated controls for the three child guards
+(their children call the same ``install()`` with the variable unset); the
+profiles guard runs in process, so its child runs here unmutated too.
+
+Each guard is shown sensitive to one column; the shim reaches only
+materialised MERGE sources (not the statements or transactions writes).
 """
 
 from __future__ import annotations
@@ -84,3 +88,11 @@ def test_guard_goes_red_under_mutation(
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     named = _named(module, out)
     assert expected <= named, f"{module} under {mutation} reported {named}: {out}"
+
+
+def test_profiles_child_unmutated_is_clean(spark_subprocess, spark_jars):
+    proc = spark_subprocess(
+        HERE / "test_aml_batch_stream_profiles_parity.py", spark_jars.classpath, timeout=900
+    )
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out == {"coverage": [], "sums": [], "nulls": [], "values": []}, out

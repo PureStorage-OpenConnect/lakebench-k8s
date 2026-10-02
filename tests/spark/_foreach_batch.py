@@ -1,11 +1,13 @@
 """Call a stream's micro-batch handler the way ``foreachBatch`` does.
 
-Inside a real ``foreachBatch`` Spark sets the local properties
-``sql.streaming.queryId`` and ``streaming.sql.batchId`` on the micro-batch
-thread, and the product reads the query id from there
-(``common.streaming_query_id``), refusing to run without it. A test that
-calls the handler directly sets the same two properties around the call
-and restores what was there before, so the product guard stays as it is.
+Inside a real ``foreachBatch`` Spark sets, on the micro-batch thread, the
+local properties ``sql.streaming.queryId`` and ``streaming.sql.batchId``
+and the job group (the run id). The product reads the query id
+(``common.streaming_query_id``) and refuses to run without it. A test that
+calls the handler directly sets the first two around the call and restores
+what was there before, so the product guard stays as it is. The run id is
+the test's to set (``setJobGroup``): without one, ``replay_possible``
+treats every batch as a possible replay, the safe fallback.
 
 Local properties belong to the calling thread (pyspark pins each Python
 thread to its own JVM thread), so a test with several writer threads

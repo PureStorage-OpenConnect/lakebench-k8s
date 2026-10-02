@@ -2380,8 +2380,8 @@ class materialised_source:  # noqa: N801 -- used like a function: with materiali
     On Spark 4.1 with Iceberg, ``MERGE ... USING <temp view>`` fails with an
     internal error ("No plan for TableReference") when the view's plan reads
     an Iceberg table. A view over a local checkpoint of the frame reads only
-    the checkpointed blocks, which works on Spark 3.5, 4.0 and 4.1. The
-    content is the frame's rows at the moment of entry, computed once.
+    the checkpointed blocks (tested on Spark 4.0 and 4.1). The content is
+    the frame's rows at the moment of entry, computed once.
 
     On exit the view is dropped and the checkpoint's blocks are freed. They
     belong to the checkpoint's own RDD, which ``DataFrame.unpersist`` does

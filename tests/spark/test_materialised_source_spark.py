@@ -33,19 +33,26 @@ def test_view_reads_a_checkpoint_and_is_freed(spark_session):
     assert _persistent(spark) - base == set()
 
 
-def test_content_fixed_at_entry(spark_session):
-    """Rows are computed once, at entry: a later change to the source does
-    not reach the view."""
+def test_content_computed_once_at_entry(spark_session):
+    """The source is evaluated once, at entry: reading the view twice does
+    not run the source again. A Python UDF counts its calls."""
     from common import materialised_source
+    from pyspark.sql.functions import udf
 
     spark = spark_session
-    spark.createDataFrame([(1,)], "n int").createOrReplaceTempView("_lb_ms_src")
-    try:
-        with materialised_source(spark, spark.table("_lb_ms_src"), "_lb_ms_fixed") as view:
-            spark.createDataFrame([(1,), (2,)], "n int").createOrReplaceTempView("_lb_ms_src")
-            assert spark.table(view).count() == 1
-    finally:
-        spark.catalog.dropTempView("_lb_ms_src")
+    calls = spark.sparkContext.accumulator(0)
+
+    @udf("long")
+    def counted(x):
+        calls.add(1)
+        return x
+
+    df = spark.range(50).select(counted("id").alias("id"))
+    with materialised_source(spark, df, "_lb_ms_once") as view:
+        assert calls.value == 50
+        assert spark.table(view).count() == 50
+        assert spark.sql(f"SELECT sum(id) FROM {view}").first()[0] == 1225
+    assert calls.value == 50
 
 
 def test_dropped_and_freed_when_the_body_raises(spark_session):
