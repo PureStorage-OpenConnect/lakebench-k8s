@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve, verify and serve a deployment's dependency set (DEP-2, ch01 s2.3-2.6).
+"""Resolve, verify and serve a deployment's dependency set inside its namespace.
 
 Shipped in the ``lb-deps-tools`` ConfigMap with ``request.json`` and run by
 the ``lb-deps`` pod and its consumers. Standard library only. It runs on the
@@ -89,7 +89,7 @@ MANIFEST_DIRS = {
 
 MIN_FREE_MIB = 2048
 # extensions.duckdb.org answers 403 to urllib's default "Python-urllib/3.x"
-# User-Agent (SD-1, 2026-10-01).
+# User-Agent (checked against the live repository, 2026-10-01).
 USER_AGENT = "lakebench-lb-deps/1"
 HTTP_TIMEOUT = 120
 FETCH_ATTEMPTS = 3
@@ -555,7 +555,7 @@ _IVY_FOUND = re.compile(r"^\s*found (\S+)#(\S+);(\S+) in ")
 def spark_jar_order(output: str, jar_dir: str) -> list[str]:
     """The jar order Spark itself uses for these packages: ``--verbose``
     prints the resolved ``spark.jars``, which is today's child-loader order
-    (SD-1: it matches a 1.6 driver's "Added JAR" order)."""
+    (it matches a 1.6 driver's "Added JAR" order, checked live)."""
     for line in output.splitlines():
         m = _SPARK_JARS_LINE.match(line.strip())
         if m:

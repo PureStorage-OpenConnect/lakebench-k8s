@@ -2019,7 +2019,7 @@ class SparkJobManager:
         catalog_type = cfg.architecture.catalog.type.value
 
         # Packages come from deps.request, the one definition shared with
-        # Spark Thrift (DEP-2, UX D2).
+        # Spark Thrift (UX D2).
         from lakebench.deps.request import jar_coordinates
 
         packages = jar_coordinates(cfg)

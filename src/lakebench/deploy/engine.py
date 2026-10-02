@@ -498,8 +498,8 @@ class DeploymentEngine:
         """``spark.jars.packages`` CSV for Spark Thrift Server.
 
         The same list the Spark jobs load (``deps.request.jar_coordinates``),
-        so Thrift and the jobs run one Iceberg runtime (UX D2). SD-5b
-        replaces this with a fetch from the deployment's lb-deps server.
+        so Thrift and the jobs run one Iceberg runtime (UX D2). It goes when
+        Thrift fetches the set from the deployment's lb-deps server.
         """
         from lakebench.deps.request import jar_coordinates
 
