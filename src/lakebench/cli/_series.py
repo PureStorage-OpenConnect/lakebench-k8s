@@ -122,8 +122,10 @@ def _call(run_once: Any, *args: Any, **kwargs: Any) -> tuple[int, BaseException 
     except KeyboardInterrupt:
         return int(ExitCode.INTERRUPTED), None
     except Exception as e:  # noqa: BLE001 -- recorded in the manifest, then re-raised
-        code = e.code if isinstance(e, LakebenchError) else ExitCode.FAILED
-        return int(code), e
+        from lakebench.cli._exit import exit_code_for
+
+        # The code the CLI exits with once the series re-raises *e*.
+        return int(exit_code_for(e) or ExitCode.FAILED), e
     return 0, None
 
 
