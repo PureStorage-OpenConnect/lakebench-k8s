@@ -31,6 +31,10 @@ nothing measured under this one):
   entity never used, as batch always did, instead of 0.00. No detection
   rule, score, gold table or query reads these two columns, so no result
   changes and the version is not bumped.
+- ``c360-2``: gold-finalize no longer switches to the incremental strategy
+  when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
+  every gold day; incremental gold runs only for multi-cycle cycles 2+, and
+  the strategy that ran is recorded per job (2026-10-02).
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
@@ -66,7 +70,7 @@ IDENTITY_VERSION = 2
 V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
-    "customer360": "c360-1",
+    "customer360": "c360-2",
     "financial": "aml-1",
     "custom": "custom-1",
 }
