@@ -1019,3 +1019,8 @@ def test_unavailable_reasons_name_no_plan_id():
     plan_id = re.compile(r"\b(?:DAT|CD|ER|EVD|SAF|QA|LB)-[0-9]+")
     for text in (ci.NO_MARKER, ci.NOT_OBSERVED, ci.UNREADABLE_MARKER, ci.NOT_ONE_CORPUS):
         assert not plan_id.search(text), text
+
+
+def test_listing_digest_of_an_empty_scope_is_none():
+    assert cd.listing_digest(bucket(data=()), BUCKET, SCOPE) is None
+    assert cd.is_sha256_hex(cd.listing_digest(bucket(), BUCKET, SCOPE))

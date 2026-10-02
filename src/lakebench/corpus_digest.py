@@ -146,9 +146,12 @@ def list_scope(client: Any, bucket: str, scope: str) -> list[dict[str, Any]]:
     return out
 
 
-def listing_digest(client: Any, bucket: str, prefix: str) -> str:
-    """``listing_sha256`` of everything under ``datagen_scope(prefix)``."""
-    return listing_sha256(list_scope(client, bucket, datagen_scope(prefix)))
+def listing_digest(client: Any, bucket: str, prefix: str) -> str | None:
+    """``listing_sha256`` of everything under ``datagen_scope(prefix)``, or
+    None when the scope holds no object (as ``read_corpus_markers``
+    records it: an empty scope is not a corpus)."""
+    objects = list_scope(client, bucket, datagen_scope(prefix))
+    return listing_sha256(objects) if objects else None
 
 
 def corpus_series_sha256(markers: Mapping[int, Sequence[Mapping[str, Any]]]) -> str | None:

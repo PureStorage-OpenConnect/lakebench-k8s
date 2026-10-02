@@ -169,8 +169,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and a read of the generator's per-node markers and `series.json`, taken
   just before the record is saved, in
   `config_snapshot.experiment_inputs.corpus_observation`; Lakebench's own
-  bucket objects under `.lakebench/` are never counted, and an empty prefix
-  records no listing digest) and gains in
+  bucket objects under `.lakebench/` are never counted; a prefix holding no
+  object records no listing digest and the corpus problem "no objects under
+  <prefix>", so such a run is not comparable) and gains in
   `experiment.corpus`: `id_v2` (null when it cannot be computed, with the
   reason in `id_v2_unavailable`), `id_version`, `args_sha256`, `declared`
   (the config's corpus settings, for display), and, when markers exist,
