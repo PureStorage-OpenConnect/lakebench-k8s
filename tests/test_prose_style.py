@@ -78,6 +78,8 @@ def test_added_em_dash_fails_and_names_line(tmp_path):
         ("a cell: " + "&" + "mdash;", "em-dash"),
         ("a cell: " + "&#" + "8212;", "em-dash"),
         ("a cell: " + "&#X" + "2014;", "em-dash"),
+        ("a cell: " + "&#x0" + "2014;", "em-dash"),
+        ("a cell: " + "&#0" + "8212;", "em-dash"),
         (f"done {chr(0x2705)}", "emoji"),
         (f"party {chr(0x1F389)}", "emoji"),
         (f"warn {chr(0x26A0)}{chr(0xFE0F)}", "emoji"),
@@ -88,6 +90,7 @@ def test_added_em_dash_fails_and_names_line(tmp_path):
         (f"ring {chr(0x2B55)}", "emoji"),
         (TRAILER, "ai-attribution"),
         (f"{CO} Claude Opus <noreply@example.com>", "ai-attribution"),
+        (f"{CO} ClaudeAI <bot@example.com>", "ai-attribution"),
         ("co-authored" + "-by: someone via Anthropic", "ai-attribution"),
         (f"{CO} GitHub Copilot", "ai-attribution"),
         (f"{CO} Cursor Agent <cursoragent@example.com>", "ai-attribution"),
@@ -153,6 +156,18 @@ def test_allowlisted_hit_passes_moves_with_its_line_and_goes_stale(tmp_path):
     assert _check(repo, entry) == []
     (repo / "g.md").write_text("golden --\n")
     problems = _check(repo, entry)
+    assert len(problems) == 1 and "stale entry g.md:em-dash:" in problems[0]
+
+
+def test_one_entry_excuses_one_identical_line(tmp_path):
+    line = f"row {EM} row"
+    repo = _repo(tmp_path, {"g.md": f"{line}\n{line}\n"})
+    entry = f"g.md:em-dash:{pg.line_key(line)}  # golden\n"
+    problems = _check(repo, entry)
+    assert len(problems) == 1 and problems[0].startswith("g.md:2 em-dash")
+    assert _check(repo, entry * 2) == []
+    (repo / "g.md").write_text(f"{line}\n")
+    problems = _check(repo, entry * 2)
     assert len(problems) == 1 and "stale entry g.md:em-dash:" in problems[0]
 
 

@@ -75,7 +75,7 @@ def test_prose_check_runs_the_prose_guard(monkeypatch):
     def fake(name):
         mod = real(name)
         if name == "prose_guard":
-            mod.check = lambda: ["docs/a.md:2 em-dash -- use `--` or restructure"]
+            mod.check = lambda skipped=None: ["docs/a.md:2 em-dash -- use `--` or restructure"]
         return mod
 
     monkeypatch.setattr(rg, "_load_script", fake)

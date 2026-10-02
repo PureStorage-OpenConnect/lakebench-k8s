@@ -186,13 +186,16 @@ def check_changelog() -> Result:
 def check_prose() -> Result:
     """scripts/prose_guard.py over every tracked file: em dashes, emoji, AI
     attribution, and allowlist entries that no longer match a hit."""
-    problems = _load_script("prose_guard").check()
+    skipped: list[str] = []
+    problems = _load_script("prose_guard").check(skipped=skipped)
+    note = f"; {len(skipped)} not scanned: {', '.join(skipped[:10])}" if skipped else ""
     if problems:
         shown = problems[:20] + (
             [f"... and {len(problems) - 20} more"] if len(problems) > 20 else []
         )
-        return Result("prose", FAIL, f"{len(problems)} prose problems:\n" + "\n".join(shown))
-    return Result("prose", PASS, "tracked files clean")
+        detail = f"{len(problems)} prose problems{note}:\n" + "\n".join(shown)
+        return Result("prose", FAIL, detail)
+    return Result("prose", PASS, f"tracked files clean{note}")
 
 
 # UAT evidence for a release lives at this path (docs/releasing.md). The

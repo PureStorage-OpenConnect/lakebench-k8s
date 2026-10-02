@@ -24,8 +24,9 @@ A hit that has to stay (a golden file for a rendered UTF-8 case, say) is
 listed in ``scripts/prose_allowlist.txt`` as ``path:kind:key  # reason``,
 where key is the one the hit prints: the first 8 hex digits of the SHA-1 of
 the line with surrounding whitespace removed. Keyed by content, an entry
-survives lines added above it. An entry that no longer matches a hit is
-itself a failure, so the list cannot outlive what it excuses.
+survives lines added above it. One entry excuses one hit, so a second
+identical line needs a second entry. An entry that no longer matches a hit
+is itself a failure, so the list cannot outlive what it excuses.
 
 Usage:
     python scripts/prose_guard.py          # exit 1 on any hit or stale entry
@@ -38,6 +39,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -48,12 +50,14 @@ MAX_BYTES = 2 * 1024 * 1024
 SNIFF_BYTES = 8192
 
 # Written as escapes so this file passes its own scan.
-_EM_DASH = re.compile("|".join(["\u2014", "&" + "mdash;", "&#" + "8212;", "&#x" + "2014;"]), re.I)
+_EM_DASH = re.compile(
+    "|".join(["\u2014", "&" + "mdash;", "&#0*" + "8212;", "&#x0*" + "2014;"]), re.I
+)
 _EMOJI = re.compile(
     "[\U0001f000-\U0001faff\u2600-\u27bf\u231a\u231b\u23e9-\u23f3\u23f8-\u23fa"
     "\u2b1b\u2b1c\u2b50\u2b55\ufe0f]"
 )
-_AI_NAMES = r"(\bclaude\b|anthropic|openai|chatgpt|\bcodex\b|copilot|\bgemini\b|\bcursor\b|\baider\b|\bdevin\b)"
+_AI_NAMES = r"(\bclaude(\b|ai|code)|anthropic|openai|chatgpt|\bcodex\b|copilot|\bgemini\b|\bcursor\b|\baider\b|\bdevin\b)"
 # The hyphens are in brackets so that no line here spells a trailer.
 _AI = [
     re.compile(rf"(co[-]authored|generated|assisted)[-]by:.*{_AI_NAMES}", re.I),
@@ -145,9 +149,11 @@ def scan(paths: Iterable[str], root: Path = ROOT, skipped: list[str] | None = No
     return hits
 
 
-def load_allowlist(path: Path = ALLOWLIST) -> tuple[set[tuple[str, str, str]], list[str]]:
-    """Entries ``(path, kind, key)`` and the malformed lines."""
-    entries: set[tuple[str, str, str]] = set()
+def load_allowlist(path: Path = ALLOWLIST) -> tuple[Counter[tuple[str, str, str]], list[str]]:
+    """Entries ``(path, kind, key)`` with how often each is listed, and the
+    malformed lines. One entry excuses one hit: two identical lines need
+    the entry twice."""
+    entries: Counter[tuple[str, str, str]] = Counter()
     bad = []
     if not path.is_file():
         return entries, bad
@@ -160,7 +166,7 @@ def load_allowlist(path: Path = ALLOWLIST) -> tuple[set[tuple[str, str, str]], l
         if not m or m.group(2) not in FIXES or not reason.strip():
             bad.append(f"{path.name}:{n}: expected 'path:kind:key  # reason', got {raw!r}")
             continue
-        entries.add((m.group(1), m.group(2), m.group(3)))
+        entries[(m.group(1), m.group(2), m.group(3))] += 1
     return entries, bad
 
 
@@ -173,11 +179,18 @@ def check(
     """Every problem as a line: hits not allowlisted, stale and malformed entries."""
     hits = scan(tracked_files(root) if paths is None else paths, root, skipped)
     allowed, bad = load_allowlist(allowlist)
-    found = {(h.path, h.kind, h.key) for h in hits}
-    out = [h.render() for h in hits if (h.path, h.kind, h.key) not in allowed]
+    left = Counter(allowed)
+    out = []
+    for h in hits:
+        k = (h.path, h.kind, h.key)
+        if left[k] > 0:
+            left[k] -= 1
+        else:
+            out.append(h.render())
     out += [
         f"{allowlist.name}: stale entry {p}:{k}:{key} (no such hit any more; remove it)"
-        for p, k, key in sorted(allowed - found)
+        for (p, k, key), n in sorted(left.items())
+        for _ in range(n)
     ]
     return out + bad
 
