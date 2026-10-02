@@ -30,6 +30,7 @@ from _foreach_batch import foreach_batch_harness
 pytest.importorskip("pyspark")
 
 pytestmark = [
+    pytest.mark.aml_parity,
     pytest.mark.requires_jars("iceberg"),
     # The module-scoped fixture below runs both scripts once for every test.
     pytest.mark.usefixtures("load_script_module"),

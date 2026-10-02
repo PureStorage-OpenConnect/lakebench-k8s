@@ -28,7 +28,7 @@ import pytest
 
 pytest.importorskip("pyspark")
 
-pytestmark = pytest.mark.requires_jars("iceberg")
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.aml_parity]
 
 HERE = Path(__file__).resolve().parent
 

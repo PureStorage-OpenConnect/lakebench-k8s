@@ -22,7 +22,11 @@ from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
-pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
+pytestmark = [
+    pytest.mark.requires_jars("iceberg"),
+    pytest.mark.usefixtures("load_script"),
+    pytest.mark.aml_parity,
+]
 
 
 def test_replay_is_idempotent_in_a_fresh_jvm(spark_subprocess, spark_jars):

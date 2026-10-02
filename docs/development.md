@@ -149,6 +149,79 @@ A test that calls a stream's micro-batch handler directly wraps the call in
 `foreachBatch` sets (the streaming query id the writers read) and restores
 them afterwards; with several writer threads, each thread enters
 `inside_foreach_batch` itself.
+### The AML freeze
+
+The code that scores the AML looks is frozen between the pre-registered
+predictions and the looks. `scripts/frozen_aml_files.json` lists it with
+hashes: the bronze and silver AML scripts, the feature and reference
+scorers, the fidelity gate, the pre-registration, the datagen sources and
+image inputs, the parity guards, the Spark-tier harness and this machinery,
+and the symbols the frozen scripts import, followed through what each of
+them references (derived, not maintained by hand: a bare script import
+resolves through `scripts_maps.SCRIPT_MAPS`, as on a Spark pod). For each
+imported module, and each package `__init__` on the way, it also pins the
+code that module runs at import time (every module-level statement other
+than a def, a method, a docstring or an assignment of a plain display such
+as a constant, a name, a container or arithmetic on those; a decorator; an
+impure default; an import of repository code or of a name pinned code
+uses), and what that code calls. A new helper, constant, literal table or
+unused external import needs no trailer; a new module-level call, a new
+import of repository code, or an import that rebinds a name pinned code
+uses does. Any module that mutates a pinned name it imports, at module level
+or in a function, is refused unless `dynamic_ok` lists it. The two pinned CI
+jobs are hashed with the workflow-level `defaults` and `env` they inherit.
+`scripts/frozen_guard.py` (Python 3.11 only; its hashes use `ast.dump`):
+
+- `check-tree` fails when the tree differs from the list, an entry is
+  missing or stale, a pinned name is bound twice, a function mutates a
+  pinned name, a module the frozen scripts import uses `import *`, or a
+  frozen file imports something dynamically, unless the list's `dynamic_ok`
+  names that call (by enclosing function and occurrence) with a reason;
+- `check-range HEAD` walks the list's creation commit and every commit
+  descended from it. A commit is walked when an entry its or its parents'
+  list holds, or the list's state, lock or allowances, differs from every
+  checked parent's: a merge is walked when it brings in a lane forked before
+  the list existed, or when it edits frozen content itself; a clean merge of
+  lanes whose commits were already checked is not. A walked commit carries
+  exactly one `Freeze-cost:` trailer (`None`, `None (append)`, `Parity`,
+  `Rebuild` or `Re-derive`). Every value except `None (append)` (an append
+  to an append-only file, nothing else) needs green AML parity on that
+  commit: the head's comes from this run's `aml-parity` job, and so does any
+  commit whose frozen content equals the head's; any other commit needs a
+  finished `ci.yml` run of its own with both parity jobs green. To get one
+  for a commit that has none (a multi-commit push only runs CI on the head,
+  and a newer push to a lane branch cancels the older run), push a branch at
+  that commit and let its run finish;
+- `check-history` checks the list's states (open, locked, spent) commit by
+  commit against each parent; under a lock the list may not change at all,
+  and the predictions and the frozen content must stay what the lock
+  recorded;
+- `regen` rewrites the list from the tree, while it is open.
+
+A frozen edit therefore runs `python3.11 scripts/frozen_guard.py regen`,
+commits the list with the edit and the trailer, and is pushed so that CI
+runs the parity job on it. The CI jobs are `aml-parity` (the guards and
+their mutation check, both Spark lines; `scripts/check_parity_job.py`
+requires exactly the node ids in `tests/spark/aml_parity_guards.txt`, each
+passed) and `frozen-guard`, which also runs the guard's own tests on 3.11
+and fails on a skip; the release gate runs `check-tree` and
+`check-history`.
+
+What the guard does not cover: CI runs the guard code of the commit being
+checked, so a change to the guard itself is reviewed, not machine-checked
+(protect `scripts/frozen_guard.py` and the parity files with code owners);
+every commit since the list's creation is judged by the current guard's
+rules, so tightening a rule can flag an older commit, which then needs a
+recorded exception in the guard; `Rebuild` and `Re-derive` are recorded, not
+verified; `tests/conftest.py`, `pyproject.toml`'s pytest settings, and the
+`job.py` and `common.frame_fingerprint` symbols the pinned Spark-tier harness
+imports are not pinned; modules that a package `__init__` imports are pinned
+only against mutating a pinned name, not as a whole; and settings that reach
+the frozen scripts through Spark configuration or environment variables set
+by `job.py` are covered by the parity guards, not by the list. `check-range`
+keeps the frozen states it computed in a cache keyed by commit and by the
+guard's own digest, so a run recomputes only commits it has not seen.
+
 The four AML batch/stream protocol guards (statements, profiles,
 dimensions, replay idempotency) have a mutation check,
 `tests/spark/test_parity_guard_mutations.py`: it reruns each guard's Spark

@@ -112,6 +112,7 @@ def test_gate_covers_the_required_checks():
         "em-dashes",
         "uat-results",
         "perf-baselines",
+        "frozen-guard",
     } <= names
 
 

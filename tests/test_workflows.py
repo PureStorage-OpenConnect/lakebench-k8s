@@ -620,3 +620,17 @@ def test_clean_venv_checks_the_reference_packages_test_reference_pins_checks():
     m = re.search(r"for name in \(([^)]*)\):", aml)
     assert m, "the aml step no longer loops over a literal tuple of package names"
     assert set(ast.literal_eval("(" + m.group(1) + ")")) == trp.CHECKED
+
+
+def test_release_call_grants_what_ci_jobs_request():
+    """GitHub refuses to start a called workflow whose jobs ask for more
+    permissions than the caller grants, so release.yml's call of ci.yml must
+    grant every permission any ci.yml job requests."""
+    ci_jobs = _load("ci.yml")["jobs"]
+    call = _load("release.yml")["jobs"]["ci"]
+    granted = call.get("permissions") or _load("release.yml").get("permissions") or {}
+    order = {"none": 0, "read": 1, "write": 2}
+    for name, job in ci_jobs.items():
+        for scope, level in (job.get("permissions") or {}).items():
+            have = granted.get(scope, "none")
+            assert order[have] >= order[level], (name, scope, level, have)

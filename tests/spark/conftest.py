@@ -20,6 +20,7 @@ earlier test started Spark without it.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -268,6 +269,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "aml_parity: one of the AML batch/stream protocol guards or their mutation check "
+        "(the CI aml-parity job runs exactly these; tests/spark/aml_parity_guards.txt)",
+    )
+    config.addinivalue_line(
+        "markers",
         "known_bug(id, match=regex, legs=('4.0', '4.1'), reason=''): a known product or "
         "test bug on these Spark lines; the test is a strict xfail there when it fails with "
         "a message matching match, any other failure stays a failure, and a fix turns the run "
@@ -335,10 +341,24 @@ def _record_skip(config: pytest.Config, report: pytest.TestReport | pytest.Colle
         config.stash.setdefault(_SKIPS, []).append((report.nodeid, _skip_reason(report)))
 
 
+_OUTCOMES = pytest.StashKey[dict[str, str]]()
+
+
 @pytest.hookimpl
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     if _CONFIG is not None:
         _record_skip(_CONFIG, report)
+        # Per node id: "passed" only when setup, call and teardown all passed
+        # and the call was not an xfail; anything else is recorded as it is.
+        outcomes = _CONFIG.stash.setdefault(_OUTCOMES, {})
+        prev = outcomes.get(report.nodeid, "passed")
+        if report.when == "call" and hasattr(report, "wasxfail"):
+            now = "xfailed" if report.skipped else "xpassed"
+        elif report.passed:
+            now = "passed"
+        else:
+            now = f"{report.outcome} in {report.when}"
+        outcomes[report.nodeid] = now if prev == "passed" else prev
 
 
 @pytest.hookimpl
@@ -364,7 +384,14 @@ def skip_problems(skips: list[tuple[str, str]], allowed: dict[str, str]) -> list
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Skip guard, the backstop for tests not on ``requires_jars``: with
     ``LB_REQUIRE_JARS=1`` a skip that mentions jars, or any skip not listed
-    in skip_allowance.txt, fails the run."""
+    in skip_allowance.txt, fails the run. With ``LB_TEST_OUTCOMES=<file>``
+    every test's outcome is written there by node id (the aml-parity job
+    compares it with tests/spark/aml_parity_guards.txt)."""
+    out = os.environ.get("LB_TEST_OUTCOMES")
+    if out:
+        Path(out).write_text(
+            json.dumps(session.config.stash.get(_OUTCOMES, {}), indent=1, sort_keys=True) + "\n"
+        )
     if os.environ.get("LB_REQUIRE_JARS") != "1":
         return
     problems = skip_problems(session.config.stash.get(_SKIPS, []), read_skip_allowance())

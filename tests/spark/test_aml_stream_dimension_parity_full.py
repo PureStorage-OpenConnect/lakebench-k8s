@@ -32,6 +32,8 @@ import pytest
 
 pytest.importorskip("pyspark")
 
+pytestmark = pytest.mark.aml_parity
+
 
 @pytest.mark.requires_jars("iceberg")
 def test_batch_and_stream_dimensions_are_row_hash_identical(spark_subprocess, spark_jars):

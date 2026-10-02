@@ -1,0 +1,874 @@
+{
+ "schema": 2,
+ "state": "open",
+ "locked": null,
+ "ast_python": "3.11",
+ "dynamic_ok": [
+  {
+   "path": "src/lakebench/aml/fidelity_gate.py",
+   "what": "library_versions:import_module",
+   "reason": "library_versions() reads __version__ of the pinned fitting libraries by module name; it imports no repository code",
+   "occurrence": 1
+  },
+  {
+   "path": "src/lakebench/spark/scripts/common.py",
+   "what": "replay_possible:_RUNS_STARTED",
+   "occurrence": 1,
+   "reason": "run-time state: the set of stream run ids seen in this driver; replay_possible's own pin covers the code that adds to it"
+  }
+ ],
+ "entries": [
+  {
+   "kind": "ci-job",
+   "path": ".github/workflows/ci.yml",
+   "job": "aml-parity",
+   "sha256": "c5f0a1173b461538a476009733d2b9ec3d207ce6f2dd8f510cf4d9a5c73e97b7"
+  },
+  {
+   "kind": "ci-job",
+   "path": ".github/workflows/ci.yml",
+   "job": "frozen-guard",
+   "sha256": "71043da1d5d6a1f7b3175cda7c3e32457855e24ea771b21760184e0a6c924636"
+  },
+  {
+   "kind": "closed-glob",
+   "glob": "datagen_rs/src/**",
+   "files": 27
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/Cargo.lock",
+   "sha256": "b86af762370fdd54fe753d6fb20bbb5e1ad5d4cf71d462ea333db7f48af6806a"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/Cargo.toml",
+   "sha256": "6b1ea69d5b7c41b4129d9ed3c22596ab5ed05db53ee76e8691f4dabef4a11ed7"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/Dockerfile",
+   "sha256": "2620946f7fee6d06ab215f3d3ea0ce31315b4f861d51823c9d603077df9327ce"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/entrypoint.py",
+   "sha256": "8308b8dd1d69531ac54f3b74b5733f0818d4ab9b96c374ac860ed02235cfc47f"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/amounts.rs",
+   "sha256": "e4107d5bf600c7589a3083b3584acc824ed7c169bdfa77a1506799aad4cb8007"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/arena.rs",
+   "sha256": "452ccefe57cad002e4fc91dcdb18217c2ed23830fe5d5ec212ad0050f272f77b"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/bin/dump_world.rs",
+   "sha256": "3725f384bde1ac404a47a6b5f64d85dea96a9c65ad1402580c8b7949afddbb52"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/bin/generate.rs",
+   "sha256": "328813214296f63ba4aacd4c967d6fafc4a10bdd314215530626d06bebf52220"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/customer360.rs",
+   "sha256": "54c4f8d3dd14ecda8b5af825165669dd7cd5605c07290c341d27f1a978cf4f8e"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/customer360_realism.rs",
+   "sha256": "a22798a9bd5e94504c84dc8a2130e6c7b9a41276ef411035e3de803db2e1d1a7"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/cycle.rs",
+   "sha256": "fbc2ae22167e09b20e28d633253d8ac696c4d453b7fb775ec00a1046f1591075"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/emit.rs",
+   "sha256": "146281d42de420124964024430839f7a2fd7d58503d9921130c652974a977e8e"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/hash.rs",
+   "sha256": "157f47b4db62b3b866988e9da8d7c800fb9b7d6d026b56622d2c3104e2cfe275"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/ids.rs",
+   "sha256": "25544d0e2962b17f53bb2dc1c8bb40c44a0f670a02daed0e6825112adcd49339"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/kyc.rs",
+   "sha256": "f86abaa1ec0c884987234b43faeed0e56de19c584087c19fed51d51586e4b86f"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/lib.rs",
+   "sha256": "6175be032fdda6d98bb920d09b8765871c0ffbdbd4b547d39f70859f1994e0bf"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/metrics.rs",
+   "sha256": "e9a7012f930c384adc255e1f42f1fbca111c68ffdf4d8d46de91ac5c697ae77b"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/model.rs",
+   "sha256": "82067692500c96ed9e2a32ea5d4befa45ff453ff8513c50f7d8d077baf794a4c"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/party.rs",
+   "sha256": "5edfd32a55cb080198ffe02b8cce8cebc6700de999c5eb199625e0ecdcd55ac4"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/placement.rs",
+   "sha256": "667c432ef5858207db8a659bde9f9cc33624503dc66a0046c72257b1eca6cd0e"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/push.rs",
+   "sha256": "b132acd18a4fe28049c0cf604ee6785e1acb1aeafb134482a978960a5fe95fca"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/realism.rs",
+   "sha256": "dba72d9f9622179dacdbf31482b627229ada0fea86a855302416a161a617a011"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/regular.rs",
+   "sha256": "7c34b9fece0686c5b17cf46378f71c44a03f7bd680cd6084b6ade5db046b7e3f"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/robustness.rs",
+   "sha256": "924bb216fa64cfa6faba201922a20ebbf0f4cdb6128c57d9d610b565e93a2fde"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/s3sink.rs",
+   "sha256": "c25e82e14e78192480216c3704b5ccf4687e2851183b1a99f206d9f800feeb78"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/schema.rs",
+   "sha256": "6db11a03303934a3f048c272ab5e870162d03b359ae15820b024046c3501793b"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/screening.rs",
+   "sha256": "3bf6ea0aebe2c4eef64d2defd0381f7d302c32f3429e354ca87b417d7b11c491"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/timing.rs",
+   "sha256": "445bf202c5fa10a84b5ed70aa0c1b0c6778dc86be7086365b85ae4cdb363b833"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/typology.rs",
+   "sha256": "625cfc7226f512bb76113203b884c387396d19f15a71ba847ed83b342ee5dcec"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/world.rs",
+   "sha256": "00e0400e7b4e38e9de838440694e40b9f8dadb5ebd95c465349adc42fd6e1834"
+  },
+  {
+   "kind": "file",
+   "path": "datagen_rs/src/writer.rs",
+   "sha256": "dabe9b7d39dcb16e4362d15584dd89cff3a03dcd6a39281594ff366397c654ae"
+  },
+  {
+   "kind": "file",
+   "path": "scripts/check_parity_job.py",
+   "sha256": "81365e68d8b266bcc59d3798b61aa9d1b327ed9f215f239aef44ae8a9d16636a"
+  },
+  {
+   "kind": "file",
+   "path": "scripts/fetch_test_jars.py",
+   "sha256": "e34306a1dbe62fd73dea66a4a9ec4e3d9fd64ce51a944688e27d4e0cbb91f3e5"
+  },
+  {
+   "kind": "file",
+   "path": "scripts/frozen_guard.py",
+   "sha256": "0861115daade35c80b8c667157f1623d50e54397e5b404f72481fcf035f5f0f1"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/aml/fidelity_gate.py",
+   "sha256": "808833c19d1337ba07e97a883cc720af5332af19afc3e2c2be4749cec16fc3ae"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/aml/reference_score.py",
+   "sha256": "c2ab713f9713919e1c3ad9bd0ae0d56a460abf98efb1f2ec98252ef472c97290"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/spark/data/aml/aml_preregistration.json",
+   "sha256": "47d41de929ad56ba052a1951e5e109df4cb0872e40164aaa3cc553bc8102f239"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/spark/scripts/aml_features.py",
+   "sha256": "341fcefdac492a13aaf1abe54b02885115aacff5ac21da37b3c3b43d37eb69f0"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/spark/scripts/bronze_ingest_financial.py",
+   "sha256": "4c8183012dfee432d641f7f9ea91dad4b0155e19be69ca939423fb6a5efc8e27"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/spark/scripts/bronze_verify_financial.py",
+   "sha256": "520c03c47ee91f09af7548e2e109853a8092540fade875539e5bb99882311d81"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/spark/scripts/score_financial_reference.py",
+   "sha256": "deafeaf0fe43e4b1a6dd8a575def3880b83c5c8dd202327491a647aea638357f"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/spark/scripts/silver_build_financial.py",
+   "sha256": "adc58c715bff306dc1dcff2d638281ababd7dbd91d1ae32dad8d8e7d6f4f3243"
+  },
+  {
+   "kind": "file",
+   "path": "src/lakebench/spark/scripts/silver_stream_financial.py",
+   "sha256": "116088d63a5c10ea6a1e38ffefd8facd379c51778d23d7340f84259ababcf64f"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/_d_full_helpers.py",
+   "sha256": "f9af2f8e8ea8bef7594b74f5d0d3d6a4bf970769225c50a6528ffdef9d98a661"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/_foreach_batch.py",
+   "sha256": "6650d09d14ecdc44477d8abb4840a5d6aca9bbffb3035b68d2de6afb07da8cff"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/_parity_mutation.py",
+   "sha256": "c851587c023936682069122d55d5cb0b4c50d89b433a201dcde0d4b3dd40b8e9"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/aml_parity_guards.txt",
+   "sha256": "f2b378fcb0e70ade74cb76bd257e9bfefcedfb9883899eb2d6954c1d35ac83aa"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/conftest.py",
+   "sha256": "90bbbe110258ea8e5e79acf7b7a22ab825220487a608879551dafc4b23aa60f3"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/jars.lock.json",
+   "sha256": "53f3de8f2bafb8e14b4137002b40500f5bee827422859346d256ac433c5475dd"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/test_aml_batch_stream_profiles_parity.py",
+   "sha256": "f35aec1c14824e1caa23a68b09e4a61ba496661531881da0ee512b11ea4de3bb"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/test_aml_batch_stream_statements_parity.py",
+   "sha256": "88c175cf8d017ceaa5082dabd3209581bb25f92b831de88ab2a888a84849fde0"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/test_aml_stream_dimension_parity_full.py",
+   "sha256": "f0c47d31c6c367d84acdc5f2ac304c9628ac25f21e83b286e8c2f7937ced7665"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/test_aml_stream_statements_replay_idempotent.py",
+   "sha256": "edd47b344b5a253c189f9fd0c6a20b905145e7a59c71a219dc04cdf42942b52d"
+  },
+  {
+   "kind": "file",
+   "path": "tests/spark/test_parity_guard_mutations.py",
+   "sha256": "8738d232c1e95db5376ae1a330bdf9e2de58597544d6fceb2c6011ad503575c4"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/__init__.py",
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/aml/__init__.py",
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/aml/d8_shards.py",
+   "sha256": "8e75c7d9be864c68a1bc545e31e39d3f937525ad58f848b20ba06cb9e48e71d6"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/config/__init__.py",
+   "sha256": "fd56aa8077c06c327ae25fd504175ddeb5602bb696b4d371220f62cc3d00eb46"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "sha256": "2f38522baed84553bc654e2f61d9241121a18cd009856893f5709df3ae223e04"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/spark/__init__.py",
+   "sha256": "c9c3890a42c943db3060adba2120736f65c430cd444d44beb0cda04a0404076e"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "sha256": "b313bf3ef377467865a1f46160b2d20c2ca1fbec13365b0c095ca935e93a3a6a"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/spark/scripts/detection_rules.py",
+   "sha256": "884d876bfac5fb34d26357b8691ec3b9d8db73e7698090cbc996f7e426be37f9"
+  },
+  {
+   "kind": "prelude",
+   "path": "src/lakebench/spark/scripts/tm_operations.py",
+   "sha256": "f571b802b84e9523fd7a0a0cabd66bcd10ce37b434e4eb48800c602ca42d5298"
+  },
+  {
+   "kind": "pyattr",
+   "path": "src/lakebench/deploy/financial_ddl.py",
+   "names": [
+    "SILVER_TRANSACTIONS_DDL",
+    "SILVER_ENTITIES_DDL",
+    "SILVER_ACCOUNTS_DDL",
+    "SILVER_ACCOUNT_STATEMENTS_DDL",
+    "SILVER_COUNTERPARTY_EDGES_DDL",
+    "SILVER_ENTITY_PROFILES_DDL",
+    "SILVER_BATCH_VERSIONS_DDL"
+   ],
+   "sha256": "e12abbcc770bd3e19c54588a15e880ab21df4a13ea72810a710a5566f425e9f6"
+  },
+  {
+   "kind": "pyattr",
+   "path": "src/lakebench/modules/pipeline_engines/spark/job.py",
+   "names": [
+    "REFERENCE_PY_DEPS"
+   ],
+   "sha256": "e8f5627b35b5338eada3e31a9eca8188879dc0b9952587585b8cc16759b3e5db"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/aml/d8_shards.py",
+   "name": "check_plan",
+   "sha256": "4e3d25ed2de3bec159c42a703132939eba5c643a5ae42b0166eadc2a63ddef45"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/aml/d8_shards.py",
+   "name": "component_sizes",
+   "sha256": "44f4afcdd961170dc3a2307f04c9a913d7af14d0b17198cc2a428da8136aa000"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/aml/d8_shards.py",
+   "name": "components",
+   "sha256": "45347671040edaa8251c78f51c505e8fb2d586455b63c070e6679b6321056b0c"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/aml/d8_shards.py",
+   "name": "spanning_instances",
+   "sha256": "8b785c240369a2b002c29e2552a2b245d353fb06ad1bd818ad765c92eb4e5ece"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "LOOKS_FILENAME",
+   "sha256": "4223e063be093c0d7faac2e95569c0ffcfe551e2129dfe281adf6b72cca06cac"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "MANIFEST_KEYS",
+   "sha256": "2dbebcb95e421ab302aaa54a1f22c7b935d94dfa788fa4b11ea90af6ecacdd4d"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "MANIFEST_MULTIPLIER_KEYS",
+   "sha256": "74a19049c6af261d5ad035957069f7d94c4283cb6d3cef300d1460db2840c01c"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "MANIFEST_STAMP_KEY",
+   "sha256": "7ae26a2dee47608e9ef1ee334ee0929f3b0d0ff125a14cc38dbb5da775928d17"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "PROTECTED_ROLES",
+   "sha256": "8395d5a4bd699381bb35dcc18ae4b18b7a745e214cca130484e3d9f4bd0c4371"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "ROBUSTNESS_PERTURBATION_IMPLEMENTED",
+   "sha256": "44ae3e7c99747b51d03e1e8d9735416dfefbcbbb26e2d0a67349ea52b73f8d34"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "ROLES",
+   "sha256": "617f4d499718fd6e5bf8070b4b6f56e1ce53ddb035f04c52760699745480d62d"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "_PREREG_PATH",
+   "sha256": "649f6727325d6e43b405eb719a4ad83e1a644cb83517c6038309de55971630f8"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "aml_seed_error",
+   "sha256": "abf1114c947d7bf8c30554cfb769fb0ad6f6112803355512f183111b5ee2e63a"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "load_looks",
+   "sha256": "a40c68084fb06504e88dc728d522644ab23210ea1bcec6aa8cc59ceb1f62d2d4"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "looks_open",
+   "sha256": "704be47b66a73c917d162af0580ce50be8445b374d3dc816ac4411e445929359"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "looks_path",
+   "sha256": "755a7f314fbcd947332aad8668cdf9d6a525ad53782b92aa3a783483d5cd1e21"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "perturbation_stamp_error",
+   "sha256": "97808153299b821eb51f5be2e21f0e61cb4e3c528fcb47515fe8538728440b7d"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "recorded_seeds",
+   "sha256": "e75e74390ab3e8c9af3502211b6cc89378139f040b30ad065c4e67c15f766f96"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "spent_from",
+   "sha256": "ad9409fa9fc87127526956f79db09d75e67bbb8b74f7262124695a082d5a84d6"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "summarise_stamp",
+   "sha256": "6c58fa2437a3771860b76c8793a5969472ef2a911b9f84700f2f2e6cc7fb4db9"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/config/datagen_seed.py",
+   "name": "with_recorded_looks",
+   "sha256": "86b0a8da9508a37fe7ddca7816ce00a035a42c658fbdfe7a37effc509fab360f"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/deploy/financial_ddl.py",
+   "name": "render_ddl",
+   "sha256": "f347d611173b958f01e38f4a3ea2fa407df8fd50438da437d6c6b5bbcedbda67"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/modules/pipeline_engines/spark/scripts_maps.py",
+   "name": "SCRIPT_MAPS",
+   "sha256": "3c17e43c0a414b185028b7dbb44acd96057ebb9659b723b173a21de8fcc41549"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/modules/pipeline_engines/spark/scripts_maps.py",
+   "name": "ScriptSource",
+   "sha256": "dd2d2f4a5c2c487b18358a53ce362cd07a7a6b27415895066119d9bba0f09d93"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/modules/pipeline_engines/spark/scripts_maps.py",
+   "name": "_scripts",
+   "sha256": "741f080f4a63c1d0df9cf6a2e3ae55987a896d19707ab3be7f2231a8756a5437"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/modules/pipeline_engines/spark/scripts_maps.py",
+   "name": "_src",
+   "sha256": "87cfe7256f317632e9e26a44329ae7587c8015fd3156f53a291aa6421b1321f9"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "ICEBERG_METADATA_PROPS_SQL",
+   "sha256": "3d5167154dba68c3ac3cd8269477619389b0c80a7986f1b30f3c99c385b4af9e"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "ICEBERG_PREVIOUS_VERSIONS_MAX",
+   "sha256": "d883432e2312dbf77c8f66cfd3db6060f7c8a16e5f6b7b2999108ceb32018b8d"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "ICEBERG_V2_SNAPPY_PROPS_SQL",
+   "sha256": "f1833e8b9b45ea6ee91fbf40b4631212f13fa68c164d234ae584dfa06e1a3ca5"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "METADATA_DELETE_AFTER_COMMIT",
+   "sha256": "9448fa02744297aae6b06e43071c5b02568fbfb2a63fba5fc5a9770695b4b30a"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "METADATA_PREVIOUS_VERSIONS_MAX",
+   "sha256": "9e4e43508bf3243a7b964b470394d3d1eb75bd2b4882a7b1c6a59f397e8eaff7"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "SILVER_STATE_CONFIGMAP_NAME",
+   "sha256": "55248a6b2a7a246abd23f860a6b9737554660150eb1d39bd76f878a96ea964f2"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "SilverAbort",
+   "sha256": "d8c4b6dfd9502253f6ea9827e6dc34ea2395c8acb631b0739adde1601ce4fd4e"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_DDL_TABLE",
+   "sha256": "52dd353dc5af7f1c8416dd549994709f7ba2df83fdd21c52cedf149939762410"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_ENTITY_TYPE_COMPANY_SUFFIX_REGEX",
+   "sha256": "ed48d7d58e7796623a8c6b71a9d2a97f703c51cd773ab01b84e6a8cd06ec83c8"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_HadoopSidecarFS",
+   "sha256": "323276839a3363700e8b0a9bbe9317724f7ad269aac8290f2c2496cad710b393"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_RUNS_STARTED",
+   "sha256": "053a30c448cd94ebb23935bd4b11b8aef71736883288a1b09c0604fd7dcf5d2b"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_hadoop_fs",
+   "sha256": "d3acda9ddbad3e4fd41591ea9e14ab30974b9999d1d4c74e0d3b571cc929d6ff"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_is_concurrent_modification",
+   "sha256": "f1b551552fee30f7e0a144a8d0953208e720b47652fbede1ce932eaeed0e3c78"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_norm_uri",
+   "sha256": "61ed61e62361ff30afc84cbaa551b75d4a189df465a049168f2e0dda787945c8"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_partition_transforms",
+   "sha256": "5140b8e1215794881db199b23b8f05bbfdafc3cf11e50d1fa4edd6a65b2e2701"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_path_size_gb_impl",
+   "sha256": "e413be4c69689e2bb07e59e6b037cc2c27a00a484b6f294a62f8fc661b5dc675"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_push_stage_metrics",
+   "sha256": "563490f1a6e1f466431ca7ff79c0a268305b1e9db1cf2de5a2405c2719b75e15"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "_stream_started_marker_path",
+   "sha256": "9c39b4c424b7babf48c9b22a31e7598cb80a6ae1a41eb22ef6676ddb5e4fe689"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "aml_opening_balance",
+   "sha256": "db387e610d1d5bab9cfffc28ee36ea0cbe7c57ccbd6b291bd9e708a3f42ad9e4"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "assert_preflight_rows",
+   "sha256": "98f13fad9bb350f114f7efb6a872e241836f5e57d85bc79b6801ebb186792547"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "assert_progress",
+   "sha256": "b930c09a43ddf95d0492b16128561ba9602c9adbde07a332e3363cfbb3916654"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "checkpoint_is_fresh",
+   "sha256": "64c0bb011e1897ee60548dfe14d9aef72694cf03f178bad3554fa116a544a050"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "clear_stream_started_marker",
+   "sha256": "8dccc8b1e57ec311187e521df06c2efe9bffda2202e42e290aa556d0d3695b22"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "configured_data_clock",
+   "sha256": "cbc49995a6ea6d8c6c4f34bb1a2e770a47aa2252863738228f634771cc7d1d56"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "data_clock_date",
+   "sha256": "be1f0f51c88960edecd119c92e09195d3e4295017721b6f828018c232d776650"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "derive_entity_type",
+   "sha256": "a2805ddd949f4873a3ba51741f8d960686344a29e04c7a48623963326acd4f47"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "emit_stream_scale_admission",
+   "sha256": "feb104103cfa66283c8980238af903ed9b9742e12194f6e084bb1fe2763417be"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "ensure_column",
+   "sha256": "8f1af25a25b08aab293f2dd059b14a1a9c944612e3ef8d8b1c4708520b69147d"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "ensure_column_with_retry",
+   "sha256": "58588221caa086e269660b6cf701389ff173bb4ce4d324b70ddf65243adad58b"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "ensure_namespaces",
+   "sha256": "7e1335a2422a0a8ed9e19f90c564731ab336d0f420cf02e040b3d696b28008fb"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "ensure_namespaces_for_ddl",
+   "sha256": "045ce3bed57172a97adc51569e6377a3f40b228da2fda1c1e8ceb1be732b8a05"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "ensure_partition_transform",
+   "sha256": "1cc39ffe8678548455d97560077b7621451456168287ed2cf96ae83ae5ef27f6"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "entity_type_from_name_sql",
+   "sha256": "5d270e50848330f4049d24af9b2932fbe9cd9689a683b9f67579e7242dba54a9"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "env",
+   "sha256": "62fa05f1858b9f359167b5e8e30c5bf6d2c99faa98b7de60f7fab9b52de79a0c"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "iceberg_table_stats",
+   "sha256": "3ed1fc728d5bb3debbab178f33fa69a3fb67ff131b6db8b54c2ed0e6a7209d07"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "log",
+   "sha256": "396e517e982f865be882c58bb91a9f7a8a5393946e295a269deea0bdef5dcf69"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "log_job_metrics",
+   "sha256": "7cfde0f843089bfe52cb9bff4cd4460ec1a19889af515ec43731cd498fbfd54e"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "mark_stream_started",
+   "sha256": "fe1af2fe9ae85f3bece050b8c238e51332b97eca362944ea25ff52a493512042"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "materialised_source",
+   "sha256": "3d19ea310d78986bf3ae002e8e9be38f75c9600fe3e741fefb76b85bb97094b9"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "one_line",
+   "sha256": "18acee1bbc41a17c238771b4fcd11967ef610e309f0b5abf75fdf772044ed015"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "path_size_gb",
+   "sha256": "c859c3d07ff1f0fbc73c30bb6335aa21cc65268440f868bf1bb77400235bec96"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "refuse_batch_while_stream_active",
+   "sha256": "1a4d04582d7a916a7bf1a86c954ba0686ee35003294767b7b7e9e74ca44a3283"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "refuse_fresh_checkpoint_over_data",
+   "sha256": "81fff15113ea0457e251408adbc2839c8c2d3c3e0c1c1f46dc3368c9452498ac"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "replay_possible",
+   "sha256": "db38ae3caed50539a60a2cc80617bdf4a2958de167bd2ff2411551f267384e63"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "resolve_data_clock",
+   "sha256": "33a14860fd8b85bcaa47e980858fc9f4e8032471c1335e929a2f43416ac3d49c"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "sealed_txns_filter",
+   "sha256": "2c1a755ce66060e4778e634900f9188e1bd472a656d034d444ba74490301c341"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "stream_batch_lines",
+   "sha256": "ebce9a2dcdb7405a38c70748dd3b4606249641ee568841d6dbc7660e818b2b91"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "stream_run_id",
+   "sha256": "aa2d7a8672fb9aa91a7b816aaebc3c15811bac0cb423a76fa3004d000473dc02"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "streaming_query_id",
+   "sha256": "f2a666693c479792a80f173c48f9fc48240a43277cd5838141967e1f1d5a7411"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "table_exists",
+   "sha256": "2d51892de2d5f5fac3c687bccc399c8744203665c9d3332bea94410528c8aeab"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/common.py",
+   "name": "write_bronze_data_clock",
+   "sha256": "420dffc02da926d65d857d53a28ec6ea3d66f7021de36da85e73cbf887c32ee3"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/detection_rules.py",
+   "name": "_STRUCTURING_THRESHOLDS",
+   "sha256": "05ef9754cc7b85c353a64fb65dfde513d4677b59cde85087a08394792323777c"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/tm_operations.py",
+   "name": "GOLD_CASES",
+   "sha256": "529a4d4f9d2a1f37d60b748dcc376786a86248cb6a53b12170bdb15de297e12b"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/tm_operations.py",
+   "name": "GOLD_COVERAGE",
+   "sha256": "6cebbd82a40615607084c0e763fc53b09a3634172d0bcb036a5b0732f22f6548"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/tm_operations.py",
+   "name": "GOLD_DISPOSITIONS",
+   "sha256": "93e67e71f5da2d6853ec5d2b44279cc5ae97fc0284ccec8b63734e3b5b52044e"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/tm_operations.py",
+   "name": "GOLD_RECON",
+   "sha256": "895d656091673901d5c972370b050d8f91fe8ced8daf75d7c9bf2c964993308d"
+  },
+  {
+   "kind": "pysym",
+   "path": "src/lakebench/spark/scripts/tm_operations.py",
+   "name": "TM_TABLES",
+   "sha256": "1008fdc2bf3b6692e710e5655d5061c0d4aa2f31aa716dff952ec643168d68f7"
+  }
+ ]
+}

@@ -1,0 +1,15 @@
+# The AML parity proof: the four batch/stream protocol guards and the
+# one-column mutation check. The aml-parity CI job runs pytest -m aml_parity and
+# scripts/check_parity_job.py requires exactly these node ids, each passed.
+tests/spark/test_aml_batch_stream_profiles_parity.py::test_batch_and_stream_profile_the_same_entities
+tests/spark/test_aml_batch_stream_profiles_parity.py::test_batch_and_stream_profile_sums_match
+tests/spark/test_aml_batch_stream_profiles_parity.py::test_batch_and_stream_profile_sums_agree_on_null
+tests/spark/test_aml_batch_stream_profiles_parity.py::test_batch_and_stream_produce_equivalent_profiles
+tests/spark/test_aml_batch_stream_statements_parity.py::test_batch_stream_parity_in_a_fresh_jvm
+tests/spark/test_aml_stream_dimension_parity_full.py::test_batch_and_stream_dimensions_are_row_hash_identical
+tests/spark/test_aml_stream_statements_replay_idempotent.py::test_replay_is_idempotent_in_a_fresh_jvm
+tests/spark/test_parity_guard_mutations.py::test_guard_goes_red_under_mutation[aml_stream_dimension_parity_full-entities.country]
+tests/spark/test_parity_guard_mutations.py::test_guard_goes_red_under_mutation[aml_batch_stream_statements_parity-accounts.current_balance]
+tests/spark/test_parity_guard_mutations.py::test_guard_goes_red_under_mutation[aml_stream_statements_replay_idempotent-accounts.current_balance]
+tests/spark/test_parity_guard_mutations.py::test_guard_goes_red_under_mutation[aml_batch_stream_profiles_parity-profiles.first_seen_ts]
+tests/spark/test_parity_guard_mutations.py::test_profiles_child_unmutated_is_clean

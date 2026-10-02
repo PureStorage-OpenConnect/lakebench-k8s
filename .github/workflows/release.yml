@@ -34,6 +34,11 @@ jobs:
   ci:
     name: CI on the tagged commit
     uses: ./.github/workflows/ci.yml
+    # A called workflow's jobs get at most what the caller grants; ci.yml's
+    # frozen-guard job reads earlier commits' CI runs (actions: read).
+    permissions:
+      contents: read
+      actions: read
 
   verify-tag:
     name: Tag is on main and matches the version

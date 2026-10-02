@@ -394,6 +394,132 @@ jobs:
           path: ${{ runner.temp }}/spark-*/**/spark-subprocess.log
           if-no-files-found: ignore
 
+  # The AML parity proof (QA-5): the four batch/stream protocol guards and
+  # their one-column mutation check, on both Spark lines. It runs on every
+  # push, never conditionally, because the frozen guard reads its result as
+  # the parity evidence for a Freeze-cost: None or Parity commit, and a
+  # skipped job would conclude success. scripts/check_parity_job.py fails it
+  # unless exactly the registered guards ran and each passed.
+  aml-parity:
+    name: AML parity (pyspark ${{ matrix.pyspark }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: "4.0"
+            pyspark: "4.0.1"
+          - leg: "4.1"
+            pyspark: "4.1.1"
+    env:
+      LB_REQUIRE_JARS: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/workflows/ci.yml
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Restore the test jar cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/lakebench-test-jars
+          key: test-jars-${{ matrix.leg }}-${{ hashFiles('tests/spark/jars.lock.json') }}
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]" "pyspark==${{ matrix.pyspark }}" pyarrow
+
+      - name: Fetch the test jars
+        run: python scripts/fetch_test_jars.py --leg ${{ matrix.leg }} --print-env >> "$GITHUB_ENV"
+
+      - name: Run the parity guards
+        run: |
+          set +e
+          LB_TEST_OUTCOMES=parity-outcomes.json pytest tests/spark -m aml_parity -q -rsxX \
+            -p no:cacheprovider --basetemp="${{ runner.temp }}/parity"
+          rc=$?
+          set -e
+          python scripts/check_parity_job.py parity-outcomes.json --pytest-rc "$rc"
+
+  # The frozen-file guard (QA-5): the tree matches scripts/frozen_aml_files.json,
+  # every commit since the list was created that changes frozen content
+  # carries a Freeze-cost: trailer with parity evidence, and the list's
+  # history follows its rules. It runs after aml-parity, whatever its result
+  # (not on a cancelled run), and reads that result for the head commit and
+  # for any earlier commit with the same frozen content; other commits are
+  # checked through their own ci.yml runs (actions: read). Hashes are defined on Python 3.11, so the
+  # guard's own tests run here too, and a skip there fails the job.
+  frozen-guard:
+    name: Frozen guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [aml-parity]
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            scripts/frozen_guard.py
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Guard tests (Python 3.11, no skips)
+        run: |
+          pytest tests/test_frozen_guard.py tests/test_check_parity_job.py -q -rs \
+            -p no:cacheprovider --junitxml=guard-tests.xml
+          python scripts/check_parity_job.py --junit-no-skips guard-tests.xml
+
+      - name: check-tree
+        run: python scripts/frozen_guard.py check-tree
+
+      - name: check-history
+        run: python scripts/frozen_guard.py check-history
+
+      # Frozen states of commits already walked, keyed by commit sha and the
+      # guard's own digest (a state from another guard version is ignored),
+      # so check-range recomputes only new commits.
+      - name: Restore the frozen state cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: frozen-states.json
+          key: frozen-states-${{ github.sha }}
+          restore-keys: frozen-states-
+
+      - name: check-range
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/frozen_guard.py check-range HEAD --require-all
+          --parity-result "${{ needs.aml-parity.result }}" --state-cache frozen-states.json
+
+      - name: Save the frozen state cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: frozen-states.json
+          key: frozen-states-${{ github.sha }}
+
   # The AML statistics tests marked `slow` (the heavy fidelity-gate fits, the
   # scale invariance check, and the Spark fidelity gate over silver), on the
   # pinned reference libraries. It runs on every push to main, integrate/**,
@@ -473,7 +599,7 @@ jobs:
   build:
     name: Build Package
     runs-on: ubuntu-24.04
-    needs: [lint, test, secrets, secrets-history, rust, spark-tests]
+    needs: [lint, test, secrets, secrets-history, rust, spark-tests, aml-parity, frozen-guard]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 

@@ -513,6 +513,20 @@ def make_perf_check(
     return run
 
 
+def check_frozen_guard() -> Result:
+    """The AML frozen-file guard: the tree matches scripts/frozen_aml_files.json
+    and the list's history follows its rules. Its hashes are defined on
+    Python 3.11, so it runs on a python3.11 interpreter."""
+    py = sys.executable if sys.version_info[:2] == (3, 11) else shutil.which("python3.11")
+    if py is None:
+        return Result("frozen-guard", FAIL, "needs Python 3.11 (python3.11 not found)")
+    for sub in ("check-tree", "check-history"):
+        res = command_check("frozen-guard", [py, str(ROOT / "scripts" / "frozen_guard.py"), sub])
+        if res.status != PASS:
+            return Result("frozen-guard", FAIL, f"{sub}: {res.detail}")
+    return Result("frozen-guard", PASS, "check-tree and check-history OK")
+
+
 def build_checks(tag: str | None = None, perf_runs: dict[str, str] | None = None) -> list[Check]:
     py = sys.executable
     return [
@@ -565,6 +579,11 @@ def build_checks(tag: str | None = None, perf_runs: dict[str, str] | None = None
             "secret scan of the history beyond .gitleaksignore",
         ),
         Check("pre-push-hook", check_pre_push_hook, "installed pre-push hook is the tracked one"),
+        Check(
+            "frozen-guard",
+            check_frozen_guard,
+            "AML frozen-file list matches the tree; its history follows the rules",
+        ),
         Check("examples", check_examples, "every examples/*.yaml validates"),
         Check("version", make_version_check(tag), "single version source; tag matches"),
         Check("changelog", check_changelog, "CHANGELOG.md has a section for the version"),
