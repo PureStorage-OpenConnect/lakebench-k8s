@@ -38,8 +38,9 @@ must be installed cluster-wide. See [Getting Started](getting-started.md#catalog
 for Helm commands.
 
 **Polaris:** No operator needed -- Lakebench deploys it directly as a
-Kubernetes Deployment with a bootstrap Job. The config must set
-`architecture.catalog.polaris.client_secret`; it has no default.
+Kubernetes Deployment with a bootstrap Job. Its client secret and DB password
+are generated per deployment unless the config sets
+`architecture.catalog.polaris.client_secret`.
 
 See [Hive Reference](component-hive.md) and
 [Operators and Catalogs](operators-and-catalogs.md) for version compatibility

@@ -910,11 +910,10 @@ platform:
       ca_cert: ./flashblade-ca.pem
       # verify_ssl: true  # default; set false only for dev
 
-architecture:
-  catalog:
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
 ```
+
+Polaris recipes need no `client_secret`: `deploy` generates one per
+deployment (see [Polaris](component-polaris.md)).
 
 **How it works:** At deploy time, lakebench reads the PEM file and creates a
 Kubernetes Secret (`lakebench-ca-certificate`) containing the certificate.

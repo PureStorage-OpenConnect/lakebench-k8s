@@ -46,7 +46,6 @@ SCHEMA_READERS = frozenset(
         "TableNamesConfig.financial_env",
         "SustainedConfig.effective_silver_bronze_wait_seconds",
         "DatagenConfig.resolve_scale_from_target_size",
-        "require_polaris_client_secret",
         "LakebenchConfig.get_namespace",
         "LakebenchConfig.get_scale_dimensions",
         "LakebenchConfig.apply_recipe_defaults",

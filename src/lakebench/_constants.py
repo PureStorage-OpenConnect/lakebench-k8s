@@ -4,9 +4,9 @@
 SPARK_SERVICE_ACCOUNT = "lakebench-spark-runner"
 
 # Polaris OAuth2 client_id used by the bootstrap job, Trino, and Spark.
-# The matching client_secret comes from user config
-# (`architecture.catalog.polaris.client_secret`); see LB-090 for why no
-# default is provided.
+# The matching client_secret is per deployment: the config value, or one
+# deploy generates and stores in the Secret lakebench-polaris-client
+# (deploy/deployment_secrets.py).
 POLARIS_CLIENT_ID = "lakebench"
 
 # Unified output directory -- single top-level directory for all lakebench outputs.

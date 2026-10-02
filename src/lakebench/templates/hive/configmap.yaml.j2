@@ -30,7 +30,7 @@ data:
       </property>
       <property>
         <name>javax.jdo.option.ConnectionPassword</name>
-        <value>{{ postgres_password | default('lakebench-hive-2024') }}</value>
+        <value>{{ postgres_password }}</value>
       </property>
 
       <!-- Connection pool (proven defaults) -->

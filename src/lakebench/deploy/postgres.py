@@ -18,6 +18,14 @@ from lakebench.k8s import (
 )
 from lakebench.k8s.security import SCCGrantError, ensure_scc_rolebinding
 
+from .deployment_secrets import (
+    HIVE_DB_KEY,
+    HIVE_DB_SECRET,
+    DeploymentSecretError,
+    postgres_psql,
+    read_secret_key,
+    sync_role_password,
+)
 from .engine import DeploymentResult, DeploymentStatus, image_tag
 
 logger = logging.getLogger(__name__)
@@ -121,6 +129,20 @@ class PostgresDeployer:
                     elapsed_seconds=time.time() - start,
                 )
 
+            # Postgres reads POSTGRES_PASSWORD only at initdb. Make the
+            # hive role match the Secret every deploy, so existing data whose
+            # Secret was lost, or a wrong v1.6 guess, cannot lock the
+            # metastore out. Sends a SCRAM verifier only.
+            try:
+                self._sync_hive_role(namespace)
+            except DeploymentSecretError as e:
+                return DeploymentResult(
+                    component="postgres",
+                    status=DeploymentStatus.FAILED,
+                    message=str(e),
+                    elapsed_seconds=time.time() - start,
+                )
+
             pg_version = image_tag(self.config.images.postgres)
             return DeploymentResult(
                 component="postgres",
@@ -144,6 +166,19 @@ class PostgresDeployer:
                 message=f"PostgreSQL deployment failed: {e}",
                 elapsed_seconds=time.time() - start,
             )
+
+    def _sync_hive_role(self, namespace: str) -> None:
+        from kubernetes import client as k8s_client
+
+        core_v1 = k8s_client.CoreV1Api()
+        password = self.context.get("postgres_password") or read_secret_key(
+            core_v1, namespace, HIVE_DB_SECRET, HIVE_DB_KEY
+        )
+        if not password:
+            raise DeploymentSecretError(
+                f"Secret {HIVE_DB_SECRET} is missing in namespace {namespace}; re-run deploy"
+            )
+        sync_role_password(postgres_psql(core_v1, namespace), "hive", password)
 
     def _grant_anyuid_scc(self, namespace: str) -> None:
         """Grant anyuid SCC to the postgres service account on OpenShift.

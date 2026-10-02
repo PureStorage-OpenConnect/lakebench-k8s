@@ -151,15 +151,12 @@ architecture:
     type: polaris                    # hive | polaris | none
     ## Polaris REST catalog settings (used when type: polaris)
     polaris:
-      # port: 8181
-      # REQUIRED for polaris. Each install must set its own OAuth2 client
-      # secret (LB-090): `deploy`, `run` and `destroy` each reload the config
-      # and must agree on the same value. Generate one with
-      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-      # then export it as LAKEBENCH_POLARIS_CLIENT_SECRET before running any
-      # lakebench command. The env-var pattern keeps the secret out of the
-      # config file and matches the other polaris-*.yaml examples.
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+      # Optional. Unset, deploy generates an OAuth2 client secret for this
+      # deployment and stores it in the Secret lakebench-polaris-client,
+      # where run and destroy read it. To choose your own, set client_secret
+      # through env-var substitution (LAKEBENCH_POLARIS_CLIENT_SECRET) so the
+      # secret stays out of the file; see docs/component-polaris.md.
+      port: 8181
       # resources:
       #   cpu: "1"
       #   memory: 2Gi

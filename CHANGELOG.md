@@ -316,6 +316,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the "benchmark (not run)" stage entry) and notes it in
   `experiment.benchmark_source`; that moves the record's identity digest,
   since it now describes another benchmark.
+- **Per-deployment secrets.** A new deployment generates its own Hive
+  metastore DB password (Secret `lakebench-postgres-secret`), Polaris DB
+  password (`lakebench-polaris-db`) and Polaris client secret
+  (`lakebench-polaris-client`), once, in its namespace. 1.6 used the fixed
+  values `lakebench-hive-2024` and `lakebench-polaris-2024` for every
+  install. An existing deployment keeps its own: a stored Secret wins, and a
+  deployment made by 1.6 (Postgres PVC or `polaris` role present) gets the
+  1.6 password stored. Every deploy then sets the `hive` and `polaris` roles
+  to their Secret's password (as a SCRAM verifier, so no plaintext crosses the
+  exec request or the logs), so a lost Secret cannot lock the metastore out.
+  `destroy` keeps these Secrets while the Postgres PVC survives.
+- **`architecture.catalog.polaris.client_secret` is optional.** Unset,
+  `deploy` generates one for a fresh Polaris and `run`, `benchmark`, Trino
+  and Spark Thrift read it from the namespace. Set before the first deploy,
+  it is used and stored. A bootstrapped Polaris keeps its secret: a differing
+  config value, or none in the config and none stored, stops `deploy` with
+  the fix. The examples, the AML perf config and the root `lakebench.yaml` no
+  longer set it.
+- **No credential literals in the Spark Thrift and Trino specs.** Thrift reads
+  the S3 keys and the Polaris client secret from Secret-backed env vars, and
+  Trino reads the client secret through `${ENV:POLARIS_CLIENT_SECRET}`. The
+  Spark job `sparkConf` S3 keys stay literal until v1.8; `spark.redaction.regex`
+  now also hides `credential` keys in the Spark UI and event log.
+- **Grafana has no fixed password.** A new shared observability install gets
+  a generated password in the Secret `lakebench-observability-grafana`, and
+  `deploy` prints the command that reads it. An existing install keeps
+  `admin`/`lakebench`.
 ### Fixed
 
 - A multi-cycle Customer 360 batch run no longer loses silver rows when a

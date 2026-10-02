@@ -318,11 +318,9 @@ def make_config(**overrides) -> LakebenchConfig:
     hand-building dicts so that new required fields are handled in one place.
 
     LB-090: when the resulting config selects Polaris and no explicit
-    ``client_secret`` was supplied, fill in a test-only value so the
-    deploy-time ``require_polaris_client_secret`` gate does not fire
-    inside unrelated tests. Real production configs must set the secret
-    themselves; the loader's ${VAR} substitution is the recommended
-    channel.
+    ``client_secret`` was supplied, fill in a test-only value, so unrelated
+    tests that build Spark job manifests never look for the Secret that
+    deploy stores (SAF-8) on a cluster they do not have.
     """
     from lakebench.config.schema import CatalogType
 

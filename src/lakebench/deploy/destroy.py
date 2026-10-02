@@ -3532,11 +3532,33 @@ def destroy_all(
             core_v1.delete_namespaced_service_account(SPARK_SERVICE_ACCOUNT, namespace)
         except ApiException as e:
             logger.debug("ServiceAccount delete skipped: %s", e.reason)
+        from lakebench.deploy.deployment_secrets import (
+            HIVE_DB_SECRET,
+            POLARIS_CLIENT_SECRET,
+            POLARIS_DB_SECRET,
+            POSTGRES_PVC,
+        )
+
+        # The DB passwords and the Polaris client secret belong to the
+        # data in the Postgres PVC. If that PVC is still there (not being
+        # deleted), keep them: a redeploy into a surviving namespace would
+        # otherwise fall back to the v1.6 defaults and lose its metastore.
+        data_survives = False
+        try:
+            pvc = core_v1.read_namespaced_persistent_volume_claim(POSTGRES_PVC, namespace)
+            data_survives = not getattr(pvc.metadata, "deletion_timestamp", None)
+        except ApiException as e:
+            if e.status != 404:
+                data_survives = True  # unknown: keep the secrets (fail safe)
+        tied_to_data = (HIVE_DB_SECRET, POLARIS_DB_SECRET, POLARIS_CLIENT_SECRET)
         for secret in [
             "lakebench-s3-credentials",
-            "lakebench-postgres-secret",
             "lakebench-ca-certificate",  # only when s3.ca_cert is set
+            *tied_to_data,
         ]:
+            if data_survives and secret in tied_to_data:
+                logger.info("Kept Secret %s: PVC %s still holds its data", secret, POSTGRES_PVC)
+                continue
             try:
                 core_v1.delete_namespaced_secret(secret, namespace)
             except ApiException as e:

@@ -458,7 +458,8 @@ def deploy(
             success_msg += (
                 f"\n\n[bold]Monitoring (shared stack in namespace {obs_ns}):[/bold]"
                 f"\n  Services: [cyan]kubectl get svc -n {obs_ns} -l release=lakebench-observability[/cyan]"
-                f"\n  Grafana login: admin / lakebench"
+                f"\n  Grafana login: admin, password from [cyan]kubectl get secret -n {obs_ns} "
+                "lakebench-observability-grafana -o jsonpath='{.data.admin-password}' | base64 -d[/cyan]"
                 f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
             )
 

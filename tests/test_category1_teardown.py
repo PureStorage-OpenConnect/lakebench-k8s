@@ -96,6 +96,9 @@ def _config(recipe: str, workload: str, tmp_path: Path | None = None):
 
 
 def _seed_cluster(rec: K8sRecorder) -> None:
+    # Deploy's psql execs into lakebench-postgres-0 (SAF-8): the polaris role
+    # probe (none yet, a fresh Polaris) and the role password sync.
+    rec.exec_output = "lbrole:0\nALTER ROLE\nCREATE ROLE\nCREATE DATABASE\nGRANT\n"
     rec.add_spark_operator(watched=["default"])
     rec.add_stackable()
     rec.add_crd("podmonitors", "monitoring.coreos.com", "PodMonitor")
