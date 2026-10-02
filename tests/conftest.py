@@ -55,10 +55,11 @@ os.environ.pop("FORCE_COLOR", None)
 # Typer forces a terminal when GITHUB_ACTIONS is set (read at import time);
 # this is its documented off switch.
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
-# pytest-xdist workers start with COLUMNS=80. Rich reads COLUMNS when a
-# Console is built, so the module-level consoles in lakebench.cli would keep
-# 80 columns and ignore a test's CliRunner env={"COLUMNS": ...}. Unset, they
-# read it per call, as in a serial run.
+# pytest-xdist starts its workers with COLUMNS=80. A Rich Console built at
+# import time (the CLI's module-level consoles) fixes its width from COLUMNS,
+# so in a worker every table was cut at 80 columns and a test's
+# CliRunner(env={"COLUMNS": ...}) had no effect. Without it, Rich reads
+# COLUMNS when it prints, as in a serial run.
 os.environ.pop("COLUMNS", None)
 os.environ.pop("LINES", None)
 
@@ -332,6 +333,43 @@ def _journal_in_tmp(tmp_path, monkeypatch):
     from lakebench.journal import Journal
 
     monkeypatch.setattr(helpers, "_journal", Journal(tmp_path / "lakebench-journal"))
+
+
+@pytest.fixture(autouse=True)
+def _signal_handlers_do_not_leak(request):
+    """Each test starts with the SIGINT and SIGTERM handlers the process had
+    before any test, and gets them back after. A run that installs its
+    interrupt handler and skips restore() (on purpose in some tests) would
+    otherwise hand it to whatever test runs next in the same process; under
+    xdist that order changes, and a later test saw a SIGTERM caught that it
+    expected to reach its own handler (CI run 37014056878, worker gw3)."""
+    import signal
+    import threading
+
+    # The Spark tier keeps pyspark's own SIGINT handler (it cancels the JVM
+    # jobs), which its module-scoped session installs.
+    in_spark_tier = "spark" in Path(str(request.node.path)).parent.parts[-1:]
+    if in_spark_tier or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def reset() -> None:
+        for s, base in _BASE_SIGNAL_HANDLERS.items():
+            signal.signal(s, base if base is not None else signal.SIG_DFL)
+
+    reset()
+    yield
+    reset()
+
+
+def _base_signal_handlers() -> dict:
+    import signal
+
+    return {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+
+
+#: The handlers at conftest import, before any test ran.
+_BASE_SIGNAL_HANDLERS = _base_signal_handlers()
 
 
 @pytest.fixture(autouse=True)

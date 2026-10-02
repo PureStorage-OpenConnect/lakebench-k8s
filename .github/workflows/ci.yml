@@ -313,20 +313,41 @@ jobs:
       - name: cargo test
         run: cargo test --release --locked
 
+  # Each pyspark leg runs the Spark tier twice, forward and in reverse
+  # order, as two parallel jobs. Run serially, a leg was the critical path of
+  # the whole run: with 381 tests the two passes add up to 67 min (4.0) and
+  # 85 min (4.1) in the first run below, and the Spark lane saw about 95 min.
+  # Split, one pass of the 381 took 30 to 52 min in two runs on 2026-10-02
+  # (37011145001: 4.0 forward 1777 s with coverage, 4.0 reverse 2254 s, 4.1
+  # forward 2813 s, 4.1 reverse 2267 s; 37020573180: 3095, 2284, 2796 and
+  # 2970 s); the same tests vary that much between runners. The budget is
+  # 70 minutes (scripts/ci_budget.py), 36% above the slowest pass, with
+  # timeout-minutes 105 as the backstop. Coverage is collected on the 4.0
+  # forward pass only.
   spark-tests:
-    name: Spark (pyspark ${{ matrix.pyspark }})
+    name: Spark (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 105
     strategy:
       fail-fast: false
       matrix:
         include:
           - leg: "4.0"
             pyspark: "4.0.1"
-            cov: --cov=src/lakebench/spark/scripts --cov-report=json:coverage-spark.json
+            order: forward
+            args: --cov=src/lakebench/spark/scripts --cov-report=json:coverage-spark.json
+          - leg: "4.0"
+            pyspark: "4.0.1"
+            order: reverse
+            args: --lb-reverse
           - leg: "4.1"
             pyspark: "4.1.1"
-            cov: ""
+            order: forward
+            args: ""
+          - leg: "4.1"
+            pyspark: "4.1.1"
+            order: reverse
+            args: --lb-reverse
     env:
       # Any test that needs a jar fails without it, and any jar-reason skip
       # fails the run (tests/spark/conftest.py).
@@ -376,23 +397,19 @@ jobs:
           path: ~/.cache/lakebench-test-jars
           key: test-jars-${{ matrix.leg }}-${{ hashFiles('tests/spark/jars.lock.json') }}
 
+      # The reverse pass (--lb-reverse) catches a test that passes only after,
+      # or only before, another one.
       - name: Run Spark tests
         run: >-
+          python scripts/ci_budget.py --seconds 4200
+          --label "Spark tests (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }})" --
           pytest tests/spark -q -rsxX -p no:cacheprovider
-          --basetemp="${{ runner.temp }}/spark-forward" ${{ matrix.cov }}
-
-      # The same tests in reverse order: a test that passes only after (or
-      # only before) another one fails here.
-      - name: Run Spark tests in reverse order
-        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
-        run: >-
-          pytest tests/spark -q -rsxX -p no:cacheprovider --lb-reverse
-          --basetemp="${{ runner.temp }}/spark-reverse"
+          --basetemp="${{ runner.temp }}/spark-${{ matrix.order }}" ${{ matrix.args }}
 
       # detection_rules.py is imported by path as a top-level module, so it
       # is measured here and not in the unit job.
       - name: Coverage floors
-        if: matrix.leg == '4.0'
+        if: matrix.leg == '4.0' && matrix.order == 'forward'
         run: python scripts/check_coverage.py --suite spark coverage-spark.json
 
       # A failing Spark child writes its whole output to spark-subprocess.log.
@@ -400,7 +417,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: spark-subprocess-logs-${{ matrix.leg }}
+          name: spark-subprocess-logs-${{ matrix.leg }}-${{ matrix.order }}
           path: ${{ runner.temp }}/spark-*/**/spark-subprocess.log
           if-no-files-found: ignore
 

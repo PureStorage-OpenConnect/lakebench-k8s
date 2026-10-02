@@ -136,6 +136,7 @@ fallback), checks each against its sha256 and caches them in
 `~/.cache/lakebench-test-jars`; `--print-env` prints the variable:
 
 ```bash
+make test-spark                      # the fetch below, then the tier with LB_REQUIRE_JARS=1
 jars=$(python scripts/fetch_test_jars.py --leg auto --print-env) && export "$jars"
 LB_REQUIRE_JARS=1 pytest tests/spark -q -rs
 pytest tests/spark -q --lb-reverse   # the same tests in reverse order
@@ -336,12 +337,13 @@ than stopping at the first failure, prints every skip reason, and a failure
 on one Python version does not cancel the other (`fail-fast: false`). On 3.13 it checks per-file
 coverage floors with `scripts/check_coverage.py --suite unit` and keeps the
 per-file report as the `coverage-unit` artifact for 30 days; floors are
-raised from that report, never lowered. The Spark job runs on two legs,
-`pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17. Each leg fetches the jars
-pinned in `tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py` and
-runs `pytest tests/spark` with `LB_REQUIRE_JARS=1`, once forward and once
-with `--lb-reverse`; the 4.0 leg checks its own coverage floors with
-`scripts/check_coverage.py --suite spark`. A failing leg uploads every
+raised from that report, never lowered. The Spark tier runs on two legs,
+`pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17, each as two parallel
+jobs: one runs `pytest tests/spark` forward and one with `--lb-reverse`,
+each under a 70-minute budget. Every job fetches the jars pinned in
+`tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py` and runs with
+`LB_REQUIRE_JARS=1`; the 4.0 forward job checks the Spark coverage floors
+with `scripts/check_coverage.py --suite spark`. A failing job uploads every
 `spark-subprocess.log`. The "AML statistics (slow)" job runs
 the tests marked `slow` (the heavy fidelity-gate fits, the scale invariance
 check and the Spark fidelity gate over silver) on Python 3.11 with the pinned
