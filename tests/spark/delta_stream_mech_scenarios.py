@@ -11,8 +11,8 @@ Scenarios:
                       ``silver_stream_delta.write_silver_batch`` on the same
                       table / warehouse. Prints B4-relevant counts.
     version_race   -- one thread commits ten silver micro-batches while
-                      another thread issues frequent metadata commits to
-                      the same table (a compaction/vacuum stand-in).
+                      another thread commits OPTIMIZE and a second
+                      writer's appends to the same table between them.
                       Prints per-batch ``write_silver_batch`` return values.
 
 Prints one JSON object on the last stdout line.
@@ -110,11 +110,20 @@ def _run_startup_race(spark, work):
 
 def _run_version_race(spark, work, batches=10):
     """Commit ``batches`` silver micro-batches from one thread while another
-    thread continually issues metadata commits (ALTER TBLPROPERTIES) against
-    the same Delta table. Each ALTER lands as its own log commit, so the
-    before/after-version bracket in the old code sees a non-zero delta
-    even for a Delta-deduped write. The I8 fix reads the write's own commit
-    from history via txnAppId/userMetadata and is immune to these.
+    thread commits to the same Delta table between them: OPTIMIZE (the
+    compaction stand-in) and appends from a second writer with its own
+    stream id. Both are commits Delta lets run beside a blind append, and
+    both move the table version between this writer's write and its history
+    read, so a before/after-version bracket would miscount; the I8 read of
+    the write's own commit (userMetadata tag) does not.
+
+    The stand-in used to be ALTER TABLE SET TBLPROPERTIES every 20 ms. Every
+    Delta metadata change conflicts with every concurrent write by design
+    (MetadataChangedException), and nothing Lakebench runs during a window
+    changes silver's metadata (maintenance is VACUUM and OPTIMIZE), so that
+    churn could not be survived and measured nothing the product does. A
+    real metadata conflict is retried; that is
+    ``test_delta_stream_conflict_retry_spark.py``.
     """
     import silver_stream_delta as ss
 
@@ -122,22 +131,34 @@ def _run_version_race(spark, work, batches=10):
     spark.sql("DROP TABLE IF EXISTS " + dtbl)
     spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.silver")
 
-    # One fixed stream id for the whole scenario; only txnVersion varies per batch.
+    # One fixed stream id for this writer; only txnVersion varies per batch.
     qid = "qvr"
+    other = "qother"
 
     stop_ev = threading.Event()
+    churn = {"optimize": 0, "foreign_appends": 0, "errors": []}
+
+    def _own_rows():
+        return int(spark.table(dtbl).where(f"_stream_id = '{qid}'").count())
 
     def _churn():
         i = 0
         while not stop_ev.is_set():
             try:
-                spark.sql(f"ALTER TABLE {dtbl} SET TBLPROPERTIES ('lb.churn.{i}' = '{i}')")
-            except Exception:  # noqa: BLE001 -- table may not exist yet
-                pass
+                if i % 2 == 0:
+                    spark.sql(f"OPTIMIZE {dtbl}")
+                    churn["optimize"] += 1
+                else:
+                    df = bronze_df(spark, 3, start=50_000 + i * 3)
+                    with inside_foreach_batch(spark, i, other):
+                        ss.write_silver_batch(df, i, dtbl, f"file://{work}/")
+                    churn["foreign_appends"] += 1
+            except Exception as e:  # noqa: BLE001 -- reported, the test asserts none
+                churn["errors"].append(f"{type(e).__name__}: {str(e)[:300]}")
             i += 1
-            time.sleep(0.02)
+            time.sleep(0.05)
 
-    # Seed the table before starting churn so ALTER doesn't fail forever.
+    # Seed the table before the churn starts.
     df0 = bronze_df(spark, 5, start=0)
     with inside_foreach_batch(spark, 0, qid):
         n0 = ss.write_silver_batch(df0, 0, dtbl, f"file://{work}/")
@@ -146,23 +167,27 @@ def _run_version_race(spark, work, batches=10):
     ch.start()
 
     returns: list[int] = [int(n0)]
-    row_counts: list[int] = [spark.table(dtbl).count()]
+    own_rows: list[int] = [_own_rows()]
+    versions: list[int] = [int(spark.sql(f"DESCRIBE HISTORY {dtbl} LIMIT 1").collect()[0][0])]
     try:
         for bid in range(1, batches):
             df = bronze_df(spark, 5, start=1000 + bid * 5)
             with inside_foreach_batch(spark, bid, qid):
                 n = ss.write_silver_batch(df, bid, dtbl, f"file://{work}/")
             returns.append(int(n))
-            row_counts.append(int(spark.table(dtbl).count()))
+            own_rows.append(_own_rows())
+            versions.append(int(spark.sql(f"DESCRIBE HISTORY {dtbl} LIMIT 1").collect()[0][0]))
     finally:
         stop_ev.set()
-        ch.join(timeout=10)
+        ch.join(timeout=30)
 
     return {
         "scenario": "version_race",
         "errors": [],
         "returns": returns,
-        "row_counts": row_counts,
+        "row_counts": own_rows,
+        "versions": versions,
+        "churn": churn,
         "batches": batches,
     }
 

@@ -27,10 +27,18 @@ checkpoint over a non-empty silver table, which would re-read all of
 bronze into it a second time.
 
 Startup race (B4): the not-exists branch is split into a metadata-only
-``CREATE TABLE IF NOT EXISTS`` (Delta serialises this at its log; the loser
-sees the table on the next check) and the same ``append`` write the exists
-branch uses. Both racers converge at CREATE and their appends both land, so
-neither's rows are lost.
+``CREATE TABLE IF NOT EXISTS`` and the same ``append`` write the exists
+branch uses. Delta does not serialise two concurrent creates: both try to
+commit the table's first version and the loser's create fails with a
+concurrent-modification error (ProtocolChangedException on Delta 4.0 and
+4.1). The loser waits for the winner's table to appear, then appends to it,
+so both racers' rows land and neither is lost to an overwrite.
+
+Write conflicts: an append that loses an optimistic-concurrency race (a
+concurrent metadata or protocol change, such as a restarted stream adding
+the debug columns) commits nothing, so it is retried a few times with the
+same transaction id and attempt tag: Delta's (txnAppId, txnVersion) check
+keeps the retry exactly-once, and the tag still finds the one commit.
 
 Debug columns (I6): every write projects ``_stream_id STRING`` and
 ``_batch_id BIGINT`` in the silver row shape, matching the Iceberg stream
@@ -131,22 +139,78 @@ def _rows_from_own_commit(spark, silver_tbl, attempt_tag):
     return int(n) if n is not None else 0
 
 
+#: Delta concurrent-modification errors after which the losing operation
+#: committed nothing and a retry against the new table state is safe.
+#: ConcurrentTransactionException (two writers with one txnAppId, so one
+#: checkpoint) is not one: it means two streams share a checkpoint.
+_RETRYABLE_CONFLICTS = (
+    "ProtocolChangedException",
+    "MetadataChangedException",
+    "ConcurrentAppendException",
+)
+#: A concurrent create can also surface as the catalog's already-exists error.
+_CREATE_CONFLICTS = (*_RETRYABLE_CONFLICTS, "TableAlreadyExistsException")
+_APPEND_ATTEMPTS = 5
+#: Seconds the loser of a create race waits for the winner's table to show.
+_CREATE_RACE_WAIT = 30
+
+
+def _delta_conflict(exc: BaseException, names=_RETRYABLE_CONFLICTS) -> str | None:
+    """The name in *names* that *exc* is, or None.
+
+    Delta's errors reach Python as a py4j error wrapping the JVM exception
+    (``java_exception``), as a pyspark captured error (``_origin``), or, once
+    ``delta.exceptions`` has patched pyspark, as a Python class of the same
+    name. The Python class names and the JVM class names along the cause
+    chain are checked; message text is not, so a message that only mentions
+    a conflict is not one.
+    """
+    seen = [cls.__name__ for cls in type(exc).__mro__]
+    java = getattr(exc, "java_exception", None) or getattr(exc, "_origin", None)
+    for _ in range(10):
+        if java is None:
+            break
+        try:
+            seen.append(str(java.getClass().getName()))
+            java = java.getCause()
+        except Exception:  # noqa: BLE001 -- not a JVM throwable: stop walking
+            break
+    for name in names:
+        if any(item == name or item.endswith("." + name) for item in seen):
+            return name
+    return None
+
+
+def _builder_name(table: str) -> str:
+    """The name ``DeltaTableBuilder.tableName`` accepts for *table*.
+
+    Delta 4.0 and 4.1 parse the builder's name as a table identifier
+    (``database.table``), so the session catalog's three-part
+    ``spark_catalog.silver.customer_interactions_enriched`` is a parse
+    error. The session catalog is the default, so dropping its prefix names
+    the same table. Any other name is returned unchanged.
+    """
+    prefix = "spark_catalog."
+    return table[len(prefix) :] if table.lower().startswith(prefix) else table
+
+
 def _create_silver_table_if_not_exists(spark, schema, silver_tbl, silver_bucket):
     """Metadata-only ``CREATE TABLE IF NOT EXISTS`` for the silver Delta table.
 
-    Delta serialises this commit at its log; a startup race between two
-    ``silver_stream_delta`` mains sees exactly one racer commit the metadata
-    and the other's ``IF NOT EXISTS`` no-op. Both then take the append branch
-    with their own ``txnAppId``, so both racers' rows land -- neither is lost
-    to an overwrite (which is what the pre-B4 not-exists branch used to do,
-    and which would have removed the winner's data files on the loser's second
-    call).
+    In a startup race between two ``silver_stream_delta`` mains one racer
+    commits the table and the other's create fails with a Delta
+    concurrent-modification error (``_CREATE_CONFLICTS``); the loser waits
+    up to ``_CREATE_RACE_WAIT`` seconds for the winner's table, then returns.
+    Both then take the append branch with their own ``txnAppId``, so both
+    racers' rows land -- neither is lost to an overwrite (which is what the
+    pre-B4 not-exists branch used to do, and which would have removed the
+    winner's data files on the loser's second call).
     """
     from delta.tables import DeltaTable
 
     builder = (
         DeltaTable.createIfNotExists(spark)
-        .tableName(silver_tbl)
+        .tableName(_builder_name(silver_tbl))
         .addColumns(schema)
         .partitionedBy("interaction_date")
         .property("delta.logRetentionDuration", "interval 30 days")
@@ -160,7 +224,45 @@ def _create_silver_table_if_not_exists(spark, schema, silver_tbl, silver_bucket)
         s, t = (sub[0], sub[1]) if len(sub) == 2 else ("default", schema_table)
         table_path = f"{silver_bucket.rstrip('/')}/warehouse/{s}.db/{t}"
         builder = builder.location(table_path)
-    builder.execute()
+    try:
+        builder.execute()
+    except Exception as e:
+        conflict = _delta_conflict(e, _CREATE_CONFLICTS)
+        if conflict is None:
+            raise
+        # Another writer created the table first. Its catalog entry can lag
+        # its log commit, so wait for the table before appending to it.
+        waited = 0.0
+        while not table_exists(spark, silver_tbl):
+            if waited >= _CREATE_RACE_WAIT:
+                raise
+            time.sleep(1.0)
+            waited += 1.0
+        log(f"Silver table created by a concurrent writer ({conflict}); appending to it")
+
+
+def _append_with_retry(spark, df, silver_tbl, silver_bucket, write_options, batch_id):
+    """``write_delta_table(..., mode="append")``, retried on a lost
+    optimistic-concurrency race (``_RETRYABLE_CONFLICTS``) with the same
+    options: the attempt that lost committed nothing, and Delta's
+    (txnAppId, txnVersion) check makes the retry exactly-once."""
+    for attempt in range(1, _APPEND_ATTEMPTS + 1):
+        try:
+            write_delta_table(
+                spark, df, silver_tbl, silver_bucket, mode="append", options=write_options
+            )
+            return
+        except Exception as e:
+            conflict = _delta_conflict(e)
+            if conflict is None or attempt == _APPEND_ATTEMPTS:
+                raise
+            delay = min(2 ** (attempt - 1), 8)
+            log(
+                f"Batch {batch_id}: append lost a concurrent commit ({conflict}), attempt "
+                f"{attempt} of {_APPEND_ATTEMPTS}; retrying in {delay}s with the same "
+                "transaction id"
+            )
+            time.sleep(delay)
 
 
 def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket, data_clock=None):
@@ -204,20 +306,13 @@ def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket, data_clock
         if not table_exists(spark, silver_tbl):
             # B4: split the not-exists branch into a metadata-only CREATE IF
             # NOT EXISTS followed by the same append the exists branch uses.
-            # Two racers converge at CREATE; the loser sees the table and
+            # The loser of a create race waits for the winner's table and
             # falls through to append. Never do an overwrite here: the
             # loser's overwrite would delete the winner's data files.
             log(f"Batch {batch_id}: creating Silver table with partitioning (metadata-only)")
             _create_silver_table_if_not_exists(spark, enriched.schema, silver_tbl, silver_bucket)
 
-        write_delta_table(
-            spark,
-            enriched,
-            silver_tbl,
-            silver_bucket,
-            mode="append",
-            options=write_options,
-        )
+        _append_with_retry(spark, enriched, silver_tbl, silver_bucket, write_options, batch_id)
         committed = _rows_from_own_commit(spark, silver_tbl, attempt_tag)
         if committed is None:
             log(f"Batch {batch_id}: skipped (txn already applied)")
