@@ -917,7 +917,9 @@ The header shows the deployment name, run ID, and an overall status badge:
 - **WARNING** (amber) -- pipeline completed but a ratio or job raised a
   non-fatal flag.
 - **FAILED** (red) -- a stage or query failed, or data completeness is below
-  threshold.
+  threshold. A run stopped by Ctrl-C or SIGTERM also shows as failed, with
+  the interrupt as its reason; its verdict is INTERRUPTED (see
+  [Interrupting a run](cli-reference.md#run)).
 
 A one-line context banner below the header shows pipeline mode (Batch /
 Continuous), Customer360 scale factor, the recipe string

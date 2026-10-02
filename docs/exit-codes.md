@@ -25,7 +25,7 @@ path yet says so.
 | 12 | `COMPARE_NOT_LIKE_FOR_LIKE` | compare: comparable, not like-for-like. | no command yet |
 | 13 | `COMPARE_CONFOUNDED` | compare: comparable, confounded. | no command yet |
 | 14 | `REQUIREMENT_UNMET` | Requirement unmet: a reproduction drifted outside its tolerance, was asked to verify at another commit, or could only be verified out of band. | `reproduce.drift`, `reproduce.commit_drift` |
-| 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C). | `sigint` |
+| 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C). | `sigint`, `run.interrupted` |
 
 ## Named paths
 
@@ -59,6 +59,7 @@ the CLI down every path listed here and checks the code.
 | `destroy.namespace_terminating` | 6 | `destroy` finished its steps but the namespace is still terminating |
 | `reproduce.commit_drift` | 14 | `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift |
 | `reproduce.drift` | 14 | `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol |
+| `run.interrupted` | 130 | `run` interrupted by SIGINT or SIGTERM; the record is sealed as interrupted and the run's unfinished jobs are stopped |
 | `sigint` | 130 | a command interrupted with Ctrl-C outside a prompt (Ctrl-C at a prompt is 5) |
 
 ## Errors and output

@@ -453,6 +453,12 @@ class PipelineMetrics:
     # None on batch runs and on records from before it.
     continuous: dict[str, Any] | None = None
 
+    # Set when SIGINT or SIGTERM stopped the run (cli/_interrupt.py):
+    # {signal, at_stage, at_utc, prior_failure, stopped, left, skipped}. The
+    # verdict is then INTERRUPTED, or FAILED when something had already failed.
+    # None: the run was not interrupted.
+    interrupted: dict[str, Any] | None = None
+
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
     # experiment_block() rebuilds it from the record when the snapshot holds
     # experiment_inputs; a record from before the block has none and never
@@ -503,6 +509,8 @@ class PipelineMetrics:
             d["maintenance_outcomes"] = list(self.maintenance_outcomes)
         if self.continuous is not None:
             d["continuous"] = self.continuous
+        if self.interrupted is not None:
+            d["interrupted"] = self.interrupted
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment

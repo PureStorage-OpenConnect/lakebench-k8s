@@ -164,7 +164,6 @@ PLANNED_BY = {
     "reproduce.verify_out_of_band": "ER-13",
     "run.args": "CC-6",
     "run.deps_missing": "SD-5c",
-    "run.interrupted": "CD-16",
     "run.namespace_gone": "CD-17",
     "run.protected_corpus": "AM-22",
     "series.corpus_changed": "CC-30",
@@ -785,6 +784,19 @@ def _scenario_run_verdict_failed(monkeypatch, tmp_path):
     return _local_run(monkeypatch, tmp_path, success=False)
 
 
+def _scenario_run_interrupted(monkeypatch, tmp_path):
+    """The QA-9 harness's batch run, with Ctrl-C while silver-build runs."""
+    import dataclasses
+
+    from tests.harness.run_harness import SCENARIOS as RUN_SCENARIOS
+    from tests.harness.run_harness import invoke_scenario
+
+    scenario = dataclasses.replace(
+        RUN_SCENARIOS["batch_c360"], interrupt=("silver-build", "SIGINT")
+    )
+    return invoke_scenario(scenario, tmp_path, monkeypatch)[0]
+
+
 def _scenario_confirm_declined(monkeypatch, tmp_path):
     a = _init_config(tmp_path)
     b = tmp_path / "b.yaml"
@@ -859,6 +871,7 @@ SCENARIOS = {
     "run.namespace_missing_no_yes": _scenario_run_namespace_missing_no_yes,
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
+    "run.interrupted": _scenario_run_interrupted,
     "confirm.declined": _scenario_confirm_declined,
     "reproduce.commit_drift": _scenario_reproduce_commit_drift,
     "reproduce.drift": _scenario_reproduce_drift,
@@ -896,6 +909,7 @@ EXPECTED_OUTPUT = {
     "deploy.identity_foreign": "Deployment Failed",
     "run.pass": "Local mode is sized",
     "run.verdict_failed": "Local mode is sized",
+    "run.interrupted": "Interrupted by SIGINT during silver-build",
     "config.validation": "Config error",
     "config.name_required": "config has no name, so it cannot change data",
     "reproduce.commit_drift": "Commit drift",
