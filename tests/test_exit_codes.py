@@ -132,9 +132,53 @@ def test_every_exit_code_has_a_meaning():
     assert set(exit_codes.MEANINGS) == set(ExitCode)
 
 
-def test_owned_paths_name_a_work_item():
-    bad = [p.name for p in PATHS if p.owner and not re.fullmatch(r"[A-Z]{2}-\d+[a-z]?", p.owner)]
-    assert not bad
+# The v1.7 work item that makes each planned path live. Kept here, not in
+# the shipped module, which does not cite plan ids.
+PLANNED_BY = {
+    "admin.version_change_in_use": "SD-10",
+    "admin.version_change_needs_flag": "SD-10",
+    "alias.refused": "CC-28",
+    "capacity.shortfall": "CC-24",
+    "capacity.unknown": "CC-24",
+    "compare.confounded": "ER-11",
+    "compare.equal_names": "CC-3",
+    "compare.like_for_like": "ER-11",
+    "compare.not_comparable": "ER-11",
+    "compare.not_established": "ER-11",
+    "compare.not_like_for_like": "ER-11",
+    "destroy.incarnation_mismatch": "CC-4",
+    "destroy.unverified_cluster": "SD-18a",
+    "financial.reproduce.mismatch": "AM-18",
+    "financial.reproduce.snapshot_gone": "AM-18",
+    "logs.no_pod": "CC-27",
+    "nameless.copied_dir": "CC-2",
+    "nameless.moved": "CC-2",
+    "nameless.nonce_mismatch": "CC-2",
+    "nameless.stamp_mismatch": "CC-2",
+    "nameless.v17_state_elsewhere": "CC-2",
+    "plan.missing_storage_class": "CC-23",
+    "plan.ok": "CC-23",
+    "repeat.no_verified_corpus": "CC-30",
+    "reproduce.existing_namespace": "CC-4",
+    "reproduce.nonce_changed": "CC-4",
+    "reproduce.verify_out_of_band": "ER-13",
+    "run.args": "CC-6",
+    "run.deps_missing": "SD-5c",
+    "run.interrupted": "CD-16",
+    "run.namespace_gone": "CD-17",
+    "run.protected_corpus": "AM-22",
+    "series.corpus_changed": "CC-30",
+    "status.drift": "CC-27",
+    "status.namespace_missing": "CC-27",
+    "status.ok": "CC-27",
+    "stop.api_error": "CC-27",
+}
+
+
+def test_planned_paths_name_a_work_item():
+    assert {p.name for p in PATHS if p.planned} == set(PLANNED_BY)
+    bad = [n for n, wi in PLANNED_BY.items() if not re.fullmatch(r"[A-Z]{2}-\d+[a-z]?", wi)]
+    assert not bad, bad
 
 
 def test_legacy_codes_are_gone():

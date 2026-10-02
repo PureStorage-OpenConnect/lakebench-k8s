@@ -2,7 +2,7 @@
 
 Provides ``lakebench config show``, ``lakebench config validate`` and
 ``lakebench config recommend``. ``lakebench config upgrade`` is removed and
-refuses (SAF-3).
+refuses: it rewrote configs lossily and wrote secrets in plaintext.
 """
 
 from __future__ import annotations
@@ -536,7 +536,7 @@ def config_upgrade(
         typer.Option("--output", "-o", help="Ignored: the command is removed."),
     ] = None,
 ) -> None:
-    """Removed: refuses before opening any file (SAF-3).
+    """Removed: refuses before opening any file.
 
     It rewrote configs lossily, in place by default, and wrote the S3
     secret key into the result in plaintext. The arguments stay declared so

@@ -97,6 +97,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SHA256SUMS` is refused, and so is a checksum mismatch on any release.
 - The package ships a `py.typed` marker, so type checkers read its
   annotations.
+- **Exit codes follow one table.** `lakebench` has a single
+  exit-code enum, `lakebench.exit_codes.ExitCode`, importable without loading
+  the CLI, and the table in `docs/exit-codes.md` is generated from it. Every
+  command now exits with a code from that table: 1 a failed run or step, 2 a
+  usage or config error before anything ran, 3 a refusal by the safety model,
+  4 a missing prerequisite before anything ran, 5 not confirmed, 6 incomplete
+  and safe to re-run, 14 a requirement unmet. An error Lakebench does not
+  classify prints one `ERROR` line, not a traceback, and exits 1
+  (`LAKEBENCH_DEBUG=1` prints the traceback). Scripts that test exit codes
+  need these changes:
+  - a declined confirmation prompt exits 5 (was 3), and so does a prompt with
+    no answer (`deploy` and `generate` off a terminal without `--yes`, end of
+    input), a cancelled `init` wizard (was 0), `destroy` without `--force`
+    off a terminal, and `run` without `--yes` when the namespace does not
+    exist (all were 1);
+  - `destroy` with the namespace still terminating exits 6 (was 4);
+  - a datagen timeout in `run` exits 1 (was 5); the run record keeps the
+    distinction: its `verdict.reasons` contains "datagen timed out";
+  - a config that fails to load or validate, an unsupported workload, recipe
+    and mode combination, and an argument a command checks itself (an
+    unknown recipe, component, stage or example, a missing file, conflicting
+    options) exit 2 (were 1); `run --stage` with an unknown name is now
+    refused before anything runs;
+  - a non-empty bronze prefix without `--regenerate` exits 3 (was 2), and a
+    bronze bucket that cannot be read to check it exits 4 (was 2);
+  - refusals by the safety model exit 3 (were 1): a namespace or bucket owned
+    by another deployment or without lakebench ownership proof (`deploy`,
+    `destroy`, `clean`), "Destroy NOT completed" because the namespace is a
+    newer deployment, a cluster lease another process holds (`destroy`,
+    `admin`), a continuous run that would reset data without
+    `--force-reset`, a non-empty bucket `admin reclaim-bucket` will not
+    retag. A command whose failed steps include any other failure still
+    exits 1;
+  - a Kubernetes config that does not load or an API that cannot be
+    reached, a bronze bucket or namespace that cannot be read for an
+    ownership or emptiness check, a failed `run` prerequisite and a Spark
+    Operator that is not ready exit 4 (were 1 or 2);
+  - `reproduce PACKAGE` exits 14 for performance or correctness drift (were
+    1 and 2), for commit drift without `--allow-commit-drift` and for a run
+    that does not follow the package (were 2), and 1 when its pipeline could
+    not run (was 2).
+
+- **Errors are one line and markup-safe; machine output is plain.**
+  `ERROR`, `WARN`, `OK` and progress lines now go to stderr, and their text
+  is printed verbatim: a value such as `s3a://b/[x]/y` or `[/tmp]` no longer
+  vanishes or crashes the command with a Rich `MarkupError`, and a long
+  message is not wrapped. `query --format json|csv`, `results --format
+  json|csv` and `compare --format json|csv` (without `-o`, which used to
+  print the table instead) write to plain stdout, with notices such as
+  "N rows in Xs" on stderr, so the output pipes into a parser. urllib3
+  retry lines and warnings are silenced. A config whose top level is not a
+  YAML mapping is refused with one line naming the problem instead of an
+  `AttributeError`.
+
 ### Fixed
 
 - Trino compaction of the Customer 360 silver table no longer fails with
@@ -209,94 +263,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   stored id or identity digest moves.
 
 ### Removed
-- `lbrun.py`, the run-from-a-checkout wrapper. Use
-  `PYTHONPATH=src python -m lakebench` instead.
-- **Exit codes follow one table (CLI-1, in progress).** `lakebench` now has a
-  single exit-code enum, `lakebench.exit_codes.ExitCode`, importable without
-  loading the CLI, and the table in `docs/exit-codes.md` is generated from it.
-  A top-level handler maps errors to the table: a confirmation prompt with no
-  answer (`deploy` and `generate` off a terminal without `--yes`, end of
-  input, or a declined `abort` prompt) now exits 5 instead of 1; an error
-- **Exit codes follow one table (CLI-1).** `lakebench` has a single
-  exit-code enum, `lakebench.exit_codes.ExitCode`, importable without loading
-  the CLI, and the table in `docs/exit-codes.md` is generated from it. Every
-  command now exits with a code from that table: 1 a failed run or step, 2 a
-  usage or config error before anything ran, 3 a refusal by the safety model,
-  4 a missing prerequisite before anything ran, 5 not confirmed, 6 incomplete
-  and safe to re-run, 14 a requirement unmet. An error Lakebench does not
-  classify prints one `ERROR` line, not a traceback, and exits 1
-  (`LAKEBENCH_DEBUG=1` prints the traceback). Scripts that test exit codes
-  need these changes:
-  - a declined confirmation prompt exits 5 (was 3), and so does a prompt with
-    no answer (`deploy` and `generate` off a terminal without `--yes`, end of
-    input), a cancelled `init` wizard (was 0), `destroy` without `--force`
-    off a terminal, and `run` without `--yes` when the namespace does not
-    exist (all were 1);
-  - `destroy` with the namespace still terminating exits 6 (was 4);
-  - a datagen timeout in `run` exits 1 (was 5); the run record keeps the
-    distinction: its `verdict.reasons` contains "datagen timed out";
-  - a config that fails to load or validate, an unsupported workload, recipe
-    and mode combination, and an argument a command checks itself (an
-    unknown recipe, component, stage or example, a missing file, conflicting
-    options) exit 2 (were 1); `run --stage` with an unknown name is now
-    refused before anything runs;
-  - a non-empty bronze prefix without `--regenerate` exits 3 (was 2), and a
-    bronze bucket that cannot be read to check it exits 4 (was 2);
-  - refusals by the safety model exit 3 (were 1): a namespace or bucket owned
-    by another deployment or without lakebench ownership proof (`deploy`,
-    `destroy`, `clean`), "Destroy NOT completed" because the namespace is a
-    newer deployment, a cluster lease another process holds (`destroy`,
-    `admin`), a continuous run that would reset data without
-    `--force-reset`, a non-empty bucket `admin reclaim-bucket` will not
-    retag. A command whose failed steps include any other failure still
-    exits 1;
-  - a Kubernetes config that does not load or an API that cannot be
-    reached, a bronze bucket or namespace that cannot be read for an
-    ownership or emptiness check, a failed `run` prerequisite and a Spark
-    Operator that is not ready exit 4 (were 1 or 2);
-  - `reproduce PACKAGE` exits 14 for performance or correctness drift (were
-    1 and 2), for commit drift without `--allow-commit-drift` and for a run
-    that does not follow the package (were 2), and 1 when its pipeline could
-    not run (was 2).
-
-- **Errors are one line and markup-safe; machine output is plain (CLI-2).**
-  `ERROR`, `WARN`, `OK` and progress lines now go to stderr, and their text
-  is printed verbatim: a value such as `s3a://b/[x]/y` or `[/tmp]` no longer
-  vanishes or crashes the command with a Rich `MarkupError`, and a long
-  message is not wrapped. `query --format json|csv`, `results --format
-  json|csv` and `compare --format json|csv` (without `-o`, which used to
-  print the table instead) write to plain stdout, with notices such as
-  "N rows in Xs" on stderr, so the output pipes into a parser. urllib3
-  retry lines and warnings are silenced. A config whose top level is not a
-  YAML mapping is refused with one line naming the problem instead of an
-  `AttributeError`.
-
-### Fixed
-
-- Trino compaction of the Customer 360 silver table no longer fails with
-  "Exceeded limit of 100 open writers for partitions" when it rewrites files
-  in more than 100 `interaction_date` partitions, as the silver of the one
-  recorded continuous Customer 360 run did (LB-210, n=1). A silver table with more than 90 partitions is now
-  compacted in chunks of at most 90, after a read of its partition values.
-  This also applies to batch runs, whose single statement happened to
-  succeed (batch silver holds a few large files per partition): the
-  pre-benchmark maintenance of a batch Customer 360 run on Trino now runs
-  one partition read and several `optimize` statements where it ran one,
-  which can change the recorded maintenance time. Compaction outcomes count
-  tables, not statements, and `experiment.effective_maintenance` names each
-  table whose compaction failed in `reasons` and
-  `detail.compaction_failures`. The maintenance policy id and the effective
-  maintenance `id` are unchanged.
-### Removed
-- **`config upgrade` refuses (SAF-3).** It rewrote configs lossily, in place
+- **`config upgrade` refuses.** It rewrote configs lossily, in place
   by default, and wrote the S3 secret key into the result in plaintext. It
   now exits 2 before opening any file and names the replacement,
   `lakebench init --from OLD.yaml -o NEW.yaml`.
-- **Dead flags (CLI-8).** `generate --wait` / `-w` (generate always waited;
+- **Dead flags.** `generate --wait` / `-w` (generate always waited;
   there was no `--no-wait`), `admin release-lock --expired-only` (always on;
   `release-lock` releases only an expired lease unless `--force` is given)
   and `deploy --include-observability` (set `observability.enabled: true`
   in the config instead). Each is now an unknown option and exits 2.
+- `lbrun.py`, the run-from-a-checkout wrapper. Use
+  `PYTHONPATH=src python -m lakebench` instead.
 
 ## [1.6.0] - 2026-09-30
 

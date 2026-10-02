@@ -553,8 +553,8 @@ _STAGE_POLL_S = 5
 BATCH_STAGE_NAMES = ("bronze-verify", "silver-build", "gold-finalize")
 
 
-# The verdict reason a datagen wait-budget timeout records (CLI-1: the code
-# is 1, formerly 5; the record keeps the distinction).
+# The verdict reason a datagen wait-budget timeout records (the exit code is
+# 1, formerly 5; the record keeps the distinction).
 DATAGEN_TIMED_OUT = "datagen timed out"
 
 
@@ -575,7 +575,7 @@ def _handle_datagen_timeout(
     pipeline stages would build on a partial bronze (invariant 3). The fix:
     delete the datagen Job so it stops writing, delete each streaming
     SparkApplication that was consuming the trickle so it stops reading,
-    then exit 1 (CLI-1). The caller records ``DATAGEN_TIMED_OUT`` in the
+    then exit 1. The caller records ``DATAGEN_TIMED_OUT`` in the
     run's ``failure_reasons``, so the record's ``verdict.reasons`` tells a
     timeout apart from other datagen failures.
     """
@@ -1810,7 +1810,7 @@ def run(
         print_error("--deploy-only and --generate-only are mutually exclusive")
         raise typer.Exit(ExitCode.USAGE)
     # A batch stage name is checked here, before any deploy, datagen or job
-    # submission, so a typo exits 2 with nothing run (CLI-1).
+    # submission, so a typo exits 2 with nothing run.
     if stage and _run_mode == "batch" and stage not in BATCH_STAGE_NAMES:
         print_error(f"Unknown stage: {stage}")
         print_info(f"Valid stages: {', '.join(BATCH_STAGE_NAMES)}")
@@ -2020,7 +2020,7 @@ def run(
         except ScriptsMapError as e:
             print_error(f"Spark scripts not deployed: {e}")
             _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
-            raise typer.Exit(1) from None
+            raise typer.Exit(ExitCode.FAILED) from None
         if not scripts_ok:
             print_error("Failed to deploy Spark scripts ConfigMap -- pipeline cannot proceed")
             _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
@@ -2100,7 +2100,7 @@ def run(
                 # leave orphan compute behind.
                 if _dg_timed_out:
                     _datagen_elapsed = (datetime.now() - datagen_start).total_seconds()
-                    # CLI-1: a timeout exits 1 like any failed run; the record
+                    # A timeout exits 1 like any failed run; the record
                     # keeps it distinct in verdict.reasons.
                     if collector.current_run is not None:
                         collector.current_run.failure_reasons.append(DATAGEN_TIMED_OUT)
@@ -3094,7 +3094,7 @@ def run(
         # benchmark scores are computed) so it can include the full scorecard.
 
     except typer.Exit as e:
-        # CLI-1: the finally block re-raises _pipeline_exit_code, so carry the
+        # The finally block re-raises _pipeline_exit_code, so carry the
         # specific code of any exit raised above (3 refused, 4 operator not
         # ready, 2 usage) and record the run as failed.
         if e.exit_code:

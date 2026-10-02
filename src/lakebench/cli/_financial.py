@@ -26,7 +26,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from lakebench.cli._helpers import print_error
+from lakebench.cli._helpers import esc, print_error
 from lakebench.exit_codes import ExitCode, LakebenchError
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ def _get_job_manager(cfg):
     try:
         scripts_ok = job_manager.deploy_scripts_configmap()
     except ScriptsMapError as e:
-        console.print(f"Spark scripts not deployed: {e}", style="red", markup=False)
+        console.print(f"Spark scripts not deployed: {esc(e)}", style="red")
         raise typer.Exit(ExitCode.FAILED) from None
     if not scripts_ok:
         raise LakebenchError("Failed to deploy Spark scripts ConfigMap")
@@ -96,8 +96,8 @@ def _require_submitted(status) -> None:
     from lakebench.modules.pipeline_engines.spark.job import JobState
 
     if status.state is JobState.FAILED:
-        console.print(f"Not submitted: {status.message}", style="red", markup=False)
-        raise typer.Exit(1)
+        console.print(f"Not submitted: {esc(status.message)}", style="red")
+        raise typer.Exit(ExitCode.FAILED)
 
 
 def _wait_for_sparkapp(namespace: str, name: str, timeout: int = 1800) -> str:

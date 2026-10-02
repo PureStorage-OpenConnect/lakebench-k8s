@@ -190,7 +190,7 @@ def clean(
     total_deleted = 0
     errors = []
     # How many of ``errors`` are ownership refusals: when all are, clean
-    # exits 3 (refused), not 1 (CLI-1).
+    # exits 3 (refused), not 1, as the exit-code table says.
     refusals = 0
 
     # Check for writers still active before cleaning S3 buckets. The prompt

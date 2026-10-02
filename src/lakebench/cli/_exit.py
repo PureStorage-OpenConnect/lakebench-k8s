@@ -219,7 +219,7 @@ def quiet_urllib3() -> None:
     """Silence urllib3's retry log lines and warnings for this process.
 
     An unreachable API server otherwise prints a "Retrying (Retry(...))"
-    trace per attempt before the one-line error (CLI-2).
+    trace per attempt before the one-line error.
     """
     import logging
     import warnings

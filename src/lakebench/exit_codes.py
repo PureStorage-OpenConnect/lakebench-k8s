@@ -10,10 +10,10 @@ The codes follow the v1.7 target UX (one enum, generated into the docs):
 ``docs/exit-codes.md`` is rendered from ``ExitCode`` and ``PATHS`` by
 ``scripts/gen_exit_codes.py`` and a test fails when the file drifts.
 
-``PATHS`` names each way a command reaches a code. An entry whose ``owner`` is
-empty is produced today, and ``tests/test_exit_codes.py`` has a scenario that
-drives the real CLI to it. An entry with an owner names the work item that
-makes the command exit with that code; until then the docs leave it out.
+``PATHS`` names each way a command reaches a code. An entry that is not
+``planned`` is produced today, and ``tests/test_exit_codes.py`` has a scenario
+that drives the real CLI to it. A ``planned`` entry is a path a later change
+makes the command produce; until then the docs leave it out.
 """
 
 from __future__ import annotations
@@ -154,8 +154,8 @@ class Incomplete(LakebenchError):
 class ExitPath:
     """One named way a command reaches an exit code.
 
-    ``owner`` is empty when the path is produced today; otherwise it is the
-    v1.7 work item that makes the command exit with ``code`` on this path.
+    ``planned`` is True for a path no command produces yet; the test suite
+    records which change is to produce it.
     ``v16_code`` is the code Lakebench 1.6 exited with on this path, when it
     differs; the UPGRADING table of renumbered codes is built from it.
     """
@@ -163,12 +163,12 @@ class ExitPath:
     name: str
     code: ExitCode
     when: str
-    owner: str = ""
+    planned: bool = False
     v16_code: int | None = None
 
     @property
     def live(self) -> bool:
-        return not self.owner
+        return not self.planned
 
 
 _C = ExitCode
@@ -177,9 +177,11 @@ PATHS: tuple[ExitPath, ...] = (
     # 0
     ExitPath("version.ok", _C.OK, "`lakebench version` prints the version"),
     ExitPath("run.pass", _C.OK, "`run` finished and its verdict passed"),
-    ExitPath("compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like", "ER-11"),
-    ExitPath("status.ok", _C.OK, "`status` finds the deployment as configured", "CC-27"),
-    ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity", "CC-23"),
+    ExitPath(
+        "compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like", planned=True
+    ),
+    ExitPath("status.ok", _C.OK, "`status` finds the deployment as configured", planned=True),
+    ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity", planned=True),
     # 1
     ExitPath(
         "unhandled_exception",
@@ -194,24 +196,29 @@ PATHS: tuple[ExitPath, ...] = (
         'datagen did not finish in time; the record says "datagen timed out" in verdict.reasons',
         v16_code=5,
     ),
-    ExitPath("run.namespace_gone", _C.FAILED, "the namespace disappeared during `run`", "CD-17"),
+    ExitPath(
+        "run.namespace_gone", _C.FAILED, "the namespace disappeared during `run`", planned=True
+    ),
     ExitPath(
         "repeat.no_verified_corpus",
         _C.FAILED,
         "`run --repeat` found no verified corpus to reuse",
-        "CC-30",
+        planned=True,
     ),
     ExitPath(
-        "status.drift", _C.FAILED, "`status` finds the deployment drifted from its config", "CC-27"
+        "status.drift",
+        _C.FAILED,
+        "`status` finds the deployment drifted from its config",
+        planned=True,
     ),
-    ExitPath("status.namespace_missing", _C.FAILED, "`status` finds no namespace", "CC-27"),
-    ExitPath("stop.api_error", _C.FAILED, "`stop` hit an API error stopping a job", "CC-27"),
-    ExitPath("logs.no_pod", _C.FAILED, "`logs` found no pod for the component", "CC-27"),
+    ExitPath("status.namespace_missing", _C.FAILED, "`status` finds no namespace", planned=True),
+    ExitPath("stop.api_error", _C.FAILED, "`stop` hit an API error stopping a job", planned=True),
+    ExitPath("logs.no_pod", _C.FAILED, "`logs` found no pod for the component", planned=True),
     ExitPath(
         "financial.reproduce.mismatch",
         _C.FAILED,
         "`financial reproduce` ran but did not reproduce the alert",
-        "AM-18",
+        planned=True,
     ),
     # 2
     ExitPath("click.usage", _C.USAGE, "an unknown flag, a missing argument or a bad value"),
@@ -238,7 +245,7 @@ PATHS: tuple[ExitPath, ...] = (
         "v1.6 state names a deployment",
         v16_code=0,
     ),
-    ExitPath("run.args", _C.USAGE, "a `run` argument or combination is refused", "CC-6"),
+    ExitPath("run.args", _C.USAGE, "a `run` argument or combination is refused", planned=True),
     ExitPath(
         "config.upgrade_refused",
         _C.USAGE,
@@ -248,42 +255,45 @@ PATHS: tuple[ExitPath, ...] = (
         "run.protected_corpus",
         _C.USAGE,
         "the config names a protected AML corpus role or seed",
-        "AM-22",
+        planned=True,
     ),
     ExitPath(
         "alias.refused",
         _C.USAGE,
         "a removed command or flag; the message names the replacement",
-        "CC-28",
+        planned=True,
     ),
     ExitPath(
-        "compare.equal_names", _C.USAGE, "`compare` was given two sides with the same name", "CC-3"
+        "compare.equal_names",
+        _C.USAGE,
+        "`compare` was given two sides with the same name",
+        planned=True,
     ),
     ExitPath(
         "admin.version_change_needs_flag",
         _C.USAGE,
         "`admin install` would change a component version without --allow-version-change",
-        "SD-10",
+        planned=True,
     ),
     # 3
     ExitPath(
         "reproduce.existing_namespace",
         _C.REFUSED,
         "`reproduce` would reuse a namespace or bucket that already exists",
-        "CC-4",
+        planned=True,
         v16_code=2,
     ),
     ExitPath(
         "reproduce.nonce_changed",
         _C.REFUSED,
         "the deployment `reproduce` created was replaced before its destroy",
-        "CC-4",
+        planned=True,
     ),
     ExitPath(
         "destroy.incarnation_mismatch",
         _C.REFUSED,
         "`destroy` was told to expect a different deployment incarnation",
-        "CC-4",
+        planned=True,
     ),
     ExitPath(
         "destroy.redeployed",
@@ -295,23 +305,28 @@ PATHS: tuple[ExitPath, ...] = (
         "nameless.nonce_mismatch",
         _C.REFUSED,
         "a nameless config's nonce does not match the namespace",
-        "CC-2",
+        planned=True,
     ),
     ExitPath(
-        "nameless.copied_dir", _C.REFUSED, "a nameless config's state directory was copied", "CC-2"
+        "nameless.copied_dir",
+        _C.REFUSED,
+        "a nameless config's state directory was copied",
+        planned=True,
     ),
-    ExitPath("nameless.moved", _C.REFUSED, "a nameless config moved away from its state", "CC-2"),
+    ExitPath(
+        "nameless.moved", _C.REFUSED, "a nameless config moved away from its state", planned=True
+    ),
     ExitPath(
         "nameless.stamp_mismatch",
         _C.REFUSED,
         "a nameless config's stamp does not match the namespace",
-        "CC-2",
+        planned=True,
     ),
     ExitPath(
         "nameless.v17_state_elsewhere",
         _C.REFUSED,
         "the namespace carries v1.7 state that lives with another config",
-        "CC-2",
+        planned=True,
     ),
     ExitPath(
         "deploy.identity_foreign",
@@ -330,20 +345,20 @@ PATHS: tuple[ExitPath, ...] = (
         "series.corpus_changed",
         _C.REFUSED,
         "the corpus changed between repetitions of `run --repeat`",
-        "CC-30",
+        planned=True,
     ),
     ExitPath("lease.held", _C.REFUSED, "another command holds the cluster lock lease", v16_code=1),
     ExitPath(
         "destroy.unverified_cluster",
         _C.REFUSED,
         '"Destroy NOT completed": this cluster has no fingerprint, so buckets are kept',
-        "SD-18a",
+        planned=True,
     ),
     ExitPath(
         "admin.version_change_in_use",
         _C.REFUSED,
         "`admin install` would change a component version that deployments use",
-        "SD-10",
+        planned=True,
     ),
     # 4
     ExitPath("run.prereq_failed", _C.PREREQUISITE, "a `run` preflight check failed", v16_code=1),
@@ -351,19 +366,19 @@ PATHS: tuple[ExitPath, ...] = (
         "capacity.shortfall",
         _C.PREREQUISITE,
         "free cluster capacity is below the run's peak",
-        "CC-24",
+        planned=True,
     ),
     ExitPath(
         "capacity.unknown",
         _C.PREREQUISITE,
         "capacity could not be read on every node",
-        "CC-24",
+        planned=True,
     ),
     ExitPath(
         "plan.missing_storage_class",
         _C.PREREQUISITE,
         "`plan` finds the scratch StorageClass missing",
-        "CC-23",
+        planned=True,
     ),
     ExitPath(
         "k8s.unreachable",
@@ -387,13 +402,13 @@ PATHS: tuple[ExitPath, ...] = (
         "financial.reproduce.snapshot_gone",
         _C.PREREQUISITE,
         "`financial reproduce` cannot read the snapshot the alert came from",
-        "AM-18",
+        planned=True,
     ),
     ExitPath(
         "run.deps_missing",
         _C.PREREQUISITE,
         "the deployment predates the v1.7 dependency server and needs a new deploy",
-        "SD-5c",
+        planned=True,
     ),
     # 5
     ExitPath(
@@ -422,12 +437,16 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=4,
     ),
     # 10 to 14
-    ExitPath("compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict", "ER-11"),
-    ExitPath("compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict", "ER-11"),
     ExitPath(
-        "compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict", "ER-11"
+        "compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict", planned=True
     ),
-    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict", "ER-11"),
+    ExitPath(
+        "compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict", planned=True
+    ),
+    ExitPath(
+        "compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict", planned=True
+    ),
+    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict", planned=True),
     ExitPath(
         "reproduce.drift",
         _C.REQUIREMENT_UNMET,
@@ -446,7 +465,7 @@ PATHS: tuple[ExitPath, ...] = (
         "reproduce.verify_out_of_band",
         _C.REQUIREMENT_UNMET,
         "`reproduce` could not verify the result in band",
-        "ER-13",
+        planned=True,
     ),
     # 130
     ExitPath(
@@ -458,14 +477,14 @@ PATHS: tuple[ExitPath, ...] = (
         "run.interrupted",
         _C.INTERRUPTED,
         "`run` interrupted; the record is sealed as interrupted",
-        "CD-16",
+        planned=True,
     ),
 )
 
 PATHS_BY_NAME: dict[str, ExitPath] = {p.name: p for p in PATHS}
 
 # v1.6 codes that an unconverted command still produced, with what they meant
-# there. CC-9 converted every command, so this is empty; ``render_markdown``
+# there. Every command is converted now, so this is empty; ``render_markdown``
 # prints a transition section only while it has entries.
 LEGACY_CODES: dict[int, str] = {}
 

@@ -1081,7 +1081,7 @@ class DataOwnershipDecision:
     hint: str = ""
     #: True when ``allowed`` is False because a check could not run (the
     #: namespace list was unreadable), not because ownership was disproved.
-    #: The CLI exits 1 for these and 3 for a refusal (CLI-1).
+    #: The CLI exits 1 for these and 3 for a refusal.
     unverifiable: bool = False
 
 

@@ -14,7 +14,7 @@ modes documented there:
   package references, then compares actual vs. expected under the recorded
   tolerance bands.
 
-Exit codes (CLI-1, TUD 4.3; see docs/exit-codes.md):
+Exit codes (see docs/exit-codes.md):
   0  -- pass (within tolerance)
   14 -- requirement unmet: correctness violation (missing stages,
         scale_ratio mismatch, ...), performance drift outside its band, or
@@ -1033,7 +1033,7 @@ def _verify(
 
     if outcome != 0:
         # _compare's verdict is 2 (correctness) or 1 (performance); both are
-        # a reproduction outside its tolerance, 14 in the CLI-1 table.
+        # a reproduction outside its tolerance, 14 in the exit-code table.
         raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
 
 
