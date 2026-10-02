@@ -2388,6 +2388,8 @@ class materialised_source:  # noqa: N801 -- used like a function: with materiali
     not reach (a checkpoint is not in the cache manager), so the RDD under
     the plan is unpersisted directly. Both run when the body raises.
 
+    Each entry logs ``[merge-source] <view>: materialised``.
+
     The blocks live on the executors that computed them: an executor lost
     between entry and the MERGE fails that micro-batch, and the query
     restarts through the replay path.
@@ -2406,6 +2408,12 @@ class materialised_source:  # noqa: N801 -- used like a function: with materiali
         except BaseException:
             self._free()
             raise
+        # One line per MERGE source and batch, so a run's log shows each
+        # site materialised. No row count: counting is one more Spark job
+        # per site per micro-batch, which would land inside the stream's
+        # published merge timings (the entity and account counts are in the
+        # [dim-merge] lines already).
+        log(f"[merge-source] {self._view}: materialised")
         return self._view
 
     def __exit__(self, *_exc):

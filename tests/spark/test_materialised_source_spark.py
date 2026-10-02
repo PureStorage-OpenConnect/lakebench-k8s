@@ -65,3 +65,12 @@ def test_dropped_and_freed_when_the_body_raises(spark_session):
             raise ValueError("merge failed")
     assert not spark.catalog.tableExists("_lb_ms_raise")
     assert _persistent(spark) - base == set()
+
+
+def test_entry_logs_the_view(spark_session, capsys):
+    from common import materialised_source
+
+    with materialised_source(spark_session, spark_session.range(7), "_lb_ms_log"):
+        pass
+    out = capsys.readouterr().out
+    assert "[merge-source] _lb_ms_log: materialised" in out, out
