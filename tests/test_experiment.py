@@ -551,6 +551,7 @@ class TestCompareCommand:
         c = self._comparison(a, b, qph=(100.0, 200.0))
         assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "5"
         assert "invariant 2" in c["missing"]["condition"]
+        assert [r["metric"] for r in c["metrics"]] == ["composite_qph", "scale_ratio"]
         (row,) = [r for r in c["metrics"] if r["metric"] == "composite_qph"]
         assert row["a"]["median"] == 100.0 and row["b"]["median"] == 200.0
         assert row["assessment"] == "withheld" and row["delta_pct"] is None

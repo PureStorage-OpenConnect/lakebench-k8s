@@ -609,37 +609,47 @@ with a warning and no QpH score is produced.
 ### What a PASSED verdict asserts
 
 The verdict in `metrics.json` (`verdict.status`, with each gate in
-`verdict.gates`) is decided from the record alone, so `run`, `report`,
+`verdict.gates`) is decided from the record as it is saved, so `run`,
 `compare`, the perf gate and the release gate read the same outcome from
 the same record. Besides the stages succeeding and no query failing, a
 PASSED run shows:
 
 - **Rows in every layer** (`layer_rows`). Batch: the last bronze-verify,
-  silver-build and gold-finalize job each recorded more than 0 output rows;
-  a missing stage job fails. Continuous: bronze-ingest's output rows,
-  silver-stream's committed rows and gold-refresh's output rows (for AML,
-  the alerts gold-refresh wrote in the window) are above 0. A continuous
-  layer with no row count passes on its bytes alone, with the warning "rows
-  not measured for gold; bytes > 0" and the layer listed in
+  silver-build and gold-finalize job each recorded more than 0 output rows
+  (a driver log that was not read counts as 0); a missing stage job fails.
+  Continuous: bronze-ingest's output rows, silver-stream's rows after its
+  transforms (the AML stream logs only the rows of its committed batches,
+  which stand for them) and gold-refresh's output rows are above 0. AML
+  gold-refresh logs no row count; the alerts it wrote in the window stand
+  for it, so a window with no alerts fails. A continuous layer with no row
+  count passes on its bytes alone, with the warning "rows not measured for
+  gold; bytes > 0" and the layer listed in
   `verdict.qualifiers.layer_rows_unmeasured`; release evidence refuses that.
 - **The expected AML rules ran** (`aml_rules`, financial runs). Batch: no
   rule errored, detection produced alerts, and every rule ran except an
   allowed skip (today only `W1_connected_components` for `giant-component`
-  or `vertex-cap`). Continuous: no rule ran that the mode leaves out. A
-  batch gold log with no per-rule counts is a warning, not a failure.
+  or `vertex-cap`; a W3 or W17 `path-cap` skip fails). A batch gold log
+  with no per-rule counts is a warning, not a failure. Continuous: no rule
+  ran that the mode leaves out, and the window produced alerts; the
+  continuous record carries no rule errors, so they are not judged there.
 - **The scale's data** (`scale_ratio`, batch). The bronze read is at least
-  95% of the scale's expected volume; a ratio of 0 (bronze not measured)
-  fails.
+  95% of the scale's expected volume, as stored (rounded to 3 places); a
+  ratio of 0 (bronze not measured) fails. A multi-cycle run's ratio is its
+  last bronze-verify's, which reads every cycle.
 - **Answers** (`query_answers`). No successful benchmark query returned 0
-  rows unless the query is declared to allow an empty result.
+  rows unless the query is declared to allow an empty result. A continuous
+  run is held to this in its last in-stream round only, and a Q9 that
+  failed in a round is tolerated (gold refresh replaces the table it
+  reads), as the run itself reports them.
 
 A run whose stage failed, or that was interrupted, is not judged on these;
-it already did not pass. A `run --stage` run is judged on its stage's layer
-only. When the record does not read PASSED although every check the run
-printed passed, `run` prints `Verdict: <reason>` and exits 1. Readers take
-the strictest of the stored verdict and the one recomputed from the record,
-so a record saved by an earlier Lakebench can read failed now (UPGRADING
-lists the stored records this changes).
+it already did not pass. A `run --stage` run is judged on its stage's
+layer, on the rules when the stage is gold-finalize, and on the scale ratio
+only when the stage is bronze-verify. When the record does not read PASSED
+although every check the run printed passed, `run` prints `Verdict:
+<reason>` and exits 1. `compare`, the perf gate and the release gate take
+the strictest of the stored verdict and the one recomputed from the
+record, so a record saved by an earlier Lakebench can read failed now.
 
 ### Batch Mode
 
@@ -1126,9 +1136,10 @@ Some sections only appear in batch or continuous mode as noted below.
 
 The header shows the deployment name, run ID, and an overall status badge:
 
-- **PASSED** (green) -- pipeline completed, data complete (scale/ingest ratio
-  0.95--1.05), all jobs succeeded, no failed queries, and the record shows
-  rows in every layer, the expected rules and non-empty answers (see
+- **PASSED** (green) -- pipeline completed, data complete (batch scale
+  ratio at least 0.95, continuous ingest ratio at least 0.95), all jobs
+  succeeded, no failed queries, and the record shows rows in every layer,
+  the expected rules and non-empty answers (see
   [What a PASSED verdict asserts](#what-a-passed-verdict-asserts)).
 - **WARNING** (amber) -- pipeline completed but a ratio or job raised a
   non-fatal flag.

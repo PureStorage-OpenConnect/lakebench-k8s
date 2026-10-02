@@ -495,6 +495,8 @@ class MetricsStorage:
             # ``lakebench report --list`` (and any other summary consumer)
             # can prefer verdict.status over raw ``success`` (OD-6).
             verdict = data.get("verdict") if isinstance(data.get("verdict"), dict) else None
+            from lakebench.metrics.verdict import passed as _record_passed
+
             return {
                 "run_id": data.get("run_id"),
                 "deployment_name": data.get("deployment_name"),
@@ -503,6 +505,9 @@ class MetricsStorage:
                 "start_time": data.get("start_time"),
                 "success": data.get("success"),
                 "verdict": verdict,
+                # The strictest of the stored verdict and the one recomputed
+                # from the whole record (a summary row cannot recompute).
+                "passed": _record_passed(data),
                 "total_elapsed_seconds": data.get("total_elapsed_seconds"),
                 "job_count": len(data.get("jobs", [])),
                 "scale": data.get("config_snapshot", {}).get("scale"),
