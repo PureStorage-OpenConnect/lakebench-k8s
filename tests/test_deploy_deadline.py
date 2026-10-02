@@ -423,13 +423,44 @@ def test_scc_verify_poll_stops_at_the_deadline(clock):
         clock.sleep(3)
         with pytest.raises(deadline.DeployTimeout):
             security.ensure_scc_rolebinding(rbac, "ns", "sa", authz_api=authz)
-    assert clock.now - 1000.0 < 5 + 2.5  # stopped near the deadline, not 15 s later
+    assert clock.now == pytest.approx(1005.0)  # stopped at the deadline, not 15 s later
     without = MagicMock()
     without.create_namespaced_local_subject_access_review.return_value = {
         "status": {"allowed": False}
     }
     with pytest.raises(security.SCCGrantError):
         security.ensure_scc_rolebinding(rbac, "ns", "sa", authz_api=without)
+
+
+def test_operator_scc_check_is_not_cut_after_a_shared_change(clock, monkeypatch):
+    """The Spark Operator's SCC check runs after a committed helm change; a
+    deadline that passes during its poll must not skip the patch after it."""
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.k8s import security
+    from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
+
+    calls = []
+
+    def fake_ensure(*a, **k):
+        calls.append(k.get("cut_by_deadline"))
+        rbac = MagicMock()
+        rbac.read_namespaced_role_binding.side_effect = ApiException(status=404)
+        authz = MagicMock()
+        authz.create_namespaced_local_subject_access_review.return_value = {
+            "status": {"allowed": False}
+        }
+        return real(rbac, a[1], a[2], a[3], authz_api=authz, **k)
+
+    real = security.ensure_scc_rolebinding
+    monkeypatch.setattr(security, "ensure_scc_rolebinding", fake_ensure)
+    monkeypatch.setattr("kubernetes.client.RbacAuthorizationV1Api", MagicMock())
+    mgr = SparkOperatorManager.__new__(SparkOperatorManager)
+    mgr.namespace = "spark-operator"
+    with deadline.deploy_deadline(5):
+        clock.sleep(4)
+        mgr._assign_openshift_scc()  # logs the SCCGrantError, no DeployTimeout
+    assert calls == [False, False]
 
 
 # --- static guard -------------------------------------------------------------------

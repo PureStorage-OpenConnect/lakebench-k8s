@@ -44,7 +44,7 @@ _WATCH_LIST_LOCK_TIMEOUT_S = 600
 # deadline: stopping half way would release the lease with the shared
 # operator mid-restart and its watch list unverified, which every other
 # deployment then works against. Today only these bounds and the lease TTL
-# hold them; a lease hold budget is planned.
+# hold them, with the lease hold budget (k8s/lease_state.py).
 _POST_UPGRADE_ROLLOUT_S = 180
 _POST_UPGRADE_RESTART_S = 120
 _POST_UPGRADE_READY_S = 120
@@ -1557,7 +1557,11 @@ class SparkOperatorManager:
         rbac_api = k8s_client.RbacAuthorizationV1Api()
         for sa in ("spark-operator-controller", "spark-operator-webhook"):
             try:
-                ensure_scc_rolebinding(rbac_api, self.namespace, sa, "anyuid")
+                # Runs after committed shared helm changes: never cut by the
+                # deploy deadline, so the patch and restart that follow happen.
+                ensure_scc_rolebinding(
+                    rbac_api, self.namespace, sa, "anyuid", cut_by_deadline=False
+                )
             except SCCGrantError as e:
                 if strict:
                     raise
