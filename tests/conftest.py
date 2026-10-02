@@ -55,6 +55,13 @@ os.environ.pop("FORCE_COLOR", None)
 # Typer forces a terminal when GITHUB_ACTIONS is set (read at import time);
 # this is its documented off switch.
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+# pytest-xdist starts its workers with COLUMNS=80. A Rich Console built at
+# import time (the CLI's module-level consoles) fixes its width from COLUMNS,
+# so in a worker every table was cut at 80 columns and a test's
+# CliRunner(env={"COLUMNS": ...}) had no effect. Without it, Rich reads
+# COLUMNS when it prints, as in a serial run.
+os.environ.pop("COLUMNS", None)
+os.environ.pop("LINES", None)
 
 import functools  # noqa: E402
 import importlib  # noqa: E402
