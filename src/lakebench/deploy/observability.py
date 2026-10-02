@@ -178,7 +178,7 @@ def _find_helm_service(
 
     # Attempt 1: K8s Python client, on the process's active cluster target
     # (or this context's, when none is active yet). Never reloads another
-    # context; a conflicting one raises rather than falling through (SAF-7).
+    # context; a conflicting one raises rather than reaching another cluster.
     from lakebench.k8s.target import ClusterTarget, ContextConflictError
 
     try:

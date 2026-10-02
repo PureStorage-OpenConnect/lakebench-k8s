@@ -1,4 +1,4 @@
-"""The one cluster a lakebench process talks to (SAF-7).
+"""The one cluster a lakebench process talks to.
 
 The kubernetes client keeps a process-wide default configuration, and every
 bare ``CoreV1Api()``/``AppsV1Api()`` copies it. That default is set only by

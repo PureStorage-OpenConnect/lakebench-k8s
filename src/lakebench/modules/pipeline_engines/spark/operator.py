@@ -279,7 +279,7 @@ class SparkOperatorManager:
         tool = cmd[0]
         args = list(cmd[1:])
         if tool != os.path.basename(tool) and os.path.basename(tool) in ("kubectl", "helm", "oc"):
-            # A path would skip the pinned helpers below (SAF-7).
+            # A path would skip the pinned-context helpers below.
             raise ValueError(f"call {os.path.basename(tool)} by name, not as {tool!r}")
         ctx = self.kube_context
         if tool == "kubectl":
@@ -979,7 +979,7 @@ class SparkOperatorManager:
         try:
             with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S):
                 try:
-                    # The pinned-context check (SAF-7) once the lease is held
+                    # The pinned-context check once the lease is held
                     # and before the first mutation. A rewrite after it can
                     # still stop a later tool call; that is mapped below.
                     cli_args("helm", self.kube_context)

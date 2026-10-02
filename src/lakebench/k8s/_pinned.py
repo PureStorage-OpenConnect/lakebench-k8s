@@ -67,7 +67,7 @@ def _pinned_argv(tool: str, cfg_or_context: Any, args: list[str]) -> list[str]:
     """Assemble the argv for ``tool`` with ``--context``/``--kube-context`` pinned.
 
     With no configured context the flag comes from the process's active
-    :class:`~lakebench.k8s.target.ClusterTarget` (SAF-7), so a subprocess
+    :class:`~lakebench.k8s.target.ClusterTarget`, so a subprocess
     and the API clients use the same context even when the kubeconfig's
     current context changes mid-run.
     """

@@ -167,7 +167,7 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
     except ImportError:  # pragma: no cover -- kubernetes lib is a hard dep
         return None
 
-    # The cluster this process's API clients are pinned to (SAF-7): its CA
+    # The cluster this process's API clients are pinned to: its CA
     # was hashed when the context was loaded, so a kubeconfig rewritten
     # since cannot change what a deploy stamps or a destroy compares.
     from lakebench.k8s.target import active_target

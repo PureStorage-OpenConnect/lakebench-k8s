@@ -159,8 +159,9 @@ class K8sClient:
     ):
         """Initialize Kubernetes client.
 
-        The client is pinned to one :class:`ClusterTarget` (SAF-7): ``target``
-        when given, else the one ``context`` resolves to. An empty context
+        The client is pinned to one :class:`ClusterTarget`, so it cannot
+        follow a context switch: ``target`` when given, else the one
+        ``context`` resolves to. An empty context
         resolves to the process's active target, or to the kubeconfig's
         current context by name. A different context from the one already
         active raises :class:`ContextConflictError`.
@@ -1093,7 +1094,7 @@ def get_k8s_client(
     target: ClusterTarget | None = None,
     namespace: str = "",
 ) -> K8sClient:
-    """Create a Kubernetes client pinned to one cluster context (SAF-7).
+    """Create a Kubernetes client pinned to the process's one cluster context.
 
     Callers pass ``context=cfg.platform.kubernetes.context`` (empty means
     the kubeconfig's current context, resolved once per process) or a

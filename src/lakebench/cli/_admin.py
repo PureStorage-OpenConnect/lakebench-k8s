@@ -81,7 +81,7 @@ def _get_core_v1(context: str | None = None):
             target = ClusterTarget.resolve(context=context).activate()
         else:
             # No configured context: the kubeconfig's current context,
-            # resolved by name once and named in the output (SAF-7).
+            # resolved by name once and named in the output, so the user sees which cluster.
             target = ClusterTarget.current()
             print_info(f"Cluster context: {escape(target.label)}")
         return k8s_client.CoreV1Api()

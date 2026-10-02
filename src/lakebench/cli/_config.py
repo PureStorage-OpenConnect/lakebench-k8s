@@ -384,7 +384,7 @@ def config_recommend(
         )
 
     if cfg is not None:
-        # Size against the config's cluster (SAF-7): pin its context before
+        # Size against the config's cluster, not whichever is current: pin its context before
         # recommend detects capacity, which otherwise uses the current one.
         from kubernetes.config import ConfigException
         from rich.markup import escape

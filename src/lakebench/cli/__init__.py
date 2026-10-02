@@ -57,7 +57,6 @@ from lakebench.k8s import (
     pinned_kubectl,
     pinned_kubectl_popen,
 )
-from lakebench.k8s.target import ContextConflictError
 from lakebench.s3 import test_s3_connectivity
 
 if TYPE_CHECKING:
@@ -1227,7 +1226,7 @@ def status(
 
     try:
         # The config's context, or (status --namespace with no config) the
-        # kubeconfig's current context resolved by name and printed (SAF-7).
+        # kubeconfig's current context resolved by name and printed.
         if cfg is not None:
             k8s = get_k8s_client(context=cfg.platform.kubernetes.context, namespace=ns)
         else:
@@ -2171,7 +2170,7 @@ def logs(
 
     namespace = cfg.get_namespace()
     label_selector, container = COMPONENT_SELECTORS[component]
-    # logs runs only kubectl; pin the context before the first call (SAF-7).
+    # logs runs only kubectl; pin the context before the first call so it names one cluster.
     from lakebench.k8s.target import pin_command
 
     try:

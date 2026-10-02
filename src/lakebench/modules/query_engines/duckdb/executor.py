@@ -106,7 +106,7 @@ class DuckDBExecutor:
         """The ``kubectl`` argv prefix with the configured context pinned.
 
         With no configured context, the process's active cluster target
-        supplies it (SAF-7, ``k8s/target.py``).
+        supplies it (``k8s/target.py``), so queries never follow a context switch.
         """
         from lakebench.k8s.target import cli_args
 
