@@ -9,7 +9,8 @@ A release is a `v*` tag on a commit that is on `main`. Pushing the tag runs
    version, which must be a final release: no dev or pre-release suffix
    (`scripts/check_version.py`);
 3. `gate`: the release-only checks of `scripts/release_gate.py` with
-   `--require-all` (examples, version, changelog, em dashes, UAT results);
+   `--require-all` (examples, version, changelog, em dashes, UAT results,
+   and the release evidence checks below);
 4. the wheel and sdist, and the PyInstaller binaries for linux-amd64,
    macos-amd64 and macos-arm64, each smoke-tested;
 5. the GitHub Release with the binaries and their `SHA256SUMS`, which
@@ -103,13 +104,62 @@ committed, so for the check to pass in the release workflow the cited runs'
 `metrics.json` must be checked in under `uat/runs/` (or `uat/perf/`). The
 maintainer who tags is still responsible for the content.
 
+### Release evidence
+
+Four checks hold the release to its evidence; `records` and
+`support-record` read the cited run records themselves
+(`src/lakebench/metrics/release_record.py`). `records`, `freeze` and
+`expected-results` are skipped until the freeze is declared in
+`uat/freeze-<version>` (one line, the 40-hex sha of the freeze commit), and
+`support-record` until a `--tag` is given; `--require-all`, which the
+release workflow passes, fails a skipped check. The release workflow runs
+all four with the repository's full history.
+
+- `records`: every run cited in the UAT results table is release evidence.
+  A record is refused when it has no experiment block; did not pass; did not
+  measure rows in every layer (the verdict's `layer_rows` gate; refused until
+  the verdict computes it); missed an expected stage (bronze, silver, gold
+  and the benchmark, unless the recipe has no query engine; AML batch also
+  scoring; C360 continuous also the result check) or skipped one; for AML,
+  ran a rule set other than the expected one or errored a rule; returned
+  results other than `uat/expected-results-<version>.json`'s (batch: each
+  query's result fingerprint and the alert set; continuous: the set of query
+  sets its rounds ran); was not run by the freeze commit from a clean tree
+  whose code did not change during the run; read a held-out corpus; is not
+  exp2 from the release datagen image (the digest `ImagesConfig.datagen`
+  pins, with that image's lineage entry); or was bound by an evaluation
+  sizing profile or any Lakebench limit in `limits.bound_kinds` the row does
+  not allow (none is allowed today). A continuous record must also say which
+  query set each round executed (a round with no QpH, every query failed,
+  is left out, and a record in which no round measured a QpH is refused);
+  a C360 continuous record must also have a result check in which no query
+  failed and that matches the expected file's fingerprints, which its continuous entry must list; a corpus with
+  recorded problems (such as datagen pods on different images) is refused.
+- `support-record` (with `--tag`): `validated_combinations.yaml` lists every
+  release-matrix row and was validated on the freeze tree; every run it lists
+  is in `uat/runs/`, is release evidence and is the workload, recipe and mode
+  of its entry; and every matrix row, scale included, has such a run.
+- `freeze`: the freeze commit is an ancestor of `HEAD`, the tree is clean,
+  and every change after it is in `uat/`, `validated_combinations.yaml`,
+  `benchmarks/perf/baselines.yaml` or `docs/benchmarks/examples/`, the
+  `CHANGELOG.md` release heading, the `__version__` line of
+  `src/lakebench/__init__.py` (the release bump), or a generated block of
+  `README.md` or a top-level `docs/*.md` file that equals what its generator
+  writes.
+- `expected-results`: `uat/expected-results-<version>.json` exists and its
+  last commit comes before the freeze commit; a fingerprint set newer than
+  the freeze is refused.
+
+The perf gate refuses the same bound runs: a run an evaluation profile or a
+Lakebench limit bound is never recorded as a baseline or compared with one.
+
 ### Performance baselines
 
 The `perf-baselines` check fails when a required pinned perf config
 (`benchmarks/perf/`) has no accepted baseline, has no run, or its run
 regressed or was refused. It is not in the release workflow's `--only` list
-(`release.yml` runs examples, version, changelog, em-dashes and
-uat-results), so it does not block a tag by itself: run it locally as part
+(`release.yml` runs examples, version, changelog, em-dashes, uat-results,
+records, support-record, freeze and expected-results), so it does not block a tag by itself: run it locally as part
 of the whole gate above before tagging. Check in the `metrics.json` of each
 required perf run as `uat/perf/run-<id>/metrics.json` so the result can be
 reproduced from the repository. See

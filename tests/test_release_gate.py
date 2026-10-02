@@ -397,3 +397,224 @@ def test_pre_push_hook_check(tmp_path, monkeypatch):
     assert rg.check_pre_push_hook().status == rg.SKIP
     (other / "pre-push").write_text("#!/bin/sh\nexit 0\n")
     assert rg.check_pre_push_hook().status == rg.PASS
+
+
+# --- release evidence: freeze, expected-results, records, support-record ----
+
+
+def _git(repo, *args):
+    import subprocess as sp
+
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(repo),
+    }
+    out = sp.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+@pytest.fixture
+def frozen(tmp_path, monkeypatch):
+    """A repository with a freeze commit declared in uat/freeze-9.9.9 and
+    the expected-results file committed before it."""
+    import shutil as sh
+
+    if sh.which("git") is None:
+        pytest.skip("git not installed")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "README.md").write_text((ROOT / "README.md").read_text())
+    (repo / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n\n- a change\n")
+    (repo / "src.txt").write_text("code\n")
+    (repo / "uat").mkdir()
+    (repo / "uat" / "expected-results-9.9.9.json").write_text(
+        '{"version": "9.9.9", "entries": [], "continuous": []}\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "expected")
+    (repo / "src.txt").write_text("code 2\n")
+    _git(repo, "commit", "-qam", "freeze")
+    sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "uat" / "freeze-9.9.9").write_text(sha + "\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "declare freeze")
+    monkeypatch.setattr(rg, "ROOT", repo)
+    fake = type("M", (), {"package_version": staticmethod(lambda: "9.9.9")})
+    monkeypatch.setattr(rg, "_load_script", lambda name: fake)
+    return repo, sha
+
+
+def test_release_checks_skip_before_the_freeze(tmp_path, monkeypatch):
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+    fake = type("M", (), {"package_version": staticmethod(lambda: "9.9.9")})
+    monkeypatch.setattr(rg, "_load_script", lambda name: fake)
+    for check in (rg.check_freeze, rg.check_expected_results, rg.check_records):
+        assert check().status == rg.SKIP
+    assert rg.make_support_record_check(None)().status == rg.SKIP
+    # --require-all at the tag makes each a failure.
+    results = [rg.check_freeze(), rg.check_records()]
+    assert len(rg.failures(results, require_all=True)) == 2
+
+
+def test_freeze_clean_passes(frozen):
+    assert rg.check_freeze().status == rg.PASS, rg.check_freeze().detail
+
+
+def test_freeze_file_not_a_sha(frozen):
+    repo, _sha = frozen
+    (repo / "uat" / "freeze-9.9.9").write_text("main\n")
+    assert rg.check_freeze().status == rg.FAIL
+
+
+def test_freeze_not_an_ancestor(frozen):
+    repo, _sha = frozen
+    (repo / "uat" / "freeze-9.9.9").write_text("e" * 40 + "\n")
+    _git(repo, "commit", "-qam", "bad freeze")
+    assert "not an ancestor" in rg.check_freeze().detail
+
+
+def test_freeze_dirty_tree(frozen):
+    repo, _sha = frozen
+    (repo / "src.txt").write_text("uncommitted\n")
+    assert "not clean" in rg.check_freeze().detail
+
+
+def test_post_freeze_allowed_paths_pass(frozen):
+    repo, _sha = frozen
+    for rel in ("benchmarks/perf/baselines.yaml", "docs/benchmarks/examples/pair/README.md"):
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("evidence\n")
+    (repo / "uat" / "results-9.9.9.md").write_text("# UAT results 9.9.9\n")
+    text = (repo / "CHANGELOG.md").read_text().replace("## [Unreleased]", "## [9.9.9] - 2026-11-11")
+    (repo / "CHANGELOG.md").write_text(text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "evidence")
+    assert rg.check_freeze().status == rg.PASS, rg.check_freeze().detail
+
+
+def test_post_freeze_readme_edit_outside_a_block_fails(frozen):
+    repo, _sha = frozen
+    (repo / "README.md").write_text((repo / "README.md").read_text() + "\nA stray line.\n")
+    _git(repo, "commit", "-qam", "stray")
+    assert "README.md changed outside its generated blocks" in rg.check_freeze().detail
+
+
+def test_post_freeze_changelog_body_edit_fails(frozen):
+    repo, _sha = frozen
+    (repo / "CHANGELOG.md").write_text((repo / "CHANGELOG.md").read_text() + "- another\n")
+    _git(repo, "commit", "-qam", "changelog")
+    assert "beyond the release heading" in rg.check_freeze().detail
+
+
+def test_post_freeze_code_change_fails(frozen):
+    repo, _sha = frozen
+    (repo / "src.txt").write_text("hotfix\n")
+    _git(repo, "commit", "-qam", "hotfix")
+    assert "src.txt changed after the freeze" in rg.check_freeze().detail
+
+
+def test_expected_results_before_the_freeze_pass(frozen):
+    assert rg.check_expected_results().status == rg.PASS, rg.check_expected_results().detail
+
+
+def test_expected_results_newer_than_the_freeze_fail(frozen):
+    repo, _sha = frozen
+    (repo / "uat" / "expected-results-9.9.9.json").write_text(
+        '{"version": "9.9.9", "entries": [{"workload": "x"}], "continuous": []}\n'
+    )
+    _git(repo, "commit", "-qam", "late fingerprints")
+    assert "newer than the freeze is refused" in rg.check_expected_results().detail
+
+
+def test_records_check_reads_each_cited_record(frozen, monkeypatch):
+    import json
+
+    from tests.fixtures import stored_records as sr
+
+    repo, sha = frozen
+    rid = "20260928-102711-8387da"
+    (repo / "uat" / "runs" / f"run-{rid}").mkdir(parents=True)
+    (repo / "uat" / "runs" / f"run-{rid}" / "metrics.json").write_text(
+        json.dumps(sr.load_record("102711-8387da"))
+    )
+    (repo / "uat" / "results-9.9.9.md").write_text(
+        "# UAT results 9.9.9\n\n| recipe | run |\n|---|---|\n| c360 | " + rid + " |\n"
+    )
+    res = rg.check_records()
+    assert res.status == rg.FAIL
+    assert rid in res.detail and "not from the freeze commit" in res.detail
+
+
+def test_support_record_empty_on_tag_fails(frozen):
+    res = rg.make_support_record_check("v9.9.9")()
+    assert res.status == rg.FAIL and "lists nothing" in res.detail
+
+
+def test_post_freeze_rename_out_of_src_fails(frozen):
+    repo, _sha = frozen
+    _git(repo, "mv", "src.txt", "uat/src.txt")
+    _git(repo, "commit", "-qm", "move")
+    assert "src.txt changed after the freeze" in rg.check_freeze().detail
+
+
+def test_support_record_needs_every_row_at_its_scale_on_the_freeze_tree(frozen, monkeypatch):
+    import json
+
+    import lakebench.config.support as support
+    from lakebench.metrics import release_record as rr
+    from tests.fixtures import stored_records as sr
+
+    repo, sha = frozen
+    rid = "20260928-130953-f8a2cf"  # AML batch hive Trino at scale 1
+    d = repo / "uat" / "runs" / f"run-{rid}"
+    d.mkdir(parents=True)
+    d.joinpath("metrics.json").write_text(json.dumps(sr.load_record("130953-f8a2cf")))
+    record = {
+        (w, r, support.canonical_mode(m)): support.Validation(
+            w, r, support.canonical_mode(m), "0" * 12, (rid,)
+        )
+        for w, m, r, _s in rr.RELEASE_MATRIX
+    }
+    monkeypatch.setattr(support, "load_validation_record", lambda path=None: record)
+    detail = rg.make_support_record_check("v9.9.9")().detail
+    assert "no validated run for financial hive-iceberg-spark-trino batch at scale 10" in detail
+    assert f"not the freeze {sha[:12]}" in detail
+
+
+def test_post_freeze_version_bump_allowed_other_edits_not(frozen):
+    repo, _sha = frozen
+    init = repo / "src" / "lakebench" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9.dev0"\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "version file before the freeze")
+    sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "uat" / "freeze-9.9.9").write_text(sha + "\n")
+    _git(repo, "commit", "-qam", "move the freeze")
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9"\n')
+    _git(repo, "commit", "-qam", "bump")
+    assert rg.check_freeze().status == rg.PASS, rg.check_freeze().detail
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9"; import os\n')
+    _git(repo, "commit", "-qam", "code on the version line")
+    assert "beyond __version__" in rg.check_freeze().detail
+    init.write_text('"""Lakebench, edited."""\n\n__version__ = "9.9.9"\n')
+    _git(repo, "commit", "-qam", "edit")
+    assert "beyond __version__" in rg.check_freeze().detail
+
+
+def test_release_workflow_runs_the_evidence_checks_on_full_history():
+    import yaml
+
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "release.yml").read_text())
+    gate = wf["jobs"]["gate"]
+    assert gate["steps"][0]["with"]["fetch-depth"] == 0
+    run = next(s["run"] for s in gate["steps"] if "release_gate.py" in str(s.get("run")))
+    only = set(run.split("--only", 1)[1].split()[0].split(","))
+    assert {"records", "support-record", "freeze", "expected-results"} <= only
+    assert "--require-all" in run

@@ -810,6 +810,11 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
         reasons.append(f"run mode {run.mode} but pinned config is {pinned.mode}")
     if experiment_of(run.raw) is None:
         reasons.append(f"{NO_PROVENANCE} (run {run.run_id} has no experiment block)")
+    # A run an evaluation profile or a Lakebench cap bound measures the
+    # limit: never a baseline, never compared against one.
+    from lakebench.metrics.release_record import bound_problems
+
+    reasons += bound_problems(run.raw)
     # The run's fingerprint is read from its stored snapshot. A snapshot not
     # stamped with this version cannot show what the version 2 inputs were,
     # so it is refused by name rather than diffed field by field.

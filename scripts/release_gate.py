@@ -362,6 +362,314 @@ def check_uat_results() -> Result:
     )
 
 
+# -- release evidence ------------------------------------------------------------
+#
+# records, support-record, freeze and expected-results read the cited run
+# records through lakebench.metrics.release_record. They SKIP until the
+# freeze is declared (uat/freeze-<version>); --require-all at the tag turns
+# a SKIP into a FAIL.
+
+FREEZE_FILE = "uat/freeze-{version}"
+EXPECTED_RESULTS = "uat/expected-results-{version}.json"
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+_SRC = Path(__file__).resolve().parents[1] / "src"
+
+#: Paths a commit after the freeze may change, by prefix or exact path.
+#: CHANGELOG.md (the release heading only) and README.md and docs/*.md
+#: (generated blocks only) are checked by content in _post_freeze_problems.
+POST_FREEZE_ALLOWED_PREFIXES = ("uat/", "docs/benchmarks/examples/")
+POST_FREEZE_ALLOWED_PATHS = (
+    "src/lakebench/config/validated_combinations.yaml",
+    "benchmarks/perf/baselines.yaml",
+)
+
+
+def _lb(module: str):
+    """A lakebench module, from this checkout's src."""
+    import importlib
+
+    if str(_SRC) not in sys.path:
+        sys.path.insert(0, str(_SRC))
+    return importlib.import_module(module)
+
+
+def _git_out(*args: str) -> tuple[int, str]:
+    r = subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False, timeout=60
+    )
+    return r.returncode, r.stdout
+
+
+def _version() -> str:
+    return _load_script("check_version").package_version()
+
+
+def _freeze() -> tuple[str | None, str | None, str]:
+    """(sha, problem, relative path) of the declared freeze; sha None and
+    problem None when no freeze file exists yet."""
+    rel = FREEZE_FILE.format(version=_version())
+    path = ROOT / rel
+    if not path.is_file():
+        return None, None, rel
+    sha = path.read_text().strip()
+    if not _SHA40.match(sha):
+        return None, f"{rel} does not hold a 40-hex commit sha", rel
+    return sha, None, rel
+
+
+def _no_freeze(name: str, rel: str) -> Result:
+    return Result(name, SKIP, f"{rel} not declared yet; release evidence is checked at the freeze")
+
+
+def _expected() -> tuple[dict | None, str | None, Path]:
+    path = ROOT / EXPECTED_RESULTS.format(version=_version())
+    if not path.is_file():
+        return None, f"{path.relative_to(ROOT)} not found", path
+    try:
+        return _lb("lakebench.metrics.release_record").load_expected(path), None, path
+    except (OSError, ValueError) as e:
+        return None, f"{path.relative_to(ROOT)}: {e}", path
+
+
+def _record_path(run_id: str, named: Sequence[str] = ()) -> Path | None:
+    """The metrics.json of *run_id*: a path the results table names, else
+    a run directory the uat-results check also searches."""
+    root = ROOT.resolve()
+    for token in named:
+        p = (ROOT / token).resolve()
+        if p.is_relative_to(root) and p.is_file() and _metrics_run_id(p) == run_id:
+            return p
+    dirs = [ROOT / d for d in UAT_RUN_DIRS]
+    env_dir = os.environ.get(PERF_RUNS_ENV)
+    if env_dir:
+        env_path = Path(env_dir)
+        dirs.insert(0, env_path if env_path.is_absolute() else ROOT / env_path)
+    for d in dirs:
+        p = d / f"run-{run_id}" / "metrics.json"
+        if _metrics_run_id(p) == run_id:
+            return p
+    return None
+
+
+def _changelog_heading_only(freeze: str) -> bool:
+    rc, out = _git_out("diff", "-U0", freeze, "HEAD", "--", "CHANGELOG.md")
+    if rc != 0:
+        return False
+    changed = [
+        ln[1:] for ln in out.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))
+    ]
+    return all(ln.startswith("## [") for ln in changed)
+
+
+VERSION_FILE = "src/lakebench/__init__.py"
+
+
+def _version_line_only(freeze: str) -> bool:
+    """Whether the version file changed after *freeze* only in its
+    ``__version__`` line (the release bump)."""
+    rc, out = _git_out("diff", "-U0", freeze, "HEAD", "--", VERSION_FILE)
+    if rc != 0:
+        return False
+    lines = [ln for ln in out.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
+    added = [ln[1:] for ln in lines if ln.startswith("+")]
+    removed = [ln[1:] for ln in lines if ln.startswith("-")]
+    version = re.compile(r'__version__ = "[^"]+"')
+    return (
+        len(added) == 1
+        and len(removed) <= 1
+        and all(version.fullmatch(ln) for ln in added + removed)
+    )
+
+
+def _generated_blocks_only(freeze: str, rel: str) -> str | None:
+    """None when *rel* changed since *freeze* only inside its generated
+    blocks and each block equals what its generator writes now; else why."""
+    support = _lb("lakebench.config.support")
+    names = support.DOCS_WITH_BLOCKS.get(rel)
+    if not names:
+        return f"{rel} changed after the freeze and carries no generated block"
+    rc, old = _git_out("show", f"{freeze}:{rel}")
+    if rc != 0:
+        return f"{rel} is not in the freeze tree"
+    new = (ROOT / rel).read_text()
+    for name in names:
+        block_new, block_old = support.block_in(new, name), support.block_in(old, name)
+        if block_new is None or block_old is None:
+            return f"{rel}: generated block {name} missing"
+        if block_new != support.expected_block(name):
+            return f"{rel}: generated block {name} is not what its generator writes"
+        new = new.replace(block_new, f"<<{name}>>")
+        old = old.replace(block_old, f"<<{name}>>")
+    if new != old:
+        return f"{rel} changed outside its generated blocks after the freeze"
+    return None
+
+
+def _post_freeze_problems(freeze: str) -> list[str]:
+    # --no-renames: a moved file lists both paths, so a source file moved
+    # under uat/ is seen leaving src/.
+    rc, out = _git_out("diff", "--name-only", "--no-renames", freeze, "HEAD")
+    if rc != 0:
+        return [f"git diff {freeze[:12]} HEAD failed"]
+    problems = []
+    for path in [p for p in out.splitlines() if p]:
+        if path.startswith(POST_FREEZE_ALLOWED_PREFIXES) or path in POST_FREEZE_ALLOWED_PATHS:
+            continue
+        if path == "CHANGELOG.md":
+            if not _changelog_heading_only(freeze):
+                problems.append("CHANGELOG.md changed after the freeze beyond the release heading")
+            continue
+        if path == VERSION_FILE:
+            if not _version_line_only(freeze):
+                problems.append(f"{VERSION_FILE} changed after the freeze beyond __version__")
+            continue
+        if path == "README.md" or (path.startswith("docs/") and path.count("/") == 1):
+            why = _generated_blocks_only(freeze, path)
+            if why:
+                problems.append(why)
+            continue
+        problems.append(f"{path} changed after the freeze")
+    return problems
+
+
+def check_freeze() -> Result:
+    sha, problem, rel = _freeze()
+    if problem:
+        return Result("freeze", FAIL, problem)
+    if sha is None:
+        return _no_freeze("freeze", rel)
+    rc, _ = _git_out("merge-base", "--is-ancestor", sha, "HEAD")
+    if rc != 0:
+        return Result("freeze", FAIL, f"freeze {sha[:12]} is not an ancestor of HEAD")
+    rc, status = _git_out("status", "--porcelain")
+    if rc != 0 or status.strip():
+        return Result("freeze", FAIL, "the working tree is not clean")
+    problems = _post_freeze_problems(sha)
+    if problems:
+        return Result("freeze", FAIL, "; ".join(problems))
+    return Result("freeze", PASS, f"freeze {sha[:12]}; post-freeze changes within the allowlist")
+
+
+def check_expected_results() -> Result:
+    sha, problem, rel = _freeze()
+    if problem:
+        return Result("expected-results", FAIL, problem)
+    if sha is None:
+        return _no_freeze("expected-results", rel)
+    expected, why, path = _expected()
+    if why:
+        return Result("expected-results", FAIL, why)
+    rc, last = _git_out("log", "-1", "--format=%H", "--", str(path.relative_to(ROOT)))
+    last = last.strip()
+    if rc != 0 or not last:
+        return Result("expected-results", FAIL, f"{path.relative_to(ROOT)} is not committed")
+    rc, _ = _git_out("merge-base", "--is-ancestor", last, sha)
+    if rc != 0 or last == sha:
+        return Result(
+            "expected-results",
+            FAIL,
+            f"{path.relative_to(ROOT)} was last changed in {last[:12]}, not before the freeze "
+            "(a fingerprint set newer than the freeze is refused)",
+        )
+    n = len((expected or {}).get("entries") or []) + len((expected or {}).get("continuous") or [])
+    return Result("expected-results", PASS, f"{n} expected entries, committed before the freeze")
+
+
+def _problems_of(
+    run_id: str, freeze: str | None, expected: dict | None, named: Sequence[str] = ()
+) -> list[str]:
+    import json
+
+    path = _record_path(run_id, named)
+    if path is None:
+        return ["no metrics.json"]
+    rr = _lb("lakebench.metrics.release_record")
+    return rr.record_problems(json.loads(path.read_text()), freeze, expected, root=ROOT)
+
+
+def check_records() -> Result:
+    sha, problem, rel = _freeze()
+    if problem:
+        return Result("records", FAIL, problem)
+    if sha is None:
+        return _no_freeze("records", rel)
+    results_path = ROOT / UAT_RESULTS.format(version=_version())
+    if not results_path.is_file():
+        return Result("records", FAIL, f"{results_path.relative_to(ROOT)} not found")
+    rows = _table_data_rows(results_path.read_text())
+    cited, _missing, _malformed = _unresolved_run_ids(rows)
+    if not cited:
+        return Result("records", FAIL, "the results table cites no run ids")
+    expected, _why, _path = _expected()
+    named = _METRICS_PATH.findall("\n".join(rows))
+    bad = {rid: p for rid in cited if (p := _problems_of(rid, sha, expected, named))}
+    if bad:
+        return Result(
+            "records",
+            FAIL,
+            f"{len(bad)} of {len(cited)} cited records are not release evidence: "
+            + "; ".join(f"{rid}: {', '.join(p)}" for rid, p in sorted(bad.items())),
+        )
+    return Result("records", PASS, f"{len(cited)} cited records are release evidence")
+
+
+def make_support_record_check(tag: str | None) -> Callable[[], Result]:
+    def run() -> Result:
+        if not tag:
+            return Result("support-record", SKIP, "checked at a release tag (--tag)")
+        support = _lb("lakebench.config.support")
+        rr = _lb("lakebench.metrics.release_record")
+        record = support.load_validation_record()
+        if not record:
+            return Result("support-record", FAIL, "validated_combinations.yaml lists nothing")
+        sha, problem, _rel = _freeze()
+        expected, _why, _path = _expected()
+        problems = []
+        keys_run: set[tuple] = set()
+        for workload, mode, recipe, _scale in rr.RELEASE_MATRIX:
+            if (workload, recipe, support.canonical_mode(mode)) not in record:
+                problems.append(f"no validated entry for {workload} {recipe} {mode}")
+        for (workload, recipe, mode), v in sorted(record.items()):
+            tree = str(v.tree)
+            if sha and not (re.fullmatch(r"[0-9a-f]{7,40}", tree) and sha.startswith(tree)):
+                problems.append(
+                    f"{workload} {recipe} {mode}: validated on tree {v.tree}, not the freeze "
+                    f"{sha[:12]}"
+                )
+            for run_id in v.runs:
+                rid = run_id.removeprefix("run-")
+                path = ROOT / "uat" / "runs" / f"run-{rid}" / "metrics.json"
+                if not path.is_file():
+                    problems.append(f"{rid}: not in uat/runs/")
+                    continue
+                import json
+
+                data = json.loads(path.read_text())
+                for p in rr.record_problems(data, sha, expected, root=ROOT):
+                    problems.append(f"{rid}: {p}")
+                key = rr.record_key(data)
+                if key is None or (key[0], key[2], support.canonical_mode(key[1])) != (
+                    workload,
+                    recipe,
+                    mode,
+                ):
+                    problems.append(f"{rid}: record is not {workload} {recipe} {mode}")
+                elif key:
+                    keys_run.add(key)
+        for row in rr.RELEASE_MATRIX:
+            if (row[0], row[1], row[2], float(row[3])) not in keys_run:
+                problems.append(
+                    f"no validated run for {row[0]} {row[2]} {row[1]} at scale {row[3]:g}"
+                )
+        if problem:
+            problems.append(problem)
+        if problems:
+            return Result("support-record", FAIL, "; ".join(problems))
+        return Result("support-record", PASS, f"{len(record)} validated entries, every run checked")
+
+    return run
+
+
 def check_gitleaks() -> Result:
     exe = os.environ.get("GITLEAKS") or shutil.which("gitleaks")
     if not exe:
@@ -570,6 +878,18 @@ def build_checks(tag: str | None = None, perf_runs: dict[str, str] | None = None
         Check("changelog", check_changelog, "CHANGELOG.md has a section for the version"),
         Check("em-dashes", check_em_dashes, "no U+2014 in *.md, .github/, examples/, CLI"),
         Check("uat-results", check_uat_results, "uat/results-<version>.md exists"),
+        Check("records", check_records, "every cited run record is release evidence"),
+        Check(
+            "support-record",
+            make_support_record_check(tag),
+            "every release row is validated by runs that are release evidence",
+        ),
+        Check("freeze", check_freeze, "declared freeze; only allowed changes after it"),
+        Check(
+            "expected-results",
+            check_expected_results,
+            "expected-results file committed before the freeze",
+        ),
         Check(
             "perf-baselines",
             make_perf_check(perf_runs),
