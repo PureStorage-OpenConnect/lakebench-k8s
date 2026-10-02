@@ -334,6 +334,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   since it now describes another benchmark.
 ### Fixed
 
+- **The capacity check counts the Spark driver's memory overhead.**
+  The driver pod requests its heap plus the overhead Spark on Kubernetes
+  adds to a Python driver, 40% of the heap (12.8 GB for the 32 GB
+  silver-build driver); `plan`, the preflight and the continuous budget
+  counted the heap only. The scale-1 batch peak is now 36 cores / 524 GB
+  (was 512 GB), AML continuous at scale 1-10 118 cores / 987 GB (was
+  980 GB); the docs tables follow. What the pods request is unchanged.
 - A multi-cycle Customer 360 batch run no longer loses silver rows when a
   later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
   tagged every row with that cycle, so an operator retry of the cycle, which

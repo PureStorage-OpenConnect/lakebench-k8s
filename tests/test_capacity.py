@@ -33,7 +33,7 @@ class TestComputePeakRequirements:
         """
         peak = compute_peak_requirements(1)
         assert peak.cpu_cores == 36
-        assert peak.memory_gb == 512
+        assert peak.memory_gb == 524
         assert peak.scratch_gb == 2400
 
     def test_silver_build_drives_the_peak(self):
@@ -139,7 +139,7 @@ class TestClusterCapacityCheck:
         result = patched_capacity(ClusterCapacity(8_000, 32 * GIB, 2, 4_000, 16 * GIB))
         assert not result.passed
         assert "36 cores" in result.hint
-        assert "512 GB" in result.hint
+        assert "524 GB" in result.hint
 
     def test_enough_total_but_node_too_small_fails(self, patched_capacity):
         """512 GB spread across 16 GB nodes cannot schedule a 60 GB executor."""
