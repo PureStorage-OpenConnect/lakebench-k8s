@@ -50,11 +50,13 @@ from lakebench.exit_codes import ExitCode, LakebenchError, SafetyRefusal
 
 logger = logging.getLogger(__name__)
 
-#: Options a later repetition always runs with: no datagen, a rebuild of
-#: silver and gold from the bronze repetition 1 verified.
+#: Options a later repetition always runs with: no datagen (so nothing a
+#: generate reads, --allow-stale-bronze included), a rebuild of silver and
+#: gold from the bronze repetition 1 verified.
 LATER_REPETITION = {
     "include_datagen": False,
     "regenerate": False,
+    "allow_stale_bronze": False,
     "skip_generate": True,
     "force_rebuild": True,
 }

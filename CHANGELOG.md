@@ -927,7 +927,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   once with `lakebench admin reclaim-bucket` and then uses `--regenerate`
   (`--allow-stale-bronze` would over-count). A multi-cycle run still clears
   an owned prefix before cycle 0, and a `run` after `generate
-  --allow-stale-bronze` still records the note.
+  --allow-stale-bronze` still records the note. `run` refuses
+  `--allow-stale-bronze` (exit 2, before any cluster call) where no generate
+  reads it: without `--generate`, `--generate-only` or a multi-cycle batch
+  run, and with `--local`, `--deploy-only` or a continuous run. A
+  `run --repeat` series passes it to repetition 1 only.
 - **`destroy` clears the kept silver-state's data clock when it empties
   bronze.** With `create_namespace: false`, `lakebench-silver-state`
   survives destroy for its rebuild counters; its `bronze_data_clock` now

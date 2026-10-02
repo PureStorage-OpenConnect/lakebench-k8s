@@ -151,6 +151,28 @@ def test_repeat_datagen_once(tmp_path, monkeypatch):
     assert manifest["passed"] == 3
 
 
+def test_repeat_allow_stale_bronze_only_reaches_repetition_1(tmp_path, monkeypatch):
+    """--allow-stale-bronze is a generate option: repetition 1 takes it, the
+    later repetitions do not generate and so run without it (the run-args
+    rule would otherwise refuse repetition 2)."""
+    import lakebench.cli._run as run_mod
+
+    seen = []
+    real = run_mod._run_once
+
+    def once(*a, **k):
+        seen.append(k.get("allow_stale_bronze"))
+        return real(*a, **k)
+
+    monkeypatch.setattr(run_mod, "_run_once", once)
+    result, rec, records, manifest = _series(
+        tmp_path, monkeypatch, argv=["--generate", "--allow-stale-bronze", "--yes", "--repeat", "3"]
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == [True, False, False]
+    assert manifest["passed"] == 3
+
+
 def test_repeat_stops_on_bronze_change(tmp_path, monkeypatch):
     """One object rewritten after repetition 1 with the same size: the
     series stops with 3 before repetition 2 submits anything."""

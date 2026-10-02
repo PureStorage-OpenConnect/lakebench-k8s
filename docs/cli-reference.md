@@ -397,6 +397,7 @@ cluster call, and exits 2 (usage) naming the first refused one:
 - `--local` with `--deploy-only`, `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
 - `--regenerate` without `--generate` or `--generate-only`;
 - `--regenerate` with `--local`, or with a continuous run other than `--generate-only`;
+- `--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, `--generate-only` or a multi-cycle batch run take it; not `--local`, `--deploy-only` or a continuous run);
 - `--skip-generate` with `--generate`;
 - `--force-reset` on a batch run;
 - `--force-rebuild` on a continuous run;

@@ -174,6 +174,15 @@ RUN_RULES: tuple[RunRule, ...] = (
         "`--regenerate` with `--local`, or with a continuous run other than `--generate-only`",
     ),
     RunRule(
+        lambda a, c: a.allow_stale_bronze and not _generates_bronze(a, c),
+        "--allow-stale-bronze only applies when the run generates into bronze: --generate "
+        "or a multi-cycle run (batch, not --local), or --generate-only",
+        "add --generate, or drop --allow-stale-bronze",
+        "`--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, "
+        "`--generate-only` or a multi-cycle batch run take it; not `--local`, `--deploy-only` "
+        "or a continuous run)",
+    ),
+    RunRule(
         lambda a, c: a.skip_generate and a.include_datagen,
         "--skip-generate and --generate cannot be combined",
         "pick one",
@@ -247,6 +256,20 @@ def run_mode(args: RunArgs, cfg: Any) -> str:
     if args.continuous or args.sustained:
         return "continuous"
     return "continuous" if is_continuous_mode(cfg.architecture.pipeline.mode) else "batch"
+
+
+def _generates_bronze(a: RunArgs, c: RunContext) -> bool:
+    """Whether this run's own datagen writes into bronze through the bronze
+    gate, the only place ``--allow-stale-bronze`` is read: ``--generate-only``
+    (its generate), or a batch run that is not ``--local`` or
+    ``--deploy-only`` and either generates (``--generate`` without
+    ``--skip-generate``) or runs more than one cycle. A continuous run's
+    datagen does not take the flag."""
+    if a.local or a.deploy_only:
+        return False
+    if a.generate_only:
+        return True
+    return c.mode == "batch" and ((a.include_datagen and not a.skip_generate) or c.cycles > 1)
 
 
 def run_args_problems(args: RunArgs, cfg: Any) -> list[RunRule]:

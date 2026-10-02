@@ -55,6 +55,7 @@ CASES = [
     (["--local", "--force-rebuild"], "--local does not deploy, generate on its own, rebuild"),
     (["--regenerate"], "--regenerate only applies with --generate or --generate-only"),
     (["--continuous", "--generate", "--regenerate"], "--regenerate does not apply to a local"),
+    (["--allow-stale-bronze"], "--allow-stale-bronze only applies when the run generates"),
     (["--generate", "--skip-generate"], "--skip-generate and --generate cannot be combined"),
     (["--force-reset"], "--force-reset only applies to a continuous run"),
     (["--continuous", "--force-rebuild"], "--force-rebuild only applies to a batch run"),
@@ -97,6 +98,7 @@ def _args_of(argv: list[str]) -> RunArgs:
         "--generate": "include_datagen",
         "--skip-generate": "skip_generate",
         "--skip-deploy": "skip_infra",
+        "--allow-stale-bronze": "allow_stale_bronze",
     }
     kw: dict = {}
     it = iter(argv)
@@ -218,3 +220,28 @@ def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatc
     with pytest.raises(UsageError, match="--timeout must be at least 1 s"):
         _run_pipeline(cfg, 0, keep=True)
     assert called == [] and no_cluster == []
+
+
+@pytest.mark.parametrize(
+    ("kw", "mode", "cycles", "refused"),
+    [
+        ({"include_datagen": True}, "batch", 1, False),
+        ({"generate_only": True}, "batch", 1, False),
+        ({"generate_only": True}, "continuous", 1, False),
+        ({}, "batch", 2, False),
+        ({"skip_generate": True}, "batch", 2, False),
+        ({}, "batch", 1, True),
+        ({"include_datagen": True, "skip_generate": True}, "batch", 1, True),
+        ({"include_datagen": True}, "continuous", 1, True),
+        ({"include_datagen": True, "local": True}, "batch", 1, True),
+        ({"deploy_only": True}, "batch", 2, True),
+    ],
+)
+def test_allow_stale_bronze_only_where_a_generate_reads_it(kw, mode, cycles, refused):
+    """The flag is read only by the bronze gate before a run's own datagen:
+    --generate-only, a batch --generate, or a multi-cycle batch run (whose
+    cycle 0 runs the gate even under --skip-generate)."""
+    rule = next(r for r in RUN_RULES if "--allow-stale-bronze" in str(r.message))
+    ctx = RunContext(mode=mode, cycles=cycles)
+    assert rule.broken(RunArgs(allow_stale_bronze=True, **kw), ctx) is refused
+    assert not rule.broken(RunArgs(**kw), ctx)
