@@ -23,7 +23,8 @@ class FakeReader:
             "secretclasses.secrets.stackable.tech",
         }
     )
-    scs: set[str] = field(default_factory=lambda: {"px-csi-scratch"})
+    scs: set[str] = field(default_factory=lambda: {"px-csi-scratch", "px-csi-db"})
+    default_scs: set[str] = field(default_factory=lambda: {"px-csi-db"})
     deps: dict[str, list[DeploymentView]] = field(default_factory=dict)
     running: set[str] = field(
         default_factory=lambda: {
@@ -41,6 +42,9 @@ class FakeReader:
 
     def storage_class_names(self):
         return self.scs
+
+    def default_storage_class_names(self):
+        return self.default_scs
 
     def deployments(self, label_selector, namespace=None):
         self.calls.append(f"{namespace}:{label_selector}")
@@ -113,6 +117,8 @@ def test_all_ok_on_a_complete_cluster():
         "stackable": PrereqStatus.OK,
         "observability-stack": PrereqStatus.SKIPPED,
         "openshift-scc-clusterrole": PrereqStatus.OK,
+        "deps-storage-class": PrereqStatus.OK,
+        "egress-hosts": PrereqStatus.SKIPPED,
         "s3-reachable-and-credentials": PrereqStatus.OK,
     }
     assert _result(out, "spark-operator").message.startswith("Spark Operator 2.5.1 ready")
@@ -272,6 +278,103 @@ def test_offline_listing_needs_no_reader():
     assert "spark-operator" in needed and "observability-stack" not in needed
 
 
+def _deps_cfg(**deps) -> LakebenchConfig:
+    return _cfg(
+        platform={
+            "storage": {
+                "s3": {"endpoint": "http://10.0.1.50:80", "access_key": "a", "secret_key": "b"},
+                "scratch": {"enabled": True},
+            },
+            "deps": deps,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "deps,scs,default,status,text",
+    [
+        ({}, {"px-csi-db"}, {"px-csi-db"}, PrereqStatus.OK, "default StorageClass px-csi-db"),
+        ({}, {"px-csi-db"}, set(), PrereqStatus.FAIL, "no default StorageClass"),
+        ({"storage_class": "px-repl3"}, {"px-repl3"}, set(), PrereqStatus.OK, "px-repl3 exists"),
+        (
+            {"storage_class": "px-repl3"},
+            {"px-csi-db"},
+            {"px-csi-db"},
+            PrereqStatus.FAIL,
+            "px-repl3 not found",
+        ),
+    ],
+)
+def test_deps_storage_class(deps, scs, default, status, text):
+    """lb-deps-data uses platform.deps.storage_class, else the cluster default;
+    a named class is never satisfied by a default one."""
+    res = _result(
+        pr.run_prereqs(_deps_cfg(**deps), _reader(scs=scs, default_scs=default)),
+        "deps-storage-class",
+    )
+    assert res.status is status and text in res.message
+
+
+def test_deps_storage_class_fails_the_run_preflight(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from lakebench.cli import _prerequisites as cp
+
+    monkeypatch.setattr("lakebench.k8s.get_k8s_client", lambda **k: MagicMock())
+    r = _reader(default_scs=set())
+    monkeypatch.setattr(pr, "KubeClusterReader", lambda cfg, load_config=True: r)
+    results = {c.name: c for c in cp._registry_checks(_cfg())}
+    res = results["deps-storage-class"]
+    assert res.passed is False and "platform.deps.storage_class" in res.hint
+    assert "egress-hosts" not in results
+
+
+def test_egress_hosts_lists_the_resolve_hosts_and_follows_the_mirror():
+    from lakebench.deps.request import egress_hosts
+
+    public = _result(pr.run_prereqs(_cfg(), _reader()), "egress-hosts")
+    assert public.status is PrereqStatus.SKIPPED and public.message.startswith("not probed")
+    assert "repo1.maven.org" in public.message
+    assert ", ".join(egress_hosts(_cfg())) in public.message
+    mirrored_cfg = _deps_cfg(maven_repository="http://nexus.lab:8081/repository/maven/")
+    mirrored = _result(pr.run_prereqs(mirrored_cfg, _reader()), "egress-hosts")
+    assert "nexus.lab" in mirrored.message and "repo1.maven.org" not in mirrored.message
+
+
+def test_egress_hosts_is_not_a_cluster_read():
+    """The egress entry never touches the reader: reachability is the
+    resolve's to report, and checks create no pod to probe from."""
+
+    class NoReads:
+        def __getattr__(self, name):
+            raise AssertionError(f"egress-hosts read the cluster: {name}")
+
+    check = next(p.check for p in pr.PREREQS if p.id == "egress-hosts")
+    assert check(_cfg(), NoReads()).status is PrereqStatus.SKIPPED
+
+
+def test_kube_reader_default_storage_classes():
+    """Both the GA and the beta default-class annotations count; "false" and
+    no annotation do not."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    def sc(name, ann):
+        return SimpleNamespace(metadata=SimpleNamespace(name=name, annotations=ann))
+
+    items = [
+        sc("ga", {"storageclass.kubernetes.io/is-default-class": "true"}),
+        sc("beta", {"storageclass.beta.kubernetes.io/is-default-class": "true"}),
+        sc("off", {"storageclass.kubernetes.io/is-default-class": "false"}),
+        sc("none", None),
+    ]
+    reader = pr.KubeClusterReader.__new__(pr.KubeClusterReader)
+    client = MagicMock()
+    client.StorageV1Api.return_value.list_storage_class.return_value = SimpleNamespace(items=items)
+    reader._client = client
+    assert reader.default_storage_class_names() == {"ga", "beta"}
+
+
 def test_reader_without_config_is_cluster_unreachable(monkeypatch):
     from kubernetes import config
 
@@ -294,7 +397,12 @@ def test_run_preflight_uses_the_registry(monkeypatch):
     r = _reader(scs=set())
     monkeypatch.setattr(pr, "KubeClusterReader", lambda cfg, load_config=True: r)
     results = {c.name: c for c in cp._registry_checks(_cfg())}
-    applicable = {p.id for p in pr.PREREQS if p.applies(_cfg())} - {"openshift-scc-clusterrole"}
+    # The SCC check is SKIPPED off OpenShift and egress-hosts is never probed;
+    # the preflight drops SKIPPED results.
+    applicable = {p.id for p in pr.PREREQS if p.applies(_cfg())} - {
+        "openshift-scc-clusterrole",
+        "egress-hosts",
+    }
     assert applicable <= set(results)
     scratch = results["scratch-storage-class"]
     assert scratch.passed is False and "install-scratch-storage-class" in scratch.hint

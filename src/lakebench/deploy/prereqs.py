@@ -9,9 +9,8 @@ without a regenerate. ``plan`` runs the same checks through
 :func:`run_prereqs`.
 
 Checks never write. They read through a :class:`ClusterReader`, which tests
-replace with a fake. A WI that adds a prerequisite (for example the
-dependency-server StorageClass and egress hosts) adds its entry here in the
-same change.
+replace with a fake. A change that adds a prerequisite adds its entry here in
+the same change.
 """
 
 from __future__ import annotations
@@ -60,6 +59,8 @@ class ClusterReader(Protocol):
     def crd_names(self) -> set[str]: ...
 
     def storage_class_names(self) -> set[str]: ...
+
+    def default_storage_class_names(self) -> set[str]: ...
 
     def deployments(
         self, label_selector: str, namespace: str | None = None
@@ -122,6 +123,39 @@ def _check_scratch(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
     if name in r.storage_class_names():
         return _ok(f"StorageClass {name} exists")
     return _fail(f"StorageClass {name} not found")
+
+
+# -- dependency server --------------------------------------------------------
+
+_DEFAULT_SC_ANNOTATIONS = (
+    "storageclass.kubernetes.io/is-default-class",
+    "storageclass.beta.kubernetes.io/is-default-class",
+)
+
+
+def _check_deps_storage_class(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
+    name = cfg.platform.deps.storage_class
+    if name:
+        if name in r.storage_class_names():
+            return _ok(f"StorageClass {name} exists (platform.deps.storage_class)")
+        return _fail(f"StorageClass {name} not found (platform.deps.storage_class)")
+    defaults = sorted(r.default_storage_class_names())
+    if not defaults:
+        return _fail(
+            "platform.deps.storage_class is empty and the cluster has no default StorageClass"
+        )
+    return _ok(f"cluster default StorageClass {', '.join(defaults)}")
+
+
+def _check_egress_hosts(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
+    # Reachability from the cluster can only be seen from a pod there, and
+    # checks never create one. The resolve itself reports an unreachable host.
+    from lakebench.deps.request import egress_hosts
+
+    return PrereqResult(
+        PrereqStatus.SKIPPED,
+        f"not probed; the lb-deps resolve reads {', '.join(egress_hosts(cfg))} at deploy",
+    )
 
 
 # -- Spark Operator ------------------------------------------------------------
@@ -396,6 +430,64 @@ PREREQS: tuple[Prereq, ...] = (
         ),
     ),
     Prereq(
+        id="deps-storage-class",
+        title="Dependency server StorageClass",
+        when="Always",
+        applies=lambda cfg: True,
+        check=_check_deps_storage_class,
+        fix=(
+            "Set `platform.deps.storage_class` to an existing StorageClass, or have a cluster "
+            "admin mark one as the cluster default. Prefer a replicated one."
+        ),
+        doc=(
+            "Each deployment runs its own dependency server, `lb-deps`, which keeps the "
+            "resolved jars, wheels and DuckDB extensions on a 5Gi ReadWriteOnce PVC, "
+            "`lb-deps-data`, from `platform.deps.storage_class` or, when that is empty, the "
+            "cluster default StorageClass. The volume must be writable by UID 185 through "
+            "`fsGroup`. A replicated StorageClass is recommended: if the volume is lost with "
+            "its node, the server pod stays Pending, every `run` stops until the PVC is "
+            "deleted and `deploy` is re-run, and that `deploy` resolves the set again from "
+            "the public repositories or the configured mirrors. The class is read only when "
+            "the PVC is created; to move an existing set, delete the PVC and re-run `deploy`."
+        ),
+    ),
+    Prereq(
+        id="egress-hosts",
+        title="Egress for the dependency resolve",
+        when="Always",
+        applies=lambda cfg: True,
+        check=_check_egress_hosts,
+        fix=(
+            "Allow egress from the deployment's namespace to the listed hosts during "
+            "`deploy`, or point `platform.deps.maven_repository`, `platform.deps.pypi_index` "
+            "and `platform.deps.duckdb_extension_repository` at mirrors the cluster can reach."
+        ),
+        doc=(
+            "`deploy` resolves every jar, wheel and DuckDB extension the deployment uses once, "
+            "in the `lb-deps` pod, from Maven Central and its Google mirror, from PyPI "
+            "(pypi.org and files.pythonhosted.org) for the AML reference and DuckDB wheels, "
+            "and from extensions.duckdb.org for DuckDB. After that no pod fetches a dependency "
+            "from outside the deployment: Spark jobs, Spark Thrift and DuckDB read the set "
+            "from `lb-deps`. The resolve runs again only when the request changes (a new "
+            "image, version or mirror), so egress is needed at those deploys only. The check "
+            "lists the hosts this config's resolve reads and does not probe them; an "
+            "unreachable host fails the `deps` step of `deploy`, naming the repository "
+            "and the mirror keys.\n\n"
+            "On a cluster without that egress, set the mirror keys under `platform.deps`. "
+            "`maven_repository` becomes the only Maven repository; `pypi_index` replaces "
+            "pypi.org as a PyPI simple index; `duckdb_extension_repository` replaces "
+            "extensions.duckdb.org. Mirrors are read anonymously, over plain HTTP or over "
+            "HTTPS with a publicly trusted certificate; mirror credentials and a private CA "
+            "are not supported. Changing a mirror re-resolves at the next `deploy`. A mirror "
+            "that serves the same bytes gives the same set hash, so runs before and after "
+            "stay comparable; one that serves other bytes gives a different set, and those "
+            "runs are not like-for-like.\n\n"
+            "Image pulls are separate: the nodes pull the images named under `images` (and "
+            "the Stackable Hive image for a Hive catalog) from their registries at every "
+            "pod start."
+        ),
+    ),
+    Prereq(
         id="s3-reachable-and-credentials",
         title="S3 endpoint and credentials",
         when="Always",
@@ -473,6 +565,16 @@ class KubeClusterReader:
         api = self._client.StorageV1Api()
         return {
             sc.metadata.name for sc in api.list_storage_class(_request_timeout=self.TIMEOUT_S).items
+        }
+
+    def default_storage_class_names(self) -> set[str]:
+        api = self._client.StorageV1Api()
+        return {
+            sc.metadata.name
+            for sc in api.list_storage_class(_request_timeout=self.TIMEOUT_S).items
+            if any(
+                (sc.metadata.annotations or {}).get(a) == "true" for a in _DEFAULT_SC_ANNOTATIONS
+            )
         }
 
     def deployments(
