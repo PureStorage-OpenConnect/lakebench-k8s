@@ -11,13 +11,19 @@ the files ``--corpus GLOB`` matches under ``--repo``) and reports:
   dropped, every non-alphanumeric character a space), as
   ``FILE:line -> corpus:line``;
 - **shared fact**: a line of FILE holding a fact token that the corpus also
-  holds, unless the line is a pointer (it links or backticks a corpus path).
-  A fact token is a number with a unit (``300Gi``, ``36 cores``, ``1200 s``)
-  or a backticked identifier containing a digit (``lb-datagen:1.6.0``).
+  holds, unless the line links or backticks a corpus file that holds that
+  fact (absolute paths into another checkout count by their repo-relative
+  suffix). A fact token is a number with a unit (``300Gi``, ``36 cores``,
+  ``1200 s``; unit spellings are folded, so ``2 hours`` is ``2 h``) or a
+  backticked identifier containing a digit (``lb-datagen:1.6.0``).
+
+``CHANGELOG.md`` is left out of the default corpus: it records past values
+and owns none.
 
 There is no allowlist: a line that has to repeat a fact is rewritten as a
 pointer to the doc that owns it. Exit 1 on any report, 0 when there is none,
-2 on a usage error.
+2 when the check cannot run (no file, an empty corpus, a corpus that is not
+a git checkout).
 
 Usage:
     python scripts/check_doc_overlap.py FILE [--repo DIR] [--corpus GLOB ...]
@@ -35,22 +41,32 @@ from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 SHINGLE = 10
+#: History, not a home for facts: a past value there owns nothing.
+DEFAULT_EXCLUDE = ("CHANGELOG.md",)
 
 _FENCE = re.compile(r"^\s*(```|~~~)")
 _LINK_TARGET = re.compile(r"\]\([^)]*\)")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
-_UNITS = (
-    "gib|mib|kib|tib|gi|mi|ki|ti|gb|mb|kb|tb|cores|core|vcpus|vcpu|"
-    "ms|min|mins|minutes|hours|hour|h|s|sec|seconds|days|day|"
-    "pods|executors|rows|%"
-)
-# A number (thousands commas and a decimal part allowed) and a unit, with at
-# most one space between them; the unit must not run on into a word.
+# Each spelling of a unit, mapped to one canonical form, so "300 GiB" and
+# "300Gi", or "2 h" and "2 hours", are the same fact.
+_UNIT_CANON = {
+    "gib": "gi", "gi": "gi", "mib": "mi", "mi": "mi", "kib": "ki", "ki": "ki",
+    "tib": "ti", "ti": "ti", "gb": "gb", "mb": "mb", "kb": "kb", "tb": "tb",
+    "cores": "cores", "core": "cores", "vcpus": "vcpu", "vcpu": "vcpu",
+    "ms": "ms", "min": "min", "mins": "min", "minute": "min", "minutes": "min",
+    "h": "h", "hour": "h", "hours": "h", "s": "s", "sec": "s", "secs": "s",
+    "second": "s", "seconds": "s", "d": "d", "day": "d", "days": "d",
+    "pods": "pods", "pod": "pods", "executors": "executors", "executor": "executors",
+    "rows": "rows", "row": "rows", "%": "%",
+}  # fmt: skip
+_UNITS = "|".join(sorted((re.escape(u) for u in _UNIT_CANON), key=len, reverse=True))
+# A number (thousands commas and a decimal part allowed) and a unit, joined
+# by nothing, one space or a hyphen; the unit must not run on into a word.
 _UNIT_FACT = re.compile(
-    rf"(?<![\w.])(\d{{1,3}}(?:,\d{{3}})+|\d+)(\.\d+)?\s?({_UNITS})(?![A-Za-z0-9])",
+    rf"(?<![\w.])(\d{{1,3}}(?:,\d{{3}})+|\d+)(\.\d+)?[ -]?({_UNITS})(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
-_BACKTICK = re.compile(r"`([^`\n]+)`")
+_SPAN = re.compile(r"`([^`]+)`")
 _LINK = re.compile(r"\]\(([^)\s]+)")
 
 
@@ -67,45 +83,59 @@ class Report(NamedTuple):
         )
 
 
-def _strip_markdown(line: str) -> str:
-    return _LINK_TARGET.sub("]", line)
-
-
 def _tokens(line: str) -> list[str]:
-    return _NON_ALNUM.sub(" ", _strip_markdown(line).lower()).split()
+    return _NON_ALNUM.sub(" ", _LINK_TARGET.sub("]", line).lower()).split()
 
 
-def _paragraphs(lines: Sequence[str]) -> list[list[tuple[int, str]]]:
-    """Blocks of (line number, token): blank lines and code fences end one."""
-    out: list[list[tuple[int, str]]] = []
-    cur: list[tuple[int, str]] = []
+def _blocks(lines: Sequence[str]) -> list[list[int]]:
+    """Paragraphs as lists of 1-based line numbers: a blank line or a code
+    fence ends one, and a fence line belongs to none."""
+    out: list[list[int]] = []
+    cur: list[int] = []
     for n, raw in enumerate(lines, 1):
         if not raw.strip() or _FENCE.match(raw):
             if cur:
                 out.append(cur)
             cur = []
             continue
-        cur.extend((n, t) for t in _tokens(raw))
+        cur.append(n)
     if cur:
         out.append(cur)
     return out
 
 
-def _shingles(par: list[tuple[int, str]]) -> Iterable[tuple[tuple[str, ...], int]]:
-    for i in range(len(par) - SHINGLE + 1):
-        yield tuple(t for _, t in par[i : i + SHINGLE]), par[i][0]
+def _shingles(lines: Sequence[str], block: list[int]) -> Iterable[tuple[tuple[str, ...], int]]:
+    toks = [(n, t) for n in block for t in _tokens(lines[n - 1])]
+    for i in range(len(toks) - SHINGLE + 1):
+        yield tuple(t for _, t in toks[i : i + SHINGLE]), toks[i][0]
+
+
+def _spans(lines: Sequence[str], block: list[int]) -> dict[int, list[str]]:
+    """Backtick spans of a paragraph by the line they start on; a span may
+    wrap onto the next line."""
+    starts, text = [], ""
+    for n in block:
+        starts.append((len(text), n))
+        text += lines[n - 1] + "\n"
+    out: dict[int, list[str]] = {}
+    for m in _SPAN.finditer(text):
+        line = next(n for off, n in reversed(starts) if off <= m.start())
+        out.setdefault(line, []).append(" ".join(m.group(1).split()))
+    return out
 
 
 def _unit_facts(line: str) -> list[str]:
-    """Each number-with-unit, normalised: ``4,349 GB`` -> ``4349gb``."""
+    """Each number-with-unit, canonical: ``4,349 GB`` -> ``4349gb``, ``2 hours`` -> ``2h``."""
     return [
-        (m.group(1).replace(",", "") + (m.group(2) or "") + m.group(3)).lower()
+        m.group(1).replace(",", "") + (m.group(2) or "") + _UNIT_CANON[m.group(3).lower()]
         for m in _UNIT_FACT.finditer(line)
     ]
 
 
-def _ident_facts(line: str) -> list[str]:
-    return [m.group(1).strip() for m in _BACKTICK.finditer(line) if re.search(r"\d", m.group(1))]
+def _ident_pattern(ident: str) -> re.Pattern[str]:
+    # Whole token: lb-datagen:1.6.0 is not found inside lb-datagen:1.6.0.1,
+    # but a sentence's closing full stop is allowed after it.
+    return re.compile(rf"(?<![\w.:/-]){re.escape(ident)}(?![\w:/-]|\.\w)", re.IGNORECASE)
 
 
 def _clean_ref(ref: str) -> str:
@@ -117,23 +147,75 @@ def _clean_ref(ref: str) -> str:
     return ref
 
 
-def _is_pointer(line: str, corpus_paths: frozenset[str]) -> bool:
-    """The line links or backticks a corpus path (absolute paths count by suffix)."""
-    refs = [m.group(1) for m in _LINK.finditer(line)] + [
-        m.group(1) for m in _BACKTICK.finditer(line)
-    ]
-    for ref in refs:
-        ref = _clean_ref(ref)
-        if not ref:
-            continue
-        for path in corpus_paths:
-            if ref == path or ref.endswith("/" + path):
-                return True
-    return False
+def _resolve(ref: str, corpus_paths: frozenset[str]) -> set[str]:
+    """Corpus files a ref names: the path itself, or any path ending in it
+    (an absolute path into another checkout of the same repository)."""
+    ref = _clean_ref(ref)
+    if not ref:
+        return set()
+    return {p for p in corpus_paths if ref == p or ref.endswith("/" + p)}
+
+
+class _Corpus:
+    def __init__(self, repo: Path, corpus: Sequence[str]):
+        self.paths = frozenset(corpus)
+        self.shingle_at: dict[tuple[str, ...], tuple[str, int]] = {}
+        self.unit_at: dict[str, list[tuple[str, int]]] = {}
+        self.lines: list[tuple[str, int, str]] = []
+        for rel in corpus:
+            path = repo / rel
+            if not path.is_file():  # tracked but deleted in this worktree
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for block in _blocks(lines):
+                for sh, n in _shingles(lines, block):
+                    self.shingle_at.setdefault(sh, (rel, n))
+            for n, raw in enumerate(lines, 1):
+                self.lines.append((rel, n, raw))
+                for f in _unit_facts(raw):
+                    self.unit_at.setdefault(f, []).append((rel, n))
+        self._ident: dict[str, list[tuple[str, int]]] = {}
+
+    def ident_at(self, ident: str) -> list[tuple[str, int]]:
+        if ident not in self._ident:
+            pat = _ident_pattern(ident)
+            self._ident[ident] = [(rel, n) for rel, n, text in self.lines if pat.search(text)]
+        return self._ident[ident]
+
+
+def check(file: Path, repo: Path, corpus: Sequence[str]) -> list[Report]:
+    """Reports for FILE against the corpus (repo-relative paths, FILE excluded)."""
+    c = _Corpus(repo, corpus)
+    lines = file.read_text(encoding="utf-8", errors="replace").splitlines()
+    reports: list[Report] = []
+    spans: dict[int, list[str]] = {}
+    for block in _blocks(lines):
+        for sh, n in _shingles(lines, block):
+            if sh in c.shingle_at:
+                rel, cn = c.shingle_at[sh]
+                reports.append(Report(n, rel, cn, "text", " ".join(sh)))
+                break  # one report per paragraph
+        spans.update(_spans(lines, block))
+
+    for n, raw in enumerate(lines, 1):
+        line_spans = spans.get(n, [])
+        facts = [(f, c.unit_at.get(f, [])) for f in _unit_facts(raw)]
+        facts += [(s, c.ident_at(s)) for s in line_spans if re.search(r"\d", s)]
+        refs: set[str] = set()
+        for ref in [m.group(1) for m in _LINK.finditer(raw)] + line_spans:
+            refs |= _resolve(ref, c.paths)
+        for fact, where in facts:
+            # A pointer excuses a fact only when it names a file that holds it.
+            if where and not refs & {rel for rel, _ in where}:
+                rel, cn = where[0]
+                reports.append(Report(n, rel, cn, "fact", fact))
+                break  # one fact report per line
+    return sorted(reports, key=lambda r: (r.line, r.kind))
 
 
 def corpus_files(repo: Path, globs: Sequence[str] | None) -> list[str]:
-    """Repo-relative corpus paths: the ``--corpus`` globs, or the tracked ``*.md``."""
+    """Repo-relative corpus paths: the ``--corpus`` globs, or the tracked
+    ``*.md`` except ``DEFAULT_EXCLUDE``."""
     if globs:
         found: set[str] = set()
         for g in globs:
@@ -142,56 +224,7 @@ def corpus_files(repo: Path, globs: Sequence[str] | None) -> list[str]:
     res = subprocess.run(
         ["git", "ls-files", "-z", "*.md"], cwd=repo, capture_output=True, text=True, check=True
     )
-    return sorted(p for p in res.stdout.split("\0") if p)
-
-
-def check(file: Path, repo: Path, corpus: Sequence[str]) -> list[Report]:
-    try:
-        self_rel = file.resolve().relative_to(repo.resolve()).as_posix()
-    except ValueError:
-        self_rel = None
-    corpus = [c for c in corpus if c != self_rel]
-    corpus_paths = frozenset(corpus)
-
-    shingle_at: dict[tuple[str, ...], tuple[str, int]] = {}
-    unit_at: dict[str, tuple[str, int]] = {}
-    corpus_lines: list[tuple[str, int, str]] = []
-    for rel in corpus:
-        lines = (repo / rel).read_text(encoding="utf-8", errors="replace").splitlines()
-        for par in _paragraphs(lines):
-            for sh, n in _shingles(par):
-                shingle_at.setdefault(sh, (rel, n))
-        for n, raw in enumerate(lines, 1):
-            corpus_lines.append((rel, n, raw))
-            for f in _unit_facts(raw):
-                unit_at.setdefault(f, (rel, n))
-
-    lines = file.read_text(encoding="utf-8", errors="replace").splitlines()
-    reports: list[Report] = []
-    for par in _paragraphs(lines):
-        for sh, n in _shingles(par):
-            if sh in shingle_at:
-                rel, cn = shingle_at[sh]
-                reports.append(Report(n, rel, cn, "text", " ".join(sh)))
-                break  # one report per paragraph
-
-    ident_cache: dict[str, tuple[str, int] | None] = {}
-    for n, raw in enumerate(lines, 1):
-        facts = [(f, unit_at.get(f)) for f in _unit_facts(raw)]
-        for ident in _ident_facts(raw):
-            if ident not in ident_cache:
-                pat = re.compile(
-                    rf"(?<![A-Za-z0-9]){re.escape(ident)}(?![A-Za-z0-9])", re.IGNORECASE
-                )
-                ident_cache[ident] = next(
-                    ((rel, cn) for rel, cn, text in corpus_lines if pat.search(text)), None
-                )
-            facts.append((ident, ident_cache[ident]))
-        hits = [(f, at) for f, at in facts if at is not None]
-        if hits and not _is_pointer(raw, corpus_paths):
-            f, (rel, cn) = hits[0]
-            reports.append(Report(n, rel, cn, "fact", f))
-    return sorted(reports, key=lambda r: (r.line, r.kind))
+    return sorted(p for p in res.stdout.split("\0") if p and p not in DEFAULT_EXCLUDE)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -207,11 +240,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.file.is_file():
         print(f"{args.file}: no such file", file=sys.stderr)
         return 2
-    corpus = corpus_files(args.repo, args.corpus)
-    if not corpus:
-        print("empty corpus: nothing to compare against", file=sys.stderr)
+    try:
+        corpus = corpus_files(args.repo, args.corpus)
+        try:
+            self_rel = args.file.resolve().relative_to(args.repo.resolve()).as_posix()
+        except ValueError:
+            self_rel = None
+        corpus = [p for p in corpus if p != self_rel]
+        if not corpus:
+            print("empty corpus: nothing to compare against", file=sys.stderr)
+            return 2
+        reports = check(args.file, args.repo, corpus)
+    except (OSError, ValueError, NotImplementedError, subprocess.CalledProcessError) as exc:
+        # Exit 1 means "overlap found"; a check that could not run is 2.
+        print(f"cannot run the check: {exc}", file=sys.stderr)
         return 2
-    reports = check(args.file, args.repo, corpus)
     for r in reports:
         print(r.render(str(args.file)))
     print(f"{len(reports)} overlap(s) against {len(corpus)} corpus file(s)", file=sys.stderr)

@@ -24,3 +24,15 @@ def test_lakebench_imported_from_this_tree():
         f"lakebench imported from {imported}, not from this checkout's {src}; "
         'pytest needs pythonpath = ["src"] in pyproject.toml'
     )
+
+
+def test_pytest_is_configured_to_import_src():
+    # The test above cannot fail in CI, whose editable install is this tree;
+    # this one does, if the option is dropped.
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10; tomli is in the dev extra there
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    opts = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
+    assert opts["pythonpath"] == ["src"]

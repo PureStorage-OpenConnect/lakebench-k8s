@@ -109,16 +109,71 @@ def test_clean_file_exits_zero(tmp_path):
 
 def test_file_inside_the_repo_is_not_its_own_corpus(tmp_path):
     repo = _repo(tmp_path)
+    (repo / "docs" / "other.md").write_text("Unrelated words only.\n")
     rc, out = _main(repo / "docs" / "sizing.md", repo)
     assert rc == 0, out
+    # With itself excluded the corpus is empty: the check cannot run.
+    (repo / "docs" / "other.md").unlink()
+    rc, out = _main(repo / "docs" / "sizing.md", repo)
+    assert rc == 2
 
 
-def test_default_corpus_is_the_tracked_markdown(tmp_path):
+def test_pointer_to_a_doc_that_does_not_hold_the_fact_is_no_excuse(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "README.md").write_text("Read the docs.\n")
+    for line in (
+        "Silver scratch is 300Gi, see `README.md`.\n",
+        "Silver scratch is 300Gi, see `/elsewhere/notes/README.md`.\n",
+    ):
+        rc, out = _run(repo, line)
+        assert rc == 1 and "(fact: 300gi)" in out, (line, out)
+
+
+def test_unit_spellings_are_one_fact(tmp_path):
+    repo = _repo(tmp_path, DOC + "\nA run lasts 2 hours on 36 cores.\n")
+    for line, fact in (
+        ("Keep scratch at 300 GiB.\n", "300gi"),
+        ("Runs over 2 h are announced.\n", "2h"),
+        ("A 36-core cluster.\n", "36cores"),
+    ):
+        rc, out = _run(repo, line)
+        assert rc == 1 and f"(fact: {fact})" in out, (line, out)
+
+
+def test_backtick_span_wrapped_across_lines(tmp_path):
+    repo = _repo(tmp_path, DOC + "\nThe image is lb-datagen:1.6.0 today.\n")
+    rc, out = _run(repo, "First `a` and then\n`b` and pin `lb-datagen:1.6.0` today.\n")
+    assert rc == 1 and "(fact: lb-datagen:1.6.0)" in out, out
+    # A span opened on one line and closed on the next pairs correctly, so
+    # the identifier after it is still read as one.
+    rc, out = _run(repo, "See `tests/\nfoo` then pin `lb-datagen:1.6.0` today.\n")
+    assert rc == 1 and "(fact: lb-datagen:1.6.0)" in out, out
+
+
+def test_identifier_inside_a_longer_one_is_not_the_fact(tmp_path):
+    repo = _repo(tmp_path, DOC + "\nThe image is lb-datagen:1.6.0.1 today.\n")
+    rc, out = _run(repo, "Pin `lb-datagen:1.6.0` in the config.\n")
+    assert rc == 0, out
+    repo2 = tmp_path / "r2"
+    repo2.mkdir()
+    _repo(repo2, DOC + "\nThe image is lb-datagen:1.6.0.\n")
+    rc, out = _run(repo2, "Pin `lb-datagen:1.6.0` in the config.\n")
+    assert rc == 1, out
+
+
+def test_a_corpus_that_is_not_a_git_checkout_cannot_run(tmp_path):
+    f = tmp_path / "agent.txt"
+    f.write_text("x\n")
+    assert cdo.main([str(f), "--repo", str(tmp_path)]) == 2
+
+
+def test_default_corpus_is_the_tracked_markdown_without_the_changelog(tmp_path):
     repo = _repo(tmp_path)
     (repo / "untracked.md").write_text("Silver scratch is 300Gi.\n")
+    (repo / "CHANGELOG.md").write_text("- scratch was 150Gi\n")
     git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
     subprocess.run([*git, "init", "-q"], cwd=repo, check=True)
-    subprocess.run([*git, "add", "docs/sizing.md"], cwd=repo, check=True)
+    subprocess.run([*git, "add", "docs/sizing.md", "CHANGELOG.md"], cwd=repo, check=True)
     assert cdo.corpus_files(repo, None) == ["docs/sizing.md"]
 
 
@@ -126,9 +181,9 @@ def test_default_corpus_is_the_tracked_markdown(tmp_path):
     ("line", "facts"),
     [
         ("4,349 GB of 434 cores", ["4349gb", "434cores"]),
-        ("timeout 1200 s, then 25 min", ["1200s", "25min"]),
+        ("timeout 1200 s, then 25 minutes", ["1200s", "25min"]),
         ("v1.7 and s3a and 2x", []),
-        ("1.5 h", ["1.5h"]),
+        ("1.5 h and 300 GiB and a 36-core node", ["1.5h", "300gi", "36cores"]),
     ],
 )
 def test_unit_facts(line, facts):
