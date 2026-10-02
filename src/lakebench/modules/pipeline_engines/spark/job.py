@@ -152,7 +152,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     # explode-and-join against gold.alerts (score_financial.py rewrote the
     # old N*M crossjoin to a single explode per side, so it stays linear in
     # the UETR footprint). Deliberately small: without this entry the job
-    # falls back to the silver-build profile (~36 cores / 512 GB at scale 1)
+    # falls back to the silver-build profile (~36 cores / 525 GB at scale 1)
     # just to score a handful of typologies, which under the 4-parallel UAT
     # limit fails to schedule and blocks on the per-job timeout after the
     # pipeline already reported success (adversarial-review finding).
@@ -535,6 +535,17 @@ class PeakRequirement:
     per_job: tuple[JobRequirement, ...]
 
 
+def _driver_pod_bytes(driver_memory: str) -> int:
+    """The memory a driver pod requests for *driver_memory*: the heap plus
+    Spark's driver overhead. The manifest sets no driver overhead, so Spark
+    on Kubernetes applies its non-JVM default to these Python jobs:
+    max(0.4 x heap, 384 MiB) (BasicDriverFeatureStep, Spark 3.5 to 4.1)."""
+    from lakebench.config.schema import parse_spark_memory
+
+    mib = parse_spark_memory(driver_memory) // 1024**2
+    return (mib + max(int(0.4 * mib), 384)) * 1024**2
+
+
 def _job_requirement(
     job_type: str, scale: float, schema_type: str | None = None
 ) -> JobRequirement | None:
@@ -556,7 +567,7 @@ def _job_requirement(
 
     exec_mem = parse_spark_memory(profile["executor_memory"])
     exec_overhead = parse_spark_memory(profile["executor_memory_overhead"])
-    driver_mem = parse_spark_memory(profile["driver_memory"])
+    driver_mem = _driver_pod_bytes(profile["driver_memory"])
     exec_total_bytes = exec_mem + exec_overhead
 
     gib = 1024**3
@@ -567,10 +578,10 @@ def _job_requirement(
         job_type=job_type,
         executors=executors,
         cpu_cores=executors * profile["executor_cores"] + profile["driver_cores"],
-        memory_gb=memory_bytes // gib,
+        memory_gb=-(-memory_bytes // gib),
         scratch_gb=scratch_gb,
         max_pod_cpu_cores=max(profile["executor_cores"], profile["driver_cores"]),
-        max_pod_memory_gb=max(exec_total_bytes, driver_mem) // gib,
+        max_pod_memory_gb=-(-max(exec_total_bytes, driver_mem) // gib),
     )
 
 
@@ -822,7 +833,7 @@ def streaming_request_under_budget(
         drv_cores = spark_cfg.driver_cores or prof["driver_cores"]
         drv_mem = spark_cfg.driver_memory or prof["driver_memory"]
         cores_m += (n * prof["executor_cores"] + drv_cores) * 1000
-        mem += n * exec_bytes + parse_spark_memory(drv_mem)
+        mem += n * exec_bytes + _driver_pod_bytes(drv_mem)
 
     trino = config.architecture.query_engine.trino
     datagen = config.architecture.workload.datagen
