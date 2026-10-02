@@ -232,6 +232,11 @@ def generate(
         # --regenerate (owned bucket: clear the datagen prefix) or
         # --allow-stale-bronze (any other bucket).
         enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
+        # The namespace's fleet sidecar describes the corpus this generate
+        # replaces; the new one is written when its pods are read.
+        from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+        drop_sidecar(cfg.get_namespace())
 
         engine = DeploymentEngine(cfg)
         datagen = DatagenDeployer(engine, allow_stale_bronze=allow_stale_bronze)
@@ -395,10 +400,6 @@ def generate(
                 print_info(f"  written to {out_path}")
             except Exception as e:
                 logger.warning("failed to collect per-pod datagen metrics: %s", e)
-                # The old sidecar describes the corpus this generate replaced.
-                from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-                drop_sidecar(cfg.get_namespace())
 
             _journal_safe(
                 j.record,

@@ -926,8 +926,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the generator image digest instead of "no datagen fleet record for this
   run". Before, only `lakebench generate` wrote the sidecar, and a batch
   `run --generate` attached whatever an older generate had left, which could
-  describe a corpus the run had replaced. A run that generates now removes
-  that sidecar before it starts; a run that does not generate still takes it.
+  describe a corpus the run had replaced. `lakebench generate` and a run
+  that generates now remove that sidecar before they replace the corpus, so
+  a generate that fails leaves none; a batch run that does not generate
+  still takes it.
 
 - **Delta continuous Customer 360 works again.** Its silver stream failed
   on the first micro-batch on every `hive-delta-*` recipe: it passed the
