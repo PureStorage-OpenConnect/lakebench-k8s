@@ -146,8 +146,9 @@ jobs:
   # (about 2 s), with --remerge-diff so what a merge commit itself changed is
   # scanned (plain `git log -p` shows no diff for merges) and
   # --ignore-gitleaks-allow so an inline allow comment hides nothing. The
-  # baseline and the config come from a trusted ref, origin/main or, until
-  # main has a baseline, origin/integrate/v1.5.0, never from the scanned
+  # baseline and the config come from a trusted ref (origin/main first for
+  # main, pull requests to main and tags; origin/integrate/v1.5.0 first for
+  # everything else; see the Scan history step), never from the scanned
   # branch: gitleaks reads a source tree's own .gitleaksignore, so the scan
   # runs on the git dir from a temp directory. A second pass uses the
   # branch's own config, so a rule a branch adds is enforced at once. A pull
@@ -187,18 +188,45 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/gitleaks-history"
           mkdir -p "$work"
           ignore="$work/gitleaksignore"
           cfg="$work/gitleaks.toml"
-          # The config always comes from a trusted ref when one has it, so an
-          # allowlist a branch (a pull request to main included) adds to its own
-          # .gitleaks.toml cannot hide a finding unnoticed. A branch can still
-          # edit this workflow; review of the pull request is that control.
+          # The config and baseline come from a trusted ref, never from the
+          # branch being scanned, so an allowlist a branch adds to its own
+          # .gitleaks.toml cannot hide a finding unnoticed. What goes to main
+          # (a push to main, a pull request to main, a release tag) is held to
+          # main's config; everything else (integrate/*, train/*, lane/*, pull
+          # requests to integrate) to integrate's first, the ref the pre-push
+          # hook trusts, then main's. Only the main lane merges to integrate,
+          # by policy: integrate has no branch protection, so a direct push
+          # to it would be its own trusted config, and train review is the
+          # control. An allowlist entry merged to integrate applies to the
+          # branches on integrate, and reaches main's pass only through its
+          # own pull request to main (see docs/releasing.md). A branch can
+          # still edit this workflow; review of the pull request is that
+          # control.
+          # trust-order begin
+          to_main=no
+          if [ "${EVENT:-}" = "pull_request" ]; then
+            [ "${BASE_REF:-}" = "main" ] && to_main=yes
+          else
+            case "${REF:-}" in
+              refs/heads/main | refs/tags/*) to_main=yes ;;
+            esac
+          fi
+          if [ "$to_main" = yes ]; then
+            trust_order="origin/main origin/integrate/v1.5.0"
+          else
+            trust_order="origin/integrate/v1.5.0 origin/main"
+          fi
+          # trust-order end
+          echo "trusted refs, first that has the file wins: $trust_order"
           cfg_ref=""
-          for ref in origin/main origin/integrate/v1.5.0; do
+          for ref in $trust_order; do
             if git cat-file -e "$ref:.gitleaks.toml" 2>/dev/null; then
               cfg_ref="$ref"
               break
@@ -212,7 +240,7 @@ jobs:
               git diff origin/main HEAD -- .gitleaksignore .gitleaks.toml || true
             fi
           else
-            for ref in origin/main origin/integrate/v1.5.0; do
+            for ref in $trust_order; do
               if git cat-file -e "$ref:.gitleaksignore" 2>/dev/null; then
                 trusted="$ref"
                 break
