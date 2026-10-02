@@ -164,3 +164,52 @@ def test_sidecar_helpers_never_raise(tmp_path, monkeypatch):
     # Never raises on a record json cannot encode, or a missing file.
     datagen_aggregator.drop_sidecar(NAMESPACE)
     datagen_aggregator.write_sidecar({"x": object()}, NAMESPACE)
+
+
+@pytest.mark.parametrize("fails", ["scripts", "datagen"])
+def test_continuous_failure_after_the_reset_leaves_no_old_sidecar(fails, tmp_path, monkeypatch):
+    """The reset cleared the corpus, then the scripts deploy or the datagen
+    submit failed: the sidecar of the corpus the reset removed is gone too."""
+    import tests.harness.run_harness as harness
+    from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+
+    _stale(tmp_path)
+
+    def failing(self, *a, **k):
+        return DeploymentResult(component="datagen", status=DeploymentStatus.FAILED, message="no")
+
+    if fails == "datagen":
+        monkeypatch.setattr(harness.FakeDatagenDeployer, "deploy", failing)
+    else:
+        monkeypatch.setattr(
+            harness.FakeJobManager, "deploy_scripts_configmap", lambda *a, **k: False
+        )
+    scenario = SCENARIOS["continuous_c360"]
+    trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
+    assert trace["exit_code"] != 0
+    assert not _sidecar(tmp_path).exists()
+
+
+def test_generate_refusal_keeps_the_sidecar(tmp_path, monkeypatch):
+    """Bronze not empty and no --regenerate: generate refuses before it
+    touches the corpus, so the sidecar that describes it stays."""
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from lakebench.config import load_config
+    from lakebench.exit_codes import ExitCode
+    from lakebench.s3.client import BucketInfo
+    from tests.test_datagen_timeout_and_regenerate import _FakeS3, _stub_run_deps, _write_cfg
+
+    monkeypatch.chdir(tmp_path)
+    cfg_file = _write_cfg(tmp_path)
+    namespace = load_config(cfg_file).get_namespace()
+    side = tmp_path / "lakebench-output" / "datagen" / f"{namespace}-datagen-metrics.json"
+    side.parent.mkdir(parents=True)
+    side.write_text(json.dumps({"namespace": namespace, "image_ids": [STALE_ID]}))
+    _stub_run_deps(monkeypatch)
+    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
+    _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=5, size_bytes=1_000_000)
+    res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes"])
+    assert res.exit_code == ExitCode.REFUSED, res.output
+    assert side.exists()
