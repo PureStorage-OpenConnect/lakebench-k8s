@@ -311,7 +311,7 @@ class Recorder:
     #: loads its kubeconfig; a bare API client before that is unconfigured).
     k8s_client_made: bool = False
     #: The silver-state ConfigMap's data (rebuild epochs) and its version.
-    silver_state: dict[str, str] = field(default_factory=dict)
+    silver_state: dict[str, str] = field(default_factory=lambda: {"bronze_data_clock": ""})
     silver_state_rv: int = 1
     #: Objects in the bronze bucket the fake paginator lists, by key:
     #: (size, etag). Empty: an empty bucket, as the goldens read it.
@@ -651,16 +651,6 @@ class FakeCoreV1Api(_FakeApi):
         self._rec.add("CoreV1Api", "list_namespace")
         return SimpleNamespace(items=[_namespace_object(self._rec.namespace)])
 
-    def read_namespaced_config_map(self, name, namespace, **kw):
-        """lakebench-silver-state of a deployment that has not yet run
-        bronze-verify: no data clock to clear before a fresh generate."""
-        self._rec.add("CoreV1Api", "read_namespaced_config_map", name, namespace)
-        if name != "lakebench-silver-state" or namespace != self._rec.namespace:
-            raise self._rec.refuse(f"unscripted ConfigMap {namespace}/{name}")
-        return SimpleNamespace(
-            data={"bronze_data_clock": ""}, metadata=SimpleNamespace(resource_version="1")
-        )
-
     def read_namespaced_pod(self, name, namespace, **kw):
         # Driver pods of an earlier run's streams: none are left.
         self._rec.add("CoreV1Api", "read_namespaced_pod", name, namespace)
@@ -687,7 +677,9 @@ class FakeCoreV1Api(_FakeApi):
         )
 
     def read_namespaced_config_map(self, name, namespace, **kw):
-        """The deployment's silver-state ConfigMap (rebuild epochs)."""
+        """The deployment's silver-state ConfigMap: rebuild epochs, and the
+        data clock (empty until a bronze-verify has run, so a fresh generate
+        has none to clear)."""
         self._rec.add("CoreV1Api", "read_namespaced_config_map", name, namespace)
         if name != "lakebench-silver-state" or namespace != self._rec.namespace:
             raise self._rec.refuse(f"unscripted ConfigMap read {namespace}/{name}")
