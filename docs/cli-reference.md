@@ -292,7 +292,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--stage` | `-s` | all | Run a specific stage only (`bronze-verify`, `silver-build`, `gold-finalize`) |
 | `--timeout` | `-t` | auto | Timeout per job in seconds. When omitted: `max(3600, scale * 120)`; the AML workload adds 900 s and never goes below its bronze-verify budget |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
-| `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
+| `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks (including the capacity check) and infrastructure validation; the record says `capacity: skipped` and the verdict "capacity not checked" |
 | `--skip-generate` | | `false` | Skip datagen (refused with `--generate`) |
 | `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused without `--generate` or `--generate-only`, and in a local or continuous run. |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |

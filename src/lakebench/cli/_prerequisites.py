@@ -25,6 +25,9 @@ class PrereqResult:
     passed: bool
     message: str
     hint: str = ""
+    #: What the check records in the run's provenance (the capacity check's
+    #: ``provenance.preflight``), or None.
+    record: dict[str, Any] | None = None
 
 
 @dataclass
@@ -40,6 +43,23 @@ class PrereqReport:
     @property
     def failed(self) -> list[PrereqResult]:
         return [c for c in self.checks if not c.passed]
+
+    @property
+    def preflight(self) -> dict[str, Any] | None:
+        """The capacity check's record, for ``provenance.preflight``."""
+        for c in self.checks:
+            if c.record is not None:
+                return c.record
+        return None
+
+
+#: ``provenance.preflight`` of a run started with ``--skip-preflight``.
+PREFLIGHT_SKIPPED: dict[str, Any] = {
+    "capacity": "skipped",
+    "scratch": "skipped",
+    "scratch_reason": "--skip-preflight",
+    "storage_class": None,
+}
 
 
 def run_prerequisites(
@@ -275,111 +295,154 @@ def _check_cluster_capacity(
     datagen_runs: bool = True,
     sizing_capacity: Any = SAME_CAPACITY,
 ) -> PrereqResult:
-    """Check that the cluster can schedule the config's floor request.
+    """Check that the cluster's free capacity holds the config's floor request.
 
     Without this, an undersized cluster produces Pending pods and a job
     timeout tens of minutes later with no explanation. Comparing the
-    request against allocatable capacity turns that into an immediate,
-    actionable error.
+    request against what the cluster can still take turns that into an
+    immediate, actionable error.
 
-    The decision is ``config.sizing.check_capacity``, the one
-    sizing source ``info``, ``config show``, ``recommend`` and the
-    docs tables also use. It checks that the floor (the Spark peak, or one
-    batch datagen pod, plus the always-on pods and continuous datagen) fits
-    the cluster, and that the largest pod fits the largest node. A batch
-    datagen Job too large to run all at once passes with a warning: its pods
-    queue.
+    The decision is ``config.sizing.check_capacity``, the one sizing source
+    ``info``, ``config show``, ``recommend`` and the docs tables also use,
+    applied to the schedulable nodes' free capacity
+    (``K8sClient.get_free_capacity``): allocatable minus what other pods
+    already request. It checks that the floor (the Spark peak, or one batch
+    datagen pod, plus the always-on pods and continuous datagen) fits, and
+    that the largest pod fits the node with the most free memory. A batch
+    datagen Job too large to run all at once passes with a warning: its
+    pods queue.
+
+    It fails closed: capacity that cannot be read (a forbidden or failed
+    node or pod list, a pod on a node the list does not show, no
+    schedulable node) is a failed check, not a pass. Scratch is checked
+    against the ``CSIStorageCapacity`` its StorageClass publishes; when
+    none is published the run is admitted with a warning and the record
+    says ``not_measurable``.
     """
+    from lakebench.config.sizing import check_capacity
+    from lakebench.k8s import get_k8s_client
+    from lakebench.k8s.client import CapacityUnknown
+
+    record: dict[str, Any] = {
+        "capacity": "checked",
+        "scratch": "disabled",
+        "scratch_reason": None,
+        "storage_class": None,
+    }
     try:
-        from lakebench.config.sizing import check_capacity
-        from lakebench.k8s import get_k8s_client
-
-        scale = cfg.architecture.workload.datagen.scale
-        run_mode = None if sustained is None else ("continuous" if sustained else "batch")
-
         k8s = get_k8s_client(
             context=cfg.platform.kubernetes.context,
             namespace=cfg.get_namespace(),
         )
-        capacity = k8s.get_cluster_capacity()
-        if capacity is None:
-            return PrereqResult(
-                name="cluster-capacity",
-                passed=True,
-                message="Cluster capacity unknown (node list unavailable) -- skipping check",
-                hint="Requires permission to list nodes",
-            )
-
-        verdict = check_capacity(
-            cfg,
-            capacity,
-            run_mode=run_mode,
-            datagen_runs=datagen_runs,
-            sizing_capacity=sizing_capacity,
-        )
-        plan = verdict.plan
-        gib = 1024**3
-        avail_cores = capacity.total_cpu_millicores / 1000.0
-        avail_gb = capacity.total_memory_bytes / gib
-        summary = (
-            f"scale {scale} ({plan.mode}) needs ~{plan.floor.cpu_cores} cores / "
-            f"{plan.floor.memory_gb} GB, driven by {plan.floor_driver} plus "
-            f"{plan.co_resident.label}"
-        )
-        if plan.overrides_not_counted:
-            summary += "; per-job executor and driver overrides are not counted"
-        hint_lines = "\n".join(f"  {s}" for s in verdict.shortfalls)
-
-        if verdict.status == "degraded":
-            names = ", ".join(verdict.capped)
-            capped = verdict.capped_request or plan.floor
-            logger.warning("Continuous streams will be capped to fit the cluster: %s", names)
-            return PrereqResult(
-                name="cluster-capacity",
-                passed=True,
-                message=(
-                    f"WARNING: cluster below the full request ({summary}); "
-                    f"running degraded at ~{capped.cpu_cores} cores / "
-                    f"{capped.memory_gb} GB with Trino and datagen, capped: {names}"
-                ),
-                hint=hint_lines,
-            )
-
-        if verdict.status == "refused":
-            return PrereqResult(
-                name="cluster-capacity",
-                passed=False,
-                message=f"Insufficient cluster capacity -- {summary}",
-                hint=(
-                    hint_lines
-                    + f"\nCluster: {capacity.node_count} worker node(s), "
-                    + f"{avail_cores:.1f} cores / {avail_gb:.1f} GB allocatable."
-                    + "\nReduce 'scale' or use a larger cluster."
-                    + (
-                        "\nA finished datagen Job is not counted: run 'lakebench "
-                        "generate' first, then 'lakebench run --skip-generate' within "
-                        "an hour of it finishing (the Job is deleted after 3600 s, and "
-                        "an absent Job is counted as running)."
-                        if plan.co_resident.includes_datagen
-                        else ""
-                    )
-                ),
-            )
-
-        message = (
-            f"Cluster capacity OK ({avail_cores:.0f} cores / "
-            f"{avail_gb:.0f} GB available, {summary})"
-        )
-        for warning in verdict.warnings:
-            logger.warning("Capacity: %s", warning)
-            message += f"; WARNING: {warning}"
-        return PrereqResult(name="cluster-capacity", passed=True, message=message)
-    except Exception as e:
-        # Never block a deploy because the capacity estimate itself failed.
-        logger.debug("Capacity check error: %s", e, exc_info=True)
+        found = k8s.get_free_capacity(exclude_namespace=cfg.get_namespace())
+    except Exception as e:  # noqa: BLE001 -- unreachable cluster or bad context
+        found = CapacityUnknown(f"{type(e).__name__}: {e}")
+    if isinstance(found, CapacityUnknown):
         return PrereqResult(
             name="cluster-capacity",
-            passed=True,
-            message=f"Capacity check skipped: {e}",
-            hint="Could not determine cluster capacity",
+            passed=False,
+            message=f"capacity could not be read: {found.reason}",
+            hint=(
+                "Next: ask the cluster admin for node and pod read access, or run "
+                "with --skip-preflight (the run records 'capacity not checked')"
+            ),
         )
+    free, allocatable = found.free, found.allocatable
+
+    scale = cfg.architecture.workload.datagen.scale
+    run_mode = None if sustained is None else ("continuous" if sustained else "batch")
+    verdict = check_capacity(
+        cfg,
+        free,
+        run_mode=run_mode,
+        datagen_runs=datagen_runs,
+        # Sized as run sizes it: against the allocatable total, not what is
+        # free, unless run says what it sized against.
+        sizing_capacity=allocatable if sizing_capacity is SAME_CAPACITY else sizing_capacity,
+        allocatable=allocatable,
+    )
+    plan = verdict.plan
+    gib = 1024**3
+    shortfalls = list(verdict.shortfalls)
+    warnings = list(verdict.warnings)
+
+    scratch_short = False
+    if plan.scratch_enabled and plan.scratch_gb > 0:
+        sc = plan.scratch_storage_class
+        record["storage_class"] = sc
+        published = k8s.get_scratch_capacity(sc)
+        if published.total_bytes is None:
+            record["scratch"] = "not_measurable"
+            record["scratch_reason"] = published.reason
+            warnings.append(
+                f"scratch capacity not measurable for StorageClass {sc} "
+                f"({published.reason}); the run requests {plan.scratch_gb:,} Gi of "
+                "scratch PVCs"
+            )
+        else:
+            record["scratch"] = "checked"
+            have_gi = published.total_bytes / gib
+            if plan.scratch_gb > have_gi:
+                scratch_short = True
+                shortfalls.append(
+                    f"Scratch: need {plan.scratch_gb:,} Gi of StorageClass {sc}, "
+                    f"its CSIStorageCapacity totals {have_gi:,.0f} Gi"
+                )
+
+    free_cores = free.total_cpu_millicores / 1000.0
+    free_gb = free.total_memory_bytes / gib
+    alloc_cores = allocatable.total_cpu_millicores / 1000.0
+    alloc_gb = allocatable.total_memory_bytes / gib
+    summary = (
+        f"scale {scale} ({plan.mode}) needs ~{plan.floor.cpu_cores} cores / "
+        f"{plan.floor.memory_gb} GB, driven by {plan.floor_driver} plus "
+        f"{plan.co_resident.label}"
+    )
+    if plan.overrides_not_counted:
+        summary += "; per-job executor and driver overrides are not counted"
+    hint_lines = "\n".join(f"  {s}" for s in shortfalls)
+
+    if verdict.status == "refused" or scratch_short:
+        return PrereqResult(
+            name="cluster-capacity",
+            passed=False,
+            message=f"Insufficient free cluster capacity -- {summary}",
+            hint=(
+                hint_lines
+                + f"\nCluster: {free.node_count} schedulable node(s), {free_cores:.1f} cores / "
+                + f"{free_gb:.1f} GB free of {alloc_cores:.1f} cores / {alloc_gb:.1f} GB "
+                + "allocatable."
+                + "\nReduce 'scale', free the cluster, or use a larger one."
+                + (
+                    "\nA finished datagen Job is not counted: run 'lakebench "
+                    "generate' first, then 'lakebench run --skip-generate' within "
+                    "an hour of it finishing (the Job is deleted after 3600 s, and "
+                    "an absent Job is counted as running)."
+                    if plan.co_resident.includes_datagen
+                    else ""
+                )
+            ),
+            record=record,
+        )
+
+    for warning in warnings:
+        logger.warning("Capacity: %s", warning)
+    if verdict.status == "degraded":
+        names = ", ".join(verdict.capped)
+        capped = verdict.capped_request or plan.floor
+        logger.warning("Continuous streams will be capped to fit the cluster: %s", names)
+        message = (
+            f"WARNING: free capacity below the full request ({summary}); "
+            f"running degraded at ~{capped.cpu_cores} cores / "
+            f"{capped.memory_gb} GB with Trino and datagen, capped: {names}"
+        )
+    else:
+        message = (
+            f"Cluster capacity OK ({free_cores:.0f} cores / {free_gb:.0f} GB free of "
+            f"{alloc_cores:.0f} / {alloc_gb:.0f} allocatable, {summary})"
+        )
+    for warning in warnings:
+        message += f"; WARNING: {warning}"
+    return PrereqResult(
+        name="cluster-capacity", passed=True, message=message, hint=hint_lines, record=record
+    )

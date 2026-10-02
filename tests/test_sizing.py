@@ -37,6 +37,20 @@ CELLS = [(wl, m, s) for wl in TABLE_WORKLOADS for m in TABLE_MODES for s in TABL
 REFERENCE = ClusterCapacity(434_000, 4349 * GIB, 10, 64_000, 512 * GIB)
 
 
+def _free_from_total(k8s_mock):
+    """The preflight reads free capacity: make the mock report the capacity
+    its get_cluster_capacity returns as both free and allocatable, with no
+    published scratch capacity."""
+    from lakebench.k8s.client import FreeCapacity, ScratchCapacity
+
+    def _free(**_kw):
+        cap = k8s_mock.get_cluster_capacity.return_value
+        return FreeCapacity(free=cap, allocatable=cap)
+
+    k8s_mock.get_free_capacity.side_effect = _free
+    k8s_mock.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")
+
+
 def _cap(cores: int, gb: int, node_cores: int = 64, node_gb: int = 512) -> ClusterCapacity:
     return ClusterCapacity(cores * 1000, gb * GIB, 8, node_cores * 1000, node_gb * GIB)
 
@@ -146,6 +160,7 @@ def _doc_rows(rel: str) -> dict[tuple[str, str, int], tuple[int, int, int]]:
 def _preflight_need(cfg, capacity: ClusterCapacity) -> tuple[int, int]:
     with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
         get_client.return_value.get_cluster_capacity.return_value = capacity
+        _free_from_total(get_client.return_value)
         res = _check_cluster_capacity(cfg)
     m = re.search(r"needs ~(\d+) cores / (\d+) GB", res.message)
     assert m, res.message
@@ -212,6 +227,7 @@ def test_preflight_warns_when_batch_datagen_queues():
     cap = _cap(400, plan.floor.memory_gb + 50, node_gb=128)
     with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
         get_client.return_value.get_cluster_capacity.return_value = cap
+        _free_from_total(get_client.return_value)
         res = _check_cluster_capacity(cfg)
         skipped = _check_cluster_capacity(cfg, datagen_runs=False)
     assert res.passed, res.message
@@ -239,6 +255,7 @@ def test_preflight_largest_pod_counts_datagen():
     cfg = make_config(workload={"datagen": {"scale": 1}})
     with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
         get_client.return_value.get_cluster_capacity.return_value = _cap(400, 4000, node_cores=6)
+        _free_from_total(get_client.return_value)
         res = _check_cluster_capacity(cfg)
     assert not res.passed
     assert "Largest pod (datagen pod) needs 8 cores" in res.hint
@@ -255,6 +272,7 @@ def test_batch_run_without_generate_counts_no_datagen_pod():
     cap = ClusterCapacity(16 * 7900, 16 * 61 * GIB, 16, 7900, 61 * GIB)
     with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
         get_client.return_value.get_cluster_capacity.return_value = cap
+        _free_from_total(get_client.return_value)
         assert _check_cluster_capacity(cfg, datagen_runs=False).passed
         assert not _check_cluster_capacity(cfg).passed
 
@@ -274,6 +292,7 @@ def test_preflight_sizes_against_the_capacity_run_sized_with():
     assert as_run.plan.floor.cpu_cores > own.plan.floor.cpu_cores
     with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
         get_client.return_value.get_cluster_capacity.return_value = cap
+        _free_from_total(get_client.return_value)
         res = _check_cluster_capacity(cfg, sizing_capacity=None)
     assert f"needs ~{as_run.plan.floor.cpu_cores} cores" in res.message
 
@@ -296,6 +315,7 @@ def test_run_passes_its_sizing_capacity_to_the_preflight(tmp_path, monkeypatch):
     monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", fake_prereqs)
     client = mock.MagicMock()
     client.get_cluster_capacity.return_value = cap
+    _free_from_total(client)
     monkeypatch.setattr("lakebench.k8s.get_k8s_client", lambda *a, **k: client)
     CliRunner().invoke(app, ["run", str(cfg_file), "--yes"])
     assert seen.get("sizing_capacity") is cap
@@ -431,6 +451,7 @@ def _recommend_answer(wl: str, mode: str, capacity: ClusterCapacity) -> int:
     first answer."""
     with mock.patch("lakebench.cli.get_k8s_client") as get_client:
         get_client.return_value.get_cluster_capacity.return_value = capacity
+        _free_from_total(get_client.return_value)
         res = CliRunner().invoke(
             app, ["recommend", "--mode", mode, "--schema", wl], env={"COLUMNS": "400"}
         )
@@ -459,6 +480,7 @@ def test_recommend_monotonic(wl, mode):
         assert best >= previous, (cores, best, previous)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             for s in sorted({1, max(1, best // 2), best}) if best else ():
                 cfg = default_sizing_config(wl, mode, s)
                 assert _check_cluster_capacity(cfg, datagen_runs=dg).passed, (cores, s)
@@ -500,6 +522,7 @@ def test_continuous_recommend_prints_both_answers():
     cfg = default_sizing_config("customer360", "continuous", 100)
     with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
         get_client.return_value.get_cluster_capacity.return_value = REFERENCE
+        _free_from_total(get_client.return_value)
         refused = _check_cluster_capacity(cfg)
         admitted = _check_cluster_capacity(cfg, datagen_runs=False)
     assert not refused.passed and "--skip-generate" in refused.hint
@@ -576,3 +599,33 @@ def test_recommend_unknown_schema_refused():
     res = CliRunner().invoke(app, ["recommend", "--scale", "1", "--schema", "iot"])
     assert res.exit_code == 2  # USAGE: a bad argument
     assert "Unknown workload schema" in res.output
+
+
+def test_recommend_context_conflict_exits_3(monkeypatch):
+    """A context conflict while recommend reads capacity is exit 3
+    (context.changed), not a fallback to the reference table and exit 0."""
+    from lakebench.k8s.target import ContextConflictError
+
+    def boom(*_a, **_k):
+        raise ContextConflictError("this process already uses context A; refusing context B")
+
+    monkeypatch.setattr("lakebench.cli.get_k8s_client", boom)
+    res = CliRunner().invoke(app, ["recommend"])
+    assert res.exit_code == 3, res.output
+    assert "Cluster sizing reference" not in res.output
+
+
+def test_recommend_with_cores_and_memory_makes_no_cluster_call(monkeypatch):
+    called = []
+
+    def spy(*_a, **_k):
+        called.append(1)
+        raise AssertionError("no cluster call expected")
+
+    monkeypatch.setattr("lakebench.cli.get_k8s_client", spy)
+    monkeypatch.setattr("lakebench.k8s.get_k8s_client", spy)
+    monkeypatch.setattr("lakebench.k8s.client.get_k8s_client", spy)
+    monkeypatch.setattr("lakebench.k8s.target.ClusterTarget.current", spy)
+    res = CliRunner().invoke(app, ["recommend", "--cores", "434", "--memory", "4349"])
+    assert res.exit_code == 0, res.output
+    assert called == []

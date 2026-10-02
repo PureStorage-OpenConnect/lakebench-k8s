@@ -477,6 +477,12 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         qualifiers["n_batch_jobs"] = n_jobs
     if metrics.benchmark is not None:
         qualifiers["n_benchmark_queries"] = len(metrics.benchmark.queries or [])
+    preflight = (getattr(metrics, "provenance", None) or {}).get("preflight") or {}
+    if preflight.get("capacity") == "skipped":
+        # --skip-preflight: nothing checked that the cluster could hold it.
+        qualifiers["capacity"] = "capacity not checked"
+    if preflight.get("scratch") == "not_measurable":
+        qualifiers["scratch_capacity"] = "scratch capacity not checked"
 
     return Verdict.strictest(
         exit_ok=exit_ok,
