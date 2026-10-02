@@ -155,6 +155,9 @@ class DuckDBExecutor:
             f"{alarm}"
             "import duckdb, json, os; "
             "conn = duckdb.connect(); "
+            # The extensions are the deployment's pre-fetched files; a missing
+            # one errors instead of downloading from extensions.duckdb.org.
+            "conn.execute('SET autoinstall_known_extensions=false'); "
             f"conn.load_extension('{'delta' if self.table_format == 'delta' else 'iceberg'}'); "
             "conn.load_extension('httpfs'); "
             f"conn.execute(\"SET s3_endpoint='{self.s3_endpoint.replace('http://', '').replace('https://', '')}'\"); "

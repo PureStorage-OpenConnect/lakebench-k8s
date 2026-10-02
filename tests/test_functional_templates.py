@@ -102,6 +102,11 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     """
     ctx = dict(engine.context)
     cfg = engine.config
+    # The Thrift and DuckDB deployers add where the dependency set is served
+    # (deploy.deps.consumer_context); offline, the placeholder set.
+    from lakebench.deps.manifest import consumer_context, placeholder_handle
+
+    ctx.update(consumer_context(placeholder_handle(cfg)))
 
     # The Prometheus and Grafana deployers that injected image, retention and
     # storage-class variables are gone (the kube-prometheus-stack chart

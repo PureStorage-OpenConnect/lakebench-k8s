@@ -310,3 +310,110 @@ def _requirements(pins: tuple[str, ...], entries: list[Mapping[str, Any]]) -> st
         ]
         lines.append(f"{pin} --hash=sha256:{entry['sha256']}\n")
     return "".join(lines)
+
+
+# --- what consumers read from a handle -----------------------------------------------
+
+
+class DepsSetMissing(RuntimeError):
+    """A Spark job, Thrift or DuckDB pod was about to be built with no
+    verified dependency set. ``run`` loads the handle before any submit."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(
+            f"{what}: no verified dependency set for this deployment; "
+            "run `lakebench deploy <config>` (it starts the dependency server)"
+        )
+
+
+# Spark conf keys Lakebench owns: a user value in ``spark.conf`` would load
+# jars from outside the verified set, or make the controller resolve again.
+OWNED_SPARK_CONF_KEYS: frozenset[str] = frozenset(
+    {
+        "spark.jars",
+        "spark.submit.pyFiles",
+        "spark.jars.packages",
+        "spark.jars.repositories",
+        "spark.jars.ivy",
+        "spark.jars.ivySettings",
+        "spark.driver.extraClassPath",
+        "spark.executor.extraClassPath",
+    }
+)
+
+PLACEHOLDER_HOST = "lb-deps.placeholder.invalid"
+
+
+def placeholder_handle(cfg: Any) -> DepsHandle:
+    """A handle for offline manifest builds (the perf fingerprint, dry run):
+    the request's jar names, zero hashes and a host that resolves nowhere.
+    Never given to anything that submits or applies."""
+    from lakebench.deps.request import select_request
+
+    request = select_request(cfg, tools_digest="0" * 64)
+    jars = [ivy_jar_name(c) for c in request.jar_coordinates]
+    groups: dict[str, list[dict[str, Any]]] = {
+        "jars": [{"file": f, "sha256": "0" * 64, "size": 0} for f in jars]
+    }
+    if GROUP_PY_REFERENCE in request.groups:
+        groups["py-reference"] = [
+            {
+                "file": f"{p.split('==')[0]}-{p.split('==')[1]}-py3-none-any.whl",
+                "sha256": "0" * 64,
+                "size": 0,
+            }
+            for p in request.py_reference
+        ]
+    pinset = pinset_sha256(groups, jars)
+    return DepsHandle(
+        pinset_sha256=pinset,
+        request_sha256=request.request_sha256,
+        base_url=f"http://{PLACEHOLDER_HOST}:{PORT}/sets/{pinset}",
+        server_pod_uid="",
+        manifest={"pinset_sha256": pinset, "groups": groups, "jar_order": jars},
+    )
+
+
+def jar_urls(handle: DepsHandle) -> list[str]:
+    """``spark.jars`` for a handle: the set's jars in the manifest's jar
+    order, which is the classpath order Spark used for ``--packages``."""
+    from urllib.parse import quote
+
+    return [f"{handle.base_url}/jars/{quote(f)}" for f in handle.manifest["jar_order"]]
+
+
+def delta_jar(handle: DepsHandle) -> str | None:
+    """The set's one ``delta-spark_*`` jar, or None for an Iceberg set."""
+    hits = [
+        f for f in handle.manifest["jar_order"] if f.split("_", 1)[-1].startswith("delta-spark_")
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def has_group(handle: DepsHandle, group: str) -> bool:
+    return bool((handle.manifest.get("groups") or {}).get(group))
+
+
+def consumer_context(handle: DepsHandle) -> dict[str, Any]:
+    """Template context for the long-lived consumers (Spark Thrift, DuckDB):
+    where the set is served, which ConfigMaps to mount, and the Thrift
+    classpath in the set's jar order. Built from the handle only, so every
+    consumer of one deploy names one pinset."""
+    from urllib.parse import urlsplit
+
+    host = urlsplit(handle.base_url).hostname
+    return {
+        "deps_pinset": handle.pinset_sha256,
+        "deps_base_url": handle.base_url,
+        "deps_host": host,
+        "deps_tools_configmap": tools_configmap_name(handle.request_sha256),
+        "deps_manifest_configmap": MANIFEST_CONFIGMAP,
+        "deps_tools_mount": TOOLS_MOUNT,
+        "deps_manifest_mount": MANIFEST_MOUNT,
+        # The image's jars first, as the jobs' parent-first loader sees them,
+        # then the set in its jar order (an overlapping image jar wins, as in
+        # the jobs; the set's own duplicates resolve in jar order).
+        "deps_thrift_classpath": ":".join(
+            ["/opt/spark/jars/*", *(f"/extra-jars/{f}" for f in handle.manifest["jar_order"])]
+        ),
+    }

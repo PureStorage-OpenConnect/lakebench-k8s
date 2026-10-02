@@ -597,6 +597,8 @@ class DependencyServerDeployer:
             return found[-1]
         if result.status == WaitStatus.FAILED:
             raise DepsStepFailed(terminal[-1] if terminal else result.message)
+        # A timeout clamped to the deploy deadline that ran out with it.
+        deploy_deadline.check(f"dependency server {m.SERVER_NAME}", result.message)
         diagnosis = self._diagnose(core, sha)
         raise DepsStepFailed(result.message + (f" | {diagnosis}" if diagnosis else ""))
 
@@ -920,3 +922,124 @@ class DependencyServerDeployer:
                     core.delete_namespaced_config_map(cm.metadata.name, self.namespace)
         except Exception as e:  # noqa: BLE001 -- leftovers are harmless; destroy removes them
             logger.warning("could not remove old lb-deps tools ConfigMaps: %s", e)
+
+
+# --- the long-lived consumers (Spark Thrift, DuckDB) -----------------------------
+
+
+def consumer_context(engine: DeploymentEngine, what: str) -> dict[str, Any]:
+    """The template context a consumer renders with: the engine's context
+    plus where this deploy's verified set is served. Never a placeholder for
+    a real deploy: without engine.deps the consumer step fails."""
+    handle = engine.deps
+    if handle is None:
+        if not engine.dry_run:
+            raise m.DepsSetMissing(what)
+        handle = m.placeholder_handle(engine.config)
+    return {**engine.context, **m.consumer_context(handle)}
+
+
+def _consumer_init_failure(core: Any, namespace: str, pod: Any) -> str | None:
+    """A consumer pod's failed lb-deps-fetch, with its LB_DEPS_ERROR line."""
+    for cs in (pod.status.init_container_statuses or []) if pod.status is not None else []:
+        term = DependencyServerDeployer._failed_termination(cs)
+        if term is None:
+            continue
+        previous = term is not (cs.state.terminated if cs.state is not None else None)
+        try:
+            log = str(
+                core.read_namespaced_pod_log(
+                    pod.metadata.name,
+                    namespace,
+                    container=cs.name,
+                    tail_lines=50,
+                    previous=previous,
+                )
+                or ""
+            )
+        except Exception as e:  # noqa: BLE001 -- the exit code still fails the step
+            log = f"(log unavailable: {e})"
+        lines = [ln.strip() for ln in log.splitlines() if ln.strip().startswith("LB_DEPS_ERROR")]
+        detail = lines[-1] if lines else (log.strip().splitlines() or ["no log"])[-1]
+        return f"{pod.metadata.name} init container {cs.name} exited {term.exit_code}: {detail}"
+    return None
+
+
+def wait_consumer_rolled(
+    namespace: str,
+    deployment: str,
+    pinset: str | None,
+    *,
+    timeout_seconds: float,
+    what: str,
+) -> None:
+    """Wait until ``deployment`` has rolled out completely and its one pod
+    runs ``pinset`` (``lakebench.io/deps-set``) and is Ready. Ready replicas
+    alone would count the old pod during a rollout. A failed set fetch fails
+    at once. ``pinset`` None (no set check) keeps the plain rollout wait."""
+    from kubernetes import client as k8s_client
+
+    from lakebench.k8s.wait import WaitStatus, WaitTerminal, wait_for_condition
+
+    apps = k8s_client.AppsV1Api()
+    core = k8s_client.CoreV1Api()
+    terminal: list[str] = []
+
+    def check() -> tuple[bool, str]:
+        try:
+            dep = apps.read_namespaced_deployment(deployment, namespace)
+        except _api_exception() as e:
+            if _status(e) == 404:
+                return False, "not created"
+            raise
+        st = dep.status
+        want = dep.spec.replicas or 1
+        rolled = (
+            st is not None
+            and (st.observed_generation or 0) >= (dep.metadata.generation or 0)
+            and (st.replicas or 0) == want
+            and (st.updated_replicas or 0) == want
+            and (st.ready_replicas or 0) == want
+        )
+        labels = dep.spec.selector.match_labels or {}
+        selector = ",".join(f"{k}={v}" for k, v in labels.items())
+        pods = [
+            p
+            for p in core.list_namespaced_pod(namespace, label_selector=selector).items
+            if not p.metadata.deletion_timestamp
+        ]
+        for pod in pods:
+            ann = (pod.metadata.annotations or {}).get(m.POD_ANNOTATION_SET)
+            if pinset is not None and ann == pinset:
+                failed = _consumer_init_failure(core, namespace, pod)
+                if failed:
+                    terminal.append(failed)
+                    raise WaitTerminal(failed)
+        on_set = [
+            p
+            for p in pods
+            if pinset is None or (p.metadata.annotations or {}).get(m.POD_ANNOTATION_SET) == pinset
+        ]
+        if rolled and len(pods) == want and len(on_set) == want:
+            return True, "rolled out"
+        state = (
+            f"{st.ready_replicas or 0}/{want} ready, {len(on_set)}/{len(pods)} on the set"
+            if st is not None
+            else "no status"
+        )
+        return False, state
+
+    result = wait_for_condition(
+        check,
+        timeout_seconds=max(1, math.ceil(timeout_seconds)),
+        poll_interval=5,
+        description=f"{what} ({deployment}) to roll out",
+    )
+    if result.status == WaitStatus.READY:
+        return
+    if result.status == WaitStatus.FAILED and terminal:
+        raise RuntimeError(f"{what} cannot fetch the dependency set: {terminal[-1]}")
+    # The caller clamped the timeout to the deploy deadline; a wait that ran
+    # out with it is a deploy timeout, not a slow rollout.
+    deploy_deadline.check(f"{what} ({deployment}) to roll out", result.message)
+    raise RuntimeError(result.message)

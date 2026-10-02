@@ -522,18 +522,14 @@ _GOLDEN_CONF = {
     "spark.hadoop.fs.s3a.fast.upload.buffer": "bytebuffer",
     "spark.sql.parquet.compression.codec": "snappy",
     "spark.hadoop.fs.s3a.endpoint.region": "us-east-1",
-    "spark.jars.packages": (
-        "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0,"
-        "org.apache.iceberg:iceberg-aws-bundle:1.11.0,"
-        "org.apache.hadoop:hadoop-aws:3.4.1"
-    ),
 }
 # The whole silver-build owned conf, key by key from _build_manifest for
 # hive + iceberg on Spark 4.0 at scale 10 (8 executors x 4 cores, base
 # partitions 64), scratch and observability off. The schema's default
 # spark.conf seeds it; Lakebench's later literals overwrite the S3A
 # connection and thread counts and the partitions. Location keys (S3
-# endpoint, catalog uri, warehouse, catalog s3.endpoint) are left out.
+# endpoint, catalog uri, warehouse, catalog s3.endpoint, the jar URLs) are
+# left out; the jars themselves are the dependency pinset's.
 _GOLDEN_SILVER_CONF = {
     "spark.default.parallelism": "64",
     "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
@@ -563,13 +559,6 @@ _GOLDEN_SILVER_CONF = {
     "spark.hadoop.fs.s3a.retry.limit": "10",
     "spark.hadoop.fs.s3a.threads.max": "100",
     "spark.hadoop.hive.metastore.client.socket.timeout": "300s",
-    "spark.jars.ivy": "/tmp/.ivy2",
-    "spark.jars.packages": (
-        "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0,"
-        "org.apache.iceberg:iceberg-aws-bundle:1.11.0,"
-        "org.apache.hadoop:hadoop-aws:3.4.1"
-    ),
-    "spark.jars.repositories": "https://maven-central.storage-download.googleapis.com/maven2/",
     "spark.kubernetes.driver.service.deleteOnTermination": "true",
     "spark.kubernetes.executor.deleteOnTermination": "true",
     "spark.memory.fraction": "0.8",

@@ -196,17 +196,24 @@ def test_thrift_wait_is_cut_by_the_deadline(clock, monkeypatch):
         monkeypatch.setattr(thrift.time, name, getattr(clock, name))
     dep = MagicMock()
     dep.status.ready_replicas = 0
+    dep.status.replicas = dep.status.updated_replicas = dep.status.observed_generation = 1
+    dep.metadata.generation = 1
     dep.spec.replicas = 1
+    dep.spec.selector.match_labels = {"app.kubernetes.io/component": "spark-thrift-server"}
     d = thrift.SparkThriftDeployer.__new__(thrift.SparkThriftDeployer)
+    d.engine = MagicMock(deps=None)
     with (
         patch("kubernetes.client.AppsV1Api") as api,
+        patch("kubernetes.client.CoreV1Api") as core,
         deadline.deploy_deadline(40),
         deadline.component("spark-thrift"),
     ):
         api.return_value.read_namespaced_deployment.return_value = dep
+        core.return_value.list_namespaced_pod.return_value.items = []
         with pytest.raises(deadline.DeployTimeout) as e:
             d._wait_for_ready("ns", timeout_seconds=deadline.clamp(300))
-    assert "spark-thrift: deployment lakebench-spark-thrift (0/1 ready)" in str(e.value)
+    assert "spark-thrift: Spark Thrift Server (lakebench-spark-thrift) to roll out" in str(e.value)
+    assert "0/1 ready" in str(e.value)
     assert clock.now - 1000.0 <= 50
 
 

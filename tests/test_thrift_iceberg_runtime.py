@@ -1,6 +1,6 @@
 """UX D2 (SD-20): Spark Thrift loads the same Iceberg runtime as the jobs.
 
-`DeploymentEngine._build_spark_thrift_packages` read `_ICEBERG_RUNTIME_SUFFIX`
+The Thrift package list (now the dependency set) read `_ICEBERG_RUNTIME_SUFFIX`
 directly, which maps Spark 4.1 to the 4.0 runtime whatever the Iceberg
 version. The jobs call `iceberg_runtime_suffix_for`, which picks the native
 4.1 runtime from Iceberg 1.11.0. On Spark 4.1 with Iceberg 1.11, Thrift
@@ -9,13 +9,11 @@ loaded `iceberg-spark-runtime-4.0` and the jobs `iceberg-spark-runtime-4.1`.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import pytest
 
-from lakebench.deploy.engine import DeploymentEngine
-from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+from lakebench.deps import manifest as m
 from tests.conftest import make_config
+from tests.test_thrift_and_jobs_share_iceberg_runtime import job_jars, thrift_classpath
 
 
 def _cfg(image: str, iceberg: str):
@@ -26,8 +24,8 @@ def _cfg(image: str, iceberg: str):
     )
 
 
-def _runtime(packages: str) -> str:
-    (runtime,) = [p for p in packages.split(",") if ":iceberg-spark-runtime-" in p]
+def _runtime(jars: list[str]) -> str:
+    (runtime,) = [j for j in jars if "iceberg-spark-runtime-" in j]
     return runtime
 
 
@@ -55,10 +53,7 @@ def _runtime(packages: str) -> str:
 )
 def test_thrift_and_jobs_load_the_same_iceberg_runtime(image, iceberg, expected):
     cfg = _cfg(image, iceberg)
-    thrift = _runtime(DeploymentEngine._build_spark_thrift_packages(cfg))
-    job_conf = SparkJobManager(cfg, MagicMock())._build_manifest(JobType.BRONZE_VERIFY)["spec"][
-        "sparkConf"
-    ]
-    job = _runtime(job_conf["spark.jars.packages"])
-    assert thrift == expected
-    assert job == expected
+    handle = m.placeholder_handle(cfg)
+    thrift = _runtime([p.rsplit("/", 1)[1] for p in thrift_classpath(cfg, handle)[1:]])
+    job = _runtime(job_jars(cfg, handle))
+    assert thrift == job == m.ivy_jar_name(expected)

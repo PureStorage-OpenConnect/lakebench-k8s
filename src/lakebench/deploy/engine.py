@@ -493,18 +493,6 @@ class DeploymentEngine:
         return spark_mem
 
     @staticmethod
-    def _build_spark_thrift_packages(cfg: Any) -> str:
-        """``spark.jars.packages`` CSV for Spark Thrift Server.
-
-        The same list the Spark jobs load (``deps.request.jar_coordinates``),
-        so Thrift and the jobs run one Iceberg runtime (UX D2). It goes when
-        Thrift fetches the set from the deployment's lb-deps server.
-        """
-        from lakebench.deps.request import jar_coordinates
-
-        return ",".join(jar_coordinates(cfg))
-
-    @staticmethod
     def _read_ca_cert_pem(path: str) -> str:
         """Read PEM certificate file content for embedding in K8s Secret.
 
@@ -530,7 +518,7 @@ class DeploymentEngine:
         # Parse S3 endpoint for Stackable (needs host and port separately)
         from urllib.parse import urlparse
 
-        from lakebench.spark.job import _MAVEN_MIRROR_REPOS, _spark_compat
+        from lakebench.spark.job import _spark_compat
 
         parsed_s3 = urlparse(s3.endpoint)
         s3_host = (
@@ -632,12 +620,6 @@ class DeploymentEngine:
             "spark_thrift_memory_k8s": self._thrift_pod_memory(cfg),
             "spark_thrift_catalog_name": cfg.architecture.query_engine.spark_thrift.catalog_name,
             "query_engine_type": cfg.architecture.query_engine.type.value,
-            # Spark Thrift packages (computed from config versions)
-            "spark_thrift_packages": self._build_spark_thrift_packages(cfg),
-            # Fallback Maven mirror -- Ivy falls to this when Central 429s
-            # on the cluster's egress IP (see _MAVEN_MIRROR_REPOS in
-            # spark/job.py for the rationale).
-            "spark_thrift_repositories": _MAVEN_MIRROR_REPOS,
             "spark_major_minor": self._get_spark_major_minor(cfg),
             "scala_suffix": _spark_compat(cfg.images.spark)[0],
             # DuckDB

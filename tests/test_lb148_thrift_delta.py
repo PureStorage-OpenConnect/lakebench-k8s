@@ -47,7 +47,10 @@ def _engine(cfg) -> DeploymentEngine:
 
 def _render_thrift(cfg) -> dict:
     engine = _engine(cfg)
-    rendered = TemplateRenderer().render("spark-thrift/sparkapplication.yaml.j2", engine.context)
+    from lakebench.deps.manifest import consumer_context, placeholder_handle
+
+    ctx = {**engine.context, **consumer_context(placeholder_handle(engine.config))}
+    rendered = TemplateRenderer().render("spark-thrift/sparkapplication.yaml.j2", ctx)
     return yaml.safe_load(rendered)
 
 

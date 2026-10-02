@@ -195,4 +195,5 @@ markers = [
     "slow: Slow tests (skip with -m 'not slow')",
     "extended: Extended scale tests (scales 1, 10, 50, 100)",
     "stress: Stress tests at large scales (250, 500, 1000)",
+    "real_deps: the SparkJobManager keeps the production default of no dependency set",
 ]

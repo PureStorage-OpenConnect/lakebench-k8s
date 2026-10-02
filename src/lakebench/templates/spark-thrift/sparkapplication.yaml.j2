@@ -5,9 +5,11 @@
 # and HiveThriftServer2 does not support cluster mode, so a standard
 # Kubernetes Deployment is used instead.
 #
-# An init container downloads Iceberg + Hadoop AWS jars into a shared
-# volume (/extra-jars) so they are on the classpath when the Thrift
-# Server starts accepting sessions.
+# An init container fetches the deployment's dependency set (the jars the
+# Spark jobs load) from its lb-deps server into /extra-jars, checking every
+# file's sha256 against the lb-deps-manifest ConfigMap. The main container
+# puts them on the driver classpath in the set's jar order, after the
+# image's own jars.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,6 +21,10 @@ metadata:
     app.kubernetes.io/managed-by: lakebench
 spec:
   replicas: 1
+  # One pod at a time: during a set change an old pod on the old set and a
+  # new one would both serve queries.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: lakebench
@@ -28,6 +34,8 @@ spec:
       labels:
         app.kubernetes.io/name: lakebench
         app.kubernetes.io/component: spark-thrift-server
+      annotations:
+        lakebench.io/deps-set: "{{ deps_pinset }}"
     spec:
       serviceAccountName: lakebench-spark-runner
       initContainers:
@@ -56,28 +64,22 @@ spec:
             - name: truststore
               mountPath: /truststore
         {% endif %}
-        - name: download-jars
+        - name: lb-deps-fetch
           image: {{ spark_image }}
           imagePullPolicy: {{ image_pull_policy }}
-          command:
-            - /bin/bash
-            - -c
-            - |
-              set -e
-              mkdir -p /tmp/.ivy2
-              /opt/spark/bin/spark-submit \
-                --packages "{{ spark_thrift_packages }}" \
-                --repositories "{{ spark_thrift_repositories }}" \
-                --conf spark.jars.ivy=/tmp/.ivy2 \
-                --class org.apache.spark.deploy.DummyNonExistent \
-                local:///dev/null 2>&1 || true
-              cp /tmp/.ivy2/jars/*.jar /extra-jars/ 2>/dev/null || true
-              ls -la /extra-jars/
+          command: ["python3", "{{ deps_tools_mount }}/lb_deps.py", "fetch", "--group", "jars", "--dest", "/extra-jars", "--manifest", "{{ deps_manifest_mount }}/manifest.json", "--url", "{{ deps_base_url }}"]
+          env:
+            - name: HOME
+              value: /tmp
           volumeMounts:
             - name: extra-jars
               mountPath: /extra-jars
-            - name: tmp
-              mountPath: /tmp
+            - name: lb-deps-tools
+              mountPath: {{ deps_tools_mount }}
+              readOnly: true
+            - name: lb-deps-manifest
+              mountPath: {{ deps_manifest_mount }}
+              readOnly: true
       containers:
         - name: spark-thrift
           image: {{ spark_image }}
@@ -92,6 +94,9 @@ spec:
           env:
             - name: SPARK_HOME
               value: /opt/spark
+            # The launcher logs the java command line, classpath included.
+            - name: SPARK_PRINT_LAUNCH_COMMAND
+              value: "1"
             - name: SPARK_USER_NAME
               value: spark
             - name: AWS_REGION
@@ -112,13 +117,11 @@ spec:
             - /bin/bash
             - -c
             - |
-              # Copy downloaded jars into Spark's jars directory for classpath
-              cp /extra-jars/*.jar /opt/spark/jars/ 2>/dev/null || true
-              mkdir -p /tmp/spark-local /tmp/spark-warehouse /tmp/.ivy2
+              mkdir -p /tmp/spark-local /tmp/spark-warehouse
               /opt/spark/bin/spark-submit \
                 --class org.apache.spark.sql.hive.thriftserver.HiveThriftServer2 \
                 --deploy-mode client \
-                --conf spark.jars.ivy=/tmp/.ivy2 \
+                --conf "spark.driver.extraClassPath={{ deps_thrift_classpath }}" \
 {% if table_format_type == "delta" and catalog_type == "unity" %}
                 --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}=io.unitycatalog.spark.UCSingleCatalog \
@@ -208,6 +211,12 @@ spec:
           emptyDir: {}
         - name: tmp
           emptyDir: {}
+        - name: lb-deps-tools
+          configMap:
+            name: {{ deps_tools_configmap }}
+        - name: lb-deps-manifest
+          configMap:
+            name: {{ deps_manifest_configmap }}
         {% if s3_ca_cert_pem %}
         - name: ca-cert
           secret:

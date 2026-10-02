@@ -151,12 +151,8 @@ READERS: dict[str, str] = {
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
     "architecture.table_format.type": "lakebench.deploy.destroy:destroy_all",
-    "architecture.table_format.iceberg.version": (
-        "lakebench.deps.request:jar_coordinates"
-    ),
-    "architecture.table_format.delta.version": (
-        "lakebench.deps.request:jar_coordinates"
-    ),
+    "architecture.table_format.iceberg.version": ("lakebench.deps.request:jar_coordinates"),
+    "architecture.table_format.delta.version": ("lakebench.deps.request:jar_coordinates"),
     "architecture.pipeline_engine": "lakebench.engine.protocol:get_engine",
     "architecture.query_engine.type": "lakebench.deploy.destroy:destroy_all",
     "architecture.query_engine.trino.coordinator.cpu": (
@@ -205,9 +201,7 @@ READERS: dict[str, str] = {
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
     "architecture.query_engine.duckdb.catalog_name": "lakebench.benchmark.executor:get_executor",
-    "architecture.query_engine.duckdb.version": (
-        "lakebench.deploy.engine:DeploymentEngine._build_context"
-    ),
+    "architecture.query_engine.duckdb.version": "lakebench.deps.request:select_request",
     "architecture.pipeline.pattern": "lakebench.config.autosizer:_apply_cluster_scaling",
     "architecture.pipeline.mode": "lakebench.cli._run:run",
     "architecture.pipeline.cycles": "lakebench.cli._run:run",

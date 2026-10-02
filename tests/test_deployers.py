@@ -269,45 +269,59 @@ class TestDuckDBDeployerTemplates:
 
 
 class TestDuckDBDeployerWaitForReady:
-    """Tests for DuckDBDeployer._wait_for_ready()."""
+    """DuckDBDeployer._wait_for_ready(): rolled out, on this deploy's set."""
 
-    def test_wait_success(self):
+    def _seed(self, rec, *, ready: int, pinset: str):
+        from kubernetes.client.models import V1DeploymentStatus
+
+        labels = {"app.kubernetes.io/name": "lakebench", "app.kubernetes.io/component": "duckdb"}
+        rec.add_namespace("test-ns")
+        rec.add(
+            "deployments",
+            {
+                "metadata": {"name": "lakebench-duckdb", "generation": 1},
+                "spec": {"replicas": 1, "selector": {"matchLabels": labels}, "template": {}},
+            },
+            namespace="test-ns",
+        )
+        rec.store[("deployments", "test-ns", "lakebench-duckdb")].status = V1DeploymentStatus(
+            observed_generation=1, replicas=1, updated_replicas=1, ready_replicas=ready
+        )
+        rec.add(
+            "pods",
+            {
+                "metadata": {
+                    "name": "lakebench-duckdb-1",
+                    "labels": labels,
+                    "annotations": {"lakebench.io/deps-set": pinset},
+                },
+                "status": {"phase": "Running"},
+            },
+            namespace="test-ns",
+        )
+
+    def _deployer(self):
         from lakebench.deploy.duckdb import DuckDBDeployer
+        from lakebench.deps.manifest import placeholder_handle
 
         cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
         engine.config = cfg
-        deployer = DuckDBDeployer(engine)
+        engine.deps = placeholder_handle(cfg)
+        return DuckDBDeployer(engine), engine.deps.pinset_sha256
 
-        mock_dep = MagicMock()
-        mock_dep.status.ready_replicas = 1
-        mock_dep.spec.replicas = 1
+    def test_wait_success(self, recording_k8s):
+        deployer, pinset = self._deployer()
+        self._seed(recording_k8s, ready=1, pinset=pinset)
+        deployer._wait_for_ready("test-ns", timeout_seconds=5)
 
-        with patch("kubernetes.client.AppsV1Api") as mock_api:
-            mock_api.return_value.read_namespaced_deployment.return_value = mock_dep
-            # Should not raise
-            deployer._wait_for_ready("test-ns", timeout_seconds=5)
-
-    def test_wait_timeout(self):
-        from lakebench.deploy.duckdb import DuckDBDeployer
-
-        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = DuckDBDeployer(engine)
-
-        mock_dep = MagicMock()
-        mock_dep.status.ready_replicas = 0
-        mock_dep.spec.replicas = 1
-
-        with patch("kubernetes.client.AppsV1Api") as mock_api:
-            mock_api.return_value.read_namespaced_deployment.return_value = mock_dep
-            with patch("time.sleep"):
-                with patch("time.time") as mock_time:
-                    # Simulate immediate timeout
-                    mock_time.side_effect = [0, 0, 1]
-                    with pytest.raises(RuntimeError, match="did not become ready"):
-                        deployer._wait_for_ready("test-ns", timeout_seconds=0)
+    def test_wait_timeout_on_another_set(self, recording_k8s):
+        """A Ready pod on the old set is not the deploy's pod."""
+        deployer, _ = self._deployer()
+        self._seed(recording_k8s, ready=1, pinset="old" * 21 + "x")
+        with patch("lakebench.k8s.wait.time.sleep"):
+            with pytest.raises(RuntimeError, match="0/1 on the set"):
+                deployer._wait_for_ready("test-ns", timeout_seconds=1)
 
 
 # ===========================================================================

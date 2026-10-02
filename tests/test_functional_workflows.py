@@ -30,6 +30,7 @@ from lakebench.benchmark.executor import (
 )
 from lakebench.benchmark.runner import BenchmarkRunner
 from lakebench.deploy.engine import DeploymentStatus
+from lakebench.deps.manifest import placeholder_handle
 from lakebench.observability.platform_collector import PlatformMetrics, PodMetrics
 from lakebench.reports.generator import ReportGenerator
 from tests.conftest import make_config
@@ -379,6 +380,8 @@ class TestDuckDBDeployerWorkflow:
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = False
+        engine.context = {}
+        engine.deps = placeholder_handle(cfg)
 
         # Mock renderer to return valid YAML
         engine.renderer.render.return_value = """
@@ -409,6 +412,8 @@ spec:
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = False
+        engine.context = {}
+        engine.deps = placeholder_handle(cfg)
         engine.renderer.render.side_effect = Exception("Template error")
 
         deployer = DuckDBDeployer(engine)
