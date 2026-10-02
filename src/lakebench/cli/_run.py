@@ -1608,7 +1608,7 @@ def run(
                 "With --generate: empty the bronze bucket before generating. "
                 "Without this flag, a non-empty bronze prefix is refused "
                 "(exit 3) so existing datagen output is never overwritten "
-                "silently. No effect without --generate."
+                "silently. Refused without --generate or --generate-only."
             ),
         ),
     ] = False,
@@ -1742,7 +1742,7 @@ def run(
     # refused one exits 2 with no cluster call made (cli/_run_args.py).
     from lakebench.cli._run_args import RunArgs, validate_run_args
 
-    validate_run_args(
+    _plan = validate_run_args(
         RunArgs(
             stage=stage,
             timeout=timeout,
@@ -1771,7 +1771,7 @@ def run(
     # mode this run will use. --local runs Customer 360 batch only.
     from lakebench.config.support import UNSUPPORTED, support_state_for_config
 
-    _run_mode = "continuous" if (sustained or continuous) else cfg.architecture.pipeline.mode
+    _run_mode = _plan.mode
     if local:
         _support = support_state_for_config(cfg, _run_mode, system="local")
     else:
@@ -1879,9 +1879,7 @@ def run(
         # capacity check is told the mode the run will use (LB-155). Datagen
         # is left out only where the run itself releases its cores: under
         # --skip-generate with a finished lakebench-datagen Job (LB-158).
-        _use_sustained = bool(
-            sustained or continuous or is_continuous_mode(cfg.architecture.pipeline.mode)
-        )
+        _use_sustained = _plan.mode == "continuous"
         _datagen_runs = True
         if _use_sustained and skip_generate:
             from lakebench.cli._sustained import _datagen_job_state
@@ -1928,8 +1926,7 @@ def run(
         print_info("Skipping prerequisites (--skip-preflight)")
 
     # Branch: sustained streaming pipeline (CLI flag overrides config)
-    use_sustained = sustained or continuous or is_continuous_mode(cfg.architecture.pipeline.mode)
-    if use_sustained:
+    if _plan.mode == "continuous":
         _run_sustained(
             cfg,
             config_file,

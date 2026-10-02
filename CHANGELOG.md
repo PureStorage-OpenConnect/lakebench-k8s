@@ -11,14 +11,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   An unknown `--stage` used to be found only after `run` had read the
   cluster's capacity (and, with `--yes`, could auto-deploy first), and
   several flags were silently dropped by the mode they did not apply to.
-  Now `run` exits 2 before contacting the cluster for: `--stage` with a
-  continuous run, `--local` with `--deploy-only` or `--generate-only`,
-  `--regenerate` without `--generate` or `--generate-only`,
-  `--skip-generate` with `--generate`, `--force-reset` on a batch run,
-  `--force-rebuild` on a continuous run, `--duration` on a batch run or
-  below 60, `--timeout` below 1, as well as an unknown `--stage` and
-  `--deploy-only` with `--generate-only`. Drop the flag the mode does not
-  use.
+  Now `run` exits 2 before contacting the cluster for: an unknown
+  `--stage`; `--stage` with a continuous run; `--deploy-only` with
+  `--generate-only`, `--stage`, `--generate` or `--skip-generate`;
+  `--generate-only` with `--skip-generate`; `--local` with `--deploy-only`,
+  `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
+  `--regenerate` without `--generate` or `--generate-only`, or with
+  `--local` or a continuous run other than `--generate-only`; `--skip-generate` with `--generate`;
+  `--force-reset` on a batch run; `--force-rebuild` on a continuous run;
+  `--duration` on a batch run or below 60; `--timeout` below 1. The full
+  list is under `run` in docs/cli-reference.md. `reproduce` refuses a
+  `--timeout` below 1 before its pre-run destroy. Drop the flag the mode
+  does not use.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
