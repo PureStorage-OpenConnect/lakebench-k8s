@@ -6,7 +6,7 @@
   "unscripted": "every seam reached is scripted; see calls.",
   "runs_saved": "one save_run in the finally block (cli/_run.py:3190).",
   "exported_run_id": "cli/_run.py:1926; normalised to <run_id>.",
-  "calls_prefix": "0-15 identical to batch_c360: capacity client (cli/_run.py:1755-1760), prerequisites sustained=False datagen_runs=True (batch, so _datagen_job_state is not read: cli/_run.py:1837-1845), namespace check, preflight infra (cli/_run.py:255-318, hive + trino: 4 AppsV1Api reads), SparkOperator init/check/ensure (:1962-1983), get_k8s_client (:1989), deploy_scripts_configmap (:1999). --timeout 1200 is explicit, so no auto-scaled timeout (cli/_run.py:1770).",
+  "calls_prefix": "0-15 identical to batch_c360: capacity client (cli/_run.py:1755-1760), prerequisites sustained=False datagen_runs=False (batch under --skip-generate with one cycle creates no datagen pod, so none is counted and _datagen_job_state is not read: cli/_run.py, the prerequisites call), namespace check, preflight infra (cli/_run.py:255-318, hive + trino: 4 AppsV1Api reads), SparkOperator init/check/ensure (:1962-1983), get_k8s_client (:1989), deploy_scripts_configmap (:1999). --timeout 1200 is explicit, so no auto-scaled timeout (cli/_run.py:1770).",
   "calls_leftover_streams": "financial only (cli/_run.py:2159-2163): _stop_leftover_streams (cli/_sustained.py:260-285) deletes the 3 stream apps via JobManager._delete_job, then reads each <app>-driver pod once (FakeCoreV1Api 404, run_harness.py:463-466).",
   "calls_stages": "per stage: submit_job, wait_for_completion(timeout 1200 from --timeout, poll _STAGE_POLL_S=5; cli/_run.py:2329-2335, 548), application_end; the first stage reads the cluster offset once (VersionApi get_code, cli/_run.py:661-667, the offset is then cached on the monitor); S3 init + get_bucket_size of the stage bucket because no AML JOB METRICS block emits output_size_gb (cli/_run.py:2425-2445).",
   "calls_scoring": "_run_financial_scoring (cli/_run.py:1238-1316): submit_job(SCORE_FINANCIAL, arguments=[--manifest, --output]) with no cycle_env, wait_for_completion('lakebench-score-financial', 1200, poll 15) with no progress callback and no application_end, then S3 init, raw_client, get_object(runchar-gold, scoring/<run_id>/recall.json) served from the fixture (run_harness.py:1448-1452, 811-822). Unchanged by the stricter fake: run() exports LB_RUN_ID = run_id (cli/_run.py:1927 at 3d067c0) before scoring and json_key uses the same run_id (cli/_run.py:1267 at 3d067c0), so key.replace('<run_id>', LB_RUN_ID) equals the requested Key, the sidecar is served and nothing is unscripted; the recorded Key still normalises to scoring/<run_id>/recall.json. calls does not move.",
@@ -58,7 +58,7 @@
    "run",
    {
     "sustained": false,
-    "datagen_runs": true
+    "datagen_runs": false
    }
   ],
   [

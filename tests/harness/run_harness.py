@@ -1614,7 +1614,10 @@ def _fake_collect_from_k8s(rec: Recorder):
 def _passing_prerequisites(rec: Recorder):
     from lakebench.cli._prerequisites import PrereqReport, PrereqResult
 
-    def run_prerequisites(cfg, *, sustained=None, datagen_runs=True):
+    def run_prerequisites(cfg, *, sustained=None, datagen_runs=True, sizing_capacity=None):
+        # sizing_capacity is the capacity run auto-sized against; the harness
+        # cluster reports none, so it is None in every scenario and is not
+        # part of the trace.
         rec.add("prerequisites", "run", {"sustained": sustained, "datagen_runs": datagen_runs})
         return PrereqReport(checks=[PrereqResult(name="harness", passed=True, message="faked")])
 
