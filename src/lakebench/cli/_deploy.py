@@ -19,6 +19,7 @@ from lakebench.cli._helpers import (
     _journal_safe,
     check_datagen_scale,
     console,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -705,7 +706,14 @@ def _deploy_impl(
     else:
         failed_component = next((r for r in results if r.status == DeploymentStatus.FAILED), None)
         guidance = "Check the errors above, then re-run 'lakebench deploy'."
-        if failed_component:
+        if failed_component and require_new:
+            # A re-run would refuse the namespace this deploy may have made.
+            guidance = (
+                f"Failed at: {failed_component.component}\n"
+                "Nothing that existed was adopted. If this deploy created the "
+                f"namespace, `lakebench destroy {esc(config_file)}` removes it; then deploy again."
+            )
+        elif failed_component:
             guidance = (
                 f"Failed at: {failed_component.component}\n"
                 "Fix the issue above, then re-run 'lakebench deploy'.\n"

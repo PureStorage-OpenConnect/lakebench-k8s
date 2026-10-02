@@ -909,6 +909,9 @@ class DeploymentEngine:
         namespace = self.config.get_namespace()
 
         if self.dry_run:
+            if self.require_new and self.k8s.namespace_exists(namespace):
+                # A read only: the real run would refuse it.
+                return self._existing_refusal("namespace", f"namespace {namespace!r}", start)
             return DeploymentResult(
                 component="namespace",
                 status=DeploymentStatus.SUCCESS,
@@ -1401,7 +1404,8 @@ class DeploymentEngine:
             return DeploymentResult(
                 component="s3-buckets",
                 status=DeploymentStatus.SUCCESS,
-                message=f"Would create buckets: {', '.join(bucket_names)}",
+                message=f"Would create buckets: {', '.join(bucket_names)}"
+                + (" (existing ones refused on the real run)" if self.require_new else ""),
                 elapsed_seconds=0,
             )
 

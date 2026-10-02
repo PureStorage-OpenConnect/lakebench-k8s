@@ -918,3 +918,45 @@ def test_expect_incarnation_mismatch_says_the_expectation_was_not_met(cfg_path, 
     assert res.exit_code == 3, res.output
     assert "not the incarnation the caller expected" in res.output
     assert "redeployed after this command checked it" not in res.output
+
+
+def test_engine_require_new_dry_run_reports_the_refusal():
+    eng, k8s = _engine(exists=True)
+    eng.dry_run = True
+    result = eng._deploy_namespace()
+    assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
+    k8s.apply_manifest.assert_not_called()
+
+
+def test_nameless_check_mismatch_keeps_the_redeployed_wording(tmp_path, monkeypatch):
+    """Without a caller's expectation the incarnation came from this
+    command's own check, so 'redeployed after this command checked it'."""
+    import lakebench.cli._nameless as nameless
+    from lakebench.cli import app
+    from tests import test_saf2_deploy_state as t
+
+    core = t.FakeCore()
+    monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
+    monkeypatch.setattr(nameless, "_bucket_owned_factory", lambda cfg: lambda b: False)
+    cfg = t._nameless(tmp_path)
+    t._legacy_state(tmp_path)
+    t._v16_namespace(core)
+
+    class Engine:
+        def __init__(self, cfg, **_):
+            pass
+
+        def destroy_all(self, **kw):
+            return [
+                DeploymentResult(
+                    component="ownership-check",
+                    status=DeploymentStatus.FAILED,
+                    message="Destroy NOT started",
+                    details={"incarnation_mismatch": True, "expected": "u1#n16", "found": "u1#x"},
+                )
+            ]
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+    res = CliRunner().invoke(app, ["destroy", str(cfg), "--force", "--name", t.NAME])
+    assert res.exit_code == 3, res.output
+    assert "redeployed after this command checked it" in res.output
