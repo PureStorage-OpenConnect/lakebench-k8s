@@ -253,7 +253,10 @@ def generate(
         if result.status != DeploymentStatus.SUCCESS:
             print_error(f"Failed to submit job: {result.message}")
             _journal_safe(j.end_command, success=False, message=result.message)
-            raise typer.Exit(ExitCode.FAILED)
+            # A refusal (stale bronze, live datagen pods) exits 3.
+            from lakebench.cli._exit import refused_result_code
+
+            raise typer.Exit(refused_result_code([result]) or ExitCode.FAILED)
 
         print_success("Datagen job submitted")
         console.print(f"  Parallelism: {esc(result.details.get('parallelism', '?'))} pods")

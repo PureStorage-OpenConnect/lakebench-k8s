@@ -392,8 +392,16 @@ PATHS: tuple[ExitPath, ...] = (
         "run.bronze_nonempty",
         _C.REFUSED,
         "datagen would write over a non-empty bronze prefix: without --regenerate, or "
-        "with it on a bucket this deployment cannot prove it owns",
+        "with it on a bucket this deployment cannot prove it owns (a continuous run "
+        "too, when objects land in the prefix after its reset)",
         v16_code=2,
+    ),
+    ExitPath(
+        "datagen.pods_live",
+        _C.REFUSED,
+        "`generate`, `run --generate` or a continuous run: an earlier datagen Job's "
+        "pods were still running five minutes after the Job was deleted, and would "
+        "write into the new corpus",
     ),
     ExitPath(
         "series.corpus_changed",

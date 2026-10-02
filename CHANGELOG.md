@@ -939,14 +939,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
 ### Fixed
+- **A fresh generate waits for an earlier datagen Job's pods to stop.**
+  The previous Job is deleted in the background, so its pods kept running
+  for their grace period and could land a `part-*` file in the datagen
+  prefix after it was cleared; silver then counted the old file as this
+  run's rows and nothing refused. `generate`, `run --generate`, a
+  multi-cycle run's first cycle and a continuous run (before its reset
+  clears the raw prefix, C360 and AML) now wait until no pod labelled
+  `app=lakebench-datagen` is still running before they clear anything or
+  start the new Job. The wait is bounded at five minutes; a pod still
+  running then refuses with exit 3 (`datagen.pods_live`) and names it, and
+  pods that cannot be listed fail the command (exit 1).
+- **A datagen refusal exits 3.** A stale-bronze refusal raised by the
+  datagen deployer (a continuous run, or a batch run whose prefix filled
+  after the CLI gate) exited 1; it now exits 3 (`run.bronze_nonempty`), as
+  the exit-code table says.
 - **A continuous run's stale-bronze refusal names a remedy that applies.**
   When datagen found objects in a bronze prefix this deployment cannot prove
   it may empty, the message told the operator to pass `--allow-stale-bronze`,
   which `run` refuses on a continuous run (exit 2). The continuous reset has
-  already cleared that prefix by then, so the objects were written since,
-  most likely by an earlier datagen Job's pods still stopping. The message
-  now says to re-run once no `lakebench-datagen` pod is left (the reset
-  clears the prefix again) and that `--force-reset` does not change this
+  already cleared that prefix by then, so another writer put the objects
+  there since. The message now says to re-run once `kubectl get pods -l
+  app=lakebench-datagen` lists none and nothing else writes there (the reset
+  clears the prefix again), and that `--force-reset` does not change this
   check. Batch messages, and `run --continuous --generate-only`, which does
   take the flag, are unchanged.
 - **Destroy stops at a failed Spark Operator restart.** After removing the

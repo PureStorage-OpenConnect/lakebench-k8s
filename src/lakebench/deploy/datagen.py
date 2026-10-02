@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from lakebench.config.datagen_seed import config_perturbation, config_seed
-from lakebench.exit_codes import ExitCode
+from lakebench.exit_codes import REFUSAL_DETAIL, ExitCode
 
 from .engine import DeploymentResult, DeploymentStatus
 
@@ -87,13 +87,124 @@ def _clear_clock_best_effort(cfg: Any) -> None:
             logger.warning("could not clear the bronze data clock: %s", e)
 
 
-class StaleBronzeRefused(RuntimeError):
+class DatagenRefused(RuntimeError):
+    """Datagen did not start because starting it could corrupt the corpus.
+
+    ``exit_path`` names the ``lakebench.exit_codes`` path a caller reports
+    (``deploy`` puts it in ``details[REFUSAL_DETAIL]``); None means the
+    state could not be checked, an ordinary failure.
+    """
+
+    exit_path: str | None = None
+
+
+class StaleBronzeRefused(DatagenRefused):
     """Datagen would write over objects in a bronze bucket this deployment may not empty.
 
     Raised by ``DatagenDeployer``'s cycle-0 path when the CLI gate was
     skipped: stale ``part-*`` files there would be read by silver as
     this run's data and over-counted.
     """
+
+    exit_path = "run.bronze_nonempty"
+
+
+class DatagenPodsStillRunning(DatagenRefused):
+    """An earlier datagen Job's pods were still running when the wait ran out."""
+
+    exit_path = "datagen.pods_live"
+
+
+class DatagenPodsUnknown(DatagenRefused):
+    """The datagen pods could not be listed, so a fresh generate cannot start."""
+
+
+#: Label every datagen pod carries (templates/datagen/job.yaml.j2).
+DATAGEN_POD_SELECTOR = "app=lakebench-datagen"
+
+#: How long a fresh generate waits for an earlier datagen Job's pods to stop
+#: after the Job is deleted. The pods get SIGTERM and the default 30 s grace
+#: period; this leaves room for a slow kubelet.
+DATAGEN_POD_STOP_WAIT_S = 300.0
+_DATAGEN_POD_POLL_S = 3.0
+
+
+def _kubectl_pods_hint(cfg: Any) -> str:
+    ctx = cfg.platform.kubernetes.context or ""
+    ctx_arg = f" --context {ctx}" if ctx else ""
+    return f"kubectl get pods{ctx_arg} -n {cfg.get_namespace()} -l {DATAGEN_POD_SELECTOR}"
+
+
+def live_datagen_pods(namespace: str) -> list[str]:
+    """Names of the namespace's datagen pods that may still write.
+
+    A pod whose phase is Succeeded or Failed has stopped (its containers
+    exited and do not restart); any other pod, including one already being
+    deleted, may still land a file. Raises on an API error: a caller that
+    cannot list the pods must not assume there are none.
+    """
+    from kubernetes import client as k8s_client
+
+    pods = k8s_client.CoreV1Api().list_namespaced_pod(
+        namespace, label_selector=DATAGEN_POD_SELECTOR, _request_timeout=30
+    )
+    return sorted(
+        p.metadata.name
+        for p in (pods.items or [])
+        if getattr(p.status, "phase", None) not in ("Succeeded", "Failed")
+    )
+
+
+def wait_for_datagen_pods_stopped(
+    cfg: Any, *, timeout_s: float | None = None, poll_s: float | None = None
+) -> None:
+    """Return once no datagen pod in the namespace may still write.
+
+    Bounded: raises ``DatagenPodsStillRunning`` (refused) when a pod is
+    still running after ``timeout_s``, and ``DatagenPodsUnknown`` when the
+    pods could not be listed by then. Call it after the old Job is deleted
+    and before anything clears or checks the datagen prefix.
+    """
+    timeout_s = DATAGEN_POD_STOP_WAIT_S if timeout_s is None else timeout_s
+    poll_s = _DATAGEN_POD_POLL_S if poll_s is None else poll_s
+    namespace = cfg.get_namespace()
+    deadline = time.time() + timeout_s
+    announced = False
+    while True:
+        error: Exception | None = None
+        live: list[str] = []
+        try:
+            live = live_datagen_pods(namespace)
+        except Exception as e:  # noqa: BLE001 -- retried until the deadline
+            error = e
+        if error is None and not live:
+            return
+        if time.time() >= deadline:
+            if error is not None:
+                raise DatagenPodsUnknown(
+                    f"could not list the datagen pods in {namespace} ({error}); a fresh "
+                    "generate does not start while an earlier datagen pod may still write"
+                )
+            raise DatagenPodsStillRunning(
+                f"datagen pod(s) {', '.join(live)} of an earlier lakebench-datagen Job "
+                f"are still running {timeout_s:.0f}s after the Job was deleted. A fresh "
+                "generate would let them write into the new corpus, where silver would "
+                f"count their files as this run's rows. Re-run once `{_kubectl_pods_hint(cfg)}` "
+                "lists none (a pod stuck on an unreachable node may need "
+                "`kubectl delete pod --force`)."
+            )
+        if not announced and live:
+            logger.info(
+                "waiting up to %.0fs for %d earlier datagen pod(s) to stop", timeout_s, len(live)
+            )
+            announced = True
+        time.sleep(poll_s)
+
+
+def _refusal_details(e: BaseException) -> dict[str, Any]:
+    """``details`` for a failed deploy result: the refusal's exit path, if any."""
+    path = getattr(e, "exit_path", None) if isinstance(e, DatagenRefused) else None
+    return {REFUSAL_DETAIL: path} if path else {}
 
 
 def _s3_client_for(cfg: Any) -> Any:
@@ -498,11 +609,11 @@ class DatagenDeployer:
             target_tb = (dims.approx_bronze_gb / total_cycles) / 1024.0
             context["datagen_target_tb"] = f"{target_tb:.6f}"
 
-            self._delete_existing_job(namespace)
+            self.stop_previous_job()
 
             # Cycle 0 is a fresh write: clear stale files a prior generate left,
-            # after the previous job is gone so nothing writes mid-clear. Append
-            # cycles (n > 0) keep the earlier cycles' files (LB-185).
+            # after the previous job's pods have stopped so nothing writes
+            # mid-clear. Append cycles (n > 0) keep the earlier cycles' files.
             self._clear_bronze_prefix_if_fresh(cycle_index, context["datagen_path_prefix"])
 
             for template_name in self.TEMPLATES:
@@ -528,12 +639,16 @@ class DatagenDeployer:
             )
 
         except Exception as e:
-            logger.exception("Datagen cycle deployment failed")
+            if isinstance(e, DatagenRefused):
+                logger.warning("Datagen cycle deployment failed: %s", e)
+            else:
+                logger.exception("Datagen cycle deployment failed")
             return DeploymentResult(
                 component="datagen",
                 status=DeploymentStatus.FAILED,
                 message=f"Datagen cycle {cycle_index + 1} failed: {e}",
                 elapsed_seconds=time.time() - start,
+                details=_refusal_details(e),
             )
 
     def _clear_bronze_prefix_if_fresh(self, cycle_index: int, path_prefix: str) -> None:
@@ -598,15 +713,14 @@ class DatagenDeployer:
             )
             return
         if self.continuous:
-            ns = self.config.get_namespace()
             raise StaleBronzeRefused(
                 f"s3://{bucket}/{prefix} holds objects and this deployment cannot prove "
                 f"it may empty {bucket}. This run's continuous reset cleared the prefix "
-                "before datagen, so they were written since, most likely by an earlier "
-                "lakebench-datagen Job's pods still stopping. Re-run once `kubectl get "
-                f"pods -n {ns} -l job-name=lakebench-datagen` lists none; the reset "
-                "clears the prefix again. A continuous run's own datagen does not take "
-                "--allow-stale-bronze, and --force-reset does not change this check."
+                "before datagen, so another writer put them there since. Re-run once "
+                f"`{_kubectl_pods_hint(self.config)}` lists none and nothing else writes "
+                "there; the reset clears the prefix again. A continuous run's own "
+                "datagen does not take --allow-stale-bronze, and --force-reset does not "
+                "change this check."
             )
         raise StaleBronzeRefused(
             f"s3://{bucket}/{prefix} holds objects and this deployment did not create "
@@ -634,11 +748,11 @@ class DatagenDeployer:
         try:
             context = self._build_datagen_context()
 
-            self._delete_existing_job(namespace)
+            self.stop_previous_job()
 
             # A single-cycle generate is a fresh write: clear stale files after
-            # the previous job is gone, so nothing writes into the prefix
-            # mid-clear.
+            # the previous job's pods have stopped, so nothing writes into the
+            # prefix mid-clear.
             self._clear_bronze_prefix_if_fresh(0, context["datagen_path_prefix"])
 
             # Render and apply job template
@@ -661,13 +775,28 @@ class DatagenDeployer:
             )
 
         except Exception as e:
-            logger.exception("Datagen deployment failed")
+            if isinstance(e, DatagenRefused):
+                logger.warning("Datagen deployment failed: %s", e)
+            else:
+                logger.exception("Datagen deployment failed")
             return DeploymentResult(
                 component="datagen",
                 status=DeploymentStatus.FAILED,
                 message=f"Datagen job submission failed: {e}",
                 elapsed_seconds=time.time() - start,
+                details=_refusal_details(e),
             )
+
+    def stop_previous_job(self) -> None:
+        """Delete an earlier lakebench-datagen Job and wait for its pods to stop.
+
+        The delete uses Background propagation, so the pods outlive the Job
+        by their grace period and may still land files. Raises
+        ``DatagenPodsStillRunning`` or ``DatagenPodsUnknown`` (bounded wait,
+        ``wait_for_datagen_pods_stopped``).
+        """
+        self._delete_existing_job(self.config.get_namespace())
+        wait_for_datagen_pods_stopped(self.config)
 
     def _delete_existing_job(self, namespace: str, *, request_timeout: int | None = None) -> None:
         """Delete existing datagen job if present.

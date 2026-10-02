@@ -3120,6 +3120,25 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(ExitCode.REFUSED)
         _stop_leftover_streams(job_manager, cfg.get_namespace())
+        datagen = None if skip_generate else DatagenDeployer(engine, continuous=True)
+        if datagen is not None:
+            # An earlier datagen Job's pods would keep writing into the raw
+            # prefix the reset is about to clear, and silver would count
+            # their files as this run's rows: delete the Job and wait
+            # (bounded) for its pods to stop before anything is cleared.
+            from lakebench.deploy.datagen import DatagenRefused
+            from lakebench.exit_codes import path_code
+
+            _stage = "datagen"
+            try:
+                datagen.stop_previous_job()
+            except DatagenRefused as e:
+                print_error(f"Refusing to reset continuous state: {e}")
+                pipeline_success = False
+                raise typer.Exit(
+                    path_code(e.exit_path) if e.exit_path else ExitCode.FAILED
+                ) from None
+            _stage = "reset"
         if not skip_generate:
             # The namespace's fleet sidecar describes the corpus this run
             # clears and regenerates.
@@ -3152,14 +3171,17 @@ def _run_sustained(
             _stage = "datagen"
             console.print()
             console.print("[bold]Starting datagen...[/bold]")
-            datagen = DatagenDeployer(engine, continuous=True)
+            assert datagen is not None  # built before the reset when generating
             _interrupt.creating("Job", "lakebench-datagen")
             datagen_result = datagen.deploy()
             if datagen_result.status != DeploymentStatus.SUCCESS:
                 _interrupt.not_created("Job", "lakebench-datagen")
                 print_error(f"Failed to start datagen: {datagen_result.message}")
                 pipeline_success = False
-                raise typer.Exit(ExitCode.FAILED)
+                # A refusal (stale bronze, live datagen pods) exits 3.
+                from lakebench.cli._exit import refused_result_code
+
+                raise typer.Exit(refused_result_code([datagen_result]) or ExitCode.FAILED)
             _interrupt.datagen_created()
             print_success("Datagen started (continuous mode)")
             # Only when this run started datagen: --skip-generate journalled

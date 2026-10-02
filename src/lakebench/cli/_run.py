@@ -2281,6 +2281,14 @@ def _run_once(
                     _interrupt.datagen_created()
                 else:
                     _interrupt.not_created("Job", "lakebench-datagen")
+                    # A refusal (stale bronze, live datagen pods) created no
+                    # Job: stop here with 3 instead of polling for progress.
+                    from lakebench.cli._exit import refused_result_code
+
+                    _refused = refused_result_code([_dg_deploy])
+                    if _refused is not None:
+                        print_error(f"Datagen refused: {_dg_deploy.message}")
+                        raise typer.Exit(_refused)
 
                 # Progress bar (same as standalone generate command)
                 _dg_start = _time.time()
@@ -2523,6 +2531,12 @@ def _run_once(
                             f"Datagen cycle {cycle_idx + 1} failed: {datagen_result.message}"
                         )
                         pipeline_success = False
+                        # A refusal (stale bronze, live datagen pods) exits 3.
+                        from lakebench.cli._exit import refused_result_code
+
+                        _pipeline_exit_code = (
+                            refused_result_code([datagen_result]) or _pipeline_exit_code
+                        )
                         break
                     else:
                         ts_start = datagen_result.details.get("timestamp_start", "")

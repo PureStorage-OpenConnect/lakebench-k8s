@@ -1654,6 +1654,11 @@ class FakeDatagenDeployer:
         self._rec = rec
         _checked(rec, DatagenDeployer.__init__, *args, **kwargs)
 
+    def stop_previous_job(self, *args, **kwargs) -> None:
+        """Before the continuous reset: no earlier datagen Job or pod is left."""
+        _checked(self._rec, self._real.stop_previous_job, *args, **kwargs)
+        self._rec.add("Datagen", "stop_previous_job")
+
     def deploy(self, *args, **kwargs):
         from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 

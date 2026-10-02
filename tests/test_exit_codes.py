@@ -717,6 +717,24 @@ def _scenario_run_bronze_nonempty(monkeypatch, tmp_path):
     return _runner().invoke(app, ["run", str(cfg), *_RUN_GENERATE, "--yes"])
 
 
+def _scenario_datagen_pods_live(monkeypatch, tmp_path):
+    dg = _fake_s3(monkeypatch)  # an empty bronze prefix: the gate proceeds
+    dg._stub_run_deps(monkeypatch)
+    # The deployer deletes the earlier Job, but one of its pods never stops.
+    from lakebench.deploy import datagen as _datagen
+
+    monkeypatch.setattr(
+        _datagen.DatagenDeployer,
+        "_build_datagen_context",
+        lambda self: {"datagen_path_prefix": "customer/interactions"},
+    )
+    monkeypatch.setattr(_datagen.DatagenDeployer, "_delete_existing_job", lambda *a, **k: None)
+    monkeypatch.setattr(_datagen, "live_datagen_pods", lambda ns: ["lakebench-datagen-0-old"])
+    monkeypatch.setattr(_datagen, "DATAGEN_POD_STOP_WAIT_S", 0.0)
+    cfg = dg._write_cfg(tmp_path)
+    return _runner().invoke(app, ["generate", str(cfg), "--yes"])
+
+
 def _scenario_s3_unreachable(monkeypatch, tmp_path):
     dg = _fake_s3(monkeypatch, init_error="endpoint unreachable")
     dg._stub_run_deps(monkeypatch)
@@ -1447,6 +1465,7 @@ SCENARIOS = {
     "destroy.namespace_terminating": _scenario_destroy_namespace_terminating,
     "deploy.identity_foreign": _scenario_deploy_identity_foreign,
     "run.bronze_nonempty": _scenario_run_bronze_nonempty,
+    "datagen.pods_live": _scenario_datagen_pods_live,
     "run.datagen_timeout": _scenario_run_datagen_timeout,
     "run.prereq_failed": _scenario_run_prereq_failed,
     "run.deps_missing": _scenario_run_deps_missing,
@@ -1495,6 +1514,7 @@ EXPECTED_STDERR = {
     # The scenario's bucket has no ownership proof, so the gate's unowned row.
     "run.bronze_nonempty": "cannot prove it owns",
     "s3.unreachable": "refusing to generate",
+    "datagen.pods_live": "lakebench-datagen-0-old of an earlier lakebench-datagen Job",
     "run.prereq_failed": "ERROR Prerequisites not met",
     "run.deps_missing": "has no dependency server",
     "run.deps_stale": "resolved for another request",
