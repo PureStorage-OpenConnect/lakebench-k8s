@@ -29,7 +29,10 @@ def _free_from_total(k8s_mock):
 
     def _free(**_kw):
         cap = k8s_mock.get_cluster_capacity.return_value
-        return FreeCapacity(free=cap, allocatable=cap)
+        # One node with the largest node's resources free, for the
+        # one-pod-on-one-node check.
+        node = (cap.largest_node_cpu_millicores, cap.largest_node_memory_bytes)
+        return FreeCapacity(free=cap, allocatable=cap, free_by_node=(node,))
 
     k8s_mock.get_free_capacity.side_effect = _free
     k8s_mock.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")

@@ -421,8 +421,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   counts, so a single-node cluster is checked rather than skipped. With
   scratch enabled the scratch request is compared with the StorageClass's
   `CSIStorageCapacity`; none published is a warning, recorded as
-  `provenance.preflight.scratch: not_measurable`. Every run records
-  `provenance.preflight` (provenance, not identity), and a run with
+  `provenance.preflight.scratch: not_measurable`. A batch or continuous
+  cluster run records `provenance.preflight` (provenance, not identity;
+  `--local` runs have no preflight), and a run with
   `--skip-preflight` records `capacity: skipped` with the verdict qualifier
   "capacity not checked".
 - **`recommend` exits 3 on a context conflict** while reading capacity,
@@ -1076,6 +1077,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `PYTHONPATH=src python -m lakebench` instead.
 
 ### Known limitations
+- **The capacity preflight sums free capacity across nodes.** Ten nodes
+  with 12 cores free each read as 120 free cores, though each holds one
+  8-core pod; only the largest pod is checked against a single node. The
+  scratch check sums the StorageClass's `CSIStorageCapacity` and ignores
+  `maximumVolumeSize`, and with scratch disabled the executors' node disk
+  is not checked.
 - **Continuous above scale 50 should generate first.** The autosizer sizes
   the datagen Job to about 90% of the CPU left after the always-on pods,
   and the capacity preflight counts it beside the streams, so a continuous

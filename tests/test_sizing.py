@@ -45,7 +45,10 @@ def _free_from_total(k8s_mock):
 
     def _free(**_kw):
         cap = k8s_mock.get_cluster_capacity.return_value
-        return FreeCapacity(free=cap, allocatable=cap)
+        # One node with the largest node's resources free, for the
+        # one-pod-on-one-node check.
+        node = (cap.largest_node_cpu_millicores, cap.largest_node_memory_bytes)
+        return FreeCapacity(free=cap, allocatable=cap, free_by_node=(node,))
 
     k8s_mock.get_free_capacity.side_effect = _free
     k8s_mock.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")
@@ -260,7 +263,7 @@ def test_preflight_largest_pod_counts_datagen():
         _free_from_total(get_client.return_value)
         res = _check_cluster_capacity(cfg)
     assert not res.passed
-    assert "Largest pod (datagen pod) needs 8 cores" in res.hint
+    assert "Largest pod needs 8 cores (datagen pod)" in res.hint
 
 
 def test_batch_run_without_generate_counts_no_datagen_pod():

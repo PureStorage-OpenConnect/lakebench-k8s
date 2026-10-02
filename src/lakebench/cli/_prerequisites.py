@@ -57,7 +57,7 @@ class PrereqReport:
 PREFLIGHT_SKIPPED: dict[str, Any] = {
     "capacity": "skipped",
     "scratch": "skipped",
-    "scratch_reason": "--skip-preflight",
+    "scratch_reason": "--skip-preflight (every prerequisite check was skipped)",
     "storage_class": None,
 }
 
@@ -354,7 +354,7 @@ def _check_cluster_capacity(
     ``not_measurable``. With *fail_closed* False (``deploy``), capacity that
     cannot be read passes with a warning instead.
     """
-    from lakebench.config.sizing import check_capacity, plan_requirements
+    from lakebench.config.sizing import plan_requirements
     from lakebench.k8s import get_k8s_client
     from lakebench.k8s.client import CapacityUnknown
     from lakebench.k8s.target import ContextConflictError
@@ -374,12 +374,24 @@ def _check_cluster_capacity(
         "scratch_reason": None,
         "storage_class": None,
     }
+
+    def _count_own(pod: Any) -> bool:
+        # The deployment's own pods are left out (the plan counts its
+        # Trino, catalog and Postgres), except what the plan does not:
+        # Spark pods left by an earlier run, and a datagen Job still running
+        # when this run does not count datagen itself.
+        labels = getattr(pod.metadata, "labels", None) or {}
+        if "spark-role" in labels:
+            return True
+        is_job = "job-name" in labels or "batch.kubernetes.io/job-name" in labels
+        return is_job and not datagen_runs
+
     try:
         k8s = get_k8s_client(
             context=cfg.platform.kubernetes.context,
             namespace=cfg.get_namespace(),
         )
-        found = k8s.get_free_capacity(exclude_namespace=cfg.get_namespace())
+        found = k8s.get_free_capacity(exclude_namespace=cfg.get_namespace(), count_own=_count_own)
     except ContextConflictError:
         raise  # exit 3 (context.changed), as everywhere else
     except Exception as e:  # noqa: BLE001 -- unreachable cluster or bad context
@@ -401,9 +413,31 @@ def _check_cluster_capacity(
                 "with --skip-preflight (the run records 'capacity not checked')"
             ),
         )
+    try:
+        return _decide_capacity(cfg, k8s, found, record, sustained, datagen_runs, sizing_capacity)
+    except ContextConflictError:
+        raise
+    except Exception as e:  # noqa: BLE001 -- fail closed on a broken estimate too
+        logger.debug("Capacity check error: %s", e, exc_info=True)
+        return PrereqResult(
+            name="cluster-capacity",
+            passed=False,
+            message=f"capacity check failed: {type(e).__name__}: {e}",
+            hint="Next: report this, or run with --skip-preflight (the run records "
+            "'capacity not checked')",
+        )
+
+
+def _decide_capacity(
+    cfg, k8s, found, record: dict[str, Any], sustained, datagen_runs, sizing_capacity
+) -> PrereqResult:
+    """The capacity decision on a free capacity that was read."""
+    from lakebench.config.sizing import check_capacity
+
     free, allocatable = found.free, found.allocatable
 
     scale = cfg.architecture.workload.datagen.scale
+    run_mode = None if sustained is None else ("continuous" if sustained else "batch")
     try:
         verdict = check_capacity(
             cfg,
@@ -414,6 +448,9 @@ def _check_cluster_capacity(
             # is free, unless run says what it sized against.
             sizing_capacity=allocatable if sizing_capacity is SAME_CAPACITY else sizing_capacity,
             allocatable=allocatable,
+            # One pod must fit one node in cores and memory at once; that
+            # needs the per-node free list, so it is checked here.
+            check_pod=False,
         )
     except Exception as e:
         # Sized against the cluster, the plan can still fail on a value
@@ -423,6 +460,17 @@ def _check_cluster_capacity(
     gib = 1024**3
     shortfalls = list(verdict.shortfalls)
     warnings = list(verdict.warnings)
+
+    pod = plan.largest_pod
+    pod_short = not found.pod_fits(pod.cpu_cores, pod.memory_gb)
+    if pod_short:
+        most_cores = max((c for c, _ in found.free_by_node), default=0) / 1000.0
+        most_gb = max((m for _, m in found.free_by_node), default=0) / gib
+        shortfalls.append(
+            f"Largest pod needs {pod.cpu_cores:g} cores ({pod.cpu_from}) and "
+            f"{pod.memory_gb:g} GB ({pod.memory_from}) on one node; no schedulable node has "
+            f"both free (most free: {most_cores:.1f} cores, {most_gb:.1f} GB)"
+        )
 
     scratch_short = False
     if plan.scratch_enabled and plan.scratch_gb > 0:
@@ -460,7 +508,7 @@ def _check_cluster_capacity(
         summary += "; per-job executor overrides are not counted"
     hint_lines = "\n".join(f"  {s}" for s in shortfalls)
 
-    if verdict.status == "refused" or scratch_short:
+    if verdict.status == "refused" or scratch_short or pod_short:
         return PrereqResult(
             name="cluster-capacity",
             passed=False,

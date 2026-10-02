@@ -7,6 +7,7 @@ import logging
 import random
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -156,6 +157,16 @@ class FreeCapacity:
 
     free: ClusterCapacity
     allocatable: ClusterCapacity
+    #: (free millicores, free bytes) of each schedulable node, for the
+    #: check that one pod fits one node in both dimensions at once.
+    free_by_node: tuple[tuple[int, int], ...] = ()
+
+    def pod_fits(self, cpu_cores: float, memory_gb: float) -> bool:
+        """Whether some schedulable node has *cpu_cores* and *memory_gb*
+        (GiB) free at once."""
+        need_m = cpu_cores * 1000
+        need_b = memory_gb * 1024**3
+        return any(c >= need_m and m >= need_b for c, m in self.free_by_node)
 
 
 @dataclass(frozen=True)
@@ -203,7 +214,13 @@ def _pod_requests(pod: Any) -> tuple[float, float]:
 
     spec = pod.spec
     main = _req(spec.containers)
-    init = _req(getattr(spec, "init_containers", None))
+    inits = list(getattr(spec, "init_containers", None) or [])
+    # A native sidecar (an init container with restartPolicy Always) runs
+    # for the pod's life, so the scheduler adds it to the main containers.
+    sidecars = [c for c in inits if getattr(c, "restart_policy", None) == "Always"]
+    plain = [c for c in inits if getattr(c, "restart_policy", None) != "Always"]
+    main += _req(sidecars)
+    init = _req(plain)
     cpu = max(sum(c for c, _ in main), max((c for c, _ in init), default=0.0))
     mem = max(sum(m for _, m in main), max((m for _, m in init), default=0.0))
     overhead = getattr(spec, "overhead", None) or {}
@@ -1060,15 +1077,21 @@ class K8sClient:
             largest_node_memory_bytes=max_mem,
         )
 
-    def get_free_capacity(self, exclude_namespace: str = "") -> FreeCapacity | CapacityUnknown:
+    def get_free_capacity(
+        self,
+        exclude_namespace: str = "",
+        *,
+        count_own: Callable[[Any], bool] | None = None,
+    ) -> FreeCapacity | CapacityUnknown:
         """Free capacity of the schedulable nodes, for the run preflight.
 
         Unlike ``get_cluster_capacity`` (allocatable totals, used to size a
         run), this subtracts what other pods already request, so a busy
         cluster that fits by total but not by what is free is refused. Pods
-        in *exclude_namespace* (the deployment's own) are not subtracted:
-        the preflight counts that deployment's Trino, catalog and Postgres
-        itself.
+        in *exclude_namespace* (the deployment's own) are not subtracted,
+        since the preflight counts that deployment's Trino, catalog and
+        Postgres itself, except those *count_own* selects (leftover Spark
+        pods, a datagen Job still running).
 
         Fails closed: a forbidden or failed node or pod list, a pod on a
         node the node list does not show, or no schedulable node gives
@@ -1103,7 +1126,11 @@ class K8sClient:
                         f"pod {pod.metadata.namespace}/{pod.metadata.name} runs on node "
                         f"{node_name}, which the node list does not show"
                     )
-                if exclude_namespace and pod.metadata.namespace == exclude_namespace:
+                if (
+                    exclude_namespace
+                    and pod.metadata.namespace == exclude_namespace
+                    and not (count_own is not None and count_own(pod))
+                ):
                     continue
                 cpu, mem = _pod_requests(pod)
                 acc = used.setdefault(node_name, [0.0, 0.0])
@@ -1144,7 +1171,11 @@ class K8sClient:
             largest_node_cpu_millicores=int(biggest[0] * 1000),
             largest_node_memory_bytes=int(biggest[1]),
         )
-        return FreeCapacity(free=free, allocatable=allocatable)
+        return FreeCapacity(
+            free=free,
+            allocatable=allocatable,
+            free_by_node=tuple((int(r[2] * 1000), int(r[3])) for r in rows),
+        )
 
     def get_scratch_capacity(self, storage_class: str) -> ScratchCapacity:
         """The ``CSIStorageCapacity`` the CSI driver publishes for
