@@ -162,7 +162,6 @@ PLANNED_BY = {
     "reproduce.existing_namespace": "CC-4",
     "reproduce.nonce_changed": "CC-4",
     "reproduce.verify_out_of_band": "ER-13",
-    "run.args": "CC-6",
     "run.deps_missing": "SD-5c",
     "run.protected_corpus": "AM-22",
     "series.corpus_changed": "CC-30",
@@ -809,6 +808,12 @@ def _scenario_run_namespace_gone(monkeypatch, tmp_path):
     return invoke_scenario(scenario, tmp_path, monkeypatch)[0]
 
 
+def _scenario_run_args(monkeypatch, tmp_path):
+    """--force-reset on a batch run: refused before any cluster call."""
+    cfg = _init_config(tmp_path)
+    return _runner().invoke(app, ["run", str(cfg), "--force-reset", "--yes"])
+
+
 def _scenario_confirm_declined(monkeypatch, tmp_path):
     a = _init_config(tmp_path)
     b = tmp_path / "b.yaml"
@@ -884,6 +889,7 @@ SCENARIOS = {
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
     "run.interrupted": _scenario_run_interrupted,
+    "run.args": _scenario_run_args,
     "run.namespace_gone": _scenario_run_namespace_gone,
     "confirm.declined": _scenario_confirm_declined,
     "reproduce.commit_drift": _scenario_reproduce_commit_drift,
@@ -923,6 +929,7 @@ EXPECTED_OUTPUT = {
     "run.pass": "Local mode is sized",
     "run.verdict_failed": "Local mode is sized",
     "run.interrupted": "Interrupted by SIGINT during silver-build",
+    "run.args": "--force-reset only applies to a continuous run",
     "run.namespace_gone": "was deleted mid-run; stopping",
     "config.validation": "Config error",
     "config.name_required": "config has no name, so it cannot change data",

@@ -25,6 +25,7 @@ from lakebench.cli._helpers import (
     resolve_config_path,
     write_run_report,
 )
+from lakebench.cli._run_args import BATCH_STAGES
 from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
@@ -556,7 +557,7 @@ _STAGE_POLL_S = 5
 
 
 # The batch pipeline stages `run --stage` accepts, in order.
-BATCH_STAGE_NAMES = ("bronze-verify", "silver-build", "gold-finalize")
+BATCH_STAGE_NAMES = BATCH_STAGES
 
 
 # The verdict reason a datagen wait-budget timeout records (the exit code is
@@ -1737,6 +1738,33 @@ def run(
         print_error(f"Config error: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
+    # Every argument and combination is checked before anything else, so a
+    # refused one exits 2 with no cluster call made (cli/_run_args.py).
+    from lakebench.cli._run_args import RunArgs, validate_run_args
+
+    validate_run_args(
+        RunArgs(
+            stage=stage,
+            timeout=timeout,
+            skip_benchmark=skip_benchmark,
+            continuous=continuous,
+            sustained=sustained,
+            duration=duration,
+            include_datagen=include_datagen,
+            skip_deploy=skip_deploy,
+            skip_generate=skip_generate,
+            regenerate=regenerate,
+            skip_maintenance=skip_maintenance,
+            force_rebuild=force_rebuild,
+            force_reset=force_reset,
+            deploy_only=deploy_only,
+            generate_only=generate_only,
+            yes=yes,
+            local=local,
+        ),
+        cfg,
+    )
+
     # DESIGN 6.5: an unsupported workload x architecture x mode is refused
     # before anything runs. Load already checks the config's own mode;
     # --continuous and --sustained do not write the mode back, so check the
@@ -1816,17 +1844,6 @@ def run(
             timeout = max(timeout, aml_bronze_verify_timeout_budget(scale))
         if scale >= 50 or is_financial:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
-
-    # Flag mutual exclusivity
-    if deploy_only and generate_only:
-        print_error("--deploy-only and --generate-only are mutually exclusive")
-        raise typer.Exit(ExitCode.USAGE)
-    # A batch stage name is checked here, before any deploy, datagen or job
-    # submission, so a typo exits 2 with nothing run.
-    if stage and _run_mode == "batch" and stage not in BATCH_STAGE_NAMES:
-        print_error(f"Unknown stage: {stage}")
-        print_info(f"Valid stages: {', '.join(BATCH_STAGE_NAMES)}")
-        raise typer.Exit(ExitCode.USAGE)
 
     # deploy_only: deploy infrastructure and exit
     if deploy_only:

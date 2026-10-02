@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **`run` refuses arguments it used to ignore, before any cluster call.**
+  An unknown `--stage` used to be found only after `run` had read the
+  cluster's capacity (and, with `--yes`, could auto-deploy first), and
+  several flags were silently dropped by the mode they did not apply to.
+  Now `run` exits 2 before contacting the cluster for: `--stage` with a
+  continuous run, `--local` with `--deploy-only` or `--generate-only`,
+  `--regenerate` without `--generate` or `--generate-only`,
+  `--skip-generate` with `--generate`, `--force-reset` on a batch run,
+  `--force-rebuild` on a continuous run, `--duration` on a batch run or
+  below 60, `--timeout` below 1, as well as an unknown `--stage` and
+  `--deploy-only` with `--generate-only`. Drop the flag the mode does not
+  use.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
