@@ -111,23 +111,29 @@ def profiles(spark, load_script_module):
     for one bronze corpus built once by each path."""
     import silver_stream_financial as ss
 
-    # Build a shared bronze corpus: 11 transactions among five entities;
+    # Build a shared bronze corpus: 13 transactions among six entities;
     # amounts spread enough that stddev is non-zero. A, Z, B and Y both send
-    # and receive (T9 to T11); C only sends.
+    # and receive (T9 to T11); C only sends; R only receives, in both
+    # micro-batches, so its never-used send side meets the UPDATE branch.
     base = datetime(2024, 6, 1)
-    corpus = [
+    batch0 = [
         _row("T1", "A", "Z", base + timedelta(days=0), "100.00"),
         _row("T2", "A", "Z", base + timedelta(days=1), "150.00"),
         _row("T3", "A", "Y", base + timedelta(days=2), "200.00"),
         _row("T4", "B", "Z", base + timedelta(days=3), "50.00"),
         _row("T5", "B", "Y", base + timedelta(days=4), "75.00"),
+        _row("T12", "A", "R", base + timedelta(days=4, hours=6), "20.00"),
+    ]
+    batch1 = [
         _row("T6", "B", "Z", base + timedelta(days=5), "300.00"),
         _row("T7", "C", "Z", base + timedelta(days=6), "125.00"),
         _row("T8", "C", "Y", base + timedelta(days=7), "175.00"),
         _row("T9", "Z", "A", base + timedelta(days=8), "60.00"),
         _row("T10", "Y", "B", base + timedelta(days=9), "90.00"),
         _row("T11", "Z", "Y", base + timedelta(days=10), "45.00"),
+        _row("T13", "C", "R", base + timedelta(days=11), "30.00"),
     ]
+    corpus = batch0 + batch1
     bronze = spark.createDataFrame(corpus, _PACS_SCHEMA)
 
     # --- Batch path: build_entity_profiles directly.
@@ -147,8 +153,8 @@ def profiles(spark, load_script_module):
     # --- Stream path: feed the same corpus as two micro-batches through
     # _merge_batch (proxy for the streaming trigger; the MERGE code path
     # is identical), with the foreachBatch local properties set
-    # (_foreach_batch). Batch 0 (T1 to T5) inserts A, B, Y and Z; batch 1 (T6
-    # to T11) inserts C and updates the other four. In the UPDATE, the
+    # (_foreach_batch). Batch 0 inserts A, B, Y, Z and R; batch 1 inserts C
+    # and updates the other five. In the UPDATE, the
     # Welford arms run as: B sends in both batches (the general arm with the
     # cross-term); Z only received in batch 0 and sends twice in batch 1
     # (the receive-then-send arm, and stddev at exactly two sends); A sends
@@ -175,20 +181,16 @@ def profiles(spark, load_script_module):
     ss._KYC_LOADED = True
     ss._kyc = lambda _s: None
     ss.append_new_dimensions = lambda *_a, **_kw: (0, 0)
-    foreach_batch_harness(
-        spark, ss._merge_batch, spark.createDataFrame(corpus[:5], _PACS_SCHEMA), 0
-    )
-    foreach_batch_harness(
-        spark, ss._merge_batch, spark.createDataFrame(corpus[5:], _PACS_SCHEMA), 1
-    )
+    foreach_batch_harness(spark, ss._merge_batch, spark.createDataFrame(batch0, _PACS_SCHEMA), 0)
+    foreach_batch_harness(spark, ss._merge_batch, spark.createDataFrame(batch1, _PACS_SCHEMA), 1)
 
     # --- Compare per-entity rows.
     batch_rows = {
         r["entity_id"]: r for r in spark.table("lh.silver_batch.entity_profiles").collect()
     }
     stream_rows = {r["entity_id"]: r for r in spark.table(f"lh.{ss.SILVER_PROFILES}").collect()}
-    # Five entities on each side.
-    assert len(batch_rows) == 5, sorted(batch_rows)
+    # Six entities on each side.
+    assert len(batch_rows) == 6, sorted(batch_rows)
     return batch_rows, stream_rows
 
 
@@ -212,14 +214,6 @@ def test_batch_and_stream_profile_sums_match(profiles):
             assert b_v == s_v, f"{eid}.{c}: batch={b[c]}, stream={s[c]}"
 
 
-@pytest.mark.known_bug(
-    "LB-240",
-    match=r"total_(sent|received)_usd: batch=None, stream=0\.00",
-    reason=(
-        "an entity that never sent (or never received) gets NULL in batch and 0.00 in "
-        "stream; fixed with AM-25"
-    ),
-)
 def test_batch_and_stream_profile_sums_agree_on_null(profiles):
     """A side the entity never used is NULL in both paths, or 0.00 in both."""
     batch_rows, stream_rows = profiles

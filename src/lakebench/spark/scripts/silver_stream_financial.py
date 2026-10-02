@@ -828,7 +828,9 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
     Aggregate strategies per column:
 
     - Additive (txn_count_out/in, total_sent/received_usd): MERGE UPDATE
-      SET target = target + batch_delta. Iceberg MERGE evaluates every
+      SET target = target + batch_delta. The two totals add NULL-aware, as
+      SUM does: NULL while the entity has no amount on that side, as batch
+      leaves it. Iceberg MERGE evaluates every
       UPDATE SET RHS against the pre-update row, so composing several
       counters in one statement is safe.
     - LEAST / GREATEST (first/last_seen_ts, _first_out_ts, _last_out_ts,
@@ -935,6 +937,11 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
                 coalesce(col("batch_sum_recv"), lit(0).cast("decimal(38,2)")).alias(
                     "batch_sum_recv"
                 ),
+                # The same sums without the 0 fill: NULL when the batch has
+                # no amount on that side, as batch's SUM leaves an entity
+                # that never sent (or never received).
+                col("batch_sum_sent").alias("batch_sum_sent_or_null"),
+                col("batch_sum_recv").alias("batch_sum_recv_or_null"),
                 col("batch_mean_out"),
                 coalesce(col("batch_m2_out"), lit(0.0)).alias("batch_m2_out"),
                 coalesce(col("recomputed_dco"), lit(0)).cast("bigint").alias("recomputed_dco"),
@@ -979,11 +986,16 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
             t.txn_count_in = t.txn_count_in + s.batch_n_in,
             t.txn_count_total =
                 t.txn_count_out + s.batch_n_out + t.txn_count_in + s.batch_n_in,
-            t.total_sent_usd =
-                COALESCE(t.total_sent_usd, CAST(0 AS DECIMAL(38,2))) + s.batch_sum_sent,
-            t.total_received_usd =
-                COALESCE(t.total_received_usd, CAST(0 AS DECIMAL(38,2)))
-                + s.batch_sum_recv,
+            t.total_sent_usd = CASE
+                WHEN t.total_sent_usd IS NULL AND s.batch_sum_sent_or_null IS NULL THEN NULL
+                ELSE COALESCE(t.total_sent_usd, CAST(0 AS DECIMAL(38,2)))
+                     + COALESCE(s.batch_sum_sent_or_null, CAST(0 AS DECIMAL(38,2)))
+            END,
+            t.total_received_usd = CASE
+                WHEN t.total_received_usd IS NULL AND s.batch_sum_recv_or_null IS NULL THEN NULL
+                ELSE COALESCE(t.total_received_usd, CAST(0 AS DECIMAL(38,2)))
+                     + COALESCE(s.batch_sum_recv_or_null, CAST(0 AS DECIMAL(38,2)))
+            END,
             t.avg_amount_usd = CASE
                 WHEN (t.txn_count_out + s.batch_n_out) = 0 THEN NULL
                 WHEN t.txn_count_out = 0 THEN s.batch_mean_out
@@ -1060,7 +1072,7 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
             s.entity_id, s.batch_first_seen_ts, s.batch_last_seen_ts,
             CAST(DATEDIFF(s.batch_last_seen_ts, s.batch_first_seen_ts) AS DOUBLE),
             s.batch_n_out, s.batch_n_in, s.batch_n_out + s.batch_n_in,
-            s.batch_sum_sent, s.batch_sum_recv,
+            s.batch_sum_sent_or_null, s.batch_sum_recv_or_null,
             CASE WHEN s.batch_n_out = 0 THEN NULL ELSE s.batch_mean_out END,
             CASE WHEN s.batch_n_out < 2 THEN NULL
                  ELSE SQRT(s.batch_m2_out / CAST(s.batch_n_out - 1 AS DOUBLE))
