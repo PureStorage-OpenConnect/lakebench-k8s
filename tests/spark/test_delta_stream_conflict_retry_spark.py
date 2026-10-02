@@ -165,3 +165,49 @@ def test_shared_checkpoint_conflict_is_not_retried(ss):
 
     assert ss._delta_conflict(ConcurrentTransactionException("x")) is None
     assert ss._delta_conflict(ValueError("MetadataChangedException in a cause text")) is None
+
+
+def _managed_location(spark, name):
+    wh = spark.conf.get("spark.sql.warehouse.dir").removeprefix("file:")
+    return f"{wh}/silver.db/{name}"
+
+
+def test_create_loser_between_winners_log_and_catalog_waits(spark_session, ss, monkeypatch):
+    """The winner's log has landed but its catalog entry has not: the
+    loser's create fails with a non-empty-location error, which is not a
+    concurrent-modification class, and it must still wait for the table."""
+    name = "race_late_catalog"
+    tbl = f"spark_catalog.silver.{name}"
+    spark_session.sql(f"DROP TABLE IF EXISTS {tbl}")
+    loc = _managed_location(spark_session, name)
+    frame = spark_session.range(3).selectExpr(
+        "cast(id as string) a", "current_date() interaction_date"
+    )
+    frame.write.format("delta").partitionBy("interaction_date").save(loc)
+
+    def _register():
+        time.sleep(2)
+        spark_session.sql(f"CREATE TABLE {tbl} USING delta LOCATION '{loc}'")
+
+    t = threading.Thread(target=_register)
+    t.start()
+    try:
+        ss._create_silver_table_if_not_exists(spark_session, frame.schema, tbl, "file:///unused/")
+    finally:
+        t.join(timeout=60)
+    assert ss.table_exists(spark_session, tbl)
+    spark_session.sql(f"DROP TABLE IF EXISTS {tbl}")
+
+
+def test_create_failure_that_leaves_no_table_is_raised(spark_session, ss, monkeypatch):
+    name = "race_never"
+    tbl = f"spark_catalog.silver.{name}"
+    spark_session.sql(f"DROP TABLE IF EXISTS {tbl}")
+    loc = _managed_location(spark_session, name)
+    frame = spark_session.range(3).selectExpr(
+        "cast(id as string) a", "current_date() interaction_date"
+    )
+    frame.write.format("delta").partitionBy("interaction_date").save(loc)
+    monkeypatch.setattr(ss, "_CREATE_RACE_WAIT", 2)
+    with pytest.raises(Exception, match="NON_EMPTY_LOCATION|non-empty|not empty"):
+        ss._create_silver_table_if_not_exists(spark_session, frame.schema, tbl, "file:///unused/")

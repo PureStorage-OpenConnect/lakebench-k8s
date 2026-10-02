@@ -29,16 +29,20 @@ bronze into it a second time.
 Startup race (B4): the not-exists branch is split into a metadata-only
 ``CREATE TABLE IF NOT EXISTS`` and the same ``append`` write the exists
 branch uses. Delta does not serialise two concurrent creates: both try to
-commit the table's first version and the loser's create fails with a
-concurrent-modification error (ProtocolChangedException on Delta 4.0 and
-4.1). The loser waits for the winner's table to appear, then appends to it,
-so both racers' rows land and neither is lost to an overwrite.
+commit the table's first version and the loser's create fails
+(ProtocolChangedException on Delta 4.0 and 4.1, or a non-empty-location
+error when it arrives between the winner's log commit and its catalog
+entry). The loser waits for the winner's table to appear, then appends to
+it, so both racers' rows land and neither is lost to an overwrite. This
+holds for writers in one Spark application. Across driver pods it rests
+on the S3 log store, which serialises commits only within one JVM.
 
 Write conflicts: an append that loses an optimistic-concurrency race (a
-concurrent metadata or protocol change, such as a restarted stream adding
-the debug columns) commits nothing, so it is retried a few times with the
-same transaction id and attempt tag: Delta's (txnAppId, txnVersion) check
-keeps the retry exactly-once, and the tag still finds the one commit.
+concurrent metadata or protocol change, such as another stream adding the
+debug columns) commits nothing, so it is retried a few times with the same
+transaction id and attempt tag: Delta's (txnAppId, txnVersion) check keeps
+the retry exactly-once, and the tag still finds the one commit. The waits
+(at most 15 s) fall inside the micro-batch's time and are logged.
 
 Debug columns (I6): every write projects ``_stream_id STRING`` and
 ``_batch_id BIGINT`` in the silver row shape, matching the Iceberg stream
@@ -188,7 +192,10 @@ def _builder_name(table: str) -> str:
     (``database.table``), so the session catalog's three-part
     ``spark_catalog.silver.customer_interactions_enriched`` is a parse
     error. The session catalog is the default, so dropping its prefix names
-    the same table. Any other name is returned unchanged.
+    the same table. Any other name is returned unchanged: Delta also
+    refuses a three-part name in another catalog, whatever ``.location()``
+    says, so such a create fails loudly instead of landing in the session
+    catalog (Unity with Delta is not a supported combination).
     """
     prefix = "spark_catalog."
     return table[len(prefix) :] if table.lower().startswith(prefix) else table
@@ -197,10 +204,11 @@ def _builder_name(table: str) -> str:
 def _create_silver_table_if_not_exists(spark, schema, silver_tbl, silver_bucket):
     """Metadata-only ``CREATE TABLE IF NOT EXISTS`` for the silver Delta table.
 
-    In a startup race between two ``silver_stream_delta`` mains one racer
-    commits the table and the other's create fails with a Delta
-    concurrent-modification error (``_CREATE_CONFLICTS``); the loser waits
-    up to ``_CREATE_RACE_WAIT`` seconds for the winner's table, then returns.
+    In a startup race between two writers one racer commits the table and
+    the other's create fails (``_CREATE_CONFLICTS``, or a non-empty-location
+    error when it arrives between the winner's log commit and its catalog
+    entry); the loser waits up to ``_CREATE_RACE_WAIT`` seconds for the
+    winner's table, then returns. A failure that leaves no table is raised.
     Both then take the append branch with their own ``txnAppId``, so both
     racers' rows land -- neither is lost to an overwrite (which is what the
     pre-B4 not-exists branch used to do, and which would have removed the
@@ -227,18 +235,21 @@ def _create_silver_table_if_not_exists(spark, schema, silver_tbl, silver_bucket)
     try:
         builder.execute()
     except Exception as e:
-        conflict = _delta_conflict(e, _CREATE_CONFLICTS)
-        if conflict is None:
-            raise
-        # Another writer created the table first. Its catalog entry can lag
-        # its log commit, so wait for the table before appending to it.
+        # Another writer may have created the table first. Which error the
+        # loser sees depends on when it arrived: a concurrent-modification
+        # error if both committed the first version at once, or a
+        # non-empty-location error if the winner's log landed before its
+        # catalog entry. Either way the winner's table appears in the
+        # catalog shortly; any other failure leaves no table, and the
+        # original error is raised after the wait.
+        reason = _delta_conflict(e, _CREATE_CONFLICTS) or type(e).__name__
         waited = 0.0
         while not table_exists(spark, silver_tbl):
             if waited >= _CREATE_RACE_WAIT:
                 raise
             time.sleep(1.0)
             waited += 1.0
-        log(f"Silver table created by a concurrent writer ({conflict}); appending to it")
+        log(f"Silver table created by a concurrent writer ({reason}); appending to it")
 
 
 def _append_with_retry(spark, df, silver_tbl, silver_bucket, write_options, batch_id):

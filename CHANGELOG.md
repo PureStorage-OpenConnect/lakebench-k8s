@@ -720,12 +720,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on the first micro-batch on every `hive-delta-*` recipe: it passed the
   three-part `spark_catalog.silver.customer_interactions_enriched` to
   Delta's table builder, which Delta 4.0 and 4.1 reject. It now passes the
-  two-part name. Two silver streams racing to create the table (a restart
-  overlapping the old driver) no longer fail: the loser's create, which
-  Delta refuses with a concurrent-modification error, waits for the
-  winner's table and appends to it. An append that loses a concurrent
-  metadata or protocol change is retried up to five times with the same
-  transaction id, so it still commits exactly once and is counted once.
+  two-part name. Two writers in one Spark application racing to create
+  the table no longer fail: the loser, whose create Delta refuses, waits
+  for the winner's table and appends to it. An append that loses a
+  concurrent metadata or protocol change is retried up to five times with
+  the same transaction id, so it still commits once and is counted once;
+  the waits (at most 15 s) count in that micro-batch's time and are logged.
 - **The capacity check counts the Spark driver's memory overhead.**
   The driver pod requests its heap plus the overhead Spark on Kubernetes
   adds to a Python driver, 40% of the heap (12.8 GiB for the 32 GiB

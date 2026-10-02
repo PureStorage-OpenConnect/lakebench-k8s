@@ -112,10 +112,11 @@ def _run_version_race(spark, work, batches=10):
     """Commit ``batches`` silver micro-batches from one thread while another
     thread commits to the same Delta table between them: OPTIMIZE (the
     compaction stand-in) and appends from a second writer with its own
-    stream id. Both are commits Delta lets run beside a blind append, and
-    both move the table version between this writer's write and its history
-    read, so a before/after-version bracket would miscount; the I8 read of
-    the write's own commit (userMetadata tag) does not.
+    stream id. Both are commits Delta lets run beside a blind append. They
+    land between this writer's batches (the test asserts the version moved
+    by more than one commit), where a before/after-version bracket around a
+    write would count them; the I8 read of the write's own commit
+    (userMetadata tag) does not.
 
     The stand-in used to be ALTER TABLE SET TBLPROPERTIES every 20 ms. Every
     Delta metadata change conflicts with every concurrent write by design
