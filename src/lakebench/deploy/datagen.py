@@ -236,9 +236,7 @@ def bronze_prefix_gate(
     if regenerate and not prefix:
         return refuse(
             f"{held}, and the datagen prefix is empty: --regenerate clears only the "
-            "datagen prefix and never a whole bucket. Set "
-            "architecture.pipeline.medallion.bronze.path_template, or clear the "
-            "bucket yourself.",
+            "datagen prefix and never a whole bucket. Clear the bucket yourself.",
             owned,
             n,
         )

@@ -129,8 +129,10 @@ class TestGate:
     def test_regenerate_empty_prefix_refused(self):
         with recording() as rec:
             cfg = _seed(rec, owned=True, objects=["x/part-0"])
-            cfg.architecture.pipeline.medallion.bronze.path_template = "/"
-            got = _gate(cfg, regenerate=True)
+            # The layout is fixed per workload now; the guard stays for a
+            # prefix that ever comes back empty.
+            with patch("lakebench.deploy.datagen.bronze_datagen_prefix", return_value="/"):
+                got = _gate(cfg, regenerate=True)
             assert not got.proceed and "prefix is empty" in got.message
             assert list(rec.buckets_store[BRONZE]) == ["x/part-0"]
 
