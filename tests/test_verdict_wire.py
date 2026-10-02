@@ -7,8 +7,9 @@ keeping pace) is the archetypal record where the raw flag is True but the
 verdict is FAILED; the wired readers must catch it.
 
 Also covers the c360 correctness verdict gate wired into
-``compute_verdict``: a run whose recorded c360 verdict is "fail" seals a
-FAILED verdict via the ``c360`` gate.
+``compute_verdict``: a gated c360 check that failed or did not run seals a
+FAILED verdict via the ``c360`` gate; a failure outside the gating list
+does not.
 """
 
 from __future__ import annotations
@@ -404,39 +405,85 @@ class TestCompareVerdictRefusal:
 # ---------------------------------------------------------------------------
 
 
+def _c360_record(
+    fail: tuple[str, ...] = (),
+    unchecked: tuple[str, ...] = (),
+    drop: tuple[str, ...] = (),
+    extra: tuple[str, ...] = ("interaction_mix", "high_churn_share"),
+    facts: bool = True,
+) -> dict[str, Any]:
+    """A c360_correctness record as evaluate_run builds it: every gated
+    check plus ``extra`` (non-gated) checks, each passing unless named."""
+    from lakebench.metrics import c360_correctness as c3
+
+    ids = sorted(c3.GATING_CHECKS) + list(extra)
+    checks = []
+    for cid in ids:
+        if cid in drop:
+            continue
+        ok: bool | None = None if cid in unchecked else cid not in fail
+        checks.append(c3._check(cid, "invariant", ok, 1, 0))
+    rec = c3.verdict(checks if facts else [], "" if facts else "no [c360-check] line")
+    rec["facts_present"] = facts
+    return rec
+
+
 class TestC360Gate:
-    def test_c360_failed_seals_failed_verdict(self) -> None:
+    """The verdict's c360 gate applies the owner-approved gating list
+    (checks 0-14 and 17), through c360_correctness.gating_outcome."""
+
+    def test_failing_gated_check_reads_failed(self) -> None:
         m = _make_passing_metrics()
-        m.c360_correctness = {
-            "status": "fail",
-            "failed": ["silver_to_gold_counts", "gold_daily_identities"],
-            "reason": "silver <-> gold row counts mismatch",
-        }
+        m.c360_correctness = _c360_record(fail=("silver_to_gold_counts",))
         v = compute_verdict(m)
         assert v.status == "FAILED"
         assert v.gates.get("c360") == "FAIL"
-        assert any("Customer 360" in r for r in v.reasons)
-        assert any("silver_to_gold_counts" in r for r in v.reasons)
+        assert any("silver_to_gold_counts fail" in r for r in v.reasons)
+
+    def test_only_nongating_failures_pass(self) -> None:
+        """A statistical miss outside the list is shown, never a FAIL. With
+        the old gate (any status == "fail") this read FAILED."""
+        m = _make_passing_metrics()
+        m.c360_correctness = _c360_record(fail=("interaction_mix",))
+        assert m.c360_correctness["status"] == "fail"
+        v = compute_verdict(m)
+        assert v.status == "PASSED"
+        assert "c360" not in v.gates
+        assert v.qualifiers.get("c360_failed_not_gating") == ["interaction_mix"]
+
+    def test_unchecked_gated_check_reads_failed(self) -> None:
+        m = _make_passing_metrics()
+        m.c360_correctness = _c360_record(unchecked=("bronze_rows_match_datagen",))
+        assert m.c360_correctness["status"] == "unknown"
+        v = compute_verdict(m)
+        assert v.status == "FAILED"
+        assert any("bronze_rows_match_datagen unchecked" in r for r in v.reasons)
+
+    def test_absent_gated_check_reads_failed(self) -> None:
+        m = _make_passing_metrics()
+        m.c360_correctness = _c360_record(drop=("avg_transaction_value_overall",))
+        v = compute_verdict(m)
+        assert v.status == "FAILED"
+        assert any("avg_transaction_value_overall not evaluated" in r for r in v.reasons)
+
+    def test_record_without_facts_reads_failed(self) -> None:
+        """Fail closed: a c360 run whose gold-finalize logged no facts is not
+        a pass (it used to read PASSED as "unknown")."""
+        m = _make_passing_metrics()
+        m.c360_correctness = _c360_record(facts=False)
+        assert m.c360_correctness["status"] == "unknown"
+        v = compute_verdict(m)
+        assert v.status == "FAILED"
+        assert v.gates.get("c360") == "FAIL"
+        assert any("no expected-result facts" in r for r in v.reasons)
 
     def test_c360_pass_does_not_add_gate(self) -> None:
         m = _make_passing_metrics()
-        m.c360_correctness = {"status": "pass", "failed": []}
+        m.c360_correctness = _c360_record()
         v = compute_verdict(m)
-        # A pass status is not surfaced as a gate: only fails need the
-        # gate to seal the verdict. compute_verdict scopes c360 in only
-        # when the record has failed something.
         assert "c360" not in v.gates
+        assert "c360_failed_not_gating" not in v.qualifiers
         assert v.status == "PASSED"
-
-    def test_c360_unknown_does_not_fail_verdict(self) -> None:
-        m = _make_passing_metrics()
-        m.c360_correctness = {"status": "unknown", "failed": [], "reason": "no facts"}
-        v = compute_verdict(m)
-        # D6: "unknown" is not owner-approved as a fail; the verdict must
-        # stay PASSED so the c360 gate does not accidentally tighten on
-        # every run without a c360-emitting workload.
-        assert v.status == "PASSED"
-        assert "c360" not in v.gates
 
     def test_c360_absent_scoped_out(self) -> None:
         m = _make_passing_metrics()
@@ -445,15 +492,64 @@ class TestC360Gate:
         assert "c360" not in v.gates
         assert v.status == "PASSED"
 
-    def test_c360_fail_without_failed_list(self) -> None:
-        """A c360 record with status=fail but no failed list still surfaces
-        a reason from the fallback."""
+    def test_reporting_only_record_never_fails(self) -> None:
         m = _make_passing_metrics()
-        m.c360_correctness = {"status": "fail", "failed": [], "reason": "no facts"}
+        m.c360_correctness = dict(_c360_record(fail=("silver_to_gold_days",)), reporting_only=True)
+        v = compute_verdict(m)
+        assert "c360" not in v.gates
+        assert v.status == "PASSED"
+
+    def test_empty_gating_list_is_reporting_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from lakebench.metrics import c360_correctness as c3
+
+        rec = _c360_record(fail=("silver_to_gold_days",))
+        monkeypatch.setattr(c3, "GATING_CHECKS", frozenset())
+        m = _make_passing_metrics()
+        m.c360_correctness = rec
+        v = compute_verdict(m)
+        assert "c360" not in v.gates
+        assert v.qualifiers.get("c360_failed_not_gating") == ["silver_to_gold_days"]
+
+    def test_gated_shape_judged_only_with_benchmark_checks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """As in the CLI, a gated benchmark shape is judged only when the
+        benchmark ran (the record holds shape checks)."""
+        from lakebench.metrics import c360_correctness as c3
+
+        rec = _c360_record()
+        monkeypatch.setattr(c3, "GATING_CHECKS", c3.GATING_CHECKS | {"benchmark_rows_Q1"})
+        m = _make_passing_metrics()
+        m.c360_correctness = rec
+        assert compute_verdict(m).status == "PASSED"
+        rec = dict(
+            rec, checks=rec["checks"] + [c3._check("benchmark_rows_Q2", "shape", True, 1, 1)]
+        )
+        m.c360_correctness = rec
         v = compute_verdict(m)
         assert v.status == "FAILED"
-        assert v.gates.get("c360") == "FAIL"
-        assert any("no facts" in r for r in v.reasons)
+        assert any("benchmark_rows_Q1 not evaluated" in r for r in v.reasons)
+
+    def test_stored_record_nongating_miss_passes(self) -> None:
+        """A stored scale-10 record (5105a0) recomputes PASSED, and still
+        PASSED with a statistical check flipped to fail; FAILED with a
+        gated one flipped."""
+        import copy
+
+        rec = json.loads(
+            (
+                Path(__file__).parent / "fixtures/records/run-20260929-212900-5105a0/metrics.json"
+            ).read_text()
+        )
+        storage = MetricsStorage.__new__(MetricsStorage)
+        assert compute_verdict(storage._dict_to_metrics(rec)).status == "PASSED"
+        for cid, want in (("duplicate_filter_share", "PASSED"), ("dates_in_window", "FAILED")):
+            r = copy.deepcopy(rec)
+            for c in r["c360_correctness"]["checks"]:
+                if c["id"] == cid:
+                    c["status"] = "fail"
+            r["c360_correctness"]["status"] = "fail"
+            assert compute_verdict(storage._dict_to_metrics(r)).status == want, cid
 
 
 # ---------------------------------------------------------------------------

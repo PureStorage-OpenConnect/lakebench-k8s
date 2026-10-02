@@ -15,12 +15,11 @@ Three kinds of check:
   a correct run fails one by chance with probability well under 1e-6.
 - ``shape``: the row count a benchmark query must return on a correct corpus.
 
-REPORTING ONLY (owner decision D6): the verdict is recorded in the run's
-metrics and printed, and never changes the run's success until the owner
-approves what each check means. The definitions for that approval are in
-the lane's expected-results table. ``GATING_CHECKS`` is the switch: the ids
-it names fail the run (``gating_problems``, read by ``cli/_run.py``); it is
-empty until the owner approves.
+Gating (owner decision D6, approved 2026-09-27): the checks named in
+``GATING_CHECKS`` fail the run when they fail or do not run. The CLI reads
+``gating_problems`` and the verdict's ``c360`` gate reads ``gating_outcome``;
+both apply the same rule. Every other check is recorded in the run's metrics
+and printed but does not change the run's success.
 """
 
 from __future__ import annotations
@@ -28,12 +27,36 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Mapping
 from datetime import date, timedelta
 from typing import Any
 
-# D6: the owner approves the meaning before any check gates a run. Add a
-# check id here to make its failure fail the run; empty means reporting only.
-GATING_CHECKS: frozenset[str] = frozenset()
+# D6: the owner approves the meaning before any check gates a run. A check
+# id here makes its failure fail the run. Owner decision 2026-09-27: checks
+# 0 to 14 (every invariant and reconcile check) and 17 (the headline average
+# transaction value) of the expected-results table gate; the other
+# statistical and the benchmark shape checks stay reporting only. The
+# numbers are the table's, not the order a record lists its checks in.
+GATING_CHECKS: frozenset[str] = frozenset(
+    {
+        "bronze_rows_match_datagen",  # 0
+        "silver_duplicate_filter_applied",  # 1
+        "amount_only_on_purchases",  # 2
+        "purchase_amount_range",  # 3
+        "silver_no_null_keys",  # 4
+        "customer_ids_in_id_space",  # 5
+        "dates_in_window",  # 6
+        "one_ticket_and_score_per_support",  # 7
+        "bronze_to_silver_rows",  # 8
+        "silver_to_gold_days",  # 9
+        "silver_to_gold_counts",  # 10
+        "silver_to_gold_revenue",  # 11
+        "gold_counts_non_negative",  # 12
+        "gold_daily_identities",  # 13
+        "daily_active_within_customers",  # 14
+        "avg_transaction_value_overall",  # 17
+    }
+)
 GATING = bool(GATING_CHECKS)
 
 # A verdict is "pass" only when these ran and passed; without them nothing
@@ -811,6 +834,31 @@ def verdict(checks: list[dict[str, Any]], reason: str = "") -> dict[str, Any]:
     }
 
 
+def _gated_ids(only: tuple[str, ...] | None) -> set[str]:
+    """``GATING_CHECKS`` for one pass: pipeline ids (``only`` None) or the
+    ids with the ``only`` prefixes (the benchmark shapes)."""
+    return {
+        g
+        for g in GATING_CHECKS
+        if (only is None and not g.startswith("benchmark_rows_"))
+        or (only is not None and g.startswith(only))
+    }
+
+
+def _gated_misses(
+    record: Mapping[str, Any], gating: set[str]
+) -> list[tuple[str, Mapping[str, Any] | None]]:
+    """``(check id, check or None)`` for each gated check that did not pass:
+    failed, ``unchecked``, or absent from the record (None)."""
+    by_id = {c.get("id"): c for c in record.get("checks") or [] if isinstance(c, Mapping)}
+    out: list[tuple[str, Mapping[str, Any] | None]] = []
+    for gid in sorted(gating):
+        c = by_id.get(gid)
+        if c is None or c.get("status") != "pass":
+            out.append((gid, c))
+    return out
+
+
 def gating_problems(
     record: dict[str, Any] | None, only: tuple[str, ...] | None = None
 ) -> list[str]:
@@ -826,12 +874,7 @@ def gating_problems(
     Gate only checks that apply at every scale the run uses: thin corpora
     leave some statistical and shape checks unchecked.
     """
-    gating = {
-        g
-        for g in GATING_CHECKS
-        if (only is None and not g.startswith("benchmark_rows_"))
-        or (only is not None and g.startswith(only))
-    }
+    gating = _gated_ids(only)
     if not gating:
         return []
     if record is None or not record.get("facts_present"):
@@ -839,19 +882,65 @@ def gating_problems(
             return []  # already reported when the pipeline was judged
         why = (record or {}).get("reason") or "the check did not run"
         return [f"Customer 360 correctness gate: no expected-result facts ({why})."]
-    by_id = {c["id"]: c for c in record.get("checks") or []}
     out = []
-    for gid in sorted(gating):
-        c = by_id.get(gid)
+    for gid, c in _gated_misses(record, gating):
         if c is None:
             out.append(f"Customer 360 correctness gate: {gid} was not evaluated.")
-        elif c["status"] != "pass":
+        else:
             out.append(
                 f"Customer 360 correctness gate: {gid} {c.get('status')} (observed "
                 f"{c.get('observed')}, expected {c.get('expected')}, tolerance "
                 f"{c.get('tolerance')}; {c.get('detail', '')})."
             )
     return out
+
+
+def gating_outcome(record: Mapping[str, Any] | None) -> tuple[str | None, str | None]:
+    """The verdict's ``c360`` gate for a stored record: ``("FAIL", reason)``
+    or ``(None, None)``.
+
+    The rule is ``gating_problems``'s: FAIL when a check in
+    ``GATING_CHECKS`` failed, is ``unchecked`` or is absent, or when the
+    record has no facts (``facts_present`` false). A gated benchmark shape
+    is judged only when the record holds benchmark shape checks, as the CLI
+    judges it only after the benchmark ran. ``(None, None)`` when there is
+    no record, when ``GATING_CHECKS`` is empty, when only checks outside it
+    failed (``reporting_failures`` lists those), and for a record marked
+    ``reporting_only``.
+    """
+    if not isinstance(record, Mapping) or record.get("reporting_only") is True:
+        return None, None
+    if not GATING_CHECKS:
+        return None, None
+    if not record.get("facts_present"):
+        why = record.get("reason") or "the check did not run"
+        return "FAIL", f"Customer 360 correctness gate failed: no expected-result facts ({why})"
+    gating = _gated_ids(None)
+    checks = record.get("checks") or []
+    if any(
+        isinstance(c, Mapping) and str(c.get("id", "")).startswith("benchmark_rows_")
+        for c in checks
+    ):
+        gating |= _gated_ids(("benchmark_rows_",))
+    misses = _gated_misses(record, gating)
+    if not misses:
+        return None, None
+    detail = ", ".join(
+        f"{gid} {'not evaluated' if c is None else c.get('status')}" for gid, c in misses
+    )
+    return "FAIL", f"Customer 360 correctness gate failed: {detail}"
+
+
+def reporting_failures(record: Mapping[str, Any] | None) -> list[str]:
+    """Ids of failed checks outside ``GATING_CHECKS``: recorded and shown,
+    never a verdict FAIL."""
+    if not isinstance(record, Mapping):
+        return []
+    return [
+        str(c.get("id"))
+        for c in record.get("checks") or []
+        if isinstance(c, Mapping) and c.get("status") == "fail" and c.get("id") not in GATING_CHECKS
+    ]
 
 
 def evaluate_run(

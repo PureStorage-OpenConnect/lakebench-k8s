@@ -24,6 +24,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+from lakebench.metrics import c360_correctness
+
 if TYPE_CHECKING:
     from lakebench.metrics.collector import PipelineMetrics
 
@@ -381,26 +383,16 @@ def _benchmark_gate_outcome(metrics: PipelineMetrics) -> str | None:
 def _c360_gate(metrics: PipelineMetrics) -> tuple[str | None, str | None]:
     """Outcome and human reason for the ``c360`` gate.
 
-    A run without a ``c360_correctness`` record (batch or otherwise) has
-    nothing to gate on, so this returns ``(None, None)``. A record whose
-    verdict is "fail" surfaces here as FAIL with the underlying reason. Any
-    other status (pass, unknown, unchecked) is not a fail: c360 gating for
-    the run is scoped by the c360_correctness verdict itself (D6 governs
-    what "unknown" means and whether it should fail; that decision lives
-    with the c360 module, not here).
+    ``c360_correctness.gating_outcome`` decides: FAIL when a check in its
+    ``GATING_CHECKS`` failed, did not run or is absent, or when the record
+    has no facts. A run without a ``c360_correctness`` record, a record
+    whose only failures are checks outside that list, and a record marked
+    ``reporting_only`` return ``(None, None)``.
     """
     rec = metrics.c360_correctness
     if not isinstance(rec, Mapping):
         return None, None
-    status = rec.get("status")
-    if status == "fail":
-        failed = rec.get("failed") or []
-        if failed:
-            detail = ", ".join(str(f) for f in failed)
-            return "FAIL", f"Customer 360 correctness gate failed: {detail}"
-        reason = rec.get("reason") or "one or more expected-result checks failed"
-        return "FAIL", f"Customer 360 correctness gate failed: {reason}"
-    return None, None
+    return c360_correctness.gating_outcome(rec)
 
 
 def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
@@ -433,8 +425,8 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     badge's pass/fail decision, computed via the shared
     ``compute_badge_status`` helper. ``success_flag`` is ``metrics.success``.
     ``gate_outcomes`` covers, at minimum, ``pipeline`` and ``benchmark``,
-    and adds ``c360`` when the run recorded a c360 correctness verdict of
-    "fail".
+    and adds ``c360`` when a check in the c360 gating list failed or did not
+    run (``c360_correctness.gating_outcome``).
 
     An interrupted run (``metrics.interrupted``) adds ``interrupt =
     "INTERRUPTED"``. Its status is INTERRUPTED when ``prior_failure`` is
@@ -504,6 +496,11 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         qualifiers["n_batch_jobs"] = n_jobs
     if metrics.benchmark is not None:
         qualifiers["n_benchmark_queries"] = len(metrics.benchmark.queries or [])
+    if isinstance(metrics.c360_correctness, Mapping):
+        # Failed checks outside the gating list: shown, never a FAIL.
+        not_gating = c360_correctness.reporting_failures(metrics.c360_correctness)
+        if not_gating:
+            qualifiers["c360_failed_not_gating"] = not_gating
 
     return Verdict.strictest(
         exit_ok=exit_ok,

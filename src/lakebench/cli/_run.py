@@ -2732,8 +2732,8 @@ def run(
             if _report_tm_verdict(_tm, "AML batch gate"):
                 pipeline_success = False
 
-        # Customer 360 expected results (D6): reported, never gating until the
-        # owner approves what each check means (c360_correctness.GATING).
+        # Customer 360 expected results (D6): every check is reported; the
+        # owner-approved c360_correctness.GATING_CHECKS fail the run.
         if (
             cfg.architecture.workload.schema_type.value == "customer360"
             and not stage
@@ -2754,7 +2754,7 @@ def run(
             except Exception as e:  # noqa: BLE001 -- reporting only
                 _c360_rec = None
                 print_warning(f"Customer 360 expected-result check could not run: {e}")
-            # Empty until the owner approves the checks' meaning (D6).
+            # The gated checks only (D6); a check that could not run fails closed.
             for _p in _c360.gating_problems(_c360_rec):
                 print_error(_p)
                 pipeline_success = False
@@ -3159,7 +3159,8 @@ def run(
                     pipeline_success = False
                 _bench_recorded = True
 
-                # Customer 360 benchmark row counts (reporting only, D6).
+                # Customer 360 benchmark row counts (reporting only: no shape
+                # check is in GATING_CHECKS, D6).
                 if (
                     collector.current_run is not None
                     and collector.current_run.c360_correctness is not None
@@ -3175,7 +3176,7 @@ def run(
                             (print_warning if _c360_rec["status"] != "pass" else print_info)(_line)
                     except Exception as e:  # noqa: BLE001 -- reporting only
                         print_warning(f"Customer 360 benchmark row check could not run: {e}")
-                    # Empty until the owner approves the checks' meaning (D6).
+                    # Gated shape checks only; none are gated today (D6).
                     for _p in _c360.gating_problems(
                         collector.current_run.c360_correctness, only=("benchmark_rows_",)
                     ):

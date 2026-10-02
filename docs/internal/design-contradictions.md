@@ -209,6 +209,9 @@ remains open only as implementation work.
   the effective policy is stamped and the difference is visible.
 - **D6** (item 6), accepted. Customer 360 expected results are derived by the
   implementation; the owner approves their meaning before they gate.
+  Approved 2026-09-27: checks 0 to 14 and 17 of the expected-results table
+  gate a batch run (`metrics/c360_correctness.py` `GATING_CHECKS`); the other
+  statistical checks and the benchmark row-count checks report only.
 - **D12** (item 12), accepted. `workload` is a top-level config key; the old
   location is accepted with a deprecation warning.
 - **D13** (item 13), accepted. Reject `custom` in v1.6.
