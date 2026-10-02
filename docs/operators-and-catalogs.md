@@ -19,21 +19,23 @@ This document tracks tested operators, catalog implementations, and migration pl
 
 ### Key Configuration
 
-Install or upgrade the shared operator with lakebench rather than raw Helm:
+Install the shared operator with lakebench rather than raw Helm:
 
 ```bash
-lakebench admin install-spark-operator \
-  --version 2.5.1 \
-  --operator-namespace spark-operator \
+lakebench admin install --component spark-operator lakebench.yaml \
+  --version spark-operator=2.5.1 \
   --controller-tmp-size 8Gi
 ```
 
+`--version` defaults to the config's `platform.compute.spark.operator.version`
+and the namespace is `platform.compute.spark.operator.namespace`.
 `--controller-tmp-size` sets the sizeLimit of the controller's `/tmp`
 emptyDir, which holds spark-submit's Ivy jar cache for applications that set
-`spark.jars.packages` (Lakebench's own jobs set none since 1.7). The default is 8Gi, the
-floor is 4Gi, and an upgrade without the flag keeps a larger size already
-set. The command runs under the cluster lease, and an upgrade keeps the
-stored Helm values, including the watch list.
+`spark.jars.packages` (Lakebench's own jobs set none since 1.7), on a fresh
+install; the default is 8Gi and the floor is 4Gi. An installed operator is
+left as it is: the command never upgrades it, a different `--version` is
+refused, and `lakebench admin repair-operator --controller-tmp-size` resizes
+its `/tmp`. The command runs under the cluster lease.
 
 On OpenShift, lakebench grants the `anyuid` SCC to the
 `spark-operator-controller` and `spark-operator-webhook` service accounts
@@ -44,7 +46,7 @@ Do not edit `spark.jobNamespaces` by hand. `lakebench deploy` adds its
 namespace to the watch list and `lakebench destroy` removes it, both under
 the `lakebench-cluster-lock` lease in `lakebench-system`. Deploy never
 installs the operator; `platform.compute.spark.operator.install: true` is
-refused by every command that changes data.
+refused by the commands that change data.
 
 ### Learnings
 - Spark Operator version (2.5.1) is different from Apache Spark runtime version (3.5.x / 4.0.x / 4.1.x)
@@ -190,17 +192,19 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 
 ## Stackable Installation
 
-The Stackable operators are shared cluster infrastructure: a cluster admin
-installs them once, and `lakebench deploy` never does
-(`architecture.catalog.hive.operator.install: true` is refused).
+A cluster admin installs the four Stackable operators (commons, listener,
+secret, hive) once, under the cluster lease, at the config's
+`architecture.catalog.hive.operator.version` (SDP 25.7.0 by default) in
+`architecture.catalog.hive.operator.namespace`:
 
 ```bash
-# Install Stackable operators (required for Hive)
-helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator --version 25.7.0 --namespace stackable --create-namespace
-helm install secret-operator oci://oci.stackable.tech/sdp-charts/secret-operator --version 25.7.0 --namespace stackable
-helm install listener-operator oci://oci.stackable.tech/sdp-charts/listener-operator --version 25.7.0 --namespace stackable
-helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator --version 25.7.0 --namespace stackable
+lakebench admin install --component stackable lakebench.yaml
 ```
+
+`lakebench deploy` never installs them; a missing operator fails the Hive
+step with that command. An installed SDP is left at its version: Lakebench
+does not automate an SDP upgrade (helm does not update the CRDs the charts
+ship in `crds/`).
 
 ---
 
@@ -264,7 +268,7 @@ lakebench validate test-config.yaml --verbose
 
 ### PVC provisioning failed
 - **Cause:** Wrong storage class name
-- **Fix:** Use a storage class that exists on the cluster. The scratch default is `px-csi-scratch` (Portworx, repl=1), which a cluster admin installs once with `lakebench admin install-scratch-storage-class`
+- **Fix:** Use a storage class that exists on the cluster. The scratch default is `px-csi-scratch` (Portworx, repl=1), which a cluster admin installs once with `lakebench admin install --component scratch-storage-class`
 
 ### deletecollection forbidden
 - **Cause:** RBAC missing `deletecollection` verb

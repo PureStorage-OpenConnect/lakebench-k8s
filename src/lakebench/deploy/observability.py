@@ -1,17 +1,19 @@
-"""Observability stack deployment for Lakebench.
+"""Observability stack for Lakebench.
 
-Deploys kube-prometheus-stack via Helm. The Helm chart bundles
-Prometheus, Grafana, node-exporter, and kube-state-metrics in a
-single install. After Helm, renders and applies PodMonitor CRDs
-for Trino JMX and Spark PrometheusServlet scraping.
+kube-prometheus-stack (Prometheus, Grafana, node-exporter and
+kube-state-metrics in one Helm chart) plus the PodMonitor CRDs each
+deployment applies for Trino JMX and Spark PrometheusServlet scraping.
 
 The stack is a shared cluster component (ownership category 3): the chart
 installs CRDs, cluster roles and admission webhooks that exist once per
-cluster. It is installed once, in its own namespace
-(``OBSERVABILITY_NAMESPACE``), only when no release of it exists anywhere
-on the cluster, and an existing release is never upgraded or modified by
-``deploy``. ``destroy`` never uninstalls the shared release: deployment A's
-teardown must not remove deployment B's monitoring (DESIGN.md invariant 6).
+cluster. A cluster admin installs it once, in its own namespace
+(``OBSERVABILITY_NAMESPACE``), with ``lakebench admin install --component
+observability`` (``deploy/shared_components.py``), which installs only when no
+release of it exists anywhere on the cluster. ``deploy`` only checks that it is
+there and applies the deployment's own PodMonitors; it never installs,
+upgrades or modifies the release. ``destroy`` never uninstalls the shared
+release: deployment A's teardown must not remove deployment B's monitoring
+(DESIGN.md invariant 6).
 Each deployment's own PodMonitors and Pushgateway live in its namespace:
 they go with it, and when ``create_namespace: false`` keeps it, destroy's
 category1 step deletes them by name (``deploy/category1.py``).
@@ -33,6 +35,8 @@ from lakebench.k8s import PlatformType, SecurityVerifier, pinned_helm, pinned_ku
 from .engine import DeploymentResult, DeploymentStatus
 
 if TYPE_CHECKING:
+    from lakebench.config.schema import ObservabilityConfig
+
     from .engine import DeploymentEngine
 
 logger = logging.getLogger(__name__)
@@ -45,10 +49,10 @@ OBSERVABILITY_NAMESPACE = "lakebench-observability"
 
 SHARED_NOTICE = (
     "kube-prometheus-stack is a shared cluster component (CRDs, cluster roles, "
-    "admission webhooks). lakebench installs it once, in namespace "
-    f"'{OBSERVABILITY_NAMESPACE}', reuses it for every deployment, never upgrades an "
-    "existing install, and never removes it on destroy. Remove it when no deployment "
-    f"uses it: helm uninstall {HELM_RELEASE_NAME} -n {OBSERVABILITY_NAMESPACE}"
+    "admission webhooks). A cluster admin installs it once with 'lakebench admin install "
+    f"--component observability', in namespace '{OBSERVABILITY_NAMESPACE}'; deploy reuses it "
+    "for every deployment, never upgrades it, and destroy never removes it. Remove it when "
+    f"no deployment uses it: helm uninstall {HELM_RELEASE_NAME} -n {OBSERVABILITY_NAMESPACE}"
 )
 
 
@@ -263,9 +267,13 @@ class ObservabilityDeployer:
         return self.config.platform.kubernetes.context or None
 
     def deploy(self) -> DeploymentResult:
-        """Deploy the observability stack.
+        """Check the shared observability stack, then apply this deployment's monitors.
 
-        Skips if ``observability.enabled`` is False.
+        Skips if ``observability.enabled`` is False. Never installs, upgrades
+        or modifies the shared release, and writes nothing outside this
+        deployment's namespace, so it needs no cluster lease: a cluster admin
+        installs the stack once with ``lakebench admin install --component
+        observability``.
         """
         start = time.time()
         namespace = self.config.get_namespace()
@@ -282,37 +290,13 @@ class ObservabilityDeployer:
             return DeploymentResult(
                 component="observability",
                 status=DeploymentStatus.SUCCESS,
-                message="Would deploy observability stack (kube-prometheus-stack)",
+                message="Would check the shared observability stack and apply this "
+                "deployment's monitors",
                 elapsed_seconds=0,
             )
 
         try:
-            from kubernetes import client as _kclient
-
-            from lakebench.deploy.cluster_lock import ClusterLockError, cluster_lock
-
-            # The existence check and the install happen under the cluster
-            # lease, so two deploys cannot both see "absent" and both install.
-            try:
-                # The wait for the lease counts against the deploy deadline,
-                # and the shared install does not start once it has passed.
-                deploy_deadline.check("the cluster lease for the observability stack")
-                with cluster_lock(_kclient.CoreV1Api(), timeout=deploy_deadline.clamp(600)):
-                    deploy_deadline.check("helm install of the shared observability stack")
-                    result = self._deploy_locked(namespace, start)
-            except ClusterLockError as e:
-                deploy_deadline.check("the cluster lease for the observability stack", str(e))
-                return DeploymentResult(
-                    component="observability",
-                    status=DeploymentStatus.FAILED,
-                    message=(
-                        f"Could not take the cluster lease to check the shared "
-                        f"observability stack: {e}. See 'lakebench admin status'."
-                    ),
-                    elapsed_seconds=time.time() - start,
-                )
-            # Readiness is waited for outside the lease, so a slow first
-            # install does not stall other deployments' lease holders.
+            result = self._deploy_monitors(namespace, start)
             release_ns = (result.details or {}).get("release_namespace")
             if result.status == DeploymentStatus.SUCCESS and release_ns:
                 problem = _wait_for_prometheus(
@@ -329,15 +313,6 @@ class ObservabilityDeployer:
                         details=result.details,
                     )
             return result
-        except subprocess.TimeoutExpired as e:
-            # Under the lease the timeout comes from the hold budget, and the
-            # message (LeasedCommandTimeout) names the recovery.
-            return DeploymentResult(
-                component="observability",
-                status=DeploymentStatus.FAILED,
-                message=f"Helm install timed out ({e})",
-                elapsed_seconds=time.time() - start,
-            )
         except Exception as e:
             logger.exception("Observability deployment failed")
             return DeploymentResult(
@@ -347,8 +322,8 @@ class ObservabilityDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _deploy_locked(self, namespace: str, start: float) -> DeploymentResult:
-        """Install the shared stack if absent, then apply this deployment's monitors."""
+    def _deploy_monitors(self, namespace: str, start: float) -> DeploymentResult:
+        """Verify the shared release, then apply this deployment's monitors."""
         try:
             existing_ns, status = find_observability_release_status(self._kube_context())
         except ObservabilityLookupError as e:
@@ -357,161 +332,64 @@ class ObservabilityDeployer:
                 status=DeploymentStatus.FAILED,
                 message=(
                     f"Cannot tell whether the shared observability stack is installed "
-                    f"({e}); not installing it. {SHARED_NOTICE}"
+                    f"({e}). {SHARED_NOTICE}"
                 ),
                 elapsed_seconds=time.time() - start,
             )
 
-        if existing_ns is not None:
-            # Never upgrade or modify an existing release: another deployment
-            # may depend on its current values. A release that is not
-            # 'deployed' (a failed or interrupted install) is not reused as if
-            # it worked, and is not repaired here either: that is an admin
-            # decision for a shared component.
-            if status in _UNUSABLE_STATUSES:
-                return DeploymentResult(
-                    component="observability",
-                    status=DeploymentStatus.FAILED,
-                    message=(
-                        f"The shared observability release in namespace '{existing_ns}' "
-                        f"has status '{status or 'unknown'}', with no running revision; not using or "
-                        f"modifying it. A cluster admin can inspect it with 'helm status "
-                        f"{HELM_RELEASE_NAME} -n {existing_ns}' and, if no deployment uses "
-                        f"it, remove it with 'helm uninstall {HELM_RELEASE_NAME} -n "
-                        f"{existing_ns}'."
-                    ),
-                    elapsed_seconds=time.time() - start,
-                )
-            self._apply_podmonitor_templates(namespace)
-            self._apply_dashboard()
-            if existing_ns == OBSERVABILITY_NAMESPACE:
-                message = (
-                    f"Using the shared observability stack in namespace '{existing_ns}' "
-                    f"(left unchanged). {SHARED_NOTICE}"
-                )
-            else:
-                message = (
-                    f"An observability release from an older lakebench exists in namespace "
-                    f"'{existing_ns}'. It is left unchanged and scrapes only that namespace, "
-                    f"so this deployment's pods are not monitored until it is removed and "
-                    f"the shared stack is installed. {SHARED_NOTICE}"
-                )
-            if status != "deployed":
-                # An upgrade in progress or a failed upgrade still has a
-                # running earlier revision; readiness is checked after the lease.
-                message = f"Release status is '{status}'. {message}"
-            logger.warning(message)
-            return DeploymentResult(
-                component="observability",
-                status=DeploymentStatus.SUCCESS,
-                message=message,
-                elapsed_seconds=time.time() - start,
-                details={"helm_release": HELM_RELEASE_NAME, "release_namespace": existing_ns},
-                label="Observability",
-                detail=f"shared, in {existing_ns}",
-            )
-
-        release_ns = OBSERVABILITY_NAMESPACE
-        # Ensure helm repo is added
-        self._add_helm_repo()
-
-        # Build Helm values
-        values = self._build_helm_values(namespace)
-
-        # A fresh install, never an upgrade: this path runs only when no
-        # release exists, and 'helm install' fails rather than modifying one
-        # that appeared since the check.
-        cmd = [
-            "install",
-            HELM_RELEASE_NAME,
-            HELM_CHART,
-            "--version",
-            self.config.observability.chart_version,
-            "--namespace",
-            release_ns,
-            "--create-namespace",
-            # No --wait: the install runs under the cluster lease, and holding
-            # it through image pulls would stall parallel watch-list changes.
-            # The release record exists once this returns, so a concurrent
-            # deploy sees it and does not install a second copy.
-            "--timeout",
-            "5m",
-        ]
-        for key, val in values.items():
-            cmd.extend(["--set", f"{key}={val}"])
-
-        # OpenShift: null out hardcoded securityContexts and disable
-        # node-exporter (requires hostNetwork/hostPID/hostPath which SCC blocks)
-        if self._is_openshift():
-            openshift_values_file = self._write_openshift_values_file()
-            cmd.extend(["-f", openshift_values_file])
-
-        result = pinned_helm(
-            self._kube_context(),
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=360,
-        )
-
-        if result.returncode != 0:
-            # Filter out K8s API warnings (I0216... lines) to find real errors
-            stderr_lines = (result.stderr or "").strip().splitlines()
-            error_lines = [
-                ln for ln in stderr_lines if not ln.lstrip().startswith(("I0", "W0", '"Warning'))
-            ]
-            error = (
-                "\n".join(error_lines).strip()[:500]
-                or result.stderr.strip()[:500]
-                or "Unknown error"
-            )
-            recovery = (
-                f"\nRecovery (cluster admin; the release is shared):\n"
-                f"  helm status {HELM_RELEASE_NAME} -n {release_ns}\n"
-                f"  helm uninstall {HELM_RELEASE_NAME} -n {release_ns}  # only if no deployment uses it\n"
-                f"  lakebench deploy  # retry"
-            )
+        if existing_ns is None:
             return DeploymentResult(
                 component="observability",
                 status=DeploymentStatus.FAILED,
-                message=f"Helm install failed: {error}{recovery}",
+                message=(
+                    "The shared observability stack (kube-prometheus-stack) is not installed. "
+                    f"A cluster admin installs it once: {INSTALL_COMMAND}. Or set "
+                    "observability.enabled: false."
+                ),
                 elapsed_seconds=time.time() - start,
             )
 
-        # Apply PodMonitor and Prometheus ConfigMap templates
+        # Deploy never upgrades or modifies the release: another deployment
+        # may depend on its current values. A release with no running revision
+        # (an install still running or never finished) is not used.
+        if status in _UNUSABLE_STATUSES:
+            return DeploymentResult(
+                component="observability",
+                status=DeploymentStatus.FAILED,
+                message=(
+                    f"The shared observability release in namespace '{existing_ns}' has status "
+                    f"'{status or 'unknown'}', with no running revision; not using it. An "
+                    "admin install may still be running: check 'lakebench admin status', then "
+                    "'lakebench admin doctor'."
+                ),
+                elapsed_seconds=time.time() - start,
+            )
         self._apply_podmonitor_templates(namespace)
-        self._apply_dashboard()
-
-        prom_svc = _find_helm_service(
-            release_ns, "kube-prometheus-stack-prometheus", context=self._kube_context()
-        )
-        grafana_svc = _find_helm_service(release_ns, "grafana", context=self._kube_context())
-        prom_url = (
-            f"http://{prom_svc}.{release_ns}.svc:9090"
-            if prom_svc
-            else f"http://{HELM_RELEASE_NAME}-prometheus.{release_ns}.svc:9090"
-        )
-        grafana_url = (
-            f"http://{grafana_svc}.{release_ns}.svc:80"
-            if grafana_svc
-            else f"http://{HELM_RELEASE_NAME}-grafana.{release_ns}.svc:80"
-        )
-        logger.warning(SHARED_NOTICE)
-
+        if existing_ns == OBSERVABILITY_NAMESPACE:
+            message = (
+                f"Using the shared observability stack in namespace '{existing_ns}' "
+                f"(left unchanged). {SHARED_NOTICE}"
+            )
+        else:
+            message = (
+                f"An observability release from an older lakebench exists in namespace "
+                f"'{existing_ns}'. It is left unchanged and scrapes only that namespace, "
+                f"so this deployment's pods are not monitored until it is removed and "
+                f"the shared stack is installed. {SHARED_NOTICE}"
+            )
+        if status != "deployed":
+            # An upgrade in progress or a failed upgrade still has a running
+            # earlier revision; readiness is checked next.
+            message = f"Release status is '{status}'. {message}"
+        logger.warning(message)
         return DeploymentResult(
             component="observability",
             status=DeploymentStatus.SUCCESS,
-            message=f"Observability stack installed (kube-prometheus-stack). {SHARED_NOTICE}",
+            message=message,
             elapsed_seconds=time.time() - start,
-            details={
-                "helm_release": HELM_RELEASE_NAME,
-                "release_namespace": release_ns,
-                "prometheus_url": prom_url,
-                "grafana_url": grafana_url,
-                "retention": self.config.observability.retention,
-            },
+            details={"helm_release": HELM_RELEASE_NAME, "release_namespace": existing_ns},
             label="Observability",
-            detail="kube-prometheus-stack",
+            detail=f"shared, in {existing_ns}",
         )
 
     def destroy(self) -> DeploymentResult:
@@ -663,123 +541,91 @@ class ObservabilityDeployer:
                 except Exception as e:
                     logger.warning("Failed to apply %s/%s: %s", template_name, doc.get("kind"), e)
 
-    def _apply_dashboard(self) -> None:
-        """Apply the single cluster-wide Grafana dashboard (LB-192).
 
-        Rendered once into OBSERVABILITY_NAMESPACE with a namespace + run_id
-        template variable, idempotently on every deploy. Best-effort: a dashboard
-        apply failure never fails the deploy.
-        """
-        if not self.config.observability.dashboards_enabled:
-            return
-        context = dict(self.context)
-        context["observability_namespace"] = OBSERVABILITY_NAMESPACE
-        try:
-            yaml_content = self.renderer.render(DASHBOARD_TEMPLATE, context)
-            if not isinstance(yaml_content, str):
-                return
-            for doc in yaml.safe_load_all(yaml_content):
-                if doc:
-                    self.k8s.apply_manifest(doc, namespace=OBSERVABILITY_NAMESPACE)
-        except Exception as e:
-            logger.warning("Failed to apply %s: %s", DASHBOARD_TEMPLATE, e)
+# ---------------------------------------------------------------------------
+# The shared install, run only by ``lakebench admin install --component
+# observability`` (deploy/shared_components.py) under the cluster lease.
+# ---------------------------------------------------------------------------
 
-    def _add_helm_repo(self) -> None:
-        """Add the prometheus-community Helm repo if not present."""
-        ctx = self._kube_context()
-        pinned_helm(
-            ctx,
-            [
-                "repo",
-                "add",
-                "prometheus-community",
-                "https://prometheus-community.github.io/helm-charts",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        pinned_helm(
-            ctx,
-            ["repo", "update"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+#: The command that installs the shared stack, named in deploy's failures.
+INSTALL_COMMAND = "lakebench admin install --component observability <config>"
 
-    def _is_openshift(self) -> bool:
-        """Detect if running on OpenShift."""
-        try:
-            verifier = SecurityVerifier(self.k8s)
-            return verifier.detect_platform() == PlatformType.OPENSHIFT
-        except Exception:
-            return False
 
-    def _build_helm_values(self, namespace: str) -> dict[str, str]:
-        """Build Helm --set values for kube-prometheus-stack."""
-        obs = self.config.observability
-        values: dict[str, str] = {
-            "prometheus.prometheusSpec.retention": obs.retention,
-            "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage": obs.storage,
-            "grafana.enabled": str(obs.dashboards_enabled).lower(),
-            # No grafana.adminPassword: the chart generates one per
-            # install into the Secret <release>-grafana. An existing install
-            # keeps the value it was installed with.
-            # The dashboard ConfigMap lives in the shared observability
-            # namespace (LB-192); ALL also picks up older per-namespace ones.
-            "grafana.sidecar.dashboards.searchNamespace": "ALL",
-        }
-        # No namespace selector: the chart default ({}) watches every
-        # namespace, so the one shared Prometheus scrapes the PodMonitors each
-        # deployment applies in its own namespace. podMonitorSelector still
-        # requires the release label those PodMonitors carry.
+def is_openshift(context: str | None) -> bool:
+    """Detect if running on OpenShift."""
+    try:
+        from lakebench.k8s import get_k8s_client
 
-        return values
+        verifier = SecurityVerifier(get_k8s_client(context=context or "", namespace="default"))
+        return verifier.detect_platform() == PlatformType.OPENSHIFT
+    except Exception:
+        return False
 
-    def _write_openshift_values_file(self) -> str:
-        """Write a temp values file that nulls out hardcoded securityContexts.
 
-        OpenShift assigns UIDs from the namespace annotation range.
-        The chart's hardcoded runAsUser/fsGroup values (e.g. 2000, 65534)
-        are rejected by SCC. A values file is needed because ``--set key=null``
-        passes the string literal "null", not YAML null.
-        """
-        import yaml
+def build_helm_values(observability: ObservabilityConfig) -> dict[str, str]:
+    """Helm --set values for the shared kube-prometheus-stack install."""
+    values: dict[str, str] = {
+        "prometheus.prometheusSpec.retention": observability.retention,
+        "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage": observability.storage,
+        "grafana.enabled": str(observability.dashboards_enabled).lower(),
+        # No grafana.adminPassword: the chart generates one per
+        # install into the Secret <release>-grafana. An existing install
+        # keeps the value it was installed with.
+        # The dashboard ConfigMap lives in the shared observability
+        # namespace (LB-192); ALL also picks up older per-namespace ones.
+        "grafana.sidecar.dashboards.searchNamespace": "ALL",
+    }
+    # No namespace selector: the chart default ({}) watches every
+    # namespace, so the one shared Prometheus scrapes the PodMonitors each
+    # deployment applies in its own namespace. podMonitorSelector still
+    # requires the release label those PodMonitors carry.
+    return values
 
-        # Shared securityContext override -- null out everything
-        _null_sc: dict[str, None] = {
-            "runAsUser": None,
-            "runAsGroup": None,
-            "fsGroup": None,
-        }
 
-        overrides = {
-            "prometheusOperator": {
-                "securityContext": _null_sc,
-                "admissionWebhooks": {
-                    "patch": {
-                        "securityContext": _null_sc,
-                        "podSecurityContext": {
-                            "runAsUser": None,
-                            "runAsNonRoot": True,
-                        },
+def write_openshift_values_file() -> str:
+    """Write a temp values file that nulls out hardcoded securityContexts.
+
+    OpenShift assigns UIDs from the namespace annotation range.
+    The chart's hardcoded runAsUser/fsGroup values (e.g. 2000, 65534)
+    are rejected by SCC. A values file is needed because ``--set key=null``
+    passes the string literal "null", not YAML null.
+    """
+    import yaml
+
+    # Shared securityContext override -- null out everything
+    _null_sc: dict[str, None] = {
+        "runAsUser": None,
+        "runAsGroup": None,
+        "fsGroup": None,
+    }
+
+    overrides = {
+        "prometheusOperator": {
+            "securityContext": _null_sc,
+            "admissionWebhooks": {
+                "patch": {
+                    "securityContext": _null_sc,
+                    "podSecurityContext": {
+                        "runAsUser": None,
+                        "runAsNonRoot": True,
                     },
                 },
             },
-            "prometheus": {
-                "prometheusSpec": {"securityContext": _null_sc},
-            },
-            "alertmanager": {
-                "alertmanagerSpec": {"securityContext": _null_sc},
-            },
-            "grafana": {"securityContext": _null_sc},
-            "kube-state-metrics": {"securityContext": _null_sc},
-            # node-exporter needs hostNetwork/hostPID/hostPath -- blocked by SCC
-            "nodeExporter": {"enabled": False},
-            "prometheusNodeExporter": {"enabled": False},
-        }
+        },
+        "prometheus": {
+            "prometheusSpec": {"securityContext": _null_sc},
+        },
+        "alertmanager": {
+            "alertmanagerSpec": {"securityContext": _null_sc},
+        },
+        "grafana": {"securityContext": _null_sc},
+        "kube-state-metrics": {"securityContext": _null_sc},
+        # node-exporter needs hostNetwork/hostPID/hostPath -- blocked by SCC
+        "nodeExporter": {"enabled": False},
+        "prometheusNodeExporter": {"enabled": False},
+    }
 
-        fp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="lb-obs-", delete=False)
-        yaml.safe_dump(overrides, fp, default_flow_style=False)
-        fp.close()
-        return fp.name
+    fp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="lb-obs-", delete=False)
+    yaml.safe_dump(overrides, fp, default_flow_style=False)
+    fp.close()
+    return fp.name

@@ -529,15 +529,14 @@ class ScratchStorageConfig(ConfigModel):
     The StorageClass is Category 2 shared infrastructure: lakebench uses
     it, lakebench does not create or destroy it. ``deploy`` verifies the
     named StorageClass exists at preflight; a cluster admin installs it
-    once with ``lakebench admin install-scratch-storage-class``. The
-    ``provisioner`` and ``parameters`` fields are consumed by that admin
-    command via the ``storageclass/px-csi-scratch.yaml.j2`` template.
+    once with ``lakebench admin install --component scratch-storage-class``,
+    which reads ``provisioner`` and ``parameters``.
     """
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "create_storage_class": (
             "lakebench no longer creates StorageClasses; a cluster admin runs "
-            "'lakebench admin install-scratch-storage-class' once."
+            "'lakebench admin install --component scratch-storage-class' once."
         ),
         # Nothing sized a PVC from it: each executor's scratch volume is the
         # job profile's scratch_size (modules/pipeline_engines/spark/job.py).
@@ -588,28 +587,48 @@ def _refuse_operator_install(model: ConfigModel, info: ValidationInfo, key: str,
     )
 
 
-_SPARK_OPERATOR_INSTALL_FIX = (
-    "the Spark Operator is shared cluster infrastructure; a cluster admin installs it "
-    "once with 'lakebench admin install-spark-operator'."
-)
-_STACKABLE_OPERATOR_INSTALL_FIX = (
-    "the Stackable operators are shared cluster infrastructure; a cluster admin installs "
-    "them once with the Helm commands in docs/component-hive.md ('Stackable Operator')."
-)
+#: Keys that v1.6 read as "deploy installs this shared operator", and the
+#: ``admin install`` component that does it now (see _refuse_operator_install).
+#: A config translator drops both keys by this table.
+OPERATOR_INSTALL_KEYS: dict[str, str] = {
+    "platform.compute.spark.operator.install": "spark-operator",
+    "architecture.catalog.hive.operator.install": "stackable",
+}
+
+
+def operator_install_fix(key: str) -> str:
+    """What to do instead of ``<key>: true``."""
+    component = OPERATOR_INSTALL_KEYS[key]
+    return (
+        "deploy never installs shared operators, because they serve every deployment on "
+        "the cluster; a cluster admin installs them once with 'lakebench admin install "
+        f"--component {component} <config>'."
+    )
+
+
+_SPARK_OPERATOR_INSTALL_FIX = operator_install_fix("platform.compute.spark.operator.install")
+_STACKABLE_OPERATOR_INSTALL_FIX = operator_install_fix("architecture.catalog.hive.operator.install")
 
 
 class SparkOperatorConfig(ConfigModel):
-    """Spark operator installation configuration."""
+    """Where the shared Spark Operator runs and the chart a fresh install uses.
 
+    ``deploy`` never installs it; ``lakebench admin install --component
+    spark-operator`` does, at ``version`` when it is not installed. An
+    installed operator keeps its version whatever this says.
+    """
+
+    #: Refused when true (see OPERATOR_INSTALL_KEYS); kept so ``false`` loads.
     install: bool = False
     namespace: str = "spark-operator"
     version: str = "2.5.1"  # webhook volume injection gap (gotcha 3) unchanged from 2.4.0; template workaround stays
 
     @model_validator(mode="after")
     def _refuse_install(self, info: ValidationInfo) -> SparkOperatorConfig:
-        _refuse_operator_install(
-            self, info, "platform.compute.spark.operator.install", _SPARK_OPERATOR_INSTALL_FIX
-        )
+        if self.install:
+            _refuse_operator_install(
+                self, info, "platform.compute.spark.operator.install", _SPARK_OPERATOR_INSTALL_FIX
+            )
         return self
 
 
@@ -839,20 +858,23 @@ class HiveResourcesConfig(ConfigModel):
 
 
 class StackableOperatorConfig(ConfigModel):
-    """Stackable operator installation configuration."""
+    """Where the shared Stackable operators run and the SDP version a fresh
+    install uses (``lakebench admin install --component stackable``)."""
 
+    #: Refused when true (see OPERATOR_INSTALL_KEYS); kept so ``false`` loads.
     install: bool = False
     namespace: str = "stackable"
     version: str = "25.7.0"
 
     @model_validator(mode="after")
     def _refuse_install(self, info: ValidationInfo) -> StackableOperatorConfig:
-        _refuse_operator_install(
-            self,
-            info,
-            "architecture.catalog.hive.operator.install",
-            _STACKABLE_OPERATOR_INSTALL_FIX,
-        )
+        if self.install:
+            _refuse_operator_install(
+                self,
+                info,
+                "architecture.catalog.hive.operator.install",
+                _STACKABLE_OPERATOR_INSTALL_FIX,
+            )
         return self
 
 

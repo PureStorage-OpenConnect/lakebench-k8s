@@ -3006,22 +3006,24 @@ def _run_sustained(
         spark_op_cfg = cfg.platform.compute.spark.operator
         operator = SparkOperatorManager(
             namespace=spark_op_cfg.namespace,
-            version=spark_op_cfg.version if spark_op_cfg.install else None,
             job_namespace=cfg.get_namespace(),
             kube_context=cfg.platform.kubernetes.context,
         )
         status = operator.check_status()
         if not status.ready:
             hint = ""
-            if not status.installed and spark_op_cfg.install:
-                hint = " -- run 'lakebench deploy' first to install it"
+            if status.installed is False:
+                hint = (
+                    " -- a cluster admin installs it once with 'lakebench admin install "
+                    "--component spark-operator <config>'"
+                )
             print_error(f"Spark Operator not ready: {status.message}{hint}")
             pipeline_success = False
             raise typer.Exit(ExitCode.PREREQUISITE)
 
         # Ensure operator watches the target namespace (always try to heal)
         ns_status = operator.ensure_namespace_watched(can_heal=True)
-        if ns_status.watching_namespace is False:
+        if ns_status.watching_namespace is False or not ns_status.ready:
             print_error(ns_status.message)
             pipeline_success = False
             raise typer.Exit(ExitCode.PREREQUISITE)

@@ -120,7 +120,7 @@ _POLL_MAX_SEC = 4.0
 # How long one holder may keep the lease (DESIGN ch01 3.7). The watch-list
 # phases (helm upgrade, rollout waits, restart, the operator pod poll, the
 # namespace delete) fit in LEASE_MAX_HOLD_S. The admin verbs
-# (install-spark-operator with --wait, repair-operator's per-namespace
+# (admin install, repair-operator's per-namespace
 # restarts, migrate-deployment, reclaim-bucket) get ADMIN_MAX_HOLD_S. Both
 # stay under the TTL so a crashed holder is still reclaimed. Subprocesses
 # under the lease are bounded by the budget today (lakebench.k8s._pinned);
@@ -855,9 +855,8 @@ class _SignalDeferral:
             self.quiet()
             _say(
                 "aborting inside the cluster lease; the lease is released first. If a "
-                "helm upgrade was running, check `helm history` for the release and "
-                "roll back a pending-upgrade revision, then run "
-                "`lakebench admin repair-operator`"
+                "helm upgrade was running, run `lakebench admin repair-operator`: it "
+                "rolls a pending-upgrade revision back when that is safe"
             )
             raise LeaseAbort(signum)
 

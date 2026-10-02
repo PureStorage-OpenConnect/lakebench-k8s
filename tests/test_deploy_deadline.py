@@ -227,7 +227,8 @@ def test_post_upgrade_rollout_is_not_cut_by_the_deadline(clock):
         clock.sleep(10)
         assert m._rollout_status_after_upgrade()
     args = [c.args[0] for c in m._run.call_args_list]
-    assert len(args) == 2 and all(f"--timeout={op._POST_UPGRADE_ROLLOUT_S}s" in a for a in args)
+    # Bounded by its phase (and the lease hold), never by the deploy deadline.
+    assert len(args) == 2 and all(f"--timeout={op.WATCH_ROLLOUT_PHASE_S}s" in a for a in args)
 
 
 # --- the shared watch list: gate before the mutation, never after ------------------
@@ -400,17 +401,12 @@ def test_transient_error_is_not_retried_after_the_deadline(clock):
     assert results[0].status == DeploymentStatus.FAILED
 
 
-def test_no_stackable_install_after_the_deadline(clock):
+def test_no_stackable_install_after_the_deadline():
+    """Deploy has no Stackable install left to cut: `admin install
+    --component stackable` installs it, outside any deploy deadline (SD-10)."""
     from lakebench.modules.catalogs.hive import deployer as hive
 
-    d = hive.HiveDeployer.__new__(hive.HiveDeployer)
-    d.config = MagicMock()
-    with patch("lakebench.k8s.pinned_helm") as helm, deadline.deploy_deadline(5):
-        clock.sleep(5)
-        with pytest.raises(deadline.DeployTimeout) as e:
-            d._install_stackable_operators()
-    helm.assert_not_called()
-    assert "helm install of Stackable commons-operator" in str(e.value)
+    assert not hasattr(hive.HiveDeployer, "_install_stackable_operators")
 
 
 def test_scc_verify_poll_stops_at_the_deadline(clock):
@@ -473,13 +469,23 @@ def test_operator_scc_check_is_not_cut_after_a_shared_change(clock, monkeypatch)
 # --- static guard -------------------------------------------------------------------
 
 _TIMEOUT_KW = {"timeout", "timeout_s", "timeout_seconds"}
-_CLAMPS = {"clamp", "lease_clamp", "clamp_whole_seconds"}
+# wait_s: a _Phase wait in operator.py, bounded by the lease's hold budget and,
+# like the post-upgrade waits, never by the deploy deadline.
+_CLAMPS = {"clamp", "lease_clamp", "clamp_whole_seconds", "wait_s"}
 _CHECKS = _CLAMPS | {"check"}
 # Waits after a committed shared mutation: bounded by their own timeout,
 # never by the deploy deadline (operator.py _POST_UPGRADE_*).
 _POST_UPGRADE = re.compile(r"^_POST_UPGRADE_\w+_S$")
 # Files whose code never runs inside deploy_all, so no deploy deadline is set.
-_OUTSIDE_DEPLOY = {"deploy/destroy.py", "deploy/datagen.py", "deploy/garage.py", "deploy/local.py"}
+_OUTSIDE_DEPLOY = {
+    "deploy/destroy.py",
+    "deploy/datagen.py",
+    "deploy/garage.py",
+    "deploy/local.py",
+    # admin install, doctor and status only (SD-10): deploy never installs a
+    # shared component, so no deploy deadline is set there.
+    "deploy/shared_components.py",
+}
 # Functions on the destroy path inside the scanned files (no deploy deadline).
 _DESTROY_PATH = {
     ("modules/pipeline_engines/spark/operator.py", "_remove_namespace_from_watch_locked"),

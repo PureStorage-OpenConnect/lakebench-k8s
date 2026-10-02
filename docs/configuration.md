@@ -330,8 +330,8 @@ platform:
 
   compute:
     spark:
-      operator:                       # Shared; a cluster admin installs it once
-        namespace: spark-operator     # (lakebench admin install-spark-operator)
+      operator:
+        namespace: spark-operator
         version: "2.5.1"
 
       # Each job takes its driver and executor sizing from its built-in job
@@ -570,9 +570,9 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `platform.compute.spark.operator.install` | bool | `false` | Refused when `true` by every command that changes data: the operator is shared infrastructure that a cluster admin installs once with `lakebench admin install-spark-operator`. `destroy`, `status` and the read-only commands load `true` as `false` with a note. |
+| `platform.compute.spark.operator.install` | bool | `false` | Refused when `true`: deploy never installs the shared operator; a cluster admin runs `lakebench admin install --component spark-operator`. `false` loads as before. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | Namespace for the Spark Operator. |
-| `platform.compute.spark.operator.version` | string | `2.5.1` | Spark Operator chart version. v2.x required. |
+| `platform.compute.spark.operator.version` | string | `2.5.1` | Chart version a fresh `admin install` uses. v2.x required. An installed operator keeps its version. |
 | `platform.compute.spark.bronze_executors` | int or null | `null` | Override bronze-verify executor count. Null = auto from scale. |
 | `platform.compute.spark.silver_executors` | int or null | `null` | Override silver-build executor count. Null = auto from scale. |
 | `platform.compute.spark.gold_executors` | int or null | `null` | Override gold-finalize executor count. Null = auto from scale. |
@@ -618,9 +618,9 @@ dependency set hash.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `architecture.catalog.type` | enum | `hive` | Catalog service: `hive`, `polaris`, or `none`. |
-| `architecture.catalog.hive.operator.install` | bool | `false` | Refused when `true` by every command that changes data: a cluster admin installs the Stackable operators once (see [component-hive.md](component-hive.md#stackable-operator)). `destroy`, `status` and the read-only commands load `true` as `false` with a note. |
+| `architecture.catalog.hive.operator.install` | bool | `false` | Refused when `true`: deploy never installs the Stackable operators; a cluster admin runs `lakebench admin install --component stackable`. `false` loads as before. |
 | `architecture.catalog.hive.operator.namespace` | string | `stackable` | Namespace for Stackable operators. |
-| `architecture.catalog.hive.operator.version` | string | `25.7.0` | Stackable chart version. |
+| `architecture.catalog.hive.operator.version` | string | `25.7.0` | Stackable SDP chart version a fresh `admin install` uses. |
 | `architecture.catalog.hive.resources.cpu_min` | string | `500m` | Hive Metastore minimum CPU request. |
 | `architecture.catalog.hive.resources.cpu_max` | string | `2` | Hive Metastore CPU limit. |
 | `architecture.catalog.hive.resources.memory` | string | `4Gi` | Hive Metastore memory. |
@@ -747,7 +747,7 @@ added at runtime.
 | `observability.dashboards_enabled` | bool | `true` | Deploy Grafana dashboards. |
 | `observability.retention` | string | `7d` | Prometheus data retention period. |
 | `observability.storage` | string | `10Gi` | Prometheus PVC size. |
-| `observability.chart_version` | string | `87.19.2` | `kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit -- there is no separate Prometheus/Grafana version field. Pinned as of 2026-07-27; the deploy previously carried no `--version` flag and silently tracked whatever the Helm repo served at install time. |
+| `observability.chart_version` | string | `87.19.2` | `kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit -- there is no separate Prometheus/Grafana version field. The version a fresh `lakebench admin install --component observability` uses; an installed release keeps its version. |
 
 ### Spark Configuration Overrides
 

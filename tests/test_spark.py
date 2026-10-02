@@ -1480,6 +1480,11 @@ class TestSparkOperatorNamespaceWatching:
                 returncode=0,
                 stdout='{"spark":{"jobNamespaces":["lakebench"]}}',
             ),
+            # _watch_list_pin: the installed chart, read again inside the lease
+            MagicMock(
+                returncode=0,
+                stdout='[{"name":"spark-operator","chart":"spark-operator-2.4.0"}]',
+            ),
             # _add_namespace_to_watch: helm upgrade
             MagicMock(returncode=0, stdout="Release updated"),
             # _is_openshift check (returncode=1 -> not OpenShift)

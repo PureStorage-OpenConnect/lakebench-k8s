@@ -174,6 +174,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   still resolves as before (to `hive-iceberg-spark-trino` when it sets no
   component, otherwise to the components it sets) and loads with a note
   naming the recipe to write. v1.8 requires `recipe:`.
+- **Deploy never installs a shared component; `lakebench admin install
+  --component` does.** The scratch StorageClass, the Spark Operator, the
+  Stackable operators and the kube-prometheus-stack observability release
+  serve every deployment on a cluster, so a cluster admin installs them once
+  with `lakebench admin install --component <c> <config>` (`c` is
+  `scratch-storage-class`, `spark-operator`, `stackable`, `observability`, or
+  `all` for what the config uses; repeatable), under the cluster lease.
+  `deploy` only checks them and fails the step with that command when one is
+  missing: the Hive step no longer installs Stackable, the Spark Operator step
+  no longer installs the operator, and the observability step no longer
+  installs the stack, takes no lease and applies only the deployment's own
+  PodMonitors and Pushgateway (the shared Grafana dashboard is applied by
+  `admin install`); with observability enabled, the deploy preflight stops
+  before creating anything when the stack is missing.
+  `platform.compute.spark.operator.install: true` and
+  `architecture.catalog.hive.operator.install: true` are refused by the
+  commands that change data, with the admin command; `destroy`, `status` and
+  `admin` load them as false. `false` loads as before.
+- **`admin install` never changes an installed component.** It installs what
+  is missing at `--version C=V`, else the config's pin, else the Lakebench
+  default, with `helm install` (never an upgrade). On a cluster that has
+  everything installed and ready it changes nothing, takes no lease and exits
+  0; the one thing it refreshes is the shared Grafana dashboard ConfigMap
+  when it differs. A config pin that differs from the installed version is
+  kept, with a warning. `--version` naming another version is refused (exit
+  2; exit 3 with `--allow-version-change`, which lists the deployments using
+  the Spark Operator and any deleted namespaces in its watch list).
+  Lakebench does not automate a version change: `helm upgrade` leaves the
+  CRDs each chart ships in `crds/` at the installed version. A release that
+  is not `deployed`, a second Spark Operator or kube-prometheus-stack,
+  leftover CRDs with no operator, or a scratch StorageClass whose parameters
+  differ from the config's are refused without a change (the
+  `install-scratch-storage-class` alias exits 3 there, where 1.6 exited 0).
+  An installed component that is not ready exits 1. Chart repos are
+  refreshed before the lease is taken; deploys and destroys wait for the
+  lease up to 37.5 minutes, then fail without changing anything shared. `--dry-run` shows the plan; `-y` skips the
+  confirmation.
+- **`admin install-spark-operator` and `admin install-scratch-storage-class`
+  are aliases** of `admin install --component spark-operator` and
+  `--component scratch-storage-class`, with a notice on stderr.
+  `install-spark-operator --version` no longer upgrades an installed operator
+  (exit 2); resize an installed controller's `/tmp` with `admin
+  repair-operator --controller-tmp-size`.
+- **The watch-list edits never fall back to the config's operator version.**
+  `deploy`, `run` and `destroy` pin the installed chart, read inside the
+  cluster lease; when it cannot be read the edit is refused rather than let
+  Helm move the shared operator to the config's or the repo's latest chart.
+  A refused removal fails `destroy`, which keeps the namespace (as for any
+  failed watch-list removal); re-run it once `helm list` answers.
+- **`admin doctor` runs the prerequisite checks** of `docs/prerequisites.md`
+  for the shared components and exits 1 when one fails or cannot run.
+  Without a config it checks all of them at their default names, and
+  Stackable and the observability stack are reported without failing.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
@@ -437,6 +490,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gold-finalize job records `gold_strategy` and `gold_strategy_source` in
   `jobs[].extra_metrics`. Customer 360 records now carry workload version
   `c360-2`, so they do not compare with `c360-1` records.
+- **`admin repair-operator` reads and repairs under the lease.** It now
+  takes the cluster lease first (waiting up to 37.5 min, three watch-list
+  holds) and reads the release state, the Helm values, the `--namespaces`
+  of the controller and webhook Deployments, and the Active namespaces
+  inside it, so a namespace a deploy re-created after an earlier read is
+  kept. It sets the watch list with one `helm upgrade` to the namespaces
+  any of the three lists that are still Active; `default` is added only
+  when nothing else is left (before, it was always added, entries were
+  dropped one upgrade at a time, and only the Helm values were read). When
+  some of them watch every namespace and others list namespaces it changes
+  nothing and exits 3, before any rollback. A release left
+  `pending-upgrade` or `pending-rollback` whose pending revision started at
+  least 10 minutes ago, by the API server's clock (the revision Secret's
+  creation time against the server's Date), is rolled back to the newest
+  deployed revision that names no deleted or Terminating namespace (and,
+  when the operator watches every namespace, only to one that does too),
+  and the list read before the rollback is then set, so a namespace an
+  interrupted add wrote is kept. Otherwise, and for `pending-install`, it exits 3 with the
+  reason; when every earlier revision names a deleted namespace (and the
+  operator does not watch every namespace) the message gives the manual
+  recovery. With no release it exits 4; an unreadable
+  Deployment or namespace list exits 1. `--dry-run` reads without the lease,
+  prints the rollback verdict and changes nothing.
+- **Deploy and run stop when the Spark Operator's watch list cannot be
+  read.** An operator that is ready but whose watch list could not be read
+  used to pass as watching; SparkApplications in a namespace it does not
+  watch are never reconciled. `validate` warns instead of passing. An
+  operator whose CRD or Deployments could not be read (API down, a refused
+  read) is reported as "could not check", not "not installed", so nobody is
+  told to install over a running operator. A Helm `spark.jobNamespaces`
+  list containing an empty entry is read as "every namespace", as the chart
+  renders it.
+- **Watch-list waits run on the lease's 750 s hold budget.** The helm
+  upgrade, the OpenShift patch rollout and the operator restart each have a
+  180 s phase, bounded by what the hold has left; the two Deployments'
+  rollout waits share one phase instead of 120 s each, and a step with too
+  little left fails without starting (destroy then keeps the namespace).
+  A helm attempt under the lease is at most 120 s; outside the lease helm
+  gets no subprocess timeout, so it is never killed mid-upgrade there. A
+  deploy, run or destroy waiting for the lease to change the watch list now
+  waits up to 37.5 min (was 10 min), three holds at that budget; a deploy
+  waits no longer than its `--timeout` allows.
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets
@@ -771,6 +866,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
 ### Fixed
+- **Destroy stops at a failed Spark Operator restart.** After removing the
+  namespace from the watch list, a failed operator restart used to be
+  ignored, leaving destroy's pod poll (one more restart, then keep the
+  namespace if a pod still listed it) as the only check. Destroy now keeps
+  the namespace and exits 1 as soon as the restart fails; the namespace is
+  already off the list, so re-run destroy once the operator pods are Ready.
+  On OpenShift the patch's rollout is awaited before the restart.
 
 - **The capacity check counts the Spark driver's memory overhead.**
   The driver pod requests its heap plus the overhead Spark on Kubernetes

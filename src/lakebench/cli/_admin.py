@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, NoReturn
 
 import typer
 from rich.markup import escape
@@ -29,6 +29,7 @@ from rich.table import Table
 
 from lakebench.cli._helpers import (
     console,
+    esc,
     print_error,
     print_info,
     print_success,
@@ -62,6 +63,17 @@ admin_app = typer.Typer(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _current_kube_context() -> str | None:
+    """The kubeconfig's current context name, or None (in-cluster, no kubeconfig)."""
+    try:
+        from kubernetes import config as k8s_config
+
+        _contexts, active = k8s_config.list_kube_config_contexts()
+        return str(active["name"]) if active and active.get("name") else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _get_core_v1(context: str | None = None):
@@ -261,8 +273,23 @@ def doctor(
         typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
 ) -> None:
-    """Read-only preflight report for Category 2/3/4 shared cluster state."""
+    """Read-only report on the shared cluster components and the lease.
+
+    Runs the shared-component checks of the prerequisite registry
+    (``deploy/prereqs.py``, the same checks ``run`` and
+    docs/prerequisites.md use): with a config, the ones it needs; without
+    one, all of them at the default names, with Stackable and the
+    observability stack reported but not gating. Exits 1 when a check fails
+    or cannot run.
+    """
+    from lakebench.config import LakebenchConfig
     from lakebench.deploy.cluster_lock import read_cluster_lock
+    from lakebench.deploy.prereqs import (
+        ClusterUnreachable,
+        KubeClusterReader,
+        PrereqStatus,
+        run_prereqs,
+    )
 
     cfg = None
     kube_ctx: str | None = None
@@ -273,48 +300,51 @@ def doctor(
 
     console.print(Panel("lakebench admin doctor", expand=False))
 
-    # StorageClass check. ADR-F8: when no config is passed we still
-    # check the default `px-csi-scratch` name so a bare
-    # `lakebench admin doctor` on a fresh cluster does not silently
-    # skip the check that would catch "SC missing" -- that is exactly
-    # the class of oversight the command exists to surface.
-    if cfg is not None and cfg.platform.storage.scratch.enabled:
-        sc_name = cfg.platform.storage.scratch.storage_class
-        sc_context = "from config"
-    elif cfg is None:
-        sc_name = "px-csi-scratch"
-        sc_context = "default (no config supplied)"
-    else:
-        sc_name = None
-        sc_context = ""
-    if sc_name is not None:
-        try:
-            from kubernetes import client as k8s_client
-
-            k8s_client.StorageV1Api().read_storage_class(sc_name)
-            print_success(f"StorageClass {sc_name!r} present ({sc_context})")
-        except Exception as e:  # noqa: BLE001
-            print_error(
-                f"StorageClass {sc_name!r} missing ({sc_context}): {e}. "
-                "Install with: lakebench admin install-scratch-storage-class"
-            )
-
-    # Spark Operator CRD check.
+    # Without a config every shared component is checked at its default
+    # name (px-csi-scratch, spark-operator, stackable, the observability
+    # release), so a bare doctor on a fresh cluster still reports a missing
+    # one -- the oversight the command exists to surface.
+    check_cfg = cfg or LakebenchConfig(
+        name="admin-doctor",
+        platform={"storage": {"scratch": {"enabled": True}}},
+        observability={"enabled": True},
+    )
     try:
-        from kubernetes import client as k8s_client
+        reader = KubeClusterReader(check_cfg, load_config=False)
+        outcomes = run_prereqs(check_cfg, reader)
+    except ClusterUnreachable as e:
+        print_error(str(e))
+        raise typer.Exit(ExitCode.FAILED) from e
 
-        apiext = k8s_client.ApiextensionsV1Api()
-        apiext.read_custom_resource_definition("sparkapplications.sparkoperator.k8s.io")
-        print_success("Spark Operator CRD present")
-    except Exception:  # noqa: BLE001
-        print_error(
-            "Spark Operator CRD missing. Install with: lakebench admin install-spark-operator"
-        )
-    else:
-        op_ns = "spark-operator"
-        if cfg is not None:
-            op_ns = cfg.platform.compute.spark.operator.namespace or op_ns
-        _print_operator_scratch(core_v1, op_ns)
+    failed = False
+    operator_ok = False
+    # Without a config, Stackable (Hive recipes only) and the observability
+    # stack (opt-in) are optional: report them, but gate only on what every
+    # deployment needs.
+    optional = {"stackable", "observability-stack"} if cfg is None else set()
+    for o in outcomes:
+        p, res = o.prereq, o.result
+        if p.component is None and p.id != "openshift-scc-clusterrole":
+            continue  # S3 and the like belong to the deployment, not the cluster
+        line = f"{p.title}: {res.message}"
+        if res.status is PrereqStatus.OK:
+            print_success(line)
+            operator_ok = operator_ok or p.id == "spark-operator"
+        elif res.status is PrereqStatus.SKIPPED:
+            print_info(line)
+        elif res.status is PrereqStatus.WARN:
+            print_warning(line)
+        elif res.status in (PrereqStatus.FAIL, PrereqStatus.UNKNOWN) and p.id in optional:
+            print_warning(f"{line} (pass a config that uses it to make this a failure)")
+            console.print(f"  Fix: {esc(p.fix)}")
+        else:
+            # FAIL, or UNKNOWN: a check that could not run proves nothing.
+            failed = True
+            print_error(line)
+            console.print(f"  Fix: {esc(p.fix)}")
+
+    if operator_ok:
+        _print_operator_scratch(core_v1, check_cfg.platform.compute.spark.operator.namespace)
 
     # Lease state.
     try:
@@ -332,6 +362,8 @@ def doctor(
         )
     else:
         print_info(f"Cluster lease active (holder={state.holder}, acquired={state.acquired_at})")
+    if failed:
+        raise typer.Exit(ExitCode.FAILED)
 
 
 # ---------------------------------------------------------------------------
@@ -390,8 +422,201 @@ def release_lock(
 
 
 # ---------------------------------------------------------------------------
-# install-scratch-storage-class
+# install --component (and the two v1.6 verbs, now aliases)
 # ---------------------------------------------------------------------------
+
+
+def _print_component_table(report) -> None:
+    from lakebench.deploy.shared_components import ComponentStatus
+
+    rows: dict[str, ComponentStatus] = report.final or {p.component: p.status for p in report.plans}
+    if not rows:
+        return
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("component")
+    table.add_column("installed")
+    table.add_column("version")
+    table.add_column("ready")
+    table.add_column("detail")
+    for name, st in rows.items():
+        installed = "unknown" if st.installed is None else ("yes" if st.installed else "no")
+        table.add_row(
+            esc(name),
+            installed,
+            esc(st.version or "-"),
+            "yes" if st.ready else "no",
+            esc(st.detail),
+        )
+    console.print(table)
+
+
+def _emit(level: str, message: str) -> None:
+    {"ok": print_success, "warn": print_warning, "error": print_error}.get(level, print_info)(
+        message
+    )
+
+
+def _run_admin_install(
+    *,
+    cfg,
+    components: list[str],
+    version_pairs: list[str],
+    allow_version_change: bool,
+    dry_run: bool,
+    yes: bool,
+    controller_tmp_size: str | None,
+    spark_operator_namespace: str | None = None,
+) -> None:
+    from lakebench.deploy import shared_components as sc
+    from lakebench.modules.pipeline_engines.spark.operator_scratch import validate_size
+
+    if not components:
+        print_error("name at least one --component (or --component all)")
+        raise typer.Exit(sc.EXIT_USAGE)
+    unknown = [c for c in components if c != "all" and c not in sc.COMPONENTS]
+    if unknown:
+        print_error(
+            f"unknown component(s) {unknown}; choose from {', '.join(sc.COMPONENTS)} or all"
+        )
+        raise typer.Exit(sc.EXIT_USAGE)
+    explicit = "all" not in components
+    if not explicit:
+        if cfg is None:
+            print_error(
+                "--component all needs a config (it installs what that config uses); name "
+                "the components instead"
+            )
+            raise typer.Exit(sc.EXIT_USAGE)
+        resolved = sc.components_for_config(cfg)
+        print_info(f"--component all: {', '.join(resolved)} (what this config uses)")
+        names = sorted(
+            set(resolved) | {c for c in components if c != "all"}, key=sc.COMPONENTS.index
+        )
+    else:
+        names = [c for c in sc.COMPONENTS if c in components]
+    try:
+        versions = sc.parse_versions(version_pairs, names)
+        if controller_tmp_size is not None:
+            validate_size(controller_tmp_size)
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(sc.EXIT_USAGE) from e
+    if controller_tmp_size is not None and sc.SPARK_OPERATOR not in names:
+        print_error("--controller-tmp-size applies to --component spark-operator only")
+        raise typer.Exit(sc.EXIT_USAGE)
+
+    settings = sc.Settings.from_config(
+        cfg,
+        controller_tmp_size=controller_tmp_size,
+        spark_operator_namespace=spark_operator_namespace,
+    )
+    if settings.kube_context is None:
+        # No config context: pin the current one now, so a kubeconfig change
+        # mid-run cannot split helm and the API client across two clusters.
+        current = _current_kube_context()
+        if current:
+            from dataclasses import replace
+
+            settings = replace(settings, kube_context=current)
+    # Every client below follows this context: _get_core_v1 loads it into
+    # the kubernetes client, and helm and the operator manager pin it.
+    core_v1 = _get_core_v1(context=settings.kube_context)
+
+    def _confirm(prompt: str) -> bool:
+        if yes:
+            return True
+        return typer.confirm(prompt, default=False)
+
+    report = sc.run_install(
+        settings,
+        names,
+        versions=versions,
+        allow_version_change=allow_version_change,
+        dry_run=dry_run,
+        confirm=_confirm,
+        core_v1=core_v1,
+        emit=_emit,
+    )
+    _print_component_table(report)
+    if report.code:
+        raise typer.Exit(report.code)
+
+
+@admin_app.command("install")
+def install(
+    config_file: Annotated[
+        Path | None,
+        typer.Argument(help="Config whose names and versions to use (optional)."),
+    ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option("--file", "-f", help="Alternative to positional argument."),
+    ] = None,
+    component: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--component",
+            "-c",
+            help="scratch-storage-class, spark-operator, stackable, observability, or all "
+            "(what the config uses). Repeatable.",
+        ),
+    ] = None,
+    version: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--version",
+            help="COMPONENT=VERSION, the exact chart version for a component that is not "
+            "installed. Repeatable. An installed component keeps its version.",
+        ),
+    ] = None,
+    allow_version_change: Annotated[
+        bool,
+        typer.Option(
+            "--allow-version-change",
+            help="For an installed component at another version: list what a change needs. "
+            "Lakebench refuses the change itself (exit 3).",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would be installed; change nothing.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask before installing.")] = False,
+    controller_tmp_size: Annotated[
+        str | None,
+        typer.Option(
+            "--controller-tmp-size",
+            help="spark-operator only, fresh install: sizeLimit of the controller's /tmp "
+            f"emptyDir (default {DEFAULT_CONTROLLER_TMP_SIZE}). An installed operator is "
+            "resized with 'admin repair-operator --controller-tmp-size'.",
+        ),
+    ] = None,
+) -> None:
+    """Install the shared cluster components a deployment needs.
+
+    Cluster-admin operation, once per cluster: deploy only verifies these.
+    A component that is installed is left as it is (exit 0 when every one
+    is installed and ready); one that is missing is installed at its
+    --version, else the config's pin, else the Lakebench default. Installs
+    hold the cluster lease, so deploys and destroys wait while it runs.
+    Exit 2: a request that needs a flag or is malformed. Exit 3: refused by
+    the safety model (a version change, a second operator, leftover CRDs).
+    """
+    cfg = None
+    if config_file is not None or file_option is not None:
+        cfg = _load_cfg(config_file, file_option)
+    _run_admin_install(
+        cfg=cfg,
+        components=list(component or []),
+        version_pairs=list(version or []),
+        allow_version_change=allow_version_change,
+        dry_run=dry_run,
+        yes=yes,
+        controller_tmp_size=controller_tmp_size,
+    )
+
+
+def _alias_notice(old: str, new: str) -> None:
+    typer.echo(f"'lakebench admin {old}' is now 'lakebench admin {new}'.", err=True)
 
 
 @admin_app.command("install-scratch-storage-class")
@@ -405,96 +630,18 @@ def install_scratch_storage_class(
         typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
 ) -> None:
-    """Install the scratch StorageClass named by config.
-
-    Cluster-admin operation. Uses the settings under
-    ``platform.storage.scratch`` (``storage_class`` name, ``provisioner``,
-    ``parameters``). Runs under the cluster lease.
-    """
-    from lakebench.deploy.cluster_lock import (
-        ADMIN_MAX_HOLD_S,
-        LEASE_REQUEST_TIMEOUT,
-        ClusterLockError,
-        ClusterLockHeld,
-        LeaseHoldExceeded,
-        cluster_lock,
-    )
-
+    """Alias of 'admin install --component scratch-storage-class'."""
+    _alias_notice("install-scratch-storage-class", "install --component scratch-storage-class")
     cfg = _load_cfg(config_file, file_option)
-    scratch = cfg.platform.storage.scratch
-    # Pin every K8s call to the configured context (LB-070 class:
-    # cluster-scoped StorageClass write on a stale KUBECONFIG hits the
-    # wrong cluster). StorageV1Api reuses whatever context the SDK
-    # loaded in _get_core_v1(context=...).
-    core_v1 = _get_core_v1(context=cfg.platform.kubernetes.context or None)
-
-    from kubernetes import client as k8s_client
-    from kubernetes.client.exceptions import ApiException
-
-    storage_v1 = k8s_client.StorageV1Api()
-
-    # ADR-F9: both the read and the create happen inside the lease so
-    # two admins racing this command produce one "created" + one
-    # "already exists no-op" instead of a spurious 409 for whichever
-    # loses the race.
-    try:
-        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
-            try:
-                storage_v1.read_storage_class(
-                    scratch.storage_class, _request_timeout=LEASE_REQUEST_TIMEOUT
-                )
-                print_info(f"StorageClass {scratch.storage_class!r} already exists; no-op")
-                return
-            except ApiException as e:
-                if e.status != 404:
-                    print_error(f"cannot read StorageClass: {e}")
-                    raise typer.Exit(ExitCode.FAILED) from e
-
-            manifest = {
-                "apiVersion": "storage.k8s.io/v1",
-                "kind": "StorageClass",
-                "metadata": {
-                    "name": scratch.storage_class,
-                    "labels": {"app.kubernetes.io/managed-by": "lakebench-admin"},
-                },
-                "provisioner": scratch.provisioner,
-                "reclaimPolicy": "Delete",
-                "volumeBindingMode": "WaitForFirstConsumer",
-                "parameters": scratch.parameters,
-            }
-            try:
-                storage_v1.create_storage_class(
-                    body=manifest, _request_timeout=LEASE_REQUEST_TIMEOUT
-                )
-            except ApiException as e:
-                if e.status == 409:
-                    # A third writer sneaked in (or a stale-cache read
-                    # earlier missed the object). Treat as no-op.
-                    print_info(f"StorageClass {scratch.storage_class!r} already exists; no-op")
-                    return
-                print_error(f"cannot create StorageClass: {e}")
-                raise typer.Exit(ExitCode.FAILED) from e
-    except ClusterLockHeld as e:
-        print_error(str(e))
-        raise typer.Exit(ExitCode.REFUSED) from e
-    except ClusterLockError as e:
-        print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
-        # A command inside the lease ran out of its hold budget; the lease
-        # has been released.
-        print_error(str(e))
-        raise typer.Exit(ExitCode.FAILED) from e
-
-    print_success(
-        f"created StorageClass {scratch.storage_class!r} "
-        f"(provisioner {scratch.provisioner}, parameters {scratch.parameters})"
+    _run_admin_install(
+        cfg=cfg,
+        components=["scratch-storage-class"],
+        version_pairs=[],
+        allow_version_change=False,
+        dry_run=False,
+        yes=True,
+        controller_tmp_size=None,
     )
-
-
-# ---------------------------------------------------------------------------
-# install-spark-operator
-# ---------------------------------------------------------------------------
 
 
 @admin_app.command("install-spark-operator")
@@ -509,85 +656,35 @@ def install_spark_operator(
     ] = None,
     version: Annotated[
         str | None,
-        typer.Option("--version", help="Chart version to install/upgrade to."),
+        typer.Option("--version", help="Chart version for a fresh install."),
     ] = None,
     operator_namespace: Annotated[
-        str,
-        typer.Option("--operator-namespace", help="Namespace to install into."),
-    ] = "spark-operator",
+        str | None,
+        typer.Option("--operator-namespace", help="Namespace to install into (no config)."),
+    ] = None,
     controller_tmp_size: Annotated[
         str | None,
         typer.Option(
             "--controller-tmp-size",
-            help="sizeLimit of the controller's /tmp emptyDir, which holds "
-            "spark-submit's Ivy jar cache (chart default 1Gi is too small). "
-            f"Default {DEFAULT_CONTROLLER_TMP_SIZE}; an upgrade without the flag "
-            "keeps a larger size already set.",
+            help="sizeLimit of the controller's /tmp emptyDir on a fresh install "
+            f"(default {DEFAULT_CONTROLLER_TMP_SIZE}).",
         ),
     ] = None,
 ) -> None:
-    """Install or upgrade the shared Spark Operator Helm release.
-
-    Runs under the cluster lease so concurrent admins cannot race the
-    same Helm upgrade. An existing release is upgraded with
-    its stored values (the watch list is kept) and stays on its chart
-    unless ``--version`` or the config names one. The controller's /tmp
-    emptyDir is sized to ``--controller-tmp-size``.
-    """
-    from lakebench.modules.pipeline_engines.spark.operator_scratch import validate_size
-
-    try:
-        if controller_tmp_size is not None:
-            validate_size(controller_tmp_size)
-    except ValueError as e:
-        print_error(f"--controller-tmp-size: {e}")
-        raise typer.Exit(ExitCode.USAGE) from e
-    from lakebench.deploy.cluster_lock import (
-        ADMIN_MAX_HOLD_S,
-        ClusterLockError,
-        ClusterLockHeld,
-        LeaseHoldExceeded,
-        cluster_lock,
-    )
-    from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
-
-    # Load cfg first so the K8s client and the operator manager both pin
-    # the configured context. Without this, a stale KUBECONFIG plus a
-    # `--file prod.yaml` invocation would helm-upgrade the shared spark-
-    # operator release on the wrong cluster (LB-070 class).
-    ns = operator_namespace
-    v = version
-    kube_ctx: str | None = None
+    """Alias of 'admin install --component spark-operator'."""
+    _alias_notice("install-spark-operator", "install --component spark-operator")
+    cfg = None
     if config_file is not None or file_option is not None:
         cfg = _load_cfg(config_file, file_option)
-        ns = cfg.platform.compute.spark.operator.namespace or ns
-        v = v or cfg.platform.compute.spark.operator.version
-        kube_ctx = cfg.platform.kubernetes.context or None
-    core_v1 = _get_core_v1(context=kube_ctx)
-
-    try:
-        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
-            mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
-            ok = mgr.install(version=v, tmp_size=controller_tmp_size)
-    except ClusterLockHeld as e:
-        print_error(str(e))
-        raise typer.Exit(ExitCode.REFUSED) from e
-    except ClusterLockError as e:
-        print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
-        # A command inside the lease ran out of its hold budget; the lease
-        # has been released.
-        print_error(str(e))
-        raise typer.Exit(ExitCode.FAILED) from e
-
-    if not ok:
-        print_error("Spark Operator install/upgrade failed. See logs above.")
-        raise typer.Exit(ExitCode.FAILED)
-    print_success(
-        f"Spark Operator install/upgrade ok (namespace={ns}, "
-        f"version={v or 'installed chart'}, "
-        f"controller /tmp={controller_tmp_size or 'default or larger existing'})"
+    _run_admin_install(
+        cfg=cfg,
+        components=["spark-operator"],
+        version_pairs=[f"spark-operator={version}"] if version else [],
+        allow_version_change=False,
+        dry_run=False,
+        yes=True,
+        controller_tmp_size=controller_tmp_size,
+        spark_operator_namespace=operator_namespace if cfg is None else None,
     )
 
 
@@ -847,6 +944,13 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# A pending revision this old (by the API server's clock) is taken as left by a
+# killed helm call, not one still running: lakebench's watch-list upgrades do
+# not --wait and apply in seconds, and a helm attempt under the lease is
+# stopped after 120 s.
+_PENDING_STALE_S = 600
+
+
 @admin_app.command("repair-operator")
 def repair_operator(
     config_file: Annotated[
@@ -869,29 +973,40 @@ def repair_operator(
         ),
     ] = DEFAULT_CONTROLLER_TMP_SIZE,
 ) -> None:
-    """Repair the shared Spark Operator: stale watch entries and a small /tmp.
+    """Repair the shared Spark Operator: stale watch entries, a pending release, a small /tmp.
 
-    When ``destroy`` fails partway through the watch-list mutation the
-    operator can be left with stale entries. This command reads the
-    live watch list and the live set of namespaces, keeps only the
-    entries whose namespace exists and is Active (plus ``default``), and
-    Helm-upgrades the operator to that reconciled list under the
-    cluster lease.
+    Under the cluster lease it reads the release state, the watch list (the
+    Helm values and the ``--namespaces`` of the controller and webhook
+    Deployments) and the Active namespaces, then:
 
-    It also raises the controller's /tmp emptyDir sizeLimit to
-    ``--controller-tmp-size`` when it is smaller. spark-submit runs in the
-    controller and fills /tmp with the Ivy jar cache; at the chart's 1Gi
-    the kubelet evicts the controller. The resize keeps every stored value
-    and the installed chart version, and rolls the controller once.
+    - rolls a release left ``pending-upgrade`` or ``pending-rollback`` (an
+      interrupted helm call) back, when the pending revision started at
+      least 10 minutes ago by the API server's clock, to the newest deployed
+      revision that names no deleted namespace (when the operator watches
+      every namespace, only to a revision that does too);
+    - sets the watch list, with one upgrade, to the namespaces any of the
+      three sources lists (before a rollback included) that still exist and
+      are Active (``default`` only when nothing else is left: an empty list
+      means "watch every namespace"). When some sources watch every
+      namespace and others list namespaces it changes nothing and exits 3;
+    - raises the controller's /tmp emptyDir sizeLimit to
+      ``--controller-tmp-size`` when it is smaller (spark-submit's Ivy cache
+      fills the chart's 1Gi and the kubelet evicts the controller).
+
+    Everything is read inside the lease, so a namespace a deploy re-created
+    after an earlier read is kept. ``--dry-run`` reads without the lease and
+    only prints.
     """
     from lakebench.deploy.cluster_lock import (
         ADMIN_MAX_HOLD_S,
+        LEASE_REQUEST_TIMEOUT,
         ClusterLockError,
         ClusterLockHeld,
         LeaseHoldExceeded,
         cluster_lock,
     )
     from lakebench.modules.pipeline_engines.spark.operator import (
+        _WATCH_LIST_LOCK_TIMEOUT_S,
         SparkOperatorManager,
         _DeploymentReadError,
         _WatchListReadError,
@@ -908,8 +1023,8 @@ def repair_operator(
         raise typer.Exit(ExitCode.USAGE) from e
 
     ns = "spark-operator"
-    v: str | None = None
     kube_ctx: str | None = None
+    v: str | None = None
     if config_file is not None or file_option is not None:
         cfg = _load_cfg(config_file, file_option)
         ns = cfg.platform.compute.spark.operator.namespace or ns
@@ -918,103 +1033,297 @@ def repair_operator(
 
     core_v1 = _get_core_v1(context=kube_ctx)
     mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
+    rel = mgr.HELM_RELEASE_NAME
+    pending_states = ("pending-upgrade", "pending-rollback")
+    deployments = (mgr.CONTROLLER_DEPLOYMENT, mgr.WEBHOOK_DEPLOYMENT)
 
-    # Controller /tmp: resize only a bounded emptyDir smaller than asked.
-    resize_from: str | None = None
-    try:
-        vol = mgr.controller_tmp_volume()
-    except _DeploymentReadError as e:
-        print_warning(f"cannot read the controller /tmp volume, not resizing it: {e}")
-    else:
-        want = parse_quantity(controller_tmp_size) or 0
-        if not vol.found or not vol.is_empty_dir:
-            print_warning(
-                "controller has no /tmp emptyDir named 'tmp'; not resizing "
-                "(the chart layout differs from 2.5.1)"
-            )
-        elif vol.size_limit is not None and (vol.limit_bytes or 0) < want:
-            resize_from = vol.size_limit
+    def _fail(msg: str, code: ExitCode = ExitCode.FAILED) -> NoReturn:
+        print_error(msg)
+        raise typer.Exit(code)
 
-    try:
-        watched = mgr._get_watched_namespaces()  # noqa: SLF001 -- reconciliation needs live state
-    except _WatchListReadError as e:
-        print_error(f"Cannot read the Spark Operator watch list: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-
-    to_drop: list[str] = []
-    reconciled: list[str] = []
-    if watched is None:
-        print_info("Spark Operator watches all namespaces; no watch list to reconcile")
-    else:
-        # ADR-F2/F2b: keep every watch entry whose namespace still exists
-        # AND is ``Active``, annotated or not. Legacy pre-PR-1 lakebench
-        # deployments (or any third-party ns the operator happens to
-        # watch) have no lakebench annotation but ARE running Spark
-        # workloads there; pruning them would silently stall
-        # reconciliation. Only namespaces that have been deleted, or are
-        # in ``Terminating`` (about to be gone) are safe to drop -- that
-        # is exactly the crash-loop this command is written to prevent.
-        # Iterate ``list_namespace`` via ``_continue`` in case a very
-        # large multi-tenant cluster exceeds the default page size:
-        # missing a page silently unwatches its tenants.
-        live_active_names: set[str] = set()
+    def _active_namespaces(leased: bool) -> set[str]:
+        # Iterate list_namespace via _continue: a missed page silently
+        # unwatches its tenants on a large cluster.
+        kw = {"_request_timeout": LEASE_REQUEST_TIMEOUT} if leased else {}
+        names: set[str] = set()
         cont: str | None = None
-        while True:
-            page = core_v1.list_namespace(_continue=cont) if cont else core_v1.list_namespace()
-            for n in page.items:
-                phase = getattr(n.status, "phase", None) if n.status else None
-                if phase == "Active":
-                    live_active_names.add(n.metadata.name)
-            cont = getattr(page.metadata, "_continue", None) or getattr(
-                page.metadata, "continue_", None
+        try:
+            while True:
+                page = (
+                    core_v1.list_namespace(_continue=cont, **kw)
+                    if cont
+                    else core_v1.list_namespace(**kw)
+                )
+                for n in page.items:
+                    phase = getattr(n.status, "phase", None) if n.status else None
+                    if phase == "Active":
+                        names.add(n.metadata.name)
+                cont = getattr(page.metadata, "_continue", None) or getattr(
+                    page.metadata, "continue_", None
+                )
+                if not cont or not isinstance(cont, str):
+                    return names
+        except Exception as e:  # noqa: BLE001 -- any failure: nothing was changed
+            _fail(f"Cannot list the cluster's namespaces: {e}")
+
+    def _read_lists() -> dict[str, list[str] | None]:
+        lists: dict[str, list[str] | None] = {}
+        try:
+            lists["helm values"] = mgr._get_watched_namespaces()  # noqa: SLF001
+        except _WatchListReadError as e:
+            _fail(f"Cannot read the Spark Operator watch list: {e}")
+        for deploy in deployments:
+            try:
+                lists[deploy] = mgr._get_active_namespaces(deployment=deploy)  # noqa: SLF001
+            except _DeploymentReadError as e:
+                # Unreadable is not "watches every namespace": reconciling
+                # without it could drop what that Deployment watches now.
+                _fail(f"Cannot read the --namespaces of {deploy}: {e}")
+        return lists
+
+    def _plan(leased: bool, carry: frozenset[str] = frozenset()) -> dict[str, Any]:
+        state = mgr.release_state()
+        if state is None:
+            _fail("Cannot read the Spark Operator Helm release state")
+        if state.status == "absent":
+            _fail(
+                f"No {rel} release in namespace {ns}. A cluster admin installs it: "
+                "lakebench admin install --component spark-operator",
+                ExitCode.PREREQUISITE,
             )
-            # Guard against test mocks where `_continue` is itself a
-            # MagicMock (truthy but not a real cursor). Only a non-empty
-            # string is a real continuation token.
-            if not cont or not isinstance(cont, str):
-                break
-
-        # ``default`` is preserved even when absent because the chart
-        # rejects an empty jobNamespaces list.
-        reconciled = sorted({n for n in watched if n in live_active_names} | {"default"})
-        if reconciled == sorted(watched):
-            print_info("Watch list already reconciled; no changes needed")
+        if state.status == "pending-install":
+            # No deployed revision to return to; only a person can tell an
+            # install still running from one that was killed.
+            _fail(
+                f"Release {rel} is pending-install (revision {state.revision}). A cluster "
+                f"admin checks 'helm status {rel} -n {ns}' and, when no install is "
+                "running, uninstalls and re-installs it.",
+                ExitCode.REFUSED,
+            )
+        lists = _read_lists()
+        active = _active_namespaces(leased)
+        resize_from: str | None = None
+        try:
+            vol = mgr.controller_tmp_volume()
+        except _DeploymentReadError as e:
+            print_warning(f"cannot read the controller /tmp volume, not resizing it: {e}")
         else:
-            to_drop = [n for n in watched if n not in reconciled]
-            console.print("Reconciled watch list:")
-            console.print(f"  before: {sorted(watched)}")
-            console.print(f"  after:  {reconciled}")
+            want = parse_quantity(controller_tmp_size) or 0
+            if not vol.found or not vol.is_empty_dir:
+                print_warning(
+                    "controller has no /tmp emptyDir named 'tmp'; not resizing "
+                    "(the chart layout differs from 2.5.1)"
+                )
+            elif vol.size_limit is not None and (vol.limit_bytes or 0) < want:
+                resize_from = vol.size_limit
+        listed = [set(x) for x in lists.values() if x is not None]
+        every = [k for k, x in lists.items() if x is None]
+        # After a rollback (carry set) a source that watches every
+        # namespace is the rolled-back revision, which is set back below.
+        watch_all = not carry and len(every) == len(lists)
+        mixed = [] if carry or watch_all else every
+        target: list[str] = []
+        needs_set = False
+        union: set[str] = set(carry).union(*listed)
+        if not watch_all and not mixed:
+            # Keep every entry a source lists whose namespace still exists
+            # and is Active, annotated or not (a non-lakebench workload
+            # there still needs reconciling); drop deleted and Terminating
+            # ones, the crash-loop this command prevents.
+            target = sorted(n for n in union if n in active) or ["default"]
+            needs_set = any(x is None or sorted(set(x)) != target for x in lists.values())
+        return {
+            "state": state,
+            "lists": lists,
+            "active": active,
+            "watch_all": watch_all,
+            "mixed": mixed,
+            "union": frozenset(union),
+            "target": target,
+            "needs_set": needs_set,
+            "resize_from": resize_from,
+        }
 
-    if resize_from is not None:
-        console.print(f"Controller /tmp emptyDir: {resize_from} -> {controller_tmp_size}")
-    elif not to_drop:
-        return
+    def _server_now() -> float | None:
+        # The API server's clock, from a response's Date header: the pending
+        # revision's age is server time minus server time, so a skewed
+        # workstation clock cannot make a running helm call look stale.
+        from email.utils import parsedate_to_datetime
+
+        try:
+            _data, _status, headers = core_v1.read_namespace_with_http_info(
+                ns, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
+            return parsedate_to_datetime(headers.get("Date")).timestamp()
+        except Exception:  # noqa: BLE001 -- unknown time refuses the rollback
+            return None
+
+    def _rollback_verdict(p: dict[str, Any]) -> tuple[int | None, str | None]:
+        """(revision to roll back to, None) or (None, why not)."""
+        state = p["state"]
+        created = mgr.revision_created(state.revision)
+        now = _server_now()
+        if created is None or now is None:
+            return None, (
+                "the API server's time for the pending revision cannot be read, so a "
+                "helm call may still be running"
+            )
+        age = now - created
+        if age < _PENDING_STALE_S:
+            return None, (
+                f"it started {age:.0f} s ago and a helm call may still be running; "
+                f"retry in {_PENDING_STALE_S - age:.0f} s"
+            )
+        revisions = mgr.good_revisions(state.revision)
+        if revisions is None:
+            return None, "'helm history' cannot be read"
+        if not revisions:
+            return None, "the release has no earlier deployed revision"
+        unsafe: list[str] = []
+        for rev in revisions:
+            try:
+                listed = mgr._get_watched_namespaces(revision=rev)  # noqa: SLF001
+            except _WatchListReadError as e:
+                return None, f"revision {rev}'s values cannot be read: {e}"
+            if p["watch_all"] and listed is not None:
+                # The operator watches every namespace now; a revision with a
+                # list would stop reconciling all the others, silently.
+                unsafe.append(f"{rev} lists {sorted(listed)}")
+                continue
+            if listed is not None:
+                gone = sorted(set(listed) - p["active"] - {"default"})
+                if gone:
+                    unsafe.append(f"{rev} watches {gone}")
+                    continue
+            return rev, None
+        if p["watch_all"]:
+            return None, (
+                "the operator watches every namespace and no earlier deployed revision "
+                f"does ({'; '.join(unsafe)}); rolling back would stop reconciling every "
+                "namespace not listed. A cluster admin decides which is meant"
+            )
+        return None, (
+            "every earlier deployed revision names a namespace that no longer exists ("
+            + "; ".join(unsafe)
+            + "), and rolling back to one would crash-loop the operator. With no deploy "
+            f"or destroy running, a cluster admin runs 'helm rollback {rel} "
+            f"{revisions[0]} -n {ns}' and then 'lakebench admin repair-operator' at once "
+            "to drop those namespaces; the operator restarts in a loop in between"
+        )
+
+    def _fmt(x: list[str] | None) -> str:
+        return "every namespace" if x is None else esc(sorted(x))
+
+    def _report(p: dict[str, Any], verdict: tuple[int | None, str | None] | None) -> None:
+        state = p["state"]
+        pending = state.status in pending_states
+        if pending:
+            console.print(f"Release {esc(rel)} is {esc(state.status)} (revision {state.revision})")
+            if verdict is not None:
+                good, why = verdict
+                if why:
+                    console.print(f"  not rolling back: {esc(why)}")
+                else:
+                    console.print(f"  roll back to revision {good}, then set the watch list")
+        if p["watch_all"]:
+            print_info("Spark Operator watches all namespaces; no watch list to reconcile")
+        elif p["mixed"] or p["needs_set"]:
+            console.print("Watch list:")
+            for name, x in p["lists"].items():
+                console.print(f"  {esc(name)}: {_fmt(x)}")
+            if p["needs_set"]:
+                console.print(f"  after: {esc(p['target'])}")
+        elif not pending:
+            print_info("Watch list already reconciled; no changes needed")
+        if p["resize_from"] is not None:
+            console.print(
+                f"Controller /tmp emptyDir: {esc(p['resize_from'])} -> {esc(controller_tmp_size)}"
+            )
+
+    def _nothing_to_do(p: dict[str, Any]) -> bool:
+        return (
+            p["state"].status not in pending_states
+            and not p["needs_set"]
+            and not p["mixed"]
+            and p["resize_from"] is None
+        )
+
+    def _refuse_mixed(p: dict[str, Any]) -> NoReturn:
+        _fail(
+            f"{', '.join(p['mixed'])} watch every namespace while the rest list namespaces. "
+            "Narrowing would stop reconciling every namespace not listed, and widening "
+            "would change what the operator watches for every deployment, so nothing was "
+            "changed. A cluster admin decides which is meant and re-applies the release "
+            "with no deploy or destroy running, then re-runs repair-operator.",
+            ExitCode.REFUSED,
+        )
 
     if dry_run:
-        print_info("--dry-run set; not applying")
+        p = _plan(leased=False)
+        pending = p["state"].status in pending_states and not p["mixed"]
+        _report(p, _rollback_verdict(p) if pending else None)
+        if p["mixed"]:
+            print_warning(
+                "the watch-list sources disagree on watching every namespace; the real "
+                "run refuses (exit 3) without changing anything"
+            )
+        if not _nothing_to_do(p):
+            print_info("--dry-run set; not applying")
         return
 
-    # Take the lease and apply. We mutate by removing entries not in
-    # ``reconciled``. The strict path already lease-gates its own
-    # per-namespace helm upgrade; we call the underlying non-strict
-    # helper inside a single lease scope so the whole reconcile is one
-    # atomic mutation.
     try:
-        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
-            for n in to_drop:
-                if not mgr._remove_namespace_from_watch_impl(n):  # noqa: SLF001
-                    print_error(
-                        f"could not drop {n!r} from watch list; the operator "
-                        "may still be inconsistent. Retry after investigating "
-                        "Helm state."
+        with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S, max_hold_s=ADMIN_MAX_HOLD_S):
+            p = _plan(leased=True)
+            # A disagreement is refused before any rollback: the rollback's
+            # carried list would otherwise narrow a watch-all operator.
+            pending = p["state"].status in pending_states and not p["mixed"]
+            verdict = _rollback_verdict(p) if pending else None
+            _report(p, verdict)
+            if p["mixed"]:
+                _refuse_mixed(p)
+            if _nothing_to_do(p):
+                return
+            if verdict is not None:
+                good, why = verdict
+                if why is not None or good is None:
+                    _fail(
+                        f"Release {rel} is {p['state'].status}: {why}. Not rolling back; "
+                        f"'helm history {rel} -n {ns}' shows the revisions.",
+                        ExitCode.REFUSED,
                     )
-                    raise typer.Exit(ExitCode.FAILED)
-            if resize_from is not None and not mgr.apply_controller_tmp_size(controller_tmp_size):
-                print_error(
-                    "could not resize the controller /tmp emptyDir; see the log above. "
-                    "The watch list repair (if any) was applied."
-                )
-                raise typer.Exit(ExitCode.FAILED)
+                if not mgr.rollback_to(good):
+                    after = mgr.release_state()
+                    if after is None or after.status != "deployed":
+                        _fail(f"helm rollback to revision {good} failed; see the log above")
+                    # The rollback landed but its rollout did not finish in
+                    # time: still set the carried list now, or a namespace
+                    # only the pending revision listed is lost for good.
+                    print_warning(
+                        f"rolled {rel} back to revision {good}, but its rollout did not "
+                        "finish; setting the watch list anyway"
+                    )
+                else:
+                    print_success(f"rolled {rel} back to revision {good}")
+                # The rolled-back revision may lack a namespace the pending
+                # one or a Deployment listed (a killed add): carry them into
+                # the set, filtered to what is still Active.
+                p = _plan(leased=True, carry=frozenset() if p["watch_all"] else p["union"])
+                if p["mixed"]:
+                    _refuse_mixed(p)
+            if p["needs_set"]:
+                if not mgr._set_watch_list_impl(p["target"]):  # noqa: SLF001
+                    _fail(
+                        "could not set the watch list; the operator may still be "
+                        "inconsistent. Retry after investigating the Helm state."
+                    )
+                print_success(f"reconciled Spark Operator watch list: {p['target']}")
+            if p["resize_from"] is not None:
+                if not mgr.apply_controller_tmp_size(controller_tmp_size):
+                    _fail(
+                        "could not resize the controller /tmp emptyDir; see the log above. "
+                        "The watch list repair (if any) was applied."
+                    )
+                print_success(f"controller /tmp emptyDir sizeLimit is now {controller_tmp_size}")
     except ClusterLockHeld as e:
         print_error(str(e))
         raise typer.Exit(ExitCode.REFUSED) from e
@@ -1026,11 +1335,6 @@ def repair_operator(
         # has been released.
         print_error(str(e))
         raise typer.Exit(ExitCode.FAILED) from e
-
-    if to_drop:
-        print_success(f"reconciled Spark Operator watch list: {reconciled}")
-    if resize_from is not None:
-        print_success(f"controller /tmp emptyDir sizeLimit is now {controller_tmp_size}")
 
 
 # ---------------------------------------------------------------------------

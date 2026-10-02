@@ -116,10 +116,11 @@ platform:
 
   # compute:
   #   spark:
-  #     operator:                  # Shared; a cluster admin installs it once with
-  #                                  # `lakebench admin install-spark-operator`.
+  #     operator:                    # Deploy never installs it; a cluster admin
+  #                                  # runs `lakebench admin install --component
+  #                                  # spark-operator` once per cluster.
   #       namespace: spark-operator
-  #       version: "2.5.1"
+  #       version: "2.5.1"           # Chart a fresh admin install uses
   #
   #     ## Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed
   #     ## in the job profiles, proven at 1 TB+ scale.
@@ -162,10 +163,11 @@ architecture:
       #   memory: 2Gi
     ## Hive Metastore tuning (uncomment when catalog.type: hive)
     # hive:
-    #   operator:                    # Shared; a cluster admin installs the Stackable
-    #                                # operators once (docs/component-hive.md).
+    #   operator:                    # Deploy never installs them; a cluster admin
+    #                                # runs `lakebench admin install --component
+    #                                # stackable` once per cluster.
     #     namespace: stackable
-    #     version: "25.7.0"
+    #     version: "25.7.0"          # SDP a fresh admin install uses
     #   resources:
     #     cpu_min: 500m
     #     cpu_max: "2"

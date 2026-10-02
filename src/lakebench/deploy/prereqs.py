@@ -217,8 +217,6 @@ def _chart_version(labels: dict[str, str]) -> str | None:
 def _check_spark_operator(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
     op = cfg.platform.compute.spark.operator
     if SPARK_APP_CRD not in r.crd_names():
-        if op.install:
-            return _warn("SparkApplication CRD not found; deploy installs the operator")
         return _fail("SparkApplication CRD not found")
     # The operator deploy and the watch-list edits use: the configured
     # namespace only, never a look-alike release elsewhere on the cluster.
@@ -226,10 +224,6 @@ def _check_spark_operator(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResul
     # The 2.x chart labels the controller (charts/.../controller/_helpers.tpl).
     controllers = [d for d in deps if d.labels.get("app.kubernetes.io/component") == "controller"]
     if not controllers:
-        if op.install:
-            return _warn(
-                f"no Spark Operator controller in namespace {op.namespace}; deploy installs it"
-            )
         return _fail(
             f"SparkApplication CRD found but no Spark Operator controller Deployment in "
             f"namespace {op.namespace} (platform.compute.spark.operator.namespace)"
@@ -268,10 +262,6 @@ def _check_stackable(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
     crds = r.crd_names()
     missing_crd = [op for crd, op in STACKABLE_CRDS.items() if crd not in crds]
     if missing_crd:
-        if cfg.architecture.catalog.hive.operator.install:
-            return _warn(
-                f"Stackable CRDs missing for {', '.join(missing_crd)}; deploy installs them"
-            )
         return _fail(f"Stackable CRDs missing for {', '.join(missing_crd)}")
     not_running = [
         op
@@ -308,10 +298,7 @@ def _observability_applies(cfg: LakebenchConfig) -> bool:
 def _check_observability(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
     deps = r.deployments(f"release={OBSERVABILITY_RELEASE}")
     if not deps:
-        return _warn(
-            f"no {OBSERVABILITY_RELEASE} release found; deploy installs the shared "
-            f"stack into namespace {OBSERVABILITY_RELEASE}"
-        )
+        return _fail(f"no {OBSERVABILITY_RELEASE} release found")
     namespaces = ", ".join(sorted({d.namespace for d in deps}))
     not_ready = [d.name for d in deps if d.ready_replicas < 1]
     if not_ready:
@@ -377,8 +364,8 @@ PREREQS: tuple[Prereq, ...] = (
         applies=_scratch_applies,
         check=_check_scratch,
         fix=(
-            "A cluster admin runs `lakebench admin install-scratch-storage-class <config>` "
-            "once per cluster, or set `platform.storage.scratch.enabled: false`."
+            "A cluster admin runs `lakebench admin install --component scratch-storage-class "
+            "<config>` once per cluster, or set `platform.storage.scratch.enabled: false`."
         ),
         doc=(
             "Spark executors put shuffle and spill on per-executor PVCs from the StorageClass "
@@ -395,9 +382,10 @@ PREREQS: tuple[Prereq, ...] = (
         applies=lambda cfg: True,
         check=_check_spark_operator,
         fix=(
-            "A cluster admin runs `lakebench admin install-spark-operator <config>` once per "
-            "cluster. Do not install or upgrade it with a raw `helm` command: the managed "
-            "path holds the cluster lease and keeps the operator's namespace watch list."
+            "A cluster admin runs `lakebench admin install --component spark-operator "
+            "<config>` once per cluster. Do not install or upgrade it with a raw `helm` "
+            "command: the managed path holds the cluster lease and never resets the "
+            "operator's namespace watch list."
         ),
         doc=(
             "Spark jobs are `SparkApplication` resources run by one shared Kubeflow Spark "
@@ -416,9 +404,9 @@ PREREQS: tuple[Prereq, ...] = (
         applies=_hive_applies,
         check=_check_stackable,
         fix=(
-            "A cluster admin installs the Stackable commons, listener, secret and hive "
-            f"operators (SDP {_STACKABLE_DEFAULT}), or use a Polaris recipe, which needs no "
-            "operator."
+            "A cluster admin runs `lakebench admin install --component stackable <config>` "
+            f"once per cluster (the commons, listener, secret and hive operators, SDP "
+            f"{_STACKABLE_DEFAULT}), or use a Polaris recipe, which needs no operator."
         ),
         doc=(
             "The Hive Metastore is a Stackable `HiveCluster`. The check needs the "
@@ -435,10 +423,10 @@ PREREQS: tuple[Prereq, ...] = (
         applies=_observability_applies,
         check=_check_observability,
         fix=(
-            "None needed: `deploy` installs the shared kube-prometheus-stack release "
-            f"`{OBSERVABILITY_RELEASE}` when none exists. To remove it later, a cluster admin "
-            f"runs `helm uninstall {OBSERVABILITY_RELEASE} -n {OBSERVABILITY_RELEASE}` once "
-            "no deployment uses it."
+            "A cluster admin runs `lakebench admin install --component observability "
+            "<config>` once per cluster, or set `observability.enabled: false`. To remove the "
+            f"stack later, a cluster admin runs `helm uninstall {OBSERVABILITY_RELEASE} -n "
+            f"{OBSERVABILITY_RELEASE}` once no deployment uses it."
         ),
         doc=(
             "Metrics go to one shared Prometheus and Grafana (kube-prometheus-stack, release "

@@ -6,8 +6,8 @@ cluster-corrupting actions:
 - ``helm install spark-operator ...``: raw helm install bypasses the
   cluster lease and read-modify-write on the operator watch list; it has
   caused crash loops of the shared Spark Operator that affected every
-  running deployment. The managed path is ``lakebench admin
-  install-spark-operator``.
+  running deployment. The managed path is ``lakebench admin install
+  --component spark-operator``.
 
 - ``kubectl create namespace <ns>``: pre-creating a namespace bypasses
   ``lakebench deploy``'s ownership stamp and the leased operator watch-list
@@ -187,7 +187,7 @@ def test_no_raw_helm_install_spark_operator_in_hints(path: Path) -> None:
     Raw helm install bypasses the cluster lease and the operator watch-list
     read-modify-write, and has crash-looped the shared operator for every
     running deployment. The safe path is ``lakebench admin
-    install-spark-operator``.
+    install --component spark-operator``.
     """
     text = path.read_text(encoding="utf-8")
     for start, block in _extract_hint_blocks(text):
@@ -195,7 +195,7 @@ def test_no_raw_helm_install_spark_operator_in_hints(path: Path) -> None:
             f"{path}: hint block at offset {start} recommends `helm install "
             "spark-operator`, which bypasses the cluster lease and can "
             "crash-loop the shared Spark Operator. Use `lakebench admin "
-            "install-spark-operator` instead."
+            "install --component spark-operator` instead."
         )
 
 
@@ -336,15 +336,15 @@ def test_force_legacy_hints_include_context_check(path: Path) -> None:
 
 def test_prerequisites_recommends_managed_spark_operator_install() -> None:
     """The Spark Operator prerequisite hint must recommend the managed
-    ``lakebench admin install-spark-operator`` path.
+    ``lakebench admin install --component spark-operator`` path.
     """
     from lakebench.deploy.prereqs import PREREQS
 
     # The run preflight's hint is the registry's fix text (DEP-4).
     fix = next(p.fix for p in PREREQS if p.id == "spark-operator")
-    assert "lakebench admin install-spark-operator" in fix, (
+    assert "lakebench admin install --component spark-operator" in fix, (
         "the spark-operator prerequisite must recommend `lakebench admin "
-        "install-spark-operator` as the safe managed install path."
+        "install --component spark-operator` as the safe managed install path."
     )
 
 

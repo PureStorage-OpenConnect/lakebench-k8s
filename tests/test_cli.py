@@ -147,8 +147,10 @@ class TestPreflightCheck:
             mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
             _preflight_check(cfg)
 
-    def test_preflight_warns_on_missing_stackable_with_install(self, monkeypatch):
-        """Preflight warns (not fails) when Stackable CRDs are missing and install is true."""
+    def test_preflight_blocks_on_missing_stackable_whatever_install_says(self, capsys):
+        """Deploy never installs Stackable, so a missing one stops the
+        preflight with the admin command even with install: true (which the
+        loader refuses anyway). Reverted, install: true only warned."""
         from unittest.mock import MagicMock, patch
 
         from lakebench.cli import _preflight_check
@@ -163,10 +165,40 @@ class TestPreflightCheck:
         mock_crd_list = MagicMock()
         mock_crd_list.items = []
 
-        with patch("kubernetes.client.ApiextensionsV1Api") as mock_api:
+        with (
+            patch("kubernetes.client.ApiextensionsV1Api") as mock_api,
+            pytest.raises(typer.Exit),
+        ):
             mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
-            # Should not raise -- warns instead of failing
             _preflight_check(cfg)
+        cap = capsys.readouterr()
+        out = " ".join((cap.out + cap.err).split())
+        assert "lakebench admin install --component stackable" in out
+        assert "helm install" not in out
+
+    def test_preflight_stops_when_observability_is_enabled_but_not_installed(self, capsys):
+        """Deploy no longer installs the shared stack, so a missing one stops
+        the preflight, before anything is created, rather than at the last
+        deploy step."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.cli import _preflight_check
+
+        cfg = MagicMock()
+        cfg.architecture.catalog.type.value = "polaris"
+        cfg.observability.enabled = True
+        cfg.platform.kubernetes.context = ""
+        cfg.platform.storage.s3.endpoint = "http://s3:80"
+        cfg.platform.storage.s3.access_key = "key"
+        cfg.platform.storage.s3.secret_key = "secret"
+        with (
+            patch("lakebench.deploy.observability.find_observability_release", return_value=None),
+            pytest.raises(typer.Exit),
+        ):
+            _preflight_check(cfg)
+        cap = capsys.readouterr()
+        out = " ".join((cap.out + cap.err).split())
+        assert "lakebench admin install --component observability" in out
 
     def test_preflight_passes_when_stackable_present(self, monkeypatch):
         """Preflight does not exit when Stackable CRDs are present."""

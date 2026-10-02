@@ -51,13 +51,13 @@ its source through 2.5.1 and is unchanged from 2.4.0, so the pod-template
 route stays. The v1.x line has broken volume
 injection entirely and is not supported.
 
-`lakebench deploy` checks the operator and adds the deployment's namespace to
-the operator's watch list (`spark.jobNamespaces`). It never installs the
-operator: a missing operator fails the deploy, and a cluster admin installs
-the shared operator once with `lakebench admin install-spark-operator`.
-`operator.install: true` is refused by every command that changes data
-(`deploy`, `run`, `generate` and the rest); `destroy`, `status` and the
-read-only commands still load a config that carries it and say it is ignored.
+`lakebench deploy` always checks the operator and adds the deployment's
+namespace to the operator's watch list (`spark.jobNamespaces`). It never
+installs the operator: a missing one fails the deploy, and a cluster admin
+installs the shared operator once with `lakebench admin install --component
+spark-operator`, at `version` in `namespace`. An installed operator keeps its
+version whatever the config says. `install: true` (v1.6) is refused by the
+commands that change data (`destroy`, `status` and `admin` load it as false).
 
 ```yaml
 platform:
@@ -65,7 +65,7 @@ platform:
     spark:
       operator:
         namespace: "spark-operator"  # Where the operator runs
-        version: "2.5.1"            # Must be v2.x
+        version: "2.5.1"            # Chart a fresh admin install uses; must be v2.x
 ```
 
 ## YAML Configuration
@@ -117,7 +117,7 @@ platform:
     spark:
       operator:
         namespace: "spark-operator"  # Operator namespace
-        version: "2.5.1"            # Operator chart version (v2.x required)
+        version: "2.5.1"            # Chart a fresh `admin install` uses (v2.x required)
 ```
 
 ### Driver Resources
@@ -187,7 +187,7 @@ refused like the removed executor block. The StorageClass must use `repl=1` --
 using `repl=2+` doubles storage consumption with zero benefit for
 recomputable shuffle data. `lakebench deploy` only verifies that the
 StorageClass exists; it never creates it. A cluster admin creates it once with
-`lakebench admin install-scratch-storage-class`.
+`lakebench admin install --component scratch-storage-class`.
 
 ### Spark Configuration Overrides (S3A, Shuffle, Memory)
 
