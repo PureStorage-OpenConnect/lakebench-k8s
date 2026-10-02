@@ -589,7 +589,7 @@ def test_protected_seed_never_printed(monkeypatch, tmp_path: Path) -> None:
         assert result.exit_code == 10
         assert str(seed_b) not in result.output, fmt
     doc = cm.compare_records([a], [b])
-    assert "<protected seed>" in doc["missing"]["hint"]
+    assert "development corpus" in doc["missing"]["hint"]
 
 
 def test_unreadable_seed_list_hides_every_integer_seed(monkeypatch) -> None:
@@ -789,15 +789,47 @@ def test_seed_inside_a_corpus_problem_is_hidden(monkeypatch) -> None:
     assert "987654321" not in text and "config seed 43" in text
 
 
-def test_customer360_seeds_are_not_hidden(monkeypatch) -> None:
-    """The AML seed lists do not apply to another workload's corpus."""
+def test_customer360_public_seed_is_shown_and_others_hidden(monkeypatch) -> None:
+    """A pair with no AML member prints the Customer 360 development seed
+    even when the AML spent list holds it; any other hidden seed stays
+    hidden on every pair."""
     a = _c360_batch()
+    assert a["experiment"]["corpus"]["seed"] == 42
     b = _with_id(a, "20261001-000000-5d0006")
-    b["experiment"]["corpus"]["seed"] = 7
-    monkeypatch.setattr(cm, "_hidden_seeds", lambda: None)
+    b["experiment"]["corpus"]["seed"] = 987654321
+    monkeypatch.setattr(cm, "_hidden_seeds", lambda: frozenset({42, 987654321}))
     doc = cm.compare_records([a], [b])
-    assert "datagen.seed: <protected seed>" not in doc["missing"]["hint"]
-    assert f"datagen.seed: {a['experiment']['corpus']['seed']}" in doc["missing"]["hint"]
+    text = json.dumps(doc)
+    assert "987654321" not in text
+    assert '"seed": 42' in text
+
+
+def test_aml_record_without_a_workload_name_still_hides(monkeypatch) -> None:
+    a = _aml_batch()
+    a["experiment"]["workload"]["name"] = None
+    seed = a["experiment"]["corpus"]["seed"]
+    b = _with_id(_c360_batch(), "20261001-000000-5d0007")
+    monkeypatch.setattr(cm, "_hidden_seeds", lambda: frozenset({seed}))
+    assert str(seed) not in json.dumps(cm.compare_records([a], [b]))
+
+
+def test_string_and_list_seeds_are_hidden(monkeypatch) -> None:
+    a = _aml_batch()
+    b = _with_id(a, "20261001-000000-5d0008")
+    b["experiment"]["corpus"]["seed"] = "987654321"
+    a["experiment"]["corpus"]["datagen"] = {"seed": [987654321, 43]}
+    monkeypatch.setattr(cm, "_hidden_seeds", lambda: frozenset({987654321}))
+    assert "987654321" not in json.dumps(cm.compare_records([a], [b]))
+
+
+def test_protected_seed_difference_names_no_setting(monkeypatch) -> None:
+    a = _aml_batch()
+    b = _with_id(a, "20261001-000000-5d0009")
+    b["experiment"]["corpus"]["seed"] = 987654321
+    monkeypatch.setattr(cm, "_hidden_seeds", lambda: frozenset({987654321}))
+    doc = cm.compare_records([b], [a])
+    assert doc["missing"]["command"] is None
+    assert "development corpus" in doc["missing"]["hint"]
 
 
 def test_caps_are_labelled_on_a_pair_that_is_not_like_for_like(tmp_path: Path) -> None:

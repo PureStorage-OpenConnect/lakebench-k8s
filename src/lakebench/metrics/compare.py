@@ -589,6 +589,10 @@ def _seed_out(v: Any, hidden: frozenset[int] | None) -> Any:
     """*v* as a recorded seed may be shown: a protected, spent or recorded
     look seed (or any integer seed when that list cannot be read) reads
     ``<protected seed>``."""
+    if isinstance(v, list | tuple):
+        return [_seed_out(x, hidden) for x in v]
+    if isinstance(v, str) and v.strip().isdigit():
+        return v if hidden is not None and int(v) not in hidden else "<protected seed>"
     if isinstance(v, bool) or not isinstance(v, int):
         return v
     if hidden is None or v in hidden:
@@ -648,16 +652,32 @@ def redact(node: Any, hidden: frozenset[int] | None) -> Any:
     return node
 
 
+def _is_aml(record: Mapping[str, Any]) -> bool:
+    exp = record.get("experiment") or {}
+    snap = record.get("config_snapshot") or {}
+    return "financial" in (
+        (exp.get("workload") or {}).get("name"),
+        (exp.get("corpus") or {}).get("schema"),
+        snap.get("workload_schema"),
+        snap.get("schema_type"),
+    )
+
+
 def hidden_for(*sides: Side) -> frozenset[int] | None:
     """The seeds a comparison of *sides* must not print: the protected,
-    spent and recorded AML seeds when any member is an AML run, else none."""
-    financial = any(
-        ((m.record.get("experiment") or {}).get("workload") or {}).get("name") == "financial"
-        or (m.record.get("config_snapshot") or {}).get("schema_type") == "financial"
-        for side in sides
-        for m in side.members
-    )
-    return _hidden_seeds() if financial else frozenset()
+    spent and recorded AML seeds, on every pair. A pair with no AML member
+    may print the public development seeds of the other workloads (the
+    Customer 360 byte-compare seed), which the AML spent list can also
+    hold."""
+    hidden = _hidden_seeds()
+    if hidden is None:
+        return None
+    if any(_is_aml(m.record) for side in sides for m in side.members):
+        return hidden
+    from lakebench.metrics.corpus_identity import COMPARE_CASES
+
+    public = {seed for case, seed in COMPARE_CASES.items() if case.startswith("C")}
+    return frozenset(hidden - public)
 
 
 def _val(v: Any) -> str:
@@ -926,16 +946,16 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
     va, vb = _val(cause.a), _val(cause.b)
     continuous = _continuous(a) or _continuous(b)
     off = (
-        "`architecture.pipeline.sustained.compaction_enabled: false` (or `--skip-maintenance`)"
+        "`--skip-maintenance` on both runs"
         if continuous
-        else "`architecture.pipeline.pre_benchmark_maintenance: false`"
+        else "`architecture.pipeline.pre_benchmark_maintenance: false` in both configs"
     )
     if key == "compaction operation":
         return MissingCondition(
             "the same maintenance",
             None,
             f"compaction differs by engine ({va} vs {vb}). Missing: the same maintenance. No "
-            f"setting aligns them; compare with maintenance off: {off} in both configs, then "
+            f"setting aligns them; compare with maintenance off: {off}, then "
             "re-run both",
         )
     if key in ("effective maintenance", "maintenance settings"):
@@ -964,8 +984,8 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
             "the same maintenance",
             None,
             f"{key} differs ({va} vs {vb}). Missing: the same maintenance. Set the same "
-            f"maintenance in both configs, or compare with maintenance off: {off} in both "
-            "configs, then re-run both",
+            f"maintenance in both configs, or compare with maintenance off: {off}, then "
+            "re-run both",
         )
     if key == "benchmark iterations":
         cmd = f"lakebench benchmark {cfg_b}"
@@ -1405,6 +1425,23 @@ def build_comparison(a: Side, b: Side) -> dict[str, Any]:
     """The cmp2 document for resolved sides *a* and *b*."""
     pair = cmp.pair_verdict(a.ladder_records, b.ladder_records, a.label, b.label)
     missing = missing_condition(pair, a, b)
+    hidden = hidden_for(a, b)
+    seed_diff = next((d for ds in pair.differences.values() for d in ds if d.key == "seed"), None)
+    if (
+        seed_diff is not None
+        and missing.hint.startswith("corpus seed differs")
+        and (
+            _seed_out(seed_diff.a, hidden) != seed_diff.a
+            or _seed_out(seed_diff.b, hidden) != seed_diff.b
+        )
+    ):
+        # A protected seed is never something to set by hand.
+        missing = MissingCondition(
+            "the same corpus",
+            None,
+            "corpus seed differs (a protected seed). Missing: the same corpus. A protected "
+            "seed is not set by hand; compare runs of a development corpus instead",
+        )
     mode = _mode(a) or _mode(b)
     withheld = pair.verdict in (cmp.NOT_COMPARABLE, cmp.NOT_ESTABLISHED)
     kinds: list[str] = []
@@ -1472,7 +1509,7 @@ def build_comparison(a: Side, b: Side) -> dict[str, Any]:
     }
     # One pass over the finished document, so no field can carry a
     # protected seed past it.
-    return redact(json.loads(json.dumps(doc, default=str)), hidden_for(a, b))
+    return redact(json.loads(json.dumps(doc, default=str)), hidden)
 
 
 def to_json(doc: Mapping[str, Any]) -> str:
