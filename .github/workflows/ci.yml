@@ -314,15 +314,17 @@ jobs:
         run: cargo test --release --locked
 
   # Each pyspark leg runs the Spark tier twice, forward and in reverse
-  # order, as two parallel jobs: serially a leg took 47 to 58 min on the
-  # QR-6 tree (forward 23 to 30 min, reverse 23 to 27 min) and was the
-  # critical path of the whole run; in parallel each job is one pass under a
-  # 40-minute budget (scripts/ci_budget.py), with timeout-minutes 60 as the
-  # backstop. Coverage is collected on the 4.0 forward pass only.
+  # order, as two parallel jobs. Run serially, a leg was the critical path of
+  # the whole run (47 to 58 min on 2026-10-02 01:52 UTC, about 70 min by
+  # 04:00). Split, one pass took 36 to 38 min on 2026-10-02 (run 36963293412:
+  # 4.0 forward 2282 s with coverage, 4.0 reverse 2227 s, 4.1 forward 2307 s,
+  # 4.1 reverse 2167 s). The budget is 50 minutes (scripts/ci_budget.py),
+  # 30% above the slowest pass, with timeout-minutes 75 as the backstop.
+  # Coverage is collected on the 4.0 forward pass only.
   spark-tests:
     name: Spark (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -396,7 +398,7 @@ jobs:
       # or only before, another one.
       - name: Run Spark tests
         run: >-
-          python scripts/ci_budget.py --seconds 2400
+          python scripts/ci_budget.py --seconds 3000
           --label "Spark tests (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }})" --
           pytest tests/spark -q -rsxX -p no:cacheprovider
           --basetemp="${{ runner.temp }}/spark-${{ matrix.order }}" ${{ matrix.args }}
