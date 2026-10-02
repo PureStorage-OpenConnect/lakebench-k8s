@@ -99,7 +99,14 @@ def test_custom_workload_is_refused(tmp_path):
 def test_top_level_workload_is_canonical(tmp_path):
     cfg = _quiet(
         load_config,
-        _write(tmp_path, {"name": "t", "workload": {"schema": "financial"}}),
+        _write(
+            tmp_path,
+            {
+                "name": "t",
+                "recipe": "hive-iceberg-spark-trino",
+                "workload": {"schema": "financial"},
+            },
+        ),
     )
     assert cfg.workload.schema_type.value == "financial"
     assert cfg.architecture.workload is cfg.workload
@@ -608,15 +615,15 @@ def test_example_configs_load_quietly():
 
 
 def test_config_template_uses_canonical_keys():
-    from lakebench.config.loader import generate_example_config_yaml
+    from lakebench.cli._init import first_day_config
 
-    text = generate_example_config_yaml()
+    text = first_day_config(name="tmpl")
     assert re.search(r"(?m)^workload:", text)
     assert not re.search(r"(?m)^  workload:", text)
     assert "iot" not in text
     assert "sustained:" not in text
     parsed = yaml.safe_load(text)
-    parsed["name"] = "tmpl"
+    parsed["platform"]["storage"]["s3"].update(access_key="a", secret_key="b")
     _quiet(LakebenchConfig.model_validate, parsed)
 
 

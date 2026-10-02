@@ -20,6 +20,11 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
 BRACKETS = "s3a://b/[x]/y under [/tmp] on [main]"
 
 
+# init writes the S3 keys as ${VAR} references; a test that loads its output
+# sets them, as a user who followed init's "next" line would.
+_INIT_KEYS = {"LAKEBENCH_S3_ACCESS_KEY": "placeholder", "LAKEBENCH_S3_SECRET_KEY": "placeholder"}
+
+
 def _stderr(result) -> str:
     try:
         return result.stderr
@@ -125,7 +130,7 @@ def _query(monkeypatch, tmp_path, raw: str, fmt: str):
     import lakebench.metrics as metrics_mod
 
     monkeypatch.chdir(tmp_path)
-    runner = CliRunner()
+    runner = CliRunner(env=_INIT_KEYS)
     init = runner.invoke(app, ["init", "--output", str(tmp_path / "c.yaml")])
     assert init.exit_code == 0, init.output
     monkeypatch.setattr(executor_mod, "get_executor", lambda cfg, ns: _FakeExecutor(raw))
@@ -357,7 +362,7 @@ def test_example_query_json_stdout_is_only_json(monkeypatch, tmp_path):
     import lakebench.metrics as metrics_mod
 
     monkeypatch.chdir(tmp_path)
-    runner = CliRunner()
+    runner = CliRunner(env=_INIT_KEYS)
     assert runner.invoke(app, ["init", "--output", "c.yaml"]).exit_code == 0
     raw = "table_name\trow_count\nsilver.x\t10"
     monkeypatch.setattr(executor_mod, "get_executor", lambda cfg, ns: _FakeExecutor(raw))
@@ -387,7 +392,7 @@ def test_failed_query_detail_is_on_the_error_line(monkeypatch, tmp_path):
             )
 
     monkeypatch.chdir(tmp_path)
-    runner = CliRunner()
+    runner = CliRunner(env=_INIT_KEYS)
     assert runner.invoke(app, ["init", "--output", "c.yaml"]).exit_code == 0
     monkeypatch.setattr(executor_mod, "get_executor", lambda cfg, ns: _Failing())
     result = runner.invoke(app, ["query", "c.yaml", "--sql", "SELECT 1", "--format", "json"])

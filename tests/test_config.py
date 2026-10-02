@@ -7,7 +7,6 @@ from lakebench.config import (
     ConfigFileNotFoundError,
     LakebenchConfig,
     generate_default_config,
-    generate_example_config_yaml,
     load_config,
     parse_size_to_bytes,
     parse_spark_memory,
@@ -549,64 +548,6 @@ class TestGenerateConfig:
         assert config.platform.storage.s3.endpoint == "http://localhost:9000"
         assert config.platform.storage.s3.access_key == "accesskey"
         assert config.platform.storage.s3.secret_key == "secretkey"
-
-    def test_generate_example_yaml(self):
-        """Test generating example YAML."""
-        yaml_content = generate_example_config_yaml()
-        assert "name:" in yaml_content
-        assert "platform:" in yaml_content
-        assert "architecture:" in yaml_content
-        assert "observability:" in yaml_content
-        assert "spark:" in yaml_content
-        # Check for proven defaults in comments
-        assert "spark.hadoop.fs.s3a" in yaml_content
-
-
-class TestGeneratedYamlDrift:
-    """BUG-008: Verify generated config YAML stays in sync with schema."""
-
-    def test_duckdb_mentioned(self):
-        """Generated YAML should mention duckdb as a query engine option."""
-        yaml_content = generate_example_config_yaml()
-        assert "duckdb" in yaml_content
-
-    def test_recipe_field_present(self):
-        """Generated YAML should include a recipe field with valid names."""
-        yaml_content = generate_example_config_yaml()
-        assert "recipe:" in yaml_content
-        # At least one known recipe name should appear
-        assert "hive-iceberg-spark-trino" in yaml_content
-
-    def test_datagen_image_matches_schema(self):
-        """Generated YAML datagen image should match schema default."""
-        yaml_content = generate_example_config_yaml()
-        default_image = LakebenchConfig(name="t").images.datagen
-        assert default_image in yaml_content
-
-    def test_scratch_provisioner_present(self):
-        """Generated YAML should document scratch provisioner field."""
-        yaml_content = generate_example_config_yaml()
-        assert "provisioner:" in yaml_content
-
-    def test_legend_present(self):
-        """Generated YAML should start with a usage legend."""
-        yaml_content = generate_example_config_yaml()
-        assert "LEGEND" in yaml_content
-
-    def test_spark_operator_note(self):
-        """Generated YAML says a cluster admin installs the Spark Operator."""
-        yaml_content = generate_example_config_yaml()
-        assert "lakebench admin install-spark-operator" in yaml_content
-        assert "install: false" not in yaml_content
-        assert "install: true" not in yaml_content
-
-    def test_benchmark_section_engine_agnostic(self):
-        """Benchmark section should not be Trino-specific."""
-        yaml_content = generate_example_config_yaml()
-        # Should NOT say "Trino query benchmark" (was the old header)
-        assert "Trino query benchmark" not in yaml_content
-        # Should have a generic benchmark header
-        assert "benchmark" in yaml_content.lower()
 
 
 class TestPerJobExecutorOverrides:

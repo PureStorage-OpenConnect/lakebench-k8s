@@ -58,7 +58,11 @@ TUD_CODES = {
 
 
 def _runner() -> CliRunner:
-    return CliRunner()
+    # init writes the S3 keys as ${VAR} references; the scenarios that load
+    # its output need them set, as a user who followed init's "next" would.
+    return CliRunner(
+        env={"LAKEBENCH_S3_ACCESS_KEY": "placeholder", "LAKEBENCH_S3_SECRET_KEY": "placeholder"}
+    )
 
 
 def _stderr(result) -> str:
@@ -770,7 +774,10 @@ def _local_run(monkeypatch, tmp_path, success: bool):
     monkeypatch.setattr(local, "print_local_summary", lambda *a, **k: None)
     monkeypatch.setattr(run_mod, "_record_local_jobs", lambda *a, **k: None)
     monkeypatch.setattr(run_mod, "_save_local_metrics", lambda *a, **k: None)
-    cfg = _init_config(tmp_path)
+    # Scale 10 so the local scale advisory prints (init's default is now 1).
+    cfg = tmp_path / "c.yaml"
+    init = _runner().invoke(app, ["init", "--output", str(cfg), "--scale", "10"])
+    assert init.exit_code == 0, init.output
     return _runner().invoke(app, ["run", str(cfg), "--local", "--skip-benchmark", "--yes"])
 
 

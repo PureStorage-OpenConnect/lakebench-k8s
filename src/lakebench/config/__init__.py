@@ -9,7 +9,6 @@ from .loader import (
     ConfigValidationError,
     LoadPurpose,
     generate_default_config,
-    generate_example_config_yaml,
     load_config,
     save_config,
 )
@@ -67,7 +66,6 @@ __all__ = [
     "load_config",
     "save_config",
     "generate_default_config",
-    "generate_example_config_yaml",
     # Helpers
     "parse_size_to_bytes",
     "parse_spark_memory",

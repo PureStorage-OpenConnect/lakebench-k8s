@@ -346,6 +346,7 @@ empty bronze).
 
 ```bash
 lakebench init                                  # writes lakebench.yaml
+export LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
 lakebench run lakebench.yaml --generate --yes   # deploy + generate + pipeline + benchmark
 lakebench results lakebench.yaml                # print the scorecard
 lakebench destroy lakebench.yaml --yes          # tear down what this deployment owns
@@ -357,32 +358,47 @@ The step-by-step below walks the same path with the intermediate checks
 ### 1. Generate a configuration file
 
 ```bash
-lakebench init --name my-first-lakehouse --scale 1
+lakebench init --name my-first-lakehouse --endpoint http://your-s3-endpoint:80
+export LAKEBENCH_S3_ACCESS_KEY=YOUR_ACCESS_KEY
+export LAKEBENCH_S3_SECRET_KEY=YOUR_SECRET_KEY
 ```
 
-This creates `lakebench.yaml` in the current directory with sensible defaults.
+This creates `lakebench.yaml` in the current directory and prints what it
+chose on stderr. Without `--name` the name is `lb-<user>-<4 hex>`, new on
+every `init`; without `--recipe` the recipe is `polaris-iceberg-spark-trino`.
+The credentials are `${VAR}` references, never plaintext; `--credentials-env
+PREFIX` picks other variable names. `--access-key` and `--secret-key` are
+refused.
 
-### 2. Edit the configuration
+### 2. Check the configuration
 
-Open `lakebench.yaml` and fill in your S3 connection details:
+The file holds only what a first run needs:
 
 ```yaml
 name: my-first-lakehouse
-
-# Optional: use a quick-recipe for one-line setup (sets catalog + format + engine)
-# recipe: hive-iceberg-spark-trino
-
+recipe: polaris-iceberg-spark-trino
+workload:
+  schema: customer360
+  datagen:
+    scale: 1  # 1 is about 10 GB of bronze
 platform:
   storage:
     s3:
-      endpoint: http://your-s3-endpoint:80   # your S3 endpoint URL
-      access_key: YOUR_ACCESS_KEY            # your S3 access key
-      secret_key: YOUR_SECRET_KEY            # your S3 secret key
-
-workload:
-  datagen:
-    scale: 1                               # ~10 GB bronze data
+      endpoint: "http://your-s3-endpoint:80"
+      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
+      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
+# Set by the recipe. Written out, each must agree with it:
+# architecture:
+#   catalog: {type: polaris}
+#   table_format: {type: iceberg}
+#   pipeline_engine: spark
+#   query_engine: {type: trino}
 ```
+
+The recipe sets the catalog, table format, pipeline engine and query
+engine. A component written with a different value (say `catalog.type:
+hive` under this recipe) is refused at load, naming both keys; pick another
+recipe with `lakebench init --recipe` instead.
 
 If your storage uses virtual-hosted bucket addressing (like AWS S3), set
 `path_style: false`. For MinIO and FlashBlade, leave it as `true` (the

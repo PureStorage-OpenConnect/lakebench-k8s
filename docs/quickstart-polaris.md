@@ -81,14 +81,15 @@ When `catalog.type: polaris` is set, Lakebench automatically:
 ### 1. Generate or modify your config
 
 ```bash
-# New config
-lakebench init --name polaris-test --scale 1
+# New config: init writes the Polaris recipe by default
+lakebench init --name polaris-test
 
 # Then edit lakebench.yaml:
 ```
 
 ```yaml
 name: polaris-test
+recipe: polaris-iceberg-spark-trino
 
 platform:
   storage:
@@ -99,7 +100,7 @@ platform:
 
 architecture:
   catalog:
-    type: polaris    # <-- changed from the default
+    type: polaris    # optional: the recipe sets it
 
 workload:
   datagen:
