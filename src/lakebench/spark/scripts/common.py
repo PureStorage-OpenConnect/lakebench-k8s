@@ -2373,6 +2373,56 @@ def sealed_txns_filter(spark, txns_df, catalog, versions_table):
     )
 
 
+class materialised_source:  # noqa: N801 -- used like a function: with materialised_source(...)
+    """``with materialised_source(spark, df, view_name) as view:`` gives a
+    temp view over ``df`` with its lineage cut, for use as a MERGE source.
+
+    On Spark 4.1 with Iceberg, ``MERGE ... USING <temp view>`` fails with an
+    internal error ("No plan for TableReference") when the view's plan reads
+    an Iceberg table. A view over a local checkpoint of the frame reads only
+    the checkpointed blocks, which works on Spark 3.5, 4.0 and 4.1. The
+    content is the frame's rows at the moment of entry, computed once.
+
+    On exit the view is dropped and the checkpoint's blocks are freed. They
+    belong to the checkpoint's own RDD, which ``DataFrame.unpersist`` does
+    not reach (a checkpoint is not in the cache manager), so the RDD under
+    the plan is unpersisted directly. Both run when the body raises.
+
+    The blocks live on the executors that computed them: an executor lost
+    between entry and the MERGE fails that micro-batch, and the query
+    restarts through the replay path.
+    """
+
+    def __init__(self, spark, df, view_name):
+        self._spark = spark
+        self._df = df
+        self._view = view_name
+        self._checkpoint = None
+
+    def __enter__(self):
+        self._checkpoint = self._df.localCheckpoint(eager=True)
+        try:
+            self._checkpoint.createOrReplaceTempView(self._view)
+        except BaseException:
+            self._free()
+            raise
+        return self._view
+
+    def __exit__(self, *_exc):
+        try:
+            self._spark.catalog.dropTempView(self._view)
+        except Exception as e:  # noqa: BLE001
+            log(f"[merge-source] dropping view {self._view} failed: {type(e).__name__}: {e}")
+        self._free()
+        return False
+
+    def _free(self):
+        try:
+            self._checkpoint._jdf.logicalPlan().rdd().unpersist(False)
+        except Exception as e:  # noqa: BLE001
+            log(f"[merge-source] freeing {self._view} blocks failed: {type(e).__name__}: {e}")
+
+
 class SealedFilterError(RuntimeError):
     """``sealed_txns_filter_at`` could not read the versions table at the
     requested snapshot (the snapshot is expired or never existed, or the

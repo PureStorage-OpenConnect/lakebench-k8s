@@ -93,6 +93,7 @@ from common import (
     log,
     log_job_metrics,
     mark_stream_started,
+    materialised_source,
     refuse_fresh_checkpoint_over_data,
     replay_possible,
     sealed_txns_filter,
@@ -187,6 +188,7 @@ _KYC_LOADED_AT = 0.0
 # need per-query naming.
 _ENTITIES_MERGE_VIEW = "_silver_stream_dim_merge_entities"
 _ACCOUNTS_MERGE_VIEW = "_silver_stream_dim_merge_accounts"
+_BALANCES_MERGE_VIEW = "_d_full_balances"
 
 
 def _kyc(spark):
@@ -512,27 +514,35 @@ def _maintain_statements(
             view_name = f"_d_full_touched_ibans_{safe_sid}_{int(batch_id)}"
             touched.select("iban").createOrReplaceTempView(view_name)
             try:
-                spark.sql(
+                # The MERGE reads a materialised source: on Spark 4.1 a MERGE
+                # whose source plan reads an Iceberg table can fail.
+                balances = spark.sql(
                     f"""
+SELECT iban, running_balance
+FROM (
+    SELECT s.iban,
+           s.bal_after AS running_balance,
+           row_number() OVER (
+               PARTITION BY s.iban
+               ORDER BY s.book_ts DESC, s.entry_seq DESC
+           ) AS rn
+    FROM {CATALOG}.{SILVER_STATEMENTS} s
+    JOIN {view_name} touched ON s.iban = touched.iban
+) ranked
+WHERE rn = 1
+""".strip()
+                )
+                with materialised_source(
+                    spark, balances, f"{_BALANCES_MERGE_VIEW}_{safe_sid}_{int(batch_id)}"
+                ) as src_view:
+                    spark.sql(
+                        f"""
 MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
-USING (
-    SELECT iban, running_balance
-    FROM (
-        SELECT s.iban,
-               s.bal_after AS running_balance,
-               row_number() OVER (
-                   PARTITION BY s.iban
-                   ORDER BY s.book_ts DESC, s.entry_seq DESC
-               ) AS rn
-        FROM {CATALOG}.{SILVER_STATEMENTS} s
-        JOIN {view_name} touched ON s.iban = touched.iban
-    ) ranked
-    WHERE rn = 1
-) src
+USING {src_view} src
 ON t.iban = src.iban
 WHEN MATCHED THEN UPDATE SET current_balance = src.running_balance
 """.strip()
-                )
+                    )
             finally:
                 try:
                     spark.catalog.dropTempView(view_name)
@@ -685,21 +695,21 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
 
         ent_elapsed_ms = 0
         if n_ents_total:
-            ents.createOrReplaceTempView(ent_view)
             t0 = time.time()
-            spark.sql(
-                f"""
-                MERGE INTO {CATALOG}.{SILVER_ENTITIES} t
-                USING {ent_view} s
-                ON t.entity_id = s.entity_id
-                WHEN MATCHED THEN UPDATE SET
-                    name = {merged_name_sql},
-                    entity_type = {entity_type_expr},
-                    legal_name = {merged_name_sql},
-                    country = coalesce(least(t.country, s.country), t.country, s.country)
-                WHEN NOT MATCHED THEN INSERT *
-                """
-            )
+            with materialised_source(spark, ents, ent_view) as src_view:
+                spark.sql(
+                    f"""
+                    MERGE INTO {CATALOG}.{SILVER_ENTITIES} t
+                    USING {src_view} s
+                    ON t.entity_id = s.entity_id
+                    WHEN MATCHED THEN UPDATE SET
+                        name = {merged_name_sql},
+                        entity_type = {entity_type_expr},
+                        legal_name = {merged_name_sql},
+                        country = coalesce(least(t.country, s.country), t.country, s.country)
+                    WHEN NOT MATCHED THEN INSERT *
+                    """
+                )
             ent_elapsed_ms = int((time.time() - t0) * 1000)
 
         acct_elapsed_ms = 0
@@ -749,29 +759,29 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
             t0 = time.time()
 
             if n_new_accts:
-                new_accts.createOrReplaceTempView(acct_view_ins)
-                spark.sql(
-                    f"""
-                    MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
-                    USING {acct_view_ins} s
-                    ON t.iban = s.iban
-                    WHEN NOT MATCHED THEN INSERT *
-                    """
-                )
+                with materialised_source(spark, new_accts, acct_view_ins) as src_view:
+                    spark.sql(
+                        f"""
+                        MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
+                        USING {src_view} s
+                        ON t.iban = s.iban
+                        WHEN NOT MATCHED THEN INSERT *
+                        """
+                    )
             if n_accts_total > n_new_accts:
-                winners.createOrReplaceTempView(acct_view_upd)
-                spark.sql(
-                    f"""
-                    MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
-                    USING {acct_view_upd} s
-                    ON t.iban = s.iban
-                    WHEN MATCHED THEN UPDATE SET
-                        holder_entity_id = s.holder_entity_id,
-                        bank_bic = s.bank_bic,
-                        currency = s.currency,
-                        opened_date = s.opened_date
-                    """
-                )
+                with materialised_source(spark, winners, acct_view_upd) as src_view:
+                    spark.sql(
+                        f"""
+                        MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
+                        USING {src_view} s
+                        ON t.iban = s.iban
+                        WHEN MATCHED THEN UPDATE SET
+                            holder_entity_id = s.holder_entity_id,
+                            bank_bic = s.bank_bic,
+                            currency = s.currency,
+                            opened_date = s.opened_date
+                        """
+                    )
 
             acct_elapsed_ms = int((time.time() - t0) * 1000)
 
@@ -936,7 +946,6 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
                 lit(int(batch_id)).cast("bigint").alias("batch_batch_id"),
             )
         )
-        final_delta.createOrReplaceTempView("_lb_profiles_delta")
 
         # SQL block below: MERGE UPDATE SET evaluates every RHS against
         # the pre-update target, so composing several counter and Welford
@@ -1071,7 +1080,10 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
             s.batch_stream_id, s.batch_batch_id
         )
         """
-        spark.sql(merge_sql)
+        # The MERGE reads a materialised source: on Spark 4.1 a MERGE whose
+        # source plan reads an Iceberg table can fail.
+        with materialised_source(spark, final_delta, "_lb_profiles_delta"):
+            spark.sql(merge_sql)
     finally:
         delta.unpersist(blocking=False)
 
