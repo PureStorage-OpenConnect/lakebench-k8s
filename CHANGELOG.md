@@ -289,6 +289,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   since it now describes another benchmark.
 ### Fixed
 
+- `lakebench clean silver` followed by `run` works on Delta recipes. The
+  clean empties the silver bucket and keeps the catalog entry, and the next
+  silver build failed on it (DELTA_TABLE_NOT_FOUND), with or without
+  `--force-rebuild`. The build now drops an entry with nothing left at its
+  location and builds the table afresh. When the Delta log is gone but data
+  files remain, it refuses and leaves the files.
 - A multi-cycle Customer 360 batch run no longer loses silver rows when a
   later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
   tagged every row with that cycle, so an operator retry of the cycle, which
