@@ -10,10 +10,9 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lakebench._constants import SPARK_SERVICE_ACCOUNT
-from lakebench.k8s._pinned import pinned_oc
 
 if TYPE_CHECKING:
     from lakebench.k8s import K8sClient
@@ -59,6 +58,173 @@ class SecurityCheckResult:
         return self.checks_failed == 0
 
 
+class SCCGrantError(Exception):
+    """An SCC could not be granted to a ServiceAccount. Deploy stops."""
+
+
+SCC_GRANT_ATTEMPTS = 5
+# How long a new RoleBinding may take to reach every apiserver's authorizer.
+SCC_VERIFY_TIMEOUT_S = 15.0
+
+
+def scc_role_name(scc: str) -> str:
+    """The ClusterRole (OCP 4.10+) granting ``use`` on an SCC, and the name of
+    the namespaced RoleBinding ``oc adm policy add-scc-to-user`` creates."""
+    return f"system:openshift:scc:{scc}"
+
+
+def _grant_fix(scc: str, sa: str, namespace: str) -> str:
+    return f"a cluster admin can run `oc adm policy add-scc-to-user {scc} -z {sa} -n {namespace}`"
+
+
+def _subject_present(subjects: list[dict] | None, sa: str, namespace: str) -> bool:
+    for sub in subjects or []:
+        if (
+            sub.get("kind") == "ServiceAccount"
+            and sub.get("name") == sa
+            and (sub.get("namespace") or namespace) == namespace
+        ):
+            return True
+    return False
+
+
+def _sa_can_use_scc(authz_api: Any, namespace: str, sa: str, scc: str) -> bool | None:
+    """Whether ServiceAccount ``sa`` may ``use`` SCC ``scc`` in ``namespace``,
+    by a LocalSubjectAccessReview (what SCC admission asks the authorizer).
+    None when the review itself cannot be made."""
+
+    body = {
+        "apiVersion": "authorization.k8s.io/v1",
+        "kind": "LocalSubjectAccessReview",
+        "metadata": {"namespace": namespace},
+        "spec": {
+            "user": f"system:serviceaccount:{namespace}:{sa}",
+            "groups": ["system:serviceaccounts", f"system:serviceaccounts:{namespace}"],
+            "resourceAttributes": {
+                "namespace": namespace,
+                "verb": "use",
+                "group": "security.openshift.io",
+                "resource": "securitycontextconstraints",
+                "name": scc,
+            },
+        },
+    }
+    try:
+        review = authz_api.create_namespaced_local_subject_access_review(namespace, body)
+    except Exception:  # noqa: BLE001  (403, timeout, connection: cannot tell)
+        return None
+    status = getattr(review, "status", None)
+    if isinstance(review, dict):
+        status = review.get("status")
+    if isinstance(status, dict):
+        return bool(status.get("allowed"))
+    return bool(getattr(status, "allowed", False))
+
+
+def ensure_scc_rolebinding(
+    rbac_api: Any,
+    namespace: str,
+    sa: str,
+    scc: str = "anyuid",
+    *,
+    authz_api: Any = None,
+) -> None:
+    """Grant ``scc`` to ServiceAccount ``sa`` in ``namespace``.
+
+    1. If a LocalSubjectAccessReview says the SA may already ``use`` the SCC
+       (a grant an admin made some other way), nothing is written.
+    2. Otherwise make the call ``oc adm policy add-scc-to-user <scc> -z <sa>
+       -n <namespace>`` makes on OCP 4.10+: read, merge and replace (under the
+       read's ``resourceVersion``) the RoleBinding
+       ``system:openshift:scc:<scc>`` in the deployment's own namespace, bound
+       to the ClusterRole of the same name. A conflict re-reads and retries.
+       Nothing outside the namespace is written.
+    3. Review again; the grant must have taken effect (a binding to a missing
+       ClusterRole would not).
+
+    ``oc`` is never run. Every failure raises :class:`SCCGrantError` naming
+    the admin command. When the review cannot be made (no permission to
+    create LocalSubjectAccessReviews), steps 1 and 3 are skipped.
+    """
+    from kubernetes.client.rest import ApiException
+
+    role = scc_role_name(scc)
+    prefix = f"cannot grant SCC {scc} to SA {sa} in namespace {namespace}"
+    if authz_api is None:
+        from kubernetes import client as k8s_client
+
+        authz_api = k8s_client.AuthorizationV1Api()
+
+    if _sa_can_use_scc(authz_api, namespace, sa, scc) is True:
+        return
+
+    subject = {"kind": "ServiceAccount", "name": sa, "namespace": namespace}
+    last: Exception | None = None
+    for _ in range(SCC_GRANT_ATTEMPTS):
+        try:
+            try:
+                current = rbac_api.read_namespaced_role_binding(role, namespace)
+            except ApiException as e:
+                if e.status != 404:
+                    raise
+                body = {
+                    "apiVersion": "rbac.authorization.k8s.io/v1",
+                    "kind": "RoleBinding",
+                    "metadata": {"name": role, "namespace": namespace},
+                    "roleRef": {
+                        "apiGroup": "rbac.authorization.k8s.io",
+                        "kind": "ClusterRole",
+                        "name": role,
+                    },
+                    "subjects": [subject],
+                }
+                rbac_api.create_namespaced_role_binding(namespace, body)
+                break
+            rb = rbac_api.api_client.sanitize_for_serialization(current)
+            ref = rb.get("roleRef") or {}
+            if ref.get("kind") != "ClusterRole" or ref.get("name") != role:
+                raise SCCGrantError(
+                    f"{prefix}: RoleBinding {role} exists with roleRef "
+                    f"{ref.get('kind')}/{ref.get('name')}, not ClusterRole/{role}; "
+                    f"{_grant_fix(scc, sa, namespace)}"
+                )
+            if _subject_present(rb.get("subjects"), sa, namespace):
+                break
+            rb["subjects"] = [*(rb.get("subjects") or []), subject]
+            # metadata.resourceVersion from the read makes this a compare-and-swap.
+            rbac_api.replace_namespaced_role_binding(role, namespace, rb)
+            break
+        except ApiException as e:
+            if e.status == 409:  # lost a race (create or replace); re-read
+                last = e
+                continue
+            raise SCCGrantError(
+                f"{prefix}: {e.reason or e}; {_grant_fix(scc, sa, namespace)}"
+            ) from e
+    else:
+        raise SCCGrantError(
+            f"{prefix}: RoleBinding {role} kept changing ({last}); {_grant_fix(scc, sa, namespace)}"
+        )
+
+    # The authorizer reads RoleBindings from an informer cache on each
+    # apiserver, so a fresh binding can take a moment to count. Poll before
+    # concluding the grant did not take effect.
+    deadline = time.monotonic() + SCC_VERIFY_TIMEOUT_S
+    delay = 0.5
+    while True:
+        verdict = _sa_can_use_scc(authz_api, namespace, sa, scc)
+        if verdict is not False or time.monotonic() >= deadline:
+            break
+        time.sleep(delay)
+        delay = min(delay * 2, 2.0)
+    if verdict is False:
+        raise SCCGrantError(
+            f"{prefix}: RoleBinding {role} is in place but the SA still may not use SCC "
+            f"{scc} (is ClusterRole {role} missing? OpenShift before 4.10 is not "
+            f"supported); {_grant_fix(scc, sa, namespace)}"
+        )
+
+
 class SecurityVerifier:
     """Verifies platform-specific security requirements.
 
@@ -70,13 +236,6 @@ class SecurityVerifier:
     # Required SCCs for Spark workloads on OpenShift
     SPARK_SCCS = [
         ("anyuid", SPARK_SERVICE_ACCOUNT, "Spark pods run as UID 185"),
-    ]
-
-    # OpenShift CRD markers
-    OPENSHIFT_CRD_MARKERS = [
-        "securitycontextconstraints.security.openshift.io",
-        "routes.route.openshift.io",
-        "projects.project.openshift.io",
     ]
 
     def __init__(self, k8s: K8sClient):
@@ -95,13 +254,18 @@ class SecurityVerifier:
         k8s = getattr(self, "k8s", None)
         return getattr(k8s, "context_name", "") or None
 
-    def detect_platform(self) -> PlatformType:
-        """Detect Kubernetes platform type.
+    # API group whose presence makes a cluster OpenShift for Lakebench's
+    # purposes: it serves the SCCs that admission enforces. Discovery (/apis)
+    # is readable by every authenticated user, unlike the CRD list.
+    OPENSHIFT_API_GROUP = "security.openshift.io"
 
-        Checks for OpenShift-specific CRDs and API resources.
+    def detect_platform(self, strict: bool = False) -> PlatformType:
+        """Detect Kubernetes platform type from API-group discovery.
 
-        Returns:
-            PlatformType enum
+        OpenShift when the ``security.openshift.io`` group is served. With
+        ``strict`` a discovery failure raises, so a caller that must grant an
+        SCC never skips the grant on an unreachable or unreadable cluster;
+        without it, a failure reads as vanilla (for display only).
         """
         if self._platform is not None:
             return self._platform
@@ -109,23 +273,18 @@ class SecurityVerifier:
         try:
             from kubernetes import client as k8s_client
 
-            api_ext = k8s_client.ApiextensionsV1Api()
-            crds = api_ext.list_custom_resource_definition()
+            groups = k8s_client.ApisApi().get_api_versions().groups or []
+            is_ocp = any(g.name == self.OPENSHIFT_API_GROUP for g in groups)
+        except Exception as e:
+            if strict:
+                raise
+            logger.warning("Platform detection failed (%s); assuming vanilla Kubernetes", e)
+            return PlatformType.VANILLA
 
-            for crd in crds.items:
-                for marker in self.OPENSHIFT_CRD_MARKERS:
-                    if marker in crd.metadata.name:
-                        self._platform = PlatformType.OPENSHIFT
-                        self._detect_openshift_version()
-                        return self._platform
-
-            self._platform = PlatformType.VANILLA
-            return self._platform
-
-        except Exception:
-            # Default to vanilla K8s if detection fails
-            self._platform = PlatformType.VANILLA
-            return self._platform
+        self._platform = PlatformType.OPENSHIFT if is_ocp else PlatformType.VANILLA
+        if is_ocp:
+            self._detect_openshift_version()
+        return self._platform
 
     def _detect_openshift_version(self) -> None:
         """Detect OpenShift version from ClusterVersion CRD."""
@@ -270,9 +429,8 @@ class SecurityVerifier:
         correctly.
 
         Reading ``.users`` alone (as this method did before) always reports
-        "not assigned" on modern OCP because that field stays empty --
-        exactly the LB-088 mistake the ``_add_scc`` retry loop was already
-        fixed for.
+        "not assigned" on modern OCP because that field stays empty. Both
+        reads go through the API, so no ``oc`` is needed.
         """
         try:
             if self._scc_binding_has_subject(scc_name, sa_name, namespace):
@@ -305,14 +463,6 @@ class SecurityVerifier:
                 message=f"SCC '{scc_name}' not assigned to {sa_name}",
             )
 
-        except FileNotFoundError:
-            return SCCStatus(
-                name=scc_name,
-                assigned=False,
-                service_account=sa_name,
-                namespace=namespace,
-                message="oc command not found - cannot verify SCC",
-            )
         except Exception as e:
             return SCCStatus(
                 name=scc_name,
@@ -324,33 +474,19 @@ class SecurityVerifier:
 
     def _scc_users_field_has(self, scc_name: str, user: str) -> bool:
         """Read the SCC's cluster-scoped ``.users`` array (legacy pre-4.10
-        mechanism). Best-effort; returns False on any read failure.
+        mechanism) through the API. Best-effort; False on any read failure.
 
-        Uses per-item jsonpath and exact token match rather than substring
-        match: `user in stdout` would false-positive if the SCC lists a
-        related SA like ``lakebench-spark-runner-v2`` when we search for
-        ``lakebench-spark-runner``. That is the same LB-088 pattern the
-        RoleBinding fix was written to avoid. Uses a space separator to
-        stay parallel with ``_scc_binding_has_subject``.
+        Exact match per entry, never a substring: ``lakebench-spark-runner-v2``
+        must not satisfy a search for ``lakebench-spark-runner``.
         """
         try:
-            result = pinned_oc(
-                self._kube_context,
-                [
-                    "get",
-                    "scc",
-                    scc_name,
-                    "-o",
-                    "jsonpath={range .users[*]}{@}{' '}{end}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
+            from kubernetes import client as k8s_client
+
+            scc = k8s_client.CustomObjectsApi().get_cluster_custom_object(
+                "security.openshift.io", "v1", "securitycontextconstraints", scc_name
             )
-            if result.returncode != 0:
-                return False
-            return user in result.stdout.split()
-        except Exception:
+            return user in (scc.get("users") or [])
+        except Exception:  # noqa: BLE001
             return False
 
     def _check_psa_labels(self, namespace: str) -> bool | None:
@@ -402,138 +538,40 @@ class SecurityVerifier:
             return False
 
     def ensure_openshift_scc(self, namespace: str) -> bool:
-        """Ensure required SCCs are assigned on OpenShift.
+        """Grant the Spark SCCs on OpenShift.
 
-        This should be called during deployment to automatically
-        configure SCCs.
-
-        Args:
-            namespace: Target namespace
-
-        Returns:
-            True if all SCCs assigned successfully
+        Returns True (nothing to do off OpenShift). Raises
+        :class:`SCCGrantError` when a grant cannot be made: the deploy step
+        fails, because pods admission-rejected on their UID would only fail
+        later and less clearly.
         """
-        if self.detect_platform() != PlatformType.OPENSHIFT:
-            return True  # Not OpenShift, nothing to do
+        if self.detect_platform(strict=True) != PlatformType.OPENSHIFT:
+            return True
 
-        success = True
+        from kubernetes import client as k8s_client
+
+        rbac_api = k8s_client.RbacAuthorizationV1Api()
         for scc_name, sa_name, _ in self.SPARK_SCCS:
-            if not self._add_scc(scc_name, sa_name, namespace):
-                success = False
-
-        return success
-
-    # `oc adm policy add-scc-to-user` on OpenShift 4.10+ creates a
-    # namespaced RoleBinding named `system:openshift:scc:<scc>` that binds
-    # the SA to a ClusterRole -- NOT a mutation of the SCC's cluster-scoped
-    # `.users` array (that legacy field stays empty on modern OCP). The
-    # binding is per-namespace, so the cross-namespace race the original
-    # LB-088 finding assumed does not apply here. The retry-with-verify
-    # still buys us two useful things: (1) within a single namespace,
-    # sequential adds for postgres + spark-runner are read-modify-write on
-    # the same RoleBinding and can race between phases; (2) surface a real
-    # `oc` failure loud instead of returning False silently. Verification
-    # reads the namespaced RoleBinding, not the (always-empty) SCC users.
-    _SCC_ADD_MAX_ATTEMPTS = 4
-    _SCC_ADD_BACKOFF_SECONDS = 1.5
-
-    def _add_scc(self, scc_name: str, sa_name: str, namespace: str) -> bool:
-        """Add SCC to service account with post-write verification.
-
-        Retries `oc adm policy add-scc-to-user` up to _SCC_ADD_MAX_ATTEMPTS
-        times, verifying after each attempt that the SA appears as a
-        subject of the namespaced `system:openshift:scc:<scc>` RoleBinding.
-        Returns True only when the subject is confirmed present. Returns
-        False (with a warning log) if no attempt succeeds -- the caller
-        should treat this as a real RBAC failure.
-        """
-        last_stderr = ""
-
-        for attempt in range(1, self._SCC_ADD_MAX_ATTEMPTS + 1):
-            try:
-                result = pinned_oc(
-                    self._kube_context,
-                    [
-                        "adm",
-                        "policy",
-                        "add-scc-to-user",
-                        scc_name,
-                        "-z",
-                        sa_name,
-                        "-n",
-                        namespace,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                last_stderr = result.stderr
-            except Exception as e:
-                last_stderr = str(e)
-                result = None
-
-            try:
-                if self._scc_binding_has_subject(scc_name, sa_name, namespace):
-                    return True
-            except FileNotFoundError:
-                # oc missing entirely; retrying will not help. Bail with a
-                # clear message rather than re-raising from a retry loop.
-                logger.warning(
-                    "SCC %s add for serviceaccount %s/%s cannot be verified: oc command not found",
-                    scc_name,
-                    namespace,
-                    sa_name,
-                )
-                return False
-
-            if attempt < self._SCC_ADD_MAX_ATTEMPTS:
-                time.sleep(self._SCC_ADD_BACKOFF_SECONDS * attempt)
-
-        logger.warning(
-            "SCC %s add for serviceaccount %s/%s failed to land after %d attempts "
-            "(last stderr: %s). This deploy's pods may be admission-rejected -- "
-            "fix RBAC before running.",
-            scc_name,
-            namespace,
-            sa_name,
-            self._SCC_ADD_MAX_ATTEMPTS,
-            last_stderr.strip()[:200],
-        )
-        return False
+            ensure_scc_rolebinding(rbac_api, namespace, sa_name, scc_name)
+        return True
 
     def _scc_binding_has_subject(self, scc_name: str, sa_name: str, namespace: str) -> bool:
-        """Return True iff the namespaced `system:openshift:scc:<scc>`
-        RoleBinding lists `sa_name` as a ServiceAccount subject.
+        """True iff the namespaced ``system:openshift:scc:<scc>`` RoleBinding
+        lists ``sa_name`` as a ServiceAccount subject (the OCP 4.10+ grant).
 
-        This is how `oc adm policy add-scc-to-user` records the grant on
-        OpenShift 4.10+. Best-effort read via `oc get rolebinding`; on any
-        transient read failure returns False so the caller retries.
-        FileNotFoundError (oc missing entirely) is re-raised so the caller
-        can distinguish "grant is not present" from "cannot check" -- the
-        former is unassigned, the latter is unknown and needs a real
-        error surface.
+        Read through the RBAC API, so no ``oc`` is needed. A missing
+        RoleBinding is False; any other read error is raised so the caller
+        reports "cannot verify" rather than "not assigned".
         """
+        from kubernetes import client as k8s_client
+        from kubernetes.client.rest import ApiException
+
+        rbac_api = k8s_client.RbacAuthorizationV1Api()
         try:
-            result = pinned_oc(
-                self._kube_context,
-                [
-                    "get",
-                    "rolebinding",
-                    f"system:openshift:scc:{scc_name}",
-                    "-n",
-                    namespace,
-                    "-o",
-                    "jsonpath={range .subjects[?(@.kind=='ServiceAccount')]}"
-                    "{.namespace}/{.name} {end}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if result.returncode != 0:
+            rb = rbac_api.read_namespaced_role_binding(scc_role_name(scc_name), namespace)
+        except ApiException as e:
+            if e.status == 404:
                 return False
-            return f"{namespace}/{sa_name}" in result.stdout.split()
-        except FileNotFoundError:
             raise
-        except Exception:
-            return False
+        body = rbac_api.api_client.sanitize_for_serialization(rb)
+        return _subject_present(body.get("subjects"), sa_name, namespace)

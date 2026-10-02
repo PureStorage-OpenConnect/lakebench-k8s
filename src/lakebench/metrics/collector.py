@@ -454,22 +454,22 @@ class PipelineMetrics:
     continuous: dict[str, Any] | None = None
 
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
-    # experiment_block() rebuilds it from the record when the snapshot holds
-    # experiment_inputs; a record from before the block has none and never
-    # gets one.
+    # None on a fresh run until it is saved; experiment_block() builds it then.
     experiment: dict[str, Any] | None = None
 
     def experiment_block(self) -> dict[str, Any] | None:
-        """The experiment block, rebuilt from the record whenever its snapshot
-        carries the config half (``experiment_inputs``, frozen at run start):
-        the run half then always describes the record as it is now, including
-        after ``lakebench benchmark`` replaced its benchmark. A record from
-        before the block has no inputs and keeps what it was written with
-        (normally nothing)."""
+        """The experiment block: the stored one whenever the record has one,
+        whatever its schema, and otherwise built from the snapshot's
+        ``experiment_inputs`` (a fresh run, or a v1.6 record saved before the
+        block existed). A stored block is never rebuilt: rebuilding with
+        newer code re-stamped v1.6 records and moved their identity
+        digests. ``lakebench benchmark`` refreshes only the
+        benchmark half of a stored block (``experiment.refresh_benchmark``)."""
+        if self.experiment is not None:
+            return self.experiment
         from lakebench.metrics.experiment import build_experiment
 
-        built = build_experiment(self)
-        return built if built is not None else self.experiment
+        return build_experiment(self)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -2145,6 +2145,67 @@ CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
     "cache": "hot",
     "iterations": 1,
 }
+
+
+# The config fields build_config_snapshot records, as dotted schema paths.
+# tests/test_schema_walk.py derives the same set from the function and fails
+# when they differ, and every one of them must have a reader outside the
+# recording modules: a recorded setting nothing honours fails the walk.
+SNAPSHOT_SOURCE_FIELDS: frozenset[str] = frozenset(
+    {
+        "architecture.benchmark.iterations",
+        "architecture.benchmark.maintenance_settle.enabled",
+        "architecture.benchmark.maintenance_settle.interval_seconds",
+        "architecture.benchmark.maintenance_settle.max_seconds",
+        "architecture.benchmark.maintenance_settle.probe_query",
+        "architecture.benchmark.maintenance_settle.probe_samples",
+        "architecture.benchmark.maintenance_settle.tolerance_pct",
+        "architecture.catalog.type",
+        "architecture.pipeline.mode",
+        "architecture.pipeline.pattern",
+        "architecture.pipeline.pre_benchmark_maintenance",
+        "architecture.pipeline.sustained.benchmark_interval",
+        "architecture.pipeline.sustained.benchmark_warmup",
+        "architecture.pipeline.sustained.bronze_target_file_size_mb",
+        "architecture.pipeline.sustained.bronze_trigger_interval",
+        "architecture.pipeline.sustained.compaction_enabled",
+        "architecture.pipeline.sustained.gold_refresh_interval",
+        "architecture.pipeline.sustained.gold_target_file_size_mb",
+        "architecture.pipeline.sustained.retention_threshold",
+        "architecture.pipeline.sustained.run_duration",
+        "architecture.pipeline.sustained.silver_target_file_size_mb",
+        "architecture.pipeline.sustained.silver_trigger_interval",
+        "architecture.pipeline_engine",
+        "architecture.query_engine.trino.coordinator.cpu",
+        "architecture.query_engine.trino.coordinator.memory",
+        "architecture.query_engine.trino.worker.cpu",
+        "architecture.query_engine.trino.worker.memory",
+        "architecture.query_engine.trino.worker.replicas",
+        "architecture.query_engine.type",
+        "architecture.table_format.type",
+        "architecture.workload.datagen.file_size",
+        "architecture.workload.datagen.mode",
+        "architecture.workload.datagen.parallelism",
+        "architecture.workload.datagen.scale",
+        "architecture.workload.schema_type",
+        "images.datagen",
+        "images.spark",
+        "images.trino",
+        "name",
+        "platform.compute.spark.bronze_executors",
+        "platform.compute.spark.bronze_ingest_executors",
+        "platform.compute.spark.gold_executors",
+        "platform.compute.spark.gold_refresh_executors",
+        "platform.compute.spark.silver_executors",
+        "platform.compute.spark.silver_stream_executors",
+        "platform.storage.s3.buckets.bronze",
+        "platform.storage.s3.buckets.gold",
+        "platform.storage.s3.buckets.silver",
+        "platform.storage.s3.endpoint",
+        "platform.storage.scratch.enabled",
+        "platform.storage.scratch.storage_class",
+    }
+)
 
 
 def build_config_snapshot(

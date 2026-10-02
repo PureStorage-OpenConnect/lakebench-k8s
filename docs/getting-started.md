@@ -29,8 +29,10 @@ Any cluster running Kubernetes 1.26+ will work. Lakebench is tested on:
 - **Vanilla Kubernetes** (kubeadm, EKS, GKE, AKS)
 
 You need admin-level access to the target namespace (or permission to create
-one). On OpenShift, Lakebench automatically handles Security Context
-Constraints for the Spark service account.
+one). On OpenShift, Lakebench grants the `anyuid` Security Context
+Constraint to its Spark and PostgreSQL service accounts, and stops the deploy
+if that grant is refused. The checks a cluster must pass, and the fix for
+each, are on the generated [Prerequisites](prerequisites.md) page.
 
 Minimum cluster size depends on the scale factor. These figures are the peak
 resources Lakebench actually requests from Kubernetes, derived from the Spark
@@ -127,7 +129,8 @@ to see the peak request for the scale in your config.
 | `kubectl` | 1.26+ | All Kubernetes operations |
 | `helm` | 3.12+ | Spark Operator install, namespace detection, and Stackable operators (Hive catalog) |
 
-If you are on OpenShift, `oc` works as a drop-in replacement for `kubectl`.
+Lakebench runs `kubectl` and `helm`; it does not need `oc`, even on
+OpenShift.
 
 ### Default StorageClass
 

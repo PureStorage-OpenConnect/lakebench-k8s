@@ -2053,7 +2053,28 @@ class K8sRecorder:
         if api == "VersionApi":
             return SimpleNamespace(git_version="v1.30.0", major="1", minor="30", platform="")
         if kind_snake in _META_KINDS:
-            return SimpleNamespace(resources=[], versions=[], groups=[])
+            # API-group discovery (``ApisApi.get_api_versions``) serves the
+            # groups of the seeded CRDs, as a real api-server does, so
+            # platform detection by group sees an ``add_openshift`` seed.
+            groups = sorted(
+                {
+                    str(_get(obj, "spec", "group"))
+                    for (k, _ns, _n), obj in self.store.items()
+                    if k == "customresourcedefinitions" and _get(obj, "spec", "group")
+                }
+            )
+            return SimpleNamespace(
+                resources=[],
+                versions=[],
+                groups=[
+                    SimpleNamespace(
+                        name=g,
+                        versions=[SimpleNamespace(group_version=f"{g}/v1", version="v1")],
+                        preferred_version=SimpleNamespace(group_version=f"{g}/v1", version="v1"),
+                    )
+                    for g in groups
+                ],
+            )
         if is_review:
             status = SimpleNamespace(allowed=self.can_i, denied=not self.can_i, reason="")
             if isinstance(body, dict):

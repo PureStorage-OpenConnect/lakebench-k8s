@@ -30,9 +30,6 @@
 # REQUIRED: unique name for this deployment (also used as the K8s namespace)
 name: my-lakehouse
 
-# Optional description
-# description: "My Lakebench lakehouse deployment"
-
 # Recipe shorthand -- sets catalog + table_format + engine + query_engine in
 # one line.
 # Valid recipes:
@@ -45,9 +42,6 @@ name: my-lakehouse
 # See docs/recipes.md.
 recipe: polaris-iceberg-spark-trino
 
-# Config schema version (always 1)
-# version: 1
-
 # ============================================================================
 # IMAGES
 # ============================================================================
@@ -57,7 +51,6 @@ recipe: polaris-iceberg-spark-trino
 #   datagen: docker.io/sillidata/lb-datagen:1.6.0    # release tag; :latest is not accepted
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
-#   hive: apache/hive:3.1.3
 #   trino: trinodb/trino:483
 #   polaris: apache/polaris:1.6.0                      # 1.3.0+ has the FlashBlade STS fix; 1.6.0 is current
 #   polaris_admin_tool: apache/polaris-admin-tool:1.6.0
@@ -86,10 +79,9 @@ platform:
       #   AWS S3:             https://s3.us-east-1.amazonaws.com
       endpoint: ""
 
-      # REQUIRED: S3 credentials (either inline or secret_ref)
+      # REQUIRED: S3 credentials, inline (environment substitution keeps them out of the file)
       access_key: ""
       secret_key: ""
-      # secret_ref: ""               # OR: name of an existing K8s Secret
 
       # region: us-east-1
       # path_style: true             # true for FlashBlade/MinIO, false for AWS S3
@@ -109,11 +101,10 @@ platform:
     ## Any StorageClass that provides RWO volumes works (Portworx, local-path, EBS, etc.).
     # scratch:
     #   enabled: false
-    #   storage_class: px-csi-scratch    # Name of the StorageClass to use
-    #   size: 100Gi
-    #   create_storage_class: true       # If true, lakebench creates this StorageClass
-    #                                    # on deploy (requires cluster-admin). Set false
-    #                                    # if the SC already exists or is managed externally.
+    #   storage_class: px-csi-scratch    # Name of the StorageClass to use. A cluster
+    #                                    # admin installs it once with
+    #                                    # `lakebench admin install-scratch-storage-class`.
+    #                                    # Each executor's PVC size is its job profile's.
     #   provisioner: pxd.portworx.com    # CSI provisioner. Examples:
     #                                    #   pxd.portworx.com (Portworx)
     #                                    #   rancher.io/local-path (local-path)
@@ -125,25 +116,13 @@ platform:
 
   # compute:
   #   spark:
-  #     operator:
-  #       install: false             # true = auto-install the Spark Operator.
-  #                                  # Default is false; run
-  #                                  # `lakebench admin install-spark-operator`
-  #                                  # once per cluster, or set true here.
+  #     operator:                  # Shared; a cluster admin installs it once with
+  #                                  # `lakebench admin install-spark-operator`.
   #       namespace: spark-operator
   #       version: "2.5.1"
   #
-  #     driver:
-  #       cores: 4
-  #       memory: 8g
-  #
-  #     # Default executor sizing (proven at 1 TB+ scale). Do not shrink.
-  #     executor:
-  #       instances: 8
-  #       cores: 4
-  #       memory: 48g
-  #       memory_overhead: 12g       # Critical for stability
-  #
+  #     ## Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed
+  #     ## in the job profiles, proven at 1 TB+ scale.
   #     ## Per-job executor count overrides (null = auto from scale factor).
   #     ## Per-executor sizing (cores, memory, PVC) stays fixed from the proven profiles.
   #     # bronze_executors: null
@@ -172,7 +151,6 @@ architecture:
     type: polaris                    # hive | polaris | none
     ## Polaris REST catalog settings (used when type: polaris)
     polaris:
-      # version: 1.6.0               # 1.3.0+ has the FlashBlade STS fix
       # port: 8181
       # REQUIRED for polaris. Each install must set its own OAuth2 client
       # secret (LB-090): `deploy`, `run` and `destroy` each reload the config
@@ -187,16 +165,10 @@ architecture:
       #   memory: 2Gi
     ## Hive Metastore tuning (uncomment when catalog.type: hive)
     # hive:
-    #   operator:
-    #     install: false             # true = auto-install Stackable operators.
-    #                                # Requires cluster-admin. Installs commons,
-    #                                # listener, secret and hive operators.
+    #   operator:                    # Shared; a cluster admin installs the Stackable
+    #                                # operators once (docs/component-hive.md).
     #     namespace: stackable
     #     version: "25.7.0"
-    #   thrift:
-    #     min_threads: 10
-    #     max_threads: 50
-    #     client_timeout: 300s
     #   resources:
     #     cpu_min: 500m
     #     cpu_max: "2"
@@ -206,8 +178,6 @@ architecture:
   #   type: iceberg                  # iceberg | delta
   #   iceberg:
   #     version: "1.11.0"            # 1.11+ is the first release with a Spark 4.1 runtime and Java 17
-  #     file_format: parquet         # parquet | orc | avro
-  #     properties: {}               # Additional Iceberg table properties
 
   # query_engine:
   #   type: trino                    # trino | spark-thrift | duckdb | none
@@ -237,28 +207,6 @@ architecture:
   #   pattern: medallion             # medallion (streaming/batch/custom are deprecated)
   #   cycles: 1                      # Batch iterations (1 = full overwrite; 2..N = append/merge)
   #   pre_benchmark_maintenance: true
-  #   ## Medallion layer configuration
-  #   medallion:
-  #     bronze:
-  #       format: parquet
-  #       path_template: customer/interactions
-  #     silver:
-  #       format: iceberg
-  #       table_name: customer_interactions_enriched
-  #       partition_by:
-  #         - date
-  #       transforms:
-  #         - normalize_email
-  #         - normalize_phone
-  #         - geo_enrichment
-  #         - customer_segmentation
-  #         - quality_flags
-  #     gold:
-  #       format: iceberg
-  #       tables:
-  #         - name: customer_executive_dashboard
-  #           partition_by: [date]
-  #           aggregations: [daily_revenue, daily_engagement, churn_indicators, channel_performance]
   #   ## Continuous pipeline settings (used when mode: continuous)
   #   continuous:
   #     bronze_trigger_interval: "30 seconds"
@@ -285,9 +233,11 @@ architecture:
   #   mode: power                    # power: single sequential stream (per-query latency)
   #                                  # throughput: N concurrent streams (aggregate QpH)
   #                                  # composite: geometric mean of power + throughput
-  #   streams: 4                     # Concurrent streams (throughput/composite only;
-  #                                  # ignored in power mode)
-  #   cache: hot                     # hot | cold
+  #                                  # `lakebench run` measures power only and refuses
+  #                                  # throughput, composite, cache: cold and streams
+  #                                  # above 1; `lakebench benchmark` runs them all.
+  #   streams: 4                     # Concurrent streams (lakebench benchmark only)
+  #   cache: hot                     # hot | cold (lakebench benchmark --cold)
   #   iterations: 3                  # Timed runs of each query. Median is used; 1 = quick run with no spread
 
   ## Table name overrides (namespace.table format)
@@ -333,7 +283,6 @@ workload:
   ## Customer360 workload overrides
   # customer360:
   #   unique_customers: null         # Override: derived from scale if null
-  #   date_range_days: null          # Override: defaults to 365 if null
 
 # ============================================================================
 # LAYER 3: OBSERVABILITY
@@ -341,11 +290,9 @@ workload:
 # Flat schema -- use top-level keys directly under observability:
 # observability:
 #   enabled: false                   # Deploy kube-prometheus-stack (Prometheus + Grafana)
-#   prometheus_stack_enabled: true   # Prometheus collection
 #   dashboards_enabled: true         # Grafana dashboards
 #   retention: 7d                    # Prometheus data retention
 #   storage: 10Gi                    # Prometheus PVC size
-#   storage_class: ""                # PVC storage class (empty = default)
 #   chart_version: "87.19.2"         # kube-prometheus-stack Helm chart version
 #   pushgateway_enabled: true        # Per-deployment Pushgateway for live datagen metrics
 #   pushgateway_image: prom/pushgateway:v1.11.1

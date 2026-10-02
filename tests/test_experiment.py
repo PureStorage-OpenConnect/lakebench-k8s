@@ -81,7 +81,12 @@ class TestStamping:
         cfg = _cfg(schema, mode)
         d = _metrics(cfg).to_dict()
         e = d["experiment"]
-        assert e["schema"] == ex.EXPERIMENT_SCHEMA
+        # No corpus observation and no system identity in this synthetic
+        # run: identity v1, naming what v2 lacked (ER-10a stamping rule).
+        assert e["schema"] == ex.EXPERIMENT_SCHEMA_V1
+        assert e["v2_unavailable"] == ["corpus id v2", "system identity"]
+        assert e["corpus"]["id_v2"] is None and e["corpus"]["id_v2_unavailable"]
+        assert e["architecture"]["access_paths"] == {"pipeline": "catalog", "query": "catalog"}
         assert e["workload"]["name"] == schema
         assert e["workload"]["version"] == ex.WORKLOAD_VERSIONS[schema]
         assert e["corpus"]["seed"] is not None
@@ -339,15 +344,16 @@ class TestRefusals:
 
     def test_trino_vs_duckdb_is_comparable_but_not_like_for_like(self):
         """DESIGN 6.5: matching results make the pair comparable; the
-        different effective maintenance and access path make it not
-        like-for-like. Neither is a refusal."""
+        different effective maintenance makes it not like-for-like. The
+        access path is part of the architecture (OD-2), not a condition.
+        Neither is a refusal."""
         a = _metrics(_cfg(engine="trino")).to_dict()
         b = _metrics(_cfg(engine="duckdb")).to_dict()
         prov, results, _ = ex.refusals(a, b)
         assert prov == [] and results == []
         conditions = ex.like_for_like(a, b)
         assert any(c.startswith("effective maintenance") for c in conditions), conditions
-        assert any(c.startswith("query access path") for c in conditions), conditions
+        assert not any(c.startswith("query access path") for c in conditions), conditions
 
     def test_stored_references_refuse_on_conditions(self):
         """The perf gate and reproduce need the same experiment under the same

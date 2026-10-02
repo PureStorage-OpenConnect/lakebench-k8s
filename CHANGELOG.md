@@ -47,6 +47,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "caps" on them, so a run whose only cuts were those no longer carries the
   "auto-sizing cuts" limit in its experiment identity; `validate` no longer
   grades executor counts and memory.
+- **Config fields nothing read are removed.** `images.hive`,
+  `images.prometheus`, `images.grafana`, `platform.storage.s3.secret_ref`,
+  `architecture.catalog.hive.thrift`, `architecture.catalog.polaris.version`,
+  `architecture.catalog.unity.version`, `architecture.table_format.iceberg.file_format`
+  and `.properties`, `architecture.table_format.delta.properties`,
+  `architecture.pipeline.medallion` (with `bronze.path_template`),
+  `workload.customer360.date_range_days`, `observability.reports`,
+  `observability.storage_class`, `observability.prometheus_stack_enabled`,
+  `observability.s3_metrics_enabled`, `observability.spark_metrics_enabled`
+  and the top-level `version` and `description` (and the flat top-level
+  `secret_ref`). A key still at its v1.6 default is inert and loads under
+  every command with a note (for `description`, any text; for `images.hive`,
+  any value naming 3.1.3; for the two metrics flags, true or null); any
+  other value is refused by the commands that change data, with the fix,
+  and dropped with a note by the others. The
+  same holds for `platform.compute.spark.driver`/`.executor` and
+  `scratch.size` at their v1.6 defaults. The bronze layout is fixed:
+  `customer/interactions/` for Customer 360 and `pacs008/` for financial; a
+  financial config that named another layout with `path_template` (which
+  v1.6 passed to the financial stages) is refused. Corpus and workload ids
+  do not move. A schema walk test fails when a config field has no reader.
 - **`operator.install: true` is refused.** The Spark Operator
   (`platform.compute.spark.operator.install`) and the Stackable operators
   (`architecture.catalog.hive.operator.install`) are shared cluster
@@ -125,6 +146,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A config validation error no longer echoes the input it failed on: a
   model-level error used to print the whole block, which could carry a
   datagen seed or a key.
+- **A refused OpenShift SCC grant fails the deploy.** The `anyuid`
+  grant for `lakebench-spark-runner` and `lakebench-postgres` is now made
+  through the Kubernetes API: a LocalSubjectAccessReview first (an existing
+  grant is left alone), else the RoleBinding `system:openshift:scc:anyuid` in
+  the deployment's namespace, then a second review that the grant took
+  effect. The Spark Operator's service accounts get theirs the same way.
+  Lakebench no longer runs `oc` anywhere. A grant that cannot be made fails
+  the RBAC or PostgreSQL step (or the operator install) with the `oc adm
+  policy` command for a cluster admin; 1.6 logged a warning and the pods were
+  rejected later. OpenShift is detected from the `security.openshift.io` API
+  group, and a failed detection fails the RBAC step instead of skipping the
+  grant. OpenShift before 4.10 is no longer supported.
+- **`lakebench run`'s preflight uses the shared prerequisite checks.** It now
+  also checks the scratch StorageClass, requires a ready Spark Operator
+  controller in `platform.compute.spark.operator.namespace` (not only the
+  CRD). A check that cannot run (an API error, or no right to list
+  cluster-wide) fails the preflight with "could not check";
+  `--skip-preflight` bypasses it.
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.
@@ -134,20 +173,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   workload does not read it.
 - Read-only commands create no files: `validate` no longer opens a journal,
   and `report` and `results` no longer create `lakebench-output/runs/`.
-- `platform.storage.s3.secret_ref` without `access_key` and `secret_key` is
-  refused at load: nothing reads an existing Secret, so such a config
-  deployed empty S3 credentials. `destroy`, `status` and `clean`
-  still load it, so an old deployment stays destroyable. Set alongside
-  inline keys, it loads with a warning that it has no effect. `config
-  validate` and the deploy preflight now ask for the inline keys only.
+- `platform.storage.s3.secret_ref` is refused by the commands that change
+  data: nothing reads an existing Secret, so a secret_ref-only config
+  deployed empty S3 credentials, and the key is removed.
+  `destroy`, `status` and `clean` still load it, so an old deployment stays
+  destroyable. `config validate` and the deploy preflight ask for the
+  inline keys only.
 - Run provenance and the Hive deploy result record Hive 3.1.3, the version
   the Stackable HiveCluster template renders, instead of the tag of
-  `images.hive`. An `images.hive` naming another version warns at load that
-  it has no effect.
-- Setting `architecture.catalog.hive.thrift.*`,
-  `architecture.catalog.polaris.version` or `observability.storage_class`
-  to a non-default value warns that it has no effect; nothing reads them.
-  The generated config template no longer carries them or `secret_ref`.
+  `images.hive`. An `images.hive` naming another version is refused by the
+  commands that change data, since the key is removed.
+- The generated config template no longer carries
+  `architecture.catalog.hive.thrift.*`, `architecture.catalog.polaris.version`,
+  `observability.storage_class` or `secret_ref`, which nothing reads (removed;
+  see Breaking changes).
 - Deploy step labels say "Verifying scratch StorageClass" and "Checking
   Spark Operator and watch list", and the deploy summary lists the operator
   step whether or not `operator.install` is set. The HTML report's
@@ -231,8 +270,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pydantic and kubernetes. Their floors are ones the existing floors already
   imply, so they add no constraint; a fresh install resolves the same
   versions as before.
+- **Experiment identity v2 and identity groups.** A run is stamped
+  `experiment.schema: exp2` with `identity_version: 2` only when it has a
+  corpus id v2, the run-start identity version and an observed system
+  identity; otherwise it is `exp1` and `experiment.v2_unavailable` names
+  what was missing (no v1.7 run is exp2 until the datagen image writes
+  the corpus markers). An exp2 identity drops the generator image tag and
+  the `cluster`/`local` string and adds corpus id v2, the query set id,
+  the system fingerprint, `architecture.access_paths` and the dependency
+  pinset, so exp2 runs of an unchanged config get new identity digests;
+  stored records keep theirs. The system and the query access path are no
+  longer execution conditions: `compare` no longer calls a pair "not
+  like-for-like" because they differ. The compaction operation now is
+  one: Trino `optimize` at 128MB and Spark Thrift Iceberg
+  `rewrite_data_files` read as different conditions, so the stored AML
+  batch pair polaris-Thrift against hive-Trino (runs 103055-de1772 and
+  130953-f8a2cf) is now comparable, not like-for-like, where 1.6 called it
+  like-for-like. A perf-gate baseline or reproduction package recorded
+  under the other identity version is refused with one message naming
+  both versions. A pair whose architecture and system both differ is
+  confounded and is no longer called like-for-like, nor is a pair that
+  differs only in its dependency set; a record with a required workload or
+  corpus key missing, or a withheld seed, is not comparable.
+- **System and load at run start and end.** `run` records
+  `experiment.system_identity` (the system fingerprint, sampled at run start)
+  and `experiment.observed`: allocatable CPU and memory of the schedulable
+  workers and the CPU and memory requested by other namespaces' scheduled
+  pods, at run start and end. The load is evidence only (n=1 per sample);
+  nothing compares on it in 1.7. Co-tenant requests include platform
+  pods (DaemonSets, shared operators), so an idle cluster reads above
+  zero; pods not yet scheduled are recorded apart. Sampling reads two node
+  lists, a paged cluster-wide pod list, the API server version and
+  ClusterVersion and sends one HEAD on the bronze bucket at run start, and
+  a node list and the pod list when the record is saved; each sample
+  returns within 120 s and 60 s, and a refused or unfinished read is
+  recorded as `not_observed`. A `--local` run records a local system
+  identity with no part observed, and no load.
+- **A stored experiment block is never rebuilt.** Loading and saving a
+  record keeps its block as written; 1.6 rebuilt it with the current code,
+  which moved the identity digest of seven stored records.
+  `lakebench benchmark` updates only the benchmark half of the stored
+  block (batch results, benchmark iterations and mode, samples per query,
+  the "benchmark (not run)" stage entry) and notes it in
+  `experiment.benchmark_source`; that moves the record's identity digest,
+  since it now describes another benchmark.
 ### Fixed
 
+- A multi-cycle Customer 360 batch run no longer loses silver rows when a
+  later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
+  tagged every row with that cycle, so an operator retry of the cycle, which
+  deletes the cycle's rows before appending them again, deleted the whole
+  rebuild and kept only that cycle, and the run exited 0. Rebuilt rows now
+  take the cycle in their bronze file's name. The rebuild, on Iceberg and
+  Delta, also reads only this run's bronze files (cycle 0 up to the current
+  cycle, the files bronze-verify counts), not the later cycles' files an
+  earlier run with more cycles left under the prefix. On Iceberg, a rebuild
+  whose own cycle's files are not named as datagen names them is refused.
+- Silver-build no longer rebuilds a populated table without
+  `--force-rebuild` when its check for existing rows fails. A failed read
+  counted as an empty table; it is now a refusal that names the error. On
+  Iceberg the check that the table exists also no longer counts any error
+  as "no table"; only a table the catalog does not have is missing.
+- A Delta Customer 360 multi-cycle batch run no longer loses cycles when the
+  deployment's rebuild epoch reads lower than one the silver table already
+  used: the `lakebench-silver-state` ConfigMap lost or recreated while the
+  table survived, or the epoch read at job submission falling back to 0.
+  Delta skipped the new run's cycles 1..N as already committed under the
+  old (txnAppId, txnVersion) keys, so silver held only the new cycle 0 and
+  the run exited 0. Silver-build now takes the epoch from the table's Delta
+  log: a full build writes under an epoch above every one in the log, and
+  each append continues the newest. An operator retry of a committed cycle
+  is still skipped, and now also when that cycle found no table and built
+  it from every cycle's files (the retry appended the cycle a second time).
+  The build refuses when it cannot read the log's transaction ids, and when
+  a later cycle of its epoch is already committed (a manual re-run of an
+  earlier cycle, which was a silent no-op). When the metastore is lost and
+  the table files are kept, cycle 0 on the Hive catalog already refused to
+  adopt the old Delta log; that is unchanged.
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one
@@ -346,6 +460,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cycle, or come from different builds are corpus problems, which
   `compare` reads as not comparable. `corpus.id` (v1) is unchanged, and no
   stored id or identity digest moves.
+- **`docs/prerequisites.md` is generated** from the prerequisite checks in
+  `deploy/prereqs.py` by `scripts/gen_prereq_docs.py`, so the page and the
+  checks cannot drift.
 
 ### Removed
 - **`config upgrade` refuses.** It rewrote configs lossily, in place

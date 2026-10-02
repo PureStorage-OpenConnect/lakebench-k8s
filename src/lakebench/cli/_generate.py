@@ -395,14 +395,10 @@ def generate(
             )
             _journal_safe(j.end_command, success=True)
 
-            # Same prefix mapping as DatagenDeployer: financial on the C360
-            # default path_template writes under pacs008.
-            written_prefix = cfg.architecture.pipeline.medallion.bronze.path_template
-            if (
-                cfg.architecture.workload.schema_type.value == "financial"
-                and written_prefix == "customer/interactions"
-            ):
-                written_prefix = "pacs008"
+            # The prefix DatagenDeployer wrote under.
+            from lakebench.deploy.datagen import bronze_datagen_prefix
+
+            written_prefix = bronze_datagen_prefix(cfg)
             console.print(
                 Panel(
                     f"[green]Data generation complete![/green]\n\n"

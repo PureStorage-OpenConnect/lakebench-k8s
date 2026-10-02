@@ -573,8 +573,7 @@ class DeploymentEngine:
             "openshift_mode": openshift_mode,
             # Images
             "postgres_image": cfg.images.postgres,
-            "hive_image": cfg.images.hive,
-            # The HiveCluster productVersion. Fixed: images.hive does not select it.
+            # The HiveCluster productVersion. Fixed: there is no config key for it.
             "hive_version": STACKABLE_HIVE_VERSION,
             "trino_image": cfg.images.trino,
             "spark_image": cfg.images.spark,
@@ -606,11 +605,7 @@ class DeploymentEngine:
             "hive_cpu_min": cfg.architecture.catalog.hive.resources.cpu_min,
             "hive_cpu_max": cfg.architecture.catalog.hive.resources.cpu_max,
             "hive_memory": cfg.architecture.catalog.hive.resources.memory,
-            "hive_thrift_min_threads": cfg.architecture.catalog.hive.thrift.min_threads,
-            "hive_thrift_max_threads": cfg.architecture.catalog.hive.thrift.max_threads,
-            "hive_client_timeout": cfg.architecture.catalog.hive.thrift.client_timeout,
             # Polaris
-            "polaris_version": cfg.architecture.catalog.polaris.version,
             "polaris_image": cfg.images.polaris,
             "polaris_admin_tool_image": cfg.images.polaris_admin_tool,
             "polaris_port": cfg.architecture.catalog.polaris.port,

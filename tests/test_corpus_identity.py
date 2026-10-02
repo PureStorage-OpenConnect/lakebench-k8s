@@ -268,9 +268,11 @@ class TestReadMarkers:
 
 class TestCorpusBlock:
     def test_no_observation_adds_no_v2_field(self):
-        """A v1.6 record re-saved before ER-10a keeps its block's shape."""
+        """A v1.7 run saved with no corpus observation says so (ER-10a); a
+        v1.6 record keeps its stored block (tests/test_stored_records.py)."""
         corpus = corpus_of()
-        assert not {"id_v2", "id_v2_unavailable", "declared", "lineage"} & set(corpus)
+        assert corpus["id_v2"] is None and corpus["id_v2_unavailable"] == ci.NOT_OBSERVED
+        assert not {"declared", "lineage"} & set(corpus)
 
     def test_no_marker_gives_unavailable(self):
         obs, _ = observe((), None)

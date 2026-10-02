@@ -2,173 +2,112 @@
 (namespaced ``system:openshift:scc:<scc>`` RoleBinding subjects), not
 the legacy cluster-scoped ``.users`` array alone.
 
-The LB-088 wave fixed this in ``_add_scc`` by adding
-``_scc_binding_has_subject``. The parallel gap in the preflight check
-went unfixed until LB-093 -- so ``verify_security()`` used to report
-every SCC as "not assigned" on modern OCP even after a successful add.
-
-Structure mirrors ``tests/test_scc_add_retry.py``.
+DEP-4 moved both reads from ``oc`` to the API (the RBAC API for the
+RoleBinding, the ``security.openshift.io/v1`` custom object for the legacy
+``.users``), so verification works without ``oc`` on PATH. The cases are
+the LB-093 ones.
 """
 
 from __future__ import annotations
 
-from subprocess import CompletedProcess
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
+
+import pytest
+from kubernetes.client.rest import ApiException
 
 from lakebench.k8s.security import SecurityVerifier
 
 
-def _make(cmd_stdout="", cmd_stderr="", cmd_returncode=0):
-    return CompletedProcess(
-        args=[], returncode=cmd_returncode, stdout=cmd_stdout, stderr=cmd_stderr
-    )
+@pytest.fixture(autouse=True)
+def _no_oc(monkeypatch):
+    def refuse(*a, **k):
+        raise AssertionError("verification must not call oc")
+
+    monkeypatch.setattr("lakebench.k8s.security.pinned_oc", refuse, raising=False)
+
+
+def _check(rb_subjects=None, rb_error=None, users=None, scc_error=None):
+    """Run ``_check_scc_assignment`` against a fake RBAC and SCC API.
+
+    ``rb_subjects=None`` means the RoleBinding does not exist (404).
+    """
+    rbac = MagicMock()
+    rbac.api_client.sanitize_for_serialization.side_effect = lambda o: o
+    if rb_error is not None:
+        rbac.read_namespaced_role_binding.side_effect = rb_error
+    elif rb_subjects is None:
+        rbac.read_namespaced_role_binding.side_effect = ApiException(status=404)
+    else:
+        rbac.read_namespaced_role_binding.return_value = {"subjects": rb_subjects}
+    custom = MagicMock()
+    if scc_error is not None:
+        custom.get_cluster_custom_object.side_effect = scc_error
+    else:
+        custom.get_cluster_custom_object.return_value = {"users": users or []}
+    with (
+        patch("kubernetes.client.RbacAuthorizationV1Api", return_value=rbac),
+        patch("kubernetes.client.CustomObjectsApi", return_value=custom),
+    ):
+        return SecurityVerifier(k8s=Mock())._check_scc_assignment(
+            "anyuid", "lakebench-spark-runner", "myns"
+        )
+
+
+def _sa(name="lakebench-spark-runner", ns="myns"):
+    return {"kind": "ServiceAccount", "name": name, "namespace": ns}
 
 
 class TestCheckSccAssignmentReadsRoleBindingFirst:
     def test_ocp_4_10_grant_via_rolebinding(self):
-        """On OCP 4.10+ `.users` stays empty; the grant lives on the
-        namespaced RoleBinding. The verifier must find it."""
-        verifier = SecurityVerifier(k8s=Mock())
-
-        def fake_run(context, cmd, **kwargs):
-            if "rolebinding" in cmd:
-                # subjects listed one per "ns/sa" token, space separated
-                return _make(cmd_stdout="myns/lakebench-spark-runner ")
-            if "scc" in cmd:
-                # legacy .users is empty on modern OCP
-                return _make(cmd_stdout="[]")
-            return _make(cmd_returncode=1)
-
-        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
-            status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
+        status = _check(rb_subjects=[_sa()])
         assert status.assigned is True
         assert "RoleBinding" in status.message
 
     def test_pre_ocp_4_10_grant_via_users_field(self):
-        """The legacy `.users` fallback must still work when the
-        RoleBinding does not exist. LB-093 follow-up: the fallback now
-        parses tokens one per line and matches exactly."""
-        verifier = SecurityVerifier(k8s=Mock())
-
-        def fake_run(context, cmd, **kwargs):
-            if "rolebinding" in cmd:
-                return _make(cmd_returncode=1, cmd_stderr="not found")
-            if "scc" in cmd:
-                return _make(cmd_stdout="system:serviceaccount:myns:lakebench-spark-runner\n")
-            return _make(cmd_returncode=1)
-
-        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
-            status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
+        status = _check(users=["system:serviceaccount:myns:lakebench-spark-runner"])
         assert status.assigned is True
         assert "legacy" in status.message.lower()
 
     def test_unassigned_when_neither_mechanism_grants(self):
-        verifier = SecurityVerifier(k8s=Mock())
-
-        def fake_run(context, cmd, **kwargs):
-            if "rolebinding" in cmd:
-                return _make(cmd_returncode=1, cmd_stderr="not found")
-            if "scc" in cmd:
-                return _make(cmd_stdout="[]")
-            return _make(cmd_returncode=1)
-
-        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
-            status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
+        status = _check()
         assert status.assigned is False
         assert "not assigned" in status.message
 
     def test_rolebinding_present_but_different_ns_is_not_a_grant(self):
-        """A binding for the same SA in a different namespace must not
-        satisfy the check -- namespace is part of the grant identity."""
-        verifier = SecurityVerifier(k8s=Mock())
+        assert _check(rb_subjects=[_sa(ns="otherns")]).assigned is False
 
-        def fake_run(context, cmd, **kwargs):
-            if "rolebinding" in cmd:
-                # subject in otherns, not myns
-                return _make(cmd_stdout="otherns/lakebench-spark-runner ")
-            if "scc" in cmd:
-                return _make(cmd_stdout="[]")
-            return _make(cmd_returncode=1)
-
-        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
-            status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
+    def test_read_error_reports_cannot_check(self):
+        status = _check(rb_error=ApiException(status=403, reason="Forbidden"))
         assert status.assigned is False
-
-    def test_oc_missing_reports_actionable_message(self):
-        verifier = SecurityVerifier(k8s=Mock())
-        with patch("lakebench.k8s.security.pinned_oc", side_effect=FileNotFoundError("oc")):
-            status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
-        assert status.assigned is False
-        assert "oc" in status.message
+        assert status.message.startswith("Error checking SCC")
 
 
 class TestDeadHelperRemoved:
     def test_scc_has_user_no_longer_exists(self):
-        """LB-093 also deletes the dead `_scc_has_user` helper (no callers).
-        Guard against it reappearing as a maintenance regression: if a
-        future contributor re-adds a legacy `.users`-only helper by that
-        name, they are almost certainly recreating the LB-088 bug.
-        """
+        """A legacy `.users`-only helper by this name recreates LB-088."""
         assert not hasattr(SecurityVerifier, "_scc_has_user")
+
+    def test_oc_retry_loop_is_gone(self):
+        """DEP-4 replaced the `oc adm policy` retry loop with the RBAC API."""
+        assert not hasattr(SecurityVerifier, "_add_scc")
 
 
 class TestScvUsersFieldExactMatch:
-    """LB-093 follow-up: the legacy `.users` fallback must not substring-match.
-    A subagent verifier flagged that `user in result.stdout` would return
-    True for `lakebench-spark-runner` when the SCC actually lists
-    `lakebench-spark-runner-v2` -- exactly the LB-088 pattern moved rather
-    than fixed. The fix parses the jsonpath output as individual tokens
-    and checks exact equality.
-    """
+    """The legacy `.users` fallback must not substring-match (LB-093)."""
 
     def test_exact_match_wins(self):
-        verifier = SecurityVerifier(k8s=Mock())
-
-        def fake_run(context, cmd, **kwargs):
-            if "rolebinding" in cmd:
-                return _make(cmd_returncode=1)
-            if "scc" in cmd:
-                return _make(
-                    cmd_stdout=(
-                        "system:serviceaccount:myns:lakebench-spark-runner\n"
-                        "system:serviceaccount:otherns:some-other-sa\n"
-                    )
-                )
-            return _make(cmd_returncode=1)
-
-        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
-            status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
-        assert status.assigned is True
+        users = [
+            "system:serviceaccount:myns:lakebench-spark-runner",
+            "system:serviceaccount:otherns:some-other-sa",
+        ]
+        assert _check(users=users).assigned is True
 
     def test_no_substring_false_positive_on_suffixed_sa(self):
-        """The subagent-provided reproducer. Before the fix,
-        `lakebench-spark-runner` in `[...lakebench-spark-runner-v2]`
-        returned True and reported a grant that didn't exist."""
-        verifier = SecurityVerifier(k8s=Mock())
-
-        def fake_run(context, cmd, **kwargs):
-            if "rolebinding" in cmd:
-                return _make(cmd_returncode=1)
-            if "scc" in cmd:
-                return _make(cmd_stdout="system:serviceaccount:myns:lakebench-spark-runner-v2\n")
-            return _make(cmd_returncode=1)
-
-        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
-            status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
-        assert status.assigned is False, (
-            "an SCC granting only the -v2 SA must not report the base name as granted"
-        )
+        users = ["system:serviceaccount:myns:lakebench-spark-runner-v2"]
+        assert _check(users=users).assigned is False
 
     def test_empty_users_returns_false(self):
-        verifier = SecurityVerifier(k8s=Mock())
+        assert _check(users=[]).assigned is False
 
-        def fake_run(context, cmd, **kwargs):
-            if "rolebinding" in cmd:
-                return _make(cmd_returncode=1)
-            if "scc" in cmd:
-                return _make(cmd_stdout="")
-            return _make(cmd_returncode=1)
-
-        with patch("lakebench.k8s.security.pinned_oc", side_effect=fake_run):
-            status = verifier._check_scc_assignment("anyuid", "lakebench-spark-runner", "myns")
-        assert status.assigned is False
+    def test_scc_read_error_returns_false(self):
+        assert _check(scc_error=ApiException(status=404)).assigned is False

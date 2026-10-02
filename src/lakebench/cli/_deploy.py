@@ -132,8 +132,8 @@ def _build_component_list(cfg) -> str:
     else:
         parts.append("Spark Operator watch list")
     if cfg.observability.enabled:
-        if cfg.observability.prometheus_stack_enabled:
-            parts.append("Prometheus")
+        # observability.enabled always installs or reuses the full stack.
+        parts.append("Prometheus")
         if cfg.observability.dashboards_enabled:
             parts.append("Grafana")
     return ", ".join(parts)

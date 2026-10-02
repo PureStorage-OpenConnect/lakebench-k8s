@@ -483,6 +483,9 @@ def _save_local_metrics(
     except Exception as e:  # noqa: BLE001
         console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
+    from lakebench.metrics.system_identity import sample_run_end
+
+    sample_run_end(run_metrics, cfg, local=True)
     if client is not None:
         # The local store's corpus, once, before the save (corpus id v2).
         from lakebench.metrics.corpus_identity import record_corpus_observation
@@ -1273,12 +1276,10 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
 
         s3 = cfg.platform.storage.s3
         # Manifest URI mirrors bronze_verify_financial:
-        # {bronze}/{prefix}/manifest/manifest.parquet. Datagen maps the C360
-        # default path_template ("customer/interactions") to "pacs008".
-        prefix = cfg.architecture.pipeline.medallion.bronze.path_template
-        if prefix == "customer/interactions":
-            prefix = "pacs008"
-        prefix = prefix.rstrip("/")
+        # {bronze}/{prefix}/manifest/manifest.parquet.
+        from lakebench.deploy.datagen import bronze_datagen_prefix
+
+        prefix = bronze_datagen_prefix(cfg).rstrip("/")
         # Glob over every cycle's manifest (manifest.parquet, manifest-cNNN.parquet).
         manifest_uri = f"s3a://{s3.buckets.bronze}/{prefix}/manifest/manifest*.parquet"
         json_key = f"scoring/{run_id}/recall.json"
@@ -1414,6 +1415,9 @@ def _run_local_mode(
     snapshot = build_config_snapshot(cfg, run_mode="batch", system="local")
     snapshot["local"] = True
     collector.start_run(run_id, cfg.name, snapshot)
+    from lakebench.metrics.system_identity import sample_run_start
+
+    sample_run_start(collector.current_run, cfg, local=True)
     if collector.current_run is not None:
         # Local mode runs no table maintenance.
         from lakebench.metrics.maintenance_policy import skipped_policy_id
@@ -1953,6 +1957,10 @@ def run(
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    # System identity and cluster load at run start; never raises.
+    from lakebench.metrics.system_identity import sample_run_end, sample_run_start
+
+    sample_run_start(collector.current_run, cfg)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts
         # [] from the start: a run that ends before the maintenance phase is
@@ -3235,6 +3243,7 @@ def run(
                         )
                     )
 
+            sample_run_end(run_metrics, cfg)
             # The corpus this run read, once, before the save (corpus id v2).
             from lakebench.metrics.corpus_identity import record_corpus_observation
 

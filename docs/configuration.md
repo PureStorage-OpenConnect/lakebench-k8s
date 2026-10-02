@@ -67,6 +67,23 @@ to do instead. `destroy`, `stop`, `status`, `logs`, `report`, `info`,
 `config show` and `admin` drop it and print an "Upgrade notes" block on
 stderr, so an old config can still be inspected, stopped and torn down.
 
+v1.7 removed these keys, which nothing read: `images.hive`,
+`images.prometheus`, `images.grafana`, `platform.storage.s3.secret_ref`,
+`architecture.catalog.hive.thrift`, `architecture.catalog.polaris.version`,
+`architecture.catalog.unity.version`, `architecture.table_format.iceberg.file_format`,
+`architecture.table_format.iceberg.properties`,
+`architecture.table_format.delta.properties`, `architecture.pipeline.medallion`
+(including `bronze.path_template`), `workload.customer360.date_range_days`,
+`observability.reports`, `observability.storage_class`,
+`observability.prometheus_stack_enabled`, `observability.s3_metrics_enabled`,
+`observability.spark_metrics_enabled`, and the top-level `version` and
+`description`. A config that still carries one of them at its old default
+(for `description` any text, for `images.hive` any value naming 3.1.3) is
+inert and loads under every command with a note; another value is refused as
+above. The bronze layout is
+fixed (`customer/interactions/`, `pacs008/` for the financial workload), so a
+`path_template` naming another layout is refused.
+
 ### Flat Fields (deprecated)
 
 v1.3 added flat top-level fields that map to nested locations. They still
@@ -79,7 +96,7 @@ workload.datagen.scale"). Write the nested key in new configs:
 | `endpoint` | `platform.storage.s3.endpoint` | (required) |
 | `access_key` | `platform.storage.s3.access_key` | (required) |
 | `secret_key` | `platform.storage.s3.secret_key` | (required) |
-| `secret_ref` | `platform.storage.s3.secret_ref` | (none; not supported, see below) |
+| `secret_ref` | `platform.storage.s3.secret_ref` | (removed in v1.7: set `access_key` and `secret_key`) |
 | `scale` | `workload.datagen.scale` | 10 |
 | `name` | root `name` | (required to change data) |
 | `recipe` | root `recipe` | default (hive-iceberg-spark-trino) |
@@ -184,12 +201,6 @@ everything else has sensible defaults.
 # at 63. Config load refuses a longer one and names the derived object.
 name: my-lakehouse
 
-# Optional human-readable description.
-description: "Production benchmark at scale 100"
-
-# Config schema version (always 1 for now).
-version: 1
-
 # Optional recipe shorthand. Sets catalog, table_format, and query_engine
 # in one line. User overrides in architecture: always take precedence.
 # recipe: hive-iceberg-spark-trino
@@ -203,7 +214,6 @@ images:
   datagen: docker.io/sillidata/lb-datagen:1.6.0
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
-  hive: apache/hive:3.1.3
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
   pull_policy: Always                 # Always | IfNotPresent | Never
@@ -395,13 +405,9 @@ workload:
 # ---------------------------------------------------------------------------
 observability:
   enabled: false                      # Deploy Prometheus + Grafana stack
-  prometheus_stack_enabled: true      # Deploy kube-prometheus-stack
-  s3_metrics_enabled: true            # Collect S3 operation metrics
-  spark_metrics_enabled: true         # Collect Spark job metrics
   dashboards_enabled: true            # Deploy Grafana dashboards
   retention: 7d                       # Prometheus data retention
   storage: 10Gi                       # Prometheus PVC size
-  storage_class: ""                   # Prometheus PVC StorageClass
 
 # ---------------------------------------------------------------------------
 # SPARK CONFIGURATION OVERRIDES
@@ -430,8 +436,6 @@ Fields marked **(required)** must be provided; everything else has a default.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | **(required)** | Unique deployment name. Also used as the K8s namespace when `namespace` is empty. |
-| `description` | string | `""` | Optional human-readable description. |
-| `version` | int | `1` | Config schema version. Always `1`. |
 | `recipe` | string or null | `null` | Recipe shorthand (e.g., `hive-iceberg-spark-trino`). Sets catalog, table format, and query engine defaults. See [Recipes](recipes.md). |
 
 ### Images
@@ -444,7 +448,6 @@ registries or custom builds.
 | `images.datagen` | string | `docker.io/sillidata/lb-datagen:1.6.0` | Data generator image. Pinned by digest `sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a` for provenance. Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`); this build cuts datagen pod memory (LB-204). |
 | `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
-| `images.hive` | string | `apache/hive:3.1.3` | Has no effect: the Stackable HiveCluster always runs Hive 3.1.3, and another version warns at load. |
 | `images.polaris` | string | `apache/polaris:1.6.0` | Apache Polaris REST catalog image. |
 | `images.trino` | string | `trinodb/trino:483` | Trino query engine image. |
 | `images.pull_policy` | enum | `Always` | `Always`, `IfNotPresent`, or `Never`. |
@@ -466,7 +469,6 @@ registries or custom builds.
 | `platform.storage.s3.path_style` | bool | `true` | Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3). |
 | `platform.storage.s3.access_key` | string | `""` | S3 access key. Required for deploy. |
 | `platform.storage.s3.secret_key` | string | `""` | S3 secret key. Required for deploy. |
-| `platform.storage.s3.secret_ref` | string | `""` | Not supported: refused without inline keys, warns that it has no effect with them. |
 | `platform.storage.s3.buckets.bronze` | string | `<name>-bronze` | Bronze layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.buckets.silver` | string | `<name>-silver` | Silver layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.buckets.gold` | string | `<name>-gold` | Gold layer S3 bucket name. Unset, it is derived from the deployment `name`. |
@@ -516,13 +518,9 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.catalog.hive.operator.install` | bool | `false` | Refused when `true` by every command that changes data: a cluster admin installs the Stackable operators once (see [component-hive.md](component-hive.md#stackable-operator)). `destroy`, `status` and the read-only commands load `true` as `false` with a note. |
 | `architecture.catalog.hive.operator.namespace` | string | `stackable` | Namespace for Stackable operators. |
 | `architecture.catalog.hive.operator.version` | string | `25.7.0` | Stackable chart version. |
-| `architecture.catalog.hive.thrift.min_threads` | int | `10` | **No effect** (the template hardcodes 10); a non-default value warns. |
-| `architecture.catalog.hive.thrift.max_threads` | int | `50` | **No effect** (the template hardcodes 50); a non-default value warns. |
-| `architecture.catalog.hive.thrift.client_timeout` | string | `300s` | **No effect** (the template hardcodes 300s); a non-default value warns. |
 | `architecture.catalog.hive.resources.cpu_min` | string | `500m` | Hive Metastore minimum CPU request. |
 | `architecture.catalog.hive.resources.cpu_max` | string | `2` | Hive Metastore CPU limit. |
 | `architecture.catalog.hive.resources.memory` | string | `4Gi` | Hive Metastore memory. |
-| `architecture.catalog.polaris.version` | string | `1.6.0` | **No effect**: the Polaris that runs is the tag of `images.polaris`; a non-default value warns. |
 | `architecture.catalog.polaris.port` | int | `8181` | Polaris REST API port. |
 | `architecture.catalog.polaris.resources.cpu` | string | `1` | Polaris CPU request/limit. |
 | `architecture.catalog.polaris.resources.memory` | string | `2Gi` | Polaris memory. |
@@ -533,10 +531,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 |---|---|---|---|
 | `architecture.table_format.type` | enum | `iceberg` | Table format: `iceberg` or `delta`. Delta runs with the `hive` catalog and `trino`, `spark-thrift` or `none` query engines (the `hive-delta-*` recipes). The `financial` (AML) workload refuses Delta. |
 | `architecture.table_format.iceberg.version` | string | `1.11.0` | Apache Iceberg runtime JAR version. |
-| `architecture.table_format.iceberg.file_format` | enum | `parquet` | **No effect; removed in v1.7.** Nothing reads it (tables are written as Parquet); a non-default value prints a warning. |
-| `architecture.table_format.iceberg.properties` | dict | `{}` | **No effect; removed in v1.7.** No table property is applied from the config; a non-empty value prints a warning. |
 | `architecture.table_format.delta.version` | string | `auto` | Delta Lake version. `auto` resolves a version that matches the Spark image. |
-| `architecture.table_format.delta.properties` | dict | `{}` | **No effect.** No table property is applied from the config. |
 
 ### Architecture -- Query Engine
 
@@ -612,7 +607,6 @@ leave these at defaults and control volume via `datagen.scale`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `workload.customer360.unique_customers` | int or null | `null` | Override customer count. Null = derived from scale. |
-| `workload.customer360.date_range_days` | int or null | `null` | Override date range in days. Null = 365. |
 | `workload.tm_operations.*` | block | enabled | AML only: the simulated TM operations layer (dispositions, cases, SARs) run after detection. Fields, defaults and ranges are in [aml-scoring.md](aml-scoring.md#the-transaction-monitoring-operations-layer). |
 
 
@@ -647,20 +641,10 @@ added at runtime.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `observability.enabled` | bool | `false` | Deploy the observability stack (Prometheus + Grafana). |
-| `observability.prometheus_stack_enabled` | bool | `true` | Deploy kube-prometheus-stack when observability is enabled. |
-| `observability.s3_metrics_enabled` | bool or null | `null` | **No effect.** Nothing reads it; setting either value prints a deprecation warning. |
-| `observability.spark_metrics_enabled` | bool or null | `null` | **No effect.** Nothing reads it; setting either value prints a deprecation warning. |
 | `observability.dashboards_enabled` | bool | `true` | Deploy Grafana dashboards. |
 | `observability.retention` | string | `7d` | Prometheus data retention period. |
 | `observability.storage` | string | `10Gi` | Prometheus PVC size. |
-| `observability.storage_class` | string | `""` | **No effect**: the Prometheus PVC always uses the cluster default StorageClass; a non-default value warns. |
 | `observability.chart_version` | string | `87.19.2` | `kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit -- there is no separate Prometheus/Grafana version field. Pinned as of 2026-07-27; the deploy previously carried no `--version` flag and silently tracked whatever the Helm repo served at install time. |
-
-### Observability -- Reports
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `observability.reports.*` | block | | **No effect; removed in v1.7.** Every run writes `report.html` into its run directory once; `lakebench report --render` writes a fresh copy to `lakebench-output/reports/` without overwriting the delivered file. A non-default value prints a warning. |
 
 ### Spark Configuration Overrides
 

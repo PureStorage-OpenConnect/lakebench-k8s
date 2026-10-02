@@ -310,12 +310,14 @@ message, and ignores inline `gitleaks:allow` comments. It fails if gitleaks
 scanned no commit, which is how gitleaks reports a `git log` it could not
 run. Findings listed in `.gitleaksignore` (the history
 baseline: two fingerprints of the old default Polaris secret that PyPI
-1.0.0 to 1.4.0 published) are not reported. The scan takes the config
-from `origin/main` (or `origin/integrate/v1.5.0`) and the baseline from
-`origin/main` (or `origin/integrate/v1.5.0` while `main` has no baseline),
-not from the branch, so a branch cannot allowlist its own finding; a pull
-request to `main` uses its own baseline, which the owner reviews, and CI
-prints its baseline and config diff against `main`. The scan also runs with
+1.0.0 to 1.4.0 published) are not reported. The scan takes the config and
+the baseline from a trusted ref, not from the branch, so a branch cannot
+allowlist its own finding. A push to `main`, a pull request to `main` and a
+release tag trust `origin/main` first, then `origin/integrate/v1.5.0`;
+every other branch trusts `origin/integrate/v1.5.0` first (the ref the
+pre-push hook reads), then `origin/main`. A pull request to `main` uses its
+own baseline, which the owner reviews, and CI prints its baseline and config
+diff against `main`. The scan also runs with
 the branch's own config, so a new rule applies at once.
 `tests/test_gitleaks_baseline.py` pins the list. The package build runs
 only after the lint, test, Spark, Rust and both secret-scan jobs pass; it

@@ -497,21 +497,27 @@ class TestDatagenDeployerSchemaWireThrough:
         # bronze_verify_financial's LB_FINANCIAL_BRONZE_PREFIX default.
         assert context["datagen_path_prefix"] == "pacs008"
 
-    def test_financial_honours_explicit_path_template_override(self):
+    def test_financial_custom_path_template_no_longer_applies(self):
+        # v1.7 removed medallion.bronze.path_template: the layout is fixed per
+        # workload (load_config refuses a custom one for the commands that
+        # change data; built directly the block is dropped with a warning).
         from lakebench.deploy.datagen import DatagenDeployer
 
-        cfg = make_config(
-            architecture={
-                "workload": {"schema": "financial"},
-                "pipeline": {
-                    "mode": "batch",
-                    "medallion": {"bronze": {"format": "parquet", "path_template": "custom/pacs"}},
-                },
-            }
-        )
+        with pytest.warns(DeprecationWarning, match="'medallion'"):
+            cfg = make_config(
+                architecture={
+                    "workload": {"schema": "financial"},
+                    "pipeline": {
+                        "mode": "batch",
+                        "medallion": {
+                            "bronze": {"format": "parquet", "path_template": "custom/pacs"}
+                        },
+                    },
+                }
+            )
         engine = MagicMock()
         engine.config = cfg
         engine.context = {}
         deployer = DatagenDeployer(engine)
         context = deployer._build_datagen_context()
-        assert context["datagen_path_prefix"] == "custom/pacs"
+        assert context["datagen_path_prefix"] == "pacs008"
