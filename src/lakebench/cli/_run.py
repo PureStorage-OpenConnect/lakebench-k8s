@@ -2148,6 +2148,9 @@ def _run_once(
     _pipeline_exit_code: int = ExitCode.FAILED
     _exception_in_flight = False
     _datagen_elapsed = 0.0
+    # Set when this run generated its corpus (fleet read from its own pods).
+    _generated_here = False
+    _run_fleet: dict | None = None
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
     results: list[tuple[str, bool, float]] = []
@@ -2254,12 +2257,21 @@ def _run_once(
 
                 from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
+                # The namespace's fleet sidecar describes a corpus this run
+                # is about to replace. With --regenerate it goes before the
+                # gate, which may empty part of bronze and then fail.
+                from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+                if regenerate:
+                    drop_sidecar(cfg.get_namespace())
                 # Refuse a non-empty bronze prefix unless --regenerate
                 # (owned bucket: clear the datagen prefix) or
                 # --allow-stale-bronze (any other bucket, recorded).
                 _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
                 if collector.current_run is not None:
                     collector.current_run.datagen_stale_bronze = _gate.record()
+                if not regenerate:
+                    drop_sidecar(cfg.get_namespace())
 
                 dg_engine = DeploymentEngine(cfg)
                 datagen_deployer = DatagenDeployer(dg_engine, allow_stale_bronze=allow_stale_bronze)
@@ -2331,6 +2343,13 @@ def _run_once(
                 datagen_end = datetime.now()
                 _datagen_elapsed = (datagen_end - datagen_start).total_seconds()
                 print_success(f"Datagen completed in {_datagen_elapsed:.0f}s")
+                # This run generated the corpus: its fleet record comes from
+                # its own pods, never from an older sidecar.
+                _generated_here = True
+                if not _dg_timed_out:
+                    from lakebench.metrics.datagen_aggregator import record_generated_fleet
+
+                    _run_fleet = record_generated_fleet(cfg.get_namespace(), _total_pods)
 
                 # Measure bronze bucket after datagen
                 try:
@@ -2440,6 +2459,19 @@ def _run_once(
         # single-cycle --generate path above already ran it). Cycle 0 of an
         # owned bucket is cleared as 1.6 did, so the gate runs with
         # regenerate on: only a bucket this deployment may not empty refuses.
+        if total_cycles > 1:
+            # Every cycle generates its own bronze (cycle 0 of an owned
+            # bucket clears it, including a --generate corpus written just
+            # above): the namespace's fleet sidecar, and any fleet this run
+            # read before the cycles, describe a corpus it replaces, and the
+            # cycle pods' fleet is not read, so the record carries no fleet.
+            # Dropped before the gate, which may clear part of bronze and
+            # then fail.
+            from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+            drop_sidecar(cfg.get_namespace())
+            _generated_here = True
+            _run_fleet = None
         if total_cycles > 1 and not (include_datagen and not skip_generate):
             _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)
             if collector.current_run is not None:
@@ -3518,7 +3550,11 @@ def _run_once(
             try:
                 from lakebench.metrics import build_pipeline_benchmark
 
-                fleet = _load_latest_datagen_fleet(cfg.get_namespace())
+                fleet = (
+                    _run_fleet
+                    if _generated_here
+                    else _load_latest_datagen_fleet(cfg.get_namespace())
+                )
                 if fleet is not None:
                     run_metrics.datagen_fleet = fleet
                 pb = build_pipeline_benchmark(

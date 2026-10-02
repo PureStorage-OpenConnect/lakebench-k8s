@@ -141,7 +141,10 @@ A run is refused, never compared, when:
   "Result check" in `benchmarking.md`); a run whose corpus did not settle, or
   whose result fingerprints differ from the baseline's, is refused like a
   batch run;
-- its datagen fleet reported `data_quality` other than `complete`;
+- its datagen fleet reported `data_quality` other than `complete` (from 1.7
+  a continuous run that generates records its own fleet, read at window end:
+  datagen pods removed by their TTL before then make it `partial` or
+  `empty`);
 - its snapshot records a `config_sha256` that is not the pinned file's, or
   (a v1.7 run) records none;
 - it is a batch run whose time to value was taken differently from the
@@ -177,8 +180,10 @@ Within a comparable run, some numbers are left out rather than trusted:
 - the datagen numbers (`datagen_*`) when the datagen metrics were written
   more than 24 hours before the run started (they came from an earlier
   `generate`) or when only one of the baseline and the run has a datagen
-  stage. `datagen_seconds` stays when it is the run's own generate time
-  (`lakebench run --generate` writes no sidecar but attaches the last one). Generate once and run several times is a normal workflow. Nothing
+  stage. `datagen_seconds` stays when it is the run's own generate time (a
+  record from before 1.7, where `lakebench run --generate` attached the last
+  sidecar instead of its own fleet; from 1.7 a run that generates records its
+  own pods' fleet and writes the sidecar). Generate once and run several times is a normal workflow. Nothing
   else is dropped with them: for batch runs time to value and GB/s are
   recomputed from the pipeline stages' own timestamps with the datagen stage
   left out, and GB/core-hr counts batch or continuous stages only. From v1.6
@@ -337,8 +342,8 @@ file. Code-default changes outside the Spark manifest's conf and sizing are
 not fingerprinted: the Spark pods' environment, the restart policy, and the
 continuous bronze-verify preflight and AML scoring jobs, which are not
 stages the gate times. A change there is compared, not refused, like any
-other code change. The datagen sidecar does not record the image
-that wrote it, so a run that reuses a recent sidecar from a different image is
+other code change. The gate does not compare the datagen image the fleet
+record names, so a run that reuses a recent sidecar from a different image is
 not caught either.
 
 Continuous runs are not checked for realised executor counts.

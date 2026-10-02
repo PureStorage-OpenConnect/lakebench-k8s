@@ -2978,6 +2978,8 @@ def _run_sustained(
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
     _datagen_output_files = 0
+    # The fleet record of this run's own datagen pods (None with --skip-generate).
+    _run_fleet: dict | None = None
     # Streams submitted and not yet stopped: the finally block stops them on
     # any early exit, so an error or Ctrl-C never leaves them running.
     submitted: list = []
@@ -3118,6 +3120,12 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(ExitCode.REFUSED)
         _stop_leftover_streams(job_manager, cfg.get_namespace())
+        if not skip_generate:
+            # The namespace's fleet sidecar describes the corpus this run
+            # clears and regenerates.
+            from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+            drop_sidecar(cfg.get_namespace())
         _reset_continuous_state(cfg, clear_raw=not skip_generate)
         # Deploy the scripts ConfigMaps (includes streaming scripts) -- must
         # succeed. After the leftover streams are stopped: a changed map is not
@@ -3699,7 +3707,18 @@ def _run_sustained(
                 _datagen_output_rows = _fleet.total_rows_written
                 _datagen_output_files = int(_fleet.total_files_written or 0)
         except Exception as e:
+            _fleet = None
             logger.warning("Could not read datagen row counts: %s", e)
+        if _fleet is not None and not skip_generate:
+            # This run's own datagen pods: the record's fleet, and the
+            # namespace's sidecar for a later run over this corpus.
+            try:
+                from lakebench.metrics.datagen_aggregator import fleet_record, write_sidecar
+
+                _run_fleet = fleet_record(_fleet, cfg.get_namespace())
+                write_sidecar(_run_fleet, cfg.get_namespace())
+            except Exception as e:  # noqa: BLE001 -- the record then says no fleet
+                logger.warning("Could not record the datagen fleet: %s", e)
 
         # Capture driver logs BEFORE stopping jobs (pods are deleted on stop)
         console.print()
@@ -4200,6 +4219,8 @@ def _run_sustained(
         if run_metrics:
             run_metrics.interrupted = _interrupted
             run_metrics.abort_reason = _abort
+            if _run_fleet is not None:
+                run_metrics.datagen_fleet = _run_fleet
             # Collect platform metrics from Prometheus (best-effort)
             if _interrupted is None and _abort is None:
                 _collect_platform_metrics(cfg, run_metrics)
