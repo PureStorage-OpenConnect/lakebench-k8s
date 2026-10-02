@@ -3626,12 +3626,14 @@ def _run_once(
                 except Exception:
                     pass  # Maintenance metrics are best-effort
 
-                # Print full scorecard panel
+                # Print full scorecard panel, only for a record that passes
+                pipeline_success = apply_save_gate(run_metrics, pipeline_success, print_error)
                 if pipeline_success:
                     _print_pipeline_scorecard(pb, results, _datagen_elapsed, benchmark_qph)
             except Exception as e:
                 console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
                 # Fallback summary if scorecard build failed
+                pipeline_success = apply_save_gate(run_metrics, pipeline_success, print_error)
                 if pipeline_success and results:
                     _total = sum(r[2] for r in results)
                     _qph = f"\nQpH: {benchmark_qph:.1f}" if benchmark_qph else ""
@@ -3658,7 +3660,8 @@ def _run_once(
                 run_metrics.success = False
                 run_metrics.interrupted = _interrupted
             # The exit code follows the verdict of the record as it is
-            # saved (the samples below write nothing the verdict reads).
+            # saved (the samples below write nothing the verdict reads); a
+            # no-op when the gate above already decided.
             pipeline_success = apply_save_gate(run_metrics, pipeline_success, print_error)
             # The end load sample, after an interrupt and after a lost
             # namespace too: bounded, never raises, and it reads the nodes and

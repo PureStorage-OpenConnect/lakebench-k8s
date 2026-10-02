@@ -840,6 +840,10 @@ def benchmark(
         from lakebench.metrics.experiment import refresh_benchmark
 
         refresh_benchmark(latest_run)
+        # The run's success follows the verdict of the record as re-saved.
+        from lakebench.metrics.verdict import apply_save_gate
+
+        apply_save_gate(latest_run, latest_run.success, print_warning)
         storage.save_run(latest_run)
         print_info(f"Benchmark metrics appended to run {latest_run.run_id}")
 

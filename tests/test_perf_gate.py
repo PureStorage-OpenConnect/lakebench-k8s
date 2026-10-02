@@ -1641,3 +1641,16 @@ def test_v16_poll_fallback_is_not_the_old_15s_poll(env):
     run = pg.load_run(env.write_run(data))
     assert pg.stage_timing_basis(run) == "poll5s"
     assert pg.compare_run(env.store(), "c360-batch-s10", run).verdict == pg.REFUSED
+
+
+def test_single_stage_run_is_refused(env):
+    """A ``run --stage`` record times one stage, not the pipeline."""
+    from lakebench.metrics.storage import MetricsStorage
+
+    snap = env.snaps["c360-batch-s10"]
+    pm = _real_run(snap, "20260924-100000-aaaaaa")
+    pm.stage_only = "silver-build"
+    run = pg.load_run(MetricsStorage(env.runs).save_run(pm))
+    assert "run measured one stage only (silver-build)" in pg.run_refusals(
+        run, env.store().pinned("c360-batch-s10")
+    )

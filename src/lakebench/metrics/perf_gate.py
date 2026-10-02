@@ -830,6 +830,9 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
     # even when the raw flag is True (LB-044 shape).
     if not _record_passed(run.raw):
         reasons.append("run did not succeed")
+    if run.raw.get("stage_only"):
+        # `run --stage` ran one stage: it times that stage, not the pipeline.
+        reasons.append(f"run measured one stage only ({run.raw['stage_only']})")
     # Only runs under this version's maintenance policy are compared or
     # recorded: m1-legacy covers two different real policies, and a baseline
     # recorded from a legacy run would refuse every current run.

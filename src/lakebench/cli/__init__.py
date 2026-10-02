@@ -1462,7 +1462,7 @@ def report(
         for r in runs:
             # Prefer the persisted verdict (OD-6: v1.6 records) and fall
             # back to raw ``success`` for legacy v1.5 records.
-            if _record_passed(r):
+            if r.get("passed", _record_passed(r)):
                 status = "[green]Passed[/green]"
             elif (_verdict_status(r) or r.get("verdict_status")) == "INTERRUPTED":
                 status = "[yellow]Interrupted[/yellow]"

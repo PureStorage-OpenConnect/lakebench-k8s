@@ -1,7 +1,7 @@
 """The run-end dependency pod check through the real ``run`` (QA-9 harness).
 
 A pod on another set fails a batch and a continuous run (exit 1, success
-false, the deps gate FAIL); an interrupt or a namespace-gone abort leaves the
+false, the dependency_set gate FAIL); an interrupt or a namespace-gone abort leaves the
 check unread and the record says why; an exception that escapes the pipeline
 is recorded as a failed run and reaches the CLI unmasked.
 """
