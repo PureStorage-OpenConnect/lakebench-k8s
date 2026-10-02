@@ -323,14 +323,14 @@ images). On OpenShift, this requires the `anyuid` Security Context Constraint
 (SCC) bound to the `lakebench-spark-runner` service account.
 
 Lakebench handles this automatically. During `lakebench deploy`, the RBAC
-deployer detects OpenShift and runs:
-
-```
-oc adm policy add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>
-```
-
-No manual intervention is needed. On vanilla Kubernetes, the SCC step is
-skipped.
+deployer detects OpenShift and makes the grant that `oc adm policy
+add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>` makes, through
+the Kubernetes API: the RoleBinding `system:openshift:scc:anyuid` in the
+deployment's namespace. `oc` is not needed. If the grant is refused (the
+deploying user cannot bind that ClusterRole), the RBAC step fails and prints
+the `oc adm policy` command for a cluster admin; see
+[Prerequisites](prerequisites.md#openshift-scc-clusterrole). On vanilla
+Kubernetes, the SCC step is skipped.
 
 Spark is used by all recipes. See the [Recipes Guide](recipes.md) for all
 supported component combinations.

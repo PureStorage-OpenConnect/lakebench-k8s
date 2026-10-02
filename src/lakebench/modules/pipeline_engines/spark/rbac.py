@@ -15,6 +15,7 @@ import yaml
 from lakebench._constants import SPARK_SERVICE_ACCOUNT
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus, image_tag
 from lakebench.k8s import PlatformType, SecurityVerifier
+from lakebench.k8s.security import SCCGrantError
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +76,23 @@ class RBACDeployer:
                 manifest = yaml.safe_load(yaml_content)
                 self.k8s.apply_manifest(manifest, namespace=namespace)
 
-            # On OpenShift, add anyuid SCC for Spark pods (UID 185)
+            # On OpenShift, add anyuid SCC for Spark pods (UID 185). A grant
+            # that cannot be made fails the step: the pods would
+            # otherwise be admission-rejected on their UID much later.
             scc_added = False
-            platform = self.security_verifier.detect_platform()
+            # strict: a discovery failure fails the step rather than reading as
+            # vanilla and skipping the grant.
+            platform = self.security_verifier.detect_platform(strict=True)
             if platform == PlatformType.OPENSHIFT:
-                scc_added = self.security_verifier.ensure_openshift_scc(namespace)
+                try:
+                    scc_added = self.security_verifier.ensure_openshift_scc(namespace)
+                except SCCGrantError as e:
+                    return DeploymentResult(
+                        component="rbac",
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                        elapsed_seconds=time.time() - start,
+                    )
 
             message = "Created Spark RBAC resources"
             spark_ver = image_tag(self.config.images.spark)

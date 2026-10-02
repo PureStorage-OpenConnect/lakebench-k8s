@@ -175,8 +175,9 @@ any job is submitted and refuses to start if a listed file is missing from the
 package or a map is over 80% of the 1 MiB ConfigMap limit; see
 [component-spark.md](component-spark.md). The driver and executor
 pods run as UID 185 (the `spark` user in the `apache/spark` base image).
-On OpenShift, an `anyuid` SCC is automatically bound to the
-`lakebench-spark-runner` service account.
+On OpenShift, `deploy` grants the `anyuid` SCC to the
+`lakebench-spark-runner` and `lakebench-postgres` service accounts through the
+Kubernetes API, and fails if the grant is refused.
 
 ### Trino
 

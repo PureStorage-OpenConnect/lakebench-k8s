@@ -15,6 +15,9 @@ Before deploying, ensure you have:
 - S3 credentials with permission to create/delete buckets and objects
 - A valid Lakebench config file with `name` and S3 settings filled in
 
+The cluster-side prerequisites, each with its check and fix, are listed on the
+generated [Prerequisites](prerequisites.md) page.
+
 ## Deploying Infrastructure
 
 ```bash
@@ -50,8 +53,9 @@ The deployment engine follows this fixed sequence:
    If `polaris`, deploys an Apache Polaris REST catalog Deployment. The
    non-selected catalog is automatically skipped.
 7. **Spark RBAC** -- Creates the ServiceAccount, Role, and RoleBinding for Spark
-   job submission. On OpenShift, also binds the `anyuid` SCC to the service
-   account.
+   job submission. On OpenShift, also grants the `anyuid` SCC to the service
+   account (the PostgreSQL step does the same for `lakebench-postgres`); a
+   refused grant fails the step.
 8. **Unity Catalog** -- Skipped unless `architecture.catalog.type` is `unity`.
    No shipped recipe uses Unity.
 9. **Spark Operator** -- Checks that the shared Spark Operator is running and

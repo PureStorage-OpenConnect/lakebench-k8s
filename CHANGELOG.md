@@ -119,6 +119,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A config validation error no longer echoes the input it failed on: a
   model-level error used to print the whole block, which could carry a
   datagen seed or a key.
+- **A refused OpenShift SCC grant fails the deploy.** The `anyuid`
+  grant for `lakebench-spark-runner` and `lakebench-postgres` is now made
+  through the Kubernetes API: a LocalSubjectAccessReview first (an existing
+  grant is left alone), else the RoleBinding `system:openshift:scc:anyuid` in
+  the deployment's namespace, then a second review that the grant took
+  effect. The Spark Operator's service accounts get theirs the same way.
+  Lakebench no longer runs `oc` anywhere. A grant that cannot be made fails
+  the RBAC or PostgreSQL step (or the operator install) with the `oc adm
+  policy` command for a cluster admin; 1.6 logged a warning and the pods were
+  rejected later. OpenShift is detected from the `security.openshift.io` API
+  group, and a failed detection fails the RBAC step instead of skipping the
+  grant. OpenShift before 4.10 is no longer supported.
+- **`lakebench run`'s preflight uses the shared prerequisite checks.** It now
+  also checks the scratch StorageClass, requires a ready Spark Operator
+  controller in `platform.compute.spark.operator.namespace` (not only the
+  CRD). A check that cannot run (an API error, or no right to list
+  cluster-wide) fails the preflight with "could not check";
+  `--skip-preflight` bypasses it.
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.
@@ -371,6 +389,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cycle, or come from different builds are corpus problems, which
   `compare` reads as not comparable. `corpus.id` (v1) is unchanged, and no
   stored id or identity digest moves.
+- **`docs/prerequisites.md` is generated** from the prerequisite checks in
+  `deploy/prereqs.py` by `scripts/gen_prereq_docs.py`, so the page and the
+  checks cannot drift.
 
 ### Removed
 - **`config upgrade` refuses.** It rewrote configs lossily, in place
