@@ -316,17 +316,18 @@ jobs:
   # Each pyspark leg runs the Spark tier twice, forward and in reverse
   # order, as two parallel jobs. Run serially, a leg was the critical path of
   # the whole run: with 381 tests the two passes add up to 67 min (4.0) and
-  # 85 min (4.1) in the run below, and the Spark lane saw about 95 min. Split,
-  # one pass of the 381 took 30 to 47 min (run 37011145001, 2026-10-02:
-  # 4.0 forward 1777 s with coverage, 4.0 reverse 2254 s, 4.1 forward
-  # 2813 s, 4.1 reverse 2267 s; the same tests vary that much between
-  # runners). The budget is 60 minutes (scripts/ci_budget.py), 28% above the
-  # slowest pass, with timeout-minutes 90 as the backstop. Coverage is
-  # collected on the 4.0 forward pass only.
+  # 85 min (4.1) in the first run below, and the Spark lane saw about 95 min.
+  # Split, one pass of the 381 took 30 to 52 min in two runs on 2026-10-02
+  # (37011145001: 4.0 forward 1777 s with coverage, 4.0 reverse 2254 s, 4.1
+  # forward 2813 s, 4.1 reverse 2267 s; 37020573180: 3095, 2284, 2796 and
+  # 2970 s); the same tests vary that much between runners. The budget is
+  # 70 minutes (scripts/ci_budget.py), 36% above the slowest pass, with
+  # timeout-minutes 105 as the backstop. Coverage is collected on the 4.0
+  # forward pass only.
   spark-tests:
     name: Spark (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 105
     strategy:
       fail-fast: false
       matrix:
@@ -400,7 +401,7 @@ jobs:
       # or only before, another one.
       - name: Run Spark tests
         run: >-
-          python scripts/ci_budget.py --seconds 3600
+          python scripts/ci_budget.py --seconds 4200
           --label "Spark tests (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }})" --
           pytest tests/spark -q -rsxX -p no:cacheprovider
           --basetemp="${{ runner.temp }}/spark-${{ matrix.order }}" ${{ matrix.args }}

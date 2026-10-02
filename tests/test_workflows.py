@@ -724,6 +724,6 @@ def test_spark_tier_runs_each_leg_forward_and_reverse_in_parallel_jobs():
         assert ("--lb-reverse" in e["args"]) == (e["order"] == "reverse"), e
         assert ("--cov=" in e["args"]) == (e["pyspark"] == "4.0.1" and e["order"] == "forward"), e
     budgeted = {n: b for n, _, _, b in _budgeted_steps()}
-    assert budgeted.get("spark-tests", 0) and budgeted["spark-tests"] <= 3600
+    assert budgeted.get("spark-tests", 0) and budgeted["spark-tests"] <= 4200
     floors = next(s for s in job["steps"] if s.get("name") == "Coverage floors")
     assert floors["if"] == "matrix.leg == '4.0' && matrix.order == 'forward'"

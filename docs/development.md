@@ -340,7 +340,7 @@ per-file report as the `coverage-unit` artifact for 30 days; floors are
 raised from that report, never lowered. The Spark tier runs on two legs,
 `pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17, each as two parallel
 jobs: one runs `pytest tests/spark` forward and one with `--lb-reverse`,
-each under a 60-minute budget. Every job fetches the jars pinned in
+each under a 70-minute budget. Every job fetches the jars pinned in
 `tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py` and runs with
 `LB_REQUIRE_JARS=1`; the 4.0 forward job checks the Spark coverage floors
 with `scripts/check_coverage.py --suite spark`. A failing job uploads every
