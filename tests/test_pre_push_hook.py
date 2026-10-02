@@ -275,3 +275,57 @@ def test_real_gitleaks_refuses_a_key_added_in_a_merge(repo):
     res = _run(repo, [_new_branch(tip)], os.environ["PATH"])
     assert res.returncode == 1, res.stderr
     assert "gitleaks findings" in res.stderr, res.stderr  # a finding, not a failure
+
+
+# -- hook v3: a relative GIT_DIR, and a gitleaks that scanned nothing ----------
+
+
+def test_real_gitleaks_refuses_a_planted_key_with_a_relative_git_dir(repo):
+    # `git --git-dir=.git push` and `GIT_DIR=.git git push` hand the hook a
+    # relative GIT_DIR. gitleaks runs from a temp dir, where .git is not the
+    # repo: before v3 its git log failed, it logged an error, scanned nothing
+    # and exited 0, so the planted key was pushed.
+    _require_gitleaks()
+    tip = _commit(repo, "conf.txt", f"access_key_id: {_planted_key()}\n", "add config")
+    res = _run(repo, [_new_branch(tip)], os.environ["PATH"], GIT_DIR=".git")
+    assert res.returncode == 1, res.stderr
+    assert "rule=pure-flashblade-s3-access-key" in res.stderr
+    assert _planted_key() not in res.stderr + res.stdout
+
+
+def test_refuses_when_gitleaks_logs_an_error_but_exits_0(repo, tmp_path):
+    # gitleaks git exits 0 when the git log it runs fails, logging ERR and
+    # scanning nothing; the hook must not read that as a clean scan.
+    d = tmp_path / "errbin"
+    d.mkdir()
+    stub = d / "gitleaks"
+    stub.write_text(
+        "#!/bin/sh\ncat >/dev/null 2>&1 || true\n"
+        'echo "10:00PM ERR [git] fatal: bad revision"\n'
+        'echo "10:00PM INF 0 commits scanned."\nexit 0\n'
+    )
+    stub.chmod(0o755)
+    tip = _commit(repo, "notes.txt", "nothing secret here\n", "clean work")
+    res = _run(repo, [_new_branch(tip)], os.pathsep.join([str(d), _path_without_gitleaks()]))
+    assert res.returncode == 1, res.stderr
+    assert "gitleaks logged an error" in res.stderr
+
+
+def test_refuses_when_git_cannot_run_remerge_diff(repo, stub_bin, tmp_path):
+    # git older than 2.36 rejects --remerge-diff, which gitleaks is given.
+    d = tmp_path / "oldgit"
+    d.mkdir()
+    real_git = shutil.which("git")
+    assert real_git
+    wrapper = d / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do [ "$a" = "--remerge-diff" ] && '
+        '{ echo "fatal: unrecognized argument: --remerge-diff" >&2; exit 128; }; done\n'
+        f'exec "{real_git}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    tip = _commit(repo, "notes.txt", "nothing secret here\n", "clean work")
+    res = _run(repo, [_new_branch(tip)], os.pathsep.join([str(d), _stub_path(stub_bin)]))
+    assert res.returncode == 1, res.stderr
+    assert "--remerge-diff fails" in res.stderr

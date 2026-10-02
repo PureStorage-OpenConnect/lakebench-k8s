@@ -50,6 +50,17 @@ gitdir=$(git rev-parse --path-format=absolute --git-dir) || {
   echo "pre-push: cannot locate the git dir; push refused" >&2
   exit 1
 }
+# A relative GIT_DIR (git --git-dir=.git push) would point elsewhere once
+# gitleaks runs from the temp dir; use the absolute one for every git call.
+export GIT_DIR="$gitdir"
+unset GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+# gitleaks git exits 0 when its git log fails, so check here that git can
+# run --remerge-diff (git 2.36 or later) rather than scan nothing.
+if ! git log --remerge-diff -1 --format=%H HEAD >/dev/null 2>&1 \
+  && ! git log --remerge-diff -1 --format=%H --all >/dev/null 2>&1; then
+  echo "pre-push: git log --remerge-diff fails (git 2.36 or later is needed); push refused" >&2
+  exit 1
+fi
 if ! command -v gitleaks >/dev/null 2>&1; then
   echo "pre-push: gitleaks is not installed; push refused" >&2
   exit 1
@@ -98,7 +109,7 @@ while read -r lref lsha rref rsha || [ -n "${lref:-}" ]; do
   # so scanning "." would let the pushing worktree allowlist its own finding.
   # --remerge-diff scans what merge commits change; --ignore-gitleaks-allow
   # stops an inline allow comment from hiding a finding.
-  (cd "$tmpdir" && gitleaks git "$gitdir" --config "$cfg" --redact --no-banner --exit-code 1 \
+  (cd "$tmpdir" && gitleaks git "$gitdir" --config "$cfg" --redact --no-banner --no-color --exit-code 1 \
     --gitleaks-ignore-path "$ignore" --ignore-gitleaks-allow \
     --log-opts="--remerge-diff $range" --report-format json --report-path "$report") \
     >"$tmpdir/gitleaks.log" 2>&1
@@ -118,17 +129,25 @@ PY
   elif [ "$status" -ne 0 ]; then
     echo "pre-push: refused $lref -> $rref: gitleaks failed (exit $status) on $range" >&2
     rc=1
+  elif grep -qE '(^| )(ERR|FTL)( |$)' "$tmpdir/gitleaks.log"; then
+    # Exit 0 with an error logged: its git log failed and nothing was scanned.
+    echo "pre-push: refused $lref -> $rref: gitleaks logged an error on $range, so it scanned nothing:" >&2
+    grep -E "FTL|ERR" "$tmpdir/gitleaks.log" | sed 's/^/  /' >&2
+    rc=1
   fi
 
   # gitleaks git mode scans diffs only: scan commit and annotated-tag messages too.
   {
     git log --format=%B $range
     [ "$(git cat-file -t "$lsha")" = "tag" ] && git cat-file -p "$lsha"
-  } 2>/dev/null | (cd "$tmpdir" && gitleaks stdin --config "$cfg" --redact --no-banner --exit-code 1 \
+  } 2>/dev/null | (cd "$tmpdir" && gitleaks stdin --config "$cfg" --redact --no-banner --no-color --exit-code 1 \
     --gitleaks-ignore-path "$ignore" --ignore-gitleaks-allow) \
     >"$tmpdir/msg.log" 2>&1
   if [ $? -ne 0 ]; then
     echo "pre-push: refused $lref -> $rref: a commit or tag message in $range matches a gitleaks rule" >&2
+    rc=1
+  elif grep -qE '(^| )(ERR|FTL)( |$)' "$tmpdir/msg.log"; then
+    echo "pre-push: refused $lref -> $rref: gitleaks logged an error scanning the messages in $range" >&2
     rc=1
   fi
 done
