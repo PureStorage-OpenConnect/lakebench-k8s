@@ -280,9 +280,11 @@ requested (scratch disabled)" when off); the cluster prerequisites from the
 registry `deploy` checks (`docs/prerequisites.md`) and the run's free
 capacity check; where the Polaris client secret comes from (a `${VAR}`
 reference is named, a value is never printed); and the hosts outside the
-cluster the deployment contacts (Maven repositories every Spark job
-resolves from at job start, PyPI and the DuckDB extensions where used, the
-observability chart when enabled, the image registries). With several
+cluster the deployment contacts (the hosts the dependency server resolves
+the jars, wheels and DuckDB extensions from at deploy, which are the
+`egress-hosts` prerequisite's list: Maven Central and its Google mirror,
+PyPI where used, or the `platform.deps` mirrors; the observability chart
+when enabled; the image registries). With several
 configs it then names the experiment-identity and execution-condition
 differences between each one and the first; configs on different cluster
 contexts are planned one at a time (a second context in one process is

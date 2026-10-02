@@ -446,8 +446,8 @@ PATHS: tuple[ExitPath, ...] = (
         "plan.missing_storage_class",
         _C.PREREQUISITE,
         "`plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, "
-        "Stackable or another check), cannot check one of those three, or finds too "
-        "little free capacity",
+        "Stackable or another check), cannot check one of those three, finds too "
+        "little free capacity, or cannot read a config value the sizing needs",
     ),
     ExitPath(
         "k8s.unreachable",

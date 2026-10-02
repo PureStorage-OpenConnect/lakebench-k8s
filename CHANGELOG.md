@@ -56,7 +56,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (the page recommends a replicated class); `egress-hosts` lists the hosts
   this config's resolve reads (Maven, PyPI, DuckDB extensions, or the
   configured mirrors) without probing them, and the page describes the
-  mirror keys. Nothing prints these two results yet; the `plan` command will.
+  mirror keys. `lakebench plan` prints both.
 
 ### Breaking changes
 - **`compare` compares stored records and runs nothing.** `lakebench compare

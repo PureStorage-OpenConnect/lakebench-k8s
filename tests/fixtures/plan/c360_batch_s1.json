@@ -12,7 +12,7 @@
     "query_engine": "trino"
   },
   "sizing": {
-    "floor": {"cpu_cores": 40, "memory_gb": 542},
+    "floor": {"cpu_cores": 41, "memory_gb": 544},
     "driven_by": "silver-build",
     "scratch_gi": 2400,
     "scratch": "not requested (scratch disabled)",
@@ -20,8 +20,8 @@
   },
   "prerequisites": "not checked (offline)",
   "egress_hosts": [
-    "repo1.maven.org",
     "maven-central.storage-download.googleapis.com",
+    "repo1.maven.org",
     "docker.io",
     "oci.stackable.tech"
   ]

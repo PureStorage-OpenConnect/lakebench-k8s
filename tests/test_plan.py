@@ -108,7 +108,7 @@ def test_plan_offline_golden(tmp_path, workload, mode):
         "scratch: not requested (scratch disabled)",
         "prerequisites: not checked (offline)",
         "egress (hosts outside the cluster this deployment contacts):",
-        "repo1.maven.org: Maven Central",
+        "repo1.maven.org: lb-deps resolves the Spark jars from it at deploy",
         "docker.io: image registry",
     ):
         assert expected in out, (expected, out)
@@ -143,6 +143,17 @@ def test_plan_cores_memory_too_small_exits_4(tmp_path):
     res = runner.invoke(app, ["plan", str(_write(tmp_path)), "--cores", "8", "--memory", "64"])
     assert res.exit_code == 4, res.output
     assert "capacity (--cores/--memory): refused" in res.stdout
+
+
+@pytest.mark.parametrize("extra", [["--offline"], ["--json"], ["--cores", "64", "--memory", "512"]])
+def test_plan_unreadable_config_quantity_exits_4(tmp_path, extra):
+    # A pod memory that is not a Kubernetes quantity: deploy and run refuse
+    # it (exit 4, LB-246), so plan does too, without a traceback.
+    trino = {"type": "trino", "trino": {"worker": {"memory": "16g"}}}
+    path = _write(tmp_path, architecture={"query_engine": trino})
+    res = runner.invoke(app, ["plan", str(path), *extra])
+    assert res.exit_code == 4, res.output
+    assert "cannot read the config" in res.stdout and "16g" in res.stdout
 
 
 def test_plan_cores_without_memory_is_usage(tmp_path):
@@ -354,6 +365,37 @@ def test_plan_egress_follows_the_components(tmp_path):
     (q,) = _plan_json(pol)["plans"]
     assert "oci.stackable.tech" not in {e["host"] for e in q["egress"]}
     assert "pypi.org" not in {e["host"] for e in q["egress"]}  # c360, no DuckDB
+
+
+def test_plan_egress_is_the_deps_resolve_list(tmp_path):
+    # The dependency hosts are deps.request.egress_hosts: a configured
+    # mirror replaces Maven Central and PyPI, and the image registries stay.
+    from lakebench.config.loader import load_config
+    from lakebench.deps.request import egress_hosts as resolve_hosts
+
+    path = _write(
+        tmp_path,
+        name="mirror-t",
+        recipe="hive-iceberg-spark-duckdb",
+        platform={
+            "storage": {
+                "s3": {"endpoint": "http://10.0.1.50:80", "access_key": "a", "secret_key": "b"}
+            },
+            "deps": {
+                "maven_repository": "https://mirror.example.internal/maven2/",
+                "pypi_index": "https://mirror.example.internal/simple/",
+            },
+        },
+    )
+    (p,) = _plan_json(path)["plans"]
+    rows = {e["host"]: e["why"] for e in p["egress"]}
+    want = resolve_hosts(load_config(path, print_notes=False))
+    assert [h for h in rows if "lb-deps" in rows[h]] == want
+    assert "repo1.maven.org" not in rows and "pypi.org" not in rows
+    assert rows["mirror.example.internal"] == (
+        "lb-deps resolves the Spark jars and Python wheels from it at deploy"
+    )
+    assert "docker.io" in rows
 
 
 def test_plan_several_configs_name_their_differences(tmp_path):

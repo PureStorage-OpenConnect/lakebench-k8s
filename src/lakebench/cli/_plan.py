@@ -10,9 +10,12 @@ differences between each one and the first.
 
 With ``--offline``, ``--cores/--memory`` or ``--json`` it makes no cluster
 call: prerequisites print "not checked (offline)" and the exit is 0 unless a
-config does not load. Online, a missing scratch StorageClass, Spark Operator
-or Stackable ends with exit 4 and the ``admin install --component`` command
-a cluster admin runs; an unreachable cluster is exit 4 too.
+config does not load (2), has a value the sizing cannot read (4), or does
+not fit the given ``--cores/--memory`` (4). Online, any prerequisite that
+fails, a scratch StorageClass, Spark Operator or Stackable that cannot be
+checked, or a failed capacity check ends with exit 4 (a missing shared
+component prints the ``admin install --component`` command a cluster admin
+runs); an unreachable cluster is exit 4 too.
 """
 
 from __future__ import annotations
@@ -33,10 +36,6 @@ FATAL_PREREQS = ("scratch-storage-class", "spark-operator", "stackable")
 #: Secret per-deployment Polaris credentials are kept in.
 POLARIS_CLIENT_SECRET = "lakebench-polaris-client"
 _POLARIS_DEPLOYMENT = "lakebench-polaris"
-
-_MAVEN_CENTRAL = "https://repo1.maven.org/maven2/"
-_PYPI_HOSTS = ("pypi.org", "files.pythonhosted.org")
-_DUCKDB_EXTENSIONS = "extensions.duckdb.org"
 
 
 # -- egress -------------------------------------------------------------------
@@ -59,40 +58,35 @@ def _registry(image: str) -> str:
 def egress_hosts(cfg: Any) -> list[tuple[str, str]]:
     """``[(host, why)]`` this deployment contacts outside the cluster.
 
-    The dependency resolve module owns this list once it lands
-    (``deps.request.egress_hosts``); until then it is built from what the
-    code fetches today: the Maven repositories every Spark job resolves its
-    jars from at job start, the PyPI packages the DuckDB pod and the AML
-    reference jobs install, the DuckDB extensions, the observability Helm
-    chart, and the image registries of every image this config deploys.
+    The dependency hosts are ``deps.request.egress_hosts``, the one list
+    (the ``egress-hosts`` prerequisite reads it too): the dependency server
+    (lb-deps) resolves every jar, wheel and DuckDB extension from them at
+    deploy, and nothing resolves at run time. The rest is what the deploy
+    pulls besides: the observability Helm chart when enabled, and the image
+    registries of every image this config deploys.
     """
-    try:
-        from lakebench.deps.request import egress_hosts as _owned  # type: ignore[import-not-found]
-    except ImportError:
-        _owned = None
-    if _owned is not None:
-        return list(_owned(cfg))
-
-    from lakebench.modules.pipeline_engines.spark.job import _MAVEN_MIRROR_REPOS
+    from lakebench.deps import request as deps_request
 
     arch = cfg.architecture
     catalog = arch.catalog.type.value
     engine = arch.query_engine.type.value
-    workload = arch.workload.schema_type.value
-    out: list[tuple[str, str]] = [
-        (_host(_MAVEN_CENTRAL), "Maven Central: every Spark job resolves its jars at job start"),
-    ]
-    for repo in (r.strip() for r in _MAVEN_MIRROR_REPOS.split(",") if r.strip()):
-        out.append((_host(repo), "Maven mirror Spark falls back to when Central rate-limits"))
-    pypi_why = []
-    if engine == "duckdb":
-        pypi_why.append("the DuckDB pod installs duckdb at start")
-    if workload == "financial":
-        pypi_why.append("the AML reference jobs install their Python pins at job start")
-    if pypi_why:
-        out += [(h, "PyPI: " + "; ".join(pypi_why)) for h in _PYPI_HOSTS]
-    if engine == "duckdb":
-        out.append((_DUCKDB_EXTENSIONS, "DuckDB iceberg and httpfs extensions, at pod start"))
+    maven = {deps_request._host(r) for r in deps_request.repositories(cfg)}
+    wheels = {deps_request._host(deps_request.pypi_index(cfg)), deps_request.PYPI_FILES_HOST}
+    extensions = deps_request._host(deps_request.duckdb_extension_repository(cfg))
+    out: list[tuple[str, str]] = []
+    for host in deps_request.egress_hosts(cfg):
+        # One mirror can serve several kinds.
+        kinds = [
+            kind
+            for kind, hit in (
+                ("Spark jars", host in maven),
+                ("Python wheels", host in wheels),
+                ("DuckDB extensions", host == extensions),
+            )
+            if hit
+        ]
+        what = " and ".join(kinds) or "dependencies"
+        out.append((host, f"lb-deps resolves the {what} from it at deploy"))
     if cfg.observability.enabled:
         out.append(
             ("prometheus-community.github.io", "kube-prometheus-stack Helm chart, at deploy")
@@ -277,28 +271,52 @@ def plan_one(
         reachable, why = k8s.test_connectivity(timeout=(5, 10))
         if not reachable:
             raise K8sConnectionError(why)
-        # As run sizes it: against the allocatable total it reads.
-        sizing_capacity = k8s.get_cluster_capacity()
-    plan = plan_requirements(cfg, capacity=sizing_capacity)
-    out["sizing"] = {
-        "floor": {"cpu_cores": plan.floor.cpu_cores, "memory_gb": plan.floor.memory_gb},
-        "full": {"cpu_cores": plan.full.cpu_cores, "memory_gb": plan.full.memory_gb},
-        "driven_by": plan.floor_driver,
-        "breakdown": breakdown_text(plan),
-        "scratch_gi": plan.scratch_gb,
-        "scratch": (
-            f"{plan.scratch_gb:,} Gi of StorageClass {plan.scratch_storage_class}"
-            if plan.scratch_enabled
-            else "not requested (scratch disabled)"
-        ),
-        "against": (
-            "this cluster"
-            if (not offline and sizing_capacity is not None)
-            else ("the given --cores/--memory" if capacity is not None else "no cluster")
-        ),
-        "basis": list(plan.basis),
-    }
-    if capacity is not None:
+        # As run sizes it: against the allocatable total it reads. A node
+        # quantity it cannot read leaves the sizing on the reference table;
+        # the capacity row below fails on it.
+        from lakebench.quantity import QuantityError
+
+        try:
+            sizing_capacity = k8s.get_cluster_capacity()
+        except QuantityError:
+            sizing_capacity = None
+    try:
+        plan = plan_requirements(cfg, capacity=sizing_capacity)
+    except Exception as e:  # noqa: BLE001 -- refused as deploy and run refuse it
+        from lakebench.cli._prerequisites import _unreadable_config
+
+        bad = _unreadable_config(e)
+        out["sizing"] = {"unreadable": bad.message, "next": bad.hint}
+        code = int(ExitCode.PREREQUISITE)
+        plan = None
+    if plan is not None:
+        out["sizing"] = {
+            "floor": {"cpu_cores": plan.floor.cpu_cores, "memory_gb": plan.floor.memory_gb},
+            "full": {"cpu_cores": plan.full.cpu_cores, "memory_gb": plan.full.memory_gb},
+            "driven_by": plan.floor_driver,
+            "breakdown": breakdown_text(plan),
+            "scratch_gi": plan.scratch_gb,
+            "scratch": (
+                f"{plan.scratch_gb:,} Gi of StorageClass {plan.scratch_storage_class}"
+                if plan.scratch_enabled
+                else "not requested (scratch disabled)"
+            ),
+            "against": (
+                "this cluster"
+                if (not offline and sizing_capacity is not None)
+                else (
+                    "the given --cores/--memory"
+                    if capacity is not None
+                    else (
+                        "no cluster"
+                        if offline
+                        else "the reference table (cluster capacity not readable)"
+                    )
+                )
+            ),
+            "basis": list(plan.basis),
+        }
+    if plan is not None and capacity is not None:
         # Node shape unknown: aggregate only, no one-pod-on-one-node check.
         verdict = check_capacity(cfg, capacity, check_pod=False)
         out["capacity"] = {
@@ -375,12 +393,16 @@ def _print_plan(p: dict[str, Any]) -> None:
         f"{esc(p['support']['state'])} ({esc(p['support']['basis'])})"
     )
     s = p["sizing"]
-    say(
-        f"  needs {s['floor']['cpu_cores']} cores / {s['floor']['memory_gb']} GB at once, "
-        f"driven by {esc(s['driven_by'])} (sized against {esc(s['against'])})"
-    )
-    say(f"    {esc(s['breakdown'])}")
-    say(f"  scratch: {esc(s['scratch'])}")
+    if "unreadable" in s:
+        say(f"  sizing: {esc(s['unreadable'])}")
+        say(f"    Next: {esc(s['next'])}")
+    else:
+        say(
+            f"  needs {s['floor']['cpu_cores']} cores / {s['floor']['memory_gb']} GB at once, "
+            f"driven by {esc(s['driven_by'])} (sized against {esc(s['against'])})"
+        )
+        say(f"    {esc(s['breakdown'])}")
+        say(f"  scratch: {esc(s['scratch'])}")
     if "capacity" in p:
         cap = p["capacity"]
         say(f"  capacity (--cores/--memory): {esc(cap['status'])} ({esc(cap['note'])})")

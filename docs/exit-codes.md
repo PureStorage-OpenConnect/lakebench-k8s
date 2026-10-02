@@ -81,7 +81,7 @@ the CLI down every path listed here and checks the code.
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
 | `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
 | `nameless.namespace_unreadable` | 4 | a nameless config's namespace could not be read for its check |
-| `plan.missing_storage_class` | 4 | `plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, Stackable or another check), cannot check one of those three, or finds too little free capacity |
+| `plan.missing_storage_class` | 4 | `plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, Stackable or another check), cannot check one of those three, finds too little free capacity, or cannot read a config value the sizing needs |
 | `run.deps_missing` | 4 | the deployment has no dependency server (deployed by 1.6, or never deployed) |
 | `run.deps_stale` | 4 | the dependency set is not verified for this config: the deploy did not finish, the request changed since deploy, or the server has no Ready pod |
 | `run.prereq_failed` | 4 | a `run` preflight check failed |
