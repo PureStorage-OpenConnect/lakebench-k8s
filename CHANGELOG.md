@@ -496,7 +496,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a generated password in the Secret `lakebench-observability-grafana`, and
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
-- **`deploy --timeout` now bounds every wait (DEP-6).** It used to be
 - **`deploy --timeout` now bounds every wait.** It used to be
   checked only between steps, so a step waiting on Spark Thrift (300 s),
   DuckDB (900 s), Polaris (600 s plus 600 s) or an operator rollout could
@@ -515,6 +514,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The deploy failure panel no longer claims that successful steps are
   skipped on retry: re-running deploy re-applies every step and keeps the
   existing resources.
+
 ### Fixed
 
 - **The capacity check counts the Spark driver's memory overhead.**

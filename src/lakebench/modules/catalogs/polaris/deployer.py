@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from lakebench.deploy import deadline as deploy_deadline
 from lakebench.deploy.deployment_secrets import (
     DeploymentSecretError,
     ensure_polaris_client_secret,
@@ -29,7 +30,6 @@ from lakebench.deploy.deployment_secrets import (
     scram_sha256_verifier,
     sync_role_password,
 )
-from lakebench.deploy import deadline as deploy_deadline
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus, image_tag
 from lakebench.k8s import WaitStatus, wait_for_deployment_ready
 
