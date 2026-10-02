@@ -613,6 +613,13 @@ class SparkOperatorConfig(ConfigModel):
         return self
 
 
+# Spark's size grammar (JavaUtils.byteStringAsBytes): a whole number and a
+# unit, with an optional "b". Fractions and Kubernetes units (Gi) fail in
+# Spark; a bare number (MiB to Spark) and 0 are refused here too, so the
+# capacity check never misreads one.
+_SPARK_MEMORY_SIZE = re.compile(r"[1-9][0-9]*[kmgt]b?", re.IGNORECASE)
+
+
 class SparkComputeConfig(ConfigModel):
     """Spark compute configuration."""
 
@@ -687,6 +694,25 @@ class SparkComputeConfig(ConfigModel):
         ge=1,
         description="Override driver cores. None = profile default (typically 4).",
     )
+
+    @field_validator("driver_memory", mode="after")
+    @classmethod
+    def _driver_memory_is_a_spark_size(cls, value: str | None, info: ValidationInfo) -> str | None:
+        """A driver memory Spark cannot read fails the job at submit, and the
+        capacity check cannot count it: commands that change data refuse it;
+        teardown and read commands drop it with a note."""
+        if value is None or _SPARK_MEMORY_SIZE.fullmatch(value.strip()):
+            return value
+        text = (
+            f"platform.compute.spark.driver_memory {value!r} is not a Spark memory size "
+            "Lakebench can count: write a whole number above 0 with a unit, k, m, g or t "
+            "(for example 16g)"
+        )
+        purpose = purpose_from_context(info.context)
+        if purpose is None or purpose in CHANGES_DATA:
+            raise ValueError(text)
+        emit_note(text + "; ignored. Commands that change data refuse it.", kind="removed")
+        return None
 
 
 class PostgresConfig(ConfigModel):
@@ -3002,7 +3028,7 @@ def parse_size_to_bytes(size_str: str) -> int:
 def parse_spark_memory(memory_str: str) -> int:
     """Parse Spark memory string to bytes.
 
-    Supports: g, m, k (case-insensitive)
+    Supports: k, m, g, t, optionally followed by b (case-insensitive)
 
     Examples:
         >>> parse_spark_memory("48g")
@@ -3011,6 +3037,9 @@ def parse_spark_memory(memory_str: str) -> int:
         4294967296
     """
     memory_str = memory_str.lower().strip()
+    # Spark also spells the units kb, mb, gb, tb.
+    if len(memory_str) > 2 and memory_str.endswith("b") and memory_str[-2] in "kmgt":
+        memory_str = memory_str[:-1]
 
     units = {
         "k": 1024,

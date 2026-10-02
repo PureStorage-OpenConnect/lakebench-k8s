@@ -370,6 +370,10 @@ all jobs at once, so setting it below 24g shrinks the silver and gold
 drivers. Lakebench logs a warning when a job has more than 24 executors and a driver
 below 24g.
 
+The capacity check, `config show` and `info` count the driver each job
+requests: these overrides, the Spark 3 size, and the overhead Spark adds
+to a Python driver pod (40% of the heap).
+
 | Executors | Driver Memory | Status |
 |:---------:|:------------:|--------|
 | 1--12     | 4g           | Proven stable |

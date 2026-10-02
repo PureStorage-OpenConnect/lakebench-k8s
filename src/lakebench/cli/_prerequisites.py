@@ -327,7 +327,7 @@ def _check_cluster_capacity(
             f"{plan.co_resident.label}"
         )
         if plan.overrides_not_counted:
-            summary += "; per-job executor and driver overrides are not counted"
+            summary += "; per-job executor overrides are not counted"
         hint_lines = "\n".join(f"  {s}" for s in verdict.shortfalls)
 
         if verdict.status == "degraded":

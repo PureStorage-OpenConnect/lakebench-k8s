@@ -673,6 +673,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   continuous at scale 1-10 38 cores / 282 GB (was 272 GB) and AML
   continuous 118 cores / 990 GB (was 980 GB); the docs tables follow.
   What the pods request is unchanged.
+- **The capacity check, `config show` and `info` count driver overrides.**
+  They read the job profiles only, so `platform.compute.spark.driver_memory`
+  and `driver_cores` and the 24g Spark 3 silver and gold drivers were never
+  counted (a 64g driver under-counted silver-build by 45 GB). They now
+  count the driver each manifest requests. A `driver_memory` Spark cannot
+  read (`16Gi`, `1.5g`) is refused by the commands that change data, since
+  the job would fail at submit; `16gb` is accepted. The capped continuous request
+  counts the always-on pods as the capacity plan does (lb-deps once, the
+  catalog and Postgres memory), so AML continuous at scale 10 runs
+  degraded from 82 cores, not 81.
 - `lakebench clean silver` followed by `run` works on Delta recipes. The
   clean empties the silver bucket and keeps the catalog entry, and the next
   silver build failed on it (DELTA_TABLE_NOT_FOUND), with or without
