@@ -287,7 +287,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the "benchmark (not run)" stage entry) and notes it in
   `experiment.benchmark_source`; that moves the record's identity digest,
   since it now describes another benchmark.
-- **`deploy --timeout` now bounds every wait (DEP-6).** It used to be
+- **`deploy --timeout` now bounds every wait.** It used to be
   checked only between steps, so a step waiting on Spark Thrift (300 s),
   DuckDB (900 s), Polaris (600 s plus 600 s) or an operator rollout could
   run past it. Every wait is now clamped to the time left, including the

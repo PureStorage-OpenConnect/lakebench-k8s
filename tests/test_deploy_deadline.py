@@ -406,21 +406,30 @@ def test_no_stackable_install_after_the_deadline(clock):
     assert "helm install of Stackable commons-operator" in str(e.value)
 
 
-def test_scc_retry_stops_at_the_deadline(clock, monkeypatch):
+def test_scc_verify_poll_stops_at_the_deadline(clock):
+    """The post-grant review poll (15 s) is cut by the deploy deadline and
+    reports the deadline, not "the grant did not take effect"."""
     from lakebench.k8s import security
 
-    v = security.SecurityVerifier.__new__(security.SecurityVerifier)
-    v.k8s = None
-    monkeypatch.setattr(
-        security, "pinned_oc", MagicMock(return_value=MagicMock(returncode=1, stderr="x"))
-    )
-    monkeypatch.setattr(security.time, "sleep", clock.sleep)
-    v._scc_binding_has_subject = MagicMock(return_value=False)
-    with deadline.deploy_deadline(1):
-        clock.sleep(1)
+    rbac = MagicMock()
+    rbac.read_namespaced_role_binding.side_effect = __import__(
+        "kubernetes.client.rest", fromlist=["ApiException"]
+    ).ApiException(status=404)
+    authz = MagicMock()
+    authz.create_namespaced_local_subject_access_review.return_value = {
+        "status": {"allowed": False}
+    }
+    with deadline.deploy_deadline(5):
+        clock.sleep(3)
         with pytest.raises(deadline.DeployTimeout):
-            v._add_scc("anyuid", "sa", "ns")
-    assert security.pinned_oc.call_count == 1
+            security.ensure_scc_rolebinding(rbac, "ns", "sa", authz_api=authz)
+    assert clock.now - 1000.0 < 5 + 2.5  # stopped near the deadline, not 15 s later
+    without = MagicMock()
+    without.create_namespaced_local_subject_access_review.return_value = {
+        "status": {"allowed": False}
+    }
+    with pytest.raises(security.SCCGrantError):
+        security.ensure_scc_rolebinding(rbac, "ns", "sa", authz_api=without)
 
 
 # --- static guard -------------------------------------------------------------------
