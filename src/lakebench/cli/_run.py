@@ -2459,16 +2459,20 @@ def _run_once(
         # single-cycle --generate path above already ran it). Cycle 0 of an
         # owned bucket is cleared as 1.6 did, so the gate runs with
         # regenerate on: only a bucket this deployment may not empty refuses.
-        if total_cycles > 1 and not (include_datagen and not skip_generate):
-            # Every cycle generates its own bronze: the namespace's fleet
-            # sidecar describes a corpus this run replaces, and the cycle
-            # pods' fleet is not read, so the record carries no fleet
-            # rather than an older generate's. Dropped before the gate,
-            # which may clear part of bronze and then fail.
+        if total_cycles > 1:
+            # Every cycle generates its own bronze (cycle 0 of an owned
+            # bucket clears it, including a --generate corpus written just
+            # above): the namespace's fleet sidecar, and any fleet this run
+            # read before the cycles, describe a corpus it replaces, and the
+            # cycle pods' fleet is not read, so the record carries no fleet.
+            # Dropped before the gate, which may clear part of bronze and
+            # then fail.
             from lakebench.metrics.datagen_aggregator import drop_sidecar
 
             drop_sidecar(cfg.get_namespace())
             _generated_here = True
+            _run_fleet = None
+        if total_cycles > 1 and not (include_datagen and not skip_generate):
             _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)
             if collector.current_run is not None:
                 collector.current_run.datagen_stale_bronze = _gate.record()

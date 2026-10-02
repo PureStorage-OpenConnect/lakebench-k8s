@@ -232,10 +232,13 @@ def test_generate_refusal_keeps_the_sidecar(tmp_path, monkeypatch):
     assert side.exists()
 
 
-def test_multi_cycle_run_never_borrows_an_older_sidecar(tmp_path, monkeypatch):
+@pytest.mark.parametrize("argv", [["--skip-generate", "--yes"], ["--generate", "--yes"]])
+def test_multi_cycle_run_never_borrows_an_older_sidecar(argv, tmp_path, monkeypatch):
     """pipeline.cycles > 1 regenerates bronze in every cycle (deploy_cycle):
     the sidecar of the corpus it replaces is dropped before the gate and
-    the record carries no fleet rather than that older generate's."""
+    the record carries no fleet rather than that older generate's. With
+    --generate, cycle 0 clears the corpus the first Job wrote, so the fleet
+    read from those pods is not kept either."""
     import tests.harness.run_harness as harness
     from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
@@ -258,11 +261,10 @@ def test_multi_cycle_run_never_borrows_an_older_sidecar(tmp_path, monkeypatch):
 
     monkeypatch.setattr("lakebench.cli._run.enforce_bronze_gate", gate)
     config = harness.base_config(architecture={"pipeline": {"mode": "batch", "cycles": 2}})
-    scenario = dataclasses.replace(
-        SCENARIOS["batch_c360"], argv=["--skip-generate", "--yes"], config=config
-    )
+    scenario = dataclasses.replace(SCENARIOS["batch_c360"], argv=argv, config=config)
     trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
-    assert seen == [False]
+    # --generate passes the gate once, before its Job (the cycles skip it).
+    assert seen == [True] if "--generate" in argv else [False]
     assert ["Datagen", "deploy_cycle"] in trace["calls"]
     assert not _sidecar(tmp_path).exists()
     record = saved_record(tmp_path)
@@ -310,3 +312,22 @@ def test_regenerate_gate_failure_leaves_no_old_sidecar(command, tmp_path, monkey
         trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
         assert trace["exit_code"] == 1
     assert not _sidecar(tmp_path).exists()
+
+
+def test_run_generate_refusal_keeps_the_sidecar(tmp_path, monkeypatch):
+    """No --regenerate: run --generate refuses at the bronze gate before it
+    touches the corpus, so the sidecar that describes it stays."""
+    import typer
+
+    from lakebench.exit_codes import ExitCode
+
+    _stale(tmp_path)
+
+    def gate(*_a, **_k):
+        raise typer.Exit(ExitCode.REFUSED)
+
+    monkeypatch.setattr("lakebench.cli._run.enforce_bronze_gate", gate)
+    scenario = dataclasses.replace(SCENARIOS["batch_c360"], argv=["--generate", "--yes"])
+    trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
+    assert trace["exit_code"] == ExitCode.REFUSED
+    assert json.loads(_sidecar(tmp_path).read_text())["image_ids"] == [STALE_ID]

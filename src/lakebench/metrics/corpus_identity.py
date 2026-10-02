@@ -37,10 +37,10 @@ first digest of an output-neutral re-pin chain. It is resolved once, by
 depends on the table installed when a record is re-read. A series.json that
 disagrees with the markers (seed, cycle count, scale, file size, customer
 id space) lends no lineage. The datagen fleet record is never the source:
-it is the run's own pods' fleet when the run generated, else the
-per-namespace sidecar an earlier generate wrote
-(``cli/_run.py:_load_latest_datagen_fleet``); when it names
-another image than series.json, the lineage is declared (the safe side).
+it is the run's own pods' fleet when the run generated (none for a
+multi-cycle run), else the per-namespace sidecar an earlier generate wrote
+(``cli/_run.py:_load_latest_datagen_fleet``); when it names another image
+than series.json, the lineage is declared (the safe side).
 No observed digest gives ``declared:<image tag>``, which never equals an
 observed lineage.
 

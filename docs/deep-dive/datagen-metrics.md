@@ -73,7 +73,9 @@ the generator image digest from it. A run that does not generate takes the
 namespace's sidecar, the record of the generate that wrote its corpus
 (batch only: a continuous `--skip-generate` run records no fleet). A batch
 run with `pipeline.cycles` above 1 generates every cycle's bronze but does
-not read those pods, so it removes the sidecar and records no fleet;
+not read those pods, so it records no fleet, with or without `--generate`,
+and removes the sidecar before its bronze check (a refusal there removes it
+too);
 `run --local` reads the sidecar and does not write one.
 `lakebench generate` and a run that generates remove the sidecar before
 they empty or regenerate the corpus, so a corpus they replaced is never
