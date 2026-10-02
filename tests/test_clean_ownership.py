@@ -77,6 +77,14 @@ def _verified_namespace():
         )
     )
     stack.enter_context(patch("lakebench.deploy.ownership.build_identity_from_config"))
+    # No engine pod: clean empties the buckets and leaves the catalog, with a
+    # warning (tests/test_clean_unregister.py covers the unregister step).
+    stack.enter_context(
+        patch(
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
+            return_value=(None, None, None),
+        )
+    )
     return stack
 
 

@@ -687,6 +687,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   batch-versions sidecar. The stream's refusal to start a fresh checkpoint
   over populated silver checks all of them too, not only transactions and
   edges.
+- `lakebench clean` followed by `run` works for every layer and format.
+  `clean` emptied buckets and kept the catalog, so the next run met tables
+  whose files were gone: Delta gold after `clean gold` or `clean data`, the
+  continuous Delta jobs, and Iceberg on a Hive catalog after any clean
+  failed on them. `clean` now unregisters a layer's tables before emptying
+  its bucket, through the deployment's Trino or Spark Thrift pod.
 - A multi-cycle Customer 360 batch run no longer loses silver rows when a
   later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
   tagged every row with that cycle, so an operator retry of the cycle, which

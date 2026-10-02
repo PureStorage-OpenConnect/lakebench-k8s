@@ -1314,13 +1314,17 @@ class TestOwnershipHooksFire:
             )
         assert s3.empty_bucket.call_count == 0
 
+    @patch(
+        "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
+        return_value=(None, None, None),
+    )
     @patch("lakebench.deploy.ownership.verify_namespace_identity")
     @patch("lakebench.deploy.ownership.build_identity_from_config")
     @patch("kubernetes.client.BatchV1Api")
     @patch("lakebench.deploy.ownership.verify_bucket_ownership")
     @patch("lakebench.s3.S3Client")
     def test_clean_absent_bucket_proceeds_with_force_legacy(
-        self, mock_s3_cls, mock_verify, _mock_batch, _mock_ident, mock_ns_identity
+        self, mock_s3_cls, mock_verify, _mock_batch, _mock_ident, mock_ns_identity, _mock_engine
     ):
         """--force-legacy on an untagged bucket proceeds. Confirms the
         opt-in escape hatch works so users can clean legacy state."""

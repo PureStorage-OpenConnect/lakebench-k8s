@@ -351,5 +351,11 @@ lakebench clean journal my-config.yaml
 ```
 
 All `clean` targets prompt for confirmation unless `--force` is passed.
-Infrastructure components (Kubernetes resources, catalog entries) are not
-affected by `clean`.
+Kubernetes resources are not affected by `clean`. Before it empties a
+layer's bucket, `clean` removes that layer's workload tables from the
+catalog, so the next run creates them afresh instead of failing on entries
+whose files are gone. It uses the deployment's Trino pod
+(`system.unregister_table`, the catalog entry only) or, without Trino, its
+Spark Thrift pod (`DROP TABLE`; a Delta table only when its data is in the
+bucket being emptied). With neither running it warns and leaves the entries;
+a statement that fails makes `clean` exit 1.
