@@ -510,3 +510,55 @@ def test_secrets_history_job_scans_full_history_and_requires_gitleaks():
     # Without this the gitleaks-backed tests would skip and the step pass.
     assert tests["env"]["LB_REQUIRE_GITLEAKS"] == "1"
     assert "secrets-history" in jobs["build"]["needs"]
+
+
+# -- OSS-5: the wheel in a clean venv -----------------------------------------
+
+
+def test_clean_venv_job_installs_the_wheel_alone_and_with_aml():
+    jobs = _load("ci.yml")["jobs"]
+    job = jobs["clean-venv"]
+    assert job["needs"] == "build"
+    assert job["strategy"]["matrix"]["python-version"] == ["3.10", "3.13"]
+    runs = {s.get("name"): str(s.get("run", "")) for s in job["steps"]}
+    plain, aml = runs["Wheel alone"], runs["Wheel with the aml extra"]
+    assert "python -m venv" in plain and 'pip" install dist/*.whl' in plain
+    assert "walk_packages" in plain and 'lakebench" version' in plain
+    assert "python -m venv" in aml and '"$(ls dist/*.whl)[aml]"' in aml
+    assert "REFERENCE_PY_DEPS" in aml and "lakebench.aml.reference_score" in aml
+    # Neither step installs from the checkout.
+    assert "-e " not in plain + aml and "pip install ." not in plain + aml
+
+
+def test_clean_venv_wheel_artifact_name_is_its_own():
+    # release.yml calls ci.yml in the same run, and artifact names are per run.
+    build = _load("ci.yml")["jobs"]["build"]
+    (upload,) = [s for s in build["steps"] if "upload-artifact" in str(s.get("uses", ""))]
+    name = upload["with"]["name"]
+    (download,) = [
+        s
+        for s in _load("ci.yml")["jobs"]["clean-venv"]["steps"]
+        if "download-artifact" in str(s.get("uses", ""))
+    ]
+    assert download["with"]["name"] == name
+    release_names = {
+        str((s.get("with") or {}).get("name", ""))
+        for j in _load("release.yml")["jobs"].values()
+        for s in j.get("steps") or []
+        if "upload-artifact" in str(s.get("uses", ""))
+    }
+    assert name not in release_names and not name.startswith("lakebench-")
+
+
+def test_clean_venv_checks_the_reference_packages_test_reference_pins_checks():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("trp", ROOT / "tests" / "test_reference_pins.py")
+    assert spec and spec.loader
+    trp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(trp)
+    job = _load("ci.yml")["jobs"]["clean-venv"]
+    (aml,) = [str(s["run"]) for s in job["steps"] if s.get("name") == "Wheel with the aml extra"]
+    m = re.search(r"for name in \(([^)]*)\):", aml)
+    assert m, "the aml step no longer loops over a literal tuple of package names"
+    assert set(ast.literal_eval("(" + m.group(1) + ")")) == trp.CHECKED
