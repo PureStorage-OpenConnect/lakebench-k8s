@@ -559,7 +559,7 @@ def test_unknown_datagen_pods_fail_before_the_reset(monkeypatch, tmp_path):
         monkeypatch, tmp_path, _c360_cfg(), stop_raises=DatagenPodsUnknown("cannot list")
     )
     assert events == ["ownership", "stop-streams", "stop-datagen"]
-    assert events_ref["exc"].exit_code == 1
+    assert events_ref["exc"].exit_code == 4  # could not check: k8s.unreachable
 
 
 def test_refused_datagen_deploy_exits_3(monkeypatch, tmp_path):

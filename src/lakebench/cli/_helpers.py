@@ -247,17 +247,28 @@ def stop_previous_datagen_or_exit(cfg, what: str = "Refusing to generate") -> No
     Called before the bronze gate (``generate``, ``run --generate``, the
     multi-cycle loop) and before a continuous reset, so no pod of an
     earlier datagen Job writes after the prefix is checked or cleared.
-    Live pods exit 3 (``datagen.pods_live``); pods that cannot be listed
-    or a Job that cannot be deleted exit 1.
+    Live pods exit 3 (``datagen.pods_live``). Pods that cannot be listed,
+    or a Job that cannot be deleted, exit 4 as an unreachable cluster does
+    (``k8s.unreachable``): nothing has run yet.
     """
-    from lakebench.deploy.datagen import DatagenRefused, stop_previous_datagen
+    from lakebench.deploy.datagen import (
+        DatagenPodsUnknown,
+        DatagenRefused,
+        stop_previous_datagen,
+    )
     from lakebench.exit_codes import path_code
 
     try:
         stop_previous_datagen(cfg)
     except DatagenRefused as e:
         print_error(f"{what}: {e}")
-        raise typer.Exit(path_code(e.exit_path) if e.exit_path else ExitCode.FAILED) from None
+        if e.exit_path:
+            code = path_code(e.exit_path)
+        elif isinstance(e, DatagenPodsUnknown):
+            code = path_code("k8s.unreachable")
+        else:
+            code = ExitCode.FAILED
+        raise typer.Exit(code) from None
 
 
 def enforce_bronze_gate(

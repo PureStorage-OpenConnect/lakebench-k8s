@@ -373,3 +373,23 @@ def test_deployer_takes_the_gates_decision_not_the_flag(monkeypatch, tmp_path, c
     res = CliRunner().invoke(app, [command, str(cfg), *argv, "--allow-stale-bronze"])
     assert built == [False]
     assert res.exit_code == 3, res.output[-2000:]
+
+
+def test_generate_with_an_unreachable_cluster_still_exits_4(monkeypatch, tmp_path):
+    """Pods that cannot be listed before anything ran: the prerequisite exit
+    an unreachable cluster had before the stop existed (k8s.unreachable)."""
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from lakebench.deploy.datagen import DatagenPodsUnknown
+    from tests import test_datagen_timeout_and_regenerate as dg
+
+    monkeypatch.chdir(tmp_path)
+    dg._stub_run_deps(monkeypatch)
+
+    def stop(c):
+        raise DatagenPodsUnknown("could not delete the earlier lakebench-datagen Job")
+
+    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", stop)
+    res = CliRunner().invoke(app, ["generate", str(dg._write_cfg(tmp_path)), "--yes"])
+    assert res.exit_code == 4, res.output

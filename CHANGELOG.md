@@ -949,7 +949,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   clears the prefix, and a continuous run (C360 and AML) does so before its
   reset clears the raw prefix. The wait is bounded at five minutes; a pod
   still running then refuses with exit 3 (`datagen.pods_live`) and names
-  it, and pods that cannot be listed fail the command (exit 1). The datagen
+  it; pods that cannot be listed exit 4, as an unreachable cluster does
+  (`k8s.unreachable`). The datagen
   deployer now takes the gate's decision rather than the
   `--allow-stale-bronze` flag, so objects that appear after the gate saw
   an empty prefix are refused instead of written over with no
