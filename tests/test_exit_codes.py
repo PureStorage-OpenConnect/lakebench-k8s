@@ -149,8 +149,6 @@ PLANNED_BY = {
     "plan.missing_storage_class": "CC-23",
     "plan.ok": "CC-23",
     "repeat.no_verified_corpus": "CC-30",
-    "reproduce.verify_out_of_band": "ER-13",
-    "run.deps_missing": "SD-5c",
     "run.protected_corpus": "AM-22",
     "series.corpus_changed": "CC-30",
     "status.drift": "CC-27",
