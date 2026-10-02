@@ -198,14 +198,12 @@ READERS: dict[str, str] = {
     "architecture.query_engine.duckdb.memory": (
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
-    "architecture.query_engine.duckdb.catalog_name": (
-        "lakebench.deploy.engine:DeploymentEngine._build_context"
-    ),
+    "architecture.query_engine.duckdb.catalog_name": "lakebench.benchmark.executor:get_executor",
     "architecture.query_engine.duckdb.version": (
         "lakebench.deploy.engine:DeploymentEngine._build_context"
     ),
-    "architecture.pipeline.pattern": "lakebench.cli.__init__:info",
-    "architecture.pipeline.mode": "lakebench.cli.__init__:info_datagen_mode",
+    "architecture.pipeline.pattern": "lakebench.config.autosizer:_apply_cluster_scaling",
+    "architecture.pipeline.mode": "lakebench.cli._run:run",
     "architecture.pipeline.cycles": "lakebench.cli._run:run",
     "architecture.pipeline.pre_benchmark_maintenance": "lakebench.cli._run:run",
     "architecture.pipeline.sustained.bronze_trigger_interval": (
@@ -217,7 +215,7 @@ READERS: dict[str, str] = {
     "architecture.pipeline.sustained.gold_refresh_interval": (
         "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
     ),
-    "architecture.pipeline.sustained.run_duration": "lakebench.cli.__init__:info",
+    "architecture.pipeline.sustained.run_duration": "lakebench.cli._sustained:_run_sustained",
     "architecture.pipeline.sustained.checkpoint_base": (
         "lakebench.modules.pipeline_engines.spark.job:bronze_ingest_checkpoint_uri"
     ),
@@ -259,7 +257,7 @@ READERS: dict[str, str] = {
     "architecture.workload.datagen.target_size": (
         "lakebench.config.schema:DatagenConfig.resolve_scale_from_target_size"
     ),
-    "architecture.workload.datagen.mode": "lakebench.cli.__init__:info_datagen_mode",
+    "architecture.workload.datagen.mode": "lakebench.config.autosizer:_resolve_datagen_mode",
     "architecture.workload.datagen.seed": "lakebench.config.datagen_seed:config_seed",
     "architecture.workload.datagen.corpus_role": (
         "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_manifest"

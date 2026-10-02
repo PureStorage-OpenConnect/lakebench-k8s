@@ -88,8 +88,10 @@ with `parallelism` set from the config (default: 4). Each pod in the Job:
    `s3://<bronze-bucket>/pacs008/` for the financial schema. v1.7 removed
    the `medallion.bronze.path_template` key: the Customer 360 Spark stages
    always read `customer/interactions/` whatever it said, so a custom bronze
-   layout is not supported. A config that still names the fixed layout
-   loads with a note; another layout is refused.
+   layout is not supported. (The financial stages did read it, through
+   `LB_FINANCIAL_BRONZE_PREFIX`.) A config that still names the fixed layout
+   loads with a note; another layout is refused by the commands that change
+   data.
 4. Reports completion status back to Kubernetes.
 
 The datagen mode (`auto`, `batch`, or `continuous`) is the S3 delivery

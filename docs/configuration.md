@@ -79,8 +79,9 @@ v1.7 removed these keys, which nothing read: `images.hive`,
 `observability.prometheus_stack_enabled`, `observability.s3_metrics_enabled`,
 `observability.spark_metrics_enabled`, and the top-level `version` and
 `description`. A config that still carries one of them at its old default
-(v1.6 tooling wrote every field) loads under every
-command with a note; another value is refused as above. The bronze layout is
+(for `description` any text, for `images.hive` any value naming 3.1.3) is
+inert and loads under every command with a note; another value is refused as
+above. The bronze layout is
 fixed (`customer/interactions/`, `pacs008/` for the financial workload), so a
 `path_template` naming another layout is refused.
 

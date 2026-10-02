@@ -70,15 +70,26 @@ def test_polaris_image_matches_schema_default() -> None:
             assert image == default, f"images.polaris {image!r}, schema default {default!r}"
             found = True
     assert found, "no images.polaris line in root lakebench.yaml"
-    in_polaris = False
+
+    # Indentation is counted after the comment marker, so a commented line
+    # keeps its nesting.
+    def body(line: str) -> str:
+        return line[1:] if line.startswith("#") else line
+
+    polaris_indent = None
     for line in text.splitlines():
-        stripped = line.lstrip("# ").rstrip()
-        if stripped.strip() == "polaris:":
-            in_polaris = True
-        elif in_polaris and stripped.strip().startswith("version:"):
-            raise AssertionError("root lakebench.yaml still sets catalog.polaris.version")
-        elif in_polaris and stripped and not stripped.startswith(" "):
-            in_polaris = False
+        b = body(line).rstrip()
+        if not b.strip():
+            continue
+        indent = len(b) - len(b.lstrip())
+        key = b.strip().lstrip("#").strip()
+        if key == "polaris:":
+            polaris_indent = indent
+        elif polaris_indent is not None:
+            if indent <= polaris_indent:
+                polaris_indent = None
+            elif key.startswith("version:"):
+                raise AssertionError("root lakebench.yaml still sets catalog.polaris.version")
     assert "1.3.0-incubating" not in text, (
         "root lakebench.yaml still references the deprecated 1.3.0-incubating Polaris tag"
     )

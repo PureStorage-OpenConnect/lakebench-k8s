@@ -36,6 +36,8 @@ def _matches_old_default(value: object, default: object) -> bool:
     if callable(default):
         return bool(default(value))
     if isinstance(default, dict):
+        if value is None:  # an empty mapping in YAML ("thrift:")
+            return True
         return isinstance(value, dict) and all(
             k in default and _matches_old_default(v, default[k]) for k, v in value.items()
         )
@@ -75,9 +77,10 @@ class ConfigModel(BaseModel):
     _removed_keys: ClassVar[dict[str, str]] = {}
 
     # Removed keys whose old default changed nothing, mapped to that default
-    # (or a predicate on the value). v1.6 wrote every field (save_config, the
-    # generated defaults), so a key still at that value is dropped with a
-    # note under every purpose; any other value takes the _removed_keys path.
+    # (or a predicate on the value). A key still at that value is inert, the
+    # same as absent (v1.6 examples, docs, ledger configs and save_config
+    # carry such keys), so it is dropped with a note under every purpose; any
+    # other value takes the _removed_keys path.
     _removed_defaults: ClassVar[dict[str, Any]] = {}
 
     @model_validator(mode="before")
@@ -2123,15 +2126,25 @@ def _drop_default_medallion(data: dict) -> dict:
     pipeline = data.get("pipeline")
     if not isinstance(pipeline, dict) or "medallion" not in pipeline:
         return data
+    if pipeline["medallion"] is None:  # "medallion:" with nothing under it
+        data = dict(data)
+        data["pipeline"] = {k: v for k, v in pipeline.items() if k != "medallion"}
+        return data
     workload = data.get("workload")
     schema = None
     if isinstance(workload, dict):
         schema = workload.get("schema", workload.get("schema_type"))
     schema = getattr(schema, "value", schema) or "customer360"
-    allowed = {"customer/interactions"} | ({"pacs008"} if schema == "financial" else set())
 
     def template_ok(v: object) -> bool:
-        return isinstance(v, str) and v.strip("/") in allowed
+        # The values whose v1.6 effective prefix is the fixed v1.7 one. v1.6
+        # mapped financial to pacs008 only on the exact C360 default, and
+        # datagen trims a trailing slash, never a leading one.
+        if not isinstance(v, str):
+            return False
+        if schema == "financial":
+            return v == "customer/interactions" or v.rstrip("/") == "pacs008"
+        return v.rstrip("/") == "customer/interactions"
 
     default = {
         **_MEDALLION_V16_DEFAULT,
@@ -2587,8 +2600,14 @@ class LakebenchConfig(ConfigModel):
             "named in the upgrade notes instead."
         ),
         "description": "nothing read it; keep notes in a YAML comment.",
+        # The v1.6 flat spelling of platform.storage.s3.secret_ref.
+        "secret_ref": (
+            "lakebench never reads an existing Secret: deploy writes the S3 Secret from "
+            "access_key and secret_key. Set those instead."
+        ),
     }
     _removed_defaults: ClassVar[dict[str, Any]] = {
+        "secret_ref": "",
         "version": 1,
         # Free text never changed what ran, whatever it said.
         "description": lambda v: v is None or isinstance(v, str),

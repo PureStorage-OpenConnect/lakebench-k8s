@@ -108,13 +108,39 @@ REFUSED = [
         "'prometheus_stack_enabled' was removed",
         "full stack",
     ),
-    ({"observability": {"s3_metrics_enabled": False}}, "'s3_metrics_enabled' was removed", ""),
+    (
+        {"observability": {"s3_metrics_enabled": False}},
+        "'s3_metrics_enabled' was removed",
+        "not gated on it",
+    ),
     (
         {"observability": {"spark_metrics_enabled": False}},
         "'spark_metrics_enabled' was removed",
-        "",
+        "not gated on it",
     ),
     ({"version": 2}, "'version' was removed", "one config schema"),
+    ({"secret_ref": "my-secret"}, "'secret_ref' was removed", "access_key and secret_key"),
+    # v1.6 mapped financial to pacs008 only on the exact C360 default; with a
+    # trailing slash its data went under customer/interactions/.
+    (
+        {
+            "workload": {"schema": "financial", "datagen": {"seed": 43}},
+            "architecture": {
+                "pipeline": {"medallion": {"bronze": {"path_template": "customer/interactions/"}}}
+            },
+        },
+        "'medallion' was removed",
+        "fixed bronze layout",
+    ),
+    (
+        {
+            "architecture": {
+                "pipeline": {"medallion": {"bronze": {"path_template": "/customer/interactions"}}}
+            }
+        },
+        "'medallion' was removed",
+        "fixed bronze layout",
+    ),
 ]
 
 
@@ -176,6 +202,9 @@ AT_DEFAULT = [
     ({"observability": {"reports": {"enabled": True}}}, "reports"),
     ({"version": 1}, "version"),
     ({"description": "anything at all"}, "description"),
+    ({"secret_ref": ""}, "secret_ref"),
+    ({"architecture": {"catalog": {"hive": {"thrift": None}}}}, "thrift"),
+    ({"observability": {"reports": None}}, "reports"),
     ({"platform": {"compute": {"spark": {"executor": {"instances": 8}}}}}, "executor"),
     ({"platform": {"storage": {"scratch": {"size": "100Gi"}}}}, "size"),
 ]
@@ -231,8 +260,31 @@ def test_v16_saved_config_deploys_and_names_its_streams(tmp_path, monkeypatch):
     path = tmp_path / "v16.yaml"
     path.write_text((FIXTURES / "v16-saved-c360.yaml").read_text())
     cfg = load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
-    removed = [t for t in load_notes(cfg).texts() if "no longer used" in t]
-    assert len(removed) >= 15, removed
+    removed = {t.split(")")[0] + ")" for t in load_notes(cfg).texts() if "no longer used" in t}
+    assert removed == {
+        "'description' (LakebenchConfig)",
+        "'version' (LakebenchConfig)",
+        "'hive' (ImagesConfig)",
+        "'prometheus' (ImagesConfig)",
+        "'grafana' (ImagesConfig)",
+        "'secret_ref' (S3Config)",
+        "'size' (ScratchStorageConfig)",
+        "'driver' (SparkComputeConfig)",
+        "'executor' (SparkComputeConfig)",
+        "'thrift' (HiveConfig)",
+        "'version' (PolarisConfig)",
+        "'version' (UnityConfig)",
+        "'file_format' (IcebergConfig)",
+        "'properties' (IcebergConfig)",
+        "'properties' (DeltaConfig)",
+        "'medallion' (ProcessingConfig)",
+        "'date_range_days' (Customer360Config)",
+        "'reports' (ObservabilityConfig)",
+        "'storage_class' (ObservabilityConfig)",
+        "'prometheus_stack_enabled' (ObservabilityConfig)",
+        "'s3_metrics_enabled' (ObservabilityConfig)",
+        "'spark_metrics_enabled' (ObservabilityConfig)",
+    }, removed
     with pytest.raises(ConfigValidationError) as e:
         load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
     assert "benchmark.streams 4" in str(e.value)
@@ -279,7 +331,31 @@ ID_CASES = {
         },
         {"corpus_id": "e15c7cecee0df916", "parameters_id": "ace33c3eb57403c9"},
     ),
+    "c360-scale5-dirty": (
+        {
+            "images": _IMAGE,
+            "architecture": {
+                "workload": {"datagen": {"seed": 43, "scale": 5, "dirty_data_ratio": 0.2}}
+            },
+        },
+        {"corpus_id": "7003cd6633e0217e", "parameters_id": "12bee0ff88813f11"},
+    ),
 }
+
+
+def test_v16_saved_config_ids_pinned(monkeypatch):
+    # The v1.6 saved config carries every removed key; its ids are the ones
+    # 9afa879 computed for it.
+    from lakebench.metrics.experiment import experiment_inputs
+
+    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "a")
+    monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", "b")
+    cfg = load_config(FIXTURES / "v16-saved-c360.yaml", purpose=LoadPurpose.READ, print_notes=False)
+    ei = experiment_inputs(cfg, run_mode="batch")
+    assert (ei["corpus"]["id"], ei["workload"]["parameters_id"]) == (
+        "12c4521ea33cba73",
+        "12bee0ff88813f11",
+    )
 
 
 @pytest.mark.parametrize("case", sorted(ID_CASES))
@@ -311,14 +387,15 @@ def test_c360_parameters_id_keeps_the_v16_shape():
 # -- the bronze prefix does not move -------------------------------------------
 
 
-def _prefixes(schema: str, mode: str) -> tuple[str, dict[str, str | None]]:
-    """(datagen --prefix arg, {job type: LB_FINANCIAL_BRONZE_PREFIX})."""
+def _prefixes(schema: str, mode: str) -> tuple[list[str], dict[str, str | None]]:
+    """(datagen Job container args, {job type: LB_FINANCIAL_BRONZE_PREFIX})."""
     from lakebench.deploy.datagen import DatagenDeployer
     from lakebench.deploy.engine import DeploymentEngine
     from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 
     cfg = make_config(
         name="pfx-probe",
+        images=_IMAGE,
         recipe=(
             "polaris-iceberg-spark-trino" if schema == "financial" else "hive-iceberg-spark-trino"
         ),
@@ -352,7 +429,26 @@ def _prefixes(schema: str, mode: str) -> tuple[str, dict[str, str | None]]:
                 if e.get("name") == "LB_FINANCIAL_BRONZE_PREFIX"
             ]
             env[jt.value] = values[0] if values else None
-    return args[args.index("--prefix") + 1], env
+    return args, env
+
+
+# The datagen Job container args 9afa879 rendered for these configs
+# (seed 43, scale 10, image 1.6.0 pinned in _prefixes); batch and continuous
+# render the same args.
+_ARGS_9AFA879 = {
+    "customer360": [
+        "--schema", "customer360", "--target-tb", "0.097656", "--customer-id-max", "1000000",
+        "--mode", "all", "--delivery-mode", "continuous", "--file-size-mb", "64",
+        "--bucket", "pfx-probe-bronze", "--prefix", "customer/interactions", "--seed", "43",
+        "--dirty-ratio", "0.08", "--total-nodes", "4", "--workers", "0",
+    ],
+    "financial": [
+        "--schema", "financial", "--scale", "10.000000", "--target-tb", "0.082031",
+        "--mode", "all", "--delivery-mode", "continuous", "--file-size-mb", "64",
+        "--bucket", "pfx-probe-bronze", "--prefix", "pacs008", "--seed", "43",
+        "--dirty-ratio", "0.08", "--total-nodes", "4", "--workers", "0",
+    ],
+}  # fmt: skip
 
 
 @pytest.mark.parametrize("mode", ["batch", "continuous"])
@@ -361,9 +457,10 @@ def test_bronze_prefix_args_unchanged(mode):
     LB_FINANCIAL_BRONZE_PREFIX every financial Spark job gets (read by the
     frozen bronze_verify_financial.py, bronze_ingest_financial.py,
     score_financial_reference.py and score_financial.py)."""
-    arg, env = _prefixes("customer360", mode)
-    assert arg == "customer/interactions"
+    args, env = _prefixes("customer360", mode)
+    assert args == _ARGS_9AFA879["customer360"]
     assert set(env.values()) == {None}
-    arg, env = _prefixes("financial", mode)
-    assert arg == "pacs008"
+    args, env = _prefixes("financial", mode)
+    assert args == _ARGS_9AFA879["financial"]
+    assert args[args.index("--prefix") + 1] == "pacs008"
     assert env and all(v == "pacs008/" for v in env.values()), env

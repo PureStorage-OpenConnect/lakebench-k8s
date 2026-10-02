@@ -60,7 +60,6 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "endpoint": ("platform", "storage", "s3", "endpoint"),
     "access_key": ("platform", "storage", "s3", "access_key"),
     "secret_key": ("platform", "storage", "s3", "secret_key"),
-    "secret_ref": ("platform", "storage", "s3", "secret_ref"),
     "scale": ("workload", "datagen", "scale"),
     "namespace": ("platform", "kubernetes", "namespace"),
     "mode": ("architecture", "pipeline", "mode"),
@@ -646,9 +645,6 @@ def generate_example_config_yaml() -> str:
 # REQUIRED: Unique name for this deployment (also used as K8s namespace)
 name: my-lakehouse
 
-# Optional description
-# description: "My Lakebench lakehouse deployment"
-
 # Recipe shorthand -- sets catalog + table_format + engine + query_engine in one line.
 # Valid recipes: default, hive-iceberg-spark-trino, hive-iceberg-spark-thrift,
 #   hive-iceberg-spark-duckdb, hive-iceberg-spark-none,
@@ -656,9 +652,6 @@ name: my-lakehouse
 #   polaris-iceberg-spark-duckdb, polaris-iceberg-spark-none
 # See docs/recipes.md for details.
 # recipe: hive-iceberg-spark-trino
-
-# Config schema version (always 1)
-# version: 1
 
 # ============================================================================
 # IMAGES

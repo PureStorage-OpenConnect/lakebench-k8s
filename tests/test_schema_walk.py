@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import re
 import textwrap
 import typing
 from functools import cache
@@ -31,6 +32,35 @@ RECORDING_MODULES = (
     "lakebench.metrics.experiment",
     "lakebench.metrics.fingerprint_inputs",
 )
+# Readers that only show or record a value: displaying a setting is not
+# honouring it (a status line once reported a Prometheus switch nothing
+# read).
+DISPLAY_PREFIXES = ("lakebench.metrics.", "lakebench.reports.", "lakebench.journal")
+DISPLAY_FUNCTIONS = ("lakebench.cli.__init__:info",)
+# Functions in config/schema.py that honour a field: env builders the Spark
+# jobs receive, accessors the deployers call, and validators that transform
+# the value. A schema.py function is a reader only when listed here.
+SCHEMA_READERS = frozenset(
+    {
+        "TmOperationsConfig.env",
+        "TableNamesConfig.financial_env",
+        "SustainedConfig.effective_silver_bronze_wait_seconds",
+        "DatagenConfig.resolve_scale_from_target_size",
+        "require_polaris_client_secret",
+        "LakebenchConfig.get_namespace",
+        "LakebenchConfig.get_scale_dimensions",
+        "LakebenchConfig.apply_recipe_defaults",
+    }
+)
+# Functions that turn the config into the template context: a field read
+# there is honoured only if the context key it feeds is rendered.
+CONTEXT_BUILDERS = frozenset(
+    {
+        "lakebench.deploy.engine:DeploymentEngine._build_context",
+        "lakebench.deploy.datagen:DatagenDeployer._build_datagen_context",
+    }
+)
+TEMPLATES = SRC / "templates"
 
 
 def _model_of(annotation: Any) -> type[BaseModel] | None:
@@ -125,7 +155,9 @@ def reads(fn: ast.AST, owner: str | None, model: str, parent: str, leaf: str) ->
                     return True
                 if node.value.id in ("self", "cls") and owner == model:
                     return True
-            if not parent and value in ("cfg", "config", "self.config", "self.cfg", "self"):
+            if not parent and value in ("cfg", "config", "self.config", "self.cfg"):
+                return True
+            if not parent and value == "self" and owner == model == "LakebenchConfig":
                 return True
         # A raw-dict read in a before-validator: data.get("<leaf>") or data["<leaf>"].
         if not parent and owner == model:
@@ -145,26 +177,29 @@ def reads(fn: ast.AST, owner: str | None, model: str, parent: str, leaf: str) ->
 
 
 @cache
-def _names_used_outside_schema() -> frozenset[str]:
-    names: set[str] = set()
-    for f in SRC.rglob("*.py"):
-        if f == SRC / "config" / "schema.py":
+def _rendered_context_keys() -> frozenset[str]:
+    """Every identifier the Jinja templates use."""
+    words: set[str] = set()
+    for f in TEMPLATES.rglob("*.j2"):
+        words.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", f.read_text()))
+    return frozenset(words)
+
+
+def _context_keys_fed(fn: ast.AST, parent: str, leaf: str) -> list[str]:
+    """Dict keys in *fn* whose value reads ``<parent>.<leaf>``."""
+    keys = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Dict):
             continue
-        for node in ast.walk(ast.parse(f.read_text())):
-            if isinstance(node, ast.Attribute):
-                names.add(node.attr)
-            elif isinstance(node, ast.Name):
-                names.add(node.id)
-            elif isinstance(node, ast.ImportFrom):
-                names.update(a.name for a in node.names)
-    return frozenset(names)
-
-
-def _is_validator(fn: ast.AST) -> bool:
-    decorators = getattr(fn, "decorator_list", [])
-    return any(
-        "validator" in ast.unparse(d if not isinstance(d, ast.Call) else d.func) for d in decorators
-    )
+        for k, v in zip(node.keys, node.values, strict=True):
+            if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                continue
+            for sub in ast.walk(v):
+                if isinstance(sub, ast.Attribute) and sub.attr == leaf:
+                    value = ast.unparse(sub.value)
+                    if value == parent or value.endswith("." + parent):
+                        keys.append(k.value)
+    return keys
 
 
 def walk_problems(
@@ -188,15 +223,25 @@ def walk_problems(
         if module in RECORDING_MODULES:
             problems.append(f"{path}: {ref} only records the value")
             continue
+        if module.startswith(DISPLAY_PREFIXES) or ref.startswith(DISPLAY_FUNCTIONS):
+            problems.append(f"{path}: {ref} only displays or records the value")
+            continue
+        if module == "lakebench.config.schema" and ref.split(":")[1] not in SCHEMA_READERS:
+            problems.append(f"{path}: {ref} is not an honouring function in config/schema.py")
+            continue
         parts = path.split(".")
         parent = tail_parent(path, tree)
         if not reads(fn, owner, model.__name__, parent, parts[-1]):
             problems.append(f"{path}: {ref} does not read {parent}.{parts[-1]}")
             continue
-        if module == "lakebench.config.schema" and not _is_validator(fn):
-            name = ref.split(":")[1].split(".")[-1]
-            if name not in _names_used_outside_schema():
-                problems.append(f"{path}: {ref} is never called outside config/schema.py")
+        if ref in CONTEXT_BUILDERS:
+            fed = _context_keys_fed(fn, parent, parts[-1])
+            unrendered = [k for k in fed if k not in _rendered_context_keys()]
+            if fed and len(unrendered) == len(fed):
+                problems.append(
+                    f"{path}: {ref} puts it only in context keys no template renders "
+                    f"({', '.join(unrendered)})"
+                )
     for path in sorted(set(readers) - set(tree)):
         problems.append(f"{path}: stale READERS entry, not a config field")
     for path in sorted(set(exempt) - set(tree)):
@@ -234,6 +279,31 @@ def test_schema_walk_fails_on_unread_field():
     # A reader that does not read it does not count either.
     wrong = {"child.never_read_anywhere_xyz": "lakebench.deploy.datagen:bronze_datagen_prefix"}
     assert "does not read" in walk_problems(tree, wrong, {})[0]
+
+
+def test_displaying_or_validating_is_not_reading():
+    tree = {"architecture.pipeline.pattern": LakebenchConfig}
+    shown = {"architecture.pipeline.pattern": "lakebench.cli.__init__:info"}
+    assert "only displays" in walk_problems(tree, shown, {})[0]
+    # A schema.py validator that only looks at a value (warns, bounds it) is
+    # not on the honouring list.
+    warned = {
+        "architecture.pipeline.pattern": "lakebench.config.schema:ProcessingConfig._warn_pattern"
+    }
+    assert "not an honouring function" in walk_problems(tree, warned, {})[0]
+
+
+def test_unrendered_context_key_is_not_reading():
+    # A field copied into the template context under a key no template uses
+    # (how polaris.version stayed dead) does not count.
+    tree = {"architecture.query_engine.duckdb.catalog_name": LakebenchConfig}
+    ref = {
+        "architecture.query_engine.duckdb.catalog_name": (
+            "lakebench.deploy.engine:DeploymentEngine._build_context"
+        )
+    }
+    problems = walk_problems(tree, ref, {})
+    assert problems and "no template renders" in problems[0], problems
 
 
 def test_recording_is_not_reading():
@@ -322,3 +392,11 @@ def test_snapshot_records_only_read_fields():
     assert not missing, missing
     unread = [p for p in SNAPSHOT_SOURCE_FIELDS if p not in _readers.READERS]
     assert not unread, unread
+    # Read somewhere other than where it is defined or recorded.
+    inside = [
+        p
+        for p in SNAPSHOT_SOURCE_FIELDS
+        if _readers.READERS[p].split(":")[0]
+        in ("lakebench.config.schema", "lakebench.metrics.collector")
+    ]
+    assert not inside, inside

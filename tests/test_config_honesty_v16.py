@@ -39,10 +39,6 @@ def _engine(cfg: LakebenchConfig) -> DeploymentEngine:
         return DeploymentEngine(config=cfg, k8s_client=k8s, dry_run=True)
 
 
-def _hive_warnings(rec) -> list[str]:
-    return [str(w.message) for w in rec if "images.hive" in str(w.message)]
-
-
 # -- LB-189: the recorded Hive is the Hive the template deploys ---------------
 
 
@@ -176,8 +172,9 @@ def test_secret_ref_with_inline_keys_is_refused_with_fix_text(tmp_path):
     from lakebench.config.loader import ConfigValidationError
 
     data = {"name": "t", "platform": _s3(access_key="a", secret_key="b", secret_ref="s")}
-    with pytest.raises(ConfigValidationError, match="'secret_ref' was removed"):
+    with pytest.raises(ConfigValidationError, match="'secret_ref' was removed") as e:
         _load(tmp_path, data, LoadPurpose.RUN)
+    assert "access_key and secret_key" in str(e.value)
     # Its v1.6 default (empty) changed nothing and loads anywhere.
     _load(
         tmp_path,
@@ -309,6 +306,30 @@ def test_generated_config_template_carries_no_unread_keys():
     text = generate_example_config_yaml()
     for key in ("secret_ref", "uploaders:", "checkpoint:", "min_threads", "max_threads"):
         assert key not in text, key
+    # CFG-9 removals: no line of the template sets one, commented or not.
+    import re
+
+    removed = (
+        "description",
+        "version: 1",
+        "thrift",
+        "medallion",
+        "path_template",
+        "date_range_days",
+        "file_format",
+        "properties",
+        "prometheus_stack_enabled",
+        "s3_metrics_enabled",
+        "spark_metrics_enabled",
+        "reports",
+        "hive: apache/hive",
+        "prometheus: prom/",
+        "grafana: grafana/",
+    )
+    for line in text.splitlines():
+        body = re.sub(r"^[#\s]*", "", line)
+        for key in removed:
+            assert not body.startswith(key), (key, line)
     # The dead polaris.version and observability.storage_class lines.
     assert "Min 1.3.0 for FlashBlade/MinIO" not in text
     assert "PVC storage class (empty = default)" not in text

@@ -56,10 +56,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `workload.customer360.date_range_days`, `observability.reports`,
   `observability.storage_class`, `observability.prometheus_stack_enabled`,
   `observability.s3_metrics_enabled`, `observability.spark_metrics_enabled`
-  and the top-level `version` and `description`. A key still at its v1.6
-  default (v1.6 wrote every field into a saved config) loads under every
-  command with a note; any other value is refused by the commands that
-  change data, with the fix, and dropped with a note by the others. The
+  and the top-level `version` and `description` (and the flat top-level
+  `secret_ref`). A key still at its v1.6 default is inert and loads under
+  every command with a note (for `description`, any text; for `images.hive`,
+  any value naming 3.1.3; for the two metrics flags, true or null); any
+  other value is refused by the commands that change data, with the fix,
+  and dropped with a note by the others. The
   same holds for `platform.compute.spark.driver`/`.executor` and
   `scratch.size` at their v1.6 defaults. The bronze layout is fixed:
   `customer/interactions/` for Customer 360 and `pacs008/` for financial; a

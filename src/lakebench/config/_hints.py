@@ -28,7 +28,6 @@ FLAT_KEYS = (
     "endpoint",
     "access_key",
     "secret_key",
-    "secret_ref",
     "scale",
     "namespace",
     "mode",
