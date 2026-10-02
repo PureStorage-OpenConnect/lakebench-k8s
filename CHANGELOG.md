@@ -457,6 +457,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **Every derived number on the HTML report is checked against the record.**
+  Each percentage, total and count the report computes is wrapped in a
+  `data-lb-derived` span that names the `metrics.json` paths it came from,
+  and a test recomputes each one from the stored record. The rendered text
+  is unchanged with two exceptions: the bottleneck bar's tooltip no longer
+  repeats the CPU share the legend shows, and a bottleneck share whose
+  denominator is zero (no stage recorded any time or compute) reads "-"
+  instead of "0.0%"; counts of 1,000 or more now carry a thousands
+  separator.
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with

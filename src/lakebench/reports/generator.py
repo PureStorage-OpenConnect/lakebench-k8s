@@ -51,6 +51,23 @@ def _format_duration_ms(ms: float | None) -> str:
     return "-"
 
 
+def _scale_ratio_pct(ratio: float) -> str:
+    """The batch scale ratio as a derived percentage (reports/derived.py)."""
+    from lakebench.reports import derived as dv
+
+    return dv.pct(ratio, num_path="pipeline_benchmark.scores.scale_ratio")
+
+
+def _passed_of(passed: int, total: int, list_key: str) -> str:
+    """ "<passed>/<total> passed" over a record list's ``success`` flags."""
+    from lakebench.reports import derived as dv
+
+    return (
+        f"{dv.count(passed, path=f'{list_key}[*].success', where='truthy')}/"
+        f"{dv.count(total, path=list_key)} passed"
+    )
+
+
 # Owner decision D-6 (AML-GOALS #46): continuous Delta ships with no effective
 # table maintenance in v1.6 (VACUUM keeps the 7 d default while streams are
 # live and OPTIMIZE is skipped), and the report says so.
@@ -535,24 +552,54 @@ class ReportGenerator:
             trino_cfg.get("worker", {}).get("replicas", 0)
         ) * float(trino_cfg.get("worker", {}).get("cpu", 0))
 
+        from lakebench.reports import derived as dv
+
+        def _sp(i: int, key: str) -> str:
+            return dv.path("pipeline_benchmark", "stages", i, key)
+
         stage_data = []
-        for s in pb.stages:
+        for i, s in enumerate(pb.stages):
             if s.stage_name in ("datagen",) and is_sustained:
                 continue
             if s.stage_name == "query" and trino_total_cores > 0:
                 cpu_sec = trino_total_cores * s.elapsed_seconds
+                # Only the keys the snapshot holds: a missing one counted 0.
+                coord = trino_cfg.get("coordinator") or {}
+                worker = trino_cfg.get("worker") or {}
+                cpu_terms = []
+                if "cpu" in coord:
+                    cpu_terms.append(
+                        dv.product(
+                            dv.path("config_snapshot", "trino", "coordinator", "cpu"),
+                            _sp(i, "elapsed_seconds"),
+                        )
+                    )
+                if "replicas" in worker and "cpu" in worker:
+                    cpu_terms.append(
+                        dv.product(
+                            dv.path("config_snapshot", "trino", "worker", "replicas"),
+                            dv.path("config_snapshot", "trino", "worker", "cpu"),
+                            _sp(i, "elapsed_seconds"),
+                        )
+                    )
             else:
                 cpu_sec = s.executor_count * s.executor_cores * s.elapsed_seconds
-            weight = (
-                s.latency_ms
-                if (is_sustained and s.latency_ms is not None and s.latency_ms > 0)
-                else s.elapsed_seconds
-            )
+                cpu_terms = [
+                    dv.product(
+                        _sp(i, "executor_count"),
+                        _sp(i, "executor_cores"),
+                        _sp(i, "elapsed_seconds"),
+                    )
+                ]
+            use_latency = is_sustained and s.latency_ms is not None and s.latency_ms > 0
+            weight = s.latency_ms if use_latency else s.elapsed_seconds
             stage_data.append(
                 {
                     "name": s.stage_name,
                     "weight": weight,
+                    "weight_path": _sp(i, "latency_ms" if use_latency else "elapsed_seconds"),
                     "cpu_sec": cpu_sec,
+                    "cpu_terms": cpu_terms,
                     "elapsed": s.elapsed_seconds,
                 }
             )
@@ -560,12 +607,33 @@ class ReportGenerator:
         if not stage_data:
             return ""
 
-        total_weight = sum(d["weight"] for d in stage_data) or 1.0
-        total_cpu = sum(d["cpu_sec"] for d in stage_data) or 1.0
+        total_weight = sum(d["weight"] for d in stage_data)
+        total_cpu = sum(d["cpu_sec"] for d in stage_data)
+        weight_den = [d["weight_path"] for d in stage_data]
+        cpu_den = [t for d in stage_data for t in d["cpu_terms"]]
 
         for d in stage_data:
-            d["weight_pct"] = d["weight"] / total_weight * 100
-            d["cpu_pct"] = d["cpu_sec"] / total_cpu * 100
+            d["weight_pct"] = d["weight"] / total_weight * 100 if total_weight else 0.0
+            d["cpu_pct"] = d["cpu_sec"] / total_cpu * 100 if total_cpu else 0.0
+
+        def _share(d: dict, key: str, digits: int) -> str:
+            if key == "weight":
+                return dv.pct(
+                    d["weight"],
+                    total_weight,
+                    num_path=d["weight_path"],
+                    den_path=weight_den,
+                    digits=digits,
+                    missing="-",
+                )
+            return dv.pct(
+                d["cpu_sec"],
+                total_cpu,
+                num_path=d["cpu_terms"],
+                den_path=cpu_den,
+                digits=digits,
+                missing="-",
+            )
 
         # Identify bottleneck -- in sustained mode latency is the primary
         # dimension (stages run concurrently); in batch mode use compute.
@@ -590,25 +658,26 @@ class ReportGenerator:
             callout = f"{'Latency' if is_sustained else 'Compute'} is balanced across stages (no single bottleneck)."
         elif dom_pct >= 50:
             callout = (
-                f"{dominant['name'].capitalize()} consumed {dominant['weight_pct']:.0f}% "
+                f"{dominant['name'].capitalize()} consumed {_share(dominant, 'weight', 0)} "
                 f"of {'latency' if is_sustained else 'wall-clock time'} and "
-                f"{dominant['cpu_pct']:.0f}% of compute."
+                f"{_share(dominant, 'cpu', 0)} of compute."
             )
         else:
             callout = (
                 f"{dominant['name'].capitalize()} is the largest stage at "
-                f"{dom_pct:.0f}% of {dim_label}."
+                f"{_share(dominant, 'weight' if is_sustained else 'cpu', 0)} of {dim_label}."
             )
 
         # Stacked bar -- always shows CPU share (the resource dimension
-        # common to all stages including Trino query).
+        # common to all stages including Trino query). The flex weights are
+        # layout, not page text; the legend below carries the numbers.
         bar_segments = []
         for d in stage_data:
             color = self._STAGE_COLORS.get(d["name"], "#94a3b8")
             bar_segments.append(
                 f'<div style="flex: {d["cpu_pct"]:.2f}; background: {color}; '
                 f'height: 28px; min-width: 0;" '
-                f'title="{d["name"]}: {d["cpu_pct"]:.1f}% CPU"></div>'
+                f'title="{d["name"]}: share of CPU"></div>'
             )
 
         legend_items = []
@@ -618,7 +687,7 @@ class ReportGenerator:
                 f'<span style="display: inline-flex; align-items: center; margin-right: 1rem;">'
                 f'<span style="width: 12px; height: 12px; background: {color}; '
                 f'border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>'
-                f"{d['name']} ({d['cpu_pct']:.0f}%)</span>"
+                f"{d['name']} ({_share(d, 'cpu', 0)})</span>"
             )
 
         weight_col = "Latency" if is_sustained else "Time (s)"
@@ -631,9 +700,9 @@ class ReportGenerator:
             table_rows += (
                 f"<tr><td>{d['name']}</td>"
                 f"<td>{weight_str}</td>"
-                f"<td>{d['weight_pct']:.1f}%</td>"
-                f"<td>{d['cpu_sec']:,.0f}</td>"
-                f"<td>{d['cpu_pct']:.1f}%</td></tr>"
+                f"<td>{_share(d, 'weight', 1)}</td>"
+                f"<td>{dv.total(d['cpu_sec'], paths=d['cpu_terms'])}</td>"
+                f"<td>{_share(d, 'cpu', 1)}</td></tr>"
             )
         bar_html = "".join(bar_segments)
         legend_html = "".join(legend_items)
@@ -721,8 +790,15 @@ class ReportGenerator:
         if post_files > 0:
             rows.append(f"<tr><td>Files after</td><td>{post_files:,}</td></tr>")
         if pre_files > 0 and post_files > 0:
-            ratio = pre_files / max(post_files, 1)
-            rows.append(f"<tr><td>Compaction ratio</td><td>{ratio:.1f}x</td></tr>")
+            from lakebench.reports import derived as dv
+
+            ratio_html = dv.ratio(
+                pre_files,
+                post_files,
+                a_path="pipeline_benchmark.scores.pre_compaction_file_count",
+                b_path="pipeline_benchmark.scores.post_compaction_file_count",
+            )
+            rows.append(f"<tr><td>Compaction ratio</td><td>{ratio_html}</td></tr>")
         if maint_elapsed > 0:
             rows.append(f"<tr><td>Maintenance time</td><td>{maint_elapsed:.0f}s</td></tr>")
         if pb.maintenance_stopped:
@@ -761,9 +837,17 @@ class ReportGenerator:
                 rows.append(f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f}</td></tr>")
         if value_pct is not None and pre_qph > 0:
             color = "var(--success)" if value_pct > 0 else "var(--danger)"
+            from lakebench.reports import derived as dv
+
+            value_html = dv.pct(
+                value_pct,
+                num_path="pipeline_benchmark.scores.maintenance_value_pct",
+                scale=1.0,
+                signed=True,
+            )
             rows.append(
                 f"<tr><td>QpH improvement</td>"
-                f'<td style="color: {color}; font-weight: 600">{value_pct:+.1f}%</td></tr>'
+                f'<td style="color: {color}; font-weight: 600">{value_html}</td></tr>'
             )
         elif pre_qph > 0 and pb.maintenance_value_reason:
             from html import escape
@@ -872,43 +956,53 @@ class ReportGenerator:
                 # 0 means the bronze size was not measured, not a full corpus.
                 indicators.append(("Scale Ratio", "status-warning", "Unmeasured"))
             elif ratio < 0.95:
-                indicators.append(("Scale Ratio", "status-failed", f"{ratio:.1%} INCOMPLETE"))
+                indicators.append(
+                    ("Scale Ratio", "status-failed", f"{_scale_ratio_pct(ratio)} INCOMPLETE")
+                )
             else:
-                indicators.append(("Scale Ratio", "status-success", f"{ratio:.1%} Complete"))
+                indicators.append(
+                    ("Scale Ratio", "status-success", f"{_scale_ratio_pct(ratio)} Complete")
+                )
+
+        from lakebench.reports import derived as dv
 
         # Job success
         if is_sustained and metrics.streaming:
             total = len(metrics.streaming)
-            passed = sum(1 for s in metrics.streaming if s.success)
+            passed = len([s for s in metrics.streaming if s.success])
             cls = "status-success" if passed == total else "status-failed"
-            indicators.append(("Streaming Jobs", cls, f"{passed}/{total} passed"))
+            indicators.append(("Streaming Jobs", cls, _passed_of(passed, total, "streaming")))
         elif metrics.jobs:
             total = len(metrics.jobs)
-            passed = sum(1 for j in metrics.jobs if j.success)
+            passed = len([j for j in metrics.jobs if j.success])
             cls = "status-success" if passed == total else "status-failed"
-            indicators.append(("Batch Jobs", cls, f"{passed}/{total} passed"))
+            indicators.append(("Batch Jobs", cls, _passed_of(passed, total, "jobs")))
 
         # Failed queries
         if metrics.benchmark_error:
             indicators.append(("Benchmark", "status-failed", "Did not complete, no QpH"))
         if metrics.benchmark:
-            failed = sum(
-                1
-                for q in (metrics.benchmark.queries or [])
-                if isinstance(q, dict) and not q.get("success", True)
+            failed = len(
+                [
+                    q
+                    for q in (metrics.benchmark.queries or [])
+                    if isinstance(q, dict) and not q.get("success", True)
+                ]
             )
             cls = "status-success" if failed == 0 else "status-failed"
-            indicators.append(("Query Failures", cls, f"{failed} failed"))
+            failed_html = dv.count(failed, path="benchmark.queries[*].success", where="falsy")
+            indicators.append(("Query Failures", cls, f"{failed_html} failed"))
 
         # Benchmark rounds validity
         if pb and pb.benchmark_rounds:
             n_rounds = len(pb.benchmark_rounds)
+            rounds_html = dv.count(n_rounds, path="pipeline_benchmark.benchmark_rounds")
             if n_rounds < 5:
                 indicators.append(
                     (
                         "Benchmark Rounds",
                         "status-warning",
-                        f"{n_rounds} rounds completed (minimum 5 for trend analysis)",
+                        f"{rounds_html} rounds completed (minimum 5 for trend analysis)",
                     )
                 )
             else:
@@ -916,7 +1010,7 @@ class ReportGenerator:
                     (
                         "Benchmark Rounds",
                         "status-success",
-                        f"{n_rounds} rounds completed",
+                        f"{rounds_html} rounds completed",
                     )
                 )
 
@@ -1150,15 +1244,28 @@ class ReportGenerator:
 
         rounds_with_meta = [(i, r) for i, r in enumerate(pb.benchmark_rounds) if r.round_meta]
 
-        contention_count = sum(
-            1 for _, r in rounds_with_meta if r.round_meta.q9_contention_observed
+        contention_count = len(
+            [r for _, r in rounds_with_meta if r.round_meta.q9_contention_observed]
         )
 
         if contention_count == 0:
             return ""
 
         total = len(rounds_with_meta)
-        pct = (contention_count / total * 100) if total > 0 else 0
+        from lakebench.reports import derived as dv
+
+        rounds_path = "pipeline_benchmark.benchmark_rounds[*].round_meta"
+        contention_html = dv.count(
+            contention_count, path=f"{rounds_path}.q9_contention_observed", where="truthy"
+        )
+        total_html = dv.count(total, path=rounds_path, where="truthy")
+        pct_html = dv.pct(
+            contention_count,
+            total,
+            num_path=dv.counted("truthy", f"{rounds_path}.q9_contention_observed"),
+            den_path=dv.counted("truthy", rounds_path),
+            digits=0,
+        )
 
         rows = []
         for idx, r in rounds_with_meta:
@@ -1183,8 +1290,8 @@ class ReportGenerator:
         <section>
             <h2>Q9 Contention</h2>
             <p style="margin-bottom: 0.75rem;">
-                Q9 contention observed in <strong>{contention_count}</strong> of
-                {total} rounds ({pct:.0f}%).
+                Q9 contention observed in <strong>{contention_html}</strong> of
+                {total_html} rounds ({pct_html}).
             </p>
             <table>
                 <thead>
@@ -1200,7 +1307,7 @@ class ReportGenerator:
                 </tbody>
             </table>
             <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.75rem; font-style: italic;">
-                Gold table was being rewritten during {pct:.0f}% of query rounds.
+                Gold table was being rewritten during {pct_html} of query rounds.
                 Benchmark rounds are offset by half the gold refresh interval to
                 minimize overlap.
             </p>
@@ -1582,8 +1689,15 @@ class ReportGenerator:
             if round_qphs:
                 import statistics
 
+                from lakebench.reports import derived as dv
+
                 qph = statistics.median(round_qphs)
-                qph_note = f"median of {len(round_qphs)} rounds"
+                n_html = dv.count(
+                    len(round_qphs),
+                    path="pipeline_benchmark.benchmark_rounds[*].qph",
+                    where="positive",
+                )
+                qph_note = f"median of {n_html} rounds"
                 qph_n_samples = len(round_qphs)
         elif metrics.benchmark and metrics.benchmark.qph > 0:
             qph = metrics.benchmark.qph
@@ -1700,6 +1814,7 @@ class ReportGenerator:
         smaller metadata row with contextual info.  When pipeline_benchmark
         is absent (old data), falls back to a simple layout.
         """
+        from lakebench.reports import derived as dv
         from lakebench.reports.formatter import (
             caps_bound_from,
             format_measurement,
@@ -1709,14 +1824,17 @@ class ReportGenerator:
         pb = metrics.pipeline_benchmark
         total_time = metrics.total_elapsed_seconds
         job_count = len(metrics.jobs)
-        successful = sum(1 for j in metrics.jobs if j.success)
+        successful = len([j for j in metrics.jobs if j.success])
+        jobs_passed_html = (
+            f"{dv.count(successful, path='jobs[*].success', where='truthy')}/"
+            f"{dv.count(job_count, path='jobs')}"
+        )
         caps_bound = caps_bound_from(metrics)
         support_state = support_state_of(metrics)
 
         if not pb:
             # Fallback for old metrics without pipeline_benchmark
             total_input = sum(j.input_size_gb for j in metrics.jobs)
-            avg_tp = total_input / total_time if total_time > 0 else 0
             qph_card = self._generate_qph_card(metrics)
             return f"""
             <div class="cards">
@@ -1726,15 +1844,15 @@ class ReportGenerator:
                 </div>
                 <div class="card">
                     <div class="card-label">Jobs</div>
-                    <div class="card-value">{successful}/{job_count}</div>
+                    <div class="card-value">{jobs_passed_html}</div>
                 </div>
                 <div class="card">
                     <div class="card-label">Data Processed</div>
-                    <div class="card-value">{total_input:.2f} GB</div>
+                    <div class="card-value">{dv.total(total_input, paths="jobs[*].input_size_gb", fmt=".2f", suffix=" GB")}</div>
                 </div>
                 <div class="card">
                     <div class="card-label">Avg Throughput</div>
-                    <div class="card-value">{avg_tp:.2f} GB/s</div>
+                    <div class="card-value">{dv.ratio(total_input, total_time, a_path="jobs[*].input_size_gb", b_path="total_elapsed_seconds", fmt=".2f", suffix=" GB/s", missing="0.00 GB/s")}</div>
                 </div>
                 {qph_card}
             </div>
@@ -1816,14 +1934,14 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
-                <div class="card-value">{pb.scale_ratio:.1%}{scale_warning}</div>
+                <div class="card-value">{_scale_ratio_pct(pb.scale_ratio)}{scale_warning}</div>
                 <div class="card-hint">actual vs expected data volume</div>
                 <div class="card-hint2">1.0 = complete</div>
             </div>
         </div>
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Total Time: {int(total_time // 60)}m {int(total_time % 60)}s</span>
-            <span>Jobs: {successful}/{job_count}</span>
+            <span>Jobs: {jobs_passed_html}</span>
         </div>
         """
 
@@ -1925,12 +2043,23 @@ class ReportGenerator:
         # The trickle bounds bronze's intake (metrics/bounds.py).
         trickle_caps = trickle_caps_from(metrics)
 
+        from lakebench.reports import derived as dv
+
         rows = []
         total_rows = 0
         total_cpu_sec = 0.0
         total_executors = 0
         total_mem_gb = 0.0
-        for s in metrics.streaming:
+        exec_paths: list[str] = []
+        cpu_terms: list[str] = []
+        mem_terms: list[str] = []
+        stage_index = {
+            st.stage_name: i
+            for i, st in enumerate(
+                metrics.pipeline_benchmark.stages if metrics.pipeline_benchmark else []
+            )
+        }
+        for si, s in enumerate(metrics.streaming):
             status_class = "status-success" if s.success else "status-failed"
             status_text = "Pass" if s.success else "Fail"
             total_rows += s.total_rows_processed
@@ -1961,10 +2090,28 @@ class ReportGenerator:
                     else "-"
                 )
                 cpu_sec = stage.executor_count * stage.executor_cores * s.elapsed_seconds
-                cpu_sec_str = f"{cpu_sec:,.0f}"
+                sp = dv.path("pipeline_benchmark", "stages", stage_index[stage_name])
+                cpu_sec_str = dv.total(
+                    cpu_sec,
+                    paths=dv.product(
+                        f"{sp}.executor_count",
+                        f"{sp}.executor_cores",
+                        dv.path("streaming", si, "elapsed_seconds"),
+                    ),
+                )
                 total_cpu_sec += cpu_sec
                 total_executors += stage.executor_count
                 total_mem_gb += stage.executor_count * stage.executor_memory_gb
+                exec_paths.append(f"{sp}.executor_count")
+                cpu_terms.append(
+                    dv.product(
+                        f"{sp}.executor_count",
+                        f"{sp}.executor_cores",
+                        dv.path("streaming", si, "elapsed_seconds"),
+                        "/3600",
+                    )
+                )
+                mem_terms.append(dv.product(f"{sp}.executor_count", f"{sp}.executor_memory_gb"))
             else:
                 execs = "-"
                 cores_mem = "-"
@@ -1991,9 +2138,9 @@ class ReportGenerator:
         if total_executors > 0:
             compute_summary = (
                 f'<div style="margin-top: 0.75rem; color: var(--text-muted); font-size: 0.8rem;">'
-                f"Total compute: {total_executors} executors | "
-                f"{cpu_hours:.1f} CPU-hours requested | "
-                f"{total_mem_gb:.0f} GB memory"
+                f"Total compute: {dv.total(total_executors, paths=exec_paths)} executors | "
+                f"{dv.total(cpu_hours, paths=cpu_terms, fmt='.1f')} CPU-hours requested | "
+                f"{dv.total(total_mem_gb, paths=mem_terms)} GB memory"
                 f"</div>"
             )
 
@@ -2001,7 +2148,7 @@ class ReportGenerator:
         <section>
             <h2>Continuous Pipeline</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                {len(metrics.streaming)} continuous jobs | {total_rows:,} total rows processed
+                {dv.count(len(metrics.streaming), path="streaming")} continuous jobs | {dv.total(total_rows, paths="streaming[*].total_rows_processed", fmt=",d")} total rows processed
             </div>
             <table>
                 <thead>
@@ -2059,14 +2206,21 @@ class ReportGenerator:
             </tr>
             """)
 
-        successful = sum(1 for q in metrics.queries if q.success)
+        from lakebench.reports import derived as dv
+
+        successful = len([q for q in metrics.queries if q.success])
         total = len(metrics.queries)
+        passed_html = (
+            f"{dv.count(successful, path='queries[*].success', where='truthy')}/"
+            f"{dv.count(total, path='queries')}"
+        )
+        time_html = dv.total(total_time, paths="queries[*].elapsed_seconds", fmt=".2f", suffix="s")
 
         return f"""
         <section>
             <h2>Query Performance</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                {successful}/{total} queries passed | Total query time: {total_time:.2f}s
+                {passed_html} queries passed | Total query time: {time_html}
             </div>
             <table>
                 <thead>
@@ -2166,8 +2320,14 @@ class ReportGenerator:
             </tr>
             """)
 
-        passed = sum(1 for q in queries if q.get("success"))
+        from lakebench.reports import derived as dv
+
+        passed = len([q for q in queries if q.get("success")])
         total = len(queries)
+        passed_html = (
+            f"{dv.count(passed, path='benchmark.queries[*].success', where='truthy')}/"
+            f"{dv.count(total, path='benchmark.queries')}"
+        )
         mode_label = b.mode
         if b.streams > 1:
             mode_label += f", {b.streams} streams"
@@ -2176,7 +2336,7 @@ class ReportGenerator:
         stream_html = ""
         if b.stream_results:
             stream_rows = []
-            for sr in b.stream_results:
+            for sri, sr in enumerate(b.stream_results):
                 sr_status_class = "status-success" if sr.get("success") else "status-failed"
                 sr_status_text = "Pass" if sr.get("success") else "Fail"
                 sr_total = sr.get("total_seconds", 0)
@@ -2184,7 +2344,7 @@ class ReportGenerator:
                 stream_rows.append(f"""
                 <tr>
                     <td>Stream {sr.get("stream_id", "?")}</td>
-                    <td>{sr_query_count}</td>
+                    <td>{dv.count(sr_query_count, path=dv.path("benchmark", "stream_results", sri, "queries")) if "queries" in sr else sr_query_count}</td>
                     <td>{sr_total:.1f}s</td>
                     <td><span class="status {sr_status_class}">{sr_status_text}</span></td>
                 </tr>
@@ -2210,7 +2370,7 @@ class ReportGenerator:
         <section>
             <h2>Trino Query Benchmark</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                {passed}/{total} queries passed |
+                {passed_html} queries passed |
                 QpH: <strong>{b.qph:.1f}</strong> |
                 Mode: {mode_label} ({b.iterations} iter) |
                 Cache: {b.cache} |
@@ -2351,8 +2511,10 @@ class ReportGenerator:
         median_qph = statistics.median(qph_values) if qph_values else 0.0
         median_freshness = statistics.median(freshness_values) if freshness_values else 0.0
 
+        from lakebench.reports import derived as dv
+
         summary_parts = [
-            f"{n_rounds} rounds during streaming",
+            f"{dv.count(n_rounds, path='benchmark_rounds')} rounds during streaming",
             f"Median QpH: <strong>{median_qph:.1f}</strong>",
         ]
         if median_freshness > 0:
@@ -2361,7 +2523,12 @@ class ReportGenerator:
                 "(corpus event time, not freshness)"
             )
         if contention_count > 0:
-            summary_parts.append(f"Q9 contention: {contention_count}x")
+            n_contention = dv.count(
+                contention_count,
+                path="benchmark_rounds[*].round_meta.q9_contention_observed",
+                where="truthy",
+            )
+            summary_parts.append(f"Q9 contention: {n_contention}x")
 
         return f"""
         <section>
@@ -2441,7 +2608,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
-                <div class="card-value">{pb.scale_ratio:.1%}{scale_warning}</div>
+                <div class="card-value">{_scale_ratio_pct(pb.scale_ratio)}{scale_warning}</div>
                 <div class="card-hint">actual vs expected data volume</div>
             </div>
         """
@@ -2462,7 +2629,9 @@ class ReportGenerator:
         # The trickle bounds bronze's intake in a continuous run.
         trickle_caps = trickle_caps_from(metrics) if is_sustained else []
 
-        for stage in pb.stages:
+        from lakebench.reports import derived as dv
+
+        for si, stage in enumerate(pb.stages):
             status_class = "status-success" if stage.success else "status-failed"
             status_text = "OK" if stage.success else "FAIL"
 
@@ -2505,7 +2674,17 @@ class ReportGenerator:
                 stage_core_hours = (
                     stage.executor_count * stage.executor_cores * stage.elapsed_seconds / 3600.0
                 )
-                cpu_hrs = f"{stage_core_hours:.1f}"
+                sp = dv.path("pipeline_benchmark", "stages", si)
+                cpu_hrs = dv.total(
+                    stage_core_hours,
+                    paths=dv.product(
+                        f"{sp}.executor_count",
+                        f"{sp}.executor_cores",
+                        f"{sp}.elapsed_seconds",
+                        "/3600",
+                    ),
+                    fmt=".1f",
+                )
             else:
                 cpu_hrs = "-"
 
@@ -2899,23 +3078,38 @@ class ReportGenerator:
                 p.get("cpu_max_cores", 0) < 0.01 and p.get("memory_max_bytes", 0) < 10 * 1024 * 1024
             )
 
-        active_pods = [p for p in pods if not _is_ghost(p)]
+        from lakebench.reports import derived as dv
+
+        active_idx = [i for i, p in enumerate(pods) if not _is_ghost(p)]
+        active_pods = [pods[i] for i in active_idx]
         ghost_count = len(pods) - len(active_pods)
 
         # Exclude infra pods from the per-stage summary (kept in detail)
-        pipeline_pods = [
-            p
-            for p in active_pods
-            if not any(p.get("pod_name", "").startswith(pfx) for pfx in self._INFRA_PREFIXES)
+        pipeline_idx = [
+            i
+            for i in active_idx
+            if not any(pods[i].get("pod_name", "").startswith(pfx) for pfx in self._INFRA_PREFIXES)
         ]
+
+        def _pod_path(i: int, key: str) -> str:
+            return dv.path("platform_metrics", "pods", i, key)
+
+        # The ghost filter is a render rule; the count names the pods it kept.
+        active_html = dv.total(
+            len(active_idx),
+            paths=[dv.counted("count", _pod_path(i, "pod_name")) for i in active_idx] or "0",
+            fmt=",d",
+        )
 
         # Aggregate by stage
         stage_agg: dict[str, dict] = {}
-        for pod in pipeline_pods:
+        for i in pipeline_idx:
+            pod = pods[i]
             stage = self._classify_pod_stage(pod)
             if stage not in stage_agg:
                 stage_agg[stage] = {
                     "pods": 0,
+                    "idx": [],
                     "cpu_sum": 0.0,
                     "cpu_max": 0.0,
                     "mem_sum": 0,
@@ -2923,6 +3117,7 @@ class ReportGenerator:
                 }
             agg = stage_agg[stage]
             agg["pods"] += 1
+            agg["idx"].append(i)
             agg["cpu_sum"] += pod.get("cpu_avg_cores", 0)
             agg["cpu_max"] += pod.get("cpu_max_cores", 0)
             agg["mem_sum"] += pod.get("memory_avg_bytes", 0)
@@ -2944,13 +3139,25 @@ class ReportGenerator:
             agg = stage_agg.get(stage)
             if not agg:
                 continue
+            idx = agg["idx"]
+
+            def _sum(key: str, value: float, *, gib: bool = False, _idx=idx) -> str:
+                if gib:
+                    return dv.total(
+                        value / (1024**3),
+                        paths=[dv.product(_pod_path(i, key), "/1073741824") for i in _idx],
+                        fmt=".1f",
+                        suffix=" GiB",
+                    )
+                return dv.total(value, paths=[_pod_path(i, key) for i in _idx], fmt=".2f")
+
             stage_rows.append(
                 f"<tr><td><strong>{stage}</strong></td>"
-                f"<td>{agg['pods']}</td>"
-                f"<td>{agg['cpu_sum']:.2f}</td>"
-                f"<td>{agg['cpu_max']:.2f}</td>"
-                f"<td>{agg['mem_sum'] / (1024**3):.1f} GiB</td>"
-                f"<td>{agg['mem_max'] / (1024**3):.1f} GiB</td></tr>"
+                f"<td>{dv.total(agg['pods'], paths=[dv.counted('count', _pod_path(i, 'pod_name')) for i in idx], fmt=',d')}</td>"
+                f"<td>{_sum('cpu_avg_cores', agg['cpu_sum'])}</td>"
+                f"<td>{_sum('cpu_max_cores', agg['cpu_max'])}</td>"
+                f"<td>{_sum('memory_avg_bytes', agg['mem_sum'], gib=True)}</td>"
+                f"<td>{_sum('memory_max_bytes', agg['mem_max'], gib=True)}</td></tr>"
             )
 
         # Collection error
@@ -3027,7 +3234,7 @@ class ReportGenerator:
         <section>
             <h2>Platform Metrics</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                Platform metrics collected over {duration:.0f}s | {len(pods)} pods observed | {len(active_pods)} active{ghost_note}
+                Platform metrics collected over {duration:.0f}s | {dv.count(len(pods), path="platform_metrics.pods")} pods observed | {active_html} active{ghost_note}
             </div>
             {error_note}
             {tier2_html}
@@ -3049,7 +3256,7 @@ class ReportGenerator:
             </table>
             <details style="margin-top: 1rem;">
                 <summary style="cursor: pointer; color: var(--text-muted); font-size: 0.85rem;">
-                    Per-pod detail ({len(active_pods)} pods)
+                    Per-pod detail ({active_html} pods)
                 </summary>
                 <table style="margin-top: 0.5rem;">
                     <thead>

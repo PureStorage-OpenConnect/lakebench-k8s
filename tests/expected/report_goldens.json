@@ -1,0 +1,155 @@
+{
+  "_about": "Hand-written expected phrases for the six R0 report goldens (tests/test_report_consistency.py). Each value was computed from the record's metrics.json, not from the renderer; 'from' names the inputs. A change that moves one of these edits this file by hand, and the reviewer checks the new value against the record. Phrases are matched in the page text with tags removed and whitespace collapsed.",
+  "1320bd": [
+    {
+      "text": "Scale Ratio: 100.8% Complete",
+      "from": "pipeline_benchmark.scores.scale_ratio 1.008"
+    },
+    {
+      "text": "Batch Jobs: 3/3 passed",
+      "from": "jobs[*].success: 3 of 3 true"
+    },
+    {
+      "text": "QpH improvement +12.1%",
+      "from": "pipeline_benchmark.scores.maintenance_value_pct 12.1"
+    },
+    {
+      "text": "Compaction ratio 1.1x",
+      "from": "scores.pre_compaction_file_count 65 / post_compaction_file_count 61"
+    },
+    {
+      "text": "silver 179s 18.4% 5,723 34.8%",
+      "from": "pipeline_benchmark.stages silver 178.8 s of the stage seconds; 8 x 4 x 178.8 core-seconds over all stages"
+    },
+    {
+      "text": "W3_round_tripping cycle 1,668 99.5%",
+      "from": "financial_scoring.typologies[cycle].recall 0.995"
+    },
+    {
+      "text": "W4_risk_propagation rapid_layering 98,479 68.4% 6.4%",
+      "from": "typologies[rapid_layering].recall, chance_by_rule.W4_risk_propagation 0.064"
+    },
+    {
+      "text": "Overall off-target rate (alerts touching no planted txn): 98.6%",
+      "from": "financial_scoring.fp_rate 0.986"
+    },
+    {
+      "text": "L1 escalation rate 10.8%; QA disagreement 14.2%",
+      "from": "tm_operations.ops.l1_escalation_rate, qa_disagreement_rate 0.1422"
+    }
+  ],
+  "be2b70": [
+    {
+      "text": "Scale Ratio: 111.4%",
+      "from": "pipeline_benchmark.scores.scale_ratio 1.114"
+    },
+    {
+      "text": "Batch Jobs: 2/3 passed",
+      "from": "jobs[*].success: gold-finalize false"
+    },
+    {
+      "text": "Jobs: 2/3",
+      "from": "jobs[*].success"
+    },
+    {
+      "text": "silver 812s 28.2% 25,974 46.4%",
+      "from": "stages: silver 8 x 4 x 811.7 s; shares over all stages"
+    },
+    {
+      "text": "gold 1,801s 62.5% 28,817 51.5%",
+      "from": "stages: gold 4 x 4 x 1801.1 s"
+    },
+    {
+      "text": "silver spark 811.7s",
+      "from": "pipeline_benchmark.stages silver elapsed_seconds 811.7"
+    },
+    {
+      "text": "8 4 x 48G 7.2",
+      "from": "stages silver CPU-hours: 8 executors x 4 cores x 811.7 s / 3600 = 7.21"
+    }
+  ],
+  "ebb26f": [
+    {
+      "text": "3 continuous jobs | 51,894,597 total rows processed",
+      "from": "streaming[*].total_rows_processed summed"
+    },
+    {
+      "text": "Streaming Jobs: 3/3 passed",
+      "from": "streaming[*].success"
+    },
+    {
+      "text": "first round 416.2, last round 402.4 (-3.3%) over 4 rounds",
+      "from": "pipeline_benchmark.benchmark_rounds[0].qph, [3].qph"
+    },
+    {
+      "text": "Benchmark Rounds: 4 rounds completed",
+      "from": "pipeline_benchmark.benchmark_rounds"
+    },
+    {
+      "text": "L1 escalation rate 11.3%",
+      "from": "tm_operations.ops.l1_escalation_rate"
+    },
+    {
+      "text": "54.0 CPU-hours requested",
+      "from": "streaming jobs: stage executors x cores x streaming[i].elapsed_seconds / 3600, summed = 54.0"
+    }
+  ],
+  "5105a0": [
+    {
+      "text": "Scale Ratio: 99.1% Complete",
+      "from": "pipeline_benchmark.scores.scale_ratio 0.991"
+    },
+    {
+      "text": "Batch Jobs: 3/3 passed",
+      "from": "jobs[*].success"
+    },
+    {
+      "text": "Compaction ratio 1.1x",
+      "from": "scores.pre_compaction_file_count 1200 / post_compaction_file_count 1098"
+    },
+    {
+      "text": "Silver consumed 43% of wall-clock time and 73% of compute.",
+      "from": "stages silver 191 s of 449 s; 6,102 of 8,374.5 core-seconds"
+    },
+    {
+      "text": "silver 191s 42.5% 6,102 72.9%",
+      "from": "stages silver"
+    }
+  ],
+  "1d17f4": [
+    {
+      "text": "3 continuous jobs | 9,151,389 total rows processed",
+      "from": "streaming[*].total_rows_processed summed"
+    },
+    {
+      "text": "first round 283.7, last round 191.5 (-32.5%) over 4 rounds",
+      "from": "pipeline_benchmark.benchmark_rounds[0].qph, [3].qph"
+    },
+    {
+      "text": "Streaming Jobs: 3/3 passed",
+      "from": "streaming[*].success"
+    }
+  ],
+  "233b69": [
+    {
+      "text": "Scale Ratio: 99.2% Complete",
+      "from": "pipeline_benchmark.scores.scale_ratio 0.992"
+    },
+    {
+      "text": "Batch Jobs: 3/3 passed",
+      "from": "jobs[*].success"
+    },
+    {
+      "text": "Query Failures: 0 failed",
+      "from": "benchmark.queries[*].success: none false"
+    },
+    {
+      "text": "8/8 queries passed",
+      "from": "benchmark.queries[*].success: 8 of 8"
+    },
+    {
+      "text": "silver 92s 30.6% 2,941",
+      "from": "stages silver 91.9 s of the stage seconds; 8 x 4 x 91.9 core-seconds"
+    }
+  ]
+}
