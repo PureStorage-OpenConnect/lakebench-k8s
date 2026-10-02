@@ -31,6 +31,12 @@ READERS: dict[str, str] = {
     "platform.kubernetes.context": "lakebench.deploy.destroy:_classify_buckets",
     "platform.kubernetes.namespace": "lakebench.config.schema:LakebenchConfig.get_namespace",
     "platform.kubernetes.create_namespace": "lakebench.deploy.destroy:destroy_all",
+    "platform.deps.maven_repository": "lakebench.deps.request:_deps_key",
+    "platform.deps.pypi_index": "lakebench.deps.request:_deps_key",
+    "platform.deps.duckdb_extension_repository": "lakebench.deps.request:_deps_key",
+    "platform.deps.storage_class": (
+        "lakebench.deploy.deps:DependencyServerDeployer._check_storage_class"
+    ),
     "platform.storage.s3.endpoint": (
         "lakebench.deploy.datagen:DatagenDeployer._clear_bronze_prefix_if_fresh"
     ),
