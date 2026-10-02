@@ -162,7 +162,25 @@ def test_run_refuses_a_mode_the_workload_does_not_declare(tmp_path, monkeypatch)
 # -- CLI display ------------------------------------------------------------
 
 
-def test_config_recipes_shows_states():
+@pytest.fixture
+def wide_consoles(monkeypatch):
+    """The CLI's module-level Rich consoles read COLUMNS once, at import, and
+    otherwise ask the process's terminal; an xdist worker has none, so its
+    tables were cut at 80 columns. Fix the width for these display tests."""
+    import sys
+
+    from rich.console import Console
+
+    import lakebench.cli  # noqa: F401  (the consoles exist once the CLI is imported)
+
+    for name, mod in list(sys.modules.items()):
+        if name.startswith("lakebench.cli") and mod is not None:
+            for value in vars(mod).values():
+                if isinstance(value, Console):
+                    monkeypatch.setattr(value, "_width", 300)
+
+
+def test_config_recipes_shows_states(wide_consoles):
     from lakebench.cli import app
 
     res = CliRunner().invoke(app, ["config", "recipes"], env={"COLUMNS": "300"})
@@ -173,7 +191,7 @@ def test_config_recipes_shows_states():
     assert "AML (financial) batch: unsupported" in res.output
 
 
-def test_config_show_shows_the_state(tmp_path, monkeypatch):
+def test_config_show_shows_the_state(tmp_path, monkeypatch, wide_consoles):
     from lakebench.cli import app
 
     cfg = tmp_path / "c.yaml"

@@ -101,10 +101,7 @@ cd datagen_rs && cargo build --release && cd ..
 ### Unit tests (mandatory)
 
 ```bash
-pytest tests/ -x
-ruff check src tests scripts
-ruff format --check src tests scripts
-mypy src/lakebench/
+make check-fast   # ruff, format check, mypy, then the unit tests in parallel
 
 # Rust
 cd datagen_rs

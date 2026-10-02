@@ -1,4 +1,4 @@
-.PHONY: help install dev test test-unit test-integration test-e2e test-extended test-stress lint typecheck fmt clean
+.PHONY: help install dev check-fast test test-unit test-integration test-e2e test-extended test-stress lint typecheck fmt clean
 
 help:
 	@echo "Lakebench Development Commands"
@@ -9,8 +9,9 @@ help:
 	@echo "  dev              Install with dev deps + pre-commit hooks"
 	@echo ""
 	@echo "Testing:"
-	@echo "  test             Run tests that need no cluster"
-	@echo "  test-unit        Run unit tests only (fast, no cluster needed)"
+	@echo "  check-fast       Lint, format check, mypy and the unit tests in parallel (XDIST_WORKERS=N caps workers)"
+	@echo "  test             The unit tests of check-fast, without the lint and type checks"
+	@echo "  test-unit        Run unit tests only, serially (slow AML statistics tests included)"
 	@echo "  test-integration Run integration tests (requires K8s/S3)"
 	@echo "  test-e2e         Run end-to-end tests (full workflow)"
 	@echo "  test-extended    Run scale matrix tests (1, 10, 50, 100)"
@@ -34,8 +35,27 @@ dev:
 	@echo "Dev environment ready. Pre-commit hooks installed."
 	@echo "Run 'make test' to verify setup."
 
+# The unit tier as CI's Lint job runs it: in parallel, one file per worker
+# (--dist loadfile), without the AML statistics tests marked slow (CI runs
+# those in the "AML statistics (slow)" job) and without the Spark tier. A -m
+# here replaces pyproject.toml's, so it repeats e2e and integration.
+# PYTHONPATH=src tests this checkout's code even when another checkout is
+# the installed one; XDIST_WORKERS=8 caps the workers on a shared host.
+PYTHON ?= python3
+XDIST_WORKERS ?= auto
+UNIT_PYTEST = PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} $(PYTHON) -m pytest tests/ -q \
+	-n $(XDIST_WORKERS) --dist loadfile -p no:cacheprovider \
+	-m "not slow and not e2e and not integration" \
+	--ignore=tests/spark --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
+
+check-fast:
+	ruff check src/ tests/ scripts/
+	ruff format --check src/ tests/ scripts/
+	mypy src/lakebench/
+	$(UNIT_PYTEST)
+
 test:
-	pytest tests/ -v -m "not e2e and not integration and not extended and not stress"
+	$(UNIT_PYTEST)
 
 test-unit:
 	pytest tests/ -v -m "not integration and not e2e"
@@ -58,14 +78,14 @@ test-cov:
 	@echo "Coverage report: htmlcov/index.html"
 
 lint:
-	ruff check src/ tests/
+	ruff check src/ tests/ scripts/
 
 typecheck:
 	mypy src/lakebench/
 
 fmt:
-	ruff format src/ tests/
-	ruff check --fix src/ tests/
+	ruff format src/ tests/ scripts/
+	ruff check --fix src/ tests/ scripts/
 
 clean:
 	rm -rf build/ dist/ *.egg-info .pytest_cache .mypy_cache .ruff_cache htmlcov/

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import math
 import re
 from pathlib import Path
 
@@ -620,3 +621,95 @@ def test_clean_venv_checks_the_reference_packages_test_reference_pins_checks():
     m = re.search(r"for name in \(([^)]*)\):", aml)
     assert m, "the aml step no longer loops over a literal tuple of package names"
     assert set(ast.literal_eval("(" + m.group(1) + ")")) == trp.CHECKED
+
+
+# -- QA-6: the fast path and the wall-time budgets ----------------------------
+
+_BUDGET = re.compile(
+    r"python scripts/ci_budget\.py --seconds (\d+) --label (?:\"[^\"]+\"|\S+) --\s"
+)
+
+
+def _budgeted_steps(workflow: str = "ci.yml") -> list[tuple[str, dict, dict, int]]:
+    """(job name, job, step, budget seconds) for every step run under ci_budget.py."""
+    out = []
+    for name, job in _load(workflow)["jobs"].items():
+        for step in job.get("steps") or []:
+            m = _BUDGET.search(" ".join(str(step.get("run", "")).split()) + " ")
+            if m:
+                out.append((name, job, step, int(m.group(1))))
+    return out
+
+
+def test_workflow_unit_step_uses_budget():
+    steps = {n: (j, st, b) for n, j, st, b in _budgeted_steps()}
+    assert "test" in steps, "the unit step is not run under scripts/ci_budget.py"
+    _, step, budget = steps["test"]
+    assert budget <= 900
+    run = " ".join(str(step["run"]).split())
+    assert "-n auto --dist loadfile" in run
+    # A -m on the command line replaces pyproject.toml's, so it repeats both.
+    assert '-m "not slow and not e2e and not integration"' in run
+    assert "--ignore=tests/spark" in run
+
+
+def test_lint_job_runs_make_check_fast_under_eight_minutes():
+    steps = {n: (j, st, b) for n, j, st, b in _budgeted_steps()}
+    assert "lint" in steps, "the Lint job does not run make check-fast under the budget"
+    _, step, budget = steps["lint"]
+    assert budget <= 480
+    assert str(step["run"]).rstrip().endswith("-- make check-fast")
+    assert "lint" in _load("ci.yml")["jobs"]["build"]["needs"]
+
+
+def test_budgeted_jobs_have_a_backstop_above_the_budget():
+    # timeout-minutes is only a backstop: above the budget (or a slow leg is
+    # killed before the budget can report it), at most 1.5 times it.
+    for name, job, _, budget in _budgeted_steps():
+        minutes = job.get("timeout-minutes")
+        assert minutes is not None, f"{name}: no timeout-minutes"
+        assert budget / 60 < minutes <= math.ceil(budget * 1.5 / 60), (name, budget, minutes)
+
+
+def _make_targets() -> dict[str, str]:
+    text = (ROOT / "Makefile").read_text().replace("\\\n", " ")
+    variables = dict(re.findall(r"^([A-Z_]+) \??= (.*)$", text, re.M))
+    targets: dict[str, str] = {}
+    current = None
+    for line in text.splitlines():
+        m = re.match(r"^([a-z][\w-]*):", line)
+        if m:
+            current = m.group(1)
+            targets[current] = ""
+        elif line.startswith("\t") and current:
+            body = line.strip()
+            while re.search(r"\$\(([A-Z_]+)\)", body):  # make expands recursively
+                body = re.sub(r"\$\(([A-Z_]+)\)", lambda v: variables[v.group(1)], body)
+            targets[current] += " ".join(body.split()) + "\n"
+    return targets
+
+
+def test_make_check_fast_matches_ci():
+    targets = _make_targets()
+    fast = targets["check-fast"]
+    for cmd in (
+        "ruff check src/ tests/ scripts/",
+        "ruff format --check src/ tests/ scripts/",
+        "mypy src/lakebench/",
+    ):
+        assert cmd in fast, cmd
+    assert "-m pytest tests/" in fast and "-n auto --dist loadfile" in fast
+    # This checkout's code, whatever is installed.
+    assert "PYTHONPATH=src" in fast
+    assert '-m "not slow and not e2e and not integration"' in fast
+    assert "--ignore=tests/spark" in fast
+    # make test is the same pytest line, without the lint and type checks.
+    assert targets["test"].strip() == fast.strip().splitlines()[-1]
+    assert "scripts/" in targets["lint"] and "scripts/" in targets["fmt"]
+
+
+def test_xdist_is_pinned_in_dev():
+    text = (ROOT / "pyproject.toml").read_text()
+    assert re.search(r'^\s*"pytest-xdist==\d+\.\d+\.\d+",', text, re.M), (
+        "pytest-xdist must be pinned"
+    )

@@ -45,13 +45,25 @@ dev environment in one step with `make dev`.
 
 ## Running Tests
 
-Run the unit test suite:
+Before pushing, run what CI's first job runs:
+
+```bash
+make check-fast
+```
+
+That is ruff, the format check and mypy, then the unit tests in parallel
+(`pytest-xdist`, one test file per worker) without the Spark tier and
+without the AML statistics tests marked `slow`, which CI runs in their own
+job. The tests import `src/` of this checkout (`PYTHONPATH=src`), whatever
+is installed, with one worker per CPU; `make check-fast XDIST_WORKERS=8`
+caps the workers on a shared machine, and `PYTHON=python3.11` picks the
+interpreter (default `python3`). `make test` is the same pytest command without the lint and
+type checks. To run the whole unit suite serially, slow tests included, and stop
+at the first failure:
 
 ```bash
 pytest tests/ -x -v --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
 ```
-
-The `-x` flag stops on the first failure, which is useful during development.
 
 End-to-end and integration tests require a live Kubernetes cluster with S3
 storage, a Spark Operator, and a Hive metastore. These are excluded from the
@@ -225,8 +237,9 @@ to see the full list.
 
 | Target | Description |
 |--------|-------------|
-| `make test` | Run the tests that need no cluster (excludes integration, e2e, extended and stress) |
-| `make test-unit` | Run every test not marked `integration` or `e2e` (`-m "not integration and not e2e"`); unlike `make test` it does not exclude `extended` or `stress` |
+| `make check-fast` | Ruff, format check and mypy on `src/`, `tests/` and `scripts/`, then the unit tests in parallel without `tests/spark` and the `slow` tests (run by CI's Lint job, budget 8 minutes) |
+| `make test` | The pytest command of `make check-fast` alone |
+| `make test-unit` | Run every test not marked `integration` or `e2e` (`-m "not integration and not e2e"`), serially, `slow` tests included |
 | `make test-integration` | Run integration tests (requires K8s and S3) |
 | `make test-e2e` | Run end-to-end tests (full workflow) |
 | `make test-extended` | Run scale matrix tests (scales 1, 10, 50, 100) |
@@ -237,8 +250,8 @@ to see the full list.
 
 | Target | Description |
 |--------|-------------|
-| `make lint` | Run ruff linter on `src/` and `tests/` (CI also lints `scripts/`) |
-| `make fmt` | Format `src/` and `tests/` with ruff and apply auto-fixes (CI also checks `scripts/`) |
+| `make lint` | Run ruff linter on `src/`, `tests/` and `scripts/`, as CI does |
+| `make fmt` | Format `src/`, `tests/` and `scripts/` with ruff and apply auto-fixes |
 | `make typecheck` | Run mypy type checker on `src/` |
 
 ### Maintenance
@@ -310,12 +323,17 @@ bug id, an internal plan, requirement or work-item id, or a gotcha number,
 none of which a reader of the package can look up; state the reason in
 words instead. A change to `tests/fixtures/citation_counts.json` that raises
 a count is a review blocker, except in the commit that lands the ratchet on
-a merge-train tree (`python tests/test_citations.py` retakes it there). The test job runs
-`pytest tests/ -rs` (excluding `tests/test_e2e.py` and
+a merge-train tree (`python tests/test_citations.py` retakes it there). The
+Lint job runs `make check-fast` on Python 3.11 under an 8-minute budget,
+alongside the docs and other static checks: `scripts/ci_budget.py` fails the step when a command runs over its
+budget, records the time in the step summary, and leaves the job's
+`timeout-minutes` (1.5 times the budget) as a backstop. The test job runs
+the same parallel unit tests (`-n auto --dist loadfile`, without
+`tests/spark` and the `slow` tests, excluding `tests/test_e2e.py` and
 `tests/test_integration.py`) on Python 3.10 and 3.13, the oldest and newest
-supported versions. It runs to the end rather than stopping at the first
-failure, prints every skip reason, and a failure on one Python version does
-not cancel the other (`fail-fast: false`). On 3.13 it checks per-file
+supported versions, under a 15-minute budget. It runs to the end rather
+than stopping at the first failure, prints every skip reason, and a failure
+on one Python version does not cancel the other (`fail-fast: false`). On 3.13 it checks per-file
 coverage floors with `scripts/check_coverage.py --suite unit` and keeps the
 per-file report as the `coverage-unit` artifact for 30 days; floors are
 raised from that report, never lowered. The Spark job runs on two legs,
@@ -329,8 +347,8 @@ the tests marked `slow` (the heavy fidelity-gate fits, the scale invariance
 check and the Spark fidelity gate over silver) on Python 3.11 with the pinned
 `[aml]` libraries, on every push to `main`, `integrate/**`, `train/*` and
 tags (through the release workflow's call) and on every pull request to
-`integrate/**` or `main`; it is not run on other branch pushes. Until the
-fast path deselects them, the unit legs run the `slow` tests as well. It also reruns the D8 power simulation in a second
+`integrate/**` or `main`; it is not run on other branch pushes, and the
+unit legs and `make check-fast` deselect the `slow` tests. It also reruns the D8 power simulation in a second
 environment with the numpy and scipy versions the pre-registration recorded
 its output hash with, since that guard skips on the `[aml]` pins.
 The Rust job runs `cargo fmt

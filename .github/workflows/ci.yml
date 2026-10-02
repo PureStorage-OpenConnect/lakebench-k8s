@@ -36,6 +36,7 @@ jobs:
   lint:
     name: Lint & Type Check
     runs-on: ubuntu-24.04
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -48,25 +49,26 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Ruff lint
-        run: ruff check src/ tests/ scripts/
-
-      - name: Ruff format check
-        run: ruff format --check src/ tests/ scripts/
-
-      - name: mypy
-        run: mypy src/lakebench/
+      # `make check-fast`, what a contributor runs before pushing: ruff, the
+      # format check, mypy and the parallel unit tier without the slow AML
+      # statistics tests, under an 8-minute budget (target 5). The first
+      # signal: the test legs below run the same unit tier on 3.10 and 3.13.
+      - name: make check-fast
+        run: python scripts/ci_budget.py --seconds 480 --label "make check-fast" -- make check-fast
 
       # Every tracked doc, script and top-level .md is linked from the docs
       # index or read by code, tests or CI (tests/test_doc_readers.py runs
       # the same check with its planted cases).
       - name: Docs have readers
+        # Runs even when make check-fast fails, so one push reports both.
+        if: success() || failure()
         run: python scripts/check_doc_readers.py
 
       # Every action in .github/workflows is pinned by SHA and listed in
       # .github/action-runtimes.json with its runs.using value. This reads
       # each action.yml at its pinned SHA and fails if the map has drifted.
       - name: Action runtimes
+        if: success() || failure()
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/check_action_runtimes.py --verify
@@ -74,6 +76,8 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-24.04
+    # A backstop 1.5 times the step budget below; the budget is the signal.
+    timeout-minutes: 23
     strategy:
       # One failing Python version must not cancel the other: both results
       # are needed to tell a version-specific failure from a real one.
@@ -97,9 +101,15 @@ jobs:
       # the number, and the other entries skip the tracing overhead. The
       # version named here must be in the matrix above, or coverage and the
       # floor check stop silently (tests/test_workflows.py checks this).
+      # In parallel (one file per worker), under a 15-minute budget
+      # (scripts/ci_budget.py fails the step when it runs over and records the
+      # time in the step summary). The AML statistics tests marked slow run in
+      # the "AML statistics (slow)" job and the Spark tier in its own job.
       - name: Run unit tests
         run: >-
-          pytest tests/ -rs --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
+          python scripts/ci_budget.py --seconds 900 --label "unit tests (Python ${{ matrix.python-version }})" --
+          pytest tests/ -n auto --dist loadfile -m "not slow and not e2e and not integration"
+          -rs --tb=short --ignore=tests/spark --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
           ${{ matrix.python-version == '3.13' && '--cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered' || '' }}
 
       # Per-file floors on the scoring and metrics code (GOALS P8.3).
