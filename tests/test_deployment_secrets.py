@@ -539,3 +539,53 @@ def test_create_race_falls_through_to_sync():
     ):
         PolarisDeployer(engine)._create_polaris_db("a")
     assert any(s.startswith("ALTER ROLE polaris") for s in sqls)
+
+
+# -- brief review of the 10-02 rebase -------------------------------------------
+
+
+@pytest.mark.parametrize("fresh", [True, False])
+def test_an_empty_stored_client_secret_is_refused_not_used(fresh):
+    """A tampered Secret holding "" must never bootstrap Polaris or be synced
+    to the role. Reverted, the empty value was returned as the secret."""
+    core = FakeCore({("a", ds.POLARIS_CLIENT_SECRET): {ds.POLARIS_CLIENT_KEY: ""}})
+    with pytest.raises(ds.DeploymentSecretError, match="empty"):
+        ds.ensure_polaris_client_secret(core, _cfg(), "a", fresh=fresh)
+    assert core.creates == [] and core.replaces == []
+
+
+def test_an_empty_stored_db_password_is_refused():
+    core = FakeCore({("a", ds.POLARIS_DB_SECRET): {ds.POLARIS_DB_KEY: ""}})
+    with pytest.raises(ds.DeploymentSecretError, match="empty"):
+        ds.ensure_polaris_db_password(core, _cfg(), "a", role_exists=True)
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        None,
+        "(?i)secret|password|mytoken",
+        "(?i)secret|password|token|credential",
+        "[unbalanced",
+        "(?x) secret # hide",
+        "\\Qmy.custom.key\\E",
+    ],
+)
+def test_job_redaction_regex_always_hides_the_catalog_credential(user):
+    """A user's spark.redaction.regex is kept, with Lakebench's terms in front:
+    the Polaris client secret sits in sparkConf as ...catalog.<name>.credential.
+    Reverted (setdefault), a user regex without 'credential' exposed it."""
+    import re
+
+    from lakebench.modules.pipeline_engines.spark.job import (
+        SPARK_REDACTION_REGEX,
+        redaction_regex,
+    )
+
+    regex = redaction_regex(user)
+    if not user:
+        assert regex == SPARK_REDACTION_REGEX
+        return
+    assert regex.endswith("|" + user)  # the user's part is kept whole
+    head = regex[: -len(user) - 1]
+    assert re.search(head, "spark.sql.catalog.lakehouse.credential")

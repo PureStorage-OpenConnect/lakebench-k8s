@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 SPARK_REDACTION_REGEX = "(?i)secret|password|token|access[.]?key|credential"
 
 
+def redaction_regex(user: str | None) -> str:
+    """``spark.redaction.regex`` for a job: Lakebench's, or the user's with
+    Lakebench's terms in front, so it always hides the catalog ``credential``
+    key (the Polaris client secret in sparkConf). The terms go first so a
+    ``(?x)`` comment or an open ``\\Q`` in the user's part cannot swallow
+    them; Spark compiles the result with Java regex, which accepts the user's
+    inline flags after the alternation."""
+    if not user or user == SPARK_REDACTION_REGEX:
+        return SPARK_REDACTION_REGEX
+    return f"(?i:secret|password|token|access[.]?key|credential)|{user}"
+
+
 def _one_line(e: BaseException) -> str:
     """First line of an exception's text (an ApiException runs to many)."""
     text = str(e).strip()
@@ -1962,7 +1974,10 @@ class SparkJobManager:
         spark_conf = {**SPARK_CONF_DEFAULTS, **cfg.spark.conf}
         # Spark's default redaction misses `...catalog.<name>.credential`
         # (the Polaris client secret); add it so the UI and event log hide it.
-        spark_conf.setdefault("spark.redaction.regex", SPARK_REDACTION_REGEX)
+        # A user's own regex is kept but always widened to cover it.
+        spark_conf["spark.redaction.regex"] = redaction_regex(
+            spark_conf.get("spark.redaction.regex")
+        )
 
         # Apply per-job shuffle partition count (scales with executor count)
         spark_conf["spark.sql.shuffle.partitions"] = shuffle_partitions

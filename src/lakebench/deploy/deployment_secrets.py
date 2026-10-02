@@ -59,7 +59,9 @@ def _generate(nbytes: int) -> str:
 
 def read_secret_key(core_v1: Any, namespace: str, name: str, key: str) -> str | None:
     """The decoded value of ``key`` in Secret ``name``; None when the Secret is
-    absent. A Secret without the key, or any other API error, raises."""
+    absent. A Secret without the key, with an empty value, or any other API
+    error raises: an empty stored password must never be synced to a role or
+    used to bootstrap Polaris."""
     from kubernetes.client.rest import ApiException
 
     try:
@@ -74,7 +76,13 @@ def read_secret_key(core_v1: Any, namespace: str, name: str, key: str) -> str | 
             f"Secret {name} in namespace {namespace} has no key {key!r}; restore it or destroy "
             "the deployment"
         )
-    return base64.b64decode(data[key]).decode("utf-8")
+    value = base64.b64decode(data[key]).decode("utf-8")
+    if not value:
+        raise DeploymentSecretError(
+            f"Secret {name} in namespace {namespace} has an empty {key!r}; restore it or destroy "
+            "the deployment"
+        )
+    return value
 
 
 def _labels(cfg: LakebenchConfig, component: str) -> dict[str, str]:

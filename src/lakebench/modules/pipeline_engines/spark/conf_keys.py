@@ -10,8 +10,9 @@ layers, later ones winning:
    Kubernetes settings. A user value for one of them would be overwritten,
    so the config refuses it instead of ignoring it.
 
-``spark.driver.maxResultSize`` and ``spark.redaction.regex`` are the keys
-Lakebench writes only when the user did not (``USER_OVERRIDABLE_SPARK_KEYS``).
+``spark.driver.maxResultSize`` is written only when the user did not set it,
+and ``spark.redaction.regex`` keeps a user value with Lakebench's terms in
+front (``USER_OVERRIDABLE_SPARK_KEYS``: a user value for either is accepted).
 
 This module imports nothing from lakebench, so the config schema can import
 it without a cycle.
@@ -32,9 +33,10 @@ SPARK_CONF_DEFAULTS: dict[str, str] = {
     "spark.memory.storageFraction": "0.3",
 }
 
-# Written only when the user did not set it. The redaction regex hides the
-# Polaris client secret (``...catalog.<name>.credential``) in the Spark UI and
-# event log; a user may widen it.
+# Keys a user may set. maxResultSize is written only when the user did not;
+# the redaction regex (which hides the Polaris client secret,
+# ``...catalog.<name>.credential``, in the Spark UI and event log) keeps a
+# user's regex with Lakebench's terms in front (job.redaction_regex).
 USER_OVERRIDABLE_SPARK_KEYS: frozenset[str] = frozenset(
     {"spark.driver.maxResultSize", "spark.redaction.regex"}
 )

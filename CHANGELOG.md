@@ -338,7 +338,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the S3 keys and the Polaris client secret from Secret-backed env vars, and
   Trino reads the client secret through `${ENV:POLARIS_CLIENT_SECRET}`. The
   Spark job `sparkConf` S3 keys stay literal until v1.8; `spark.redaction.regex`
-  now also hides `credential` keys in the Spark UI and event log.
+  now also hides `credential` keys in the Spark UI and event log (a user's
+  own `spark.redaction.regex` is kept, with Lakebench's terms added in front). A Secret
+  holding an empty password or client secret stops `deploy` instead of being
+  used.
 - **Grafana has no fixed password.** A new shared observability install gets
   a generated password in the Secret `lakebench-observability-grafana`, and
   `deploy` prints the command that reads it. An existing install keeps
