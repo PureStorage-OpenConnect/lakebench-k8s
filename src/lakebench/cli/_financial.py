@@ -76,9 +76,13 @@ def _get_job_manager(cfg):
         context=cfg.platform.kubernetes.context,
         namespace=cfg.get_namespace(),
     )
+    from lakebench.cli._helpers import load_deps_handle
     from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
 
+    # Before the scripts or any job: the deployment's verified set.
+    deps_handle = load_deps_handle(cfg)
     job_manager = get_engine(cfg, k8s)
+    job_manager.deps = deps_handle  # type: ignore[attr-defined]
     try:
         scripts_ok = job_manager.deploy_scripts_configmap()
     except ScriptsMapError as e:

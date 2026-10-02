@@ -2735,6 +2735,16 @@ def _run_sustained(
         )
     )
 
+    from lakebench.cli._helpers import (
+        load_deps_handle,
+        record_deps_pods,
+        record_deps_provenance,
+    )
+
+    # Before anything is recorded: the streams need the deployment's verified
+    # dependency set; a refusal exits 3 or 4 with no run saved.
+    deps_handle = load_deps_handle(cfg)
+
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.RUN, {"sustained": True, "duration": run_duration})
 
@@ -2748,6 +2758,7 @@ def _run_sustained(
 
     config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    record_deps_provenance(collector.current_run, deps_handle)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
 
@@ -2812,6 +2823,7 @@ def _run_sustained(
             namespace=cfg.get_namespace(),
         )
         job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
+        job_manager.deps = deps_handle
         monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
 
         _short = short_window_problem(cfg, run_duration)
@@ -3854,6 +3866,8 @@ def _run_sustained(
         pipeline_success = False
         raise
     finally:
+        # Before the streams stop, while their drivers still exist.
+        record_deps_pods(collector.current_run, cfg, deps_handle)
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
         if _total_s3_objects is None:

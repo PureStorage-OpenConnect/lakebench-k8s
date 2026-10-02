@@ -417,3 +417,24 @@ def consumer_context(handle: DepsHandle) -> dict[str, Any]:
             ["/opt/spark/jars/*", *(f"/extra-jars/{f}" for f in handle.manifest["jar_order"])]
         ),
     }
+
+
+def provenance_block(handle: DepsHandle) -> dict[str, Any]:
+    """``provenance.deps`` of a run (design s2.8): what set its jobs ran."""
+    man = handle.manifest
+    return {
+        "pinset_sha256": handle.pinset_sha256,
+        "request_sha256": handle.request_sha256,
+        "repositories": list(man.get("repositories") or []),
+        "pypi_index": man.get("pypi_index", ""),
+        "groups": {
+            g: [{"file": e["file"], "sha256": e["sha256"], "size": e["size"]} for e in entries]
+            for g, entries in (man.get("groups") or {}).items()
+        },
+        "python": dict(man.get("python") or {}),
+        "overlaps": list(man.get("overlaps") or []),
+        "resolved_at": man.get("resolved_at"),
+        "server_pod": handle.server_pod_uid,
+        "pods_checked": None,
+        "pod_mismatches": [],
+    }

@@ -16,8 +16,8 @@ path yet says so.
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout` |
 | 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `config.upgrade_refused` |
-| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `destroy.redeployed`, `deploy.identity_foreign`, `run.bronze_nonempty`, `lease.held` |
-| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable` |
+| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `destroy.redeployed`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `lease.held` |
+| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
 | 10 | `COMPARE_NOT_COMPARABLE` | compare: NOT COMPARABLE. | no command yet |
@@ -49,8 +49,11 @@ the CLI down every path listed here and checks the code.
 | `destroy.redeployed` | 3 | "Destroy NOT completed": the namespace now belongs to a newer deployment |
 | `lease.held` | 3 | another command holds the cluster lock lease |
 | `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix without --regenerate |
+| `run.deps_mismatch` | 3 | the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
 | `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
+| `run.deps_missing` | 4 | the deployment has no dependency server (deployed by 1.6, or never deployed) |
+| `run.deps_stale` | 4 | the dependency set is not verified for this config: the deploy did not finish, the request changed since deploy, or the server has no Ready pod |
 | `run.prereq_failed` | 4 | a `run` preflight check failed |
 | `s3.unreachable` | 4 | `generate` or `run --generate` cannot read the bronze bucket to check it is empty |
 | `confirm.declined` | 5 | a confirmation prompt was answered no |

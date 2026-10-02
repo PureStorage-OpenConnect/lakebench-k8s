@@ -551,3 +551,66 @@ def test_trino_worker_claims_are_deleted(monkeypatch):
             )
         _destroy(rec, cfg)
         assert not [k for k in rec.store if k[0] == "persistentvolumeclaims" and k[1] == NS]
+
+
+def test_two_deployments_isolated(monkeypatch, tmp_path):
+    """Deployments A and B, each with its dependency server, deployed on one
+    fake; destroying A (namespace kept) touches nothing of B's: B's lb-deps
+    objects, its ConfigMaps and its deps-set annotation are unchanged, and
+    no delete lands outside A's namespace (DEP-2 s2.11)."""
+    import copy
+
+    from lakebench.deploy.engine import DeploymentEngine
+    from lakebench.deps.manifest import ANNOTATION_DEPS_SET, SERVER_NAME
+    from lakebench.k8s.client import K8sClient
+
+    _instant_waits(monkeypatch)
+    a = _config("hive-iceberg-spark-thrift", "c360-batch", tmp_path)
+    b = _config("hive-iceberg-spark-thrift", "c360-batch", tmp_path)
+    b.name = "u02"
+    b.platform.kubernetes.namespace = "u02"
+    for layer in ("bronze", "silver", "gold"):
+        setattr(b.platform.storage.s3.buckets, layer, f"u02-{layer}")
+    with recording() as rec:
+        rec.teardown_check = False
+        rec.for_config(b)
+        _seed_cluster(rec)
+        engine_b = DeploymentEngine(b, k8s_client=K8sClient(namespace="u02"))
+        assert all(r.status.value != "failed" for r in engine_b.deploy_all())
+        assert engine_b.deps is not None and ".u02.svc" in engine_b.deps.base_url
+        rec.for_config(a)
+        engine_a = DeploymentEngine(a, k8s_client=K8sClient(namespace=NS))
+        res_a = engine_a.deploy_all()
+        assert all(r.status.value != "failed" for r in res_a), [
+            (r.component, r.message) for r in res_a if r.status.value == "failed"
+        ]
+        assert f".{NS}.svc" in engine_a.deps.base_url
+        b_objects = {k: copy.deepcopy(v) for k, v in rec.store.items() if k[1] == "u02"}
+        assert ("deployments", "u02", SERVER_NAME) in b_objects
+        b_ns = rec.store[("namespaces", None, "u02")].metadata.annotations
+        assert b_ns.get(ANNOTATION_DEPS_SET) == engine_b.deps.pinset_sha256
+        before = len(rec.calls)
+
+        _destroy(rec, a)
+
+        after = rec.calls[before:]
+        assert not [c for c in after if c.mutating and c.namespace == "u02"]
+        # The only deletes outside A's namespace are A's own SecretClasses.
+        outside = [c for c in after if c.deleting and c.namespace != NS]
+        assert {c.name for c in outside} <= {
+            f"lakebench-s3-credentials-{NS}",
+            f"lakebench-s3-ca-cert-{NS}",
+        }
+        assert {k: v for k, v in rec.store.items() if k[1] == "u02"} == b_objects
+        assert rec.store[("namespaces", None, "u02")].metadata.annotations == b_ns
+        # A's own server objects and annotation are gone.
+        assert ("deployments", NS, SERVER_NAME) not in rec.store
+        anns = rec.store[("namespaces", None, NS)].metadata.annotations or {}
+        assert ANNOTATION_DEPS_SET not in anns
+        # The annotation goes before any teardown: a run starting mid-destroy
+        # sees no verified set.
+        first_patch = min(
+            i for i, c in enumerate(after) if c.kind == "namespaces" and c.verb == "patch"
+        )
+        first_delete = min(i for i, c in enumerate(after) if c.deleting)
+        assert first_patch < first_delete

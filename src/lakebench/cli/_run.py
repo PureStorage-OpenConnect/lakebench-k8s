@@ -18,10 +18,13 @@ from lakebench.cli._helpers import (
     console,
     enforce_bronze_regenerate,
     journal_open,
+    load_deps_handle,
     print_error,
     print_info,
     print_success,
     print_warning,
+    record_deps_pods,
+    record_deps_provenance,
     resolve_config_path,
     write_run_report,
 )
@@ -1926,6 +1929,10 @@ def run(
 
     no_query_engine, skip_benchmark = no_query_engine_skip(cfg, skip_benchmark)
 
+    # Before anything is recorded: the jobs need the deployment's verified
+    # dependency set; a refusal exits 3 or 4 with no run saved.
+    deps_handle = load_deps_handle(cfg)
+
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
     console.print()
     console.print("[bold dim]Phase 2/7: Infrastructure[/bold dim]")
@@ -1954,6 +1961,7 @@ def run(
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    record_deps_provenance(collector.current_run, deps_handle)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
 
@@ -2023,6 +2031,7 @@ def run(
         )
 
         job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
+        job_manager.deps = deps_handle
         monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
 
         # Deploy scripts ConfigMap -- must succeed or pipeline jobs will fail
@@ -3152,6 +3161,7 @@ def run(
             console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
 
         # Always save metrics, even on failure
+        record_deps_pods(collector.current_run, cfg, deps_handle)
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
             # LB-123: attach folded-in financial recall scoring (if any) so it

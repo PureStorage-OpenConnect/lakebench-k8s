@@ -361,6 +361,17 @@ def _c360_gate(metrics: PipelineMetrics) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
+    """A FAIL reason when a pod of the run ran another dependency set than
+    the run recorded (``provenance.deps.pod_mismatches``)."""
+    deps = (getattr(metrics, "provenance", None) or {}).get("deps")
+    mismatches = (deps or {}).get("pod_mismatches") if isinstance(deps, dict) else None
+    if not mismatches:
+        return None
+    pods = ", ".join(f"{p.get('pod')} on {str(p.get('pinset'))[:12]}" for p in mismatches[:5])
+    return f"pods ran different dependency sets ({pods})"
+
+
 def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     """Compute a ``Verdict`` for a completed ``PipelineMetrics`` run.
 
@@ -386,6 +397,9 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     c360_outcome, c360_reason = _c360_gate(metrics)
     if c360_outcome is not None:
         gate_outcomes["c360"] = c360_outcome
+    deps_reason = _deps_pods_reason(metrics)
+    if deps_reason is not None:
+        gate_outcomes["deps"] = "FAIL"
 
     reasons: list[str] = []
     if not exit_ok:
@@ -395,6 +409,8 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
             reasons.append(r)
     if c360_reason and c360_reason not in reasons:
         reasons.append(c360_reason)
+    if deps_reason is not None:
+        reasons.append(deps_reason)
     for name, outcome in gate_outcomes.items():
         if outcome == "FAIL":
             marker = f"Gate '{name}' FAILED"

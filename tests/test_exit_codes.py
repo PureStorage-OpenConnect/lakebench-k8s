@@ -163,7 +163,6 @@ PLANNED_BY = {
     "reproduce.nonce_changed": "CC-4",
     "reproduce.verify_out_of_band": "ER-13",
     "run.args": "CC-6",
-    "run.deps_missing": "SD-5c",
     "run.interrupted": "CD-16",
     "run.namespace_gone": "CD-17",
     "run.protected_corpus": "AM-22",
@@ -835,6 +834,61 @@ def _config_name(path: Path) -> str:
     raise AssertionError(f"no name in {path}")
 
 
+from lakebench.deps.runtime import load_handle as _real_load_handle  # noqa: E402
+
+
+def _deps_cluster(monkeypatch, *, annotation: str | None, manifest: dict | None):
+    """`run` up to its dependency-set check, against a namespace whose
+    annotation and lb-deps-manifest ConfigMap are given; the real check."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.deps import runtime
+    from tests import test_datagen_timeout_and_regenerate as dg
+
+    dg._stub_full_run(monkeypatch)
+    monkeypatch.setattr(runtime, "load_handle", _real_load_handle)
+    core = MagicMock()
+    anns = {"lakebench.deployment/deps-set": annotation} if annotation else {}
+    core.read_namespace.return_value = SimpleNamespace(metadata=SimpleNamespace(annotations=anns))
+
+    def read_cm(name, ns):
+        if name == "lb-deps-manifest" and manifest is not None:
+            import json
+
+            return SimpleNamespace(data={"manifest.json": json.dumps(manifest)})
+        raise ApiException(status=404)
+
+    core.read_namespaced_config_map.side_effect = read_cm
+    core.list_namespaced_pod.return_value = SimpleNamespace(items=[])
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    return dg
+
+
+def _scenario_run_deps_missing(monkeypatch, tmp_path):
+    dg = _deps_cluster(monkeypatch, annotation=None, manifest=None)
+    return _runner().invoke(app, ["run", str(dg._write_cfg(tmp_path)), "--skip-preflight"])
+
+
+def _scenario_run_deps_stale(monkeypatch, tmp_path):
+    dg = _deps_cluster(monkeypatch, annotation="p" * 64, manifest={"request_sha256": "x" * 64})
+    return _runner().invoke(app, ["run", str(dg._write_cfg(tmp_path)), "--skip-preflight"])
+
+
+def _scenario_run_deps_mismatch(monkeypatch, tmp_path):
+    from lakebench.config import load_config
+    from lakebench.deps.request import select_request
+    from tests.test_deps_manifest import fake_shown
+
+    dg = _deps_cluster(monkeypatch, annotation=None, manifest=None)
+    cfg_path = dg._write_cfg(tmp_path)
+    shown = fake_shown(select_request(load_config(cfg_path)))
+    _deps_cluster(monkeypatch, annotation="0" * 64, manifest=shown)  # another pinset
+    return _runner().invoke(app, ["run", str(cfg_path), "--skip-preflight"])
+
+
 SCENARIOS = {
     "config.upgrade_refused": _scenario_config_upgrade_refused,
     "version.ok": _scenario_version_ok,
@@ -856,6 +910,9 @@ SCENARIOS = {
     "run.bronze_nonempty": _scenario_run_bronze_nonempty,
     "run.datagen_timeout": _scenario_run_datagen_timeout,
     "run.prereq_failed": _scenario_run_prereq_failed,
+    "run.deps_missing": _scenario_run_deps_missing,
+    "run.deps_stale": _scenario_run_deps_stale,
+    "run.deps_mismatch": _scenario_run_deps_mismatch,
     "run.namespace_missing_no_yes": _scenario_run_namespace_missing_no_yes,
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
@@ -875,6 +932,9 @@ EXPECTED_STDERR = {
     "run.bronze_nonempty": "Refusing to generate over it",
     "s3.unreachable": "refusing to generate",
     "run.prereq_failed": "ERROR Prerequisites not met",
+    "run.deps_missing": "has no dependency server",
+    "run.deps_stale": "resolved for another request",
+    "run.deps_mismatch": "does not check",
     "run.namespace_missing_no_yes": "does not exist",
     "cli.bad_argument": "ERROR Unknown recipe: no-such-recipe",
     "config.unsupported": "Unsupported combination, refused",

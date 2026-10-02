@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Breaking changes
+- **`run` needs a 1.7 deploy.** Spark jobs, Spark Thrift and DuckDB now take
+  every jar and wheel from the deployment's dependency server, so `run`,
+  continuous runs and the `financial` commands check the deployment's set
+  before anything is recorded or submitted. A deployment made by 1.6 exits 4
+  ("this deployment has no dependency server; run `lakebench deploy` once");
+  so does one whose last deploy did not finish its dependency step, whose
+  config changed since deploy (the changed request fields are named, which
+  includes a Lakebench upgrade that changed the resolver), or whose server
+  has no Ready pod. A recorded set that does not check, a replaced server on
+  another set, or a Thrift or DuckDB pod on another set exits 3. New exit
+  paths `run.deps_stale` (4) and `run.deps_mismatch` (3); `run.deps_missing`
+  (4) is live. Redeploy once after upgrading.
+- `spark.conf` may no longer set `spark.jars`, `spark.submit.pyFiles`,
+  `spark.jars.packages`, `spark.jars.repositories`, `spark.jars.ivy`,
+  `spark.jars.ivySettings` or `spark.driver.extraClassPath` /
+  `spark.executor.extraClassPath`: Lakebench sets the jars from the verified
+  set, and a run that sets one is refused when its manifest is built.
+
 ### Added
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
@@ -130,6 +149,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   job installs, so a local gate fits the same model as the cluster.
 
 ### Changed
+- **Nothing resolves from Maven or PyPI at run time.** Spark jobs name the
+  set's jars by URL (`spark.jars`, in the order `--packages` used to load
+  them; `spark.submit.pyFiles` for the Delta jar) and set no
+  `spark.jars.packages`, repositories or Ivy cache; the Spark Operator
+  controller and the drivers resolve nothing. The AML reference job installs
+  its wheels from the set with `--no-index --require-hashes` into the same
+  `/opt/lb-pydeps`. Spark Thrift copies the set from the server and puts it
+  on its driver classpath after the image's jars, in the jobs' jar order
+  (before, the jars were copied into `/opt/spark/jars` in directory order).
+  DuckDB installs its wheel and extensions from the set and runs with
+  extension autoinstall off. Spark Thrift and DuckDB use the Recreate
+  strategy, and deploy waits until their pod runs the deployment's set.
+  Every job, Thrift and DuckDB pod carries `lakebench.io/deps-set`.
+- A run records `provenance.deps` (the set's pinset, request, repositories,
+  files and Python versions) and, at the end, checks the pinset of this
+  run's driver pods and the query engine pods (`pods_checked`,
+  `pod_mismatches`); a mismatch fails the verdict with "pods ran different
+  dependency sets". `benchmark` and `query` do not add results to the latest
+  run when the query engine now runs another set than that run recorded.
+- A Spark stage that fails fetching a jar from the dependency server says so
+  (not served, server error, unreachable), and a failed driver init
+  container is named in the stage failure.
+- `destroy` removes the `lakebench.deployment/deps-set` annotation right
+  after its ownership check, before any teardown.
 - typer is capped below 0.28 (`typer>=0.12.0,<0.28`), so a new typer minor
   cannot change the CLI without a tested raise of the cap.
 - The `[dev]` extra includes `[aml]`, so a development install now gets the

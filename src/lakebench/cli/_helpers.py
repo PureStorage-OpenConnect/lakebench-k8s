@@ -346,3 +346,33 @@ def write_run_report(metrics_storage, run_id: str) -> Path | None:
         return None
     print_info(f"Report written to {path}")
     return path
+
+
+def load_deps_handle(cfg):
+    """The deployment's verified dependency set for the Spark jobs:
+    called before anything is recorded or submitted. A typed refusal
+    (``run.deps_missing``, ``run.deps_stale``, ``run.deps_mismatch``)
+    propagates to the CLI's error handler."""
+    from lakebench.deps import runtime
+
+    handle = runtime.load_handle(cfg, None)
+    print_info(f"Dependency set {handle.pinset_sha256[:12]} verified")
+    return handle
+
+
+def record_deps_provenance(run, handle) -> None:
+    """``provenance.deps`` from the run-start handle."""
+    from lakebench.deps.manifest import provenance_block
+
+    if run is not None and handle is not None:
+        run.provenance = {**(run.provenance or {}), "deps": provenance_block(handle)}
+
+
+def record_deps_pods(run, cfg, handle) -> None:
+    """The run-end check that every pod of this run named the set
+    (``provenance.deps.pods_checked`` and ``pod_mismatches``)."""
+    from lakebench.deps import runtime
+
+    if run is None or handle is None or not (run.provenance or {}).get("deps"):
+        return
+    run.provenance["deps"].update(runtime.check_pods(cfg, handle, run.start_time))

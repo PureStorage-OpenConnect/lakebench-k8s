@@ -33,12 +33,16 @@ results as JSON.
 
 ### Extension installation
 
-The DuckDB pod installs the Python `duckdb` module at startup via `pip`,
-pinned to `duckdb.version` (default 1.5.5),
-then runs `INSTALL iceberg` and `INSTALL httpfs` to download the required
-DuckDB extensions. The startup probe verifies both extensions load
-successfully before the pod is marked ready. This means the pod needs
-internet access on first boot (or pre-cached extensions in a custom image).
+The DuckDB wheel (`duckdb.version`, default 1.5.5) and the `httpfs`,
+`iceberg` and `avro` extensions are part of the deployment's dependency set:
+the deploy resolves them once onto the `lb-deps` server, and the DuckDB
+pod's init container copies them from there, checking every file's sha256
+(`pip install --no-index --require-hashes`, and `lb_deps.py fetch` for the
+extensions). Queries run with `autoinstall_known_extensions=false`, so a
+missing extension fails instead of downloading. The startup probe verifies
+both extensions load before the pod is marked ready. The pod needs no
+internet access; only the deploy-time resolve does (or a mirror, see
+`platform.deps`).
 
 ### Iceberg table access
 

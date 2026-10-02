@@ -684,7 +684,12 @@ added at runtime.
 
 The `spark.conf` section accepts arbitrary Spark configuration key-value pairs.
 These are passed directly to the SparkApplication manifest. The defaults below
-are proven at 1 TB+ scale.
+are proven at 1 TB+ scale. The keys that load jars (`spark.jars`,
+`spark.submit.pyFiles`, `spark.jars.packages`, `spark.jars.repositories`,
+`spark.jars.ivy`, `spark.jars.ivySettings`, `spark.driver.extraClassPath`,
+`spark.executor.extraClassPath`) are Lakebench's: the jobs take their jars
+from the deployment's verified dependency set, and a config that sets one is
+refused.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
