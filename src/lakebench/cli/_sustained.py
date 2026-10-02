@@ -2978,6 +2978,8 @@ def _run_sustained(
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
     _datagen_output_files = 0
+    # The fleet record of this run's own datagen pods (None with --skip-generate).
+    _run_fleet: dict | None = None
     # Streams submitted and not yet stopped: the finally block stops them on
     # any early exit, so an error or Ctrl-C never leaves them running.
     submitted: list = []
@@ -3688,6 +3690,11 @@ def _run_sustained(
         # that ends before the corpus is consumed then honestly reads as
         # saturated. Unmeasured (None) when any pod has not reported, or the
         # pods were already garbage-collected (ttlSecondsAfterFinished).
+        if not skip_generate:
+            # The sidecar describes the corpus this run replaced.
+            from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+            drop_sidecar(cfg.get_namespace())
         try:
             from lakebench.metrics.datagen_aggregator import collect_from_k8s
 
@@ -3695,6 +3702,13 @@ def _run_sustained(
                 namespace=cfg.get_namespace(),
                 job_completions=cfg.architecture.workload.datagen.parallelism,
             )
+            if not skip_generate:
+                # This run's own datagen pods: the record's fleet, and the
+                # namespace's sidecar for a later run over this corpus.
+                from lakebench.metrics.datagen_aggregator import fleet_record, write_sidecar
+
+                _run_fleet = fleet_record(_fleet, cfg.get_namespace())
+                write_sidecar(_run_fleet, cfg.get_namespace())
             if _fleet.data_quality == "complete" and _fleet.total_rows_written > 0:
                 _datagen_output_rows = _fleet.total_rows_written
                 _datagen_output_files = int(_fleet.total_files_written or 0)
@@ -4200,6 +4214,8 @@ def _run_sustained(
         if run_metrics:
             run_metrics.interrupted = _interrupted
             run_metrics.abort_reason = _abort
+            if _run_fleet is not None:
+                run_metrics.datagen_fleet = _run_fleet
             # Collect platform metrics from Prometheus (best-effort)
             if _interrupted is None and _abort is None:
                 _collect_platform_metrics(cfg, run_metrics)

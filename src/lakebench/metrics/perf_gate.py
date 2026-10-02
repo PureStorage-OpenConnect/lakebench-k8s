@@ -90,10 +90,11 @@ WINDOW_TOLERANCE_PCT = 10.0
 # 1.0 is saturation, a real performance signal, and stays comparable.
 MAX_INGEST_RATIO = 1.05
 
-# The datagen fleet numbers come from a sidecar written by the last
-# `lakebench generate` in the namespace. One written more than this before
-# the run started belongs to an earlier generate: its datagen numbers are
-# left out rather than attributed to the run.
+# The datagen fleet numbers come from the run's own datagen pods when it
+# generated, else from the sidecar the last generate in the namespace wrote
+# (`lakebench generate`, or a run that generated). One written more than
+# this before the run started belongs to an earlier generate: its datagen
+# numbers are left out rather than attributed to the run.
 MAX_DATAGEN_AGE_HOURS = 24.0
 # Before v1.6 start_time is naive local time on the host that ran lakebench,
 # and the zone is not recorded (from v1.6 it is UTC with its offset, and the
@@ -738,8 +739,8 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     stale = _datagen_stale(run)
     if stale:
         # datagen_seconds is the in-run generate time when there was one
-        # (`lakebench run --generate`, which writes no sidecar but still
-        # attaches an old one); the collector only falls back to the
+        # (a record from before 1.7, whose `run --generate` attached an old
+        # sidecar instead of its own fleet); the collector only falls back to the
         # sidecar's wall_elapsed_max_s when the run did not generate. Keep
         # it unless it is the sidecar's number.
         fleet = run.raw.get("datagen_fleet") or {}

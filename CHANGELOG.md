@@ -919,6 +919,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the namespace and exits 1 as soon as the restart fails; the namespace is
   already off the list, so re-run destroy once the operator pods are Ready.
   On OpenShift the patch's rollout is awaited before the restart.
+- **A run that generates its corpus records the generator.** `lakebench run
+  --generate` (batch) and a continuous run that starts its own datagen now
+  read the fleet from their own datagen pods, record it as `datagen_fleet`
+  and write the namespace's sidecar, so `experiment.corpus.datagen` carries
+  the generator image digest instead of "no datagen fleet record for this
+  run". Before, only `lakebench generate` wrote the sidecar, and a batch
+  `run --generate` attached whatever an older generate had left, which could
+  describe a corpus the run had replaced. A run that generates now removes
+  that sidecar before it starts; a run that does not generate still takes it.
 
 - **Delta continuous Customer 360 works again.** Its silver stream failed
   on the first micro-batch on every `hive-delta-*` recipe: it passed the

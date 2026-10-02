@@ -170,8 +170,10 @@ Within a comparable run, some numbers are left out rather than trusted:
 - the datagen numbers (`datagen_*`) when the datagen metrics were written
   more than 24 hours before the run started (they came from an earlier
   `generate`) or when only one of the baseline and the run has a datagen
-  stage. `datagen_seconds` stays when it is the run's own generate time
-  (`lakebench run --generate` writes no sidecar but attaches the last one). Generate once and run several times is a normal workflow. Nothing
+  stage. `datagen_seconds` stays when it is the run's own generate time (a
+  record from before 1.7, where `lakebench run --generate` attached the last
+  sidecar instead of its own fleet; from 1.7 a run that generates records its
+  own pods' fleet and writes the sidecar). Generate once and run several times is a normal workflow. Nothing
   else is dropped with them: for batch runs time to value and GB/s are
   recomputed from the pipeline stages' own timestamps with the datagen stage
   left out, and GB/core-hr counts batch or continuous stages only. From v1.6
