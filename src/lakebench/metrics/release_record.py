@@ -196,13 +196,21 @@ def _results_problems(
             return ["no expected query sets for this continuous workload"]
         # The rounds as the pipeline benchmark holds them (where the round
         # recorder writes the executed query set); the top-level copy for a
-        # record without them.
-        rounds = list(
-            (record.get("pipeline_benchmark") or {}).get("benchmark_rounds")
-            or record.get("benchmark_rounds")
-            or []
-        )
-        if not rounds or any(not r.get("executed_query_set_id") for r in rounds):
+        # record without them. A round with no QpH (every query failed)
+        # executed no set and records none; it is left out, as the
+        # composite QpH leaves it out.
+        rounds = [
+            r
+            for r in (
+                (record.get("pipeline_benchmark") or {}).get("benchmark_rounds")
+                or record.get("benchmark_rounds")
+                or []
+            )
+            if isinstance(r, dict) and (r.get("qph") or 0) > 0
+        ]
+        if not rounds:
+            return ["no in-stream round measured a QpH"]
+        if any(not r.get("executed_query_set_id") for r in rounds):
             # The declared query_set_id says what a round was asked to run,
             # not what it ran.
             return ["rounds do not record the query set they executed"]

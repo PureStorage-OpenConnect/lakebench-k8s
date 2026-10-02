@@ -378,6 +378,20 @@ def test_rounds_without_the_executed_query_set(ready):
     _fails(rec, "rounds do not record the query set they executed")
 
 
+def test_a_round_with_no_qph_is_left_out(ready):
+    """A round whose queries all failed has QpH 0 and records no executed
+    set; it is left out, as the composite QpH leaves it out."""
+    rec = _release("c360_cont")
+    rounds = rec["pipeline_benchmark"]["benchmark_rounds"]
+    assert len(rounds) > 1 and all(r["qph"] > 0 for r in rounds)
+    rounds[0]["qph"] = 0.0
+    rounds[0]["executed_query_set_id"] = None
+    assert _problems(rec) == []
+    for r in rounds:
+        r["qph"] = 0.0
+    _fails(rec, "no in-stream round measured a QpH")
+
+
 def test_c360_continuous_fingerprints_compared_when_listed(ready):
     rec = _release("c360_cont")
     expected = _expected(rec)
