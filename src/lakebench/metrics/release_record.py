@@ -54,8 +54,8 @@ EVALUATION_PROFILE_KIND = "evaluation sizing profile"
 EXPECTED_STAGES: dict[tuple[str, str], tuple[str, ...]] = {
     ("customer360", "batch"): ("bronze", "silver", "gold", "query"),
     ("financial", "batch"): ("bronze", "silver", "gold", "query"),
-    ("customer360", "sustained"): ("bronze", "silver", "gold", "query"),
-    ("financial", "sustained"): ("bronze", "silver", "gold", "query"),
+    ("customer360", "continuous"): ("bronze", "silver", "gold", "query"),
+    ("financial", "continuous"): ("bronze", "silver", "gold", "query"),
 }
 #: The one skip a release record may carry: no benchmark on a recipe with no
 #: query engine.
@@ -63,7 +63,9 @@ DECLARED_SKIP_NO_ENGINE = "benchmark (skipped: no query engine)"
 
 
 def _mode(value: Any) -> str:
-    return "sustained" if value in ("continuous", "sustained") else str(value)
+    """``batch`` or ``continuous`` (config.support.canonical_mode's
+    spelling, which the validation record and the verdict use)."""
+    return "continuous" if value in ("continuous", "sustained") else str(value)
 
 
 def _exp(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -80,7 +82,7 @@ def record_key(record: Mapping[str, Any]) -> tuple[str, str, str, float] | None:
     exp = _exp(record)
     if exp is None:
         return None
-    mode = "continuous" if _mode(exp.get("mode")) == "sustained" else str(exp.get("mode"))
+    mode = _mode(exp.get("mode"))
     return (
         str((exp.get("workload") or {}).get("name")),
         mode,
@@ -110,6 +112,10 @@ def _observed_datagen_digest(record: Mapping[str, Any], exp: Mapping[str, Any]) 
     dg = ((exp.get("corpus") or {}).get("datagen")) or {}
     if dg.get("digest"):
         return str(dg["digest"])
+    if record.get("datagen_fleet"):
+        # The fleet saw the pods and named no single digest (several images
+        # ran): the series marker cannot vouch for them.
+        return None
     obs = ((record.get("config_snapshot") or {}).get("experiment_inputs") or {}).get(
         "corpus_observation"
     ) or {}
@@ -122,6 +128,9 @@ def _image_problems(
 ) -> list[str]:
     if exp.get("schema") != "exp2":
         return ["exp1 record: release evidence needs corpus id v2 (exp2)"]
+    corpus_problems = list((exp.get("corpus") or {}).get("problems") or [])
+    if corpus_problems:
+        return [f"corpus problems: {'; '.join(map(str, corpus_problems))}"]
     if release_digest is None:
         return ["the release datagen image is not pinned by digest (ImagesConfig.datagen)"]
     observed = _observed_datagen_digest(record, exp)
@@ -172,7 +181,7 @@ def _results_problems(
         return ["no expected-results file to check the results against"]
     w = exp.get("workload") or {}
     corpus = exp.get("corpus") or {}
-    if _mode(exp.get("mode")) == "sustained":
+    if _mode(exp.get("mode")) == "continuous":
         entry = next(
             (
                 e
@@ -184,11 +193,12 @@ def _results_problems(
         )
         if entry is None:
             return ["no expected query sets for this continuous workload"]
-        ran = {
-            r.get("executed_query_set_id") or r.get("query_set_id")
-            for r in record.get("benchmark_rounds") or []
-        }
-        ran.discard(None)
+        rounds = list(record.get("benchmark_rounds") or [])
+        if not rounds or any(not r.get("executed_query_set_id") for r in rounds):
+            # The declared query_set_id says what a round was asked to run,
+            # not what it ran.
+            return ["rounds do not record the query set they executed"]
+        ran = {r["executed_query_set_id"] for r in rounds}
         want = set(entry.get("query_set_ids") or [])
         if ran != want:
             missing = sorted(want - ran)
@@ -198,6 +208,9 @@ def _results_problems(
                 if missing
                 else f"rounds ran unexpected query set(s) {', '.join(extra)}"
             ]
+        if entry.get("fingerprints"):
+            # C360 continuous: gold read once the corpus settled.
+            return _fingerprint_problems(exp.get("results") or {}, entry)
         return []
     entry = next(
         (
@@ -213,9 +226,16 @@ def _results_problems(
     )
     if entry is None:
         return ["no expected results for this workload, corpus and scale"]
+    if str((exp.get("architecture") or {}).get("recipe") or "").endswith("-none"):
+        # No query engine: no results to compare (the stage check holds the
+        # declared skip).
+        return []
+    return _fingerprint_problems(exp.get("results") or {}, entry)
+
+
+def _fingerprint_problems(results: Mapping[str, Any], entry: Mapping[str, Any]) -> list[str]:
     from lakebench.benchmark.fingerprint import mismatch
 
-    results = exp.get("results") or {}
     got_fp: dict[str, Any] = dict(results.get("fingerprints") or {})
     want_fp: dict[str, Any] = dict(entry.get("fingerprints") or {})
     problems = []
@@ -240,9 +260,18 @@ def _results_problems(
 # --- the record -------------------------------------------------------------------
 
 
+#: The verdict qualifier that lists the layers whose rows were not measured
+#: (the layer_rows gate passed on bytes alone). Release evidence must measure
+#: rows, so a non-empty list refuses the record. ``verdict_from_record``
+#: (the verdict recomputed from the record) is to set it with the gate.
+LAYER_ROWS_UNMEASURED = "layer_rows_unmeasured"
+
+
 def _layer_rows_problem(record: Mapping[str, Any]) -> str | None:
     """Rows per layer > 0, from the verdict's ``layer_rows`` gate computed
-    from the record. Fails closed until the verdict computes that gate."""
+    from the record, with every layer's rows measured. Fails closed until
+    the verdict computes that gate and its ``LAYER_ROWS_UNMEASURED``
+    qualifier."""
     from lakebench.metrics import verdict as v
 
     compute = getattr(v, "verdict_from_record", None)
@@ -252,9 +281,12 @@ def _layer_rows_problem(record: Mapping[str, Any]) -> str | None:
     gate = (getattr(verdict, "gates", None) or {}).get("layer_rows")
     if gate != "PASS":
         return f"rows per layer: layer_rows gate is {gate or 'not computed'}"
-    warnings = [w for w in getattr(verdict, "warnings", None) or [] if "not measured" in str(w)]
-    if warnings:
-        return f"rows per layer not measured: {'; '.join(map(str, warnings))}"
+    qualifiers = getattr(verdict, "qualifiers", None) or {}
+    if LAYER_ROWS_UNMEASURED not in qualifiers:
+        return "rows per layer not checked: the verdict does not say which layers were measured"
+    unmeasured = list(qualifiers[LAYER_ROWS_UNMEASURED] or [])
+    if unmeasured:
+        return f"rows not measured for {', '.join(map(str, unmeasured))}"
     return None
 
 
@@ -274,17 +306,22 @@ def _rules_problems(exp: Mapping[str, Any]) -> list[str]:
 
     mode = _mode(exp.get("mode"))
     expected = set(RULE_TARGETS)
-    if mode == "sustained":
+    if mode == "continuous":
         expected -= set(AML_CONTINUOUS_SKIPPED_RULES)
-    skips = allowed.get((workload, "continuous" if mode == "sustained" else mode), {})
+    skips = allowed.get((workload, mode), {})
     skipped = rules.get("skipped") or {}
     for rule, why in skipped.items():
-        if rule not in skips or str(why) not in skips[rule]:
+        reasons = skips.get(rule, ())
+        reasons = {reasons} if isinstance(reasons, str) else set(reasons)
+        if str(why) not in reasons:
             problems.append(f"rule {rule} skipped ({why}), not an allowed skip")
     executed = set(rules.get("executed") or [])
     missing = expected - executed - set(skipped)
     if missing:
         problems.append(f"expected rules did not run: {', '.join(sorted(missing))}")
+    extra = executed - expected
+    if extra:
+        problems.append(f"rules outside the expected set ran: {', '.join(sorted(extra))}")
     return problems
 
 
@@ -311,7 +348,7 @@ def _stage_problems(record: Mapping[str, Any], exp: Mapping[str, Any]) -> list[s
     # The C360 continuous result check reads gold once the corpus settled;
     # AML continuous results depend on when the passes ran, so its record
     # says not_checked by design and is held to its query sets instead.
-    if mode == "sustained" and workload == "customer360":
+    if mode == "continuous" and workload == "customer360":
         check = (record.get("continuous") or {}).get("result_check") or {}
         if check.get("not_checked") or not check.get("fingerprints"):
             problems.append(
@@ -330,9 +367,7 @@ def bound_problems(record: Mapping[str, Any]) -> list[str]:
     kinds = list(((exp.get("limits") or {}).get("bound_kinds")) or [])
     key = record_key(record)
     allowed = (
-        RELEASE_ALLOWED_BOUNDS.get((key[0], _mode(key[1]), key[3]), frozenset())
-        if key
-        else frozenset()
+        RELEASE_ALLOWED_BOUNDS.get((key[0], key[1], key[3]), frozenset()) if key else frozenset()
     )
     problems = []
     for kind in kinds:

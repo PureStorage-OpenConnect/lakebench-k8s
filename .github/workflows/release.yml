@@ -72,7 +72,10 @@ jobs:
     needs: ci
     runs-on: ubuntu-24.04
     steps:
+      # Full history: the freeze and expected-results checks compare commits.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
@@ -84,7 +87,7 @@ jobs:
       - name: Release gate (release-only checks)
         run: >-
           python scripts/release_gate.py --tag "${GITHUB_REF_NAME}" --require-all
-          --only examples,version,changelog,em-dashes,uat-results
+          --only examples,version,changelog,em-dashes,uat-results,records,support-record,freeze,expected-results
 
   build-dist:
     name: Build wheel and sdist

@@ -431,7 +431,14 @@ def _expected() -> tuple[dict | None, str | None, Path]:
         return None, f"{path.relative_to(ROOT)}: {e}", path
 
 
-def _record_path(run_id: str) -> Path | None:
+def _record_path(run_id: str, named: Sequence[str] = ()) -> Path | None:
+    """The metrics.json of *run_id*: a path the results table names, else
+    a run directory the uat-results check also searches."""
+    root = ROOT.resolve()
+    for token in named:
+        p = (ROOT / token).resolve()
+        if p.is_relative_to(root) and p.is_file() and _metrics_run_id(p) == run_id:
+            return p
     dirs = [ROOT / d for d in UAT_RUN_DIRS]
     env_dir = os.environ.get(PERF_RUNS_ENV)
     if env_dir:
@@ -479,7 +486,9 @@ def _generated_blocks_only(freeze: str, rel: str) -> str | None:
 
 
 def _post_freeze_problems(freeze: str) -> list[str]:
-    rc, out = _git_out("diff", "--name-only", freeze, "HEAD")
+    # --no-renames: a moved file lists both paths, so a source file moved
+    # under uat/ is seen leaving src/.
+    rc, out = _git_out("diff", "--name-only", "--no-renames", freeze, "HEAD")
     if rc != 0:
         return [f"git diff {freeze[:12]} HEAD failed"]
     problems = []
@@ -542,10 +551,12 @@ def check_expected_results() -> Result:
     return Result("expected-results", PASS, f"{n} expected entries, committed before the freeze")
 
 
-def _problems_of(run_id: str, freeze: str | None, expected: dict | None) -> list[str]:
+def _problems_of(
+    run_id: str, freeze: str | None, expected: dict | None, named: Sequence[str] = ()
+) -> list[str]:
     import json
 
-    path = _record_path(run_id)
+    path = _record_path(run_id, named)
     if path is None:
         return ["no metrics.json"]
     rr = _lb("lakebench.metrics.release_record")
@@ -561,11 +572,13 @@ def check_records() -> Result:
     results_path = ROOT / UAT_RESULTS.format(version=_version())
     if not results_path.is_file():
         return Result("records", FAIL, f"{results_path.relative_to(ROOT)} not found")
-    cited, _missing, _malformed = _unresolved_run_ids(_table_data_rows(results_path.read_text()))
+    rows = _table_data_rows(results_path.read_text())
+    cited, _missing, _malformed = _unresolved_run_ids(rows)
     if not cited:
         return Result("records", FAIL, "the results table cites no run ids")
     expected, _why, _path = _expected()
-    bad = {rid: p for rid in cited if (p := _problems_of(rid, sha, expected))}
+    named = _METRICS_PATH.findall("\n".join(rows))
+    bad = {rid: p for rid in cited if (p := _problems_of(rid, sha, expected, named))}
     if bad:
         return Result(
             "records",
@@ -588,10 +601,16 @@ def make_support_record_check(tag: str | None) -> Callable[[], Result]:
         sha, problem, _rel = _freeze()
         expected, _why, _path = _expected()
         problems = []
+        keys_run: set[tuple] = set()
         for workload, mode, recipe, _scale in rr.RELEASE_MATRIX:
             if (workload, recipe, support.canonical_mode(mode)) not in record:
                 problems.append(f"no validated entry for {workload} {recipe} {mode}")
         for (workload, recipe, mode), v in sorted(record.items()):
+            if sha and not sha.startswith(str(v.tree)):
+                problems.append(
+                    f"{workload} {recipe} {mode}: validated on tree {v.tree}, not the freeze "
+                    f"{sha[:12]}"
+                )
             for run_id in v.runs:
                 rid = run_id.removeprefix("run-")
                 path = ROOT / "uat" / "runs" / f"run-{rid}" / "metrics.json"
@@ -610,6 +629,13 @@ def make_support_record_check(tag: str | None) -> Callable[[], Result]:
                     mode,
                 ):
                     problems.append(f"{rid}: record is not {workload} {recipe} {mode}")
+                elif key:
+                    keys_run.add(key)
+        for row in rr.RELEASE_MATRIX:
+            if (row[0], row[1], row[2], float(row[3])) not in keys_run:
+                problems.append(
+                    f"no validated run for {row[0]} {row[2]} {row[1]} at scale {row[3]:g}"
+                )
         if problem:
             problems.append(problem)
         if problems:

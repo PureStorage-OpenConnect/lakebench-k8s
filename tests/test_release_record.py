@@ -31,7 +31,9 @@ def ready(monkeypatch):
     monkeypatch.setattr(
         verdict_mod,
         "verdict_from_record",
-        lambda record: SimpleNamespace(gates={"layer_rows": "PASS"}, warnings=[]),
+        lambda record: SimpleNamespace(
+            gates={"layer_rows": "PASS"}, qualifiers={rr.LAYER_ROWS_UNMEASURED: []}
+        ),
         raising=False,
     )
     monkeypatch.setattr(
@@ -56,6 +58,8 @@ def _release(kind: str) -> dict:
         "git_dirty": False,
         "end_sample": {"code_changed_during_run": False},
     }
+    for r in rec.get("benchmark_rounds") or []:
+        r["executed_query_set_id"] = r["query_set_id"]
     if kind == "aml_cont":
         exp["rules"]["executed"] = sorted(
             set(exp["rules"]["executed"]) | (_rule_targets() - set(_continuous_skipped()))
@@ -146,19 +150,18 @@ def test_failed_record(ready):
 
 
 @pytest.mark.parametrize(
-    ("gate", "warning", "needle"),
+    ("gate", "qualifiers", "needle"),
     [
-        ("FAIL", None, "layer_rows gate is FAIL"),
-        ("PASS", "rows not measured for gold", "not measured"),
+        ("FAIL", {rr.LAYER_ROWS_UNMEASURED: []}, "layer_rows gate is FAIL"),
+        ("PASS", {rr.LAYER_ROWS_UNMEASURED: ["gold"]}, "rows not measured for gold"),
+        ("PASS", {}, "does not say which layers were measured"),
     ],
 )
-def test_zero_or_unmeasured_rows(ready, monkeypatch, gate, warning, needle):
+def test_zero_or_unmeasured_rows(ready, monkeypatch, gate, qualifiers, needle):
     monkeypatch.setattr(
         verdict_mod,
         "verdict_from_record",
-        lambda record: SimpleNamespace(
-            gates={"layer_rows": gate}, warnings=[warning] if warning else []
-        ),
+        lambda record: SimpleNamespace(gates={"layer_rows": gate}, qualifiers=qualifiers),
         raising=False,
     )
     _fails(_release("c360_batch"), needle)
@@ -181,7 +184,10 @@ def test_no_engine_recipe_may_skip_the_benchmark(ready):
     rec["experiment"]["architecture"]["recipe"] = "hive-iceberg-spark-none"
     rec["experiment"]["stages"]["executed"].remove("query")
     rec["experiment"]["stages"]["skipped"].append(rr.DECLARED_SKIP_NO_ENGINE)
-    assert not [p for p in _problems(rec) if "stage" in p]
+    rec["experiment"]["results"] = {"query_set_id": None, "fingerprints": {}}
+    # The expected file lists the engine recipes' fingerprints for this
+    # corpus; a no-engine row is not held to them.
+    assert _problems(rec, _expected(_release("c360_batch"))) == []
 
 
 def test_errored_rule(ready):
@@ -233,7 +239,7 @@ def test_aml_continuous_only_the_8_query_set_fails(ready):
 def test_aml_continuous_only_the_12_query_set_fails(ready):
     rec = _release("aml_cont")
     for r in rec["benchmark_rounds"]:
-        r["query_set_id"] = "qs12-x"
+        r["query_set_id"] = r["executed_query_set_id"] = "qs12-x"
     expected = _expected(_release("aml_cont"))
     expected["continuous"][0]["query_set_ids"] = ["qs12-x", "qs8-32f521a57551"]
     _fails(rec, "never ran query set(s) qs8-32f521a57551", expected)
@@ -343,8 +349,48 @@ def test_eval_profile_baseline_refused():
     pinned = SimpleNamespace(
         mode=run.mode, fingerprint={}, fingerprint_hash="", file_sha256="", name="p"
     )
-    try:
-        reasons = run_refusals(run, pinned)  # type: ignore[arg-type]
-    except AttributeError:
-        pytest.skip("PinnedConfig needs more fields than the stub carries")
+    reasons = run_refusals(run, pinned)  # type: ignore[arg-type]
     assert "evaluation profile runs are not release evidence" in reasons
+
+
+def test_extra_rule_ran(ready):
+    rec = _release("aml_cont")
+    from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+
+    rec["experiment"]["rules"]["executed"].append(AML_CONTINUOUS_SKIPPED_RULES[0])
+    _fails(rec, "rules outside the expected set ran")
+
+
+def test_rounds_without_the_executed_query_set(ready):
+    rec = _release("c360_cont")
+    for r in rec["benchmark_rounds"]:
+        r.pop("executed_query_set_id")
+    _fails(rec, "rounds do not record the query set they executed")
+
+
+def test_c360_continuous_fingerprints_compared_when_listed(ready):
+    rec = _release("c360_cont")
+    expected = _expected(rec)
+    fps = copy.deepcopy(rec["experiment"]["results"]["fingerprints"])
+    q = sorted(fps)[0]
+    fps[q]["rows"] = -1
+    expected["continuous"][0]["fingerprints"] = fps
+    _fails(rec, f"query {q} result differs", expected)
+
+
+def test_mixed_datagen_images_refused(ready):
+    """Pods on two images: the fleet names no single digest, and the series
+    marker of the release image does not vouch for them."""
+    rec = _release("c360_batch")
+    rec["experiment"]["corpus"]["datagen"]["digest"] = None
+    rec["datagen_fleet"] = {"image_ids": ["a@sha256:" + "1" * 64, "b@" + DIGEST]}
+    rec["config_snapshot"].setdefault("experiment_inputs", {})["corpus_observation"] = {
+        "series": {"generation": {"image_digest": DIGEST}}
+    }
+    _fails(rec, "not generated by the release datagen image")
+
+
+def test_corpus_problems_refused(ready):
+    rec = _release("c360_batch")
+    rec["experiment"]["corpus"]["problems"] = ["datagen pods ran different images: a, b"]
+    _fails(rec, "corpus problems")

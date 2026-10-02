@@ -554,3 +554,34 @@ def test_records_check_reads_each_cited_record(frozen, monkeypatch):
 def test_support_record_empty_on_tag_fails(frozen):
     res = rg.make_support_record_check("v9.9.9")()
     assert res.status == rg.FAIL and "lists nothing" in res.detail
+
+
+def test_post_freeze_rename_out_of_src_fails(frozen):
+    repo, _sha = frozen
+    _git(repo, "mv", "src.txt", "uat/src.txt")
+    _git(repo, "commit", "-qm", "move")
+    assert "src.txt changed after the freeze" in rg.check_freeze().detail
+
+
+def test_support_record_needs_every_row_at_its_scale_on_the_freeze_tree(frozen, monkeypatch):
+    import json
+
+    import lakebench.config.support as support
+    from lakebench.metrics import release_record as rr
+    from tests.fixtures import stored_records as sr
+
+    repo, sha = frozen
+    rid = "20260928-130953-f8a2cf"  # AML batch hive Trino at scale 1
+    d = repo / "uat" / "runs" / f"run-{rid}"
+    d.mkdir(parents=True)
+    d.joinpath("metrics.json").write_text(json.dumps(sr.load_record("130953-f8a2cf")))
+    record = {
+        (w, r, support.canonical_mode(m)): support.Validation(
+            w, r, support.canonical_mode(m), "0" * 12, (rid,)
+        )
+        for w, m, r, _s in rr.RELEASE_MATRIX
+    }
+    monkeypatch.setattr(support, "load_validation_record", lambda path=None: record)
+    detail = rg.make_support_record_check("v9.9.9")().detail
+    assert "no validated run for financial hive-iceberg-spark-trino batch at scale 10" in detail
+    assert f"not the freeze {sha[:12]}" in detail
