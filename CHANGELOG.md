@@ -243,6 +243,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **`admin repair-operator` repairs in one step under the lease.** It now
+  takes the cluster lease first (waiting up to 37.5 min, three watch-list
+  holds) and reads the release state, the Helm values, the controller's
+  `--namespaces` and the Active namespaces inside it, so a namespace a
+  deploy re-created after an earlier read is kept. It sets the watch list,
+  in one `helm upgrade`, to the namespaces either the values or the
+  controller list that are still Active; `default` is added only when
+  nothing else is left (before, it was always added and entries were
+  dropped one upgrade at a time). A release left `pending-upgrade` or
+  `pending-rollback` is rolled back to its last deployed revision when that
+  revision's list names no deleted namespace and drops none the controller
+  watches now; otherwise, and for `pending-install`, it exits 3 with the
+  manual step. With no release it exits 4. An unreadable controller
+  Deployment exits 1. `--dry-run` reads without the lease and changes
+  nothing.
+- **Deploy and run stop when the Spark Operator's watch list cannot be
+  read.** An operator that is ready but whose watch list could not be read
+  used to pass as watching; SparkApplications in a namespace it does not
+  watch are never reconciled. `validate` warns instead of passing, and an
+  operator whose status could not be read is reported as "could not
+  check", not "not installed".
+- **Watch-list changes fit the lease's 750 s hold budget.** The helm
+  upgrade, the OpenShift patch rollout, the operator restart and the pod
+  poll each have a phase budget (180, 180, 180 and 120 s); the two
+  Deployments' rollout waits share one budget instead of 120 s each, and a
+  step with no time left fails without starting. A deploy, run or destroy
+  waiting for the lease to change the watch list now waits up to 37.5 min
+  (was 10 min), three holds at that budget.
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets
@@ -550,6 +578,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
 ### Fixed
+- **Destroy keeps the namespace when the Spark Operator restart fails.**
+  After removing the namespace from the watch list, a failed operator
+  restart was ignored and destroy deleted a namespace the running pods may
+  still watch, which crash-loops the operator for every deployment. Destroy
+  now exits 1 naming `admin repair-operator`. On OpenShift the patch's
+  rollout is awaited before the restart.
 
 - **The capacity check counts the Spark driver's memory overhead.**
   The driver pod requests its heap plus the overhead Spark on Kubernetes

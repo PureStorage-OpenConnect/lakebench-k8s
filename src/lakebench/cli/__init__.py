@@ -1008,9 +1008,13 @@ def validate(
                 else:
                     _check_warn(msg, hint=hint)
             elif status.watching_namespace is None:
-                _check_ok(
-                    "Namespace watching unverified (helm values unavailable)",
+                # deploy and run stop on an unreadable watch list
+                _check_warn(
+                    "Namespace watching unverified (watch list unreadable)",
+                    hint="deploy and run refuse until the operator's watch list can be read",
                 )
+        elif status.installed is None:
+            _check_warn(f"Could not check the Spark Operator: {status.message}")
         elif status.installed:
             _check_warn(f"Installed but not ready: {status.message}")
         else:

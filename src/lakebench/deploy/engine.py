@@ -1898,7 +1898,7 @@ class DeploymentEngine:
             status = operator.ensure_namespace_watched(can_heal=True)
 
             if not status.ready:
-                if not status.installed and not status.message.startswith("Error checking"):
+                if status.installed is False:
                     message = (
                         f"Spark Operator not installed: {status.message}. A cluster admin "
                         "installs it once: lakebench admin install --component spark-operator "

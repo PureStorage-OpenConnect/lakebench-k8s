@@ -289,54 +289,252 @@ class TestReclaimBucket:
         cm_ctx.__enter__.assert_called_once()
 
 
+def _ns(name: str, phase: str = "Active") -> MagicMock:
+    n = MagicMock()
+    n.metadata.name = name
+    n.status.phase = phase
+    return n
+
+
+def _page(*names: str) -> MagicMock:
+    page = MagicMock(items=[_ns(n) for n in names])
+    page.metadata._continue = None
+    page.metadata.continue_ = None
+    return page
+
+
+class _Repair:
+    """A repair-operator harness: a fake lease that records when it is held,
+    a manager mock whose reads record whether they ran under it, and Active
+    namespaces that may differ inside and outside the lease."""
+
+    def __init__(
+        self,
+        *,
+        values=None,
+        live=None,
+        active=(),
+        active_in_lease=None,
+        state=("deployed", 3),
+        tmp=TmpVolume(True, "8Gi"),
+    ):
+        from contextlib import contextmanager
+
+        self.held = False
+        self.reads: list[tuple[str, bool]] = []
+        self.core = MagicMock()
+        outside = _page(*active)
+        inside = _page(*(active if active_in_lease is None else active_in_lease))
+
+        def list_ns(**_kw):
+            self.reads.append(("namespaces", self.held))
+            return inside if self.held else outside
+
+        self.core.list_namespace.side_effect = list_ns
+
+        @contextmanager
+        def lock(*_a, **_kw):
+            self.held = True
+            try:
+                yield
+            finally:
+                self.held = False
+
+        self.lock = MagicMock(side_effect=lock)
+        self.mgr = MagicMock()
+        self.mgr.HELM_RELEASE_NAME = "spark-operator"
+        self.revision_lists: dict[int, list[str] | None] = {}
+        states = list(state) if isinstance(state, list) else [state]
+
+        def rec(name, value):
+            def f(*_a, **_kw):
+                self.reads.append((name, self.held))
+                return value() if callable(value) else value
+
+            return f
+
+        def watched(revision=None):
+            self.reads.append(("values", self.held))
+            if revision is not None:
+                return self.revision_lists.get(revision)
+            return values
+
+        self.mgr.release_state.side_effect = rec(
+            "state", lambda: states.pop(0) if len(states) > 1 else states[0]
+        )
+        self.mgr._get_watched_namespaces.side_effect = watched
+        self.mgr._get_active_namespaces.side_effect = rec("live", live)
+        self.mgr.controller_tmp_volume.side_effect = rec("tmp", tmp)
+        self.mgr._set_watch_list_impl.return_value = True
+        self.mgr.rollback_to.return_value = True
+        self.mgr.apply_controller_tmp_size.return_value = True
+
+    def invoke(self, *args: str):
+        with (
+            patch("lakebench.cli._admin._get_core_v1", return_value=self.core),
+            patch(
+                "lakebench.modules.pipeline_engines.spark.operator.SparkOperatorManager",
+                return_value=self.mgr,
+            ),
+            patch("lakebench.deploy.cluster_lock.cluster_lock", self.lock),
+        ):
+            return runner.invoke(admin_app, ["repair-operator", *args])
+
+
 class TestRepairOperator:
     def test_all_watch_noop(self):
-        core = MagicMock()
-        with (
-            patch("lakebench.cli._admin._get_core_v1", return_value=core),
-            patch(
-                "lakebench.modules.pipeline_engines.spark.operator.SparkOperatorManager"
-            ) as mock_mgr,
-        ):
-            mgr_instance = mock_mgr.return_value
-            mgr_instance._get_watched_namespaces.return_value = None
-            mgr_instance.controller_tmp_volume.return_value = TmpVolume(True, "8Gi")
-            r = runner.invoke(admin_app, ["repair-operator"])
-        assert r.exit_code == 0
+        h = _Repair(values=None, live=None, active=("ns-a",))
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
         assert "watches all namespaces" in r.output
+        h.mgr._set_watch_list_impl.assert_not_called()
 
     def test_reconcile_drops_only_deleted_namespaces_in_dry_run(self):
-        """ADR-F2: keep every entry whose ns still exists (annotated or
-        not); only drop entries pointing at DELETED namespaces. Legacy
-        pre-PR-1 lakebench namespaces run active workloads and would
-        stall silently if pruned."""
-        core = MagicMock()
-        ns_a = MagicMock()
-        ns_a.metadata.name = "ns-a"
-        ns_a.metadata.annotations = {"lakebench.deployment/name": "a"}
-        ns_a.status.phase = "Active"
-        ns_stale = MagicMock()
-        ns_stale.metadata.name = "ns-stale"
-        ns_stale.metadata.annotations = None  # legacy annotationless
-        ns_stale.status.phase = "Active"
-        page = MagicMock(items=[ns_a, ns_stale])
-        page.metadata._continue = None
-        page.metadata.continue_ = None
-        core.list_namespace.return_value = page
+        """Keep every entry whose namespace still exists and is Active
+        (annotated or not); drop only deleted ones. --dry-run takes no lease
+        and applies nothing."""
+        h = _Repair(
+            values=["ns-a", "ns-stale", "ns-gone"],
+            live=["ns-a", "ns-stale", "ns-gone"],
+            active=("ns-a", "ns-stale"),
+        )
+        r = h.invoke("--dry-run")
+        assert r.exit_code == 0, r.output
+        assert "helm values: ['ns-a', 'ns-gone', 'ns-stale']" in r.output
+        assert "after:       ['ns-a', 'ns-stale']" in r.output
+        assert not h.lock.called
+        h.mgr._set_watch_list_impl.assert_not_called()
 
-        with (
-            patch("lakebench.cli._admin._get_core_v1", return_value=core),
-            patch(
-                "lakebench.modules.pipeline_engines.spark.operator.SparkOperatorManager"
-            ) as mock_mgr,
-        ):
-            mgr_instance = mock_mgr.return_value
-            # Operator watches three: ns-a (live+annotated),
-            # ns-stale (live but annotationless), ns-gone (deleted).
-            mgr_instance._get_watched_namespaces.return_value = ["ns-a", "ns-stale", "ns-gone"]
-            mgr_instance.controller_tmp_volume.return_value = TmpVolume(True, "8Gi")
-            r = runner.invoke(admin_app, ["repair-operator", "--dry-run"])
-        assert r.exit_code == 0
-        assert "before: ['ns-a', 'ns-gone', 'ns-stale']" in r.output
-        # ns-stale is kept (still exists cluster-side); only ns-gone drops.
-        assert "after:  ['default', 'ns-a', 'ns-stale']" in r.output
+    def test_repair_rereads_inside_lease(self):
+        """A namespace a deploy re-created after an unlocked read must be kept:
+         every read runs under the lease and the reconciled list comes from it
+        . Reverted (read before the lease, drop one by one),
+         ns-b is removed."""
+        h = _Repair(
+            values=["ns-a", "ns-b", "ns-gone"],
+            live=["ns-a", "ns-b", "ns-gone"],
+            active=("ns-a",),
+            active_in_lease=("ns-a", "ns-b"),
+        )
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        assert all(held for _, held in h.reads), h.reads
+        h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a", "ns-b"])
+        h.mgr._remove_namespace_from_watch_impl.assert_not_called()
+
+    def test_one_upgrade_unions_values_and_controller(self):
+        """Helm values and the controller's --namespaces disagree after a
+        killed upgrade: the target is their union, filtered to Active."""
+        h = _Repair(values=["ns-a"], live=["ns-b", "ns-gone"], active=("ns-a", "ns-b"))
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a", "ns-b"])
+
+    def test_empty_target_falls_back_to_default(self):
+        """Never an empty list: the chart reads {} as every namespace."""
+        h = _Repair(values=["ns-gone"], live=["ns-gone"], active=())
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        h.mgr._set_watch_list_impl.assert_called_once_with(["default"])
+
+    def test_default_is_not_added_when_others_remain(self):
+        h = _Repair(values=["ns-a", "ns-gone"], live=["ns-a", "ns-gone"], active=("ns-a",))
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a"])
+
+    def test_unreadable_controller_fails_closed(self):
+        from lakebench.modules.pipeline_engines.spark.operator import _DeploymentReadError
+
+        h = _Repair(values=["ns-a", "ns-gone"], active=("ns-a",))
+        h.mgr._get_active_namespaces.side_effect = _DeploymentReadError("timeout")
+        r = h.invoke()
+        assert r.exit_code == 1
+        h.mgr._set_watch_list_impl.assert_not_called()
+
+    def test_unreadable_release_state_fails_closed(self):
+        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",), state=None)
+        r = h.invoke()
+        assert r.exit_code == 1
+        h.mgr._set_watch_list_impl.assert_not_called()
+
+    def test_failed_set_exits_nonzero(self):
+        h = _Repair(values=["ns-a", "ns-gone"], live=["ns-a", "ns-gone"], active=("ns-a",))
+        h.mgr._set_watch_list_impl.return_value = False
+        r = h.invoke()
+        assert r.exit_code == 1
+
+    def test_pending_release_rolls_back_to_a_safe_revision(self):
+        """A pending-upgrade release blocks every later upgrade. Its last
+        deployed revision watches only Active namespaces and keeps what the
+        controller watches now, so repair rolls back, re-reads and then
+        reconciles."""
+        h = _Repair(
+            values=["ns-a", "ns-gone"],
+            live=["ns-a"],
+            active=("ns-a",),
+            state=[("pending-upgrade", 5), ("deployed", 6)],
+        )
+        h.mgr.last_good_revision.return_value = 4
+        h.revision_lists[4] = ["ns-a"]
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        h.mgr.last_good_revision.assert_called_once_with(5)
+        h.mgr.rollback_to.assert_called_once_with(4)
+        assert all(held for _, held in h.reads), h.reads
+        h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a"])
+
+    def test_pending_release_refuses_a_revision_naming_a_deleted_namespace(self):
+        """Rolling back to a list naming a deleted namespace crash-loops the
+        operator for every tenant: refuse and name the manual step."""
+        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",), state=("pending-upgrade", 5))
+        h.mgr.last_good_revision.return_value = 4
+        h.revision_lists[4] = ["ns-a", "ns-gone"]
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        assert "helm history" in " ".join(r.output.split())
+        h.mgr.rollback_to.assert_not_called()
+        h.mgr._set_watch_list_impl.assert_not_called()
+
+    def test_pending_release_refuses_a_revision_dropping_a_watched_namespace(self):
+        h = _Repair(
+            values=["ns-a", "ns-b"],
+            live=["ns-a", "ns-b"],
+            active=("ns-a", "ns-b"),
+            state=("pending-rollback", 7),
+        )
+        h.mgr.last_good_revision.return_value = 6
+        h.revision_lists[6] = ["ns-a"]
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        h.mgr.rollback_to.assert_not_called()
+
+    def test_pending_release_without_a_deployed_revision_refuses(self):
+        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",), state=("pending-upgrade", 1))
+        h.mgr.last_good_revision.return_value = None
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        h.mgr.rollback_to.assert_not_called()
+
+    def test_pending_install_refuses(self):
+        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",), state=("pending-install", 1))
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        h.mgr.rollback_to.assert_not_called()
+        h.mgr._set_watch_list_impl.assert_not_called()
+
+    def test_absent_release_is_a_prerequisite(self):
+        h = _Repair(state=("absent", 0))
+        r = h.invoke()
+        assert r.exit_code == 4, r.output
+        assert "admin install --component spark-operator" in " ".join(r.output.split())
+
+    def test_waits_up_to_three_watch_list_holds(self):
+        from lakebench.deploy.cluster_lock import ADMIN_MAX_HOLD_S
+        from lakebench.modules.pipeline_engines.spark.operator import _WATCH_LIST_LOCK_TIMEOUT_S
+
+        h = _Repair(values=["ns-a", "ns-gone"], live=["ns-a", "ns-gone"], active=("ns-a",))
+        h.invoke()
+        kw = h.lock.call_args.kwargs
+        assert kw["timeout"] == _WATCH_LIST_LOCK_TIMEOUT_S
+        assert kw["max_hold_s"] == ADMIN_MAX_HOLD_S

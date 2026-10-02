@@ -146,7 +146,9 @@ missing entry as a warning, or as expected before the first deploy.
 If the lease is held, `lakebench admin status` shows who holds it. If the
 watch list still names namespaces that no longer exist, run
 `lakebench admin repair-operator` (use `--dry-run` first) and then deploy
-again.
+again. When deploy or run says the watch list "could not be read", they
+stop rather than submit jobs the operator may never reconcile; check
+`helm status spark-operator -n spark-operator` and the operator pods.
 
 **Destroy says "operator pods [...] still watch it".** Destroy removed the
 namespace from the Spark Operator watch list and restarted the operator, but
@@ -158,9 +160,11 @@ crash-loop the operator for every deployment, so destroy kept it and exited
 re-run `lakebench destroy`. When the list names a `deployment/...`, an
 operator Deployment's pod template still lists the namespace while the helm
 values do not, usually an upgrade that did not apply (check `helm history
-spark-operator -n spark-operator`). `lakebench admin repair-operator` does
-not compare the Deployments yet, so a cluster admin has to re-apply the
-release before destroy can finish.
+spark-operator -n spark-operator`). `lakebench admin repair-operator` reads
+both the Helm values and the controller's `--namespaces` and sets the list,
+in one upgrade, to the namespaces either names that still exist; run it,
+then destroy again. Destroy also keeps the namespace (exit 1) when the
+operator restart after the removal fails.
 
 **Ctrl-C does not stop the command at once.** If the command holds the
 cluster lease, it prints "interrupt received while holding the cluster
@@ -168,9 +172,13 @@ lease" and finishes the shared change first (its hold budget is 750 s,
 1800 s for `admin` commands), then releases the lease and stops. Press
 Ctrl-C twice more to abort at once; the lease is still released. If a helm
 upgrade was running, run `helm history spark-operator -n spark-operator`:
-a `pending-upgrade` revision blocks every deployment's watch-list change,
-so roll it back with `helm rollback spark-operator <last deployed
-revision> -n spark-operator`, then run `lakebench admin repair-operator`.
+a `pending-upgrade` revision blocks every deployment's watch-list change.
+`lakebench admin repair-operator` rolls it back to the last deployed
+revision when that revision watches no deleted namespace and drops none the
+controller watches now, then reconciles the list. Otherwise it exits 3 and
+a cluster admin picks a revision from the history (`helm rollback
+spark-operator <revision> -n spark-operator`) and runs repair-operator
+again.
 
 **An interrupted `run` left a job running.** `run` deletes the jobs it
 created when it is interrupted, but leaves any it cannot show to be its own

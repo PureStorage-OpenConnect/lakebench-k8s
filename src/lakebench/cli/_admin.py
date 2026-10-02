@@ -966,29 +966,37 @@ def repair_operator(
         ),
     ] = DEFAULT_CONTROLLER_TMP_SIZE,
 ) -> None:
-    """Repair the shared Spark Operator: stale watch entries and a small /tmp.
+    """Repair the shared Spark Operator: stale watch entries, a pending release, a small /tmp.
 
-    When ``destroy`` fails partway through the watch-list mutation the
-    operator can be left with stale entries. This command reads the
-    live watch list and the live set of namespaces, keeps only the
-    entries whose namespace exists and is Active (plus ``default``), and
-    Helm-upgrades the operator to that reconciled list under the
-    cluster lease.
+    Under the cluster lease it reads the release state, the watch list (the
+    Helm values and the controller's ``--namespaces``) and the Active
+    namespaces, then:
 
-    It also raises the controller's /tmp emptyDir sizeLimit to
-    ``--controller-tmp-size`` when it is smaller. spark-submit runs in the
-    controller and fills /tmp with the Ivy jar cache; at the chart's 1Gi
-    the kubelet evicts the controller. The resize keeps every stored value
-    and the installed chart version, and rolls the controller once.
+    - rolls a release left ``pending-upgrade`` or ``pending-rollback`` (an
+      interrupted helm call) back to its last deployed revision, only when
+      that revision's watch list names no deleted namespace and drops no
+      namespace the controller watches now;
+    - sets the watch list, in one upgrade, to the namespaces either source
+      lists that still exist and are Active (``default`` only when nothing
+      else is left: an empty list means "watch every namespace");
+    - raises the controller's /tmp emptyDir sizeLimit to
+      ``--controller-tmp-size`` when it is smaller (spark-submit's Ivy cache
+      fills the chart's 1Gi and the kubelet evicts the controller).
+
+    Everything is read again inside the lease, so a namespace a deploy
+    re-created after an earlier read is kept. ``--dry-run`` reads without
+    the lease and only prints.
     """
     from lakebench.deploy.cluster_lock import (
         ADMIN_MAX_HOLD_S,
+        LEASE_REQUEST_TIMEOUT,
         ClusterLockError,
         ClusterLockHeld,
         LeaseHoldExceeded,
         cluster_lock,
     )
     from lakebench.modules.pipeline_engines.spark.operator import (
+        _WATCH_LIST_LOCK_TIMEOUT_S,
         SparkOperatorManager,
         _DeploymentReadError,
         _WatchListReadError,
@@ -1005,8 +1013,8 @@ def repair_operator(
         raise typer.Exit(ExitCode.USAGE) from e
 
     ns = "spark-operator"
-    v: str | None = None
     kube_ctx: str | None = None
+    v: str | None = None
     if config_file is not None or file_option is not None:
         cfg = _load_cfg(config_file, file_option)
         ns = cfg.platform.compute.spark.operator.namespace or ns
@@ -1015,103 +1023,184 @@ def repair_operator(
 
     core_v1 = _get_core_v1(context=kube_ctx)
     mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
+    pending_states = ("pending-upgrade", "pending-rollback")
 
-    # Controller /tmp: resize only a bounded emptyDir smaller than asked.
-    resize_from: str | None = None
-    try:
-        vol = mgr.controller_tmp_volume()
-    except _DeploymentReadError as e:
-        print_warning(f"cannot read the controller /tmp volume, not resizing it: {e}")
-    else:
-        want = parse_quantity(controller_tmp_size) or 0
-        if not vol.found or not vol.is_empty_dir:
-            print_warning(
-                "controller has no /tmp emptyDir named 'tmp'; not resizing "
-                "(the chart layout differs from 2.5.1)"
-            )
-        elif vol.size_limit is not None and (vol.limit_bytes or 0) < want:
-            resize_from = vol.size_limit
-
-    try:
-        watched = mgr._get_watched_namespaces()  # noqa: SLF001 -- reconciliation needs live state
-    except _WatchListReadError as e:
-        print_error(f"Cannot read the Spark Operator watch list: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-
-    to_drop: list[str] = []
-    reconciled: list[str] = []
-    if watched is None:
-        print_info("Spark Operator watches all namespaces; no watch list to reconcile")
-    else:
-        # ADR-F2/F2b: keep every watch entry whose namespace still exists
-        # AND is ``Active``, annotated or not. Legacy pre-PR-1 lakebench
-        # deployments (or any third-party ns the operator happens to
-        # watch) have no lakebench annotation but ARE running Spark
-        # workloads there; pruning them would silently stall
-        # reconciliation. Only namespaces that have been deleted, or are
-        # in ``Terminating`` (about to be gone) are safe to drop -- that
-        # is exactly the crash-loop this command is written to prevent.
-        # Iterate ``list_namespace`` via ``_continue`` in case a very
-        # large multi-tenant cluster exceeds the default page size:
-        # missing a page silently unwatches its tenants.
-        live_active_names: set[str] = set()
+    def _active_namespaces(leased: bool) -> set[str]:
+        # Iterate list_namespace via _continue: a missed page silently
+        # unwatches its tenants on a large cluster.
+        kw = {"_request_timeout": LEASE_REQUEST_TIMEOUT} if leased else {}
+        names: set[str] = set()
         cont: str | None = None
         while True:
-            page = core_v1.list_namespace(_continue=cont) if cont else core_v1.list_namespace()
+            page = (
+                core_v1.list_namespace(_continue=cont, **kw)
+                if cont
+                else core_v1.list_namespace(**kw)
+            )
             for n in page.items:
                 phase = getattr(n.status, "phase", None) if n.status else None
                 if phase == "Active":
-                    live_active_names.add(n.metadata.name)
+                    names.add(n.metadata.name)
             cont = getattr(page.metadata, "_continue", None) or getattr(
                 page.metadata, "continue_", None
             )
-            # Guard against test mocks where `_continue` is itself a
-            # MagicMock (truthy but not a real cursor). Only a non-empty
-            # string is a real continuation token.
             if not cont or not isinstance(cont, str):
-                break
+                return names
 
-        # ``default`` is preserved even when absent because the chart
-        # rejects an empty jobNamespaces list.
-        reconciled = sorted({n for n in watched if n in live_active_names} | {"default"})
-        if reconciled == sorted(watched):
-            print_info("Watch list already reconciled; no changes needed")
+    def _plan(leased: bool) -> dict:
+        state = mgr.release_state()
+        if state is None:
+            print_error("Cannot read the Spark Operator Helm release state")
+            raise typer.Exit(ExitCode.FAILED)
+        if state[0] == "absent":
+            print_error(
+                f"No {mgr.HELM_RELEASE_NAME} release in namespace {ns}. A cluster admin "
+                "installs it: lakebench admin install --component spark-operator"
+            )
+            raise typer.Exit(ExitCode.PREREQUISITE)
+        if state[0] == "pending-install":
+            # No deployed revision to return to; only a person can tell an
+            # install still running from one that was killed.
+            print_error(
+                f"Release {mgr.HELM_RELEASE_NAME} is pending-install (revision {state[1]}). "
+                f"A cluster admin checks 'helm status {mgr.HELM_RELEASE_NAME} -n {ns}' and, "
+                "when no install is running, uninstalls and re-installs it."
+            )
+            raise typer.Exit(ExitCode.REFUSED)
+        try:
+            values = mgr._get_watched_namespaces()  # noqa: SLF001 -- reconciliation needs live state
+        except _WatchListReadError as e:
+            print_error(f"Cannot read the Spark Operator watch list: {e}")
+            raise typer.Exit(ExitCode.FAILED) from e
+        try:
+            live = mgr._get_active_namespaces()  # noqa: SLF001
+        except _DeploymentReadError as e:
+            # Unreadable is not "watches every namespace": reconciling
+            # against only the Helm values could drop what the controller
+            # watches now.
+            print_error(f"Cannot read the Spark Operator controller's --namespaces: {e}")
+            raise typer.Exit(ExitCode.FAILED) from e
+        active = _active_namespaces(leased)
+        resize_from: str | None = None
+        try:
+            vol = mgr.controller_tmp_volume()
+        except _DeploymentReadError as e:
+            print_warning(f"cannot read the controller /tmp volume, not resizing it: {e}")
         else:
-            to_drop = [n for n in watched if n not in reconciled]
-            console.print("Reconciled watch list:")
-            console.print(f"  before: {sorted(watched)}")
-            console.print(f"  after:  {reconciled}")
+            want = parse_quantity(controller_tmp_size) or 0
+            if not vol.found or not vol.is_empty_dir:
+                print_warning(
+                    "controller has no /tmp emptyDir named 'tmp'; not resizing "
+                    "(the chart layout differs from 2.5.1)"
+                )
+            elif vol.size_limit is not None and (vol.limit_bytes or 0) < want:
+                resize_from = vol.size_limit
+        watch_all = values is None and live is None
+        target: list[str] = []
+        needs_set = False
+        if not watch_all:
+            # Keep every entry either source lists whose namespace still
+            # exists and is Active, annotated or not (a non-lakebench
+            # workload there still needs reconciling); drop deleted and
+            # Terminating ones, the crash-loop this command prevents.
+            sources = set(values or []) | set(live or [])
+            target = sorted(n for n in sources if n in active) or ["default"]
+            needs_set = target != sorted(values or []) or target != sorted(live or [])
+        return {
+            "state": state,
+            "values": values,
+            "live": live,
+            "active": active,
+            "watch_all": watch_all,
+            "target": target,
+            "needs_set": needs_set,
+            "resize_from": resize_from,
+        }
 
-    if resize_from is not None:
-        console.print(f"Controller /tmp emptyDir: {resize_from} -> {controller_tmp_size}")
-    elif not to_drop:
-        return
+    def _report(p: dict) -> None:
+        status, revision = p["state"]
+        if status in pending_states:
+            console.print(
+                f"Release {esc(mgr.HELM_RELEASE_NAME)} is {esc(status)} (revision {revision})"
+            )
+        if p["watch_all"]:
+            print_info("Spark Operator watches all namespaces; no watch list to reconcile")
+        elif p["needs_set"]:
+            console.print("Reconciled watch list:")
+            console.print(f"  helm values: {esc(sorted(p['values'] or []))}")
+            console.print(f"  controller:  {esc(sorted(p['live'] or []))}")
+            console.print(f"  after:       {esc(p['target'])}")
+        else:
+            print_info("Watch list already reconciled; no changes needed")
+        if p["resize_from"] is not None:
+            console.print(
+                f"Controller /tmp emptyDir: {esc(p['resize_from'])} -> {esc(controller_tmp_size)}"
+            )
+
+    def _nothing_to_do(p: dict) -> bool:
+        return (
+            p["state"][0] not in pending_states and not p["needs_set"] and p["resize_from"] is None
+        )
 
     if dry_run:
-        print_info("--dry-run set; not applying")
+        p = _plan(leased=False)
+        _report(p)
+        if not _nothing_to_do(p):
+            print_info("--dry-run set; not applying")
         return
 
-    # Take the lease and apply. We mutate by removing entries not in
-    # ``reconciled``. The strict path already lease-gates its own
-    # per-namespace helm upgrade; we call the underlying non-strict
-    # helper inside a single lease scope so the whole reconcile is one
-    # atomic mutation.
     try:
-        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
-            for n in to_drop:
-                if not mgr._remove_namespace_from_watch_impl(n):  # noqa: SLF001
+        with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S, max_hold_s=ADMIN_MAX_HOLD_S):
+            p = _plan(leased=True)
+            _report(p)
+            if _nothing_to_do(p):
+                return
+            status, revision = p["state"]
+            if status in pending_states:
+                good = mgr.last_good_revision(revision)
+                good_list = (
+                    mgr._get_watched_namespaces(revision=good)  # noqa: SLF001
+                    if good is not None
+                    else None
+                )
+                keep = set(p["live"] or []) & p["active"]
+                safe = (
+                    good is not None
+                    and good_list is not None
+                    and set(good_list) <= p["active"] | {"default"}
+                    and keep <= set(good_list)
+                )
+                if not safe or good is None:
                     print_error(
-                        f"could not drop {n!r} from watch list; the operator "
-                        "may still be inconsistent. Retry after investigating "
-                        "Helm state."
+                        f"Release {mgr.HELM_RELEASE_NAME} is {status}, and its last deployed "
+                        f"revision ({good}) would watch {good_list}: a deleted namespace, or "
+                        "without a namespace the controller watches now. Not rolling back. A "
+                        f"cluster admin checks 'helm history {mgr.HELM_RELEASE_NAME} -n {ns}' "
+                        "and rolls back to a revision whose watch list is safe, then re-runs "
+                        "repair-operator."
+                    )
+                    raise typer.Exit(ExitCode.REFUSED)
+                if not mgr.rollback_to(good):
+                    print_error(f"helm rollback to revision {good} failed; see the log above")
+                    raise typer.Exit(ExitCode.FAILED)
+                print_success(f"rolled {mgr.HELM_RELEASE_NAME} back to revision {good}")
+                p = _plan(leased=True)
+            if p["needs_set"]:
+                if not mgr._set_watch_list_impl(p["target"]):  # noqa: SLF001
+                    print_error(
+                        "could not set the watch list; the operator may still be inconsistent. "
+                        "Retry after investigating the Helm state."
                     )
                     raise typer.Exit(ExitCode.FAILED)
-            if resize_from is not None and not mgr.apply_controller_tmp_size(controller_tmp_size):
-                print_error(
-                    "could not resize the controller /tmp emptyDir; see the log above. "
-                    "The watch list repair (if any) was applied."
-                )
-                raise typer.Exit(ExitCode.FAILED)
+                print_success(f"reconciled Spark Operator watch list: {p['target']}")
+            if p["resize_from"] is not None:
+                if not mgr.apply_controller_tmp_size(controller_tmp_size):
+                    print_error(
+                        "could not resize the controller /tmp emptyDir; see the log above. "
+                        "The watch list repair (if any) was applied."
+                    )
+                    raise typer.Exit(ExitCode.FAILED)
+                print_success(f"controller /tmp emptyDir sizeLimit is now {controller_tmp_size}")
     except ClusterLockHeld as e:
         print_error(str(e))
         raise typer.Exit(ExitCode.REFUSED) from e
@@ -1123,11 +1212,6 @@ def repair_operator(
         # has been released.
         print_error(str(e))
         raise typer.Exit(ExitCode.FAILED) from e
-
-    if to_drop:
-        print_success(f"reconciled Spark Operator watch list: {reconciled}")
-    if resize_from is not None:
-        print_success(f"controller /tmp emptyDir sizeLimit is now {controller_tmp_size}")
 
 
 # ---------------------------------------------------------------------------

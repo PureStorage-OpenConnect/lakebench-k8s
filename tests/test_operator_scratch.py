@@ -260,6 +260,8 @@ def _admin_mgr(vol: TmpVolume, watched=None):
         mgr = cls.return_value
         mgr.controller_tmp_volume.return_value = vol
         mgr._get_watched_namespaces.return_value = watched
+        mgr._get_active_namespaces.return_value = watched
+        mgr.release_state.return_value = ("deployed", 3)
         mgr.apply_controller_tmp_size.return_value = True
         yield mgr, lock
 
@@ -281,11 +283,13 @@ class TestRepairOperatorTmp:
         mgr.apply_controller_tmp_size.assert_not_called()
 
     def test_large_enough_tmp_is_left_alone(self):
+        # The lease is taken to read inside it; nothing is applied.
         with _admin_mgr(TmpVolume(True, "8Gi")) as (mgr, lock):
             r = runner.invoke(admin_app, ["repair-operator"])
         assert r.exit_code == 0
-        assert not lock.called
+        assert lock.called
         mgr.apply_controller_tmp_size.assert_not_called()
+        mgr._set_watch_list_impl.assert_not_called()
 
     def test_failed_resize_exits_nonzero(self):
         with _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, _lock):
