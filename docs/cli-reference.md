@@ -347,7 +347,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-deploy` | | `false` | Skip the deploy and the infrastructure readiness check (namespace and components); the read-only prerequisite checks, cluster capacity included, still run and fail the run with exit 4 |
 | `--skip-generate` | | `false` | Skip datagen (refused with `--generate`) |
 | `--regenerate` | | `false` | With `--generate`: clear the datagen prefix before generating, when this deployment owns the bronze bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment does not own. A multi-cycle run clears an owned prefix before cycle 0 without it. Refused without `--generate` or `--generate-only`, and in a local or continuous run. |
-| `--allow-stale-bronze` | | `false` | With `--generate`, `--generate-only` or a multi-cycle batch run: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; `metrics.json` records it (`datagen.stale_bronze`). |
+| `--allow-stale-bronze` | | `false` | On a batch run with `--generate` or more than one cycle, or with `--generate-only`: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; `metrics.json` records it (`datagen.stale_bronze`). |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. On Delta the silver table's own log has the last word: the rebuild writes under an epoch above every one the table has used, even if the counter reads lower |
 | `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
@@ -379,8 +379,9 @@ before any repetition when one of the deployment's SparkApplications is
 still running or they cannot be listed. Each record carries `series {id, index, size}`, and
 `lakebench-output/series/<id>.json` lists the repetitions, which are members
 of the series' corpus, which passed, and the corpus (with `stale_bronze` when
-repetition 1 generated with `--allow-stale-bronze` over objects already in
-bronze: rows may be over-counted in every repetition). The manifest is the
+repetition 1's bronze was generated with `--allow-stale-bronze` over objects
+already there, by its own `--generate` or an earlier `generate`: rows may be
+over-counted in every repetition). The manifest is the
 authority on membership: only repetitions that passed and are members
 count. Exit: 0 when every repetition passed, 1 when any did not, 3 when bronze or
 the corpus changed, 130 on an interrupt. A repetition that stops before

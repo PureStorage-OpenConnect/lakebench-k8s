@@ -364,9 +364,11 @@ def run_series(
                     "bronze_listing_sha256": d1,
                     "digest_scope": scope,
                     "from_run_id": record.get("run_id"),
-                    # Set when repetition 1 generated over objects already in
-                    # a bronze bucket it did not create: D1 hashes those too,
-                    # and rows may be over-counted in every repetition.
+                    # Set when repetition 1's bronze was generated over objects
+                    # already in a bucket this deployment did not create (by
+                    # its own --generate or an earlier generate): D1 hashes
+                    # those too, and rows may be over-counted in every
+                    # repetition.
                     "stale_bronze": (record.get("datagen") or {}).get("stale_bronze"),
                 }
                 manifest.write(out_dir)
