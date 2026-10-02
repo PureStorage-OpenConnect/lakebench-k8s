@@ -319,9 +319,12 @@ class TestCoResidentPodsAreCounted:
         seen.clear()
         CliRunner().invoke(app, ["run", str(cfg_file), "--generate", "--yes"])
         assert seen == {"sustained": False, "datagen_runs": True}
+        # --generate with --skip-generate is refused before the preflight.
         seen.clear()
-        CliRunner().invoke(app, ["run", str(cfg_file), "--generate", "--skip-generate", "--yes"])
-        assert seen == {"sustained": False, "datagen_runs": False}
+        res = CliRunner().invoke(
+            app, ["run", str(cfg_file), "--generate", "--skip-generate", "--yes"]
+        )
+        assert res.exit_code == 2 and seen == {}
         cycles_file = tmp_path / "cycles.yaml"
         cycles_file.write_text(
             cfg_file.read_text().replace("name: cap-flag\n", "name: cap-cycles\n")
