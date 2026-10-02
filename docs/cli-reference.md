@@ -156,7 +156,7 @@ better side: the winner rule is not in this release. Each row's
 | `withheld` | The pair is NOT COMPARABLE or NOT ESTABLISHED; the delta is not computed |
 | `not_directional` | The score has no better side (correctness, guard and diagnostic scores, scores that follow the config, a score the registry does not know, or a mode-dependent score on a record without a mode) |
 | `confounded` | The pair is confounded |
-| `not_assessed` | Every other directional row: on a NOT LIKE-FOR-LIKE pair because the pair is not like-for-like, otherwise because the winner rule is not in this release |
+| `not_assessed` | A median over in-stream rounds (`composite_qph`, `in_stream_composite_qph`, `qph_degradation_pct`) on a side whose rounds ran different query sets or all missed the same query, on any pair that is not withheld (the hint names the side); every other directional row: on a NOT LIKE-FOR-LIKE pair because the pair is not like-for-like, otherwise because the winner rule is not in this release |
 | `capped` | On a like-for-like pair, a Lakebench limit bound the row on a passed member of either side (a bound kind the row depends on, or the trickle of a continuous run): the figure measures that limit, not the system |
 
 Whatever its assessment, a row that a Lakebench limit bound on either side
