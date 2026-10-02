@@ -285,8 +285,18 @@ class DatagenDeployer:
 
     TEMPLATES = ["datagen/job.yaml.j2"]
 
-    def __init__(self, engine: DeploymentEngine, allow_stale_bronze: bool = False):
+    def __init__(
+        self,
+        engine: DeploymentEngine,
+        allow_stale_bronze: bool = False,
+        *,
+        continuous: bool = False,
+    ):
         self.allow_stale_bronze = allow_stale_bronze
+        # A continuous run's datagen: it never takes --allow-stale-bronze,
+        # and its reset has already cleared the datagen prefix, so a refusal
+        # names that path's remedy instead of the flag.
+        self.continuous = continuous
         self.engine = engine
         self.config = engine.config
         self.k8s = engine.k8s
@@ -559,7 +569,11 @@ class DatagenDeployer:
                 raise StaleBronzeRefused(
                     f"s3://{bucket} holds objects and the datagen prefix is empty, so "
                     "they cannot be cleared before a fresh generate. Clear the bucket "
-                    "yourself, or pass --allow-stale-bronze."
+                    + (
+                        "yourself."
+                        if self.continuous
+                        else "yourself, or pass --allow-stale-bronze."
+                    )
                 )
             return
         if deployment_may_empty(self.config, bucket, s3):
@@ -583,6 +597,17 @@ class DatagenDeployer:
                 bucket,
             )
             return
+        if self.continuous:
+            ns = self.config.get_namespace()
+            raise StaleBronzeRefused(
+                f"s3://{bucket}/{prefix} holds objects and this deployment cannot prove "
+                f"it may empty {bucket}. This run's continuous reset cleared the prefix "
+                "before datagen, so they were written since, most likely by an earlier "
+                "lakebench-datagen Job's pods still stopping. Re-run once `kubectl get "
+                f"pods -n {ns} -l job-name=lakebench-datagen` lists none; the reset "
+                "clears the prefix again. A continuous run's own datagen does not take "
+                "--allow-stale-bronze, and --force-reset does not change this check."
+            )
         raise StaleBronzeRefused(
             f"s3://{bucket}/{prefix} holds objects and this deployment did not create "
             f"{bucket}. Pass --allow-stale-bronze to generate over them, or clear the "

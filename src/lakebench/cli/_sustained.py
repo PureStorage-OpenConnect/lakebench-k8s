@@ -3144,7 +3144,7 @@ def _run_sustained(
             _stage = "datagen"
             console.print()
             console.print("[bold]Starting datagen...[/bold]")
-            datagen = DatagenDeployer(engine)
+            datagen = DatagenDeployer(engine, continuous=True)
             _interrupt.creating("Job", "lakebench-datagen")
             datagen_result = datagen.deploy()
             if datagen_result.status != DeploymentStatus.SUCCESS:

@@ -912,6 +912,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
 ### Fixed
+- **A continuous run's stale-bronze refusal names a remedy that applies.**
+  When datagen found objects in a bronze prefix this deployment cannot prove
+  it may empty, the message told the operator to pass `--allow-stale-bronze`,
+  which `run` refuses on a continuous run (exit 2). The continuous reset has
+  already cleared that prefix by then, so the objects were written since,
+  most likely by an earlier datagen Job's pods still stopping. The message
+  now says to re-run once no `lakebench-datagen` pod is left (the reset
+  clears the prefix again) and that `--force-reset` does not change this
+  check. Batch messages, and `run --continuous --generate-only`, which does
+  take the flag, are unchanged.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the
