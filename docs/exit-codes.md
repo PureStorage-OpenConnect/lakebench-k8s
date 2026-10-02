@@ -14,7 +14,7 @@ path yet says so.
 | Code | Name | Meaning | Produced by |
 |---|---|---|---|
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass` |
-| 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout` |
+| 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone` |
 | 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `config.upgrade_refused` |
 | 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `destroy.redeployed`, `deploy.identity_foreign`, `run.bronze_nonempty`, `lease.held` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `run.prereq_failed`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable` |
@@ -37,6 +37,7 @@ the CLI down every path listed here and checks the code.
 | `run.pass` | 0 | `run` finished and its verdict passed |
 | `version.ok` | 0 | `lakebench version` prints the version |
 | `run.datagen_timeout` | 1 | datagen did not finish in time; the record says "datagen timed out" in verdict.reasons |
+| `run.namespace_gone` | 1 | the namespace was deleted, or deleted and deployed again, during a continuous `run`; the record names it in abort_reason |
 | `run.verdict_failed` | 1 | `run` finished with a failing verdict |
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `cli.bad_argument` | 2 | a command refuses an argument it checks itself: an unknown recipe, component, stage or example, a missing file, conflicting options |

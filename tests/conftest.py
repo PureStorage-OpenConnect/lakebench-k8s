@@ -435,6 +435,39 @@ def stub_experiment(
 
 
 @pytest.fixture(autouse=True)
+def _continuous_namespace_reads_answered(monkeypatch):
+    """The continuous runner reads its namespace through the real
+    kubernetes client (cli/_sustained.NamespaceWatch). Tests that drive
+    _run_sustained with no CoreV1Api fake would reach for a real API server
+    and, after three failed reads, stop as "namespace unreadable"; answer
+    them with a healthy namespace. A test that fakes CoreV1Api (the QA-9
+    harness, tests/test_run_namespace_gone.py) gets its fake."""
+    try:
+        import kubernetes.client
+        from kubernetes.client.api.core_v1_api import CoreV1Api as real_core_v1
+
+        from lakebench.cli import _sustained
+    except Exception:  # noqa: BLE001
+        return
+    from types import SimpleNamespace
+
+    watch = getattr(_sustained, "NamespaceWatch", None)
+    if watch is None:  # a tree from before the watch (a fix-reverted run)
+        return
+    real_read = watch._read
+
+    def read(self):
+        if kubernetes.client.CoreV1Api is real_core_v1:
+            return SimpleNamespace(
+                metadata=SimpleNamespace(uid="test-ns-uid", deletion_timestamp=None),
+                status=SimpleNamespace(phase="Active"),
+            )
+        return real_read(self)
+
+    monkeypatch.setattr(watch, "_read", read)
+
+
+@pytest.fixture(autouse=True)
 def _continuous_short_window_check_off(request, monkeypatch):
     """Tests that drive _run_sustained with short windows exercise other
     paths; the short-window refusal (cli/_sustained.short_window_problem)
