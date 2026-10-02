@@ -219,6 +219,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   configured context tried them first). `compare` still runs each config
   in its own `lakebench` process, each resolving its own context, until it
   becomes read-only.
+- **One source of metric metadata.** Every score's unit, direction and band
+  now come from `metrics/metric_registry.py`, which `compare`, `reproduce`,
+  the perf gate, the HTML report and `score_descriptions` read. `compare`
+  colours a delta only for a performance score, and some colours change:
+  `qph_degradation_pct` is lower is better (a run that slowed down was shown
+  as the faster side); `qph_spread`, `maintenance_value_pct`,
+  `compaction_ratio`, `window_seconds`, `benchmark_rounds_count`,
+  `total_rows_processed`, `bronze_busy_fraction`, `ingest_ratio`,
+  `corpus_ingest_ratio`, `query_time_event_age_seconds`, the time-to-detect
+  alert counts, the maintenance file and snapshot counts and the other
+  diagnostic scores are no longer coloured; in a continuous run
+  core-hours (they scale with the window) and total elapsed seconds are not
+  coloured, and the report's continuous CPU-hours card drops its "lower is
+  better" hint. A score with no registry entry is shown uncoloured (it used
+  to read as lower is better). The saved comparison gains `pipeline_mode`,
+  the mode its directions were read under. Score values, their
+  descriptions, and what `reproduce` and the perf gate check are unchanged.
 - typer is capped below 0.28 (`typer>=0.12.0,<0.28`), so a new typer minor
   cannot change the CLI without a tested raise of the cap.
 - The `[dev]` extra includes `[aml]`, so a development install now gets the

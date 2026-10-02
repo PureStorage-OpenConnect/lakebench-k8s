@@ -76,7 +76,7 @@ differ, so compare, the perf gate and reproduce refuse them).
 | `arrival_seconds` | the whole window while corpus was left, else bronze's last write inside the window + one bronze trigger | Seconds of the window data was still arriving. Throughput is never averaged over idle time after the corpus ran out. |
 | `window_arrival_fraction` | `arrival_seconds / window_seconds` | Below 1 the corpus ran out inside the window. |
 | `pre_window_rows` | bronze rows written before the window opened | Not part of any window score. |
-| `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency. Lower is better. |
+| `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency (a diagnostic: `compare` does not colour it). |
 | `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
 | `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of the whole corpus taken by the window's end. About 0.8 on a default run, whose trickle is sized to outlast the window; not a saturation signal. |
 | `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when bronze fell behind the rows the trickle released. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |

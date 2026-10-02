@@ -64,7 +64,8 @@ DEFAULT_TOLERANCES: dict[str, float] = {
 }
 
 
-# Every enumerated metric carries an explicit (band, direction).
+# (band, direction) of a metric, from metrics/metric_registry.py (the one
+# source of metric metadata):
 #
 # band -- "correctness" or "performance". The verifier looks up the band
 #     here, not in the package, so a malformed or hostile package cannot
@@ -74,31 +75,7 @@ DEFAULT_TOLERANCES: dict[str, float] = {
 #     higher -- higher-is-better; negative drift is bad.
 #     exact  -- either direction of drift is bad (correctness signals like
 #               scale_ratio and ingest_ratio: 2x is a bug just as much as
-#               0.5x is).
-#
-# Adding a new metric without an entry in this table trips the completeness
-# self-check in _classify_direction() rather than silently defaulting to a
-# forgiving direction. That's F7 from the adversarial review.
-_METRIC_TABLE: dict[str, tuple[str, str]] = {
-    # Correctness -- exact match, zero tolerance by default.
-    "scale_ratio": ("correctness", "exact"),
-    "ingest_ratio": ("correctness", "exact"),
-    # Performance -- lower is better (durations).
-    "time_to_value_seconds": ("performance", "lower"),
-    "data_freshness_seconds": ("performance", "lower"),
-    "datagen_cpu_hr_per_tb": ("performance", "lower"),
-    # Performance -- higher is better (throughput, efficiency, QpH).
-    "pipeline_throughput_gb_per_second": ("performance", "higher"),
-    "compute_efficiency_gb_per_core_hour": ("performance", "higher"),
-    "composite_qph": ("performance", "higher"),
-    "sustained_throughput_rps": ("performance", "higher"),
-    "datagen_aggregate_mbps": ("performance", "higher"),
-    # Used by the performance-regression gate (lakebench.metrics.perf_gate).
-    # _extract_expected_numbers does not emit them, so reproduction packages
-    # are unchanged.
-    "datagen_mbps_per_pod": ("performance", "higher"),
-    "pre_compaction_qph": ("performance", "higher"),
-}
+#               0.5x is; and every metric with no better side).
 
 # Per-query QpH (3600 / query seconds) lives in an open namespace keyed by
 # query name, for example ``query_qph_Q1_full_aggregation_scan``. Higher is
@@ -107,34 +84,44 @@ QUERY_QPH_PREFIX = "query_qph_"
 
 
 # Per-stage seconds live in an open namespace: the stage name comes from the
-# PipelineBenchmark stage list, which uses short names (bronze, silver, gold,
-# datagen, query) in batch mode and (bronze-ingest, silver-stream,
-# gold-refresh) in sustained mode. Any key matching STAGE_SECONDS_SUFFIX --
-# and not already in _METRIC_TABLE -- is classified as (performance, lower).
+# PipelineBenchmark stage list (bronze, silver, gold, datagen, query in both
+# modes). Any key matching STAGE_SECONDS_SUFFIX and not an enumerated
+# metric is a stage time.
 STAGE_SECONDS_SUFFIX = "_seconds"
+
+
+def _classify_direction(metric: str) -> tuple[str, str]:
+    """Return (band, direction) for a metric key, from the metric registry
+    (``metric_registry.reproduce_class``)."""
+    from lakebench.metrics.metric_registry import reproduce_class
+
+    return reproduce_class(metric)
+
+
+#: The metrics reproduce and the perf gate enumerate, with their (band,
+#: direction). A view of the registry, kept for callers that read the table.
+_METRIC_TABLE: dict[str, tuple[str, str]] = {
+    m: _classify_direction(m)
+    for m in (
+        "scale_ratio",
+        "ingest_ratio",
+        "time_to_value_seconds",
+        "data_freshness_seconds",
+        "datagen_cpu_hr_per_tb",
+        "pipeline_throughput_gb_per_second",
+        "compute_efficiency_gb_per_core_hour",
+        "composite_qph",
+        "sustained_throughput_rps",
+        "datagen_aggregate_mbps",
+        "datagen_mbps_per_pod",
+        "pre_compaction_qph",
+    )
+}
 
 
 def _is_stage_seconds(metric: str) -> bool:
     """True for open-namespace per-stage duration metrics."""
     return metric.endswith(STAGE_SECONDS_SUFFIX) and metric not in _METRIC_TABLE
-
-
-def _classify_direction(metric: str) -> tuple[str, str]:
-    """Return (band, direction) for a metric key.
-
-    Enumerated metrics come from the table. Stage-seconds default to
-    (performance, lower). Anything else is treated as (performance, exact)
-    -- the safest default: a metric we don't recognise won't fabricate a
-    correctness failure, but a divergence in either direction will still
-    be caught. This shuts the door on F7's silent higher-is-better default.
-    """
-    if metric in _METRIC_TABLE:
-        return _METRIC_TABLE[metric]
-    if metric.startswith(QUERY_QPH_PREFIX):
-        return ("performance", "higher")
-    if _is_stage_seconds(metric):
-        return ("performance", "lower")
-    return ("performance", "exact")
 
 
 # Legacy set kept for tests / callers that reference it directly. The
