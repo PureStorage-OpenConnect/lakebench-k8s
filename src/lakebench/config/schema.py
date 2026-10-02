@@ -2343,30 +2343,15 @@ class ObservabilityConfig(ConfigModel):
 
 
 class SparkConfOverrides(ConfigModel):
-    """Spark configuration overrides.
+    """The user's Spark conf, merged over the job defaults.
 
-    These are proven defaults that can be customized.
+    Holds user keys only. Each job's conf is the defaults
+    (``SPARK_CONF_DEFAULTS``), then these keys, then the keys Lakebench owns
+    (partitions, catalog, S3A, jars, UI); ``LakebenchConfig`` refuses a user
+    value for an owned key, which would otherwise be overwritten.
     """
 
-    conf: dict[str, str] = Field(
-        default_factory=lambda: {
-            # S3A settings (proven defaults for FlashBlade)
-            "spark.hadoop.fs.s3a.connection.maximum": "500",
-            "spark.hadoop.fs.s3a.threads.max": "200",
-            "spark.hadoop.fs.s3a.fast.upload": "true",
-            "spark.hadoop.fs.s3a.multipart.size": "268435456",
-            "spark.hadoop.fs.s3a.fast.upload.active.blocks": "16",
-            "spark.hadoop.fs.s3a.attempts.maximum": "20",
-            "spark.hadoop.fs.s3a.retry.limit": "10",
-            "spark.hadoop.fs.s3a.retry.interval": "500ms",
-            # Shuffle settings
-            "spark.sql.shuffle.partitions": "200",
-            "spark.default.parallelism": "200",
-            # Memory settings
-            "spark.memory.fraction": "0.8",
-            "spark.memory.storageFraction": "0.3",
-        }
-    )
+    conf: dict[str, str] = Field(default_factory=dict)
 
 
 # =============================================================================
@@ -2686,6 +2671,56 @@ class LakebenchConfig(ConfigModel):
         if not self.name:
             raise ValueError("'name' is required")
         return self
+
+    @field_validator("spark", mode="after")
+    @classmethod
+    def refuse_owned_spark_conf(
+        cls, spark: SparkConfOverrides, info: ValidationInfo
+    ) -> SparkConfOverrides:
+        """A user ``spark.conf`` key that Lakebench owns is refused.
+
+        Lakebench writes it for every job after the user's conf, so the value
+        would be lost. A key at its v1.6 schema default (which v1.6 wrote and
+        then overwrote) changed nothing and is dropped with a note. Teardown
+        and read commands drop owned keys with a note, so an old config can
+        still be destroyed.
+        """
+        from lakebench.modules.pipeline_engines.spark.conf_keys import (
+            V16_DEFAULT_SPARK_CONF,
+            is_owned_spark_key,
+            owned_key_reason,
+        )
+
+        conf = spark.conf
+        # architecture is declared (so validated) before spark.
+        arch = info.data.get("architecture")
+        catalog = arch.query_engine.trino.catalog_name if arch is not None else "lakehouse"
+        owned = [k for k in conf if is_owned_spark_key(k, catalog)]
+        if not owned:
+            return spark
+        inert = [k for k in owned if V16_DEFAULT_SPARK_CONF.get(k) == str(conf[k])]
+        refused = [k for k in owned if k not in inert]
+        purpose = purpose_from_context(info.context)
+        if refused and (purpose is None or purpose in CHANGES_DATA):
+            raise ValueError(
+                "spark.conf sets keys Lakebench owns: "
+                + "; ".join(owned_key_reason(k, catalog) for k in refused)
+                + ". Delete them from spark.conf"
+            )
+        for key in owned:
+            if key in inert:
+                text = (
+                    f"spark.conf '{key}' is ignored: it carried its v1.6 default, which "
+                    "Lakebench overwrote then too. Delete it from spark.conf."
+                )
+            else:
+                text = (
+                    f"spark.conf '{key}' is ignored ({owned_key_reason(key, catalog)}). "
+                    "Commands that change data refuse the config until it is deleted."
+                )
+            emit_note(text, kind="removed")
+        object.__setattr__(spark, "conf", {k: v for k, v in conf.items() if k not in owned})
+        return spark
 
     @model_validator(mode="after")
     def refuse_reserved_namespace(self) -> LakebenchConfig:
