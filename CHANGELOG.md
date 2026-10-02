@@ -465,9 +465,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   job builder cannot run, or a short tree is refused. A run is stamped
   `supported` only on the listed versions: a Spark 4.1 entry leaves a Spark
   4.0 run of the same recipe `unverified`, with both pairs in the basis. The
-  record is written by `python -m lakebench.config.support . --from-records
-  DIR... --tree SHA --expected FILE --write` from records that are release
-  evidence on a release-matrix row at that row's versions, never by hand.
+  Spark minor is read only from an `apache/spark` image with a release tag,
+  so a run on a custom or forked Spark image is never `supported`. An entry
+  that is not a release-matrix row at the matrix's versions is refused at
+  load. The record is written by `PYTHONPATH=src python -m
+  lakebench.config.support . --from-records DIR... --tree SHA --expected
+  FILE --write` from records that are release evidence on a release-matrix
+  row at that row's versions, never by hand.
   The support table in the README and docs names each supported cell's
   version pairs and gives each unverified cell's reason as a note. The
   release gate's `support-record` check requires every matrix row at its

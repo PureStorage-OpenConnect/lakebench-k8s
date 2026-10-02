@@ -38,9 +38,13 @@ not per recipe:
   the Spark image tag) and table format version (the resolved Iceberg or
   Delta version), so an entry validated on Spark 4.1 does not make a Spark
   4.0 run of the same recipe supported. A supported cell in the table below
-  names the version pairs its runs used. The record is generated from the
-  release-matrix run records and never edited by hand (see
-  [Releasing](releasing.md)); it is empty until the release runs fill it.
+  names the version pairs its runs used. The Spark minor is read only from
+  an `apache/spark` image (under any registry prefix) with a release tag
+  such as `4.1.1-python3`; a run on any other Spark image is never stamped
+  supported. The record is generated from the release-matrix run records
+  and never edited by hand (see [Releasing](releasing.md)); lakebench
+  refuses to load an entry that is not a release-matrix row at the matrix's
+  versions, and the record is empty until the release runs fill it.
 - **unverified**: valid for the workload and mode, but no release validation
   run is listed. It runs, and its evidence and `compare` output carry the
   state; an unverified run is not proof that the combination is supported.

@@ -120,6 +120,10 @@ def test_supported_only_when_listed_with_runs(tmp_path):
         (_entry(spark="4.1.1"), "Spark minor such as"),
         (_entry(spark='"4.0"', version="1.9.1"), "not compatible with Spark 4.0"),
         (_entry(recipe="hive-delta-spark-trino", spark='"3.5"', version="4.0.0"), "Delta"),
+        (_entry(spark='"4.0"'), "release matrix runs customer360 hive-iceberg-spark-trino"),
+        (_entry(spark='"3.5"'), "release matrix runs"),
+        (_entry(recipe="polaris-iceberg-spark-none"), "not a release-matrix row"),
+        (_entry(mode="continuous", recipe="hive-iceberg-spark-duckdb"), "not a release-matrix"),
         (_entry() + "extra: 1\n", "only top-level key"),
         (_entry().replace("runs:", "run_ids:"), "unknown keys"),
     ],
@@ -357,14 +361,45 @@ def test_config_and_record_name_the_same_versions(image, recipe, arch, want):
 
 def test_spark_minor_parses_like_the_job_builder():
     assert support.spark_minor("apache/spark:4.1.1-python3") == "4.1"
-    assert support.spark_minor("registry.example/spark:4.0.2") == "4.0"
+    assert support.spark_minor("apache/spark:4.0.2-java17-python3") == "4.0"
+    assert support.spark_minor("registry.example:5000/apache/spark:4.0.2") == "4.0"
+    assert support.spark_minor("apache/spark:4.1.1-python3@sha256:" + "a" * 64) == "4.1"
+    # Not the validated build: another repository, a custom tag, no tag.
+    assert support.spark_minor("registry.example/spark:4.0.2") is None
+    assert support.spark_minor("myreg/forked-spark:4.1.1-python3") is None
+    assert support.spark_minor("apache/spark:4.1.1-python3-patched") is None
     assert support.spark_minor("apache/spark@sha256:" + "a" * 64) is None
     assert support.spark_minor(None) is None
 
 
-def test_matrix_cell_lists_its_version_pairs(tmp_path):
-    body = _entry() + _entry(spark='"4.0"').replace("validated:\n", "")
-    rec = support.load_validation_record(_record(tmp_path, body))
+def test_a_custom_spark_image_is_never_supported(tmp_path):
+    rec = support.load_validation_record(_record(tmp_path, _entry()))
+    cfg = _cfg("myreg/forked-spark:4.1.1-python3")
+    assert support.config_versions(cfg)[0] is None
+    s = support.support_state(
+        "customer360",
+        "hive",
+        "iceberg",
+        "spark",
+        "trino",
+        "batch",
+        record=rec,
+        spark=support.config_versions(cfg)[0],
+        table_format_version="1.11.0",
+    )
+    assert s["state"] == support.UNVERIFIED and "not known" in s["basis"]
+
+
+def test_matrix_cell_lists_its_version_pairs():
+    # The loader admits one pair per cell (the matrix's); the matrix and
+    # the table still list every pair a record holds.
+    v41 = support.Validation(
+        "customer360", "hive-iceberg-spark-trino", "batch", "4.1", "1.11.0", TREE, ("r1",)
+    )
+    v40 = support.Validation(
+        "customer360", "hive-iceberg-spark-trino", "batch", "4.0", "1.11.0", TREE, ("r2",)
+    )
+    rec = {v41.key: v41, v40.key: v40}
     rows = {(r["recipe"], r["workload"], r["mode"]): r for r in support.support_matrix(record=rec)}
     cell = rows[("hive-iceberg-spark-trino", "customer360", "batch")]
     assert cell["state"] == support.SUPPORTED

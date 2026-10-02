@@ -24,9 +24,9 @@ def _spark(rec: dict, image: str) -> dict:
 
 
 def _records() -> dict[str, dict]:
-    """Two records that are release evidence on their matrix rows, and four
-    that are not: a dirty tree, a matrix row at other versions, a row that
-    is not in the matrix, and a second, different copy of a kept run."""
+    """Two records that are release evidence on their matrix rows, and
+    three that are not: a dirty tree, a matrix row at other versions and a
+    row that is not in the matrix."""
     polaris = _release("c360_batch")  # polaris-iceberg-spark-thrift, Spark 4.0
     aml = _spark(_release("aml_batch"), "apache/spark:4.1.1-python3")
     dirty = _release("c360_batch")
@@ -37,24 +37,27 @@ def _records() -> dict[str, dict]:
     off_matrix = _release("c360_batch")
     off_matrix["run_id"] = "20260928-102711-5c5c5c"
     off_matrix["experiment"]["corpus"]["scale"] = 5.0
-    twin = json.loads(json.dumps(aml))
-    twin["note"] = "a different copy"
     return {
         "polaris": polaris,
         "aml": aml,
         "dirty": dirty,
         "wrong_spark": wrong_spark,
         "off_matrix": off_matrix,
-        "twin": twin,
     }
+
+
+def _put(d: Path, rec: dict, dirname: str | None = None) -> None:
+    run_dir = d / (dirname or f"run-{rec['run_id']}")
+    run_dir.mkdir(parents=True)
+    (run_dir / "metrics.json").write_text(json.dumps(rec))
 
 
 def _write_runs(root: Path, records: dict[str, dict]) -> list[Path]:
     a, b = root / "runs-a", root / "runs-b"
-    for name, rec in records.items():
-        d = (b if name == "twin" else a) / f"run-{rec['run_id']}"
-        d.mkdir(parents=True)
-        (d / "metrics.json").write_text(json.dumps(rec))
+    a.mkdir()
+    b.mkdir()
+    for rec in records.values():
+        _put(a, rec)
     return [a, b]
 
 
@@ -75,17 +78,65 @@ def test_from_records_writes_rows(ready, tmp_path):  # noqa: F811
     ]
     assert all(e["tree"] == FREEZE and e["table_format_version"] == "1.11.0" for e in out.entries)
     refused = {p.parent.name: " ".join(why) for p, why in out.refused}
-    assert out.read == 6 and len(refused) == 4
+    assert (out.read, out.kept, len(refused)) == (5, 2, 3)
     assert "modified tree" in refused[f"run-{records['dirty']['run_id']}"]
     assert (
-        "the release matrix runs this row on Spark 4.1, Iceberg 1.11.0; the run used "
-        "Spark 4.0, Iceberg 1.11.0"
+        "the release matrix runs financial hive-iceberg-spark-trino batch on "
+        "Spark 4.1, Iceberg 1.11.0, not Spark 4.0, Iceberg 1.11.0"
     ) in refused[f"run-{records['wrong_spark']['run_id']}"]
     assert (
         "at scale 5 is not a release-matrix row"
         in refused[f"run-{records['off_matrix']['run_id']}"]
     )
-    assert "a second, different record" in refused[f"run-{records['twin']['run_id']}"]
+    assert "financial hive-iceberg-spark-trino batch at scale 10" in out.uncovered
+    assert len(out.uncovered) == len(rr.RELEASE_MATRIX) - 2
+
+
+def test_two_different_records_of_one_run_are_both_refused(ready, tmp_path):  # noqa: F811
+    # Whichever copy passes, two records of one run are not evidence of
+    # either; the order the directories are read in must not decide it.
+    records = _records()
+    dirs = _write_runs(tmp_path, records)
+    twin = json.loads(json.dumps(records["aml"]))
+    twin["note"] = "a different copy"
+    twin["provenance"]["git_dirty"] = True  # this copy fails on its own
+    _put(dirs[1], twin)
+    expected = _expected(*records.values())
+    for order in (dirs, dirs[::-1]):
+        out = support.rows_from_records(order, FREEZE, expected, root=REPO, release_digest=DIGEST)
+        assert [e["recipe"] for e in out.entries] == ["polaris-iceberg-spark-thrift"]
+        reasons = [" ".join(why) for p, why in out.refused if records["aml"]["run_id"] in str(p)]
+        assert len(reasons) == 2 and all("has different records" in r for r in reasons)
+
+
+def test_identical_copies_count_once_and_ids_are_normalised(ready, tmp_path):  # noqa: F811
+    records = _records()
+    dirs = _write_runs(tmp_path, records)
+    _put(dirs[1], records["polaris"])  # a byte-equal copy
+    prefixed = json.loads(json.dumps(records["aml"]))
+    prefixed["run_id"] = "run-" + prefixed["run_id"]  # the same run, spelled with run-
+    _put(dirs[1], prefixed, f"run-{records['aml']['run_id']}")
+    out = support.rows_from_records(
+        dirs, FREEZE, _expected(*records.values()), root=REPO, release_digest=DIGEST
+    )
+    # The byte-equal copy is counted once; the run-prefixed spelling is the
+    # same run id with different bytes, so that run is refused, never
+    # listed twice.
+    assert [r for e in out.entries for r in e["runs"]] == [records["polaris"]["run_id"]]
+    assert out.duplicates == 1 and out.kept == 1
+    reasons = [" ".join(w) for p, w in out.refused if records["aml"]["run_id"] in str(p)]
+    assert len(reasons) == 2 and all("has different records" in r for r in reasons)
+
+
+def test_a_record_outside_its_run_directory_is_refused(ready, tmp_path):  # noqa: F811
+    records = {"aml": _records()["aml"]}
+    dirs = _write_runs(tmp_path, {})
+    _put(dirs[0], records["aml"], "run-20260101-000000-ffffff")
+    out = support.rows_from_records(
+        dirs, FREEZE, _expected(*records.values()), root=REPO, release_digest=DIGEST
+    )
+    assert not out.entries
+    assert "its directory is not run-" in " ".join(out.refused[0][1])
 
 
 def test_written_record_loads_and_stamps_only_its_versions(ready, tmp_path):  # noqa: F811
@@ -142,8 +193,11 @@ def test_cli_writes_the_record_and_lists_refusals(ready, tmp_path, monkeypatch, 
     rc = _main(monkeypatch, *argv, "--write", "--output", str(out))
     err = capsys.readouterr().err
     assert rc == 0
-    assert err.count("refused ") == 4 and "6 records read, 2 kept, 4 refused; 2 entries" in err
+    assert err.count("refused ") == 3
+    assert "5 records read: 2 runs kept, 3 refused, 0 identical copies skipped; 2 entries" in err
+    assert "not covered: financial hive-iceberg-spark-trino batch at scale 10" in err
     assert len(support.load_validation_record(out)) == 2
+    assert out.stat().st_mode & 0o777 == 0o644
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted([*before, "out.yaml"])
     # Without --write the record is printed and nothing is written.
     out.unlink()
@@ -180,13 +234,63 @@ def test_cli_usage_errors_exit_2(argv, fragment, tmp_path, capsys):
     (tmp_path / "e.json").write_text('{"entries": []}')
     argv = [a.format(d=tmp_path, e=tmp_path / "e.json") for a in argv]
     with pytest.raises(SystemExit) as e:
-        support.main([str(tmp_path), *argv])
+        support.main([str(REPO), *argv])
     assert e.value.code == 2 and fragment in capsys.readouterr().err
 
 
-def test_shipped_record_is_the_generated_header_and_an_empty_list():
-    text = support.VALIDATION_RECORD.read_text()
-    assert text == support.RECORD_HEADER + "validated: []\n"
+def test_shipped_record_is_what_the_generator_writes():
+    # Holds the checked-in file to the writer's text for its own entries:
+    # an edit by hand that the writer would not produce fails here.
+    rec = support.load_validation_record()
+    entries = [
+        {
+            "workload": v.workload,
+            "recipe": v.recipe,
+            "mode": v.mode,
+            "spark": v.spark,
+            "table_format_version": v.table_format_version,
+            "tree": v.tree,
+            "runs": list(v.runs),
+        }
+        for _k, v in sorted(rec.items())
+    ]
+    assert support.VALIDATION_RECORD.read_text() == support.record_text(entries)
+
+
+def test_cli_refuses_a_lakebench_imported_from_another_tree(tmp_path, capsys):
+    # The tables, the record rules and the release image come from the
+    # imported code; writing ROOT's files from another tree's code would
+    # put that tree's record and tables into ROOT.
+    with pytest.raises(SystemExit) as e:
+        support.main([str(tmp_path)])
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and "not " + str(tmp_path.resolve() / "src") in err
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_writes_into_root_by_default(ready, tmp_path, monkeypatch, capsys):  # noqa: F811
+    import shutil
+
+    root = tmp_path / "tree"
+    shutil.copytree(REPO / "src" / "lakebench", root / "src" / "lakebench")
+    for rel in ("tests/fixtures/datagen_reference", "src/lakebench/config/datagen_lineage.yaml"):
+        src = REPO / rel
+        if src.is_dir() and not (root / rel).exists():
+            shutil.copytree(src, root / rel)
+    records = _records()
+    dirs = _write_runs(tmp_path, records)
+    expected = _expected_file(tmp_path, records)
+    here = root / "src" / "lakebench" / "config" / "support.py"
+    monkeypatch.setattr(support, "__file__", str(here))
+    monkeypatch.setattr(rr, "release_datagen_digest", lambda image=None: DIGEST)
+    rc = support.main(
+        [str(root), "--from-records", *map(str, dirs), "--tree", FREEZE]
+        + ["--expected", str(expected), "--write"]
+    )
+    assert rc == 0, capsys.readouterr().err
+    written = root / "src" / "lakebench" / "config" / "validated_combinations.yaml"
+    assert len(support.load_validation_record(written)) == 2
+    assert support.load_validation_record() == {}  # the imported package's file is untouched
 
 
 def test_every_matrix_row_names_runnable_versions():

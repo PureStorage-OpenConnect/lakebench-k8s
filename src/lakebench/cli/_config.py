@@ -484,7 +484,8 @@ def config_recipes(
     console.print(table)
     console.print()
     console.print(
-        "[dim]Support: supported = validated on the release tree; unverified = valid, "
+        "[dim]Support: supported = validated on the release tree, at the Spark and table "
+        "format versions `config recipes <name>` lists; unverified = valid, "
         "not release-validated; unsupported = refused at config load.[/dim]"
     )
     console.print("[dim]lakebench config recipes <name> for caveats and detail.[/dim]")

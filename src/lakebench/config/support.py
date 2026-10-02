@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -223,16 +223,33 @@ def compatibility_problem(
 # ---------------------------------------------------------------------------
 
 
+#: The image repository release validation runs use, after any registry
+#: prefix (a mirror of it is the same image name), and the tag suffixes the
+#: job builder strips (job._parse_spark_major_minor).
+SPARK_REPOSITORY = "apache/spark"
+_SPARK_TAG = re.compile(
+    r"^(\d+)\.(\d+)\.\d+(?:-python3|-java21|-java17|-java11|-scala2\.12|-scala2\.13)*$"
+)
+
+
 def spark_minor(image: object) -> str | None:
     """``"4.1"`` for ``apache/spark:4.1.1-python3``: the Spark minor of an
-    image reference, parsed as the job builder parses it; None when the tag
-    names no version (a digest-only reference, for one)."""
+    ``apache/spark`` image (under any registry prefix, with or without a
+    trailing ``@sha256:`` digest) whose tag is a plain release version
+    with the job builder's suffixes. None for anything else (another
+    repository, a custom tag such as ``4.1.1-python3-patched``, a
+    digest-only reference): its Spark build is not the one validated, so
+    a run on it is never stamped supported."""
     if not isinstance(image, str) or not image:
         return None
-    from lakebench.modules.pipeline_engines.spark.job import _parse_spark_major_minor
-
-    major, minor = _parse_spark_major_minor(image)
-    return f"{major}.{minor}" if major > 0 else None
+    ref = image.split("@", 1)[0]
+    repo, sep, tag = ref.rpartition(":")
+    if not sep or "/" in tag:
+        return None
+    if not (repo == SPARK_REPOSITORY or repo.endswith("/" + SPARK_REPOSITORY)):
+        return None
+    m = _SPARK_TAG.match(tag)
+    return f"{int(m.group(1))}.{int(m.group(2))}" if m else None
 
 
 def format_version_problem(spark: str, table_format: str, version: str) -> str:
@@ -247,12 +264,12 @@ def format_version_problem(spark: str, table_format: str, version: str) -> str:
     return ""
 
 
-def config_versions(cfg: Any) -> tuple[str | None, str | None]:
-    """(Spark minor, table format version) a loaded config runs: the same
-    reading the run record's ``experiment.architecture`` makes
-    (``metrics/experiment.py``), so a run's stamp and its record agree."""
+def resolved_format_version(cfg: Any) -> str | None:
+    """The table format version a config's Spark jobs use
+    (``job.resolve_format_version`` over the config's Spark image and
+    requested version), or None when it does not resolve. The run record's
+    ``experiment.architecture.table_format.version`` is this value."""
     arch = cfg.architecture
-    image = cfg.images.spark
     table_format = arch.table_format.type.value
     try:
         from lakebench.modules.pipeline_engines.spark.job import resolve_format_version
@@ -262,10 +279,16 @@ def config_versions(cfg: Any) -> tuple[str | None, str | None]:
             if table_format == "iceberg"
             else arch.table_format.delta.version
         )
-        version: str | None = resolve_format_version(image, table_format, requested)
-    except Exception:  # noqa: BLE001 -- the record writes None for the same failure
-        version = None
-    return spark_minor(image), version or None
+        return resolve_format_version(cfg.images.spark, table_format, requested) or None
+    except Exception:  # noqa: BLE001 -- recorded as unknown, never raised
+        return None
+
+
+def config_versions(cfg: Any) -> tuple[str | None, str | None]:
+    """(Spark minor, table format version) a loaded config runs: the same
+    reading ``record_versions`` makes of the run record, which holds the
+    config's Spark image and ``resolved_format_version``."""
+    return spark_minor(cfg.images.spark), resolved_format_version(cfg)
 
 
 def record_versions(record: Mapping[str, Any]) -> tuple[str | None, str | None]:
@@ -306,6 +329,28 @@ def versions_label(spark: str, table_format: str, version: str) -> str:
     return f"Spark {spark}, {_FORMAT_LABELS.get(table_format, table_format)} {version}"
 
 
+def matrix_versions_problem(
+    workload: str, mode: str, recipe: str, spark: str, version: str
+) -> str | None:
+    """Why (workload, mode, recipe) at Spark *spark* and format *version*
+    cannot be a validation entry, or None: it must be a release-matrix row
+    (``release_record.RELEASE_MATRIX_VERSIONS``, SPEC section 11) at that
+    row's versions. A valid tuple outside the matrix is published
+    unverified, so an entry for it is refused rather than stamped."""
+    from lakebench.metrics.release_record import RELEASE_MATRIX_VERSIONS
+
+    fmt = (components_of(recipe) or ("", ""))[1]
+    want = RELEASE_MATRIX_VERSIONS.get((workload, canonical_mode(mode), recipe))
+    if want is None:
+        return f"{workload} {recipe} {canonical_mode(mode)} is not a release-matrix row"
+    if (spark, version) != want:
+        return (
+            f"the release matrix runs {workload} {recipe} {canonical_mode(mode)} on "
+            f"{versions_label(want[0], fmt, want[1])}, not {versions_label(spark, fmt, version)}"
+        )
+    return None
+
+
 def _as_str(entry: Mapping[str, Any], key: str, where: str) -> str:
     value = entry.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -319,8 +364,9 @@ def load_validation_record(path: Path | None = None) -> dict[ValidationKey, Vali
 
     Refuses (ValidationRecordError) a record that lists anything layers 1 to
     3 refuse, an unknown recipe, a row without its Spark minor or table
-    format version, a version pair the job builder cannot run, a tree that
-    is not a 40-hex commit, an entry with no run ids, or the same key twice.
+    format version, a version pair the job builder cannot run, a row that is
+    not a release-matrix row at that row's versions, a tree that is not a
+    40-hex commit, an entry with no run ids, or the same key twice.
     A record that lists an unsupported combination would otherwise stamp it
     "supported".
     """
@@ -368,9 +414,11 @@ def load_validation_record(path: Path | None = None) -> dict[ValidationKey, Vali
             )
         if not _SPARK_MINOR.match(spark):
             raise ValidationRecordError(f"{where}: spark must be a Spark minor such as 4.1")
-        problem = format_version_problem(spark, comps[1], version)
-        if problem:
-            raise ValidationRecordError(f"{where}: {problem}")
+        version_problem = format_version_problem(
+            spark, comps[1], version
+        ) or matrix_versions_problem(workload, mode, recipe, spark, version)
+        if version_problem:
+            raise ValidationRecordError(f"{where}: {version_problem}")
         if not _SHA40.match(tree):
             raise ValidationRecordError(f"{where}: tree must be the 40-hex freeze commit")
         runs = entry.get("runs")
@@ -845,7 +893,7 @@ RECORD_HEADER = """\
 #
 # Generated from release-matrix run records, never edited by hand:
 #
-#   python -m lakebench.config.support --from-records uat/runs \\
+#   PYTHONPATH=src python -m lakebench.config.support . --from-records uat/runs \\
 #       --tree <freeze commit> --expected uat/expected-results-<version>.json --write
 #
 # One entry per workload x recipe x mode x Spark minor x table format
@@ -854,10 +902,11 @@ RECORD_HEADER = """\
 # results, the freeze commit, a clean tree, the release datagen image)
 # completed on the freeze tree. Only a run of a listed combination at the
 # listed versions is stamped "supported"; a valid combination that is not
-# listed, or runs at other versions, is "unverified". A combination that
-# fails the architecture, workload or mode checks is refused at config load
-# and can never be listed (lakebench refuses to load a record that lists
-# one). The list starts empty for every release.
+# listed, or runs at other versions, is "unverified". Only release-matrix
+# rows at the matrix's versions (metrics/release_record.py
+# RELEASE_MATRIX_VERSIONS) can be listed, and a combination that fails the
+# architecture, workload or mode checks never can: lakebench refuses to
+# load a record that lists one. The list starts empty for every release.
 #
 # Entry shape:
 #
@@ -873,36 +922,30 @@ RECORD_HEADER = """\
 
 @dataclass
 class FromRecords:
-    """What ``rows_from_records`` kept and refused."""
+    """What ``rows_from_records`` kept and refused. *read* counts the
+    metrics.json files read, *kept* the runs that fill an entry (a
+    byte-equal copy of a kept run is counted once), *duplicates* the
+    byte-equal copies skipped."""
 
     entries: list[dict[str, Any]]
     refused: list[tuple[Path, list[str]]]
     read: int
+    kept: int = 0
+    duplicates: int = 0
+    uncovered: list[str] = field(default_factory=list)
 
 
 def _matrix_problem(record: Mapping[str, Any], key: ValidationKey) -> str | None:
     """Why a record that is release evidence still cannot fill a row: its
     workload x mode x recipe x scale is not a release-matrix row, or it ran
-    other versions than the row names (SPEC section 11)."""
-    from lakebench.metrics.release_record import (
-        RELEASE_MATRIX,
-        RELEASE_MATRIX_VERSIONS,
-        record_key,
-    )
+    other versions than the row names (``matrix_versions_problem``)."""
+    from lakebench.metrics.release_record import RELEASE_MATRIX, record_key
 
     rkey = record_key(record)
     if rkey is None or rkey not in {(w, m, r, float(s)) for w, m, r, s in RELEASE_MATRIX}:
         where = f"{rkey[0]} {rkey[2]} {rkey[1]} at scale {rkey[3]:g}" if rkey else "it"
         return f"{where} is not a release-matrix row"
-    want = RELEASE_MATRIX_VERSIONS.get((rkey[0], rkey[1], rkey[2]))
-    fmt = (components_of(key[1]) or ("", ""))[1]
-    if want is None or (key[3], key[4]) != want:
-        named = versions_label(want[0], fmt, want[1]) if want else "no versions"
-        return (
-            f"the release matrix runs this row on {named}; the run used "
-            f"{versions_label(key[3], fmt, key[4])}"
-        )
-    return None
+    return matrix_versions_problem(key[0], key[2], key[1], key[3], key[4])
 
 
 def rows_from_records(
@@ -914,17 +957,18 @@ def rows_from_records(
     release_digest: str | None = None,
 ) -> FromRecords:
     """The validation entries the release-matrix records under *dirs*
-    (each ``run-*/metrics.json``) fill: records with no ``record_problems``
-    for freeze *tree* and *expected*, on a release-matrix row at that row's
-    versions, grouped by key and sorted. Every other record is refused with
-    its reasons."""
+    (each ``run-<id>/metrics.json``) fill: records with no
+    ``record_problems`` for freeze *tree* and *expected*, on a
+    release-matrix row at that row's versions, grouped by key and sorted.
+    Every other record is refused with its reasons. A run id found with two
+    different records is refused in every copy, whichever passes; a record
+    whose directory is not ``run-<its run_id>`` is refused."""
     import json
 
-    from lakebench.metrics.release_record import record_problems
+    from lakebench.metrics.release_record import RELEASE_MATRIX, record_key, record_problems
 
-    grouped: dict[ValidationKey, list[str]] = {}
-    seen: dict[str, bytes] = {}
     refused: list[tuple[Path, list[str]]] = []
+    copies: dict[str, list[tuple[Path, bytes, dict[str, Any]]]] = {}
     read = 0
     for d in dirs:
         for path in sorted(d.glob("run-*/metrics.json")):
@@ -935,32 +979,45 @@ def rows_from_records(
             except (OSError, ValueError) as e:
                 refused.append((path, [f"unreadable: {e}"]))
                 continue
-            if not isinstance(record, dict):
-                refused.append((path, ["not a run record"]))
+            run_id = record.get("run_id") if isinstance(record, dict) else None
+            if not isinstance(run_id, str) or not run_id.removeprefix("run-"):
+                refused.append((path, ["not a run record with a run_id"]))
                 continue
-            run_id = record.get("run_id")
-            if not isinstance(run_id, str) or not run_id:
-                refused.append((path, ["the record names no run_id"]))
+            rid = run_id.removeprefix("run-")
+            if path.parent.name != f"run-{rid}":
+                refused.append((path, [f"its directory is not run-{rid}"]))
                 continue
-            if run_id in seen:
-                if seen[run_id] != raw:
-                    refused.append((path, [f"a second, different record of run {run_id}"]))
-                continue
-            problems = record_problems(
-                record, tree, expected, release_digest=release_digest, root=root
+            copies.setdefault(rid, []).append((path, raw, record))
+
+    grouped: dict[ValidationKey, list[str]] = {}
+    keys_run: set[tuple[str, str, str, float]] = set()
+    kept = duplicates = 0
+    for rid, found in sorted(copies.items()):
+        if len({raw for _p, raw, _r in found}) > 1:
+            where = ", ".join(str(p) for p, _raw, _r in found)
+            refused += [(p, [f"run {rid} has different records ({where})"]) for p, _, _ in found]
+            continue
+        path, _raw, record = found[0]
+        duplicates += len(found) - 1
+        problems = record_problems(record, tree, expected, release_digest=release_digest, root=root)
+        key = validation_key_of(record)
+        if key is None:
+            problems.append(
+                "the record names no Spark minor (an apache/spark X.Y.Z image) or no table "
+                "format version"
             )
-            key = validation_key_of(record)
-            if key is None:
-                problems.append("the record names no Spark minor or table format version")
-            elif not problems:
-                matrix = _matrix_problem(record, key)
-                if matrix:
-                    problems.append(matrix)
-            if problems or key is None:
-                refused.append((path, problems))
-                continue
-            seen[run_id] = raw
-            grouped.setdefault(key, []).append(run_id.removeprefix("run-"))
+        elif not problems:
+            matrix = _matrix_problem(record, key)
+            if matrix:
+                problems.append(matrix)
+        if problems or key is None:
+            refused += [(p, problems) for p, _raw, _r in found]
+            continue
+        kept += 1
+        grouped.setdefault(key, []).append(rid)
+        rkey = record_key(record)
+        if rkey is not None:
+            keys_run.add(rkey)
     entries = [
         {
             "workload": k[0],
@@ -973,7 +1030,12 @@ def rows_from_records(
         }
         for k, runs in sorted(grouped.items())
     ]
-    return FromRecords(entries, refused, read)
+    uncovered = [
+        f"{w} {r} {m} at scale {s:g}"
+        for w, m, r, s in RELEASE_MATRIX
+        if (w, m, r, float(s)) not in keys_run
+    ]
+    return FromRecords(entries, refused, read, kept, duplicates, uncovered)
 
 
 def record_text(entries: list[dict[str, Any]]) -> str:
@@ -996,6 +1058,9 @@ def write_record(entries: list[dict[str, Any]], path: Path) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
+        # mkstemp makes the file 0600; the record is package data every
+        # user of a build reads.
+        os.chmod(tmp, 0o644)
         loaded = load_validation_record(Path(tmp))
         if len(loaded) != len(entries):
             raise ValidationRecordError(f"wrote {len(entries)} entries, read {len(loaded)}")
@@ -1005,12 +1070,20 @@ def write_record(entries: list[dict[str, Any]], path: Path) -> None:
             os.unlink(tmp)
 
 
+def _record_path(root: Path) -> Path:
+    return root / "src" / "lakebench" / "config" / VALIDATION_RECORD.name
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python -m lakebench.config.support [ROOT]`` rewrites the docs'
-    generated blocks under ROOT. With ``--from-records DIR...`` it builds the
-    validation record from the run records instead and prints it, or with
-    ``--write`` writes it; it touches no other file. Exit 0 when entries
-    were built, 1 when none was (nothing is written), 2 on a usage error."""
+    generated blocks under ROOT (default ``.``). With ``--from-records
+    DIR...`` it builds the validation record from the run records instead
+    and prints it, or with ``--write`` writes it to ROOT's
+    ``src/lakebench/config/validated_combinations.yaml``; it touches no
+    other file. Both forms refuse unless this lakebench is imported from
+    ROOT's ``src`` (the tables, the record rules and the release image all
+    come from the imported code). Exit 0 when the work was done, 1 when no
+    record is release evidence (nothing is written), 2 on a usage error."""
     import argparse
     import sys
 
@@ -1020,42 +1093,53 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tree", help="the 40-hex freeze commit")
     ap.add_argument("--expected", type=Path, help="uat/expected-results-<version>.json")
     ap.add_argument("--write", action="store_true", help="write the record file")
-    ap.add_argument("--output", type=Path, default=VALIDATION_RECORD, help=argparse.SUPPRESS)
+    ap.add_argument("--output", type=Path, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
+    root = args.root.resolve()
+    if not args.from_records and (args.tree or args.expected or args.write):
+        ap.error("--tree, --expected and --write need --from-records")
+    if args.from_records:
+        if not args.tree or not _SHA40.match(args.tree):
+            ap.error("--tree must be the 40-hex freeze commit")
+        if args.expected is None:
+            ap.error("--expected is required with --from-records")
+        missing = [str(d) for d in args.from_records if not d.is_dir()]
+        if missing:
+            ap.error(f"not a directory: {', '.join(missing)}")
+    here = Path(__file__).resolve()
+    if not here.is_relative_to(root / "src"):
+        ap.error(
+            f"this lakebench is imported from {here.parent.parent}, not {root / 'src'}; "
+            f"run it as PYTHONPATH={root / 'src'} python -m lakebench.config.support {args.root}"
+        )
     if not args.from_records:
-        if args.tree or args.expected or args.write:
-            ap.error("--tree, --expected and --write need --from-records")
         for f in regenerate_docs(args.root):
             print(f"updated {f}")
         return 0
-    if not args.tree or not _SHA40.match(args.tree):
-        ap.error("--tree must be the 40-hex freeze commit")
-    if args.expected is None:
-        ap.error("--expected is required with --from-records")
-    missing = [str(d) for d in args.from_records if not d.is_dir()]
-    if missing:
-        ap.error(f"not a directory: {', '.join(missing)}")
     from lakebench.metrics.release_record import load_expected
 
     try:
         expected = load_expected(args.expected)
     except (OSError, ValueError) as e:
         ap.error(f"cannot read {args.expected}: {e}")
-    result = rows_from_records(args.from_records, args.tree, expected, root=args.root)
+    result = rows_from_records(args.from_records, args.tree, expected, root=root)
     for path, problems in result.refused:
         print(f"refused {path}: {'; '.join(problems)}", file=sys.stderr)
     print(
-        f"{result.read} records read, {result.read - len(result.refused)} kept, "
-        f"{len(result.refused)} refused; {len(result.entries)} entries",
+        f"{result.read} records read: {result.kept} runs kept, {len(result.refused)} refused, "
+        f"{result.duplicates} identical copies skipped; {len(result.entries)} entries",
         file=sys.stderr,
     )
+    for row in result.uncovered:
+        print(f"not covered: {row} (the release gate refuses the tag)", file=sys.stderr)
     if not result.entries:
         print("no record is release evidence; nothing written", file=sys.stderr)
         return 1
     if args.write:
-        write_record(result.entries, args.output)
-        print(f"wrote {args.output}", file=sys.stderr)
+        output = args.output or _record_path(root)
+        write_record(result.entries, output)
+        print(f"wrote {output}", file=sys.stderr)
     else:
         sys.stdout.write(record_text(result.entries))
     return 0

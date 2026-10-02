@@ -111,21 +111,35 @@ generated from the release-matrix run records once they are checked in
 under `uat/runs/`, and never edited by hand:
 
 ```bash
-python -m lakebench.config.support . --from-records uat/runs \
+PYTHONPATH=$PWD/src python -m lakebench.config.support . --from-records uat/runs \
     --tree "$(cat uat/freeze-<version>)" \
     --expected uat/expected-results-<version>.json --write
-python -m lakebench.config.support .   # regenerate the README and docs tables
+PYTHONPATH=$PWD/src python -m lakebench.config.support .   # regenerate the README and docs tables
 ```
+
+`.` is the repository root: the record is written to its
+`src/lakebench/config/validated_combinations.yaml`, and the release
+datagen image's lineage evidence is read from it. Both commands refuse
+(exit 2) unless the lakebench they import is that root's `src`, because the
+tables, the record rules and the release image come from the imported
+code; hence `PYTHONPATH`. `--expected` is the expected-results file the
+`expected-results` check reads.
 
 It keeps each record that is release evidence (the `records` check's
 rules, below) on a release-matrix row run at that row's Spark minor and
-table format version, groups them by workload, recipe, mode, Spark minor
-and table format version, and writes one entry per group with the freeze
-commit as its `tree`. Every other record is listed on stderr with its
-reasons. Without `--write` it prints the record instead; it exits 1 and
-writes nothing when no record is release evidence, and touches no other
-file. Commit the record and the regenerated tables together; both are on
-the post-freeze allowlist.
+table format version (SPEC section 11, `RELEASE_MATRIX_VERSIONS` in
+`src/lakebench/metrics/release_record.py`), groups them by workload,
+recipe, mode, Spark minor and table format version, and writes one entry
+per group with the freeze commit as its `tree`. A record whose directory is
+not `run-<its run_id>` is refused, and so is every copy of a run id found
+with two different records; byte-equal copies count once. Every refused
+record is listed on stderr with its reasons, and so is every matrix row,
+scale included, that no kept run covers (the `support-record` check
+refuses the tag until each is covered). Without `--write` it prints the
+record instead. It exits 0 when it built at least one entry, 1 when no
+record is release evidence (nothing is written) and 2 on a usage error, and
+touches no other file. Commit the record and the regenerated tables
+together; both are on the post-freeze allowlist.
 
 Four checks hold the release to its evidence; `records` and
 `support-record` read the cited run records themselves
