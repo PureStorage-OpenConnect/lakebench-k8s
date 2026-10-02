@@ -261,11 +261,90 @@ def test_binding_override_not_like_for_like():
 
 
 def test_perf_gate_refuses_override_bound_baseline():
+    """A record whose override binds (emitted by the run, not injected) is
+    refused as a run, a baseline and evidence (one predicate,
+    release_record.bound_problems)."""
     from lakebench.metrics.release_record import bound_problems
 
+    cfg = _cfg()
+    cfg.platform.compute.spark.silver_executors = 4
+    problems = bound_problems(_record_with(cfg))
+    assert "silver-build: executor override bound this run; its numbers measure the cap" in problems
+
+
+def test_a_binding_override_labels_the_metrics_it_caps():
+    from lakebench.metrics.metric_registry import capped_by
+
+    kinds = ["silver-build: executor override"]
+    assert capped_by("total_core_hours", kinds, "batch") == kinds
+
+
+def test_a_count_pinned_at_the_cap_keeps_the_cap_label():
+    cfg = _cfg(scale=1000)
+    cap = job_mod._JOB_PROFILES["gold-finalize"]["max_executors"]
+    cfg.platform.compute.spark.gold_executors = cap
+    e = _record_with(cfg, "gold-finalize")["experiment"]
+    gold = next(x for x in e["limits"]["executors"] if x["job_type"] == "gold-finalize")
+    assert gold["cap_hit"] and "override_bound" not in gold
+    assert "gold-finalize: executor cap" in e["limits"]["bound_kinds"]
+
+
+def test_a_local_run_applies_no_override():
+    cfg = _cfg()
+    cfg.platform.compute.spark.silver_executors = 4
+    run = _metrics(cfg)
+    run.config_snapshot["local"] = True
+    run.jobs.append(JobMetrics(job_name="j", job_type="silver-build", success=True))
+    rec = run.to_dict()
+    sb = next(
+        x for x in rec["experiment"]["limits"]["executors"] if x["job_type"] == "silver-build"
+    )
+    assert sb["override"] is None and "override_bound" not in sb
+    # A local run's block records no override (experiment_inputs with
+    # system="local"); the identity must not take one back from the snapshot.
+    rec["experiment"]["architecture"].pop("spark_executor_overrides", None)
+    assert "spark executor overrides" not in cmp.optional_keys(rec["experiment"], rec)
+
+
+def test_the_identity_fallback_reads_the_run_mode():
     rec = sr.load_record("5105a0")
-    rec["experiment"]["limits"]["bound_kinds"] = ["silver-build: executor override"]
-    assert any("executor override" in p for p in bound_problems(rec))
+    rec["config_snapshot"]["spark"]["executor_overrides"]["silver"] = 12
+    rec["config_snapshot"]["spark"]["executor_overrides"]["gold_refresh"] = 3
+    rec["experiment"]["mode"] = "continuous"
+    assert cmp.optional_keys(rec["experiment"], rec)["spark executor overrides"] == {
+        "gold_refresh": 3
+    }
+
+
+def test_the_comparability_key_table_is_the_job_table():
+    for mode, job_types in (
+        ("batch", job_mod.BATCH_JOB_TYPES),
+        ("continuous", job_mod.STREAMING_JOB_TYPES),
+    ):
+        assert cmp._OVERRIDE_KEYS_BY_MODE[mode] == {
+            jt: EXECUTOR_OVERRIDE_FIELDS[jt][1] for jt in job_types
+        }
+
+
+def test_a_refusal_names_the_overrides():
+    from unittest import mock
+
+    from lakebench.cli._prerequisites import _check_cluster_capacity
+    from lakebench.k8s.client import ClusterCapacity, FreeCapacity
+
+    g = 1024**3
+    cfg = make_config(platform={"compute": {"spark": {"silver_executors": 28}}})
+    cap = ClusterCapacity(100_000, 800 * g, 4, 40_000, 402 * g)
+    k8s = mock.MagicMock()
+    k8s.get_cluster_capacity.return_value = cap
+    k8s.get_free_capacity.return_value = FreeCapacity(
+        free=cap, allocatable=cap, free_by_node=((40_000, 402 * g),)
+    )
+    with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
+        result = _check_cluster_capacity(cfg)
+    assert not result.passed
+    assert "with executor overrides silver-build 28" in result.message
+    assert "Lower or unset the executor overrides" in result.hint
 
 
 def test_upward_and_driver_overrides_are_not_evidence():

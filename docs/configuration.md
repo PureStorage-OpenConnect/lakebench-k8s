@@ -406,8 +406,9 @@ An override changes what a run measures:
 
 - It enters the experiment record (`architecture.spark_executor_overrides`;
   the driver overrides as `architecture.spark_driver_overrides`) and the
-  identity, as an architecture difference: two runs with different overrides
-  are not like-for-like.
+  identity, as an architecture difference: compare reports two runs with
+  different overrides as differing in architecture. They are like-for-like
+  only when no override binds one run and not the other (below).
 - An override below what the profile asks for at the run's scale binds the
   run. It is labelled in `limits.bound` ("silver-build: executor override 4
   (profile asks 8)") and enters "Lakebench limits that bound".
@@ -890,9 +891,10 @@ address), is recorded as `<redacted>`. Any other value is recorded as
 not protect: put secrets under a secret-named key or an environment
 variable. A per-bucket S3A key records its bucket's layer (`<bronze>`,
 `<silver>`, `<gold>`) or `<other-bucket>` instead of its name. The
-recorded map is the `spark conf` key of the experiment identity, so two
-runs whose recorded maps differ are not like-for-like, while two
-deployments that differ only in buckets and endpoints are. A difference
+recorded map is the `spark conf` key of the experiment identity, so compare
+reports two runs whose recorded maps differ as an architecture difference,
+while two deployments that differ only in buckets and endpoints do not
+differ there. A difference
 in a value recorded as `<redacted>` (an environment variable's value, for
 example) is not seen by compare.
 

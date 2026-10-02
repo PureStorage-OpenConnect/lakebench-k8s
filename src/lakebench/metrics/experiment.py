@@ -459,7 +459,12 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
     )
 
     scale = float(snapshot.get("scale") or 0)
-    overrides = ((snapshot.get("spark") or {}).get("executor_overrides")) or {}
+    # A --local run has no executors, so no override applied.
+    overrides = (
+        {}
+        if snapshot.get("local")
+        else ((snapshot.get("spark") or {}).get("executor_overrides")) or {}
+    )
     out = []
     job_types = [j.job_type for j in metrics.jobs] + [s.job_type for s in metrics.streaming]
     for job_type in dict.fromkeys(job_types):
@@ -485,7 +490,9 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
             "scale_derived": uncapped,
             "cap": cap,
             "override": override,
-            "cap_hit": override is None and uncapped > cap,
+            # A count pinned at the cap is the cap binding too (a pinned
+            # perf-gate config must pin the profile's count, the cap there).
+            "cap_hit": uncapped > cap and (override is None or override == cap),
             "observed": observed,
         }
         if override is not None and override < min(uncapped, cap):

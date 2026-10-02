@@ -114,17 +114,19 @@ from lakebench.metrics.bounds import (  # noqa: E402
     BOUND_AUTOSIZE,
     BOUND_EXECUTOR_BUDGET,
     BOUND_EXECUTOR_CAP,
+    BOUND_EXECUTOR_OVERRIDE,
     BOUND_MAINTENANCE,
     BOUND_RULE_CAP,
     BOUND_TM_ALERTS,
     BOUND_TRICKLE,
 )
 
-#: Caps on batch pipeline times, throughput and compute: executor counts,
-#: auto-sizing, and AML rule and TM caps (a skipped rule makes gold faster).
+#: Caps on batch pipeline times, throughput and compute: executor counts
+#: (cap, budget, a binding override), auto-sizing, and AML rule and TM caps (a skipped rule makes gold faster).
 _PIPELINE_CAPS = (
     BOUND_EXECUTOR_CAP,
     BOUND_EXECUTOR_BUDGET,
+    BOUND_EXECUTOR_OVERRIDE,
     BOUND_AUTOSIZE,
     BOUND_RULE_CAP,
     BOUND_TM_ALERTS,
@@ -135,6 +137,7 @@ _PIPELINE_CAPS = (
 _STREAM_CAPS = (
     BOUND_EXECUTOR_CAP,
     BOUND_EXECUTOR_BUDGET,
+    BOUND_EXECUTOR_OVERRIDE,
     BOUND_AUTOSIZE,
 )
 _INTAKE_CAPS = (*_STREAM_CAPS, BOUND_TRICKLE)
