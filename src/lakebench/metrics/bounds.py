@@ -190,6 +190,7 @@ def _from_record(rec: Mapping[str, Any]) -> dict[str, Any] | None:
             (snapshot.get("sustained") or {}).get("bronze_trigger_interval")
         ),
         "corpus_rows": _num(pb_snap.get("datagen_output_rows")),
+        "corpus_files": _num(pb_snap.get("datagen_output_files")),
     }
 
 
@@ -219,6 +220,7 @@ def _from_metrics(metrics: Any) -> dict[str, Any] | None:
             (snapshot.get("sustained") or {}).get("bronze_trigger_interval")
         ),
         "corpus_rows": _num(pb_snap.get("datagen_output_rows")),
+        "corpus_files": _num(pb_snap.get("datagen_output_files")),
     }
 
 
@@ -253,31 +255,58 @@ def trickle_bound(source: Any) -> dict[str, Any] | None:
         trigger_s=v["trigger_s"],
     )
     if pace["kept_pace"] is False:
-        if v["intake_limit"] != "trickle_rate":
+        per_trigger = (
+            float(v["value"]) * v["corpus_rows"] / v["corpus_files"]
+            if v["corpus_rows"] and v["corpus_files"]
+            else None
+        )
+        within_one_batch = bool(
+            ingested is not None
+            and per_trigger
+            and released - ingested <= per_trigger
+            and pace["lag_s"] is not None
+            and v["trigger_s"]
+            and pace["lag_s"] <= v["trigger_s"] + 0.05
+        )
+        if v["intake_limit"] == "trickle_rate":
+            why = (
+                "ingested rows were under 0.99 of the offered rows, but intake_limit says the "
+                "trickle held intake"
+            )
+        elif within_one_batch:
+            # released_rows counts the trigger at the window's edge: its batch
+            # may be in flight. Not shown to keep pace, not shown capacity.
+            why = (
+                "ingested rows are within one trigger's batch of the offered rows and the lag "
+                "is within one trigger: the last batch may have been in flight"
+            )
+        else:
             return None
         pace["kept_pace"] = None
-        pace["not_measured"] = (
-            "ingested rows were under 0.99 of the offered rows, but intake_limit says the "
-            "trickle held intake"
-        )
+        pace["not_measured"] = why
     return {"kind": BOUND_TRICKLE, "value": v["value"], "source": v["source"], **pace}
+
+
+def _value_text(bound: Mapping[str, Any]) -> str:
+    value = bound.get("value")
+    return "unknown" if value is None else str(value)
 
 
 def trickle_line(bound: Mapping[str, Any]) -> str:
     """The ``limits.bound`` line for a trickle bound."""
     source = f" ({bound['source']})" if bound.get("source") else ""
-    head = f"{TRICKLE_LINE_PREFIX} max_files_per_trigger {bound.get('value')}{source}"
+    head = f"{TRICKLE_LINE_PREFIX} max_files_per_trigger {_value_text(bound)}{source}"
     if bound.get("kept_pace"):
         return f"{head}, the pipeline kept pace"
-    return f"{head}; whether the pipeline kept pace was not measured"
+    return f"{head}; the pipeline was not shown to keep pace"
 
 
 def trickle_label(bound: Mapping[str, Any]) -> str:
     """What a card shows on a number the trickle bounds."""
-    head = f"trickle {bound.get('value')} files per trigger"
+    head = f"trickle {_value_text(bound)} files per trigger"
     if bound.get("kept_pace"):
         return f"{head}; this is the offered load, not infrastructure capacity"
-    return f"{head} set; whether the pipeline kept pace was not measured"
+    return f"{head} set; the pipeline was not shown to keep pace, so this is not a capacity"
 
 
 def record_trickle_bound(record: Any) -> dict[str, Any] | None:
@@ -307,6 +336,11 @@ def record_trickle_bound(record: Any) -> dict[str, Any] | None:
                 "value": None,
                 "source": None,
                 "kept_pace": None,
+                "ingested_rows": None,
+                "offered_rows": None,
+                "ratio": None,
+                "lag_s": None,
+                "trigger_s": None,
                 "not_measured": "the trickle inputs could not be read",
             }
         return None
@@ -337,6 +371,9 @@ def binding_caps(record: Any) -> list[str]:
 def trickle_note(record: Any) -> str:
     """A plain-text suffix for a rows/s figure the trickle held (CLI
     output), or "" when it did not."""
-    return (
-        " (BOUNDED BY trickle: offered load, not capacity)" if record_trickle_bound(record) else ""
-    )
+    tb = record_trickle_bound(record)
+    if not tb:
+        return ""
+    if tb.get("kept_pace"):
+        return " (BOUNDED BY trickle: offered load, not capacity)"
+    return " (BOUNDED BY trickle: not shown to keep pace, not a capacity)"

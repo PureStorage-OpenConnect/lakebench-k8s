@@ -104,8 +104,8 @@ trigger_s, offered_rows, ingested_rows}`, with `not_measured` when
 `kept_pace` is null and `lag_note` when the lag was not tested; null when
 the trickle did not hold intake) and adds a line `trickle: max_files_per_trigger N (auto), the
 pipeline kept pace` to `limits.bound`. When an input was not recorded,
-`kept_pace` is null and the line says so; the throughput is still not shown
-as a capacity. The trickle is not one of `limits.bound_kinds`, so it is not
+`kept_pace` is null and the line says "the pipeline was not shown to keep
+pace"; the throughput is still not shown as a capacity. The trickle is not one of `limits.bound_kinds`, so it is not
 part of the experiment identity. The report labels the continuous rows/s
 (headline card, Pipeline Stages summary, the bronze stream and stage rows),
 GB/s and efficiency figures "BOUNDED BY: trickle (offered load, not
@@ -116,10 +116,12 @@ the run's limits. `compare` marks the rows that depend on the trickle
 efficiency and `corpus_drain_seconds`) `capped` per row, and
 `comparison.json` carries each row's `capped` and each side's
 `trickle_bound_a` / `trickle_bound_b`. A record written before 1.7 gets the
-same answer, computed when it is read. Known resolution: `released_rows`
-counts the trigger at the window's edge, so a run whose last batch was still
-in flight reads about one trigger short (0.983 at an 1800 s window and a 30 s
-trigger) and is not labelled.
+same answer, computed when it is read. `released_rows` counts the trigger at
+the window's edge, so a run whose last batch was still in flight can read up
+to one trigger short (0.983 at an 1800 s window and a 30 s trigger); when the
+shortfall is within one trigger's batch and the lag within one trigger, the
+run is labelled with `kept_pace` null ("not shown to keep pace"), not shown
+as a capacity.
 
 ### Per-Stage Metrics
 

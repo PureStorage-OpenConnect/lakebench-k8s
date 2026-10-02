@@ -125,17 +125,34 @@ def test_corpus_taken_skips_the_lag():
     assert tb["kept_pace"] is True and tb["lag_s"] is None and tb["lag_note"]
 
 
-@pytest.mark.parametrize(("ratio", "bound"), [(0.985, False), (0.9899, False), (0.99, True)])
-def test_the_ratio_is_ingested_over_released(ratio, bound):
+@pytest.mark.parametrize(
+    ("ratio", "kept"),
+    [(0.97, "none"), (0.98, "none"), (0.985, None), (0.9899, None), (0.99, True), (1.0, True)],
+)
+def test_the_ratio_is_ingested_over_released(ratio, kept):
     """SPEC's 0.99 applies to ingested over released rows, as the record's
-    ingest_ratio states it: one trigger short at 1800 s / 30 s (0.983) is
-    not kept pace."""
+    ingest_ratio states it. One trigger's batch on e338c5 is 30,982 rows of
+    1,858,920 released (1.7%): a shortfall within it, with the lag within
+    one trigger, may be the edge batch in flight, so it is labelled without
+    claiming kept pace; more than one batch short is not bounded."""
     rec = _rec()
     _scores(rec)["ingest_ratio"] = ratio
     tb = bounds.trickle_bound(rec)
-    assert (tb is not None) is bound
-    if bound:
-        assert tb["ratio"] == ratio and tb["offered_rows"] == _scores(rec)["released_rows"]
+    if kept == "none":
+        assert tb is None
+        return
+    assert tb is not None and tb["kept_pace"] is kept
+    assert tb["ratio"] == ratio and tb["offered_rows"] == _scores(rec)["released_rows"]
+    if kept is None:
+        assert "in flight" in tb["not_measured"]
+
+
+def test_within_one_batch_needs_the_lag_within_one_trigger():
+    rec = _rec()
+    _scores(rec)["ingest_ratio"] = 0.985
+    bronze = next(s for s in rec["streaming"] if s["job_type"] == "bronze-ingest")
+    bronze["last_write_offset_seconds"] = 1800.0 - 45.0
+    assert bounds.trickle_bound(rec) is None
 
 
 def test_intake_limit_trickle_rate_is_not_shown_as_capacity():
@@ -152,17 +169,25 @@ def test_an_unreadable_continuous_record_is_not_capacity(monkeypatch):
     monkeypatch.setattr(bounds, "trickle_bound", lambda _r: 1 / 0)
     tb = bounds.record_trickle_bound(_rec())
     assert tb is not None and tb["kept_pace"] is None
+    assert {"ratio", "lag_s", "offered_rows"} <= set(tb)
     assert bounds.record_trickle_bound(_rec("231711-6dd3bc")) is None
 
 
 def test_not_measured_line_and_label():
     tb = bounds.trickle_bound(_rec("215221-65567b"))
     assert bounds.trickle_line(tb) == (
-        "trickle: max_files_per_trigger 50; whether the pipeline kept pace was not measured"
+        "trickle: max_files_per_trigger 50; the pipeline was not shown to keep pace"
     )
     assert bounds.trickle_label(tb) == (
-        "trickle 50 files per trigger set; whether the pipeline kept pace was not measured"
+        "trickle 50 files per trigger set; the pipeline was not shown to keep pace, "
+        "so this is not a capacity"
     )
+    assert bounds.trickle_note(tb_rec := _rec("215221-65567b")) == (
+        " (BOUNDED BY trickle: not shown to keep pace, not a capacity)"
+    )
+    assert tb_rec
+    unknown = {"value": None, "kept_pace": None}
+    assert "max_files_per_trigger unknown" in bounds.trickle_line(unknown)
 
 
 # --- the experiment block ----------------------------------------------------
@@ -313,6 +338,8 @@ def test_stored_blocks_reproduce_their_bound_lists():
         exp = (sr.load_record(run_id).get("experiment") or {}).get("limits")
         if not exp:
             continue
+        stored_limits = dict(exp)
+        bounds.bound_entries(stored_limits, {}, strict=True)  # every stored kind registered
         rebuilt = _rebuilt(run_id)["limits"]
         assert rebuilt["bound_kinds"] == exp.get("bound_kinds", []), run_id
         assert [

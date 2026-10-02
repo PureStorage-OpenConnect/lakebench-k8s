@@ -109,7 +109,7 @@ comparison measures and does not make a pair not like-for-like. Each side's supp
 shown. `comparison.json` records `verdict`, `comparable`, `like_for_like`,
 `condition_differences`, `support` and `refusals`, each row's `capped`
 (a Lakebench limit bound that row on either side: any bound kind caps every
-row; the trickle caps only the throughput rows) and each side's
+row; the trickle caps only the rows that depend on it) and each side's
 `trickle_bound_a` / `trickle_bound_b`.
 
 The two configs run one after the other, not side by side. Running them

@@ -2576,7 +2576,9 @@ class ReportGenerator:
                 + format_measurement(
                     f"{pb.sustained_throughput_rps:,.0f} rows/s",
                     "",
-                    caps_bound=trickle_caps if pb.sustained_throughput_rps > 0 else None,
+                    caps_bound=(
+                        [*caps_bound, *trickle_caps] if pb.sustained_throughput_rps > 0 else None
+                    ),
                 )
                 + "</strong> | "
                 f"Data: <strong>{pb.total_data_processed_gb:.1f} GB</strong> | "

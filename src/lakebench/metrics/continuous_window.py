@@ -573,6 +573,9 @@ def trickle_kept_pace(
         return out
     ratio = float(ingested_rows) / float(released_rows)
     out["ratio"] = round(ratio, 4)
+    lag_known = window_s is not None and last_write_offset_s is not None and bool(trigger_s)
+    if lag_known and not corpus_taken:
+        out["lag_s"] = round(float(window_s) - float(last_write_offset_s), 1)  # type: ignore[arg-type]
     if ratio < TRICKLE_KEPT_PACE_RATIO:
         out["kept_pace"] = False
         return out
@@ -580,10 +583,9 @@ def trickle_kept_pace(
         out["kept_pace"] = True
         out["lag_note"] = "bronze took the whole corpus; nothing was left to offer"
         return out
-    if window_s is None or last_write_offset_s is None or not trigger_s:
+    if not lag_known:
         out["not_measured"] = "the lag at window end is not known"
         return out
-    lag = float(window_s) - float(last_write_offset_s)
-    out["lag_s"] = round(lag, 1)
-    out["kept_pace"] = lag <= float(trigger_s) + _LAG_ROUNDING_S
+    lag = float(window_s) - float(last_write_offset_s)  # type: ignore[arg-type]
+    out["kept_pace"] = lag <= float(trigger_s) + _LAG_ROUNDING_S  # type: ignore[arg-type]
     return out

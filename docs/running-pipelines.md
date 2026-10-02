@@ -201,12 +201,11 @@ derived per run so the corpus keeps arriving for about 1.2 x the window
 files, about 2,190 s), capped at 50 files per 30 s (about 107 MB/s; a Lakebench-imposed cap, so
 an auto-capped rate measures the cap, not the infrastructure). At the
 cap, a 30-minute window takes about 19% of the scale-100 corpus. The larger
-corpus is not a failure:
-the scorecard reports `intake_limit: trickle_rate` and
-`pipeline_saturated: false` when the pipeline kept pace with the trickle, and
-`corpus_drain_seconds` for the window that would drain the corpus; a run the
-trickle held is recorded in `experiment.limits.trickle_bound` and its
-throughput is labelled the offered load. See
+corpus is not a failure: a run the trickle held is recorded in
+`experiment.limits.trickle_bound`, its throughput is labelled the offered
+load, and the scorecard reads `intake_limit: none` (bronze kept up with what
+was released). `intake_limit: trickle_rate` and `corpus_drain_seconds` appear
+when the released rows are unknown or bronze took under 0.95 of them. See
 [Scoring and Benchmarking](benchmarking.md#continuous-mode).
 
 The measurement window opens when all three streams are running and lasts
