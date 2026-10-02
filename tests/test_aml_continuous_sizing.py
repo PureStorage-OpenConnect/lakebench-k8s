@@ -147,7 +147,7 @@ def test_counts_scale_and_respect_the_cap(scale, silver, gold):
 
 @pytest.mark.parametrize(
     ("scale", "cores", "memory"),
-    [(1, 118, 987), (10, 118, 987), (100, 222, 1955)],
+    [(1, 118, 990), (10, 118, 990), (100, 222, 1958)],
 )
 def test_peak_requirements(scale, cores, memory):
     """Gotcha 34: the preflight and the docs read compute_peak_requirements."""
@@ -394,11 +394,14 @@ def test_driver_pod_counts_spark_non_jvm_overhead(heap, mib):
     assert _driver_pod_bytes(heap) == mib * 1024**2
 
 
-def test_manifest_sets_no_driver_overhead():
+@pytest.mark.parametrize("schema", ["financial", "customer360"])
+def test_manifest_sets_no_driver_overhead(schema):
     # The count above holds only while the manifest leaves the overhead to Spark.
-    cfg = _config("financial", 1)
-    for jt in _STAGES + (JobType.SILVER_BUILD,):
+    cfg = _config(schema, 1)
+    for jt in _STAGES + (JobType.BRONZE_VERIFY, JobType.SILVER_BUILD, JobType.GOLD_FINALIZE):
         m = SparkJobManager(cfg, _capacity_k8s(434))._build_manifest(jt)
+        assert m["spec"]["type"] == "Python"
+        assert "memoryOverheadFactor" not in m["spec"]
         assert "memoryOverhead" not in m["spec"]["driver"]
         conf = m["spec"]["sparkConf"]
         assert not [k for k in conf if "memoryOverhead" in k and "driver" in k]
@@ -430,3 +433,10 @@ def test_continuous_budget_counts_driver_overhead(schema, monkeypatch):
     )
     assert with_overhead - heap_only in (overhead // 1024**3, -(-overhead // 1024**3))
     assert with_overhead > heap_only
+
+
+def test_peak_rounds_driver_overhead_up():
+    # silver-build at scale 1: 8 x 60 GiB executors + a 44.8 GiB driver pod.
+    peak = compute_peak_requirements(1, "batch")
+    sb = next(r for r in peak.per_job if r.job_type == "silver-build")
+    assert sb.memory_gb == 525  # 524.8 GiB, never rounded down

@@ -37,14 +37,15 @@ each, are on the generated [Prerequisites](prerequisites.md) page.
 Minimum cluster size depends on the scale factor. These figures are the peak
 resources Lakebench actually requests from Kubernetes, derived from the Spark
 job profiles. Driver memory includes the overhead Spark adds to a Python
-driver pod (40% of the heap, 12.8 GB for the 32 GB silver-build driver):
+driver pod (40% of the heap, 12.8 GiB for the 32 GiB silver-build driver),
+rounded up to a whole GB per job:
 
 | Scale | Bronze data | Minimum CPU | Minimum RAM | Scratch PVC |
 |------:|------------:|------------:|------------:|------------:|
-| 1 | ~10 GB | 36 cores | 524 GB | 2,400 Gi |
-| 10 | ~100 GB | 36 cores | 524 GB | 2,400 Gi |
-| 50 | ~500 GB | 52 cores | 764 GB | 3,600 Gi |
-| 100 | ~1 TB | 76 cores | 1,124 GB | 5,400 Gi |
+| 1 | ~10 GB | 36 cores | 525 GB | 2,400 Gi |
+| 10 | ~100 GB | 36 cores | 525 GB | 2,400 Gi |
+| 50 | ~500 GB | 52 cores | 765 GB | 3,600 Gi |
+| 100 | ~1 TB | 76 cores | 1,125 GB | 5,400 Gi |
 
 Three things surprise people about this table:
 
@@ -68,9 +69,9 @@ CTAS fallback) sets the scratch peak:
 
 | Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
 |:---------|------:|------------:|------------:|------------:|
-| AML batch | 1-10 | 36 cores | 524 GB | 2,400 Gi |
-| AML batch | 50 | 52 cores | 764 GB | 3,600 Gi |
-| AML batch | 100 | 76 cores | 1,124 GB | 5,500 Gi |
+| AML batch | 1-10 | 36 cores | 525 GB | 2,400 Gi |
+| AML batch | 50 | 52 cores | 765 GB | 3,600 Gi |
+| AML batch | 100 | 76 cores | 1,125 GB | 5,500 Gi |
 
 These are the Spark pipeline's requests. Data generation runs before the
 pipeline and can be the larger demand: the AML scale-100 generate in
@@ -91,12 +92,12 @@ detect grows with it:
 
 | Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
 |:---------|------:|------------:|------------:|------------:|
-| Customer360 | 1-10 | 38 cores | 279 GB | 640 Gi |
-| AML | 1-10 | 118 cores | 987 GB | 2,300 Gi |
-| Customer360 | 50 | 56 cores | 445 GB | 1,060 Gi |
-| AML | 50 | 198 cores | 1,763 GB | 4,220 Gi |
-| Customer360 | 100 | 84 cores | 697 GB | 1,700 Gi |
-| AML | 100 | 222 cores | 1,955 GB | 4,660 Gi |
+| Customer360 | 1-10 | 38 cores | 282 GB | 640 Gi |
+| AML | 1-10 | 118 cores | 990 GB | 2,300 Gi |
+| Customer360 | 50 | 56 cores | 448 GB | 1,060 Gi |
+| AML | 50 | 198 cores | 1,766 GB | 4,220 Gi |
+| Customer360 | 100 | 84 cores | 700 GB | 1,700 Gi |
+| AML | 100 | 222 cores | 1,958 GB | 4,660 Gi |
 
 The AML scale-10 continuous run run-20260925-180003-bb3df4 ran at exactly
 this split (bronze-ingest 5, silver-stream 10, gold-refresh 12 executors at 4
