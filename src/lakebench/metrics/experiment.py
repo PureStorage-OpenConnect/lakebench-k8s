@@ -693,13 +693,17 @@ def support_state(
 ) -> dict[str, Any]:
     """The DESIGN 6.5 support state of a run's workload x architecture x mode,
     computed by lakebench.config.support from layers 1-3 and the release
-    validation record (config/validated_combinations.yaml)."""
+    validation record (config/validated_combinations.yaml), at the Spark
+    minor and table format version the architecture block names."""
+    from lakebench.config.support import spark_minor
     from lakebench.config.support import support_state as _state
 
     def t(key: str) -> str | None:
         v = arch.get(key)
         return (v or {}).get("type") if isinstance(v, Mapping) else v
 
+    engine, fmt = arch.get("pipeline_engine"), arch.get("table_format")
+    version = fmt.get("version") if isinstance(fmt, Mapping) else None
     return _state(
         workload,
         t("catalog"),
@@ -708,6 +712,8 @@ def support_state(
         t("query_engine"),
         mode,
         system=system,
+        spark=spark_minor(engine.get("image") if isinstance(engine, Mapping) else None),
+        table_format_version=version if isinstance(version, str) else None,
     )
 
 

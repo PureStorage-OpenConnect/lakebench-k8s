@@ -192,7 +192,8 @@ class TestStamping:
         rec.write_text(
             "validated:\n"
             "  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: batch,\n"
-            "     tree: abc1234, runs: [run-1]}\n"
+            "     spark: '4.0', table_format_version: 1.11.0,\n"
+            f"     tree: {'abc1234' + '0' * 33}, runs: [run-1]}}\n"
         )
         with (
             mock.patch.object(support, "VALIDATION_RECORD", rec),

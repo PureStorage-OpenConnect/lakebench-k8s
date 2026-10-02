@@ -1,20 +1,28 @@
 # Release validation record (DESIGN.md section 6.5, layer 4).
 #
-# One entry per workload x recipe x mode that a live run on the release tree
-# completed end to end with the correctness contract passing and
-# non-degenerate output. Only a combination listed here is stamped
-# "supported" in a run's evidence. A combination that is valid for its
-# workload and mode but not listed is "unverified". A combination that fails
-# the architecture, workload or mode checks is refused at config load and can
-# never be listed (lakebench refuses to load a record that lists one).
+# Generated from release-matrix run records, never edited by hand:
+#
+#   python -m lakebench.config.support --from-records uat/runs \
+#       --tree <freeze commit> --expected uat/expected-results-<version>.json --write
+#
+# One entry per workload x recipe x mode x Spark minor x table format
+# version that release-evidence runs (metrics/release_record.py
+# record_problems: passed, rows in every layer, expected stages, rules and
+# results, the freeze commit, a clean tree, the release datagen image)
+# completed on the freeze tree. Only a run of a listed combination at the
+# listed versions is stamped "supported"; a valid combination that is not
+# listed, or runs at other versions, is "unverified". A combination that
+# fails the architecture, workload or mode checks is refused at config load
+# and can never be listed (lakebench refuses to load a record that lists
+# one). The list starts empty for every release.
 #
 # Entry shape:
 #
 #   - workload: customer360          # customer360 | financial
 #     recipe: hive-iceberg-spark-trino
 #     mode: batch                    # batch | continuous
-#     tree: 3d304d1                  # release-tree commit the runs ran on
-#     runs: [run-20261001-120000-abcd]
-#
-# The list starts empty for every release and is filled from live runs.
+#     spark: "4.1"                   # Spark minor of the run's Spark image
+#     table_format_version: 1.11.0   # experiment.architecture.table_format.version
+#     tree: <40-hex freeze commit>
+#     runs: [20261105-011500-abcdef]
 validated: []

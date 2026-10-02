@@ -626,10 +626,23 @@ def make_support_record_check(tag: str | None) -> Callable[[], Result]:
         expected, _why, _path = _expected()
         problems = []
         keys_run: set[tuple] = set()
+        matrix_keys = set()
         for workload, mode, recipe, _scale in rr.RELEASE_MATRIX:
-            if (workload, recipe, support.canonical_mode(mode)) not in record:
-                problems.append(f"no validated entry for {workload} {recipe} {mode}")
-        for (workload, recipe, mode), v in sorted(record.items()):
+            spark, version = rr.RELEASE_MATRIX_VERSIONS[(workload, mode, recipe)]
+            key5 = (workload, recipe, support.canonical_mode(mode), spark, version)
+            matrix_keys.add(key5)
+            if key5 not in record:
+                problems.append(
+                    f"no validated entry for {workload} {recipe} {mode} on Spark {spark} "
+                    f"with table format {version}"
+                )
+        for key5, v in sorted(record.items()):
+            workload, recipe, mode = key5[:3]
+            if key5 not in matrix_keys:
+                problems.append(
+                    f"{workload} {recipe} {mode} on Spark {key5[3]} with table format "
+                    f"{key5[4]} is not a release-matrix row"
+                )
             tree = str(v.tree)
             if sha and not (re.fullmatch(r"[0-9a-f]{7,40}", tree) and sha.startswith(tree)):
                 problems.append(
@@ -648,13 +661,12 @@ def make_support_record_check(tag: str | None) -> Callable[[], Result]:
                 for p in rr.record_problems(data, sha, expected, root=ROOT):
                     problems.append(f"{rid}: {p}")
                 key = rr.record_key(data)
-                if key is None or (key[0], key[2], support.canonical_mode(key[1])) != (
-                    workload,
-                    recipe,
-                    mode,
-                ):
-                    problems.append(f"{rid}: record is not {workload} {recipe} {mode}")
-                elif key:
+                if key is None or support.validation_key_of(data) != key5:
+                    problems.append(
+                        f"{rid}: record is not {workload} {recipe} {mode} on Spark {key5[3]} "
+                        f"with table format {key5[4]}"
+                    )
+                else:
                     keys_run.add(key)
         for row in rr.RELEASE_MATRIX:
             if (row[0], row[1], row[2], float(row[3])) not in keys_run:

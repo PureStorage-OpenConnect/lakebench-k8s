@@ -457,6 +457,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **Support is keyed by Spark minor and table format version, and the record
+  is generated from run records.** A `validated_combinations.yaml` entry now
+  names `spark` (the Spark minor of the image tag) and
+  `table_format_version` beside workload, recipe and mode, and its `tree` is
+  the 40-hex freeze commit; a row without the versions, a version pair the
+  job builder cannot run, or a short tree is refused. A run is stamped
+  `supported` only on the listed versions: a Spark 4.1 entry leaves a Spark
+  4.0 run of the same recipe `unverified`, with both pairs in the basis. The
+  record is written by `python -m lakebench.config.support . --from-records
+  DIR... --tree SHA --expected FILE --write` from records that are release
+  evidence on a release-matrix row at that row's versions, never by hand.
+  The support table in the README and docs names each supported cell's
+  version pairs and gives each unverified cell's reason as a note. The
+  release gate's `support-record` check requires every matrix row at its
+  versions and refuses entries outside the matrix.
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with

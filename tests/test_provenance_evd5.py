@@ -274,13 +274,14 @@ def test_unchanged_code_keeps_support(monkeypatch):
 def test_support_state_refuses_supported_when_code_changed():
     from lakebench.config.support import Validation, support_state
 
-    key = ("customer360", "hive-iceberg-spark-trino", "batch")
-    record = {key: Validation(*key, tree="t", runs=("r1",))}
+    key = ("customer360", "hive-iceberg-spark-trino", "batch", "4.1", "1.11.0")
+    record = {key: Validation(*key, tree="t" * 40, runs=("r1",))}
     clean = {"git_sha": SHA, "git_dirty": False}
     args = ("customer360", "hive", "iceberg", "spark", "trino", "batch")
-    assert support_state(*args, record=record, provenance=clean)["state"] == "supported"
+    versions = {"spark": "4.1", "table_format_version": "1.11.0"}
+    assert support_state(*args, record=record, provenance=clean, **versions)["state"] == "supported"
     changed = {**clean, "end_sample": {"git_sha": "f" * 40, "code_changed_during_run": True}}
-    out = support_state(*args, record=record, provenance=changed)
+    out = support_state(*args, record=record, provenance=changed, **versions)
     assert out["state"] == "unverified"
 
 
