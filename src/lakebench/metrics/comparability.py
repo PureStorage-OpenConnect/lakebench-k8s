@@ -295,6 +295,33 @@ def compaction_operation(exp: Mapping[str, Any]) -> str | None:
     return f"unknown ({engine or 'no engine'}, {fmt or 'no format'})"
 
 
+def _benchmark_rounds(limits: Mapping[str, Any], record: Mapping[str, Any] | None) -> Any:
+    """In-stream rounds behind a continuous QpH median: the block's
+    ``limits.benchmark_rounds``, or, for a record written before the block
+    stored it, the rounds of the record's ``pipeline_benchmark`` with a
+    positive QpH (the count ``build_experiment`` stores). Without either it
+    is None. A read-time derivation: ``_identity_v1`` and its digest do not
+    change."""
+    stored = limits.get("benchmark_rounds")
+    if stored is not None:
+        return stored
+    pb = (record or {}).get("pipeline_benchmark")
+    if not isinstance(pb, Mapping):
+        return None
+    # A record with no in-stream round saves no rounds list: 0, as stored.
+    rounds = pb.get("benchmark_rounds") or []
+    if not isinstance(rounds, list):
+        return None
+
+    def ran(r: Any) -> bool:
+        try:
+            return isinstance(r, Mapping) and float(r.get("qph") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    return sum(1 for r in rounds if ran(r))
+
+
 def access_paths(exp: Mapping[str, Any]) -> dict[str, Any]:
     """How each engine reaches the tables: ``architecture.access_paths``
     when stored (exp2), else built from the v1.6 ``query_access_path``. The
@@ -426,7 +453,7 @@ def classify(exp: Mapping[str, Any], record: Mapping[str, Any] | None = None) ->
         "benchmark iterations": limits.get("benchmark_iterations"),
         "benchmark mode": limits.get("benchmark_mode"),
         "Lakebench limits that bound": list(limits.get("bound_kinds") or []),
-        "benchmark rounds": limits.get("benchmark_rounds"),
+        "benchmark rounds": _benchmark_rounds(limits, record),
     }
     conditions = {
         k: values[k]
