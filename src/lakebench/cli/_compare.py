@@ -452,7 +452,14 @@ def _samples_per_query(metrics: dict) -> int | None:
     return samples_per_query((qb or {}).get("queries") or [])
 
 
-_RENAMED_SCORES = {"query_time_freshness_seconds": "query_time_event_age_seconds"}
+def _registry_aliases() -> dict[str, str]:
+    from lakebench.metrics.metric_registry import ALIASES
+
+    return dict(ALIASES)
+
+
+# Renamed score keys (metrics/metric_registry.ALIASES).
+_RENAMED_SCORES = _registry_aliases()
 
 
 def _renamed_scores(scores: dict) -> dict:

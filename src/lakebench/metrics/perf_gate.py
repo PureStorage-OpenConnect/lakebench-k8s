@@ -24,8 +24,8 @@ A baseline also records the dependency pinset of its run
 (``provenance.deps.pinset_sha256``); a run on another set is refused.
 
 Metric classification and direction come from the metric registry
-(``metrics/metric_registry.py``) through ``lakebench.cli._reproduce``
-``_classify_direction``; this module adds no second table. Only the performance band is compared here: the correctness signals
+(``metrics/metric_registry.reproduce_class``), as reproduce's do; this
+module adds no second table. Only the performance band is compared here: the correctness signals
 (``scale_ratio``, ``corpus_drained``) are guards that refuse a run.
 
 Design and workflow: docs/perf-regression-gate.md.
@@ -48,7 +48,6 @@ import yaml
 
 from lakebench.cli._reproduce import (
     QUERY_QPH_PREFIX,
-    _classify_direction,
     _drift_pct,
     _extract_expected_numbers,
     _is_stage_seconds,
@@ -65,6 +64,7 @@ from lakebench.metrics.experiment import (
 )
 from lakebench.metrics.fingerprint_inputs import FINGERPRINT_VERSION
 from lakebench.metrics.maintenance_policy import not_current, policy_mismatch, recorded_policy
+from lakebench.metrics.metric_registry import reproduce_class as _classify_direction
 
 # Schema 2 adds fingerprint_version and pinset_sha256 to every baseline.
 # load_store reads 1 and 2; save always writes 2.

@@ -168,8 +168,8 @@ The reproduce command lives in
 `src/lakebench/cli/_reproduce.py`. It shares the deploy / generate /
 run / destroy plumbing with the main CLI; it does not reimplement
 any of it. The default bands are `DEFAULT_TOLERANCES` in
-`_reproduce.py`, and each metric's band and direction come from
-`_METRIC_TABLE` there, not from the package.
+`_reproduce.py`, and each metric's band and direction come from the
+metric registry (`metrics/metric_registry.py`), not from the package.
 
 ## For contributors
 

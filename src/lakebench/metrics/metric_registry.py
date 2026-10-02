@@ -1,12 +1,13 @@
 """One source of metric metadata: unit, direction, band, modes, workloads
 and Lakebench caps a metric depends on.
 
-Every reader of a metric's direction takes it from here: ``lakebench
-compare`` (which deltas carry a better side), ``lakebench reproduce`` and
-the perf gate (``cli/_reproduce._classify_direction``), the HTML report's
-"higher is better" hints (``direction_hint``), and the collector's
-``score_descriptions``. A score emitted with no entry fails
-``tests/test_metric_registry.py``.
+Readers: ``lakebench compare`` (which deltas carry a better side),
+``lakebench reproduce`` and the perf gate (``reproduce_class``), the HTML
+report's "higher is better" hints (``direction_hint``), and the collector's
+``score_descriptions``. Still outside it: compare's QpH query-set check and
+its "capped" rendering, and the perf gate's own rule that continuous stage
+seconds are not measurements (later work moves them here). A score emitted
+with no entry fails ``tests/test_metric_registry.py``.
 
 ``band`` decides who uses a metric:
 
@@ -15,9 +16,9 @@ the perf gate (``cli/_reproduce._classify_direction``), the HTML report's
 - ``correctness``: exact in reproduce (``scale_ratio``, best at 1.0).
 - ``guard``: a range the run must sit in (``ingest_ratio``).
 - ``diagnostic``, ``config_bound``, ``label`` and ``result``: shown, never
-  directional. ``config_bound`` equals a configured value (a continuous
-  stage runs for the whole window); ``result`` is a workload result (AML
-  recall, false positives), never a directional delta.
+  directional. ``config_bound`` follows a configured value (a continuous
+  stream stage runs for the whole window); ``result`` is a workload result
+  (AML recall, false positives), never a directional delta.
 
 ``direction`` is ``higher``, ``lower``, ``target`` (best at a value, never
 a winner direction) or ``none``. A metric is directional, so a delta in it
@@ -28,28 +29,35 @@ direction is ``higher`` or ``lower``.
 ``metrics/experiment._bound_kinds`` writes them; ``*`` matches any job
 type, and ``{job}`` the job type of the stage a key names) that, when they
 bound a run, bound this metric: it is then capped, not infrastructure
-performance.
+performance. ``capped_by`` takes the trickle and the ML loop cap, which are
+not bound kinds, as ``extra``.
 
 Some keys mean different things by mode (a continuous stream stage's
-seconds are the window length, and so are its core-hours): they have one
-entry per mode, and ``lookup`` takes the run's mode. ``mode=None`` is the
-mode-free view (the batch entry with every mode's caps), for callers that
-do not know the mode; ``METRICS`` holds that view.
+seconds are the window length; continuous core-hours scale with it): they
+have one entry per mode, and ``lookup`` takes the run's mode. ``lookup``
+refuses ``mode=None`` for a key whose unit, direction or band differs by
+mode (``ModeRequired``), and answers it with every mode's caps when only the
+caps differ; reproduce and the perf gate, which read numbers without a
+mode, use ``reproduce_class``.
 
-History of band and direction changes to published metrics (each named in
-UPGRADING):
+History of band and direction changes to published metrics (to be named in
+UPGRADING-1.7.md):
 
 - 1.7: compare had derived direction from name tokens. ``qph_degradation_pct``
-  is lower is better (was higher); ``qph_spread``, ``maintenance_value_pct``,
-  ``window_seconds``, ``benchmark_rounds_count``, ``total_rows_processed``,
-  ``bronze_busy_fraction``, ``corpus_ingest_ratio``,
-  ``query_time_event_age_seconds``, the time-to-detect alert counts and the
-  maintenance file and snapshot counts, and continuous core-hours, compute
-  efficiency and total elapsed seconds are not directional (were higher or
-  lower); ``compaction_ratio`` is higher (was lower) and diagnostic;
-  ``ingest_ratio`` is a guard, best inside [0.95, 1.05] (was higher). The
-  reproduce and perf-gate classification of every metric they read is
-  unchanged.
+  is lower is better (was higher). Not directional (were higher or lower):
+  ``qph_spread``, ``maintenance_value_pct``, ``window_seconds``,
+  ``benchmark_rounds_count``, ``benchmark_samples_per_query``,
+  ``total_rows_processed``, ``bronze_busy_fraction``, ``corpus_ingest_ratio``,
+  ``query_time_event_age_seconds``, ``arrival_seconds``,
+  ``window_arrival_fraction``, ``pre_window_rows``, ``released_rows``,
+  ``corpus_drain_seconds``, the time-to-detect alert and cycle counts,
+  ``maintenance_pct_of_pipeline``, ``maintenance_paired_queries``,
+  ``maintenance_settle_seconds``, the maintenance file and snapshot counts,
+  ``storage_reclaimed_mb``, and in a continuous run ``total_core_hours`` and
+  ``total_elapsed_seconds``. ``compaction_ratio`` is higher (was lower) and
+  diagnostic; ``ingest_ratio`` is a guard, best inside [0.95, 1.05] (was
+  higher). The reproduce and perf-gate classification of every metric they
+  extract is unchanged.
 """
 
 from __future__ import annotations
@@ -100,8 +108,10 @@ _AML = frozenset({"financial"})
 
 # Bound kinds (``limits.bound_kinds``) as metrics/experiment._bound_kinds
 # writes them; ``*`` matches any job type. BOUND_TRICKLE and
-# BOUND_ML_LOOP_EXECUTOR_CAP are not written yet: the bounds module and the
-# ML loop import these names, so the strings cannot drift apart.
+# BOUND_ML_LOOP_EXECUTOR_CAP are never bound kinds (the trickle is read from
+# the record, the loop cap sits in the ml_loop block): a reader passes them to
+# ``capped_by`` as ``extra``. The bounds module and the ML loop are to take
+# these names from here.
 BOUND_EXECUTOR_CAP = "*: executor cap"
 BOUND_EXECUTOR_BUDGET = "*: concurrent executor budget"
 BOUND_AUTOSIZE = "auto-sizing cuts"
@@ -120,13 +130,15 @@ _PIPELINE_CAPS = (
     BOUND_RULE_CAP,
     BOUND_TM_ALERTS,
 )
-#: Caps on continuous rates and latencies: the same, plus the trickle.
+#: Caps on continuous latencies (freshness, time to detect) and compute:
+#: executor counts and auto-sizing. The trickle bounds intake, so it caps the
+#: throughputs only (``_INTAKE_CAPS``).
 _STREAM_CAPS = (
     BOUND_EXECUTOR_CAP,
     BOUND_EXECUTOR_BUDGET,
     BOUND_AUTOSIZE,
-    BOUND_TRICKLE,
 )
+_INTAKE_CAPS = (*_STREAM_CAPS, BOUND_TRICKLE)
 _AML_CAPS = (BOUND_RULE_CAP, BOUND_TM_ALERTS)
 
 
@@ -144,8 +156,9 @@ class MetricMeta:
     group: Literal["pipeline", "ml_loop"] = "pipeline"
     #: ``scores``: emitted under ``pipeline_benchmark.scores`` (and listed in
     #: ``score_descriptions``); ``derived``: computed by reproduce or the perf
-    #: gate from elsewhere in the record.
-    source: Literal["scores", "derived"] = "scores"
+    #: gate from elsewhere in the record; ``ml_loop``: in the record's
+    #: ``ml_loop`` block.
+    source: Literal["scores", "derived", "ml_loop"] = "scores"
     description: str = ""
 
     @property
@@ -172,7 +185,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "config_bound",
         _CONT,
         _ALL_WL,
-        (),
+        _STREAM_CAPS,
         description="Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
     ),
     MetricMeta(
@@ -188,11 +201,11 @@ _ENTRIES: tuple[MetricMeta, ...] = (
     MetricMeta(
         "compute_efficiency_gb_per_core_hour",
         "GB/core-h",
-        "none",
-        "diagnostic",
+        "higher",
+        "performance",
         _CONT,
         _ALL_WL,
-        (),
+        _INTAKE_CAPS,
         description="GB processed per core-hour of requested compute (higher is better)",
     ),
     MetricMeta(
@@ -222,7 +235,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _CONT,
         _ALL_WL,
-        _STREAM_CAPS,
+        _INTAKE_CAPS,
         description="Total data / wall-clock time in GB/s (higher is better)",
     ),
     MetricMeta(
@@ -239,7 +252,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "total_elapsed_seconds",
         "s",
         "none",
-        "config_bound",
+        "diagnostic",
         _CONT,
         _ALL_WL,
         (),
@@ -252,7 +265,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _BATCH,
         _ALL_WL,
-        (BOUND_MAINTENANCE,),
+        (BOUND_MAINTENANCE, *_AML_CAPS),
         description="Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
     ),
     MetricMeta(
@@ -282,7 +295,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _CONT,
         _ALL_WL,
-        _STREAM_CAPS,
+        (*_STREAM_CAPS, *_AML_CAPS),
         description="Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
     ),
     MetricMeta(
@@ -292,7 +305,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _CONT,
         _ALL_WL,
-        _STREAM_CAPS,
+        _INTAKE_CAPS,
         description="Rows bronze ingested inside the measurement window per second of the window that data was arriving (arrival_seconds), higher is better. Rows ingested before the window opened are not counted. When intake_limit is trickle_rate this is the configured offered load, not a capacity",
     ),
     MetricMeta(
@@ -423,7 +436,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _CONT,
         _AML,
-        _STREAM_CAPS + _AML_CAPS,
+        (*_STREAM_CAPS, *_AML_CAPS),
         description="AML continuous. Median seconds from the newest bronze ingest of an alert's related transactions to the commit of the rule's alerts on the tick that first raised it (lower is better)",
     ),
     MetricMeta(
@@ -433,7 +446,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _CONT,
         _AML,
-        _STREAM_CAPS + _AML_CAPS,
+        (*_STREAM_CAPS, *_AML_CAPS),
         description="AML continuous. 95th percentile of time_to_detect (histogram bin upper edge, 10 s bins)",
     ),
     MetricMeta(
@@ -443,7 +456,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _CONT,
         _AML,
-        _STREAM_CAPS + _AML_CAPS,
+        (*_STREAM_CAPS, *_AML_CAPS),
         description="AML continuous. Longest time to detect of any newly raised alert",
     ),
     MetricMeta(
@@ -703,7 +716,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _BATCH,
         _ALL_WL,
-        (),
+        _AML_CAPS,
         description="QpH measured before maintenance (on uncompacted data)",
     ),
     MetricMeta(
@@ -713,7 +726,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _BATCH,
         _ALL_WL,
-        (BOUND_MAINTENANCE,),
+        (BOUND_MAINTENANCE, *_AML_CAPS),
         description="QpH measured after maintenance (on compacted data) -- the primary QpH score",
     ),
     MetricMeta(
@@ -870,12 +883,24 @@ PATTERNS: tuple[tuple[re.Pattern[str], tuple[MetricMeta, ...]], ...] = (
     (
         re.compile(r"^query_qph_.+$"),
         (
+            # The batch per-query QpH comes from the post-maintenance round,
+            # as composite_qph does.
             MetricMeta(
                 "query_qph_<query>",
                 "QpH",
                 "higher",
                 "performance",
-                _BOTH,
+                _BATCH,
+                _ALL_WL,
+                (BOUND_MAINTENANCE, *_AML_CAPS),
+                description="One query's QpH (3600 / its median seconds)",
+            ),
+            MetricMeta(
+                "query_qph_<query>",
+                "QpH",
+                "higher",
+                "performance",
+                _CONT,
                 _ALL_WL,
                 description="One query's QpH (3600 / its median seconds)",
             ),
@@ -939,8 +964,9 @@ _BY_ID = _by_id(_ENTRIES)
 
 
 def _merged(entries: tuple[MetricMeta, ...]) -> MetricMeta:
-    """The mode-free view: the first (batch) entry, with every entry's
-    modes and caps."""
+    """The first (batch) entry of a mode-split key with every entry's modes
+    and caps: ``lookup(key, None)`` when the entries agree on unit,
+    direction and band, and ``reproduce_class`` always."""
     first = entries[0]
     if len(entries) == 1:
         return first
@@ -951,8 +977,8 @@ def _merged(entries: tuple[MetricMeta, ...]) -> MetricMeta:
     return replace(first, modes=modes, cap_dependence=tuple(caps))
 
 
-#: Every exact key, mode-free view (see ``lookup``).
-METRICS: dict[str, MetricMeta] = {k: _merged(v) for k, v in _BY_ID.items()}
+#: Every exact key and its entries, one per mode set (most keys have one).
+METRICS: dict[str, tuple[MetricMeta, ...]] = dict(_BY_ID)
 
 
 def canonical_mode(mode: str | None) -> str | None:
@@ -966,34 +992,44 @@ def canonical_mode(mode: str | None) -> str | None:
     raise ValueError(f"unknown pipeline mode {mode!r}")
 
 
-def _pick(entries: tuple[MetricMeta, ...], mode: str | None) -> MetricMeta:
+class ModeRequired(ValueError):
+    """``lookup(key, None)`` on a key whose meaning depends on the mode."""
+
+
+def _pick(entries: tuple[MetricMeta, ...], mode: str | None, key: str) -> MetricMeta:
     if mode is None:
+        if len({(m.unit, m.direction, m.band) for m in entries}) > 1:
+            raise ModeRequired(f"metric {key} differs by mode; pass the run's mode")
+        # Same meaning in every mode (only the caps differ): every mode's caps.
         return _merged(entries)
     for m in entries:
         if mode in m.modes:
             return m
     # Registered for the other mode only: the key is not emitted in this
-    # one. The mode-free view, rather than None, keeps a stored record's
-    # stray key readable.
-    return _merged(entries)
+    # one. Its single entry, rather than None, keeps a stored record's stray
+    # key readable.
+    if len(entries) == 1:
+        return entries[0]
+    raise ModeRequired(f"metric {key} has no {mode} entry")
 
 
 def lookup(key: str, mode: str | None) -> MetricMeta | None:
     """The metadata of score *key* in *mode* (``batch``, ``sustained`` or
-    ``continuous``; None for the mode-free view), or None for a key the
-    registry does not know (a reader then treats it as not directional).
-    *mode* has no default: a caller that knows the run's mode must pass
-    it."""
+    ``continuous``), or None for a key the registry does not know (a reader
+    then treats it as not directional). *mode* has no default; None is
+    accepted only for a key whose meaning does not depend on the mode, and
+    raises ``ModeRequired`` otherwise, so no reader gets one mode's answer
+    for the other's record."""
     mode = canonical_mode(mode)
     key = ALIASES.get(key, key)
     entries = _BY_ID.get(key)
     if entries:
-        return _pick(entries, mode)
+        return _pick(entries, mode, key)
     for pattern, metas in PATTERNS:
         m = pattern.match(key)
         if not m:
             continue
-        meta = replace(_pick(metas, mode), id=key)
+        meta = replace(_pick(metas, mode, key), id=key)
         stage = m.groupdict().get("stage")
         if stage:
             job = STAGE_JOB_TYPES[stage]
@@ -1004,36 +1040,68 @@ def lookup(key: str, mode: str | None) -> MetricMeta | None:
     return None
 
 
+def _lookup_or_none(key: str, mode: str | None) -> MetricMeta | None:
+    """``lookup``, with a mode-split key under an unknown mode read as
+    unknown (no better side), for readers that only colour or label."""
+    try:
+        return lookup(key, mode)
+    except ModeRequired:
+        return None
+
+
 def is_directional(key: str, mode: str | None) -> bool:
-    meta = lookup(key, mode)
+    """Whether a delta in *key* has a better side; False for an unknown key
+    and for a mode-split key when the mode is unknown."""
+    meta = _lookup_or_none(key, mode)
     return bool(meta and meta.directional)
 
 
 def higher_is_better(key: str, mode: str | None) -> bool:
-    meta = lookup(key, mode)
+    meta = _lookup_or_none(key, mode)
     return bool(meta and meta.directional and meta.direction == "higher")
 
 
 def direction_hint(key: str, mode: str | None) -> str:
     """``higher is better``, ``lower is better``, or "" for a metric with
     no better side."""
-    meta = lookup(key, mode)
+    meta = _lookup_or_none(key, mode)
     if meta is None or not meta.directional:
         return ""
     return f"{meta.direction} is better"
 
 
-def capped_by(key: str, bound_kinds: Iterable[str], mode: str | None) -> list[str]:
-    """The bound kinds in *bound_kinds* that cap *key*'s value."""
+def capped_by(
+    key: str, bound_kinds: Iterable[str], mode: str | None, *, extra: Iterable[str] = ()
+) -> list[str]:
+    """The kinds in *bound_kinds* (``limits.bound_kinds``) and *extra* that
+    cap *key*'s value. *extra* carries the bounds a record states elsewhere:
+    ``BOUND_TRICKLE`` when the trickle held intake, and
+    ``BOUND_ML_LOOP_EXECUTOR_CAP`` from the ml_loop block."""
     meta = lookup(key, mode)
     if meta is None:
         return []
-    return [b for b in bound_kinds if any(fnmatch.fnmatchcase(b, c) for c in meta.cap_dependence)]
+    return [
+        b
+        for b in (*bound_kinds, *extra)
+        if any(fnmatch.fnmatchcase(b, c) for c in meta.cap_dependence)
+    ]
 
 
 def descriptions() -> dict[str, str]:
     """Score key -> description, as metrics.json ``score_descriptions``."""
-    return {k: m.description for k, m in METRICS.items() if m.source == "scores"}
+    return {k: v[0].description for k, v in METRICS.items() if v[0].source == "scores"}
+
+
+def _mode_free(key: str) -> MetricMeta | None:
+    """The batch entry with every mode's caps (``_merged``); reproduce and
+    the perf gate read stored numbers without a mode."""
+    key = ALIASES.get(key, key)
+    if key in _BY_ID:
+        return _merged(_BY_ID[key])
+    for pattern, metas in PATTERNS:
+        if pattern.match(key):
+            return replace(_merged(metas), id=key)
+    return None
 
 
 def reproduce_class(key: str) -> tuple[str, str]:
@@ -1044,7 +1112,7 @@ def reproduce_class(key: str) -> tuple[str, str]:
     drift counts). Mode-free, as those callers are. A key the registry does
     not know keeps the rule those callers had: a ``*_seconds`` key is lower
     is better, anything else exact."""
-    meta = lookup(key, None)
+    meta = _mode_free(key)
     if meta is None:
         if key.endswith("_seconds"):
             return ("performance", "lower")

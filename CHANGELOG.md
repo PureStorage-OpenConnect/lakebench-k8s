@@ -161,13 +161,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `total_rows_processed`, `bronze_busy_fraction`, `ingest_ratio`,
   `corpus_ingest_ratio`, `query_time_event_age_seconds`, the time-to-detect
   alert counts, the maintenance file and snapshot counts and the other
-  diagnostic scores are no longer coloured; in a continuous run core-hours,
-  compute efficiency and total elapsed seconds follow the window length and
-  are not coloured, and the report's continuous CPU-hours and efficiency
-  cards drop their "lower/higher is better" hint. A score with no registry
-  entry is shown uncoloured (it used to read as lower is better). Score
-  values, their descriptions, and what `reproduce` and the perf gate check
-  are unchanged.
+  diagnostic scores are no longer coloured; in a continuous run
+  core-hours (they scale with the window) and total elapsed seconds are not
+  coloured, and the report's continuous CPU-hours card drops its "lower is
+  better" hint. A score with no registry entry is shown uncoloured (it used
+  to read as lower is better). The saved comparison gains `pipeline_mode`,
+  the mode its directions were read under. Score values, their
+  descriptions, and what `reproduce` and the perf gate check are unchanged.
 - typer is capped below 0.28 (`typer>=0.12.0,<0.28`), so a new typer minor
   cannot change the CLI without a tested raise of the cap.
 - The `[dev]` extra includes `[aml]`, so a development install now gets the
