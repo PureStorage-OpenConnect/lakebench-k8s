@@ -52,7 +52,12 @@ It refuses, rather than rewrites:
 * a scrub that changes the identity dict (every key, ``generator digest``
   included), corpus id, result fingerprints, query set, stages run or bound
   kinds of the stored block, or the identity of the block
-  ``PipelineMetrics.experiment_block()`` rebuilds.
+  ``build_experiment`` makes from the record's ``experiment_inputs``. The
+  one identity change it makes itself: a system identity (ER-8) whose
+  ``storage_endpoint`` part it rewrote gets its ``fingerprint`` recomputed
+  over the rewritten parts, so a fixture's fingerprint is the hash of what
+  it shows; a source fingerprint that is not the hash of its own parts, or
+  a rewrite of any other part, is refused.
 
 Not covered: IPv6 addresses; hostnames that are neither in a URL, an
 endpoint value of the same record, nor a subdomain of one of its endpoint
@@ -87,7 +92,7 @@ from pathlib import Path
 from typing import Any
 
 #: Bump when a rule changes; recorded in tests/fixtures/records/MANIFEST.json.
-SCRUBBER_VERSION = 10
+SCRUBBER_VERSION = 11
 
 #: The documented placeholder host for the lab S3 address.
 PLACEHOLDER_HOST = "10.0.1.50"
@@ -727,8 +732,15 @@ def check_clean(obj: Any) -> list[str]:
 
 def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
     """What the scrubber must not change, for the stored block and the block
-    ``experiment_block()`` rebuilds on load."""
-    from lakebench.metrics.experiment import experiment_of, identity, result_fingerprints
+    ``build_experiment`` makes from the record's ``experiment_inputs`` (what
+    a record without a stored block gets on load; a stored block is never
+    rebuilt, so this is the stricter of the two)."""
+    from lakebench.metrics.experiment import (
+        build_experiment,
+        experiment_of,
+        identity,
+        result_fingerprints,
+    )
     from lakebench.metrics.storage import MetricsStorage
 
     def view(exp: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -747,7 +759,7 @@ def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory() as tmp:
         rebuilt = MetricsStorage(tmp)._dict_to_metrics(copy.deepcopy(dict(record)))
-        rebuilt_block = rebuilt.experiment_block()
+        rebuilt_block = build_experiment(rebuilt) or rebuilt.experiment
     rebuilt_view = view(rebuilt_block)
     return {
         "stored": view(experiment_of(record)),
@@ -784,6 +796,89 @@ def scrub_text(text: str, record: Mapping[str, Any] | None = None) -> str:
     return out
 
 
+#: The parts the scrubber may rewrite (an endpoint host); any other part
+#: changing is refused.
+_SCRUBBABLE_PARTS = frozenset({"storage_endpoint"})
+
+
+def _system_identity_paths(obj: Any, path: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Every ``system_identity`` mapping with ``parts`` in a record, at any
+    depth: the experiment block, the run-start inputs, and the copies a
+    snapshot carries (``pipeline_benchmark.config_snapshot``)."""
+    out: list[tuple[str, ...]] = []
+    if isinstance(obj, Mapping):
+        for key, value in obj.items():
+            here = (*path, str(key))
+            if key == "system_identity" and isinstance(value, Mapping) and "parts" in value:
+                out.append(here)
+            else:
+                out += _system_identity_paths(value, here)
+    elif isinstance(obj, list):
+        for i, value in enumerate(obj):
+            out += _system_identity_paths(value, (*path, str(i)))
+    return out
+
+
+def _at(obj: Any, path: tuple[str, ...]) -> Any:
+    for key in path:
+        if isinstance(obj, list) and key.isdigit() and int(key) < len(obj):
+            obj = obj[int(key)]
+        elif isinstance(obj, Mapping):
+            obj = obj.get(key)
+        else:
+            return None
+    return obj
+
+
+def _recompute_system_fingerprints(
+    record: Mapping[str, Any], scrubbed: dict[str, Any]
+) -> list[tuple[tuple[str, ...], str]]:
+    """Recompute the fingerprint of each system identity whose parts the
+    scrub rewrote (the storage endpoint host), so a fixture's fingerprint is
+    the hash of the parts it shows. Refuses a source whose fingerprint was
+    not the hash of its own parts, or a rewrite of any other part. Returns
+    ``(path, source fingerprint)`` for each recomputed one."""
+    from lakebench.metrics.system_identity import fingerprint_of
+
+    out = []
+    for path in _system_identity_paths(record):
+        src, dst = _at(record, path), _at(scrubbed, path)
+        if not isinstance(src, Mapping) or not isinstance(dst, dict):
+            continue
+        sp, dp = src.get("parts") or {}, dst.get("parts") or {}
+        if sp == dp:
+            continue
+        moved = sorted(k for k in set(sp) | set(dp) if sp.get(k) != dp.get(k))
+        where = ".".join(path)
+        if set(moved) - _SCRUBBABLE_PARTS:
+            raise ScrubError(
+                f"scrubbing would rewrite {where} parts other than an endpoint: {moved}"
+            )
+        version = src.get("version")
+        kind = str(src.get("type") or "cluster")
+        if not isinstance(version, int) or fingerprint_of(sp, None, kind, version) != src.get(
+            "fingerprint"
+        ):
+            raise ScrubError(f"{where}.fingerprint is not the hash of its parts in the source")
+        dst["fingerprint"] = fingerprint_of(dp, None, kind, version)
+        out.append((path, str(src.get("fingerprint"))))
+    return out
+
+
+def _with_source_fingerprints(
+    scrubbed: Mapping[str, Any], fixed: list[tuple[tuple[str, ...], str]]
+) -> dict[str, Any]:
+    """*scrubbed* with each recomputed fingerprint put back to its source
+    value, for the identity guard: the recompute is the one identity change
+    the scrubber makes, and it is checked on its own."""
+    out = copy.deepcopy(dict(scrubbed))
+    for path, fingerprint in fixed:
+        node = _at(out, path)
+        if isinstance(node, dict):
+            node["fingerprint"] = fingerprint
+    return out
+
+
 def scrub_record(record: Any) -> tuple[dict[str, Any], list[str]]:
     """(scrubbed copy, sorted list of rewritten paths). Raises ScrubError
     when the record cannot become a fixture (see the module docstring)."""
@@ -817,10 +912,12 @@ def scrub_record(record: Any) -> tuple[dict[str, Any], list[str]]:
             "scrubbing would rewrite evidence (not an endpoint, bucket or credential): "
             + ", ".join(guarded)
         )
+    fixed = _recompute_system_fingerprints(record, scrubbed)
+    changed += [".".join(("", *path, "fingerprint")) for path, _ in fixed]
     problems = check_clean(scrubbed)
     if problems:
         raise ScrubError("record is not clean after scrubbing: " + "; ".join(problems))
-    if identity_view(record) != identity_view(scrubbed):
+    if identity_view(record) != identity_view(_with_source_fingerprints(scrubbed, fixed)):
         raise ScrubError(
             "scrubbing would change the record's identity, results or verdict "
             f"(rewritten paths: {', '.join(changed)})"

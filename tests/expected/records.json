@@ -251,16 +251,8 @@
     }
   },
   "known_rebuild_drift": {
-    "_about": "Records whose identity digest moves when PipelineMetrics.experiment_block() rebuilds the block on load (ch03 section 0.1, S1): the v1.6 builder re-renders effective maintenance ids and benchmark rounds. ER-10a (a stored block is never rebuilt) empties this list; the strict xfail in tests/test_stored_records.py fails until it does.",
+    "_about": "Records whose identity digest moved when PipelineMetrics.experiment_block() rebuilt the block on load (ch03 section 0.1, S1): the v1.6 builder re-rendered effective maintenance ids and benchmark rounds for 6dd3bc, e338c5, 497f02, 7ad7ad, 9de9c9, 7934eb and 71b4a3. ER-10a returns a stored block unchanged, so the list is empty and stays empty; a run listed here fails the strict xfail in tests/test_stored_records.py.",
     "owner": "ER-10a",
-    "runs": [
-      "20260926-231711-6dd3bc",
-      "20260927-011043-e338c5",
-      "20260927-011123-497f02",
-      "20260927-011355-7ad7ad",
-      "20260927-073533-9de9c9",
-      "20260927-073818-7934eb",
-      "20260927-095006-71b4a3"
-    ]
+    "runs": []
   }
 }

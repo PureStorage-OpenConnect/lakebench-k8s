@@ -453,3 +453,283 @@ def test_detect_backend_answers_are_pinned() -> None:
     assert detect_backend("http://10.0.1.50:80") == "unknown"
     assert detect_backend("https://minio.example:9000") == "unknown"
     assert detect_backend("https://s3.us-east-1.amazonaws.com") == "aws"
+
+
+# ---------------------------------------------------------------------------
+# Load (K31, ER-10b)
+# ---------------------------------------------------------------------------
+
+
+def _pod(namespace, node, cpu=None, memory=None, init=None, overhead=None):
+    def c(cpu, mem):
+        req = {}
+        if cpu:
+            req["cpu"] = cpu
+        if mem:
+            req["memory"] = mem
+        return NS(resources=NS(requests=req or None))
+
+    return NS(
+        metadata=NS(namespace=namespace),
+        spec=NS(
+            node_name=node,
+            containers=[c(cpu, memory)],
+            init_containers=[c(*i) for i in init] if init else None,
+            overhead=overhead,
+        ),
+    )
+
+
+def _load_cluster(nodes=None, pods=(), pod_error=None, node_error=None):
+    calls: list[Any] = []
+    items = _default_nodes() if nodes is None else nodes
+
+    class Core:
+        def list_node(self, **kw):
+            calls.append(("list_node", kw.get("_request_timeout")))
+            if node_error:
+                raise node_error
+            return NS(items=items)
+
+        def list_pod_for_all_namespaces(self, **kw):
+            calls.append(("pods", kw.get("field_selector"), kw.get("_request_timeout")))
+            if pod_error:
+                raise pod_error
+            return NS(items=list(pods))
+
+    return NS(_core_v1=Core()), calls
+
+
+def test_load_sums_schedulable_workers_and_other_namespaces() -> None:
+    nodes = _default_nodes()
+    nodes[2].spec.unschedulable = True  # a cordoned worker
+    pods = [
+        _pod("mine", "w0", "8", "64Gi"),  # this deployment: left out
+        _pod("other", "w1", "4500m", "16Gi"),
+        _pod("other", "w2", "2", "2Gi"),  # on the cordoned worker: left out
+        _pod("openshift-dns", "m0", "1", "1Gi"),  # control plane: left out
+        _pod("other", "w0", "500m", None, init=[("2", "1Gi")]),  # init dominates cpu
+        _pod("pending", None, "16", "16Gi"),  # not scheduled: left out
+    ]
+    k8s, calls = _load_cluster(nodes, pods)
+    out = si.observe_load(k8s, "mine")
+    assert out["allocatable"] == {
+        "cpu": 79.0,
+        "memory_gib": round(2 * 400000000 / 1024**2, 1),
+        "nodes": 2,
+    }
+    assert out["cotenant_requested"] == {"cpu": 6.5, "memory_gib": 17.0, "pods": 2}
+    assert out["cotenant_pending"] == {"cpu": 16.0, "memory_gib": 16.0, "pods": 1}
+    assert calls[1][:3] == ("pods", "status.phase!=Succeeded,status.phase!=Failed", (5, 60))
+    assert out["at"]
+
+
+def test_load_pod_overhead_counts() -> None:
+    k8s, _ = _load_cluster(pods=[_pod("o", "w0", "1", "1Gi", overhead={"cpu": "250m"})])
+    assert si.observe_load(k8s, "mine")["cotenant_requested"]["cpu"] == 1.25
+
+
+def test_endless_continue_token_is_bounded() -> None:
+    class Core:
+        def list_node(self, **kw):
+            return NS(items=_default_nodes())
+
+        def list_pod_for_all_namespaces(self, **kw):
+            return NS(items=[], metadata=NS(_continue="again"))  # never ends
+
+    out = si.observe_load(NS(_core_v1=Core()), "mine")
+    assert "did not end" in out["cotenant_requested"]["not_observed"]
+
+
+def test_mock_continue_token_ends_the_list() -> None:
+    """A test double's continue token (not a string) ends the list."""
+    from unittest import mock
+
+    class Core:
+        def list_node(self, **kw):
+            return NS(items=_default_nodes())
+
+        def list_pod_for_all_namespaces(self, **kw):
+            return mock.MagicMock()
+
+    assert si.observe_load(NS(_core_v1=Core()), "mine")["cotenant_requested"]["pods"] == 0
+
+
+def test_refused_pod_list_is_not_observed() -> None:
+    k8s, _ = _load_cluster(pod_error=_ApiError(403))
+    out = si.observe_load(k8s, "mine")
+    assert si.is_observed(out["allocatable"])
+    assert out["cotenant_requested"] == {"not_observed": "cluster-wide pod list: forbidden (403)"}
+
+
+def test_refused_node_list_leaves_both_halves_not_observed() -> None:
+    k8s, calls = _load_cluster(node_error=_ApiError(403))
+    out = si.observe_load(k8s, "mine")
+    assert not si.is_observed(out["allocatable"]) and not si.is_observed(out["cotenant_requested"])
+    assert [c[0] for c in calls] == ["list_node"]
+
+
+def test_local_load_is_not_observed() -> None:
+    out = si.observe_load(None, "mine", local=True)
+    assert out["allocatable"] == {"not_observed": "local run"}
+
+
+def test_run_samples_land_in_the_inputs_and_the_block(cluster) -> None:
+    """sample_run_start writes system_identity and the start sample;
+    sample_run_end adds the end sample; build_experiment copies both."""
+    from tests.test_experiment import _cfg as exp_cfg
+    from tests.test_experiment import _metrics
+
+    cfg = exp_cfg()
+    run = _metrics(cfg)
+    k8s = cluster()
+    k8s._core_v1.list_pod_for_all_namespaces = lambda **kw: NS(
+        items=[_pod("other", "w0", "2", "4Gi")]
+    )
+    si.sample_run_start(run, cfg, k8s=k8s)
+    si.sample_run_end(run, cfg, k8s=k8s)
+    inputs = run.config_snapshot["experiment_inputs"]
+    assert inputs["system_identity"]["fingerprint"]
+    observed = inputs["observed"]
+    assert set(observed) == {"allocatable", "cotenant_requested", "cotenant_pending"}
+    for half in observed.values():
+        assert set(half) == {"start", "end"} and half["start"]["at"]
+    assert observed["cotenant_requested"]["end"]["cpu"] == 2.0
+    e = run.to_dict()["experiment"]
+    assert e["observed"] == observed
+    assert e["system_identity"] == inputs["system_identity"]
+
+
+def test_run_sampling_never_raises() -> None:
+    class Boom:
+        def __getattr__(self, name):
+            raise RuntimeError("boom")
+
+    run = NS(config_snapshot={"experiment_inputs": {}})
+    si.sample_run_start(run, Boom(), k8s=Boom())
+    si.sample_run_end(run, Boom(), k8s=Boom())
+    si.sample_run_start(NS(config_snapshot=None), Boom())
+
+
+def test_load_quantities_in_any_canonical_form() -> None:
+    pods = [
+        _pod("o", "w0", "250m", "107374182400m"),  # 0.1 GiB in milli-bytes
+        _pod("o", "w0", "1", "1Pi"),
+    ]
+    k8s, _ = _load_cluster(pods=pods)
+    out = si.observe_load(k8s, "mine")["cotenant_requested"]
+    assert out["cpu"] == 1.25 and out["pods"] == 2
+    assert out["memory_gib"] == round((0.1 * 1024**3 + 1024**5) / 1024**3, 1)
+
+
+def test_one_unreadable_pod_is_counted_not_fatal() -> None:
+    k8s, _ = _load_cluster(pods=[_pod("o", "w0", "1", "1Gi"), _pod("o", "w0", "bogus", "1Gi")])
+    out = si.observe_load(k8s, "mine")["cotenant_requested"]
+    assert (out["cpu"], out["pods"], out["unreadable_pods"]) == (1.0, 1, 1)
+
+
+def test_sidecars_and_pod_level_requests() -> None:
+    side = _pod("o", "w0", "1", "1Gi", init=[("2", "1Gi")])
+    side.spec.init_containers[0].restart_policy = "Always"  # a native sidecar
+    pod_level = _pod("o", "w0", "1", "8Gi")
+    pod_level.spec.resources = NS(requests={"cpu": "4"})  # memory not set: containers' 8Gi
+    k8s, _ = _load_cluster(pods=[side, pod_level])
+    out = si.observe_load(k8s, "mine")["cotenant_requested"]
+    assert out["cpu"] == 3.0 + 4.0
+    assert out["memory_gib"] == 2.0 + 8.0
+
+
+def test_unsampled_start_marks_every_half() -> None:
+    from tests.test_experiment import _cfg as exp_cfg
+    from tests.test_experiment import _metrics
+
+    class Core:
+        def list_node(self, **kw):
+            raise RuntimeError("boom")
+
+    cfg = exp_cfg()
+    run = _metrics(cfg)
+    import lakebench.metrics.system_identity as mod
+
+    orig = mod.observe_system
+    mod.observe_system = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+    try:
+        si.sample_run_start(run, cfg, k8s=NS(_core_v1=Core(), _custom=None))
+    finally:
+        mod.observe_system = orig
+    observed = run.config_snapshot["experiment_inputs"]["observed"]
+    for half in ("allocatable", "cotenant_requested", "cotenant_pending"):
+        assert observed[half]["start"]["not_observed"].startswith("sampling failed")
+
+
+def test_pod_list_is_paged() -> None:
+    pages = [
+        NS(items=[_pod("o", "w0", "1", "1Gi")], metadata=NS(_continue="t1")),
+        NS(items=[_pod("o", "w1", "2", "1Gi")], metadata=NS(_continue=None)),
+    ]
+    seen: list[Any] = []
+
+    class Core:
+        def list_node(self, **kw):
+            return NS(items=_default_nodes())
+
+        def list_pod_for_all_namespaces(self, **kw):
+            seen.append((kw.get("limit"), kw.get("_continue")))
+            return pages[len(seen) - 1]
+
+    out = si.observe_load(NS(_core_v1=Core()), "mine")
+    assert out["cotenant_requested"]["cpu"] == 3.0
+    assert seen == [(500, None), (500, "t1")]
+
+
+def test_reasons_carry_no_address() -> None:
+    exc = ConnectionError(
+        "HTTPSConnectionPool(host='api.lab.example', port=6443): Max retries "
+        "(Caused by ... http://192.0.2.15:80/bucket)"
+    )
+    reason = si._reason(exc)
+    assert "api.lab.example" not in reason and "192.0.2.15" not in reason
+
+
+def test_start_sample_is_bounded_by_its_deadline(monkeypatch) -> None:
+    import threading
+
+    gate = threading.Event()
+
+    class Core:
+        def list_node(self, **kw):
+            gate.wait(10)
+            return NS(items=[])
+
+    monkeypatch.setattr(si, "START_DEADLINE_S", 0.2)
+    from tests.test_experiment import _cfg as exp_cfg
+    from tests.test_experiment import _metrics
+
+    cfg = exp_cfg()
+    run = _metrics(cfg)
+    si.sample_run_start(run, cfg, k8s=NS(_core_v1=Core(), _custom=None))
+    gate.set()
+    inputs = run.config_snapshot["experiment_inputs"]
+    assert not si.observed_parts(inputs["system_identity"]["parts"])
+    assert inputs["system_identity"]["type"] == "cluster"
+    assert "not sampled within" in inputs["observed"]["allocatable"]["start"]["not_observed"]
+
+
+def test_local_identity_names_nothing() -> None:
+    ident = si._local_identity(None)
+    assert ident["type"] == "local" and ident["partial"] is True
+    assert not si.observed_parts(ident["parts"])
+
+
+def test_non_plain_values_are_gaps() -> None:
+    """A client returning objects (a test double) never puts a non-JSON
+    value into the record."""
+    from unittest import mock
+
+    k8s = mock.MagicMock()
+    ident = si.observe_system(k8s, _cfg(), s3_client=_S3())
+    json.dumps(ident)
+    inputs: dict[str, Any] = {}
+    si._record_load(inputs, "start", {"at": "t", "allocatable": {"cpu": mock.MagicMock()}})
+    json.dumps(inputs)
+    assert "not a plain value" in inputs["observed"]["allocatable"]["start"]["not_observed"]

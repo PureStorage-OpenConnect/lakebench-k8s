@@ -99,10 +99,13 @@ shows any performance difference, and prints one of three verdicts:
 | NOT COMPARABLE | Different experiments (workload, corpus, scale, mode), different results, a failed run, or a record without the experiment block. Deltas and winner colouring are withheld | 1 |
 | comparability not established | A side has no checked results (`--skip-benchmark`, a recipe without a query engine, or a continuous run without a settled result check). Raw numbers are shown, no deltas or winner | 0 |
 
-A comparable pair whose execution conditions differ (effective maintenance,
-query access path, system, benchmark iterations or in-stream rounds, limits
-that bound) is labelled **not like-for-like** and the differences are
-listed. Each side's support state (supported, unverified, unsupported) is
+A comparable pair whose execution conditions differ (effective maintenance
+and its compaction operation, maintenance settings, benchmark iterations or
+in-stream rounds, limits that bound) is labelled **not like-for-like** and
+the differences are listed, as is a pair whose architecture and system both
+differ (confounded) or whose only architecture difference is the dependency
+set. A difference in the architecture or the system alone is what the
+comparison measures and does not make a pair not like-for-like. Each side's support state (supported, unverified, unsupported) is
 shown. `comparison.json` records `verdict`, `comparable`, `like_for_like`,
 `condition_differences`, `support` and `refusals`.
 

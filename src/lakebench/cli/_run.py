@@ -482,6 +482,9 @@ def _save_local_metrics(
     except Exception as e:  # noqa: BLE001
         console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
+    from lakebench.metrics.system_identity import sample_run_end
+
+    sample_run_end(run_metrics, cfg, local=True)
     if client is not None:
         # The local store's corpus, once, before the save (corpus id v2).
         from lakebench.metrics.corpus_identity import record_corpus_observation
@@ -1411,6 +1414,9 @@ def _run_local_mode(
     snapshot = build_config_snapshot(cfg, run_mode="batch", system="local")
     snapshot["local"] = True
     collector.start_run(run_id, cfg.name, snapshot)
+    from lakebench.metrics.system_identity import sample_run_start
+
+    sample_run_start(collector.current_run, cfg, local=True)
     if collector.current_run is not None:
         # Local mode runs no table maintenance.
         from lakebench.metrics.maintenance_policy import skipped_policy_id
@@ -1948,6 +1954,10 @@ def run(
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    # System identity and cluster load at run start; never raises.
+    from lakebench.metrics.system_identity import sample_run_end, sample_run_start
+
+    sample_run_start(collector.current_run, cfg)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts
         # [] from the start: a run that ends before the maintenance phase is
@@ -3230,6 +3240,7 @@ def run(
                         )
                     )
 
+            sample_run_end(run_metrics, cfg)
             # The corpus this run read, once, before the save (corpus id v2).
             from lakebench.metrics.corpus_identity import record_corpus_observation
 

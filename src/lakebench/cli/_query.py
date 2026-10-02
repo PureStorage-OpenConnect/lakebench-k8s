@@ -813,6 +813,11 @@ def benchmark(
             engine=primary_result.engine,
         )
         latest_run.benchmark = bench_metrics
+        # The stored experiment block is never rebuilt; bring its benchmark
+        # half (results, iterations, mode) in line with what replaced it.
+        from lakebench.metrics.experiment import refresh_benchmark
+
+        refresh_benchmark(latest_run)
         storage.save_run(latest_run)
         print_info(f"Benchmark metrics appended to run {latest_run.run_id}")
 
