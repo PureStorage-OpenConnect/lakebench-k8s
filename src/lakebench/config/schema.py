@@ -67,7 +67,11 @@ class ConfigModel(BaseModel):
     # which can hold a datagen seed or a credential, and the CLI prints the
     # error text. Pydantic takes the setting from the model validation
     # starts at (LakebenchConfig for every config load), which inherits it.
-    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    # A string literal right after a field is its description
+    # (scripts/gen_config_reference.py writes docs/configuration.md from it).
+    model_config = ConfigDict(
+        extra="forbid", hide_input_in_errors=True, use_attribute_docstrings=True
+    )
 
     # Keys that were once valid and now do nothing. Maps key -> what to do
     # instead. A load for a command that changes data (LoadPurpose MUTATE or
@@ -434,18 +438,34 @@ class ImagesConfig(ConfigModel):
     # tags are the exception to the commit-tag rule above.
     # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
     datagen: str = "docker.io/sillidata/lb-datagen:1.6.0"
+    """Data generator image. Pinned by digest
+    `sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a` for
+    provenance. Output is byte-identical to the v1.6 AML generator freeze
+    (`datagen-v2-rs-0.3`); this build cuts datagen pod memory.
+    """
     spark: str = "apache/spark:4.0.2-python3"
+    """Spark runtime image. Spark 4.x images are auto-detected."""
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
+    """PostgreSQL image (metadata backend)."""
     polaris: str = "apache/polaris:1.6.0"
+    """Apache Polaris REST catalog image."""
     polaris_admin_tool: str = "apache/polaris-admin-tool:1.6.0"
+    """Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe."""
     unity: str = (
         "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x
     )
+    """Unity Catalog server image (Unity catalog only; no recipe uses it)."""
     trino: str = "trinodb/trino:483"
+    """Trino query engine image."""
     duckdb: str = "python:3.11-slim"
+    """Python image the DuckDB query engine pod runs in; DuckDB itself is pinned by
+    `architecture.query_engine.duckdb.version`.
+    """
     jmx_exporter: str = "bitnami/jmx-exporter:latest"
+    """JMX exporter image for the metrics sidecars, used when observability is enabled."""
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
+    """`Always`, `IfNotPresent`, or `Never`."""
 
     @field_validator("spark")
     @classmethod
@@ -466,8 +486,20 @@ class KubernetesConfig(ConfigModel):
     """Kubernetes connection and namespace configuration."""
 
     context: str = ""  # Empty = use current context
+    """kubectl context name from the kubeconfig (`$KUBECONFIG`, else `~/.kube/config`). Empty =
+    the kubeconfig's current context (`kubectl config current-context`; with several files
+    in `$KUBECONFIG`, the first file that sets one), resolved by name at the command's first
+    cluster call, API or `kubectl`/`helm`/`oc`; every later call in that `lakebench` process
+    uses that context, even if the current context changes while it runs. The command stops
+    at its next client load or tool call if the context's API server or CA changes in the
+    kubeconfig. A name that is not in the kubeconfig is refused. In-cluster credentials are
+    used only when no kubeconfig file exists. Set this to target a specific cluster when you
+    have multiple contexts configured.
+    """
     namespace: str = ""  # Empty = use default namespace
+    """Kubernetes namespace for all resources. Empty = use the deployment `name`."""
     create_namespace: bool = True
+    """Create the namespace if it does not exist."""
 
 
 class S3BucketsConfig(ConfigModel):
@@ -479,8 +511,11 @@ class S3BucketsConfig(ConfigModel):
     """
 
     bronze: str = "lakebench-bronze"
+    """Bronze layer S3 bucket name. Unset, it is derived from the deployment `name`."""
     silver: str = "lakebench-silver"
+    """Silver layer S3 bucket name. Unset, it is derived from the deployment `name`."""
     gold: str = "lakebench-gold"
+    """Gold layer S3 bucket name. Unset, it is derived from the deployment `name`."""
 
 
 class S3Config(ConfigModel):
@@ -488,30 +523,44 @@ class S3Config(ConfigModel):
 
     endpoint: str = Field(
         default="",
-        description="S3 endpoint URL (e.g., http://your-s3:80 or https://your-s3:443)",
+        description=(
+            "S3-compatible endpoint URL (e.g., `http://minio:9000` or "
+            "`https://s3.example.com:443`). HTTPS endpoints with self-signed CAs require "
+            "`ca_cert`."
+        ),
     )
     region: str = "us-east-1"
+    """AWS region. Used by boto3 for signing."""
     path_style: bool = True  # Required for FlashBlade, MinIO
+    """Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3)."""
 
     # Credentials. Only the inline keys are used: deploy writes them into the
     # lakebench-s3-credentials Secret and the CLI's S3 client reads them.
     access_key: str = ""
+    """S3 access key. Required for deploy."""
     secret_key: str = ""
+    """S3 secret key. Required for deploy."""
 
     # TLS / HTTPS support
     ca_cert: str = Field(
         default="",
-        description="Path to PEM CA certificate bundle for HTTPS S3 endpoints. "
-        "Empty = system default CAs.",
+        description=(
+            "Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private "
+            "CAs. Empty = use system default CAs. The PEM content is read at deploy time and "
+            "embedded into a Kubernetes Secret for all components."
+        ),
     )
     verify_ssl: bool = Field(
         default=True,
-        description="Verify SSL certificates for HTTPS endpoints. "
-        "Set false only for self-signed certs in dev.",
+        description=(
+            "Verify SSL certificates for HTTPS endpoints. Set `false` only for development with "
+            "self-signed certs when you don't have the CA certificate file."
+        ),
     )
 
     buckets: S3BucketsConfig = Field(default_factory=S3BucketsConfig)
     create_buckets: bool = True
+    """Create buckets if they do not exist. `reproduce` refuses `false`."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "secret_ref": (
@@ -546,11 +595,17 @@ class ScratchStorageConfig(ConfigModel):
     _removed_defaults: ClassVar[dict[str, Any]] = {"size": "100Gi"}
 
     enabled: bool = False
+    """Enable scratch StorageClass for Spark PVCs."""
     storage_class: str = "px-csi-scratch"
+    """StorageClass name for scratch volumes."""
     provisioner: str = "pxd.portworx.com"
+    """CSI provisioner for the StorageClass. Use `rancher.io/local-path`, `ebs.csi.aws.com`,
+    etc. for non-Portworx providers.
+    """
     parameters: dict[str, str] = Field(
         default_factory=lambda: {"repl": "1", "io_profile": "auto", "priority_io": "high"}
     )
+    """Provider-specific StorageClass parameters."""
 
 
 class StorageConfig(ConfigModel):
@@ -602,8 +657,15 @@ class SparkOperatorConfig(ConfigModel):
     """Spark operator installation configuration."""
 
     install: bool = False
+    """Refused when `true` by every command that changes data: the operator is shared
+    infrastructure that a cluster admin installs once with `lakebench admin
+    install-spark-operator`. `destroy`, `status` and the read-only commands load `true` as
+    `false` with a note.
+    """
     namespace: str = "spark-operator"
+    """Namespace for the Spark Operator."""
     version: str = "2.5.1"  # webhook volume injection gap (gotcha 3) unchanged from 2.4.0; template workaround stays
+    """Spark Operator chart version. v2.x required."""
 
     @model_validator(mode="after")
     def _refuse_install(self, info: ValidationInfo) -> SparkOperatorConfig:
@@ -652,34 +714,34 @@ class SparkComputeConfig(ConfigModel):
     bronze_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override bronze-verify executor count. None = auto from scale.",
+        description="Override bronze-verify executor count. Null = auto from scale.",
     )
     silver_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override silver-build executor count. None = auto from scale.",
+        description="Override silver-build executor count. Null = auto from scale.",
     )
     gold_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override gold-finalize executor count. None = auto from scale.",
+        description="Override gold-finalize executor count. Null = auto from scale.",
     )
 
     # Streaming job executor count overrides (None = auto from scale).
     bronze_ingest_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override bronze-ingest executor count. None = auto from scale.",
+        description="Override bronze-ingest executor count. Null = auto from scale.",
     )
     silver_stream_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override silver-stream executor count. None = auto from scale.",
+        description="Override silver-stream executor count. Null = auto from scale.",
     )
     gold_refresh_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override gold-refresh executor count. None = auto from scale.",
+        description="Override gold-refresh executor count. Null = auto from scale.",
     )
 
     # Driver resource overrides (None = use profile defaults).
@@ -687,12 +749,12 @@ class SparkComputeConfig(ConfigModel):
     # have limited memory or when running at extreme scales (500+).
     driver_memory: str | None = Field(
         default=None,
-        description="Override driver memory (e.g., '8g', '16g'). None = profile default.",
+        description=("Global driver memory override (e.g., `16g`). Null = profile default."),
     )
     driver_cores: int | None = Field(
         default=None,
         ge=1,
-        description="Override driver cores. None = profile default (typically 4).",
+        description="Override driver cores. Null = profile default (typically 4).",
     )
 
     @field_validator("driver_memory", mode="after")
@@ -719,7 +781,11 @@ class PostgresConfig(ConfigModel):
     """PostgreSQL configuration for metadata backend."""
 
     storage: str = "10Gi"
+    """PVC size for PostgreSQL data."""
     storage_class: str = ""  # Empty = default storage class
+    """StorageClass for PostgreSQL PVC. Empty = cluster default StorageClass (requires one to
+    exist -- see [Prerequisites](getting-started.md#default-storageclass)).
+    """
 
 
 class ComputeConfig(ConfigModel):
@@ -749,22 +815,31 @@ class DepsConfig(ConfigModel):
 
     maven_repository: str = Field(
         default="",
-        description="The only Maven repository the resolve reads; replaces Maven "
-        "Central and the Google mirror. Empty = the public repositories.",
+        description=(
+            "The only Maven repository the resolve reads; replaces Maven Central and the Google "
+            "mirror. An `http://` or `https://` base URL without credentials, query or fragment; "
+            "stored with one trailing `/`."
+        ),
     )
     pypi_index: str = Field(
         default="",
-        description="PyPI simple index for the AML reference and DuckDB wheels. "
-        "Empty = https://pypi.org/simple/.",
+        description=(
+            "PyPI simple index for the AML reference wheels and the DuckDB wheel. Empty = "
+            "`https://pypi.org/simple/`. A plain-HTTP index is passed to pip as a trusted host."
+        ),
     )
     duckdb_extension_repository: str = Field(
         default="",
-        description="DuckDB extension repository. Empty = http://extensions.duckdb.org.",
+        description=("DuckDB extension repository. Empty = `http://extensions.duckdb.org`."),
     )
     storage_class: str = Field(
         default="",
-        description="StorageClass of the lb-deps-data PVC. Empty = the cluster default. "
-        "Applies when the PVC is created; an existing PVC is never changed.",
+        description=(
+            "StorageClass of the `lb-deps-data` PVC (5Gi, ReadWriteOnce). Empty = the cluster "
+            "default StorageClass. Read only when the PVC is created; an existing PVC is never "
+            "changed, so delete it to move the set. The volume must be writable by UID 185 "
+            "through `fsGroup`."
+        ),
     )
 
     @field_validator("maven_repository", "pypi_index", "duckdb_extension_repository")
@@ -834,16 +909,26 @@ class HiveResourcesConfig(ConfigModel):
     """Hive Metastore resource configuration."""
 
     cpu_min: str = "500m"
+    """Hive Metastore minimum CPU request."""
     cpu_max: str = "2"
+    """Hive Metastore CPU limit."""
     memory: str = "4Gi"
+    """Hive Metastore memory."""
 
 
 class StackableOperatorConfig(ConfigModel):
     """Stackable operator installation configuration."""
 
     install: bool = False
+    """Refused when `true` by every command that changes data: a cluster admin installs the
+    Stackable operators once (see
+    [component-hive.md](component-hive.md#stackable-operator)). `destroy`, `status` and the
+    read-only commands load `true` as `false` with a note.
+    """
     namespace: str = "stackable"
+    """Namespace for Stackable operators."""
     version: str = "25.7.0"
+    """Stackable chart version."""
 
     @model_validator(mode="after")
     def _refuse_install(self, info: ValidationInfo) -> StackableOperatorConfig:
@@ -877,7 +962,9 @@ class PolarisResourcesConfig(ConfigModel):
     """Polaris resource configuration."""
 
     cpu: str = "1"
+    """Polaris CPU request/limit."""
     memory: str = "2Gi"
+    """Polaris memory."""
 
 
 class PolarisConfig(ConfigModel):
@@ -895,7 +982,12 @@ class PolarisConfig(ConfigModel):
     """
 
     port: int = Field(default=8181, ge=1, le=65535)
+    """Polaris REST API port."""
     client_secret: str = ""
+    """OAuth2 secret of the `lakebench` Polaris client. Empty = deploy generates one
+    and keeps it in the Secret `lakebench-polaris-client`; a value is written there
+    on the first deploy. Use a `${VAR}` reference rather than a literal.
+    """
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
     _removed_keys: ClassVar[dict[str, str]] = {
@@ -912,7 +1004,9 @@ class UnityConfig(ConfigModel):
     """
 
     spark_connector_version: str = "0.4.0"
+    """Unity Catalog Spark connector version the Spark jobs load."""
     port: int = Field(default=8080, ge=1, le=65535)
+    """Unity Catalog REST API port."""
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
     _removed_keys: ClassVar[dict[str, str]] = {
@@ -925,6 +1019,7 @@ class CatalogConfig(ConfigModel):
     """Catalog service configuration."""
 
     type: CatalogType = CatalogType.HIVE
+    """Catalog service: `hive`, `polaris`, or `none`."""
     hive: HiveConfig = Field(default_factory=HiveConfig)
     polaris: PolarisConfig = Field(default_factory=PolarisConfig)
     unity: UnityConfig = Field(default_factory=UnityConfig)
@@ -943,6 +1038,7 @@ class IcebergConfig(ConfigModel):
     # this version; validate_iceberg_java_runtime() refuses the combination
     # rather than letting it fail inside the driver.
     version: str = "1.11.0"
+    """Apache Iceberg runtime JAR version."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "file_format": "Iceberg tables are always written as Parquet.",
@@ -955,6 +1051,7 @@ class DeltaConfig(ConfigModel):
     """Delta Lake table format configuration."""
 
     version: str = "auto"
+    """Delta Lake version. `auto` resolves a version that matches the Spark image."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "properties": "no table property is applied from the config.",
@@ -970,6 +1067,10 @@ class TableFormatConfig(ConfigModel):
     }
 
     type: TableFormatType = TableFormatType.ICEBERG
+    """Table format: `iceberg` or `delta`. Delta runs with the `hive` catalog and `trino`,
+    `spark-thrift` or `none` query engines (the `hive-delta-*` recipes). The `financial`
+    (AML) workload refuses Delta.
+    """
     iceberg: IcebergConfig = Field(default_factory=IcebergConfig)
     delta: DeltaConfig = Field(default_factory=DeltaConfig)
 
@@ -978,7 +1079,9 @@ class TrinoCoordinatorConfig(ConfigModel):
     """Trino coordinator resource configuration."""
 
     cpu: str = "2"
+    """Trino coordinator CPU."""
     memory: str = "8Gi"
+    """Trino coordinator memory."""
 
 
 class TrinoWorkerConfig(ConfigModel):
@@ -987,12 +1090,21 @@ class TrinoWorkerConfig(ConfigModel):
     # le: the largest tier in config/scale.py asks for scale // 50 workers,
     # 200 at the top scale of 10000.
     replicas: int = Field(default=2, ge=1, le=256)
+    """Number of Trino worker pods."""
     cpu: str = "4"
+    """Trino worker CPU."""
     memory: str = "16Gi"
+    """Trino worker memory."""
     spill_enabled: bool = True
+    """Enable query spill to disk."""
     spill_max_per_node: str = "40Gi"
+    """Maximum spill size per worker."""
     storage: str = "50Gi"
+    """Worker storage size for spill and temp data."""
     storage_class: str = ""
+    """Worker StorageClass. Empty = emptyDir (ephemeral, no PVC needed). Set a class name to
+    use PVC-backed persistent volumes instead.
+    """
 
     @model_validator(mode="after")
     def spill_fits_storage(self) -> TrinoWorkerConfig:
@@ -1048,34 +1160,48 @@ class TrinoConfig(ConfigModel):
     coordinator: TrinoCoordinatorConfig = Field(default_factory=TrinoCoordinatorConfig)
     worker: TrinoWorkerConfig = Field(default_factory=TrinoWorkerConfig)
     catalog_name: str = "lakehouse"
+    """Trino catalog name for the Iceberg connector."""
 
 
 class SparkThriftConfig(ConfigModel):
     """Spark Thrift Server configuration."""
 
     cores: int = Field(default=2, ge=1)
+    """Spark Thrift Server CPU cores. Auto-sized to `8` on Delta + Hive when unset."""
     memory: str = "4g"
+    """Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to
+    `16g` on Delta + Hive and `24g` on the financial schema when unset.
+    """
     catalog_name: str = "lakehouse"
+    """Iceberg catalog name for Spark Thrift Server."""
 
 
 class DuckDBConfig(ConfigModel):
     """DuckDB query engine configuration."""
 
     cores: int = Field(default=2, ge=1)
+    """DuckDB CPU cores."""
     memory: str = "4g"
+    """DuckDB memory."""
     catalog_name: str = "lakehouse"
+    """Iceberg catalog name for DuckDB."""
     # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
     # so every deploy took whatever was current and two runs weeks apart could
     # compare different query engines while reporting the difference as a
     # result. Measured local run-to-run spread is 0.9%, well below what an
     # engine change would move, so the drift was invisible to the noise floor.
     version: str = "1.5.5"
+    """DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes
+    whatever is current, so two runs weeks apart can query with different engines while
+    `compare` reports the difference as a result.
+    """
 
 
 class QueryEngineConfig(ConfigModel):
     """Query engine configuration."""
 
     type: QueryEngineType = QueryEngineType.TRINO
+    """Query engine: `trino`, `spark-thrift`, `duckdb`, or `none`."""
     trino: TrinoConfig = Field(default_factory=TrinoConfig)
     spark_thrift: SparkThriftConfig = Field(default_factory=SparkThriftConfig)
     duckdb: DuckDBConfig = Field(default_factory=DuckDBConfig)
@@ -1125,14 +1251,22 @@ class SustainedConfig(ConfigModel):
     """
 
     bronze_trigger_interval: str = "30 seconds"
+    """Bronze streaming trigger interval."""
     silver_trigger_interval: str = "60 seconds"
+    """Silver streaming trigger interval."""
     gold_refresh_interval: str = "5 minutes"
+    """Gold refresh trigger interval."""
     run_duration: int = Field(
         default=1800,
         ge=60,
-        description="Streaming run duration in seconds (default 30 min)",
+        description=(
+            "Measurement window in seconds. The schema accepts 60 and up; a continuous run "
+            "refuses less than 3 x `gold_refresh_interval` (900 s at defaults). Use 900 s or "
+            "more, UAT included."
+        ),
     )
     checkpoint_base: str = "checkpoints"
+    """S3 prefix for streaming checkpoints."""
 
     # Throughput tuning -- these control how much data the streaming
     # pipeline can process per trigger interval.
@@ -1140,13 +1274,12 @@ class SustainedConfig(ConfigModel):
         default=None,
         ge=1,
         description=(
-            "Max Parquet files bronze-ingest reads per trigger. With "
-            "bronze_trigger_interval it sets the offered load. Unset (auto): "
-            "the run derives it from the corpus size and run_duration so data "
-            "keeps arriving through the window (about 1.2 x run_duration of "
-            "arrival), capped at 50 files per trigger (about 107 MB/s at 30 s). "
-            "An explicit value that would offer the whole corpus before the "
-            "window ends is refused at run start."
+            "Max Parquet files bronze reads per trigger; with `bronze_trigger_interval` it sets "
+            "the offered load. Unset: derived per run so data keeps arriving for about 1.2 x "
+            "`run_duration`, capped at 50 (a Lakebench-imposed cap; 50 files per 30 s is about "
+            "107 MB/s, so an auto-capped ingest rate measures the cap, not the infrastructure). "
+            "An explicit value that would offer the corpus before the window ends is refused at "
+            "run start."
         ),
     )
     bronze_target_file_size_mb: int = Field(
@@ -1164,11 +1297,10 @@ class SustainedConfig(ConfigModel):
         ge=10,
         description=(
             "Seconds silver-stream waits for the bronze table to appear before "
-            "raising SilverAbort (A3, silver-plan). Unset (auto): run_duration / "
-            "4, floored at 10 s, so a short run cannot spend its whole window on "
-            "the wait. The old fixed 1800 was longer than a default run_duration "
-            "and prevented the LB-044 gate from ever firing on a stalled "
-            "bronze-ingest."
+            "it stops the run. Unset (auto): run_duration / 4, floored at 10 s, "
+            "so a short run cannot spend its whole window on the wait. The old "
+            "fixed 1800 was longer than a default run_duration, so the check for "
+            "a stalled bronze-ingest never fired."
         ),
     )
     gold_target_file_size_mb: int = Field(
@@ -1185,20 +1317,28 @@ class SustainedConfig(ConfigModel):
         ge=300,
         le=7200,
         description=(
-            "Seconds between table maintenance rounds (Iceberg expire_snapshots + "
-            "remove_orphan_files, Delta VACUUM). Unset (auto): run_duration / 3, "
-            "within 300..7200, so a default run maintains inside its window; the "
-            "old fixed 1800 equalled the default run_duration and never fired. An "
-            "explicit value too long to fire inside the window is refused at run "
-            "start unless --skip-maintenance is given."
+            "Seconds between table maintenance rounds during a continuous run: Iceberg "
+            "`expire_snapshots` + `remove_orphan_files`, or Delta `VACUUM` (Trino only). Unset: "
+            "`run_duration / 3`, within 300--7200, resolved at run start (600 s for the default "
+            "1800 s window), so a default run maintains inside its window. An explicit value too "
+            "long for the first round to run inside the window is refused at run start unless "
+            "`--skip-maintenance` is given. While streams are live Delta `VACUUM` keeps Delta's "
+            "7-day default retention, so continuous Delta has no effective table maintenance in "
+            "v1.6. Range: 300--7200."
         ),
     )
     retention_threshold: str = Field(
         default="30m",
         description=(
-            "Iceberg snapshot retention threshold passed to Trino "
-            "(e.g. '30m', '1h', '7d'). Snapshots older than this are expired. "
-            "A whole number and one unit: s, m, h or d."
+            "Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole "
+            "number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else "
+            "is rejected at load. While streams are live, Iceberg expiry is floored at `1h`, and "
+            "a continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints "
+            "a warning when it loads. The `30m` default does not warn: every continuous "
+            "maintenance round runs beside live streams, so it expires at `1h`, and the run "
+            "records the applied values in `continuous.retention` of `metrics.json`. Delta has no "
+            "effective table maintenance in continuous mode (v1.6). Orphan-file removal never "
+            "uses less than 24 h 10 min, on any engine."
         ),
     )
 
@@ -1221,16 +1361,19 @@ class SustainedConfig(ConfigModel):
     # than expire_snapshots, so it runs less frequently.
     compaction_enabled: bool = Field(
         default=True,
-        description="Enable periodic Iceberg compaction (rewrite_data_files) during sustained runs",
+        description=(
+            "Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during "
+            "continuous runs."
+        ),
     )
     compaction_interval: int = Field(
         default=0,
         ge=0,
         description=(
-            "Seconds between compaction rounds. 0 = auto (2x the effective "
-            "retention_interval, resolved at run start). An explicit value too "
-            "long to fire inside the window is refused at run start unless "
-            "compaction_enabled is false or --skip-maintenance is given."
+            "Seconds between compaction rounds. `0` = 2x the effective `retention_interval` (1200 "
+            "s for the default window). An explicit value that cannot run inside the window is "
+            "refused at run start unless `compaction_enabled` is false or `--skip-maintenance` is "
+            "given. Minimum 0; no upper bound in the schema."
         ),
     )
 
@@ -1242,13 +1385,21 @@ class SustainedConfig(ConfigModel):
         default=300,
         ge=300,
         le=3600,
-        description="Seconds between in-stream benchmark rounds",
+        description=(
+            "Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at "
+            "runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: "
+            "300--3600."
+        ),
     )
     benchmark_warmup: int = Field(
         default=300,
         ge=300,
         le=1800,
-        description="Seconds before first in-stream benchmark round",
+        description=(
+            "Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` "
+            "at runtime -- rounds before the first gold refresh produce inflated QpH. Range: "
+            "300--1800."
+        ),
     )
 
     @model_validator(mode="after")
@@ -1315,20 +1466,35 @@ class ProcessingConfig(ConfigModel):
     """Processing pattern configuration."""
 
     pattern: ProcessingPattern = ProcessingPattern.MEDALLION
+    """**Deprecated; removed in v1.7.** The stages are chosen by `pipeline.mode`. The only
+    remaining effect is that `streaming` makes the auto-sizer give Spark 60% and datagen 40%
+    of the CPU budget; any value other than `medallion` prints a warning.
+    """
     mode: PipelineMode = PipelineMode.BATCH
+    """Pipeline execution mode: `batch` (sequential medallion jobs) or `continuous` (concurrent
+    jobs over arriving data). `sustained` is accepted as a deprecated alias. The
+    `--continuous` CLI flag overrides this.
+    """
     cycles: int = Field(
         default=1,
         ge=1,
         le=50,
         description=(
-            "Number of batch iterations. "
-            "Cycle 1 = full overwrite (current behavior), "
-            "cycles 2-N = incremental append/merge."
+            "Batch iterations (1--50). Cycle 1 is full overwrite; cycles 2+ are incremental "
+            "append/merge. Simulates multi-day lakehouse behavior. Only valid when `mode: batch`. "
+            "See [Multi-Cycle Batch](#multi-cycle-batch)."
         ),
     )
     pre_benchmark_maintenance: bool = Field(
         default=True,
-        description="Run Iceberg compaction + expire_snapshots before benchmark for clean QpH",
+        description=(
+            "Run table maintenance before the benchmark phase so QpH is measured against "
+            "maintained tables. Iceberg: `expire_snapshots`, `remove_orphan_files` (never below "
+            "24 h 10 min) and compaction of silver and gold. Delta: `VACUUM` on Trino only; Delta "
+            "`OPTIMIZE` is never run. All statements share one 30-minute budget; the first "
+            "statement timeout or the deadline stops the rest, and the perf gate then treats "
+            "post-maintenance QpH as not a measurement."
+        ),
     )
     sustained: SustainedConfig = Field(default_factory=SustainedConfig)
 
@@ -1438,58 +1604,109 @@ class DatagenConfig(ConfigModel):
         ge=0.01,
         le=10000,
         description=(
-            "Abstract scale factor. 1 unit ~ 10 GB on-disk bronze. "
-            "Scale 10 = ~100 GB, Scale 100 = ~1 TB. "
-            "Values below 1 are intended for local mode: 0.1 = ~1 GB."
+            "Scale factor (1 unit ~ 10 GB bronze). The schema accepts 0.01--10000, but datagen is "
+            "banded per workload: Customer 360 supported to 300, unverified to 600, refused "
+            "above; AML supported to 300, unverified to 800, refused above (see [Scale "
+            "Factors](#scale-factors)). Values below 1 are intended for local mode."
         ),
     )
 
     # Deprecated: kept for backward compatibility
     target_size: str | None = Field(
         default=None,
-        description="DEPRECATED: Use 'scale' instead. Will be removed in a future version.",
+        description=(
+            "**Deprecated.** Legacy size string (e.g., `100gb`). Converted to scale automatically."
+        ),
     )
 
     mode: DatagenMode = DatagenMode.AUTO
+    """S3 delivery pattern: `batch` = one PUT per file, `continuous` = S3 multipart upload as
+    row-groups close, `auto` = `continuous` at every scale. Row
+    content is byte-identical across modes at a fixed seed. Sizing is keyed on scale, not
+    mode.
+    """
     # Top-level generator seed. Unset: the AML pre-registration's calibration
     # seed for the financial schema, 42 otherwise (config/datagen_seed.py). A
     # financial seed the pre-registration lists as spent is refused.
     seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    """Top-level generator seed, which names the corpus. Unset: the AML pre-registration's
+    calibration seed for `financial`, 42 for other schemas. A `financial` seed listed in the
+    pre-registration's `corpora.spent_seeds` is refused at config load, so a retired corpus
+    is never regenerated by accident. The AML reference job reports the seed it scored. The
+    pre-registered evaluation and robustness seeds are refused unless `corpus_role` declares
+    that role.
+    """
     # AML corpus role (financial only). The evaluation and robustness seeds are
     # refused unless the run declares its role here: each is generated once,
     # as the registered gate run for that role. Set without a seed, the role's
     # registered seed is used.
     corpus_role: Literal["calibration", "evaluation", "robustness"] | None = None
+    """`financial` only: `calibration`, `evaluation` or `robustness`. Declares this deployment
+    as the registered corpus for that role; it must match the role's pre-registered seed
+    (unset `seed` then uses it). Only set it for the one registered gate run of that role.
+    """
     # Robustness corpus (financial only; AML-GOALS R3(b)): datagen shifts the
     # nuisance parameters by corpora.robustness_perturbation in the
     # pre-registration (median amount, persona sds, dormancy, each x1.2 in
     # natural units). Required with corpus_role: robustness, refused with a
     # calibration or evaluation role. Off: output is unchanged.
     robustness_perturbation: bool = False
+    """`financial` only. Generates the robustness corpus: the pre-registration's
+    `corpora.robustness_perturbation` multipliers shift the nuisance parameters in natural
+    units (median amount x1.2, persona activity and amount log-sds x1.2, dormancy lengths
+    x1.2). Instances, participants and row counts are unchanged. Required with `corpus_role:
+    robustness`, refused with `calibration` or `evaluation`; the generator also refuses the
+    robustness seed without it. Off, the corpus is byte-identical to a run without the
+    option.
+    """
     parallelism: int = Field(default=4, ge=1)
+    """Number of parallel datagen pods. A value you set is used as given, except that it is
+    capped to fit the cluster and financial above scale 100 is raised to at least 8 pods;
+    unset, the auto-sizer derives it from the scale. The schema fallback without auto-sizing
+    is 4.
+    """
     # Datagen output file size, fixed at 64mb for every workload and mode
     # (owner decision 2026-09-29). c360 rows are drawn per file and truncated
     # by file size, so one size keeps row content identical across delivery
     # modes (DESIGN.md) and keeps corpus identity stable. The field stays so
     # existing configs that set 64mb still load; any other value is refused.
     file_size: Literal["64mb"] = "64mb"
+    """Fixed at `64mb` for every workload and mode; any other value is refused. One size keeps
+    row content identical across delivery modes.
+    """
     dirty_data_ratio: float = 0.08
+    """Fraction of intentionally dirty records (0.0--1.0). Applies to the `customer360` schema
+    only; the `financial` (AML) generator ignores it.
+    """
     cpu: str = "2"
+    """CPU per datagen pod. A value you set is used as given; unset, the auto-sizer sets 8 in
+    both modes.
+    """
     memory: str = "4Gi"
+    """Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives
+    it from the measured peak RSS model for the schema, scale, pod CPU (thread count) at the
+    fixed 64mb file size, with a 4Gi floor.
+    """
     # Generator threads per pod; 0 = auto (follow the pod CPU).
     generators: int = Field(default=0, ge=0, le=1024)
+    """Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU
+    request.
+    """
     timestamp_start: str | None = Field(
         default=None,
-        description="Start date for generated timestamps (ISO format, e.g. '2024-01-01'). Default: datagen built-in (2024-01-01).",
+        description=(
+            "Start date for generated timestamps (ISO format). Default: `2024-01-01`. See "
+            "[Timestamp Range Impact](#timestamp-range-impact)."
+        ),
     )
     timestamp_end: str | None = Field(
         default=None,
         description=(
-            "End date for generated timestamps (ISO format, exclusive, e.g. "
-            "'2025-01-01'). Default: Rust generator built-in '2025-01-01' for "
-            "single-cycle runs; a multi-cycle run (cycles > 1) instead splits "
-            "a wider '2024-01-01' to '2025-12-31' window across cycles "
-            "(deploy/datagen.py fallback, matched by metrics.c360_correctness)."
+            "End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for "
+            "single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a "
+            "wider `2024-01-01` to `2025-12-31` default window across cycles (`deploy/datagen.py` "
+            "fallback, matched by `metrics/c360_correctness.py`). See [Timestamp Range "
+            "Impact](#timestamp-range-impact)."
         ),
     )
 
@@ -1587,7 +1804,9 @@ class TmOperationsConfig(ConfigModel):
     )
     seed: int = Field(default=20260924, description="Seed for every simulated decision")
     analyst_accuracy: float = Field(default=0.90, ge=0.5, le=1.0)
+    """Share of alerts the simulated L1 analyst dispositions correctly (0.5--1.0)."""
     investigator_accuracy: float = Field(default=0.95, ge=0.5, le=1.0)
+    """Share of cases the simulated L2 investigator decides correctly (0.5--1.0)."""
     qa_sample_rate: float = Field(
         default=0.05, ge=0.0, le=1.0, description="Share of L1 decisions QA re-reviews"
     )
@@ -1669,6 +1888,11 @@ class WorkloadConfig(ConfigModel):
         return data
 
     schema_type: WorkloadSchema = Field(default=WorkloadSchema.CUSTOMER360, alias="schema")
+    """Workload schema: `customer360` or `financial`. `custom` is refused at load in v1.6.
+    `financial` requires `table_format: iceberg`. The block was `architecture.workload`
+    before v1.6; that location still loads with a deprecation warning, and setting both with
+    different values is an error.
+    """
     datagen: DatagenConfig = Field(default_factory=DatagenConfig)
     customer360: Customer360Config = Field(default_factory=Customer360Config)
 
@@ -1679,7 +1903,12 @@ class WorkloadConfig(ConfigModel):
     # than expiring everything with the default "0s" threshold. See
     # REQ-R-03/REQ-R-05 in the FinServ-Crime spec.
     retention_workload: bool = False
+    """AML: keep the snapshots time-travel reproduction needs. Pre-benchmark
+    maintenance then retains `retention_months` plus headroom instead of expiring
+    every snapshot.
+    """
     retention_months: int = Field(default=60, ge=1, le=120)
+    """AML: months of snapshots kept when `retention_workload` is true (1--120)."""
 
     # W1 connected-components vertex cap for the Financial detection path.
     # Default sits above the scale-10 vertex count (1.1M entities) so W1 runs
@@ -1689,6 +1918,10 @@ class WorkloadConfig(ConfigModel):
     # ceiling stays generous rather than unbounded. Consumed by
     # gold_finalize_financial via LB_FINANCIAL_W1_MAX_VERTICES.
     w1_max_vertices: int = Field(default=8_000_000, ge=1, le=200_000_000)
+    """AML: vertex cap of the W1 connected-components rule, a Lakebench-imposed cap.
+    The default covers scale 10 (1.1M entities); raise it for larger scales that
+    have the executor budget.
+    """
 
     # Financial transaction-monitoring operations layer (GOALS P10).
     tm_operations: TmOperationsConfig = Field(default_factory=TmOperationsConfig)
@@ -1966,7 +2199,7 @@ class TableNamesConfig(ConfigModel):
     )
     silver_batch_versions: str = Field(
         default="silver.silver_batch_versions",
-        description="Silver sealed-batch marker sidecar (I10, Financial): one row per (stream_id, batch_id) written last so downstream consumers hide mid-batch crashes",
+        description="Silver sealed-batch marker sidecar (Financial): one row per (stream_id, batch_id) written last so downstream consumers hide mid-batch crashes",
     )
     gold_alerts: str = Field(
         default="gold.alerts",
@@ -2086,7 +2319,10 @@ class MaintenanceSettleConfig(ConfigModel):
 
     enabled: bool = Field(
         default=True,
-        description="Probe until storage settles before the post-maintenance round",
+        description=(
+            "Batch mode: probe until storage settles between maintenance and the post-maintenance "
+            "round. See [benchmarking.md](benchmarking.md)."
+        ),
     )
     # Recovery took about 35 minutes in the one measured case; 45 minutes
     # leaves 10 minutes of margin before the post round runs unsettled.
@@ -2095,15 +2331,15 @@ class MaintenanceSettleConfig(ConfigModel):
         ge=60,
         le=14400,
         description=(
-            "Longest wait after maintenance. When reached, the post round still runs "
-            "but maintenance_value_pct is null"
+            "Longest wait. When reached, the post round still runs and `maintenance_value_pct` is "
+            "null. Range: 60--14400."
         ),
     )
     interval_seconds: int = Field(
         default=60,
         ge=5,
         le=3600,
-        description="Seconds between the start of consecutive probes",
+        description=("Seconds between the starts of consecutive probes. Range: 5--3600."),
     )
     # The unsettled rounds were 27-34% slow and the in-round spread of one
     # query at scale 10 is a few percent, so 10% separates the two.
@@ -2112,8 +2348,8 @@ class MaintenanceSettleConfig(ConfigModel):
         gt=0,
         le=100,
         description=(
-            "Settled when two consecutive probes differ by at most this percent and, "
-            "when a pre-maintenance time is known, neither is slower than it by more"
+            "Settled when two consecutive probes differ by at most this percent and neither is "
+            "slower than the pre-maintenance time by more. Range: above 0, up to 100."
         ),
     )
     probe_query: str | None = Field(
@@ -2127,7 +2363,7 @@ class MaintenanceSettleConfig(ConfigModel):
         default=1,
         ge=1,
         le=10,
-        description="Timed runs per probe; the probe time is their median",
+        description=("Timed runs per probe; the probe time is their median. Range: 1--10."),
     )
 
 
@@ -2139,16 +2375,27 @@ class BenchmarkConfig(ConfigModel):
     """
 
     mode: BenchmarkMode = BenchmarkMode.POWER
+    """Benchmark mode: `power`, `standard`, `extended`, `throughput`, or `composite`.
+    `lakebench run` measures one power pass (`standard` and `extended` are power) and
+    refuses `throughput` and `composite`, with or without `--skip-benchmark`; `lakebench
+    benchmark --mode` runs them.
+    """
     streams: int = Field(
         default=4,
         ge=1,
         le=64,
-        description="Number of concurrent query streams for throughput mode",
+        description=(
+            "Concurrent query streams for `lakebench benchmark` throughput mode. Range: 1--64. "
+            "`lakebench run` uses one stream and refuses an explicit value above 1."
+        ),
     )
     cache: str = Field(
         default="hot",
         pattern=r"^(hot|cold)$",
-        description="Cache mode: 'hot' or 'cold'",
+        description=(
+            "Cache mode: `hot` (warm cache) or `cold` (cleared before each query). `lakebench "
+            "run` measures a hot cache and refuses `cold`; use `lakebench benchmark --cold`."
+        ),
     )
     # One sample per query cannot tell a change from noise: same-run rounds
     # on the live cluster differed 3-11% in QpH and a post-maintenance round
@@ -2159,9 +2406,10 @@ class BenchmarkConfig(ConfigModel):
         ge=1,
         le=100,
         description=(
-            "Timed runs of each query per benchmark round. QpH is scored from the "
-            "per-query median and the spread is recorded; 1 is a quick run with no "
-            "measured spread"
+            "Timed runs of each query per benchmark round. QpH is scored from the per-query "
+            "median and every sample plus the spread is recorded in `metrics.json`. `1` is a "
+            "quick run with no measured spread; the maintenance value is then not reported. "
+            "Range: 1--100."
         ),
     )
     maintenance_settle: MaintenanceSettleConfig = Field(default_factory=MaintenanceSettleConfig)
@@ -2249,6 +2497,7 @@ class ArchitectureConfig(ConfigModel):
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
     table_format: TableFormatConfig = Field(default_factory=TableFormatConfig)
     pipeline_engine: PipelineEngineType = PipelineEngineType.SPARK
+    """Pipeline engine; `spark` is the only one."""
     query_engine: QueryEngineConfig = Field(default_factory=QueryEngineConfig)
     pipeline: ProcessingConfig = Field(default_factory=ProcessingConfig)
     workload: WorkloadConfig = Field(default_factory=WorkloadConfig)
@@ -2364,24 +2613,39 @@ class ObservabilityConfig(ConfigModel):
     """
 
     enabled: bool = False
+    """Deploy the observability stack (Prometheus + Grafana)."""
     dashboards_enabled: bool = True
+    """Deploy Grafana dashboards."""
     retention: str = "7d"
+    """Prometheus data retention period."""
     storage: str = "10Gi"
+    """Prometheus PVC size."""
     # kube-prometheus-stack chart version (bundles Prometheus + Grafana +
     # node-exporter + kube-state-metrics as one unit). Pinned as of 2026-07-27
     # -- the deploy previously carried no --version flag at all, so it
     # silently tracked whatever the Helm repo served at install time. That
     # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
     chart_version: str = "87.19.2"
+    """`kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit
+    -- there is no separate Prometheus/Grafana version field. Pinned as of 2026-07-27; the
+    deploy previously carried no `--version` flag and silently tracked whatever the Helm
+    repo served at install time.
+    """
     # Per-deployment Prometheus Pushgateway for live datagen + bronze->silver
     # metrics (batch jobs Prometheus pull cannot catch). Deployed only when
     # observability is enabled; a best-effort live view, never a published
     # source (metrics.json stays authoritative). See
     # docs/internal/observability-pushgateway.md.
     pushgateway_enabled: bool = True
+    """Deploy a Prometheus Pushgateway for Spark job metrics when observability is
+    enabled. A live view only; `metrics.json` stays the record.
+    """
     pushgateway_image: str = "prom/pushgateway:v1.11.1"
+    """Pushgateway image."""
     pushgateway_storage: str = "1Gi"
+    """Pushgateway persistent volume size."""
     pushgateway_storage_class: str = "px-csi-scratch"
+    """StorageClass of the Pushgateway volume."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "reports": (
@@ -2436,6 +2700,9 @@ class SparkConfOverrides(ConfigModel):
     """
 
     conf: dict[str, str] = Field(default_factory=dict)
+    """Your Spark keys, merged over the job defaults. Enters the experiment record
+    (`architecture.spark_conf_user`) when it changes something.
+    """
 
 
 # =============================================================================
@@ -2654,10 +2921,15 @@ class LakebenchConfig(ConfigModel):
     # Metadata
     name: str = Field(
         default="",
-        description="Unique name for this deployment (REQUIRED)",
+        description=(
+            "Unique deployment name. Also used as the K8s namespace when `namespace` is empty."
+        ),
         max_length=63,  # matches K8s namespace + S3 bucket-tag safe length
     )
     recipe: str | None = None
+    """Recipe shorthand (e.g., `hive-iceberg-spark-trino`). Sets catalog, table format, and
+    query engine defaults. See [Recipes](recipes.md).
+    """
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "version": (
