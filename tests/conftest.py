@@ -336,6 +336,40 @@ def _journal_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _signal_handlers_do_not_leak():
+    """Each test starts with the SIGINT and SIGTERM handlers the process had
+    before any test, and gets them back after. A run that installs its
+    interrupt handler and skips restore() (on purpose in some tests) would
+    otherwise hand it to whatever test runs next in the same process; under
+    xdist that order changes, and a later test saw a SIGTERM caught that it
+    expected to reach its own handler (CI run 37014056878, worker gw3)."""
+    import signal
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def reset() -> None:
+        for s, base in _BASE_SIGNAL_HANDLERS.items():
+            signal.signal(s, base if base is not None else signal.SIG_DFL)
+
+    reset()
+    yield
+    reset()
+
+
+def _base_signal_handlers() -> dict:
+    import signal
+
+    return {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+
+
+#: The handlers at conftest import, before any test ran.
+_BASE_SIGNAL_HANDLERS = _base_signal_handlers()
+
+
+@pytest.fixture(autouse=True)
 def _reset_cluster_target():
     """A process pins one cluster context (SAF-7, ``k8s/target.py``); the
     suite is one process, so each test starts with no active target. The
