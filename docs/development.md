@@ -57,7 +57,7 @@ without the AML statistics tests marked `slow`, which CI runs in their own
 job. The tests import `src/` of this checkout (`PYTHONPATH=src`), whatever
 is installed, with one worker per CPU; `make check-fast XDIST_WORKERS=8`
 caps the workers on a shared machine, and `PYTHON=python3.11` picks the
-interpreter. `make test` is the same pytest command without the lint and
+interpreter (default `python3`). `make test` is the same pytest command without the lint and
 type checks. To run the whole unit suite serially, slow tests included, and stop
 at the first failure:
 

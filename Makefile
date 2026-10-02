@@ -41,7 +41,7 @@ dev:
 # here replaces pyproject.toml's, so it repeats e2e and integration.
 # PYTHONPATH=src tests this checkout's code even when another checkout is
 # the installed one; XDIST_WORKERS=8 caps the workers on a shared host.
-PYTHON ?= python
+PYTHON ?= python3
 XDIST_WORKERS ?= auto
 UNIT_PYTEST = PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} $(PYTHON) -m pytest tests/ -q \
 	-n $(XDIST_WORKERS) --dist loadfile -p no:cacheprovider \

@@ -95,3 +95,44 @@ def test_a_signal_stops_the_command_and_still_records_the_time(tmp_path):
     assert proc.returncode == 128 + signal.SIGTERM, out
     assert "stopped by signal" in out
     assert "(stopped by a signal)" in summary.read_text()
+
+
+def test_sigint_then_sigterm_stops_a_command_that_ignores_sigint(tmp_path):
+    # The runner cancels with SIGINT, then SIGTERM; make does not pass SIGINT
+    # on. The whole command group must stop, once, with the time recorded.
+    summary = tmp_path / "summary.md"
+    env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
+    pidfile = tmp_path / "child.pid"
+    body = (
+        "import os, pathlib, signal, time; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+        f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "--seconds", "60", "--label", "stub", "--"]
+        + [sys.executable, "-c", body],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    deadline = time.monotonic() + 30
+    while not pidfile.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pidfile.exists(), "the child never started"
+    proc.send_signal(signal.SIGINT)
+    time.sleep(0.2)
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 128 + signal.SIGINT, out + err
+    assert "Traceback" not in err
+    assert summary.read_text().count("(stopped by a signal)") == 1
+    child_pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError(f"child {child_pid} still running")
