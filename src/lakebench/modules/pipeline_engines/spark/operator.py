@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import subprocess
 import time
@@ -277,6 +278,9 @@ class SparkOperatorManager:
             raise ValueError("empty command")
         tool = cmd[0]
         args = list(cmd[1:])
+        if tool != os.path.basename(tool) and os.path.basename(tool) in ("kubectl", "helm", "oc"):
+            # A path would skip the pinned helpers below (SAF-7).
+            raise ValueError(f"call {os.path.basename(tool)} by name, not as {tool!r}")
         ctx = self.kube_context
         if tool == "kubectl":
             return pinned_kubectl(ctx, args, **kwargs)
@@ -961,6 +965,7 @@ class SparkOperatorManager:
             ClusterLockHeld,
             cluster_lock,
         )
+        from lakebench.k8s.target import ContextConflictError, cli_args
 
         try:
             core_v1 = _kclient.CoreV1Api()
@@ -973,6 +978,17 @@ class SparkOperatorManager:
 
         try:
             with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S):
+                try:
+                    # The pinned-context check (SAF-7) once the lease is held
+                    # and before the first mutation. A rewrite after it can
+                    # still stop a later tool call; that is mapped below.
+                    cli_args("helm", self.kube_context)
+                except ContextConflictError as e:
+                    raise WatchListMutationError(
+                        f"{e}. The operator's watch list was NOT modified; run "
+                        "destroy again once the kubeconfig names the deployment's "
+                        "cluster."
+                    ) from e
                 if precondition is not None:
                     precondition()
                 ok = self._remove_namespace_from_watch_impl(namespace)
@@ -1001,6 +1017,12 @@ class SparkOperatorManager:
                 f"Kubernetes API error while acquiring cluster lock: {e}. "
                 "The operator's watch list was NOT modified; run "
                 "`lakebench admin repair-operator` after the cluster is reachable."
+            ) from e
+        except ContextConflictError as e:
+            raise WatchListMutationError(
+                f"{e}. The operator's watch list may be partly modified; once "
+                "the kubeconfig names the deployment's cluster again, run "
+                "`lakebench admin repair-operator` against it."
             ) from e
 
         if not ok:
@@ -1092,6 +1114,14 @@ class SparkOperatorManager:
                     "`lakebench admin repair-operator`.",
                     namespace,
                 )
+                return False
+            from lakebench.k8s.target import ContextConflictError, cli_args
+
+            try:
+                # The pinned-context check (SAF-7) before the first mutation.
+                cli_args("helm", self.kube_context)
+            except ContextConflictError as e:
+                logger.error("spark-operator watch-list: refusing to add %r -- %s", namespace, e)
                 return False
             try:
                 return self._add_namespace_to_watch_impl(namespace, _retry_on_eviction)

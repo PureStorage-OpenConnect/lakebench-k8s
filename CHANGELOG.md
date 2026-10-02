@@ -150,6 +150,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   retry lines and warnings are silenced. A config whose top level is not a
   YAML mapping is refused with one line naming the problem instead of an
   `AttributeError`.
+- **One cluster context per process.** A `lakebench` command
+  resolves its cluster context once, at its first cluster call, from
+  `platform.kubernetes.context` or, when that is empty, from the
+  kubeconfig's current context by name. Every API client and every
+  `kubectl`, `helm` and `oc` call in that process then uses it, so
+  switching the current context during a long run no longer moves the rest
+  of the run to another cluster. With several files in `$KUBECONFIG` the
+  current context is the one `kubectl config current-context` prints (the
+  first file that sets it; the Python client used to take the last), so a
+  deployment made with a multi-file `$KUBECONFIG` and no configured context
+  may now resolve another context: set `platform.kubernetes.context` for
+  those. A second context in one process is refused,
+  and so is a context whose API server or CA changes in the kubeconfig
+  while the command runs; the check runs at each `kubectl`, `helm` or `oc`
+  call and at each client load, and the ownership fingerprint a deploy
+  stamps or a destroy compares is the CA read when the context was pinned.
+  `config recommend CONFIG` sizes against the config's context (a config
+  that does not load says so and uses the current context). `admin`
+  commands without a config, `status --namespace` and `recommend` print
+  the context they resolved. A
+  context name that is not in the kubeconfig is refused (`admin` commands
+  used to fall back to in-cluster credentials), and in-cluster credentials
+  are used only when no kubeconfig file exists (before, a command with no
+  configured context tried them first). `compare` still runs each config
+  in its own `lakebench` process, each resolving its own context, until it
+  becomes read-only.
 
 ### Fixed
 
