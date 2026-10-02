@@ -602,6 +602,11 @@ On a backend without bucket tagging, `clean` (like `destroy` and the
 continuous reset) empties a bucket only when the namespace records creating
 it or adopting it empty.
 
+Before emptying a layer's bucket, `clean` unregisters that layer's tables
+through the deployment's Trino or Spark Thrift pod (see
+[Deployment](deployment.md)). A table it cannot unregister makes it exit 1,
+and that bucket is left as it is unless the table's files are already gone.
+
 `-f` is not accepted on `destroy` or `clean`: it exits 2 and names `--force` / `-y`,
 because `-f` means `--file` everywhere else. `LAKEBENCH_LEGACY_SHORT_F=1` restores the old
 meaning (force) with a warning for this release only.

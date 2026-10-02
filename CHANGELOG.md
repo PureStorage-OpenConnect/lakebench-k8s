@@ -769,6 +769,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   batch-versions sidecar. The stream's refusal to start a fresh checkpoint
   over populated silver checks all of them too, not only transactions and
   edges.
+- `lakebench clean` followed by `run` works on recipes with a Trino or
+  Spark Thrift query engine. `clean` emptied buckets and kept the catalog,
+  so the next run met tables whose files were gone: Delta gold after `clean
+  gold` or `clean data`, the continuous Delta jobs, and Iceberg on a Hive
+  catalog after any clean failed on them. `clean` now unregisters a layer's
+  tables before emptying its bucket, through that engine's pod, and keeps the
+  bucket (exit 1) when a table there cannot be unregistered, so a re-run can
+  finish. On recipes with DuckDB or no query engine it still warns and leaves
+  the entries.
 - A multi-cycle Customer 360 batch run no longer loses silver rows when a
   later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
   tagged every row with that cycle, so an operator retry of the cycle, which

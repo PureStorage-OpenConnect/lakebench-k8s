@@ -351,5 +351,14 @@ lakebench clean journal my-config.yaml
 ```
 
 All `clean` targets prompt for confirmation unless `--force` is passed.
-Infrastructure components (Kubernetes resources, catalog entries) are not
-affected by `clean`.
+Kubernetes resources are not affected by `clean`. Before it empties a
+layer's bucket, `clean` removes that layer's workload tables from the
+catalog, so the next run creates them afresh instead of failing on entries
+whose files are gone. It uses the deployment's query engine pod, the
+configured one first: Trino runs `system.unregister_table` (the catalog
+entry only), Spark Thrift runs `DROP TABLE` (for a Delta table only when its
+data is in the bucket being emptied). With neither running (DuckDB or no
+query engine) it warns and leaves the entries. When a table that still has
+its files cannot be unregistered, `clean` leaves that bucket as it is and
+exits 1, so a re-run can finish; an entry whose files are already gone is
+reported (exit 1) and the bucket is emptied.
