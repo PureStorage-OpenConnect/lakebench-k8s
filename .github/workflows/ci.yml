@@ -187,18 +187,36 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/gitleaks-history"
           mkdir -p "$work"
           ignore="$work/gitleaksignore"
           cfg="$work/gitleaks.toml"
-          # The config always comes from a trusted ref when one has it, so an
-          # allowlist a branch (a pull request to main included) adds to its own
-          # .gitleaks.toml cannot hide a finding unnoticed. A branch can still
-          # edit this workflow; review of the pull request is that control.
+          # The config and baseline come from a trusted ref, never from the
+          # branch being scanned, so an allowlist a branch adds to its own
+          # .gitleaks.toml cannot hide a finding unnoticed. Which ref is
+          # trusted first follows the pre-push hook: what goes to main (a push
+          # to main, a pull request to main, a release tag) is held to main's
+          # config; everything else (integrate/*, train/*, lane/*, pull
+          # requests to integrate) to integrate's, which only the main lane
+          # changes, then main's. So a lane cannot allowlist itself, and an
+          # allowlist entry merged to integrate applies to every branch on
+          # integrate before it reaches main. A branch can still edit this
+          # workflow; review of the pull request is that control.
+          # trust-order begin
+          if { [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" = "main" ]; } \
+            || { [ "$EVENT" != "pull_request" ] \
+              && { [ "$REF" = "refs/heads/main" ] || [ "${REF#refs/tags/}" != "$REF" ]; }; }; then
+            trust_order="origin/main origin/integrate/v1.5.0"
+          else
+            trust_order="origin/integrate/v1.5.0 origin/main"
+          fi
+          # trust-order end
+          echo "trusted refs, first that has the file wins: $trust_order"
           cfg_ref=""
-          for ref in origin/main origin/integrate/v1.5.0; do
+          for ref in $trust_order; do
             if git cat-file -e "$ref:.gitleaks.toml" 2>/dev/null; then
               cfg_ref="$ref"
               break
@@ -212,7 +230,7 @@ jobs:
               git diff origin/main HEAD -- .gitleaksignore .gitleaks.toml || true
             fi
           else
-            for ref in origin/main origin/integrate/v1.5.0; do
+            for ref in $trust_order; do
               if git cat-file -e "$ref:.gitleaksignore" 2>/dev/null; then
                 trusted="$ref"
                 break

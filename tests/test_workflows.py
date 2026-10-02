@@ -512,6 +512,58 @@ def test_secrets_history_job_scans_full_history_and_requires_gitleaks():
     assert "secrets-history" in jobs["build"]["needs"]
 
 
+def _history_trust_order(event: str, ref: str, base_ref: str = "") -> list[str]:
+    """Run the trust-order block of the history scan step for one event."""
+    import subprocess
+
+    job = _load("ci.yml")["jobs"]["secrets-history"]
+    scan = next(str(s["run"]) for s in job["steps"] if s.get("name") == "Scan history")
+    m = re.search(r"# trust-order begin\n(.*?)# trust-order end", scan, re.S)
+    assert m, "the Scan history step has no trust-order block"
+    out = subprocess.run(
+        ["bash", "-c", m.group(1) + 'printf "%s" "$trust_order"'],
+        env={"EVENT": event, "REF": ref, "BASE_REF": base_ref, "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return out.split()
+
+
+MAIN_FIRST = ["origin/main", "origin/integrate/v1.5.0"]
+INTEGRATE_FIRST = ["origin/integrate/v1.5.0", "origin/main"]
+
+
+def test_history_scan_trusts_main_for_what_goes_to_main():
+    assert _history_trust_order("push", "refs/heads/main") == MAIN_FIRST
+    assert _history_trust_order("pull_request", "refs/pull/7/merge", "main") == MAIN_FIRST
+    # release.yml calls ci.yml on the tag push.
+    assert _history_trust_order("push", "refs/tags/v1.7.0") == MAIN_FIRST
+
+
+def test_history_scan_trusts_integrate_first_for_every_other_ref():
+    for ref in (
+        "refs/heads/integrate/v1.5.0",
+        "refs/heads/train/1002-e",
+        "refs/heads/lane/v17-platform-sd16",
+        "refs/heads/maintained",  # a name that only starts like main
+    ):
+        assert _history_trust_order("push", ref) == INTEGRATE_FIRST, ref
+    assert (
+        _history_trust_order("pull_request", "refs/pull/8/merge", "integrate/v1.5.0")
+        == INTEGRATE_FIRST
+    )
+
+
+def test_history_scan_config_and_baseline_follow_the_trust_order():
+    job = _load("ci.yml")["jobs"]["secrets-history"]
+    scan = next(str(s["run"]) for s in job["steps"] if s.get("name") == "Scan history")
+    assert scan.count("for ref in $trust_order; do") == 2
+    assert "for ref in origin/" not in scan
+    step = next(s for s in job["steps"] if s.get("name") == "Scan history")
+    assert step["env"]["REF"] == "${{ github.ref }}"
+
+
 # -- OSS-5: the wheel in a clean venv -----------------------------------------
 
 

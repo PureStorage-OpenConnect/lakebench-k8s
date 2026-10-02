@@ -62,18 +62,18 @@ runs), and fails on a shallow clone, on git older than 2.36 (no
 without it the check is skipped, which `--require-all` fails. It checks the
 directory git runs hooks from (`core.hooksPath` when set).
 
-Once `main` carries `.gitleaksignore`, the baseline changes only through a
-pull request to `main`: CI scans every other branch with the baseline from
-`origin/main`, so a baseline change made elsewhere does not take effect, and
-a finding it was meant to cover fails CI, until it is on `main`. Until then
-the baseline comes from `origin/integrate/v1.5.0`, so a baseline change
-merged to integrate takes effect at that merge; the train review and the
-list pinned in `tests/test_gitleaks_baseline.py` are the control in that
-window. The history scan's `.gitleaks.toml` always comes from `origin/main`
-(or `origin/integrate/v1.5.0` if `main` has none), so a config change on any
-other branch, integrate included, applies to the trusted pass only once it is
-on `main`; the second pass uses the branch's own config, so a new rule
-applies at once. Main's required checks should include "Secret scan (history)" and
+The history scan reads `.gitleaks.toml` and `.gitleaksignore` from a
+trusted ref, the first of two that has the file. For a push to `main`, a
+pull request to `main` and a `v*` tag that is `origin/main`, then
+`origin/integrate/v1.5.0`; for every other branch it is
+`origin/integrate/v1.5.0`, then `origin/main`, the order the pre-push hook
+uses. So an allowlist or baseline change takes effect for lane and train
+branches when it merges to integrate, which only the main lane does (the
+train review and the list pinned in `tests/test_gitleaks_baseline.py` are
+the control), and for `main` and releases only once a pull request puts it
+on `main`; a finding it was meant to cover fails CI on `main` until then. A
+lane branch cannot allowlist itself. The second pass uses the branch's own
+config, so a new rule applies at once. Main's required checks should include "Secret scan (history)" and
 "AML statistics (slow)".
 
 The version lives only in `src/lakebench/__init__.py`; `pyproject.toml`
