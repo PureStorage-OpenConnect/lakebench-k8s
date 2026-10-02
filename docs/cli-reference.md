@@ -118,10 +118,24 @@ keys the workdir, the Garage container, and the bucket names, so identical
 names would mean the second config ran against the first one's data.
 
 **Reading the delta column** (comparable pairs only). Delta is B relative to A, and it is coloured by
-whether the change is an improvement -- higher is better for QpH, throughput,
-and efficiency; lower is better for times and sizes. Descriptive scores
-(`scale_ratio`, `total_data_processed_gb`, `total_s3_objects`) are never
-coloured, because a change in them is information rather than a win or a loss.
+whether the change is an improvement. Each score's direction comes from the
+metric registry (`metrics/metric_registry.py`), which gives every score a
+unit, a direction (higher, lower, a target value, or none) and a band. Only
+performance scores are coloured: QpH, throughput and efficiency are higher is
+better; time to value, freshness, time to detect, maintenance time, and in a
+batch run stage times, core-hours and total elapsed seconds are lower is better;
+`qph_degradation_pct` is lower is better (positive means the run slowed down).
+Correctness and guard scores (`scale_ratio`, `ingest_ratio`, best at 1.0),
+diagnostics (for example `qph_spread`, `maintenance_value_pct`,
+`compaction_ratio`, `total_rows_processed`, `bronze_busy_fraction`,
+`benchmark_rounds_count`, and in a continuous run `total_elapsed_seconds`),
+scores that follow the config (`window_seconds`, and in a continuous run
+core-hours, which scale with the window, and the bronze, silver and gold stream
+seconds, which equal it), labels and any score the registry
+does not know are never coloured, because a change in them is information
+rather than a win or a loss. The mode a pair is read under is the run's
+`pipeline_benchmark.pipeline_mode`, saved as `pipeline_mode` in the
+comparison; a record without one leaves the mode-dependent scores uncoloured.
 
 Differences under 2% are printed without colour. Repeated local benchmarks on
 unchanged data measured 0.9% run-to-run spread (n=5, stdev 1.8 QpH on a mean of
@@ -387,8 +401,9 @@ lakebench stop [CONFIG_FILE]
 ```
 
 Deletes the continuous-mode SparkApplications (`bronze-ingest`, `silver-stream`,
-`gold-refresh`) from the cluster. `--file` / `-f` is the only option, and
-points at the config the same way it does on the other commands.
+`gold-refresh`) from the cluster. `--file` / `-f` points at the config the
+same way it does on the other commands; `--name` names the deployment of a
+nameless config, as for `destroy`.
 
 ### benchmark
 
@@ -452,6 +467,7 @@ lakebench status [CONFIG_FILE] [OPTIONS]
 | `--namespace` | `-n` | from config | Kubernetes namespace to check |
 | `--local` | | `false` | Show local mode status instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
+| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
 
 Displays a table of the deployment's components (PostgreSQL, the configured
 catalog and query engine) with their readiness and replica counts, and the
@@ -561,6 +577,7 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--force-legacy` | | `false` | Proceed on a namespace or bucket with no lakebench ownership annotation or tag. Foreign-owned namespaces and buckets are refused regardless |
 | `--allow-unverified-cluster` | | `false` | Bypass the API-server fingerprint match when it cannot be computed |
 | `--file` | | | Config file (alternative to the positional argument; no short form) |
+| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
 
 Removes everything in this order: ownership check, Spark jobs, orphaned
 pods, datagen jobs, table removal from the catalog, S3 bucket contents
@@ -597,10 +614,16 @@ concurrent destroy of the same deployment finished first and a redeploy has
 re-created the name, destroy stops and leaves the new deployment alone.
 
 Exit codes: `0` everything removed; `1` a step failed (see the summary);
-`3` the user declined the confirmation prompt (no side effects); `4`
-everything else succeeded but the namespace was still terminating at
-`--namespace-timeout` (usually a PVC or pod finalizer; check with
-`kubectl get ns <namespace>` before re-deploying under the same name).
+`2` the config did not load, including a nameless config with no `--name`
+in a directory that cannot name its deployment; `3` a nameless config could
+not prove the deployment is its own, or the namespace was redeployed since
+that check (nothing deleted either way), or a redeploy was found partway
+through (destroy stops there, and the steps before it may have removed
+components); `5` the confirmation prompt was
+declined (no side effects); `6` everything else succeeded but the namespace
+was still terminating at `--namespace-timeout` (usually a PVC or pod
+finalizer; check with `kubectl get ns <namespace>` before re-deploying
+under the same name). The full table is in [Exit Codes](exit-codes.md).
 
 ### report
 
@@ -657,6 +680,7 @@ lakebench logs COMPONENT [CONFIG_FILE] [OPTIONS]
 |---|---|---|---|
 | `--follow` | `-F` | `false` | Follow log output (like `tail -f`; `-f` is deprecated here) |
 | `--lines` | `-n` | `100` | Number of lines to show |
+| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
 
 Valid components: `postgres`, `hive`, `polaris`, `trino`, `spark-driver`.
 
@@ -694,15 +718,18 @@ lakebench reproduce PACKAGE.yaml [OPTIONS]
 | `--config-reference` | | | Record mode: store this relative config path in the package |
 | `--config` | `-c` | package's config | Verify mode: config to run instead of the package's `config_reference` |
 | `--timeout` | `-t` | auto | Verify mode: per-job timeout in seconds |
-| `--keep` | | `false` | Verify mode: keep the deployment after the run (reproduce always destroys before the run) |
+| `--keep` | | `false` | Verify mode: keep the deployment after the run. reproduce never destroys before the run: it refuses an existing namespace or bucket |
 | `--allow-commit-drift` | | `false` | Verify mode: run even when HEAD differs from the recorded commit (refused with exit 14 otherwise) |
 | `--dry-run` | | `false` | Verify mode: parse the package and exit |
 
 Exit codes: `0` pass; `14` (requirement unmet) for performance or
 correctness drift, commit drift without `--allow-commit-drift`, or a run that
 did not follow the package (different samples, maintenance policy, experiment
-or benchmark results); `2` for a package or config refused before running;
-`1` when the pipeline could not run. 1.6 used `1` for performance drift and
+or benchmark results); `2` for a package or config refused before running
+(including `create_namespace: false` or `create_buckets: false`); `3` when
+the namespace or a bucket already exists, or when another deploy replaced the
+deployment reproduce created (then nothing is destroyed); `4` when the
+namespace or buckets cannot be read; `1` when the pipeline could not run. 1.6 used `1` for performance drift and
 `2` for correctness drift.
 
 ### financial

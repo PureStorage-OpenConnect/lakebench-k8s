@@ -163,6 +163,19 @@ def error_for(exc: BaseException) -> LakebenchError | None:
             code=ExitCode.REFUSED,
         )
 
+    from lakebench.k8s.target import ContextConflictError
+
+    if isinstance(exc, ContextConflictError):
+        # A refusal, not a retryable failure: a fresh process would pin to
+        # whatever the kubeconfig names now.
+        return LakebenchError(
+            f"Refused: {_first_line(str(exc))}",
+            next="Point the kubeconfig back at the deployment's cluster, or set "
+            "platform.kubernetes.context, and re-run.",
+            path="context.changed",
+            code=ExitCode.REFUSED,
+        )
+
     from lakebench.config import ConfigError, ConfigValidationError
 
     if isinstance(exc, ConfigValidationError):

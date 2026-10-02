@@ -66,6 +66,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   list is under `run` in docs/cli-reference.md. `reproduce` refuses a
   `--timeout` below 1 before its pre-run destroy. Drop the flag the mode
   does not use.
+- **`reproduce` no longer destroys before its run.** It refuses (exit 3)
+  when the config's namespace or one of its buckets already exists, and
+  refuses `create_namespace: false` or `create_buckets: false` (exit 2),
+  instead of destroying whatever deployment had that name. It deploys with
+  a nonce of its own, refuses a namespace or bucket that appears while it
+  deploys, and its post-run destroy acts only on the namespace incarnation
+  it created: if another deploy replaced it, nothing is deleted and
+  reproduce exits 3 after printing its verdict. Run `lakebench destroy
+  CONFIG` first to reuse a deployment's name.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
@@ -188,10 +197,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **Run provenance is complete.** `metrics.json` `provenance` now says how
+  lakebench was installed (`install`), and a pip-installed run names the
+  commit its wheel was built from (the build writes it into the package;
+  before, a wheel recorded no commit). It also records the config file's
+  sha256 and path, the Spark scripts ConfigMaps applied, the dependency set
+  (`"not_recorded"` until one is recorded), the image digests this run's
+  Spark, Trino and Thrift pods actually ran, and each Spark job's scratch
+  PVC as the cluster held it. The code is read again at run end, including
+  a hash of the package files; a run whose lakebench code changed while it
+  ran is not `supported`. See `docs/benchmarking.md`, "Metrics JSON".
 - `[aml]` install extra (`pip install "lakebench-k8s[aml]"`) for running the
   AML reference detector and the local AML gate. It pins numpy, scipy,
   pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster
   job installs, so a local gate fits the same model as the cluster.
+
+- **A nameless config tears down or reads only a deployment it can prove
+  is its own.** `destroy`, `stop`, `status` and `logs` take `--name` for
+  a config that has no `name:`. With it, or as the only nameless config in
+  its directory, the command goes ahead only when the namespace carries a
+  nonce recorded in `.lakebench/<name>.json` for this directory on this
+  host, or, for a v1.6 directory (only `.lakebench/state.json`), when the
+  namespace's name and created-buckets stamps match `--name`; otherwise it
+  refuses (exit 3) and points at `lakebench init --from`. Without `--name`
+  a v1.6 directory is still refused at load (exit 2). Destroy then touches
+  only the namespace incarnation it checked.
 
 ### Changed
 - **Nothing resolves from Maven or PyPI at run time.** Spark jobs name the
@@ -227,6 +257,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   container is named in the stage failure.
 - `destroy` removes the `lakebench.deployment/deps-set` annotation right
   after its ownership check, before any teardown.
+- **Deploy records its nonce beside the config.** Every `deploy` writes
+  the nonce it stamps on the namespace to `.lakebench/<name>.json` first
+  (last five kept, under a host-local lock), and the namespace gets
+  `lakebench.deployment/state-schema: lb-state/1`. `deploy --dry-run`
+  writes no state; a state that cannot be written or read stops the deploy
+  with exit 4 before any cluster change, and a state copied from another
+  directory or host stops it with exit 3. A destroy that finds the
+  namespace redeployed since its check exits 3 with nothing deleted.
+  `python -m lakebench.config.deploy_state relocate CONFIG NEWDIR [--name
+  NAME]` moves a config with its state; only the directory that wrote the
+  state can move it.
+- **One cluster context per process.** A `lakebench` command
+  resolves its cluster context once, at its first cluster call, from
+  `platform.kubernetes.context` or, when that is empty, from the
+  kubeconfig's current context by name. Every API client and every
+  `kubectl`, `helm` and `oc` call in that process then uses it, so
+  switching the current context during a long run no longer moves the rest
+  of the run to another cluster. With several files in `$KUBECONFIG` the
+  current context is the one `kubectl config current-context` prints (the
+  first file that sets it; the Python client used to take the last), so a
+  deployment made with a multi-file `$KUBECONFIG` and no configured context
+  may now resolve another context: set `platform.kubernetes.context` for
+  those. A second context in one process is refused (exit 3,
+  `context.changed`),
+  and so is a context whose API server or CA changes in the kubeconfig
+  while the command runs; the check runs at each `kubectl`, `helm` or `oc`
+  call and at each client load, and the ownership fingerprint a deploy
+  stamps or a destroy compares is the CA read when the context was pinned.
+  `config recommend CONFIG` sizes against the config's context (a config
+  that does not load says so and uses the current context). `admin`
+  commands without a config, `status --namespace` and `recommend` print
+  the context they resolved. A
+  context name that is not in the kubeconfig is refused (`admin` commands
+  used to fall back to in-cluster credentials), and in-cluster credentials
+  are used only when no kubeconfig file exists (before, a command with no
+  configured context tried them first). `compare` still runs each config
+  in its own `lakebench` process, each resolving its own context, until it
+  becomes read-only.
+- **One source of metric metadata.** Every score's unit, direction and band
+  now come from `metrics/metric_registry.py`, which `compare`, `reproduce`,
+  the perf gate, the HTML report and `score_descriptions` read. `compare`
+  colours a delta only for a performance score, and some colours change:
+  `qph_degradation_pct` is lower is better (a run that slowed down was shown
+  as the faster side); `qph_spread`, `maintenance_value_pct`,
+  `compaction_ratio`, `window_seconds`, `benchmark_rounds_count`,
+  `total_rows_processed`, `bronze_busy_fraction`, `ingest_ratio`,
+  `corpus_ingest_ratio`, `query_time_event_age_seconds`, the time-to-detect
+  alert counts, the maintenance file and snapshot counts and the other
+  diagnostic scores are no longer coloured; in a continuous run
+  core-hours (they scale with the window) and total elapsed seconds are not
+  coloured, and the report's continuous CPU-hours card drops its "lower is
+  better" hint. A score with no registry entry is shown uncoloured (it used
+  to read as lower is better). The saved comparison gains `pipeline_mode`,
+  the mode its directions were read under. Score values, their
+  descriptions, and what `reproduce` and the perf gate check are unchanged.
 - typer is capped below 0.28 (`typer>=0.12.0,<0.28`), so a new typer minor
   cannot change the CLI without a tested raise of the cap.
 - The `[dev]` extra includes `[aml]`, so a development install now gets the
@@ -437,6 +522,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   existing resources.
 ### Fixed
 
+- **The capacity check counts the Spark driver's memory overhead.**
+  The driver pod requests its heap plus the overhead Spark on Kubernetes
+  adds to a Python driver, 40% of the heap (12.8 GiB for the 32 GiB
+  silver-build driver); `plan`, the preflight and the continuous budget
+  counted the heap only. Per-job memory now rounds up to a whole GB. The
+  scale-1 batch peak is now 36 cores / 525 GB (was 512 GB), Customer360
+  continuous at scale 1-10 38 cores / 282 GB (was 272 GB) and AML
+  continuous 118 cores / 990 GB (was 980 GB); the docs tables follow.
+  What the pods request is unchanged.
 - A multi-cycle Customer 360 batch run no longer loses silver rows when a
   later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
   tagged every row with that cycle, so an operator retry of the cycle, which

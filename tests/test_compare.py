@@ -13,15 +13,16 @@ import pytest
 from lakebench.cli._compare import (
     _NOISE_FLOOR_PCT,
     _build_comparison,
+    _directional,
     _higher_is_better,
-    _is_neutral,
     _load_latest_metrics,
     _run_single,
 )
 
 
 class TestScoreDirection:
-    """Which way is better differs per score, and guessing wrong inverts it."""
+    """Which way is better differs per score, and guessing wrong inverts it.
+    Directions come from metrics/metric_registry.py."""
 
     @pytest.mark.parametrize(
         "metric",
@@ -32,23 +33,30 @@ class TestScoreDirection:
         ],
     )
     def test_rate_scores_are_higher_is_better(self, metric):
-        assert _higher_is_better(metric)
+        assert _directional(metric, "batch")
+        assert _higher_is_better(metric, "batch")
 
     @pytest.mark.parametrize(
-        "metric",
-        ["time_to_value_seconds", "total_elapsed_seconds", "data_freshness_seconds"],
+        ("metric", "mode"),
+        [
+            ("time_to_value_seconds", "batch"),
+            ("total_elapsed_seconds", "batch"),
+            ("data_freshness_seconds", "sustained"),
+        ],
     )
-    def test_durations_are_lower_is_better(self, metric):
-        assert not _higher_is_better(metric)
+    def test_durations_are_lower_is_better(self, metric, mode):
+        assert _directional(metric, mode)
+        assert not _higher_is_better(metric, mode)
 
-    def test_unknown_metric_defaults_to_lower_is_better(self):
-        """Most of the scorecard is times and sizes, so that is the safe default."""
-        assert not _higher_is_better("some_future_metric_seconds")
+    def test_unknown_metric_has_no_better_side(self):
+        """An unknown key is shown, never coloured: guessing its direction
+        could paint a faster engine red."""
+        assert not _directional("some_future_metric_seconds", "batch")
 
     @pytest.mark.parametrize("metric", ["scale_ratio", "total_data_processed_gb"])
     def test_descriptive_scores_are_neutral(self, metric):
         """scale_ratio is best at 1.0 in either direction, not simply higher."""
-        assert _is_neutral(metric)
+        assert not _directional(metric, "batch")
 
 
 class TestLoadLatestMetrics:

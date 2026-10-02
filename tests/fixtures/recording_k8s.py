@@ -647,6 +647,29 @@ def _apply_helm_sets(values: dict[str, Any], sets: list[str]) -> dict[str, Any]:
     return out
 
 
+def _fake_load_kube_config(real: Callable[..., Any]) -> Callable[..., Any]:
+    """A kubeconfig loader that sets a client configuration and nothing else.
+
+    ``ClusterTarget.activate`` loads into a scratch configuration and refuses
+    a load whose host differs from the context's cluster entry (the
+    kubeconfig changed during the load), so a no-op stub reads as a rewrite.
+    The library's own loader fills a given configuration, which keeps the
+    host, CA and token what a real run would see; a credential plugin it
+    starts goes through the patched ``subprocess`` and is recorded. With no
+    configuration (the process default) nothing is loaded, as before.
+    """
+
+    def load(*args: Any, client_configuration: Any = None, **kwargs: Any) -> None:
+        if client_configuration is None:
+            return None
+        kwargs.pop("persist_config", None)
+        return real(
+            *args, client_configuration=client_configuration, persist_config=False, **kwargs
+        )
+
+    return load
+
+
 # ---------------------------------------------------------------------------
 # kubectl / oc / helm argv parsing
 # ---------------------------------------------------------------------------
@@ -2536,7 +2559,9 @@ class K8sRecorder:
                 monkeypatch.setattr(kc, attr, fake)
                 self._fakes[f"kubernetes.client.{attr}"] = fake
         monkeypatch.setattr(kstream, "stream", self._stream)
-        monkeypatch.setattr(kconfig, "load_kube_config", lambda *a, **k: None)
+        monkeypatch.setattr(
+            kconfig, "load_kube_config", _fake_load_kube_config(kconfig.load_kube_config)
+        )
         monkeypatch.setattr(kconfig, "load_incluster_config", lambda *a, **k: None)
 
         recorder = self

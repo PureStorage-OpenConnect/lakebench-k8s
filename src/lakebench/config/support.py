@@ -392,10 +392,38 @@ def _support_state(
             validation_runs=list(v.runs),
             validation_tree=v.tree,
         )
-        return out
+        return withdraw_if_code_changed(out, provenance)
     out.update(
         state=UNVERIFIED,
         basis=f"valid for this workload and mode; no validation run is listed in {_RECORD_NAME}",
+    )
+    return out
+
+
+def withdraw_if_code_changed(
+    support: Mapping[str, Any], provenance: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """*support*, made unverified when the run's end sample saw other
+    lakebench code than its start (``provenance.end_sample``,
+    metrics/provenance.py): the release validation then says nothing about
+    the code that produced part of the run. Never promotes."""
+    out = dict(support)
+    end = (provenance or {}).get("end_sample")
+    if (
+        out.get("state") != SUPPORTED
+        or not isinstance(end, Mapping)
+        or not end.get("code_changed_during_run")
+    ):
+        return out
+    for k in ("validation_runs", "validation_tree"):
+        out.pop(k, None)
+    out.update(
+        state=UNVERIFIED,
+        basis=(
+            "listed as validated, but the lakebench code changed during the run "
+            f"(commit {(provenance or {}).get('git_sha') or 'unknown'} at start, "
+            f"{end.get('git_sha') or 'unknown'} at end)"
+        ),
     )
     return out
 

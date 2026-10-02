@@ -318,3 +318,25 @@ def test_results_are_not_attached_to_a_run_on_another_set(recording_k8s):
     assert runtime.attach_refusal(cfg, same) is None
     old = SimpleNamespace(run_id="r0", provenance={})
     assert runtime.attach_refusal(cfg, old) is None
+
+
+def test_the_record_keeps_the_pod_check_when_the_job_manager_is_read_again():
+    """The collector re-reads the job manager at run end; a deps block on the
+    same set keeps its pod check, and a manager holding the set's handle
+    records the set, not "not_recorded"."""
+    from types import SimpleNamespace
+
+    from lakebench.metrics import provenance as prov_mod
+    from lakebench.metrics.collector import MetricsCollector
+
+    cfg = make_config()
+    handle = m.placeholder_handle(cfg)
+    assert prov_mod.job_manager_fields(SimpleNamespace(deps=handle))["deps"] == (
+        m.provenance_block(handle)
+    )
+    coll = MetricsCollector()
+    run = coll.start_run("20261002-000000-dddddd", "d", {})
+    run.provenance["deps"] = {**m.provenance_block(handle), "pods_checked": 2}
+    coll.record_job_manager(SimpleNamespace(scripts_provenance=None, deps=handle))
+    coll.end_run(success=True)
+    assert run.provenance["deps"]["pods_checked"] == 2

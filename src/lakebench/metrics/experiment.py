@@ -49,6 +49,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from lakebench.metrics import comparability as _cmp
+from lakebench.metrics.provenance import experiment_lakebench
 
 EXPERIMENT_SCHEMA_V1 = "exp1"
 EXPERIMENT_SCHEMA_V2 = "exp2"
@@ -913,7 +914,7 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         "rules": rules,
         "limits": limits,
         "results": _results(metrics, mode),
-        "lakebench": dict(metrics.provenance or {}),
+        "lakebench": experiment_lakebench(metrics.provenance),
     }
 
 

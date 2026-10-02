@@ -599,20 +599,21 @@ def _find_prometheus_svc(namespace: str, context: str | None = None) -> str | No
 
     label = f"release={HELM_RELEASE_NAME},app=kube-prometheus-stack-prometheus"
 
-    # Attempt 1: K8s Python client
+    # Attempt 1: K8s Python client, on the process's active cluster target
+    # (or this context's, when none is active yet). Never reloads another
+    # context; a conflicting one raises rather than reaching another cluster.
+    from lakebench.k8s.target import ClusterTarget, ContextConflictError
+
     try:
         from kubernetes import client as k8s_client
-        from kubernetes import config as k8s_config
 
-        try:
-            k8s_config.load_incluster_config()
-        except k8s_config.ConfigException:
-            k8s_config.load_kube_config()
-
+        ClusterTarget.resolve(context=context or "").activate()
         v1 = k8s_client.CoreV1Api()
         svcs = v1.list_namespaced_service(namespace, label_selector=label)
         if svcs.items:
             return svcs.items[0].metadata.name
+    except ContextConflictError:
+        raise
     except Exception:
         pass
 
@@ -2922,7 +2923,7 @@ def _run_sustained(
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
-    collector.start_run(run_id, cfg.name, config_snapshot)
+    collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
     record_deps_provenance(collector.current_run, deps_handle)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
@@ -3099,6 +3100,7 @@ def _run_sustained(
             raise typer.Exit(ExitCode.FAILED)
         print_success("Spark scripts deployed")
         dims = cfg.get_scale_dimensions()
+        collector.record_job_manager(job_manager)
         if skip_generate:
             console.print()
             print_info("Skipping datagen deploy (--skip-generate)")
@@ -3285,6 +3287,7 @@ def _run_sustained(
                     print_error(f"lakebench-{job_name} did not start: {running.message}")
                     pipeline_success = False
                     raise typer.Exit(ExitCode.FAILED)
+                collector.record_scratch(job_name, running.final_status)
         finally:
             for w in stream_watch.values():
                 w.close()
@@ -3299,6 +3302,11 @@ def _run_sustained(
                     }
                     for name, w in stream_watch.items()
                 }
+        collector.observe_images(
+            cfg.get_namespace(),
+            at="streams running",
+            apps={f"lakebench-{n}" for _, n in submitted},
+        )
         # The window in cluster time (pod log clocks), not this host's.
         clock_offset = cluster_clock_offset_seconds()
         from datetime import timedelta as _td
@@ -3829,6 +3837,11 @@ def _run_sustained(
         # still this run's (a redeployment's streams have the same names).
         _stage = "stop-streams"
         _ns_watch.check(time.time() - start)
+        # Images again before the streams stop: a driver or executor that
+        # restarted inside the window may have pulled another digest.
+        collector.observe_images(
+            namespace, at="before stop", apps={f"lakebench-{n}" for _, n in submitted}
+        )
         _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
         for _job_type, job_name in submitted:

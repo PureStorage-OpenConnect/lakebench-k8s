@@ -146,21 +146,13 @@ PLANNED_BY = {
     "compare.not_comparable": "ER-11",
     "compare.not_established": "ER-11",
     "compare.not_like_for_like": "ER-11",
-    "destroy.incarnation_mismatch": "CC-4",
     "destroy.unverified_cluster": "SD-18a",
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
     "logs.no_pod": "CC-27",
-    "nameless.copied_dir": "CC-2",
-    "nameless.moved": "CC-2",
-    "nameless.nonce_mismatch": "CC-2",
-    "nameless.stamp_mismatch": "CC-2",
-    "nameless.v17_state_elsewhere": "CC-2",
     "plan.missing_storage_class": "CC-23",
     "plan.ok": "CC-23",
     "repeat.no_verified_corpus": "CC-30",
-    "reproduce.existing_namespace": "CC-4",
-    "reproduce.nonce_changed": "CC-4",
     "reproduce.verify_out_of_band": "ER-13",
     "run.protected_corpus": "AM-22",
     "series.corpus_changed": "CC-30",
@@ -653,6 +645,17 @@ def _scenario_lease_held(monkeypatch, tmp_path):
     return _destroy_with(monkeypatch, [_result("spark-operator-watch", "failed", msg, **flag)])
 
 
+def _scenario_context_changed(monkeypatch, tmp_path):
+    from lakebench.k8s.target import ContextConflictError
+
+    def conflict(*a, **k):
+        raise ContextConflictError("one cluster context per process: A is active, refusing B")
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", conflict)
+    (tmp_path / "c.yaml").write_text("name: x\n")
+    return _runner().invoke(app, ["destroy", str(tmp_path / "c.yaml"), "--yes"])
+
+
 def _scenario_destroy_namespace_terminating(monkeypatch, tmp_path):
     from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
@@ -669,8 +672,11 @@ def _scenario_deploy_identity_foreign(monkeypatch, tmp_path):
     from unittest.mock import MagicMock
 
     import lakebench.cli._deploy as deploy_mod
+    from tests import test_saf2_deploy_state as t
 
     cfg = _init_config(tmp_path)
+    # deploy reads the namespace to reconcile its recorded nonces first.
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: t.FakeCore())
     monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
     monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
     engine = MagicMock()
@@ -856,6 +862,37 @@ def _scenario_reproduce_drift(monkeypatch, tmp_path):
     return _runner().invoke(app, ["reproduce", str(pkg)])
 
 
+def _scenario_reproduce_existing_namespace(monkeypatch, tmp_path):
+    import lakebench.cli._reproduce as rep
+
+    pkg = _reproduce_package(tmp_path, "abc")
+    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
+    monkeypatch.setattr("lakebench.k8s.client.K8sClient.namespace_exists", lambda self, n: True)
+    return _runner().invoke(app, ["reproduce", str(pkg)])
+
+
+def _scenario_reproduce_nonce_changed(monkeypatch, tmp_path):
+    import lakebench.cli._reproduce as rep
+    from lakebench.exit_codes import SafetyRefusal
+
+    pkg = _reproduce_package(tmp_path, "abc")
+    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
+
+    def pipeline(config_file, timeout, keep, refusals=None):
+        # Its post-run destroy found another incarnation and deleted nothing.
+        refusals.append(SafetyRefusal("Destroy NOT started", path="destroy.incarnation_mismatch"))
+        return object()
+
+    monkeypatch.setattr(rep, "_run_pipeline", pipeline)
+    for check in ("_sample_mismatch", "_policy_refusal", "_experiment_refusal"):
+        monkeypatch.setattr(rep, check, lambda *a, **k: None)
+    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 1)
+    monkeypatch.setattr(rep, "_run_maintenance_policy", lambda m: None)
+    monkeypatch.setattr(rep, "_run_query_set", lambda m: None)
+    monkeypatch.setattr(rep, "_measure_actual_numbers", lambda m: {"scale_ratio": 0.992})
+    return _runner().invoke(app, ["reproduce", str(pkg)])
+
+
 def _config_name(path: Path) -> str:
     for line in path.read_text().splitlines():
         if line.startswith("name:"):
@@ -918,8 +955,195 @@ def _scenario_run_deps_mismatch(monkeypatch, tmp_path):
     return _runner().invoke(app, ["run", str(cfg_path), "--skip-preflight"])
 
 
+def _nameless_destroy(monkeypatch, tmp_path, setup, argv_extra=()):
+    """`destroy --force` on a nameless config against a fake namespace (SAF-2)."""
+    import lakebench.cli._nameless as nameless
+    from tests import test_saf2_deploy_state as t
+
+    core = t.FakeCore()
+    monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
+    monkeypatch.setattr(nameless, "_bucket_owned_factory", lambda cfg: lambda b: False)
+    cfg = t._nameless(tmp_path)
+    setup(t, core, cfg)
+    return _runner().invoke(app, ["destroy", str(cfg), "--force", *argv_extra])
+
+
+def _nameless_status(monkeypatch, tmp_path, setup):
+    """`status` on a nameless config with no v1.6 state (a suggested name)."""
+    import lakebench.cli._nameless as nameless
+    from lakebench.config import deploy_state as ds
+    from tests import test_saf2_deploy_state as t
+
+    core = t.FakeCore()
+    monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
+    monkeypatch.setattr(ds, "suggested_name", lambda *a, **k: t.NAME)
+    cfg = t._nameless(tmp_path)
+    setup(t, core, cfg)
+    return _runner().invoke(app, ["status", str(cfg)])
+
+
+def _scenario_nameless_ambiguous(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._nameless(tmp_path, "b.yaml")
+
+    return _nameless_status(monkeypatch, tmp_path, setup)
+
+
+def _scenario_nameless_nonce_mismatch(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._v16_namespace(core, nonce="foreign")
+        t._v17_state(cfg, [("mine", "confirmed")])
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_copied_dir(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._v16_namespace(core, nonce="n1")
+        t._v17_state(cfg, [("n1", "confirmed")], config_dir="/elsewhere")
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_moved(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._v16_namespace(core, nonce="n1")
+        t._v17_state(cfg, [("n1", "confirmed")], moved_to="/new/home")
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_name_required(monkeypatch, tmp_path):
+    # The suggested name happens to name a live namespace: no v1.7 state
+    # proves it, so status refuses without --name.
+    def setup(t, core, cfg):
+        t._v16_namespace(core)
+
+    return _nameless_status(monkeypatch, tmp_path, setup)
+
+
+def _scenario_nameless_stamp_mismatch(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+        core.add("lb-x", **{t.ANNOTATION_DEPLOYMENT_NAME: "lb-other"})
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_v17_state_elsewhere(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+        t._v16_namespace(core, **{t.ANNOTATION_STATE_SCHEMA: "lb-state/1"})
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_namespace_missing(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_nameless_namespace_unreadable(monkeypatch, tmp_path):
+    def setup(t, core, cfg):
+        t._legacy_state(tmp_path)
+        core.fail_reads = True
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
+def _scenario_deploy_state_unrecordable(monkeypatch, tmp_path):
+    import lakebench.cli._deploy as deploy_mod
+    from lakebench.config import deploy_state as ds
+    from tests import test_saf2_deploy_state as t
+
+    core = t.FakeCore()
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
+
+    class Engine:
+        def __init__(self, cfg, dry_run=False, **kw):
+            self.results = []
+
+        def deploy_all(self, **kw):  # pragma: no cover -- must not be reached
+            raise AssertionError("deploy_all after a failed state write")
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+
+    def no_write(path, state):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(ds, "write_state", no_write)
+    cfg = t._named(tmp_path)
+    return _runner().invoke(app, ["deploy", str(cfg), "--yes"])
+
+
+def _scenario_deploy_state_copied(monkeypatch, tmp_path):
+    import lakebench.cli._deploy as deploy_mod
+    from tests import test_saf2_deploy_state as t
+
+    core = t.FakeCore()
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
+
+    class Engine:
+        def __init__(self, cfg, dry_run=False, **kw):
+            self.results = []
+
+        def deploy_all(self, **kw):  # pragma: no cover -- must not be reached
+            raise AssertionError("deploy_all from a copied directory")
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+    cfg = t._named(tmp_path)
+    t._v17_state(cfg, [("n1", "confirmed")], config_dir="/elsewhere")
+    return _runner().invoke(app, ["deploy", str(cfg), "--yes"])
+
+
+def _scenario_destroy_incarnation_mismatch(monkeypatch, tmp_path):
+    from lakebench.deploy import DeploymentResult, DeploymentStatus
+
+    class Engine:
+        def __init__(self, cfg, **kw):
+            pass
+
+        def destroy_all(self, **kw):
+            assert kw["expected_incarnation"] == "u1#n1"
+            return [
+                DeploymentResult(
+                    component="ownership-check",
+                    status=DeploymentStatus.FAILED,
+                    message="Destroy NOT started: namespace lb-x is not the deployment "
+                    "this command checked. Nothing was changed.",
+                    details={"incarnation_mismatch": True},
+                )
+            ]
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+
+    def setup(t, core, cfg):
+        t._v16_namespace(core, nonce="n1")
+        t._v17_state(cfg, [("n1", "confirmed")])
+
+    return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
+
+
 SCENARIOS = {
     "config.upgrade_refused": _scenario_config_upgrade_refused,
+    "deploy.state_copied": _scenario_deploy_state_copied,
+    "destroy.incarnation_mismatch": _scenario_destroy_incarnation_mismatch,
+    "deploy.state_unrecordable": _scenario_deploy_state_unrecordable,
+    "nameless.ambiguous": _scenario_nameless_ambiguous,
+    "nameless.nonce_mismatch": _scenario_nameless_nonce_mismatch,
+    "nameless.copied_dir": _scenario_nameless_copied_dir,
+    "nameless.moved": _scenario_nameless_moved,
+    "nameless.name_required": _scenario_nameless_name_required,
+    "nameless.stamp_mismatch": _scenario_nameless_stamp_mismatch,
+    "nameless.v17_state_elsewhere": _scenario_nameless_v17_state_elsewhere,
+    "nameless.namespace_missing": _scenario_nameless_namespace_missing,
+    "nameless.namespace_unreadable": _scenario_nameless_namespace_unreadable,
     "version.ok": _scenario_version_ok,
     "click.usage": _scenario_click_usage,
     "unhandled_exception": _scenario_unhandled_exception,
@@ -934,6 +1158,7 @@ SCENARIOS = {
     "s3.unreachable": _scenario_s3_unreachable,
     "destroy.redeployed": _scenario_destroy_redeployed,
     "lease.held": _scenario_lease_held,
+    "context.changed": _scenario_context_changed,
     "destroy.namespace_terminating": _scenario_destroy_namespace_terminating,
     "deploy.identity_foreign": _scenario_deploy_identity_foreign,
     "run.bronze_nonempty": _scenario_run_bronze_nonempty,
@@ -951,6 +1176,8 @@ SCENARIOS = {
     "confirm.declined": _scenario_confirm_declined,
     "reproduce.commit_drift": _scenario_reproduce_commit_drift,
     "reproduce.drift": _scenario_reproduce_drift,
+    "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
+    "reproduce.nonce_changed": _scenario_reproduce_nonce_changed,
 }
 
 # The line each path must print on stderr, where it prints one.

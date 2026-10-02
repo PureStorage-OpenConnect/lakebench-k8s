@@ -734,21 +734,20 @@ class TestF4RunFingerprintingSurvivesConcurrentRuns:
             _find_reproduce_run(FakeStorage(), "my-config", watermark)
 
 
-class TestF5FreshSlateBeforeDeploy:
-    """--keep should mean 'leave running after', never 'reuse whatever's
-    there'. _run_pipeline must destroy BEFORE deploy to keep bronze empty."""
+class TestNoPreRunDestroy:
+    """reproduce never destroys before its run (SAF-1): it refuses an
+    existing namespace or bucket instead (tests/test_saf1_reproduce.py), and
+    destroys at the end only the incarnation it deployed, unless --keep."""
 
-    def test_run_pipeline_calls_destroy_before_deploy(self, tmp_path):
+    def _run(self, tmp_path, keep):
         cfg = tmp_path / "cfg.yaml"
         cfg.write_text("name: my-config\n")
+        call_log: list[tuple[str, object]] = []
 
-        call_log: list[str] = []
-
-        def track(name, ok=True):
+        def track(name):
             def _fn(*a, **kw):
-                call_log.append(name)
-                if not ok:
-                    raise typer.Exit(1)
+                call_log.append((name, kw.get("expected_incarnation", kw.get("nonce"))))
+                return kw.get("nonce")
 
             return _fn
 
@@ -767,67 +766,36 @@ class TestF5FreshSlateBeforeDeploy:
             def load_run(self, rid):
                 return SimpleNamespace(run_id=rid)
 
-        fake_cfg = SimpleNamespace(name="my-config")
-
+        fake_cfg = SimpleNamespace(name="my-config", get_namespace=lambda: "my-config")
         with (
-            mock.patch("lakebench.cli._destroy.destroy", track("destroy")),
-            mock.patch("lakebench.cli._deploy.deploy", track("deploy")),
+            mock.patch("lakebench.cli._destroy.destroy", track("destroy-command")),
+            mock.patch("lakebench.cli._destroy._destroy_impl", track("destroy")),
+            mock.patch("lakebench.cli._deploy._deploy_impl", track("deploy")),
             mock.patch("lakebench.cli._generate.generate", track("generate")),
             mock.patch("lakebench.cli._run.run", track("run")),
+            mock.patch("lakebench.cli._reproduce._refuse_existing"),
+            mock.patch(
+                "lakebench.cli._reproduce._own_incarnation",
+                side_effect=lambda cfg, path, own, **k: f"uid#{own}",
+            ),
+            mock.patch("lakebench.cli._helpers.journal_open"),
             mock.patch("lakebench.config.load_config", return_value=fake_cfg),
             mock.patch("lakebench.metrics.MetricsStorage", return_value=FakeStorage()),
         ):
             from lakebench.cli._reproduce import _run_pipeline
 
-            _run_pipeline(cfg, timeout=None, keep=True)
+            _run_pipeline(cfg, timeout=None, keep=keep)
+        return call_log
 
-        # Destroy fires first (F5); keep=True suppresses the post-run destroy,
-        # so the call log ends after run.
-        assert call_log == ["destroy", "deploy", "generate", "run"]
+    def test_keep_runs_without_any_destroy(self, tmp_path):
+        log = self._run(tmp_path, keep=True)
+        assert [n for n, _ in log] == ["deploy", "generate", "run"]
 
-    def test_run_pipeline_destroys_at_the_end_when_not_keep(self, tmp_path):
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("name: my-config\n")
-
-        call_log: list[str] = []
-
-        def track(name):
-            def _fn(*a, **kw):
-                call_log.append(name)
-
-            return _fn
-
-        class FakeStorage:
-            metrics_dir = tmp_path
-
-            def list_runs(self):
-                return [
-                    {
-                        "run_id": "produced",
-                        "deployment_name": "my-config",
-                        "start_time": datetime.now(timezone.utc).isoformat(),
-                    }
-                ]
-
-            def load_run(self, rid):
-                return SimpleNamespace(run_id=rid)
-
-        with (
-            mock.patch("lakebench.cli._destroy.destroy", track("destroy")),
-            mock.patch("lakebench.cli._deploy.deploy", track("deploy")),
-            mock.patch("lakebench.cli._generate.generate", track("generate")),
-            mock.patch("lakebench.cli._run.run", track("run")),
-            mock.patch(
-                "lakebench.config.load_config",
-                return_value=SimpleNamespace(name="my-config"),
-            ),
-            mock.patch("lakebench.metrics.MetricsStorage", return_value=FakeStorage()),
-        ):
-            from lakebench.cli._reproduce import _run_pipeline
-
-            _run_pipeline(cfg, timeout=None, keep=False)
-
-        assert call_log == ["destroy", "deploy", "generate", "run", "destroy"]
+    def test_the_only_destroy_is_the_post_run_one_for_its_own_incarnation(self, tmp_path):
+        log = self._run(tmp_path, keep=False)
+        assert [n for n, _ in log] == ["deploy", "generate", "run", "destroy"]
+        own = log[0][1]
+        assert own and log[-1][1] == f"uid#{own}"
 
 
 class TestF6RecordRequiresCorrectnessMetric:
@@ -976,98 +944,6 @@ class TestR1CorrectnessToleranceCannotBeInflated:
             {"performance": 20.0, "correctness": 20.0},  # 15% drift < 20% tol
         )
         assert exit_code == 2
-
-
-class TestR2PreRunDestroyFailsLoud:
-    """A non-zero pre-run destroy would leave bronze contaminated; F5's
-    fresh-slate promise depends on refusing to proceed."""
-
-    def test_pre_destroy_failure_raises_reproduce_error(self, tmp_path):
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("name: my-config\n")
-
-        def destroy_fails(*a, **kw):
-            raise typer.Exit(1)
-
-        class FakeStorage:
-            metrics_dir = tmp_path
-
-            def list_runs(self):
-                return []
-
-            def load_run(self, rid):
-                return None
-
-        deploy_called = {"n": 0}
-
-        def deploy_track(*a, **kw):
-            deploy_called["n"] += 1
-
-        with (
-            mock.patch("lakebench.cli._destroy.destroy", destroy_fails),
-            mock.patch("lakebench.cli._deploy.deploy", deploy_track),
-            mock.patch(
-                "lakebench.config.load_config",
-                return_value=SimpleNamespace(name="my-config"),
-            ),
-            mock.patch("lakebench.metrics.MetricsStorage", return_value=FakeStorage()),
-        ):
-            from lakebench.cli._reproduce import _run_pipeline
-
-            with pytest.raises(ReproduceError, match="Pre-run destroy failed"):
-                _run_pipeline(cfg, timeout=None, keep=False)
-
-        # Deploy must not have run against a contaminated namespace.
-        assert deploy_called["n"] == 0
-
-    def test_pre_destroy_exit_zero_continues(self, tmp_path):
-        """destroy(--force) on a missing namespace exits cleanly (0) --
-        that's the expected happy path on a first-ever reproduce."""
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("name: my-config\n")
-
-        def destroy_ok(*a, **kw):
-            raise typer.Exit(0)
-
-        call_log: list[str] = []
-
-        def track(name):
-            def _fn(*a, **kw):
-                call_log.append(name)
-
-            return _fn
-
-        class FakeStorage:
-            metrics_dir = tmp_path
-
-            def list_runs(self):
-                return [
-                    {
-                        "run_id": "produced",
-                        "deployment_name": "my-config",
-                        "start_time": datetime.now(timezone.utc).isoformat(),
-                    }
-                ]
-
-            def load_run(self, rid):
-                return SimpleNamespace(run_id=rid)
-
-        with (
-            mock.patch("lakebench.cli._destroy.destroy", destroy_ok),
-            mock.patch("lakebench.cli._deploy.deploy", track("deploy")),
-            mock.patch("lakebench.cli._generate.generate", track("generate")),
-            mock.patch("lakebench.cli._run.run", track("run")),
-            mock.patch(
-                "lakebench.config.load_config",
-                return_value=SimpleNamespace(name="my-config"),
-            ),
-            mock.patch("lakebench.metrics.MetricsStorage", return_value=FakeStorage()),
-        ):
-            from lakebench.cli._reproduce import _run_pipeline
-
-            _run_pipeline(cfg, timeout=None, keep=True)
-
-        assert call_log == ["deploy", "generate", "run"]
 
 
 class TestR3NaiveLocalTimestampsHandled:

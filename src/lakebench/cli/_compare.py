@@ -273,35 +273,33 @@ def config_condition_differences(cfg_a, cfg_b) -> list[str]:
 # variation. 2% leaves headroom over that without hiding real differences.
 _NOISE_FLOOR_PCT = 2.0
 
-# Scores where a bigger number is the better result. Everything else -- times,
-# sizes, staleness -- is better when smaller.
-_HIGHER_IS_BETTER = (
-    "qph",
-    "throughput",
-    "efficiency",
-    "rows_processed",
-    "ingest_ratio",
-)
 
-# Scores that describe the run rather than rate it. A difference here is
-# information, not a win or a loss: scale_ratio is best at 1.0 in either
-# direction, and the data volume is an input, not a result.
-_NEUTRAL = ("scale_ratio", "total_data_processed_gb", "total_s3_objects", "composite_qph_rounds")
+def _pipeline_mode(metrics: dict) -> str | None:
+    """The mode a record's scores were computed under, as the metric
+    registry reads it (``batch`` or ``sustained``), or None."""
+    from lakebench.metrics.metric_registry import canonical_mode
 
-
-def _higher_is_better(metric: str) -> bool:
-    """Whether an increase in this score is an improvement.
-
-    Getting this backwards paints a faster engine red, so the default is the
-    conservative one: unknown metrics are treated as lower-is-better, matching
-    the times and sizes that make up most of the scorecard.
-    """
-    return any(token in metric.lower() for token in _HIGHER_IS_BETTER)
+    if not isinstance(metrics, dict) or "error" in metrics:
+        return None
+    raw = (metrics.get("pipeline_benchmark") or {}).get("pipeline_mode")
+    try:
+        return canonical_mode(raw) if isinstance(raw, str) else None
+    except ValueError:
+        return None
 
 
-def _is_neutral(metric: str) -> bool:
-    """Whether a change in this score is neither better nor worse."""
-    return metric.lower() in _NEUTRAL
+def _directional(metric: str, mode: str | None) -> bool:
+    """Whether a delta in *metric* has a better side (metrics/metric_registry.py).
+    An unknown metric has none: it is shown, never coloured."""
+    from lakebench.metrics.metric_registry import is_directional
+
+    return is_directional(metric, mode)
+
+
+def _higher_is_better(metric: str, mode: str | None) -> bool:
+    from lakebench.metrics.metric_registry import higher_is_better
+
+    return higher_is_better(metric, mode)
 
 
 def _stderr_fd() -> int:
@@ -454,7 +452,14 @@ def _samples_per_query(metrics: dict) -> int | None:
     return samples_per_query((qb or {}).get("queries") or [])
 
 
-_RENAMED_SCORES = {"query_time_freshness_seconds": "query_time_event_age_seconds"}
+def _registry_aliases() -> dict[str, str]:
+    from lakebench.metrics.metric_registry import ALIASES
+
+    return dict(ALIASES)
+
+
+# Renamed score keys (metrics/metric_registry.ALIASES).
+_RENAMED_SCORES = _registry_aliases()
 
 
 def _renamed_scores(scores: dict) -> dict:
@@ -641,6 +646,9 @@ def _build_comparison(
             "run_id": metrics_b.get("run_id"),
         },
         "noise_floor_pct": _NOISE_FLOOR_PCT,
+        # The mode the metric registry reads directions under (A's; a pair
+        # of two modes is not comparable).
+        "pipeline_mode": _pipeline_mode(metrics_a) or _pipeline_mode(metrics_b),
         "query_sets": {"config_a": qs_a, "config_b": qs_b},
         "qph_comparable": qph_ok,
         "qph_refused": {"metrics": refused, "reason": qph_reason} if refused else None,
@@ -781,6 +789,7 @@ def _print_comparison_table(comparison: dict) -> None:
     _capped_either_side = bool(comparison.get("caps_bound_a")) or bool(
         comparison.get("caps_bound_b")
     )
+    mode = comparison.get("pipeline_mode")
     for row in comparison["metrics"]:
         val_a = row["config_a"]
         val_b = row["config_b"]
@@ -793,9 +802,10 @@ def _print_comparison_table(comparison: dict) -> None:
             and val_a != 0
         ):
             pct = ((val_b - val_a) / abs(val_a)) * 100
-            within_noise = abs(pct) < _NOISE_FLOOR_PCT or _is_neutral(row["metric"])
+            directional = _directional(row["metric"], mode)
+            within_noise = abs(pct) < _NOISE_FLOOR_PCT or not directional
             token = delta_token(
-                higher_is_better=_higher_is_better(row["metric"]),
+                higher_is_better=_higher_is_better(row["metric"], mode),
                 pct=pct,
                 within_noise=within_noise,
                 capped=_capped_either_side,
@@ -811,7 +821,7 @@ def _print_comparison_table(comparison: dict) -> None:
                 # support, and neutral scores have no better direction.
                 delta = f"[dim]{glyph} {token} {pct:+.1f}%[/dim]"
             else:
-                better = "green" if _higher_is_better(row["metric"]) == (pct > 0) else "red"
+                better = "green" if _higher_is_better(row["metric"], mode) == (pct > 0) else "red"
                 delta = f"[{better}]{glyph} {token} {pct:+.1f}%[/{better}]"
 
         if row.get("not_comparable"):

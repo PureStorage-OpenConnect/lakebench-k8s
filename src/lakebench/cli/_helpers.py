@@ -377,7 +377,7 @@ def record_deps_pods(run, cfg, handle, skipped: str | None = None) -> bool:
     in ``pods_check_skipped``."""
     from lakebench.deps import runtime
 
-    if run is None or handle is None or not (run.provenance or {}).get("deps"):
+    if run is None or handle is None or not isinstance((run.provenance or {}).get("deps"), dict):
         return False
     if skipped:
         run.provenance["deps"]["pods_check_skipped"] = skipped

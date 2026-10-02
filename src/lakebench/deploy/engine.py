@@ -363,11 +363,16 @@ class DeploymentEngine:
     9. Monitoring Stack (if enabled)
     """
 
+    #: Class default, so an engine built without __init__ (tests) reads False.
+    require_new: bool = False
+
     def __init__(
         self,
         config: LakebenchConfig,
         k8s_client: K8sClient | None = None,
         dry_run: bool = False,
+        deploy_nonce: str | None = None,
+        require_new: bool = False,
     ):
         """Initialize deployment engine.
 
@@ -375,7 +380,16 @@ class DeploymentEngine:
             config: Lakebench configuration
             k8s_client: Kubernetes client (created if not provided)
             dry_run: If True, show what would be deployed without making changes
+            deploy_nonce: The nonce ``deploy`` recorded in the directory's
+                state before deploying; stamped on the namespace.
+            require_new: Refuse, instead of adopting, a namespace or bucket
+                that already exists (``reproduce``, which may destroy only
+                what it created). The namespace is created with a plain
+                create, so a competing create between a caller's check and
+                this step is refused (409), not adopted.
         """
+        self.deploy_nonce = deploy_nonce
+        self.require_new = require_new
         self.config = config
         self.dry_run = dry_run
         self.results: list[DeploymentResult] = []
@@ -808,6 +822,21 @@ class DeploymentEngine:
             return True
         return False
 
+    def _existing_refusal(self, component: str, what: str, start: float) -> DeploymentResult:
+        """The refusal for an existing namespace or bucket under ``require_new``."""
+        import time
+
+        return DeploymentResult(
+            component=component,
+            status=DeploymentStatus.FAILED,
+            message=(
+                f"Refused: {what} already exists, and this deploy may only create new "
+                "resources (require_new). Nothing that existed was changed."
+            ),
+            elapsed_seconds=time.time() - start,
+            details={REFUSAL_DETAIL: "reproduce.existing_namespace"},
+        )
+
     def _namespace_already_using_name(self, namespace: str) -> str | None:
         """Return another namespace that carries this deployment's name, if any.
 
@@ -865,6 +894,9 @@ class DeploymentEngine:
         namespace = self.config.get_namespace()
 
         if self.dry_run:
+            if self.require_new and self.k8s.namespace_exists(namespace):
+                # A read only: the real run would refuse it.
+                return self._existing_refusal("namespace", f"namespace {namespace!r}", start)
             return DeploymentResult(
                 component="namespace",
                 status=DeploymentStatus.SUCCESS,
@@ -890,9 +922,27 @@ class DeploymentEngine:
                 elapsed_seconds=time.time() - start,
             )
 
+        # Under require_new a namespace that exists is refused, unless this
+        # engine's own create landed and only its response was lost: that
+        # create carried this deploy's nonce, so the retry can tell.
+        ours_from_retry = False
+        if self.require_new and self.k8s.namespace_exists(namespace):
+            from lakebench.deploy.ownership import ANNOTATION_DEPLOY_NONCE
+
+            ours_from_retry = (
+                namespace in self._namespace_created_this_run
+                and bool(self.deploy_nonce)
+                and self.k8s.get_namespace_annotation(namespace, ANNOTATION_DEPLOY_NONCE)
+                == self.deploy_nonce
+            )
+            if not ours_from_retry:
+                return self._existing_refusal(
+                    "namespace", f"namespace {namespace!r} (or it is still terminating)", start
+                )
+
         # Check if namespace exists and wait if it's terminating
         pre_existing = False
-        if self.k8s.namespace_exists(namespace):
+        if not ours_from_retry and self.k8s.namespace_exists(namespace):
             phase = self.k8s.get_namespace_phase(namespace)
             if phase == "Terminating":
                 # LB-157: an earlier destroy of this name is still finishing.
@@ -928,8 +978,8 @@ class DeploymentEngine:
                 pre_existing = True
 
         # Create namespace when missing.
-        created = False
-        if not pre_existing:
+        created = ours_from_retry
+        if not pre_existing and not ours_from_retry:
             if not self.config.platform.kubernetes.create_namespace:
                 return DeploymentResult(
                     component="namespace",
@@ -952,7 +1002,30 @@ class DeploymentEngine:
             # branch still catches it before writing.
             self._namespace_created_this_run.add(namespace)
             try:
-                self.k8s.apply_manifest(manifest)
+                if self.require_new:
+                    from kubernetes import client as _kc
+                    from kubernetes.client.rest import ApiException as _ApiException
+
+                    from lakebench.deploy.ownership import ANNOTATION_DEPLOY_NONCE
+
+                    if self.deploy_nonce:
+                        meta = manifest.setdefault("metadata", {})
+                        anns = meta.get("annotations") or {}
+                        anns[ANNOTATION_DEPLOY_NONCE] = self.deploy_nonce
+                        meta["annotations"] = anns
+                    try:
+                        # A plain create: 409 when the namespace appeared
+                        # since the check above, never an adopting patch.
+                        _kc.CoreV1Api().create_namespace(body=manifest)
+                    except _ApiException as e:
+                        if e.status != 409:
+                            raise
+                        self._namespace_created_this_run.discard(namespace)
+                        return self._existing_refusal(
+                            "namespace", f"namespace {namespace!r} (created meanwhile)", start
+                        )
+                else:
+                    self.k8s.apply_manifest(manifest)
             except Exception as e:
                 # F2-A: on a non-transient failure (K8s definitively
                 # rejected the create), un-seed the tracking so a
@@ -1040,7 +1113,7 @@ class DeploymentEngine:
         from lakebench.deploy.ownership import write_deploy_nonce
 
         try:
-            write_deploy_nonce(core_v1, namespace)
+            write_deploy_nonce(core_v1, namespace, nonce=self.deploy_nonce)
         except Exception as e:  # noqa: BLE001
             return DeploymentResult(
                 component="namespace",
@@ -1285,6 +1358,12 @@ class DeploymentEngine:
 
         s3_cfg = self.config.platform.storage.s3
         if not s3_cfg.create_buckets:
+            if self.require_new and not self.dry_run:
+                # Pre-provisioned buckets exist by definition; adopting them
+                # is what require_new refuses.
+                return self._existing_refusal(
+                    "s3-buckets", "pre-provisioned buckets (create_buckets=false)", start
+                )
             if not self.dry_run and s3_cfg.endpoint:
                 self._record_preprovisioned_empty_buckets()
             return DeploymentResult(
@@ -1312,7 +1391,8 @@ class DeploymentEngine:
             return DeploymentResult(
                 component="s3-buckets",
                 status=DeploymentStatus.SUCCESS,
-                message=f"Would create buckets: {', '.join(bucket_names)}",
+                message=f"Would create buckets: {', '.join(bucket_names)}"
+                + (" (existing ones refused on the real run)" if self.require_new else ""),
                 elapsed_seconds=0,
             )
 
@@ -1335,6 +1415,15 @@ class DeploymentEngine:
                 elapsed_seconds=time.time() - start,
             )
 
+        if self.require_new:
+            # Check all of them before creating any, so a refusal leaves no
+            # bucket behind; names repeated across tiers are created once.
+            bucket_names = list(dict.fromkeys(bucket_names))
+            present = [b for b in bucket_names if s3.bucket_exists(b)]
+            if present:
+                return self._existing_refusal(
+                    "s3-buckets", "bucket(s) " + ", ".join(present), start
+                )
         results = s3.ensure_buckets(bucket_names)
         created = [name for name, was_created in results.items() if was_created]
         existed = [name for name, was_created in results.items() if not was_created]
@@ -1397,6 +1486,11 @@ class DeploymentEngine:
                     self.config.get_namespace(),
                     e,
                 )
+        if self.require_new and existed:
+            # One appeared between the check above and its create. Checked
+            # before any tag is written, so it is left as it was; the buckets
+            # created above are recorded, so destroy removes them.
+            return self._existing_refusal("s3-buckets", "bucket(s) " + ", ".join(existed), start)
         other_deployments = list_lakebench_deployment_names(
             _kclient.CoreV1Api(), exclude=self.config.get_namespace()
         )
@@ -1838,6 +1932,7 @@ class DeploymentEngine:
         force_legacy: bool = False,
         namespace_wait_timeout: int | None = None,
         delete_buckets: bool = True,
+        expected_incarnation: str | None = None,
     ) -> list[DeploymentResult]:
         """Destroy all deployed components.
 
@@ -1860,4 +1955,5 @@ class DeploymentEngine:
                 else namespace_wait_timeout
             ),
             delete_buckets=delete_buckets,
+            expected_incarnation=expected_incarnation,
         )

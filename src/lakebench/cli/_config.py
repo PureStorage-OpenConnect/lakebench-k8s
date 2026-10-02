@@ -383,12 +383,31 @@ def config_recommend(
 
     # Extract pipeline mode from config to pass to recommend
     schema: str | None = None
+    cfg = None
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
         mode = cfg.architecture.pipeline.mode.value
         schema = cfg.architecture.workload.schema_type.value
-    except Exception:
+    except Exception as e:
         mode = None
+        console.print(
+            f"[yellow]{esc(config_file)} did not load ({esc(type(e).__name__)}); sizing against "
+            "the kubeconfig's current context and the default mode.[/yellow]"
+        )
+
+    if cfg is not None:
+        # Size against the config's cluster, not whichever is current: pin its context before
+        # recommend detects capacity, which otherwise uses the current one.
+        from kubernetes.config import ConfigException
+        from rich.markup import escape
+
+        from lakebench.k8s.target import pin_command
+
+        try:
+            pin_command(cfg)
+        except ConfigException as e:
+            console.print(f"[red]Cannot use the config's cluster context:[/red] {escape(str(e))}")
+            raise typer.Exit(ExitCode.PREREQUISITE) from None
 
     _recommend(mode=mode, schema_type=schema)
 

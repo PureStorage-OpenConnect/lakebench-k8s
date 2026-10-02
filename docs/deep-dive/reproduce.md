@@ -89,8 +89,23 @@ or `ingest_ratio` (continuous).
    package's maintenance policy differs from the running version's,
    or if the package has no `experiment_identity`. `--dry-run` stops
    here.
-5. Destroys any existing deployment, then deploys, generates and runs
-   the pipeline, and destroys again unless `--keep` is set.
+5. Refuses (exit 3) when the config's namespace or any of its three
+   buckets already exists, and exits 2 when the config sets
+   `create_namespace: false` or `create_buckets: false`: reproduce
+   measures against empty buckets it creates, and never destroys or
+   adopts what it did not create. A namespace or bucket it cannot read
+   stops it (exit 4). It then deploys with a nonce of its own; a
+   namespace or bucket that appears in the meantime is refused, not
+   adopted. It confirms the namespace carries that nonce (exit 3 if
+   another deploy replaced it, before generating or running anything),
+   generates and runs the pipeline, and checks the nonce again after the
+   run, with or without `--keep` (exit 3, nothing destroyed, no verdict:
+   the measurement may not be its own). The run it compares is the first
+   one on this deployment started after the run step began. Unless
+   `--keep` is set it then destroys only that namespace incarnation
+   (`uid#nonce`); if a redeploy landed between that check and the
+   destroy, the destroy deletes nothing, reproduce prints its verdict and
+   then exits 3.
 6. Exits 14 if the run took a different number of samples per query,
    ran under a different maintenance policy, or is not the package's
    experiment or returned different benchmark results.
@@ -168,8 +183,8 @@ The reproduce command lives in
 `src/lakebench/cli/_reproduce.py`. It shares the deploy / generate /
 run / destroy plumbing with the main CLI; it does not reimplement
 any of it. The default bands are `DEFAULT_TOLERANCES` in
-`_reproduce.py`, and each metric's band and direction come from
-`_METRIC_TABLE` there, not from the package.
+`_reproduce.py`, and each metric's band and direction come from the
+metric registry (`metrics/metric_registry.py`), not from the package.
 
 ## For contributors
 

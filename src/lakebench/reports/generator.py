@@ -27,6 +27,7 @@ from typing import Any
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
+from lakebench.metrics.metric_registry import direction_hint
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,20 @@ def _stage_matches_cap(stage_name: str, caps_bound: list[str]) -> bool:
             if jt in text:
                 return True
     return False
+
+
+_ARROWS = {"higher is better": "&#8593; ", "lower is better": "&#8595; "}
+
+
+def _direction_hint(key: str, mode: str, detail: str = "") -> str:
+    """A card's "<arrow> higher is better | <detail>" line, the direction
+    from the metric registry; the detail alone when the metric has no
+    better side."""
+    hint = direction_hint(key, mode)
+    text = f"{_ARROWS[hint]}{hint}" if hint else ""
+    if detail:
+        return f"{text} | {detail}" if text else detail
+    return text
 
 
 def _qph_stop_warning(metrics) -> str:
@@ -1604,26 +1619,32 @@ class ReportGenerator:
         )
 
         # Derived context values for hint line 2
+        _cont = "sustained"
         freshness_hint2 = (
-            f"&#8595; lower is better | {freshness_val / 60:.1f} min lag"
+            _direction_hint("data_freshness_seconds", _cont, f"{freshness_val / 60:.1f} min lag")
             if freshness_val is not None
             else "< 2 gold refresh cycles completed"
         )
-        throughput_hint2 = (
-            f"&#8593; higher is better | {throughput * 3600:,.0f} rows/hr"
-            if throughput > 0
-            else "&#8593; higher is better"
+        throughput_hint2 = _direction_hint(
+            "sustained_throughput_rps",
+            _cont,
+            f"{throughput * 3600:,.0f} rows/hr" if throughput > 0 else "",
         )
         qph_hint2 = (
-            f"&#8593; higher is better | ~{qph / 60:.0f} queries/min"
+            _direction_hint("in_stream_composite_qph", _cont, f"~{qph / 60:.0f} queries/min")
             if qph is not None
             else "no benchmark rounds completed"
         )
-        cpu_hint2 = (
-            f"&#8595; lower is better | extrapolates to ~{core_hours * 86400 / total_time:,.0f}/day"
+        # Continuous core-hours follow the window length, so they have no
+        # better side (metrics/metric_registry.py).
+        cpu_hint2 = _direction_hint(
+            "total_core_hours",
+            _cont,
+            f"extrapolates to ~{core_hours * 86400 / total_time:,.0f}/day"
             if total_time > 0
-            else "&#8595; lower is better"
+            else "",
         )
+        efficiency_hint2 = _direction_hint("compute_efficiency_gb_per_core_hour", _cont)
 
         return f"""
         <div class="cards">
@@ -1643,12 +1664,12 @@ class ReportGenerator:
                 <div class="card-label">Compute Efficiency</div>
                 <div class="card-value">{efficiency:.2f} GB/core-hr</div>
                 <div class="card-hint">GB processed per core-hour requested</div>
-                <div class="card-hint2">&#8593; higher is better</div>
+                <div class="card-hint2">{efficiency_hint2}</div>
             </div>
             <div class="card">
                 <div class="card-label">In-Stream QpH</div>
                 <div class="card-value">{qph_display}</div>
-                <div class="card-hint">{qph_note or "higher is better"}</div>
+                <div class="card-hint">{qph_note or direction_hint("in_stream_composite_qph", "sustained")}</div>
                 <div class="card-hint2">{qph_hint2}</div>
             </div>
             <div class="card">
@@ -1732,16 +1753,16 @@ class ReportGenerator:
         )
 
         ttv = pb.time_to_value_seconds
-        ttv_hint2 = (
-            f"&#8595; lower is better | {int(ttv // 60)}m {int(ttv % 60)}s"
-            if ttv > 0
-            else "&#8595; lower is better"
+        ttv_hint2 = _direction_hint(
+            "time_to_value_seconds",
+            "batch",
+            f"{int(ttv // 60)}m {int(ttv % 60)}s" if ttv > 0 else "",
         )
-        qph_hint2 = (
-            f"&#8593; higher is better | ~{qph / 60:.0f} queries/min"
-            if qph > 0
-            else "&#8593; higher is better"
+        qph_hint2 = _direction_hint(
+            "composite_qph", "batch", f"~{qph / 60:.0f} queries/min" if qph > 0 else ""
         )
+        throughput_hint2 = _direction_hint("pipeline_throughput_gb_per_second", "batch")
+        efficiency_hint2 = _direction_hint("compute_efficiency_gb_per_core_hour", "batch")
         qph_display = format_measurement(
             f"{qph:,.1f}" if qph > 0 else "N/A",
             "",
@@ -1772,18 +1793,18 @@ class ReportGenerator:
                     {pb.total_data_processed_gb:.1f} GB total
                 </div>
                 <div class="card-hint">data volume / wall-clock time</div>
-                <div class="card-hint2">&#8593; higher is better</div>
+                <div class="card-hint2">{throughput_hint2}</div>
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
                 <div class="card-value">{pb.compute_efficiency_gb_per_core_hour:.2f} GB/core-hr</div>
                 <div class="card-hint">GB processed per core-hour requested</div>
-                <div class="card-hint2">&#8593; higher is better</div>
+                <div class="card-hint2">{efficiency_hint2}</div>
             </div>
             <div class="card">
                 <div class="card-label">QpH</div>
                 <div class="card-value">{qph_display}{_qph_stop_warning(metrics)}</div>
-                <div class="card-hint">queries per hour -- higher is better</div>
+                <div class="card-hint">queries per hour -- {direction_hint("composite_qph", "batch")}</div>
                 <div class="card-hint2">{qph_hint2}</div>
             </div>
             <div class="card">
