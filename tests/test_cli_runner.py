@@ -249,9 +249,9 @@ class TestObservabilityConfigValidation:
     def test_flat_config_accepted(self):
         from lakebench.config.schema import ObservabilityConfig
 
-        cfg = ObservabilityConfig(enabled=True, prometheus_stack_enabled=True)
+        cfg = ObservabilityConfig(enabled=True, dashboards_enabled=False)
         assert cfg.enabled is True
-        assert cfg.prometheus_stack_enabled is True
+        assert cfg.dashboards_enabled is False
 
     def test_nested_config_rejected(self):
         """Deeply nested YAML structure should raise ValidationError."""
@@ -279,7 +279,6 @@ class TestObservabilityConfigValidation:
 
         cfg = ObservabilityConfig()
         assert cfg.enabled is False
-        assert cfg.prometheus_stack_enabled is True
         assert cfg.dashboards_enabled is True
         assert cfg.retention == "7d"
         assert cfg.storage == "10Gi"
