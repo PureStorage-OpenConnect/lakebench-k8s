@@ -23,6 +23,7 @@ import sys
 import tempfile
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
@@ -71,7 +72,7 @@ def _run(jars):
         for bid in range(5):
             rows = batch_rows(bid, count=1)
             df = bronze_batch(spark, rows)
-            ss._merge_batch(df, bid)
+            foreach_batch_harness(spark, ss._merge_batch, df, bid)
 
         stmts = spark.sql(
             "SELECT iban, entry_seq, cdt_dbt_ind, amt, bal_before, bal_after "

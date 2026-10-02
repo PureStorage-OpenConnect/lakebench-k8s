@@ -2373,6 +2373,224 @@ def sealed_txns_filter(spark, txns_df, catalog, versions_table):
     )
 
 
+class materialised_source:  # noqa: N801 -- used like a function: with materialised_source(...)
+    """``with materialised_source(spark, df, view_name) as view:`` gives a
+    temp view over ``df`` with its lineage cut, for use as a MERGE source.
+
+    On Spark 4.1 with Iceberg, ``MERGE ... USING <temp view>`` fails with an
+    internal error ("No plan for TableReference") when the view's plan reads
+    an Iceberg table. A view over a local checkpoint of the frame reads only
+    the checkpointed blocks (tested on Spark 4.0 and 4.1). The content is
+    the frame's rows at the moment of entry, computed once.
+
+    On exit the view is dropped and the checkpoint's blocks are freed. They
+    belong to the checkpoint's own RDD, which ``DataFrame.unpersist`` does
+    not reach (a checkpoint is not in the cache manager), so the RDD under
+    the plan is unpersisted directly. Both run when the body raises.
+
+    Each entry logs ``[merge-source] <view>: materialised``.
+
+    The blocks live on the executors that computed them: an executor lost
+    between entry and the MERGE fails that micro-batch, and the query
+    restarts through the replay path.
+    """
+
+    def __init__(self, spark, df, view_name):
+        self._spark = spark
+        self._df = df
+        self._view = view_name
+        self._checkpoint = None
+
+    def __enter__(self):
+        self._checkpoint = self._df.localCheckpoint(eager=True)
+        try:
+            self._checkpoint.createOrReplaceTempView(self._view)
+        except BaseException:
+            self._free()
+            raise
+        # One line per MERGE source and batch, so a run's log shows each
+        # site materialised. No row count: counting is one more Spark job
+        # per site per micro-batch, which would land inside the stream's
+        # published merge timings (the entity and account counts are in the
+        # [dim-merge] lines already).
+        log(f"[merge-source] {self._view}: materialised")
+        return self._view
+
+    def __exit__(self, *_exc):
+        try:
+            self._spark.catalog.dropTempView(self._view)
+        except Exception as e:  # noqa: BLE001
+            log(f"[merge-source] dropping view {self._view} failed: {type(e).__name__}: {e}")
+        self._free()
+        return False
+
+    def _free(self):
+        try:
+            self._checkpoint._jdf.logicalPlan().rdd().unpersist(False)
+        except Exception as e:  # noqa: BLE001
+            log(f"[merge-source] freeing {self._view} blocks failed: {type(e).__name__}: {e}")
+
+
+class SealedFilterError(RuntimeError):
+    """``sealed_txns_filter_at`` could not read the versions table at the
+    requested snapshot (the snapshot is expired or never existed, or the
+    table is missing or unreadable). The caller decides the fallback; the
+    helper never returns the transactions unfiltered."""
+
+
+def sealed_txns_filter_at(spark, txns_df, catalog, versions_table, versions_snapshot):
+    """``sealed_txns_filter`` with the versions table read ``VERSION AS OF
+    versions_snapshot`` instead of at current state.
+
+    A detection tick and a scorer that pass the same versions snapshot see
+    the same sealed set, whatever is committed to the versions table later:
+    the snapshot id is part of the plan, so every action on the returned
+    frame reads the same versions rows.
+
+    Fails closed, unlike ``sealed_txns_filter``:
+
+    - ``versions_snapshot`` must be an ``int`` (not a bool). ``None``, the
+      string ``TTD_SNAPSHOT_UNKNOWN`` or any other value raises
+      ``TypeError`` before anything is read.
+    - The versions frame is built and analysed inside this call, so a
+      snapshot id the table does not have, or a missing or unreadable
+      versions table, raises ``SealedFilterError`` here, before the caller
+      runs any action.
+
+    It never returns ``txns_df`` unfiltered.
+    """
+    if isinstance(versions_snapshot, bool) or not isinstance(versions_snapshot, int):
+        raise TypeError(
+            "sealed_txns_filter_at needs an int versions snapshot id, got "
+            f"{type(versions_snapshot).__name__} {versions_snapshot!r}"
+        )
+    from pyspark.sql.functions import col as _col
+
+    versions_fq = f"{catalog}.{versions_table}"
+    try:
+        versions = spark.sql(
+            f"SELECT stream_id, batch_id FROM {versions_fq} VERSION AS OF {versions_snapshot}"
+        ).select(
+            _col("stream_id").alias("_sv_stream_id"),
+            _col("batch_id").alias("_sv_batch_id"),
+        )
+        # Classic pyspark analyses spark.sql eagerly; reading the schema
+        # forces analysis on a lazy client too, so the snapshot and the
+        # table are resolved here and not at the caller's first action.
+        versions.schema  # noqa: B018
+    except Exception as e:  # noqa: BLE001
+        raise SealedFilterError(
+            f"{versions_fq} not readable at snapshot {versions_snapshot}: {e}"
+        ) from e
+    return txns_df.join(
+        versions,
+        (txns_df["_stream_id"] == versions["_sv_stream_id"])
+        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
+        "left_semi",
+    )
+
+
+# Bumped when the fingerprint definition changes, so fingerprints made by two
+# definitions never compare equal. Hashed into every row.
+_FINGERPRINT_VERSION = 1
+
+
+def frame_fingerprint(df, cols):
+    """Order-independent fingerprint of ``df`` over the named columns.
+
+    Returns ``(rows, fp, cols_sha)``: the row count, the sum of one xxhash64
+    per row as a decimal string, and the first 16 hex digits of the sha256
+    of ``name:type`` for each column in the given order. Two frames match
+    only when all three match. One Spark action (one aggregate).
+
+    Each row's hash covers the definition version, every named column in
+    order, and a null mask (bit ``i`` set when column ``i`` is NULL). Spark's
+    xxhash64 skips NULL arguments, so without the mask ``(x, NULL)`` and
+    ``(NULL, x)`` would hash the same. The sum is taken as decimal(38,0), so
+    it is exact and cannot overflow under ANSI mode. Row order does not
+    matter; a duplicated row changes both ``rows`` and ``fp``.
+
+    Array, struct and map columns are hashed through a canonical form,
+    because xxhash64 chains nested values without their lengths or NULL
+    positions (``(["a","b"], [])`` and ``(["a"], ["b"])`` would collide, and
+    so would ``[a, NULL]`` and ``[NULL, a]``, or a struct whose value moves
+    to a NULL neighbour). Every nested value is paired with its own NULL
+    flag, every array and map carries its size, and a map becomes its
+    entries in sorted order (Spark refuses to hash a map, and a map has no
+    defined entry order). ``-0.0`` and ``0.0`` hash the same, and so do all
+    NaNs; a collated string hashes by its bytes, so ``'A'`` and ``'a'``
+    differ under ``UTF8_LCASE``. A struct with two fields of one name (only
+    an in-memory frame can have one) raises at analysis. The nested form
+    costs higher-order functions per row: measure it before fingerprinting
+    a full large table on a hot path.
+
+    Callers name the columns; AML time travel and reproduction pass every
+    column of the snapshot schema, including ``_stream_id``, ``_batch_id``
+    and ``ingest_ts``, which decide sealed visibility.
+
+    Raises ``ValueError`` for no columns, more than 63 (the mask is a
+    signed long), a repeated name, or a name that is not a top-level
+    column of ``df``.
+    """
+    import hashlib
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import ArrayType, MapType, StructField, StructType
+
+    def _flagged(c, dt):
+        return F.struct(c.isNull(), _canonical(c, dt))
+
+    def _canonical_array(c, element_type, sort):
+        elements = F.transform(c, lambda x: _flagged(x, element_type))
+        if sort:
+            elements = F.array_sort(elements)
+        size = F.when(c.isNull(), F.lit(-1)).otherwise(F.size(c))
+        return F.struct(size, elements)
+
+    def _canonical(c, dt):
+        if isinstance(dt, MapType):
+            entry = StructType([StructField("key", dt.keyType), StructField("value", dt.valueType)])
+            return _canonical_array(F.map_entries(c), entry, sort=True)
+        if isinstance(dt, ArrayType):
+            return _canonical_array(c, dt.elementType, sort=False)
+        if isinstance(dt, StructType):
+            return F.struct(*[_flagged(c.getField(f.name), f.dataType) for f in dt.fields])
+        return c
+
+    cols = list(cols)
+    if not cols:
+        raise ValueError("frame_fingerprint needs at least one column")
+    if len(cols) > 63:
+        raise ValueError(f"frame_fingerprint takes at most 63 columns, got {len(cols)}")
+    if len(set(cols)) != len(cols):
+        raise ValueError(f"frame_fingerprint: repeated column in {cols}")
+    fields = {f.name: f for f in df.schema.fields}
+    missing = [c for c in cols if c not in fields]
+    if missing:
+        raise ValueError(f"frame_fingerprint: {missing} not in {sorted(fields)}")
+
+    def _ref(name):
+        return F.col("`" + name.replace("`", "``") + "`")
+
+    hashed = []
+    mask = F.lit(0).cast("long")
+    for i, name in enumerate(cols):
+        c = _ref(name)
+        hashed.append(_canonical(c, fields[name].dataType))
+        bit = F.lit(1 << i).cast("long")
+        mask = mask + F.when(c.isNull(), bit).otherwise(F.lit(0).cast("long"))
+    h = F.xxhash64(F.lit(_FINGERPRINT_VERSION), *hashed, mask)
+    row = df.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.sum(h.cast("decimal(38,0)")).alias("s"),
+    ).collect()[0]
+    rows = int(row["n"])
+    fp = str(int(row["s"])) if row["s"] is not None else "0"
+    spec = ",".join(f"{name}:{fields[name].dataType.simpleString()}" for name in cols)
+    cols_sha = hashlib.sha256(spec.encode("utf-8")).hexdigest()[:16]
+    return rows, fp, cols_sha
+
+
 def _s3_table_path(bucket_uri, fq_table):
     """Build the S3 path for an EXTERNAL Delta table.
 

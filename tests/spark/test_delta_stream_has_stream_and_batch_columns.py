@@ -11,18 +11,15 @@ Import- and call-shape test only. Delta jar path is exercised by
 
 from __future__ import annotations
 
-import types
 from pathlib import Path
 
 import pytest
 
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts"
+_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 pytestmark = pytest.mark.usefixtures("load_script")
 
 
-_SRC = (
-    Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts/silver_stream_delta.py"
-).read_text()
+_SRC = (_SCRIPTS_DIR / "silver_stream_delta.py").read_text()
 
 
 def test_stream_delta_imports_ensure_column():
@@ -95,12 +92,13 @@ def test_stream_delta_create_if_not_exists_replaces_overwrite():
     )
 
 
-def test_stream_delta_main_calls_ensure_column_for_stream_and_batch_id(monkeypatch):
+def test_stream_delta_main_calls_ensure_column_for_stream_and_batch_id(monkeypatch, tmp_path):
     """Drive ``silver_stream_delta.main()`` far enough to hit the startup
     ``ensure_column`` calls with a table_exists stub returning True. Capture
     every call and assert both columns land on the silver table.
     """
     pytest.importorskip("pyspark")
+    import _stream_main_stub
     import silver_stream_delta as ss
 
     calls: list[tuple[str, str, str]] = []
@@ -110,88 +108,22 @@ def test_stream_delta_main_calls_ensure_column_for_stream_and_batch_id(monkeypat
         return False
 
     monkeypatch.setattr(ss, "ensure_column", _capture)
-    monkeypatch.setattr(ss, "refuse_fresh_checkpoint_over_data", lambda *a, **k: None)
     monkeypatch.setattr(ss, "table_exists", lambda *a, **k: True)
-    monkeypatch.setattr(ss, "assert_progress", lambda *a, **k: None)
     monkeypatch.setattr(ss, "emit_stream_scale_admission", lambda *a, **k: None)
     monkeypatch.setattr(ss, "set_utc_session", lambda *a, **k: None)
+    spark = _stream_main_stub.install(monkeypatch, ss)
 
-    class _Query:
-        isActive = False
-        lastProgress = None
-
-        def exception(self):
-            return None
-
-        def stop(self):
-            pass
-
-    class _WriteStream:
-        def foreachBatch(self, fn):
-            return self
-
-        def option(self, *a, **k):
-            return self
-
-        def trigger(self, *a, **k):
-            return self
-
-        def start(self):
-            return _Query()
-
-    class _ReaderChain:
-        def format(self, *_):
-            return self
-
-        def option(self, *_a, **_k):
-            return self
-
-        def table(self, *_a, **_k):
-            df = types.SimpleNamespace()
-            df.writeStream = _WriteStream()
-            return df
-
-        def load(self, *_a, **_k):
-            df = types.SimpleNamespace()
-            df.writeStream = _WriteStream()
-            return df
-
-    class _Conf:
-        def set(self, *a, **k):
-            pass
-
-        def get(self, *a, **k):
-            return "UTC"
-
-    class _SparkStub:
-        conf = _Conf()
-        readStream = _ReaderChain()
-
-        def sql(self, *_a, **_k):
-            return None
-
-        def table(self, *_a, **_k):
-            return None
-
-        def stop(self):
-            pass
-
-    class _Builder:
-        def appName(self, *_):
-            return self
-
-        def getOrCreate(self):
-            return _SparkStub()
-
-    monkeypatch.setattr(ss.SparkSession, "builder", _Builder())
-
-    monkeypatch.setenv("CHECKPOINT_LOCATION", "/tmp/ckpt-noop-i6")
+    monkeypatch.setenv("CHECKPOINT_LOCATION", str(tmp_path / "ckpt-noop-i6"))
     monkeypatch.setenv("LB_ICEBERG_CATALOG", "ice")
     monkeypatch.setenv("LB_BRONZE_TABLE", "default.bronze_raw")
     monkeypatch.setenv("LB_SILVER_TABLE", "silver.customer_interactions_enriched")
+    # job.py always exports the data clock for silver jobs; main() refuses
+    # to start without it.
+    monkeypatch.setenv("LB_DATA_CLOCK", "2025-06-15")
 
     ss.main()
 
+    assert "refuse_fresh_checkpoint_over_data" in spark.skipped_calls, spark.skipped_calls
     silver_tbl = "ice.silver.customer_interactions_enriched"
     assert (silver_tbl, "_stream_id", "STRING") in calls, (
         f"silver_stream_delta.main() did not call ensure_column for _stream_id STRING; "

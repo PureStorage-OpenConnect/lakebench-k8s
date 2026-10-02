@@ -19,6 +19,7 @@ import sys
 import tempfile
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
@@ -78,7 +79,7 @@ def _run(jars):
 
         for bid, rows in enumerate(batches):
             df = bronze_batch(spark, rows)
-            ss._merge_batch(df, bid)
+            foreach_batch_harness(spark, ss._merge_batch, df, bid)
 
         # Expected: query the same row_number=1 window the production MERGE
         # source uses.

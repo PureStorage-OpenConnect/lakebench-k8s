@@ -30,6 +30,10 @@ def spark():
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.sql.session.timeZone", "UTC")
+        # No broadcast joins: late in a long Spark-tier process the 4.1
+        # line ran out of driver memory building a broadcast here. The join
+        # strategy does not change the gate's inputs.
+        .config("spark.sql.autoBroadcastJoinThreshold", "-1")
         .getOrCreate()
     )
     yield s

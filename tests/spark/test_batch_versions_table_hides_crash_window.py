@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
@@ -98,56 +99,6 @@ def _bronze_row(spark, txn_id, ts):
     return spark.createDataFrame([row], _PACS_SCHEMA)
 
 
-_TXNS_DDL = """
-CREATE TABLE lh.silver.transactions (
-    txn_id                  STRING NOT NULL,
-    uetr                    STRING NOT NULL,
-    originator_id           BIGINT NOT NULL,
-    beneficiary_id          BIGINT NOT NULL,
-    originator_bank_bic     STRING,
-    beneficiary_bank_bic    STRING,
-    txn_amount              DECIMAL(18, 2) NOT NULL,
-    txn_currency            STRING NOT NULL,
-    txn_amount_usd          DECIMAL(18, 2),
-    txn_timestamp           TIMESTAMP NOT NULL,
-    txn_type                STRING NOT NULL,
-    purpose_code            STRING,
-    correspondent_chain     ARRAY<STRING>,
-    cross_border            BOOLEAN,
-    regulatory_reported     BOOLEAN NOT NULL,
-    rptd_originator_name    STRING,
-    rptd_originator_address STRING,
-    rptd_beneficiary_name   STRING,
-    rptd_beneficiary_address STRING,
-    source_message_ref      STRING,
-    _batch_id               BIGINT,
-    _stream_id              STRING,
-    ingest_ts               TIMESTAMP
-) USING iceberg PARTITIONED BY (months(txn_timestamp))
-"""
-
-_EDGES_DDL = """
-CREATE TABLE lh.silver.counterparty_edges (
-    source_entity_id       BIGINT NOT NULL,
-    target_entity_id       BIGINT NOT NULL,
-    first_seen_ts          TIMESTAMP NOT NULL,
-    last_seen_ts           TIMESTAMP NOT NULL,
-    cumulative_amount_usd  DECIMAL(38, 2) NOT NULL,
-    txn_count              BIGINT NOT NULL,
-    _batch_id              BIGINT,
-    _stream_id             STRING
-) USING iceberg PARTITIONED BY (bucket(64, source_entity_id))
-"""
-
-_VERSIONS_DDL = """
-CREATE TABLE lh.silver.silver_batch_versions (
-    stream_id      STRING NOT NULL,
-    batch_id       BIGINT NOT NULL,
-    committed_at   TIMESTAMP NOT NULL
-) USING iceberg
-"""
-
-
 def _run(jars):
     from pyspark.sql import SparkSession
 
@@ -169,23 +120,12 @@ def _run(jars):
             .getOrCreate()
         )
 
-        import silver_stream_financial as ss
+        from _d_full_helpers import bind_stream_module, bootstrap_catalog
 
-        ss.CATALOG = "lh"
-        ss.SILVER_TXNS = "silver.transactions"
-        ss.SILVER_EDGES = "silver.counterparty_edges"
-        ss.SILVER_BATCH_VERSIONS = "silver.silver_batch_versions"
-
-        spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver")
-        spark.sql(_TXNS_DDL)
-        spark.sql(_EDGES_DDL)
-        spark.sql(_VERSIONS_DDL)
-
-        # Skip KYC + dimension writes (tables not created here).
-        ss._KYC = None
-        ss._KYC_LOADED = True
-        ss._kyc = lambda _s: None
-        ss.append_new_dimensions = lambda *_a, **_kw: (0, 0)
+        # Every table _merge_batch writes, in the shapes the stream uses
+        # today; KYC and dimension writes are skipped.
+        bootstrap_catalog(spark)
+        ss = bind_stream_module(spark)
 
         def bronze(bid):
             return _bronze_row(
@@ -195,7 +135,7 @@ def _run(jars):
             )
 
         # ---- Batch 0: sealed cleanly.
-        ss._merge_batch(bronze(0), 0)
+        foreach_batch_harness(spark, ss._merge_batch, bronze(0), 0)
 
         # ---- Batch 1: crash between phase-2 (edges commit) and phase-4
         # (sealed marker). Intercept spark.sql: allow every phase-1/2
@@ -212,7 +152,7 @@ def _run(jars):
         spark.sql = _sql  # type: ignore[assignment]
         try:
             try:
-                ss._merge_batch(bronze(1), 1)
+                foreach_batch_harness(spark, ss._merge_batch, bronze(1), 1)
             except RuntimeError as e:
                 assert "simulated driver crash" in str(e), e
         finally:
@@ -244,8 +184,10 @@ def _run(jars):
         # SAME batchId, but this test simulates a crash-then-restart cycle
         # where the driver process died; we drive a re-run of batch 1 (with
         # the crash injector off) and a fresh batch 2 on top.
-        ss._merge_batch(bronze(1), 1)  # sealed retry of the crashed batch
-        ss._merge_batch(bronze(2), 2)  # new batch on top
+        foreach_batch_harness(
+            spark, ss._merge_batch, bronze(1), 1
+        )  # sealed retry of the crashed batch
+        foreach_batch_harness(spark, ss._merge_batch, bronze(2), 2)  # new batch on top
 
         versions_row_count_after_retry = spark.table("lh.silver.silver_batch_versions").count()
         versions_rows_for_batch_1_after_retry = (
@@ -255,7 +197,7 @@ def _run(jars):
 
         # ---- MERGE-idempotency direct check: re-drive batch 0 again with
         # the SAME (sid, batch_id). Row count in versions must not grow.
-        ss._merge_batch(bronze(0), 0)
+        foreach_batch_harness(spark, ss._merge_batch, bronze(0), 0)
         versions_row_count_after_replay_of_batch_0 = spark.table(
             "lh.silver.silver_batch_versions"
         ).count()

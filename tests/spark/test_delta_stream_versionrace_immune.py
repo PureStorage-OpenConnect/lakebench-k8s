@@ -27,16 +27,28 @@ def result(tmp_path_factory, spark_subprocess, spark_jars):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+@pytest.mark.known_bug(
+    "LB-223",
+    match="PARSE_SYNTAX_ERROR",
+    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
+)
 def test_ten_batches_written(result):
+    assert result["errors"] == [], result
     assert result["batches"] == 10
     assert len(result["returns"]) == 10
 
 
+@pytest.mark.known_bug(
+    "LB-223",
+    match="PARSE_SYNTAX_ERROR",
+    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
+)
 def test_returns_non_zero_and_match_table_delta(result):
     """Every non-empty batch's return value equals the row-count delta the
     table saw. With interleaved metadata commits the old before/after bracket
     read zero (or garbage); the I8 fix ties the count to this writer's own
     commit metrics, so returns match ground truth."""
+    assert result["errors"] == [], result
     returns = result["returns"]
     row_counts = result["row_counts"]
     prev = 0

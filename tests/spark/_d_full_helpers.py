@@ -201,10 +201,33 @@ def build_spark(work_dir, jars):
 
 
 def bootstrap_catalog(spark):
-    """Create silver namespace and every table _maintain_statements needs."""
+    """Create the silver namespace and every table ``_merge_batch`` writes:
+    the trimmed copies above, plus silver.entity_profiles and
+    silver.silver_batch_versions from the product's own DDL (the stream
+    maintains both on every micro-batch)."""
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver")
     for ddl in (TXNS_DDL, EDGES_DDL, STATEMENTS_DDL, ACCOUNTS_DDL, ENTITIES_DDL):
         spark.sql(ddl)
+    for ddl in product_ddls("SILVER_PROFILES", "SILVER_BATCH_VERSIONS"):
+        spark.sql(ddl)
+
+
+def product_ddls(*names):
+    """silver_build_financial's DDL for each table attribute in *names*
+    (``SILVER_PROFILES`` -> ``DDL_PROFILES``), pointed at catalog lh. The
+    module renders its DDL with the catalog it read at import, so the
+    catalog-qualified table name is swapped for lh's."""
+    import silver_build_financial as sbf
+
+    ddl_attr = {"SILVER_PROFILES": "DDL_PROFILES", "SILVER_BATCH_VERSIONS": "DDL_BATCH_VERSIONS"}
+    out = []
+    for name in names:
+        table = getattr(sbf, name)
+        ddl = getattr(sbf, ddl_attr[name])
+        qualified = f"{sbf.CATALOG}.{table}"
+        assert ddl.count(qualified) == 1, (name, qualified)
+        out.append(ddl.replace(qualified, f"lh.{table}"))
+    return out
 
 
 def seed_account(spark, iban, holder_entity_id=1, bank_bic="BICFI", currency="USD"):
@@ -240,6 +263,8 @@ def bind_stream_module(spark):
     ss.SILVER_STATEMENTS = "silver.account_statements"
     ss.SILVER_ACCOUNTS = "silver.accounts"
     ss.SILVER_ENTITIES = "silver.entities"
+    ss.SILVER_PROFILES = "silver.entity_profiles"
+    ss.SILVER_BATCH_VERSIONS = "silver.silver_batch_versions"
 
     ss._KYC = None
     ss._KYC_LOADED = True

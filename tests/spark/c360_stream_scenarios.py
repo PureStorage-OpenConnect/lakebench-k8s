@@ -205,6 +205,10 @@ def gold_merge(spark, script):
     return old, new, days, _merge_gold_from(script)
 
 
+def _failed(e: BaseException) -> str:
+    return f"{type(e).__name__}: {e}"[:4000]
+
+
 def main():
     jars, work = sys.argv[1], sys.argv[2]
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
@@ -305,32 +309,40 @@ def main():
     run_stream(spark, src, f"{work}/ckpt-ice-bronze-fresh", wb)
     out["ice_bronze_rows_after_fresh"] = spark.table(btbl).count()
 
+    # The Delta sections record a failure instead of raising, so a Delta bug
+    # does not hide the Iceberg results; the Delta tests fail on the record.
     # Delta silver stream: txnAppId/txnVersion, skip detected by version.
-    import silver_stream_delta
+    try:
+        import silver_stream_delta
 
-    spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.silver")
-    dtbl = "spark_catalog.silver.customer_interactions_enriched"
-    wd = lambda df, bid: silver_stream_delta.write_silver_batch(  # noqa: E731
-        df, bid, dtbl, f"file://{work}/"
-    )
-    log, _, _ = crash_then_replay(spark, work, "delta-silver", wd)
-    out["delta_silver_log"] = log
-    out["delta_silver_rows"] = spark.table(dtbl).count()
-    src = stage_files(spark, work, "delta-silver-fresh", 1, 10, start=2000)
-    run_stream(spark, src, f"{work}/ckpt-delta-silver-fresh", wd)
-    out["delta_silver_rows_after_fresh"] = spark.table(dtbl).count()
+        spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.silver")
+        dtbl = "spark_catalog.silver.customer_interactions_enriched"
+        wd = lambda df, bid: silver_stream_delta.write_silver_batch(  # noqa: E731
+            df, bid, dtbl, f"file://{work}/"
+        )
+        log, _, _ = crash_then_replay(spark, work, "delta-silver", wd)
+        out["delta_silver_log"] = log
+        out["delta_silver_rows"] = spark.table(dtbl).count()
+        src = stage_files(spark, work, "delta-silver-fresh", 1, 10, start=2000)
+        run_stream(spark, src, f"{work}/ckpt-delta-silver-fresh", wd)
+        out["delta_silver_rows_after_fresh"] = spark.table(dtbl).count()
+    except Exception as e:  # noqa: BLE001 (recorded for the Delta tests)
+        out["delta_silver_error"] = _failed(e)
 
     # Delta bronze ingest.
-    import bronze_ingest_delta
+    try:
+        import bronze_ingest_delta
 
-    spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.default")
-    dbtbl = "spark_catalog.default.bronze_raw"
-    wdb = lambda df, bid: bronze_ingest_delta.write_bronze_batch(  # noqa: E731
-        df, bid, dbtbl, f"file://{work}/"
-    )
-    log, _, _ = crash_then_replay(spark, work, "delta-bronze", wdb)
-    out["delta_bronze_log"] = log
-    out["delta_bronze_rows"] = spark.table(dbtbl).count()
+        spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.default")
+        dbtbl = "spark_catalog.default.bronze_raw"
+        wdb = lambda df, bid: bronze_ingest_delta.write_bronze_batch(  # noqa: E731
+            df, bid, dbtbl, f"file://{work}/"
+        )
+        log, _, _ = crash_then_replay(spark, work, "delta-bronze", wdb)
+        out["delta_bronze_log"] = log
+        out["delta_bronze_rows"] = spark.table(dbtbl).count()
+    except Exception as e:  # noqa: BLE001 (recorded for the Delta tests)
+        out["delta_bronze_error"] = _failed(e)
 
     # Gold INCREMENTAL boundary replace: one commit, earlier days kept.
     from pyspark.sql.functions import lit

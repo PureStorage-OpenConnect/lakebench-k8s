@@ -26,6 +26,11 @@ rules, or the benchmark queries; a run under another version compares with
 nothing measured under this one):
 
 - ``c360-1``, ``aml-1``: first stamped versions (2026-09-26).
+- ``aml-1`` kept (2026-10-02): continuous ``silver.entity_profiles`` now
+  leaves ``total_sent_usd`` and ``total_received_usd`` NULL for a side an
+  entity never used, as batch always did, instead of 0.00. No detection
+  rule, score, gold table or query reads these two columns, so no result
+  changes and the version is not bumped.
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is

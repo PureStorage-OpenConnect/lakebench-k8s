@@ -13,22 +13,18 @@ transform helper itself is exercised by
 
 from __future__ import annotations
 
-import types
 from pathlib import Path
 
 import pytest
 
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts"
+_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def test_stream_imports_ensure_partition_transform():
     """Regression guard on the import block: the H2 fix wired the helper into
     the stream's `from common import ...` line."""
-    src = (
-        Path(__file__).resolve().parent.parent
-        / "src/lakebench/spark/scripts/silver_stream_financial.py"
-    ).read_text()
+    src = (_SCRIPTS_DIR / "silver_stream_financial.py").read_text()
     # The name must appear inside the `from common import (` block, not merely
     # somewhere in the file (a comment or unused symbol would not count).
     assert "ensure_partition_transform," in src, (
@@ -42,11 +38,11 @@ def test_stream_main_invokes_ensure_partition_transform(monkeypatch):
     bootstrap and the partition-transform migration, capturing which
     (table, old, new) triples are requested. `.start()` is stubbed to a
     non-active query so the wait loop exits and `assert_progress` does not
-    swallow SilverAbort. All Spark interactions are stubs -- this test does
-    not launch a real SparkSession.
+    swallow SilverAbort. All Spark interactions are stubs (``_stream_main_stub``);
+    this test does not launch a real SparkSession.
     """
     pytest.importorskip("pyspark")
-    import common  # noqa: F401
+    import _stream_main_stub
     import silver_stream_financial as ss
 
     # D-safe residual (entity_profiles not maintained in continuous mode).
@@ -64,73 +60,7 @@ def test_stream_main_invokes_ensure_partition_transform(monkeypatch):
     # ensure_column and ensure_namespaces_for_ddl should be no-ops.
     monkeypatch.setattr(ss, "ensure_column", lambda *a, **k: False)
     monkeypatch.setattr(ss, "ensure_namespaces_for_ddl", lambda *a, **k: None)
-    # assert_progress would raise on our stubbed 0-row stream; bypass it.
-    monkeypatch.setattr(ss, "assert_progress", lambda *a, **k: None)
-
-    class _Query:
-        isActive = False
-        lastProgress = None
-
-        def exception(self):
-            return None
-
-        def stop(self):
-            pass
-
-    class _WriteStream:
-        def foreachBatch(self, fn):
-            return self
-
-        def option(self, *a, **k):
-            return self
-
-        def trigger(self, *a, **k):
-            return self
-
-        def start(self):
-            return _Query()
-
-    class _ReadStream:
-        def format(self, *_):
-            return self
-
-        def option(self, *_a, **_k):
-            return self
-
-        def load(self, *_a, **_k):
-            df = types.SimpleNamespace()
-            df.writeStream = _WriteStream()
-            return df
-
-    class _Conf:
-        def set(self, *a, **k):
-            pass
-
-        def get(self, *a, **k):
-            return "UTC"
-
-    class _SparkStub:
-        conf = _Conf()
-        readStream = _ReadStream()
-
-        def sql(self, *_a, **_k):
-            return None
-
-        def table(self, *_a, **_k):
-            return None
-
-        def stop(self):
-            pass
-
-    class _Builder:
-        def appName(self, *_):
-            return self
-
-        def getOrCreate(self):
-            return _SparkStub()
-
-    # Patch the whole SparkSession.builder chain.
-    monkeypatch.setattr(ss.SparkSession, "builder", _Builder())
+    _stream_main_stub.install(monkeypatch, ss)
 
     ss.main()
 

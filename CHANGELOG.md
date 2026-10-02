@@ -520,6 +520,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   table whose compaction failed in `reasons` and
   `detail.compaction_failures`. The maintenance policy id and the effective
   maintenance `id` are unchanged.
+- Continuous AML on Spark 4.1 with Iceberg no longer fails its silver
+  stream with an internal error ("No plan for TableReference") on the
+  entity and account MERGEs. Every MERGE in the AML silver stream whose
+  source reads a table now reads a materialised copy of it: the same rows,
+  computed once.
+- Continuous AML `silver.entity_profiles` now leaves `total_sent_usd` NULL
+  for an entity that never sent and `total_received_usd` NULL for one that
+  never received, as batch does; it wrote 0.00. A continuous deployment
+  that started before the fix keeps 0.00 on the rows it already wrote. No detection
+  rule, score or query reads these two columns, and `passthrough_ratio`
+  was already equal.
 ### Changed
 - **`destroy` removes what it used to leave in a surviving namespace.** With
   `create_namespace: false`, destroy left the PostgreSQL ServiceAccount, the

@@ -37,18 +37,27 @@ pytest.importorskip("pyspark")
 def test_batch_and_stream_dimensions_are_row_hash_identical(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
-    # Every maintained entity column matches between batch and stream on
-    # every row (sorted by entity_id).
-    assert out["entities_match"] is True, out
-    # Same for the maintained account columns (sorted by iban).
-    assert out["accounts_match"] is True, out
-    # Row counts also match: batch's DISTINCT and stream's MERGE
-    # both end up with one row per key.
-    assert out["entities_batch_count"] == out["entities_stream_count"], out
-    assert out["accounts_batch_count"] == out["accounts_stream_count"], out
-    # Guard against a silent no-op where both sides read the same table.
-    assert out["entities_batch_count"] > 0, out
-    assert out["accounts_batch_count"] > 0, out
+    assert not problems(out), out
+
+
+def problems(out):
+    """The guard's checks on the child's JSON, as named failures (the parity
+    mutation check reads them too): every maintained entity and account
+    column matches on every row; row counts match (batch's DISTINCT and the
+    stream's MERGE both end with one row per key); and both sides have rows,
+    so a silent no-op cannot pass."""
+    found = []
+    if out["entities_match"] is not True:
+        found.append("entities_match")
+    if out["accounts_match"] is not True:
+        found.append("accounts_match")
+    if out["entities_batch_count"] != out["entities_stream_count"]:
+        found.append("entities_count")
+    if out["accounts_batch_count"] != out["accounts_stream_count"]:
+        found.append("accounts_count")
+    if not (out["entities_batch_count"] > 0 and out["accounts_batch_count"] > 0):
+        found.append("no_rows")
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -299,4 +308,7 @@ def _run(jars):
 if __name__ == "__main__":
     # Run by spark_subprocess, which puts the scripts on PYTHONPATH; argv[1]
     # is the comma-separated jar classpath.
+    import _parity_mutation
+
+    _parity_mutation.install()
     _run(sys.argv[1])
