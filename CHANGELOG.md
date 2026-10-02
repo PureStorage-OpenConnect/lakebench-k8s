@@ -682,10 +682,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - An AML continuous run on a reused catalog no longer scores, or shows,
   the previous run's gold. The reset before the run now also drops
   gold.alerts, risk_scores, entity_clusters, daily_dashboards and
-  detection_status (gold-refresh recreates them), and the financial score
-  refuses a detection status that another run wrote: it took the run id
-  from that table without comparing it to its own, so a score taken before
-  this run's first gold tick reported the previous run's recall.
+  detection_status (gold-refresh recreates them), so a score or a query
+  before this run's first gold tick no longer reads the previous run's
+  alerts. The financial score inside `lakebench run` now also refuses a
+  detection status that another run wrote: it took the run id from that
+  table without comparing it to its own.
 - An AML continuous run on a reused catalog no longer starts from an
   earlier run's account statements and entity profiles. The reset before
   the run dropped transactions, edges, entities and accounts only, so the

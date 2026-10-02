@@ -309,10 +309,11 @@ def _drop_owned_table(spark, table):
     unreadable, shared (a namespace or warehouse root), or overlaps the datagen
     path is dropped catalog-only and its files are kept.
 
-    Scope of the proof: the callers pass only this deployment's silver.* and TM
-    gold.* tables, all created ``CREATE TABLE ... USING iceberg`` with no
-    LOCATION and no ``add_files`` (verified in silver_build_financial.py and
-    tm_operations.py), in this deployment's own catalog. So their files live
+    Scope of the proof: the callers pass only this deployment's silver.*, TM
+    gold.* and gold-refresh gold.* tables, all created ``CREATE TABLE ...
+    USING iceberg`` with no LOCATION and no ``add_files`` (verified in
+    silver_build_financial.py, tm_operations.py and gold_finalize_financial.py),
+    in this deployment's own catalog. So their files live
     under the catalog warehouse and the name + datagen-disjoint check is enough
     to keep PURGE off the raw corpus and off a shared namespace root. It does
     NOT prove the location is under a deployment-owned bucket root the way c360's
