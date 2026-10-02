@@ -204,8 +204,7 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "repeat.no_verified_corpus",
         _C.FAILED,
-        "`run --repeat` found no verified corpus to reuse",
-        planned=True,
+        "`run --repeat` found no verified corpus to reuse after repetition 1",
     ),
     ExitPath(
         "status.drift",
@@ -399,8 +398,7 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "series.corpus_changed",
         _C.REFUSED,
-        "the corpus changed between repetitions of `run --repeat`",
-        planned=True,
+        "the bronze corpus changed during or between repetitions of `run --repeat`",
     ),
     ExitPath("lease.held", _C.REFUSED, "another command holds the cluster lock lease", v16_code=1),
     ExitPath(

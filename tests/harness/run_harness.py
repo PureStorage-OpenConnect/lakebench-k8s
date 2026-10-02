@@ -305,6 +305,17 @@ class Recorder:
     fresh_bronze: bool = False
     #: The datagen Job this run deployed has not finished.
     datagen_running: bool = False
+    #: Batch applications still running (a stage a timeout left behind).
+    running_apps: set[str] = field(default_factory=set)
+    #: A K8sClient was made (the real one pins the process's context and
+    #: loads its kubeconfig; a bare API client before that is unconfigured).
+    k8s_client_made: bool = False
+    #: The silver-state ConfigMap's data (rebuild epochs) and its version.
+    silver_state: dict[str, str] = field(default_factory=lambda: {"bronze_data_clock": ""})
+    silver_state_rv: int = 1
+    #: Objects in the bronze bucket the fake paginator lists, by key:
+    #: (size, etag). Empty: an empty bucket, as the goldens read it.
+    bronze_objects: dict[str, tuple[int, str]] = field(default_factory=dict)
     #: With ``interrupt``: the state the monitor reports before the signal
     #: ("completed", "failed"): the application ended, its log is being read.
     interrupt_after_state: str | None = None
@@ -450,6 +461,7 @@ class RecordingK8s:
         self.namespace = namespace or rec.namespace
         self.context_name = context
         rec.add("k8s", "get_k8s_client", namespace)
+        rec.k8s_client_made = True
 
     def get_cluster_capacity(self, *args, **kwargs):
         _checked(self._rec, self._real.get_cluster_capacity, *args, **kwargs)
@@ -639,16 +651,6 @@ class FakeCoreV1Api(_FakeApi):
         self._rec.add("CoreV1Api", "list_namespace")
         return SimpleNamespace(items=[_namespace_object(self._rec.namespace)])
 
-    def read_namespaced_config_map(self, name, namespace, **kw):
-        """lakebench-silver-state of a deployment that has not yet run
-        bronze-verify: no data clock to clear before a fresh generate."""
-        self._rec.add("CoreV1Api", "read_namespaced_config_map", name, namespace)
-        if name != "lakebench-silver-state" or namespace != self._rec.namespace:
-            raise self._rec.refuse(f"unscripted ConfigMap {namespace}/{name}")
-        return SimpleNamespace(
-            data={"bronze_data_clock": ""}, metadata=SimpleNamespace(resource_version="1")
-        )
-
     def read_namespaced_pod(self, name, namespace, **kw):
         # Driver pods of an earlier run's streams: none are left.
         self._rec.add("CoreV1Api", "read_namespaced_pod", name, namespace)
@@ -673,6 +675,26 @@ class FakeCoreV1Api(_FakeApi):
                 _fake_pod("openshift-dns", "master-0", "1", "1Gi"),  # control plane
             ]
         )
+
+    def read_namespaced_config_map(self, name, namespace, **kw):
+        """The deployment's silver-state ConfigMap: rebuild epochs, and the
+        data clock (empty until a bronze-verify has run, so a fresh generate
+        has none to clear)."""
+        self._rec.add("CoreV1Api", "read_namespaced_config_map", name, namespace)
+        if name != "lakebench-silver-state" or namespace != self._rec.namespace:
+            raise self._rec.refuse(f"unscripted ConfigMap read {namespace}/{name}")
+        return SimpleNamespace(
+            metadata=SimpleNamespace(name=name, resource_version=str(self._rec.silver_state_rv)),
+            data=dict(self._rec.silver_state),
+        )
+
+    def replace_namespaced_config_map(self, name, namespace, body, **kw):
+        self._rec.add("CoreV1Api", "replace_namespaced_config_map", name, namespace)
+        if name != "lakebench-silver-state" or namespace != self._rec.namespace:
+            raise self._rec.refuse(f"unscripted ConfigMap replace {namespace}/{name}")
+        self._rec.silver_state = dict(body.data or {})
+        self._rec.silver_state_rv += 1
+        return body
 
     def list_namespaced_pod(self, namespace, label_selector="", **kw):
         self._rec.add("CoreV1Api", "list_namespaced_pod", namespace, label_selector)
@@ -716,6 +738,29 @@ class FakeCustomObjectsApi(_FakeApi):
             }
         # No SparkApplication is left over from an earlier run.
         raise _api_exception(404)
+
+    def list_namespaced_custom_object(self, group, version, namespace, plural, **kw):
+        """This deployment's SparkApplications: streams run until deleted,
+        every other submitted application has finished."""
+        self._rec.add("CustomObjectsApi", "list", plural, namespace)
+        if not self._rec.k8s_client_made:
+            raise self._rec.refuse("a CustomObjectsApi list before any K8sClient (no kubeconfig)")
+        if plural != "sparkapplications" or namespace != self._rec.namespace:
+            raise self._rec.refuse(f"unscripted list {namespace}/{plural}")
+        items = [
+            {
+                "metadata": {"name": name, "uid": uid},
+                "status": {
+                    "applicationState": {
+                        "state": "RUNNING"
+                        if name in self._rec.live_streams or name in self._rec.running_apps
+                        else "COMPLETED"
+                    }
+                },
+            }
+            for name, uid in sorted(self._rec.apps.items())
+        ]
+        return {"items": items}
 
     def delete_namespaced_custom_object(
         self, group, version, namespace, plural, name, body=None, **kw
@@ -1222,7 +1267,13 @@ class _FakeBoto:
                 rec.add("S3", "paginate list_objects_v2", Bucket, Prefix)
                 if not Bucket.startswith(f"{NAME}-"):
                     raise rec.refuse(f"listing of a bucket not of the deployment: {Bucket}")
-                return iter([{"KeyCount": 0, "Contents": []}])
+                # As S3 lists: only keys under Prefix (bronze bucket only).
+                contents = [
+                    {"Key": k, "Size": size, "ETag": f'"{etag}"'}
+                    for k, (size, etag) in sorted(rec.bronze_objects.items())
+                    if Bucket == f"{NAME}-bronze" and k.startswith(Prefix)
+                ]
+                return iter([{"KeyCount": len(contents), "Contents": contents}])
 
         return _Paginator()
 

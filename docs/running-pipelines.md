@@ -113,6 +113,18 @@ metrics, and table health (data file counts and snapshot counts from
 Iceberg system tables). The `cycle_progression` score shows how elapsed
 time and table state evolve across cycles.
 
+## Repeated Batch Runs
+
+`lakebench run --repeat 3` runs the batch pipeline three times as one
+series over one corpus: repetition 1 may generate, repetitions 2 and 3
+rebuild silver and gold from the same bronze. Bronze is checked between
+repetitions and the series stops (exit 3) if it changed. Records carry
+`series {id, index, size}`; the series manifest is
+`lakebench-output/series/<id>.json`. `--repeat` is refused with a
+continuous run, with `cycles` above 1, and with `--stage`, `--local`,
+`--deploy-only` or `--generate-only`. See
+[CLI Reference](cli-reference.md#run) for the rules.
+
 ## Command Flags
 
 | Flag | Short | Default | Description |

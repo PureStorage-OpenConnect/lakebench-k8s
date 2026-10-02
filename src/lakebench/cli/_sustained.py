@@ -33,6 +33,7 @@ from lakebench.cli._helpers import (
     print_warning,
     write_run_report,
 )
+from lakebench.cli._interrupt import restores_handlers
 from lakebench.config.schema import is_continuous_mode
 from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
@@ -2847,6 +2848,7 @@ def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
     return max(counts) if counts else None
 
 
+@restores_handlers
 def _run_sustained(
     cfg,
     config_file: Path,

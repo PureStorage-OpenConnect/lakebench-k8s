@@ -410,6 +410,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   PVC as the cluster held it. The code is read again at run end, including
   a hash of the package files; a run whose lakebench code changed while it
   ran is not `supported`. See `docs/benchmarking.md`, "Metrics JSON".
+- **`run --repeat N`: one series of batch runs over one corpus.**
+  Repetition 1 runs as asked; repetitions 2 to N do not generate and
+  rebuild silver and gold from the same bronze. The config is loaded once
+  for the whole series. The datagen prefix is listed around every
+  repetition and must not change; a change, a corpus that differs from
+  repetition 1's, or an interrupt stops the series (exit 3, 3, 130), and a
+  repetition that fails its verdict does not. Records carry
+  `series {id, index, size}`, later repetitions inherit repetition 1's
+  corpus block (`experiment.corpus.inherited_from`) only when their own
+  pre-save listing matches, and `lakebench-output/series/<id>.json`
+  (schema `lb-series/1`) lists the repetitions, the passed members and the
+  corpus. Refused with a continuous run, `cycles` above 1, `--stage`,
+  `--local`, `--deploy-only` and `--generate-only`.
 - `[aml]` install extra (`pip install "lakebench-k8s[aml]"`) for running the
   AML reference detector and the local AML gate. It pins numpy, scipy,
   pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster
@@ -925,6 +938,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   silver at the replay snapshot with the `snapshot-id` read option, which
   Iceberg 1.11 removed, so it failed before running any rule; it now reads
   with `VERSION AS OF`.
+- **A run that fails while saving its record no longer leaves its signal
+  handlers installed.** When the metrics save, the report or the journal
+  raised at the end of a batch or continuous run, the run's SIGINT/SIGTERM
+  handler stayed in the process, and a later cluster-lock acquire in the
+  same process (which guards only an unhandled SIGTERM) ran unguarded. The
+  handlers are now put back however the run ends.
 - **The capacity check counts the Spark driver's memory overhead.**
   The driver pod requests its heap plus the overhead Spark on Kubernetes
   adds to a Python driver, 40% of the heap (12.8 GiB for the 32 GiB
@@ -1102,7 +1121,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   once with `lakebench admin reclaim-bucket` and then uses `--regenerate`
   (`--allow-stale-bronze` would over-count). A multi-cycle run still clears
   an owned prefix before cycle 0, and a `run` after `generate
-  --allow-stale-bronze` still records the note.
+  --allow-stale-bronze` still records the note. `run` refuses
+  `--allow-stale-bronze` (exit 2, before any cluster call) where no generate
+  reads it: without `--generate`, `--generate-only` or a multi-cycle batch
+  run, and with `--local`, `--deploy-only` or a continuous run other than
+  `--generate-only`. A `run --repeat` series passes it to repetition 1
+  only, and its manifest carries repetition 1's note (`corpus.stale_bronze`).
 - **`destroy` clears the kept silver-state's data clock when it empties
   bronze.** With `create_namespace: false`, `lakebench-silver-state`
   survives destroy for its rebuild counters; its `bronze_data_clock` now

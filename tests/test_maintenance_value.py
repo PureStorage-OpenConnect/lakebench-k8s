@@ -125,7 +125,7 @@ def test_delta_file_counts_never_measure_a_compaction():
 
     import lakebench.cli._run as run_mod
 
-    src = inspect.getsource(run_mod.run)
+    src = inspect.getsource(run_mod._run_once)
     gate = src.index("if not compaction_measurable(cfg):")
     assert src.index("post_file_count = _data_file_total(_post_health)") < gate
     assert gate < src.index("if pre_file_count > 0 and post_file_count > 0:")

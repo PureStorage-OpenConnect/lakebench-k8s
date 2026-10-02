@@ -32,11 +32,13 @@ stage, or deploys datagen, deletes a left object by name first.
 
 from __future__ import annotations
 
+import functools
 import logging
 import signal
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,6 +89,78 @@ class Owned:
     @property
     def key(self) -> str:
         return f"{self.kind}/{self.name}"
+
+
+@contextmanager
+def interrupt_scope() -> Iterator[None]:
+    """Around one ``run`` (or a whole ``--repeat`` series). Inside it, a
+    SIGTERM left at its default raises ``KeyboardInterrupt`` like a Ctrl-C,
+    so one that lands outside a run's own handlers (between repetitions, or
+    before a run installs them) still ends the command through its cleanup.
+    On the way out, a handler still owned by a ``RunInterrupt`` (a run whose
+    finally raised before it restored its handlers) is replaced by the
+    handler that instance saved, and SIGTERM gets its default back, so
+    nothing outlives the command."""
+    sigterm_set = False
+    if threading.current_thread() is threading.main_thread():
+        try:
+            if signal.getsignal(signal.SIGTERM) == signal.SIG_DFL:
+                signal.signal(signal.SIGTERM, _sigterm_as_interrupt)
+                sigterm_set = True
+        except (ValueError, OSError) as e:
+            logger.debug("run: cannot handle SIGTERM: %s", e)
+    try:
+        yield
+    finally:
+        if threading.current_thread() is threading.main_thread():
+            for sig in INTERRUPT_SIGNALS:
+                try:
+                    current = signal.getsignal(sig)
+                    owner = getattr(current, "__self__", None)
+                    if isinstance(owner, RunInterrupt):
+                        owner.restore()
+                except (ValueError, OSError, TypeError) as e:
+                    logger.debug("run: could not check the handler for %s: %s", sig, e)
+            if sigterm_set:
+                try:
+                    if signal.getsignal(signal.SIGTERM) is _sigterm_as_interrupt:
+                        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                except (ValueError, OSError) as e:
+                    logger.debug("run: could not restore SIGTERM: %s", e)
+
+
+def restores_handlers(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorates a run function whose ``RunInterrupt.restore()`` comes at the
+    end of a long finally (after the save, report and journal): however the
+    call ends, even when that finally raised, the SIGINT and SIGTERM handlers
+    it found on entry are put back, so none of the run's outlives it. Main
+    thread only (signal handlers cannot be read or set elsewhere)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if threading.current_thread() is not threading.main_thread():
+            return fn(*args, **kwargs)
+        found: dict[int, _Handler] = {}
+        for sig in INTERRUPT_SIGNALS:
+            try:
+                found[sig] = signal.getsignal(sig)
+            except (ValueError, OSError) as e:
+                logger.debug("run: cannot read the handler for %s: %s", sig, e)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            for sig, handler in found.items():
+                try:
+                    if signal.getsignal(sig) is not handler:
+                        signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+                except (ValueError, OSError, TypeError) as e:
+                    logger.debug("run: could not restore the handler for %s: %s", sig, e)
+
+    return wrapper
+
+
+def _sigterm_as_interrupt(signum: int, _frame: Any) -> None:
+    raise KeyboardInterrupt
 
 
 def signal_name(signum: int) -> str:

@@ -15,7 +15,13 @@ import pytest
 from typer.testing import CliRunner
 
 from lakebench.cli import app
-from lakebench.cli._run_args import RUN_RULES, RunArgs, run_args_problems, validate_run_args
+from lakebench.cli._run_args import (
+    RUN_RULES,
+    RunArgs,
+    RunContext,
+    run_args_problems,
+    validate_run_args,
+)
 from lakebench.exit_codes import ExitCode, UsageError
 
 CONFIG = """\
@@ -49,12 +55,17 @@ CASES = [
     (["--local", "--force-rebuild"], "--local does not deploy, generate on its own, rebuild"),
     (["--regenerate"], "--regenerate only applies with --generate or --generate-only"),
     (["--continuous", "--generate", "--regenerate"], "--regenerate does not apply to a local"),
+    (["--allow-stale-bronze"], "--allow-stale-bronze only applies when the run generates"),
     (["--generate", "--skip-generate"], "--skip-generate and --generate cannot be combined"),
     (["--force-reset"], "--force-reset only applies to a continuous run"),
     (["--continuous", "--force-rebuild"], "--force-rebuild only applies to a batch run"),
     (["--duration", "600"], "--duration only applies to a continuous run"),
     (["--continuous", "--duration", "30"], "--duration is below 60 s"),
     (["--timeout", "0"], "--timeout must be at least 1 s"),
+    (["--repeat", "0"], "--repeat must be between 1 and 20"),
+    (["--continuous", "--repeat", "2"], "--repeat does not apply to a continuous run"),
+    (["--repeat", "2", "--cycles"], "--repeat does not apply to a multi-cycle run"),
+    (["--stage", "silver-build", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
 ]
 
 
@@ -67,8 +78,11 @@ def test_every_rule_has_a_case():
     assert len(CASES) == len(RUN_RULES)
     for (argv, message), rule in zip(CASES, RUN_RULES, strict=True):
         args = _args_of(argv)
-        mode = "continuous" if args.continuous else "batch"
-        assert rule.broken(args, mode), argv
+        ctx = RunContext(
+            mode="continuous" if args.continuous else "batch",
+            cycles=2 if "--cycles" in argv else 1,
+        )
+        assert rule.broken(args, ctx), argv
         assert message in rule.text(args), (argv, rule.next)
 
 
@@ -84,6 +98,7 @@ def _args_of(argv: list[str]) -> RunArgs:
         "--generate": "include_datagen",
         "--skip-generate": "skip_generate",
         "--skip-deploy": "skip_infra",
+        "--allow-stale-bronze": "allow_stale_bronze",
     }
     kw: dict = {}
     it = iter(argv)
@@ -92,7 +107,7 @@ def _args_of(argv: list[str]) -> RunArgs:
             kw[flags[a]] = True
         elif a == "--stage":
             kw["stage"] = next(it)
-        elif a in ("--duration", "--timeout"):
+        elif a in ("--duration", "--timeout", "--repeat"):
             kw[a[2:]] = int(next(it))
     return RunArgs(**kw)
 
@@ -144,10 +159,15 @@ def no_cluster(monkeypatch):
 def test_run_validation_zero_cluster_calls(tmp_path, monkeypatch, no_cluster, argv, message):
     monkeypatch.chdir(tmp_path)
     cfg = tmp_path / "runargs.yaml"
-    cfg.write_text(CONFIG)
+    text = CONFIG
+    if "--cycles" in argv:  # not a flag: the config's cycle count
+        argv = [a for a in argv if a != "--cycles"]
+        text = text.replace("    mode: batch\n", "    mode: batch\n    cycles: 2\n")
+    cfg.write_text(text)
     result = CliRunner().invoke(app, ["run", str(cfg), *argv, "--yes"])
     assert result.exit_code == ExitCode.USAGE, result.output
-    assert message in result.output, result.output
+    if argv[:2] != ["--repeat", "0"]:  # the CLI's own range check answers first
+        assert message in result.output, result.output
     assert no_cluster == []
     assert not list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
 
@@ -200,3 +220,28 @@ def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatc
     with pytest.raises(UsageError, match="--timeout must be at least 1 s"):
         _run_pipeline(cfg, 0, keep=True)
     assert called == [] and no_cluster == []
+
+
+@pytest.mark.parametrize(
+    ("kw", "mode", "cycles", "refused"),
+    [
+        ({"include_datagen": True}, "batch", 1, False),
+        ({"generate_only": True}, "batch", 1, False),
+        ({"generate_only": True}, "continuous", 1, False),
+        ({}, "batch", 2, False),
+        ({"skip_generate": True}, "batch", 2, False),
+        ({}, "batch", 1, True),
+        ({"include_datagen": True, "skip_generate": True}, "batch", 1, True),
+        ({"include_datagen": True}, "continuous", 1, True),
+        ({"include_datagen": True, "local": True}, "batch", 1, True),
+        ({"deploy_only": True}, "batch", 2, True),
+    ],
+)
+def test_allow_stale_bronze_only_where_a_generate_reads_it(kw, mode, cycles, refused):
+    """The flag is read only by the bronze gate before a run's own datagen:
+    --generate-only, a batch --generate, or a multi-cycle batch run (whose
+    cycle 0 runs the gate even under --skip-generate)."""
+    rule = next(r for r in RUN_RULES if "--allow-stale-bronze" in str(r.message))
+    ctx = RunContext(mode=mode, cycles=cycles)
+    assert rule.broken(RunArgs(allow_stale_bronze=True, **kw), ctx) is refused
+    assert not rule.broken(RunArgs(**kw), ctx)
