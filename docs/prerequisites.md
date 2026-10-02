@@ -28,7 +28,7 @@ Check id `scratch-storage-class`. Needed when: `platform.storage.scratch.enabled
 
 Spark executors put shuffle and spill on per-executor PVCs from the StorageClass named by `platform.storage.scratch.storage_class` (default `px-csi-scratch`, Portworx with one replica). The StorageClass is shared cluster infrastructure: Lakebench uses it and never creates or deletes it during `deploy` or `destroy`.
 
-**Fix:** A cluster admin runs `lakebench admin install-scratch-storage-class <config>` once per cluster, or set `platform.storage.scratch.enabled: false`.
+**Fix:** A cluster admin runs `lakebench admin install --component scratch-storage-class <config>` once per cluster, or set `platform.storage.scratch.enabled: false`.
 
 <a id="spark-operator"></a>
 
@@ -38,7 +38,7 @@ Check id `spark-operator`. Needed when: Always.
 
 Spark jobs are `SparkApplication` resources run by one shared Kubeflow Spark Operator. The check needs the `SparkApplication` CRD, a controller Deployment with a ready replica, and a 2.x chart (2.5.1 is the tested release; 1.x cannot mount the scripts volume). `deploy` adds its namespace to the operator's watch list under the cluster lease; never edit `spark.jobNamespaces` by hand.
 
-**Fix:** A cluster admin runs `lakebench admin install-spark-operator <config>` once per cluster. Do not install or upgrade it with a raw `helm` command: the managed path holds the cluster lease and keeps the operator's namespace watch list.
+**Fix:** A cluster admin runs `lakebench admin install --component spark-operator <config>` once per cluster. Do not install or upgrade it with a raw `helm` command: the managed path holds the cluster lease and never resets the operator's namespace watch list.
 
 <a id="stackable"></a>
 
@@ -48,7 +48,7 @@ Check id `stackable`. Needed when: `architecture.catalog.type: hive`.
 
 The Hive Metastore is a Stackable `HiveCluster`. The check needs the `HiveCluster` and `SecretClass` CRDs and a running hive-operator and secret-operator pod. CRDs alone are not enough, because helm leaves them behind when an operator is uninstalled.
 
-**Fix:** A cluster admin installs the Stackable commons, listener, secret and hive operators (SDP 25.7.0), or use a Polaris recipe, which needs no operator.
+**Fix:** A cluster admin runs `lakebench admin install --component stackable <config>` once per cluster (the commons, listener, secret and hive operators, SDP 25.7.0), or use a Polaris recipe, which needs no operator.
 
 <a id="observability-stack"></a>
 
@@ -58,7 +58,7 @@ Check id `observability-stack`. Needed when: `observability.enabled: true`.
 
 Metrics go to one shared Prometheus and Grafana (kube-prometheus-stack, release `lakebench-observability`). Each deployment adds only its own PodMonitors; `destroy` never removes the shared release.
 
-**Fix:** None needed: `deploy` installs the shared kube-prometheus-stack release `lakebench-observability` when none exists. To remove it later, a cluster admin runs `helm uninstall lakebench-observability -n lakebench-observability` once no deployment uses it.
+**Fix:** A cluster admin runs `lakebench admin install --component observability <config>` once per cluster, or set `observability.enabled: false`. To remove the stack later, a cluster admin runs `helm uninstall lakebench-observability -n lakebench-observability` once no deployment uses it.
 
 <a id="openshift-scc-clusterrole"></a>
 

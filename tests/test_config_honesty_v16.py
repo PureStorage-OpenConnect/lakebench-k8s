@@ -360,19 +360,27 @@ def test_deploy_step_labels_say_verify_and_check():
     assert not any(v.startswith(("Creating scratch", "Installing Spark")) for v in labels.values())
 
 
-@pytest.mark.parametrize(
-    ("install", "expected"),
-    [
-        (False, "Spark Operator watch list"),
-        (True, "Spark Operator (installed if missing, namespace watched)"),
-    ],
-)
-def test_deploy_summary_lists_the_operator_step_either_way(install, expected):
+def test_deploy_summary_lists_the_operator_step_and_install_true_is_refused(tmp_path):
+    """Superseded by DEP-3 (V16-10: superseded hunks are dropped): deploy
+    never installs the operator, so the summary always names the watch-list
+    step, and ``operator.install: true`` is refused at load for a command
+    that changes data, with the admin command."""
     from lakebench.cli._deploy import _build_component_list
+    from lakebench.config import ConfigValidationError, LoadPurpose, load_config
 
-    cfg = make_config()
-    cfg.platform.compute.spark.operator.install = install
-    assert expected in _build_component_list(cfg)
+    assert "Spark Operator watch list" in _build_component_list(make_config())
+    path = tmp_path / "c.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "honesty",
+                "platform": {"compute": {"spark": {"operator": {"install": True}}}},
+            }
+        )
+    )
+    with pytest.raises(ConfigValidationError) as exc:
+        load_config(path, purpose=LoadPurpose.MUTATE)
+    assert "admin install --component spark-operator" in str(exc.value)
 
 
 def test_generate_has_no_resume_flag(tmp_path):

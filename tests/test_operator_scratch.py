@@ -53,6 +53,9 @@ class _FakeCluster:
     def helm_upgrades(self) -> list[list[str]]:
         return [c for c in self.calls if c[:2] == ["helm", "upgrade"]]
 
+    def helm_writes(self) -> list[list[str]]:
+        return [c for c in self.calls if c[:2] in (["helm", "upgrade"], ["helm", "install"])]
+
     def __call__(self, cmd, **kwargs):
         self.calls.append(list(cmd))
         ok = MagicMock(returncode=0, stdout="", stderr="")
@@ -70,7 +73,7 @@ class _FakeCluster:
             return MagicMock(
                 returncode=0, stdout=json.dumps([{"name": "spark-operator", "chart": self.chart}])
             )
-        if cmd[:2] == ["helm", "upgrade"]:
+        if cmd[:2] in (["helm", "upgrade"], ["helm", "install"]):
             self.upgraded = True
             return ok
         if cmd[:3] == ["kubectl", "api-resources", "--api-group=security.openshift.io"]:
@@ -123,48 +126,42 @@ class TestHelmValues:
 
 
 class TestInstall:
+    """install() is the fresh install admin install runs; never an upgrade."""
+
     def test_fresh_install_sizes_tmp(self):
         fake = _FakeCluster(release=False)
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
             assert SparkOperatorManager(version="2.5.1").install() is True
-        (cmd,) = fake.helm_upgrades()
+        (cmd,) = fake.helm_writes()
+        assert cmd[:2] == ["helm", "install"]
         assert "--reuse-values" not in cmd
         assert "controller.volumes[0].emptyDir.sizeLimit=8Gi" in _set_values(cmd)
         assert cmd[cmd.index("--version") + 1] == "2.5.1"
 
-    def test_existing_release_keeps_watch_list_and_backfills(self):
-        """A plain upgrade --install resets spark.jobNamespaces to ["default"]
-        and unwatches every tenant; an existing release must reuse values
-        and backfill what the stored values lack (gotcha 3b)."""
+    def test_existing_release_is_never_upgraded(self):
+        """An installed operator keeps its chart and watch list: install()
+        on an existing release refuses. Reverted (v1.6), it ran helm upgrade
+        --reuse-values to the given version."""
         fake = _FakeCluster(release=True)
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            mgr = SparkOperatorManager(version="2.5.1", job_namespace="tenant-a")
-            assert mgr.install() is True
-        (cmd,) = fake.helm_upgrades()
-        assert "--reuse-values" in cmd
-        sets = _set_values(cmd)
-        assert not any(v.startswith("spark.jobNamespaces") for v in sets)
-        assert "controller.volumes[0].name=tmp" in sets
-        assert "controller.volumes[0].emptyDir.sizeLimit=8Gi" in sets
-        assert any(v.startswith("prometheus.metrics.jobSubmitLatencyBuckets=") for v in sets)
-        # The upgrade waits for the new ReplicaSets before reporting ready.
-        assert any(c[:3] == ["kubectl", "rollout", "status"] for c in fake.calls)
+            mgr = SparkOperatorManager(version="2.4.0", job_namespace="tenant-a")
+            assert mgr.install() is False
+        assert fake.helm_writes() == []
 
-    def test_existing_release_without_version_stays_on_its_chart(self):
-        fake = _FakeCluster(release=True, chart="spark-operator-2.5.1")
+    def test_no_version_refuses_an_unpinned_install(self):
+        fake = _FakeCluster(release=False)
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager().install() is True
-        (cmd,) = fake.helm_upgrades()
-        assert cmd[cmd.index("--version") + 1] == "2.5.1"
+            assert SparkOperatorManager().install() is False
+        assert fake.helm_writes() == []
 
     def test_refuses_when_release_state_unreadable(self):
         fake = _FakeCluster(release=None)
         with patch(_RUN, side_effect=fake):
             assert SparkOperatorManager(version="2.5.1").install() is False
-        assert fake.helm_upgrades() == []
+        assert fake.helm_writes() == []
 
     def test_fails_when_the_spec_did_not_take_the_size(self):
-        fake = _FakeCluster(release=True)
+        fake = _FakeCluster(release=False)
         fake.tmp_after_upgrade = "1Gi"
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
             assert SparkOperatorManager(version="2.5.1").install() is False
@@ -182,12 +179,17 @@ class TestApplyTmpSize:
         assert cmd[cmd.index("--version") + 1] == "2.5.1"
         assert "controller.volumes[0].emptyDir.sizeLimit=8Gi" in _set_values(cmd)
         assert not any(v.startswith("spark.jobNamespaces") for v in _set_values(cmd))
+        # The resize waits for the new ReplicaSets before reporting done.
+        assert any(c[:3] == ["kubectl", "rollout", "status"] for c in fake.calls)
 
     def test_watch_list_edit_never_touches_the_volume(self):
         """Watch-list edits run on every deploy; they carry the stored size
         forward with --reuse-values and must not override it."""
-        mgr = SparkOperatorManager(version="2.5.1")
-        assert not any("controller.volumes" in a for a in mgr._watch_list_pin())
+        fake = _FakeCluster(release=True)
+        with patch(_RUN, side_effect=fake):
+            pin = SparkOperatorManager(version="2.5.1")._watch_list_pin()
+        assert pin is not None
+        assert not any("controller.volumes" in a for a in pin)
 
 
 class TestDiagnose:
@@ -294,16 +296,24 @@ class TestRepairOperatorTmp:
 
 class TestInstallCommand:
     def test_passes_version_and_size(self):
-        """The command used to call install() with no version, so
-        --version was ignored and Helm installed the repo's latest chart."""
-        with _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, _lock):
+        """The old verb, now an alias of admin install, still passes --version
+        and --controller-tmp-size to a fresh install."""
+        from lakebench.deploy.shared_components import ComponentStatus, SparkOperator
+
+        absent = ComponentStatus(installed=False, detail="no Spark Operator")
+        ready = ComponentStatus(installed=True, version="2.5.1", ready=True)
+        with (
+            _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, _lock),
+            patch.object(SparkOperator, "status", side_effect=[absent, absent, ready]),
+        ):
             mgr.install.return_value = True
+            mgr.refresh_chart_repo.return_value = None
             r = runner.invoke(
                 admin_app,
                 ["install-spark-operator", "--version", "2.5.1", "--controller-tmp-size", "16Gi"],
             )
         assert r.exit_code == 0, r.output
-        mgr.install.assert_called_once_with(version="2.5.1", tmp_size="16Gi")
+        mgr.install.assert_called_once_with(version="2.5.1", tmp_size="16Gi", add_repo=False)
 
     def test_rejects_a_size_below_the_floor(self):
         with _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, _lock):
@@ -328,16 +338,21 @@ class TestDoctorAndStatus:
         )
 
     def test_doctor_names_the_condition_and_the_repair(self):
+        from lakebench.deploy import prereqs
+
         core = MagicMock()
+        ok = [
+            prereqs.PrereqOutcome(p, prereqs.PrereqResult(prereqs.PrereqStatus.OK, "fine"))
+            for p in prereqs.PREREQS
+        ]
         with (
             patch("lakebench.cli._admin._get_core_v1", return_value=core),
-            patch("kubernetes.client.ApiextensionsV1Api"),
-            patch("kubernetes.client.StorageV1Api"),
+            patch("lakebench.deploy.prereqs.run_prereqs", return_value=ok),
             patch("lakebench.deploy.cluster_lock.read_cluster_lock", return_value=None),
             patch("lakebench.cli._admin._read_operator_scratch", return_value=self._diag()),
         ):
             r = runner.invoke(admin_app, ["doctor"])
-        assert r.exit_code == 0
+        assert r.exit_code == 0, r.output
         out = " ".join(r.output.split())
         assert "sizeLimit is 1Gi" in out
         assert "evicted for storage" in out
@@ -359,43 +374,7 @@ class TestDoctorAndStatus:
         assert "controller /tmp: 8Gi" in " ".join(r.output.split())
 
 
-class _Clock:
-    def __init__(self):
-        self.now = 0.0
-
-    def time(self):
-        return self.now
-
-    def sleep(self, s):
-        self.now += s
-
-
 class TestReviewFixes:
-    def test_deploy_path_never_upgrades_an_existing_not_ready_release(self):
-        """ensure_installed (operator.install: true) used to reinstall a
-        not-ready operator outside the cluster lease, pinned to the tenant's
-        config version; during an eviction storm that fires constantly."""
-        fake = _FakeCluster(release=True)
-        fake.ready = "0"
-        with (
-            patch(_RUN, side_effect=fake),
-            patch("lakebench.modules.pipeline_engines.spark.operator.time", _Clock()),
-        ):
-            status = SparkOperatorManager(version="2.4.0", job_namespace="t").ensure_installed()
-        assert fake.helm_upgrades() == []
-        assert status.ready is False
-        assert "admin repair-operator" in status.message
-
-    def test_deploy_path_still_installs_a_missing_release(self):
-        fake = _FakeCluster(release=False)
-        fake.ready = "0"
-        with (
-            patch(_RUN, side_effect=fake),
-            patch("lakebench.modules.pipeline_engines.spark.operator.time", _Clock()),
-        ):
-            SparkOperatorManager(version="2.5.1", job_namespace="t").ensure_installed()
-        assert len(fake.helm_upgrades()) == 1
-
     def test_refuses_to_drop_other_stored_controller_volumes(self):
         fake = _FakeCluster(release=True)
         fake.stored_values = {"controller": {"volumes": [{"name": "tmp"}, {"name": "ca-bundle"}]}}
@@ -408,7 +387,7 @@ class TestReviewFixes:
         fake = _FakeCluster(release=True)
         fake.tmp_before = fake.tmp_after_upgrade = "16Gi"
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager(version="2.5.1").install() is True
+            assert SparkOperatorManager().apply_controller_tmp_size(None) is True
         (cmd,) = fake.helm_upgrades()
         assert "controller.volumes[0].emptyDir.sizeLimit=16Gi" in _set_values(cmd)
 
@@ -464,27 +443,9 @@ class TestReviewFixes:
         fake.tmp_before = fake.tmp_after_upgrade = None
         fake.stored_values = {"controller": {"volumes": [{"name": "tmp", "emptyDir": {}}]}}
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager(version="2.5.1").install() is True
+            assert SparkOperatorManager().apply_controller_tmp_size(None) is True
         (cmd,) = fake.helm_upgrades()
         assert not any("controller.volumes" in v for v in _set_values(cmd))
-
-    def test_recovered_operator_still_gets_the_namespace_added(self):
-        fake = _FakeCluster(release=True)
-        fake.ready = "0"
-        mgr = SparkOperatorManager(version="2.5.1", job_namespace="t")
-
-        def ready_after_wait(timeout=120):
-            fake.ready = "1"
-            return True
-
-        with (
-            patch(_RUN, side_effect=fake),
-            patch.object(mgr, "_wait_for_ready", side_effect=ready_after_wait),
-            patch.object(mgr, "_get_active_namespaces", return_value=["default"]),
-            patch.object(mgr, "_add_namespace_to_watch", return_value=True) as add,
-        ):
-            mgr.ensure_installed()
-        add.assert_called_once_with("t")
 
 
 class TestThirdPass:
@@ -515,6 +476,6 @@ class TestThirdPass:
         fake = _FakeCluster(release=True)
         fake.tmp_before = None
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager(version="2.5.1").install() is True
+            assert SparkOperatorManager().apply_controller_tmp_size(None) is True
         (cmd,) = fake.helm_upgrades()
         assert "controller.volumes[0].emptyDir.sizeLimit=8Gi" in _set_values(cmd)

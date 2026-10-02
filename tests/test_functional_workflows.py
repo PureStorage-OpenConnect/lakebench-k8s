@@ -464,8 +464,8 @@ spec:
 class TestObservabilityDeployerWorkflow:
     """Tests for ObservabilityDeployer lifecycle."""
 
-    def test_deploy_builds_correct_helm_values(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
+    def test_install_builds_correct_helm_values(self):
+        from lakebench.deploy.observability import build_helm_values
 
         cfg = make_config(
             observability={
@@ -475,11 +475,7 @@ class TestObservabilityDeployerWorkflow:
                 "dashboards_enabled": False,
             }
         )
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = ObservabilityDeployer(engine)
-
-        values = deployer._build_helm_values("test-ns")
+        values = build_helm_values(cfg.observability)
         assert values["prometheus.prometheusSpec.retention"] == "14d"
         assert (
             "20Gi"
@@ -489,21 +485,12 @@ class TestObservabilityDeployerWorkflow:
         )
         assert values["grafana.enabled"] == "false"
 
-    @staticmethod
-    def _lease():
-        from contextlib import ExitStack
-
-        stack = ExitStack()
-        stack.enter_context(patch("kubernetes.client.CoreV1Api"))
-        lock = stack.enter_context(patch("lakebench.deploy.cluster_lock.cluster_lock"))
-        lock.return_value.__exit__.return_value = False
-        stack.enter_context(
-            patch("lakebench.deploy.observability._wait_for_prometheus", return_value="")
+    def test_deploy_uses_the_shared_release_and_never_installs(self):
+        from lakebench.deploy.observability import (
+            HELM_RELEASE_NAME,
+            OBSERVABILITY_NAMESPACE,
+            ObservabilityDeployer,
         )
-        return stack
-
-    def test_deploy_installs_shared_release_when_absent(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
 
         cfg = make_config(observability={"enabled": True})
         engine = MagicMock()
@@ -511,46 +498,25 @@ class TestObservabilityDeployerWorkflow:
         engine.dry_run = False
 
         deployer = ObservabilityDeployer(engine)
-
+        listed = json.dumps(
+            [
+                {
+                    "name": HELM_RELEASE_NAME,
+                    "namespace": OBSERVABILITY_NAMESPACE,
+                    "status": "deployed",
+                }
+            ]
+        )
         with (
-            self._lease(),
             patch("subprocess.run") as mock_run,
-            patch(
-                "lakebench.deploy.observability._find_helm_service",
-                return_value="mock-svc",
-            ),
+            patch("lakebench.deploy.observability._wait_for_prometheus", return_value=""),
         ):
-            mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stdout=listed, stderr="")
             result = deployer.deploy()
 
         assert result.status == DeploymentStatus.SUCCESS
         cmds = [c.args[0] for c in mock_run.call_args_list]
-        # helm list (absent), repo add, repo update, helm install -- never an upgrade
-        assert [c[:2] for c in cmds if c[0] == "helm"][0] == ["helm", "list"]
-        assert sum(1 for c in cmds if c[:2] == ["helm", "install"]) == 1
-        assert not any(c[:2] == ["helm", "upgrade"] for c in cmds)
-
-    def test_deploy_helm_failure(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
-
-        cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = False
-
-        deployer = ObservabilityDeployer(engine)
-
-        with self._lease(), patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                MagicMock(returncode=0, stdout="[]", stderr=""),  # helm list: absent
-                MagicMock(returncode=0),  # repo add
-                MagicMock(returncode=0),  # repo update
-                MagicMock(returncode=1, stderr="chart not found", stdout=""),  # install
-            ]
-            result = deployer.deploy()
-
-        assert result.status == DeploymentStatus.FAILED
-        assert "chart not found" in result.message
+        assert [c[:2] for c in cmds if c[0] == "helm"] == [["helm", "list"]]
 
     def test_destroy_does_not_uninstall_the_shared_release(self):
         from lakebench.deploy.observability import ObservabilityDeployer

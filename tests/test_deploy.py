@@ -361,7 +361,7 @@ class TestContextStorageVars:
             result = engine._deploy_scratch_storageclass()
 
         assert result.status == DeploymentStatus.FAILED
-        assert "admin install-scratch-storage-class" in result.message
+        assert "admin install --component scratch-storage-class" in result.message
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     def test_scratch_sc_verified_when_present(self, _mock_ocp):

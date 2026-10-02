@@ -2080,7 +2080,6 @@ def run(
         spark_op_cfg = cfg.platform.compute.spark.operator
         operator = SparkOperatorManager(
             namespace=spark_op_cfg.namespace,
-            version=spark_op_cfg.version if spark_op_cfg.install else None,
             job_namespace=cfg.get_namespace(),
             kube_context=cfg.platform.kubernetes.context,
         )
@@ -2088,8 +2087,11 @@ def run(
 
         if not status.ready:
             hint = ""
-            if not status.installed and spark_op_cfg.install:
-                hint = " -- run 'lakebench deploy' first to install it"
+            if not status.installed:
+                hint = (
+                    " -- a cluster admin installs it once with 'lakebench admin install "
+                    "--component spark-operator <config>'"
+                )
             print_error(f"Spark Operator not ready: {status.message}{hint}")
             pipeline_success = False
             raise typer.Exit(ExitCode.PREREQUISITE)

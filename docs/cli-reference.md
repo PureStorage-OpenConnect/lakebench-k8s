@@ -281,18 +281,19 @@ the config's pipeline and always-on pods; a cluster it cannot reach does not
 block it. `--dry-run` prints the result without refusing.
 
 Deploys components in order: namespace, secrets, S3 buckets, scratch
-StorageClass check (it must already exist; `lakebench admin
-install-scratch-storage-class` installs it), PostgreSQL, catalog (Hive or
+StorageClass check (it must already exist; `lakebench admin install
+--component scratch-storage-class` installs it), PostgreSQL, catalog (Hive or
 Polaris), Spark RBAC, Unity Catalog (only when `catalog.type` is `unity`; no
 recipe uses it), Spark Operator check and watch-list entry for the
 namespace (under the cluster lock), the dependency server (`lb-deps`:
 resolves the jars and wheels onto its own PVC and serves them in the
 namespace), then the query engine (Trino, Spark Thrift or DuckDB), and
-optionally the shared observability stack. The Spark
-Operator step always runs: it checks the operator is ready and adds the
-namespace to its watch list. It never installs the shared operator (a cluster
-admin runs `lakebench admin install-spark-operator` once), and a config with
-`operator.install: true` is refused.
+optionally this deployment's monitors on the shared observability stack.
+Deploy never installs a shared component (the Spark Operator, the Stackable
+operators, the scratch StorageClass, the observability stack): a missing one
+fails its step with the `lakebench admin install --component` command. The
+Spark Operator step always runs: it checks the operator is ready and adds the
+namespace to its watch list.
 
 With `--local`, lakebench runs the same pipeline against podman/docker
 containers on the local machine instead of a Kubernetes cluster, useful for
@@ -832,9 +833,10 @@ the cluster-wide `lakebench-cluster-lock` lease.
 | Subcommand | Options | Purpose |
 |---|---|---|
 | `admin status` | `--operator-namespace` (default `spark-operator`) | Installed operators, lease state, lakebench namespaces, controller `/tmp` size and storage evictions |
-| `admin doctor [CONFIG]` | `-f/--file` | Read-only preflight of shared cluster state (StorageClass, operators, watch list, controller `/tmp`) |
-| `admin install-scratch-storage-class [CONFIG]` | `-f/--file` | Install the scratch StorageClass named by the config |
-| `admin install-spark-operator [CONFIG]` | `--version`, `--operator-namespace`, `--controller-tmp-size` (default 8Gi, floor 4Gi), `-f/--file` | Install or upgrade the shared Spark Operator. An upgrade keeps the tenants' watch lists, the installed chart unless `--version` or the config names one, and a larger `/tmp` already set |
+| `admin doctor [CONFIG]` | `-f/--file` | Read-only report on the shared components (the prerequisite checks of [Prerequisites](prerequisites.md): scratch StorageClass, Spark Operator, Stackable, observability stack, OpenShift SCC role), the controller `/tmp` and the lease. Without a config, every component at its default name, with Stackable and the observability stack reported but not failing. Exits 1 when a check fails or cannot run |
+| `admin install [CONFIG]` | `--component/-c C` (repeatable: `scratch-storage-class`, `spark-operator`, `stackable`, `observability`, or `all` for what the config uses; `all` needs a config), `--version C=V` (repeatable, exact chart version), `--allow-version-change`, `--dry-run`, `-y/--yes`, `--controller-tmp-size` (spark-operator fresh install, default 8Gi, floor 4Gi), `-f/--file` | Install the shared components that are missing, under the cluster lease, at `--version`, else the config's pin, else the Lakebench default. An installed component is never changed: with everything installed and ready it exits 0 and changes nothing. A config pin that differs from the installed version is kept with a warning; a stale shared Grafana dashboard is re-applied. Chart repos are refreshed before the lease is taken. Exit 1: a status that cannot be read, a release not `deployed`, an install that failed, or a component not ready. Exit 2: a malformed request, a version change without `--allow-version-change`, or `--controller-tmp-size` for an installed operator. Exit 3: refused (a version change, which Lakebench does not automate because helm leaves a chart's `crds/` at the installed version; a second Spark Operator or kube-prometheus-stack; leftover CRDs; a partial Stackable install that is ambiguous or at another version; a StorageClass whose parameters differ from the config's) |
+| `admin install-scratch-storage-class [CONFIG]` | `-f/--file` | Alias of `admin install --component scratch-storage-class` (prints a notice on stderr). An existing class whose parameters differ from the config's now exits 3 |
+| `admin install-spark-operator [CONFIG]` | `--version`, `--operator-namespace`, `--controller-tmp-size`, `-f/--file` | Alias of `admin install --component spark-operator` (prints a notice on stderr). It no longer upgrades an installed operator: `--version` differing from the installed chart exits 2 |
 | `admin repair-operator [CONFIG]` | `--dry-run`, `--controller-tmp-size` (default 8Gi), `-f/--file` | Remove stale watch-list entries and raise a controller `/tmp` smaller than the given size |
 | `admin migrate-deployment NAMESPACE [CONFIG]` | `--api-server-fingerprint`, `-f/--file` | Stamp identity annotations on a legacy pre-ownership namespace |
 | `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment and this cluster, or on a backend without tagging its owner marker (`.lakebench/owner.json`); refused (exit 3) when the bucket holds objects unless `--force-nonempty`, exit 4 when the cluster fingerprint cannot be computed |

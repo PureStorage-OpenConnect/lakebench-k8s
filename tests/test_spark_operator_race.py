@@ -15,6 +15,7 @@ import pytest
 from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
 _RUN = "lakebench.modules.pipeline_engines.spark.operator.subprocess.run"
+INSTALLED = "2.5.1"
 
 
 @pytest.fixture(autouse=True)
@@ -28,8 +29,13 @@ def _bypass_cluster_lock_in_race_tests():
     # The add refuses a namespace it cannot prove is live (a destroy-race
     # guard covered in test_watch_list_strict.py); these tests exercise the
     # read-modify-write, so treat every namespace as live.
+    # The watch-list edits pin the installed chart, read inside the lease;
+    # these tests mock subprocess.run with empty output, so answer that read.
     try:
-        with patch.object(SparkOperatorManager, "_namespace_is_terminating", return_value=False):
+        with (
+            patch.object(SparkOperatorManager, "_namespace_is_terminating", return_value=False),
+            patch.object(SparkOperatorManager, "_get_helm_version", return_value=INSTALLED),
+        ):
             yield
     finally:
         del SparkOperatorManager._bypass_cluster_lock
@@ -102,7 +108,7 @@ class TestChartVersionPinnedOnUpgrade:
     @patch.object(SparkOperatorManager, "_filter_existing_namespaces", side_effect=lambda ns: ns)
     @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01"])
     @patch(_RUN)
-    def test_upgrade_passes_version_when_pinned(self, mock_run, *_):
+    def test_upgrade_passes_the_installed_version_not_the_config_pin(self, mock_run, *_):
         mock_run.return_value = _ok()
         mgr = SparkOperatorManager(version="2.4.0", job_namespace="u02")
 
@@ -110,7 +116,7 @@ class TestChartVersionPinnedOnUpgrade:
 
         cmd = _helm_cmds(mock_run)[0]
         assert "--version" in cmd, "namespace add must pin the chart version"
-        assert cmd[cmd.index("--version") + 1] == "2.4.0"
+        assert cmd[cmd.index("--version") + 1] == INSTALLED
 
     @patch.object(SparkOperatorManager, "_verify_namespace_watched", return_value=True)
     @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
@@ -118,13 +124,15 @@ class TestChartVersionPinnedOnUpgrade:
     @patch.object(SparkOperatorManager, "_filter_existing_namespaces", side_effect=lambda ns: ns)
     @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01"])
     @patch(_RUN)
-    def test_upgrade_omits_version_when_unpinned(self, mock_run, *_):
-        """No pin means latest is intentional -- do not invent a version."""
+    def test_upgrade_refused_when_the_installed_chart_is_unreadable(self, mock_run, *_):
+        """No readable installed chart: refuse rather than let Helm pick the
+        repo's latest (or the config's pin) for every deployment."""
         mock_run.return_value = _ok()
-        mgr = SparkOperatorManager(job_namespace="u02")
+        mgr = SparkOperatorManager(version="2.4.0", job_namespace="u02")
 
-        assert mgr._add_namespace_to_watch("u02") is True
-        assert "--version" not in _helm_cmds(mock_run)[0]
+        with patch.object(SparkOperatorManager, "_get_helm_version", return_value=None):
+            assert mgr._add_namespace_to_watch("u02") is False
+        assert _helm_cmds(mock_run) == []
 
 
 class TestJobSubmitLatencyBucketsBackfill:
@@ -153,24 +161,6 @@ class TestJobSubmitLatencyBucketsBackfill:
         assert any("jobSubmitLatencyBuckets=" in s for s in sets), (
             f"pinned-version upgrade must backfill jobSubmitLatencyBuckets, got {cmd}"
         )
-
-    @patch.object(SparkOperatorManager, "_verify_namespace_watched", return_value=True)
-    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
-    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
-    @patch.object(SparkOperatorManager, "_filter_existing_namespaces", side_effect=lambda ns: ns)
-    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01"])
-    @patch(_RUN)
-    def test_add_namespace_no_backfill_when_unpinned(self, mock_run, *_):
-        """No version pin -- Helm resolves the same chart it already has, so
-        there is no --reuse-values/new-key gap to backfill for."""
-        mock_run.return_value = _ok()
-        mgr = SparkOperatorManager(job_namespace="u02")
-
-        assert mgr._add_namespace_to_watch("u02") is True
-
-        cmd = _helm_cmds(mock_run)[0]
-        sets = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--set"]
-        assert not any("jobSubmitLatencyBuckets=" in s for s in sets)
 
     @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
     @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
@@ -345,14 +335,14 @@ class TestRemoveNamespaceFromWatch:
     @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
     @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01", "u02"])
     @patch(_RUN)
-    def test_removal_keeps_the_chart_version_pinned(self, mock_run, *_):
+    def test_removal_keeps_the_installed_chart_version(self, mock_run, *_):
         mock_run.return_value = _ok()
         mgr = SparkOperatorManager(version="2.4.0", job_namespace="u02")
 
         assert mgr.remove_namespace_from_watch("u02") is True
 
         cmd = _helm_cmds(mock_run)[0]
-        assert cmd[cmd.index("--version") + 1] == "2.4.0"
+        assert cmd[cmd.index("--version") + 1] == INSTALLED
 
     @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=None)
     @patch(_RUN)

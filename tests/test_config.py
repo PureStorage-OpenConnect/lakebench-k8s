@@ -198,7 +198,10 @@ class TestStackableOperatorConfig:
         assert op.namespace == "stackable"
         assert op.version == "25.7.0"
 
-    def test_override_install_true(self):
+    def test_install_true_outside_a_load_keeps_the_value(self):
+        """A model built without a load purpose keeps install as given (nothing
+        reads it); load_config refuses true for commands that change data
+        (tests/test_shared_components.py, test_cfg1_honoured_or_refused.py)."""
         cfg = make_config(architecture={"catalog": {"hive": {"operator": {"install": True}}}})
         assert cfg.architecture.catalog.hive.operator.install is True
 

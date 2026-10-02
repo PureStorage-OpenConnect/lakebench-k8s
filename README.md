@@ -61,6 +61,7 @@ pip install lakebench-k8s
 ```bash
 pip install lakebench-k8s
 lakebench init                                 # writes lakebench.yaml; export the two S3 key variables it names
+lakebench admin install --component all lakebench.yaml  # once per cluster (cluster admin)
 lakebench run lakebench.yaml --generate --yes  # deploy + generate + pipeline + benchmark
 lakebench results lakebench.yaml               # view scorecard
 lakebench destroy lakebench.yaml               # tear down what this deployment owns
@@ -68,8 +69,10 @@ lakebench destroy lakebench.yaml               # tear down what this deployment 
 
 `--yes` lets `run` deploy the namespace and components when they do not
 exist yet; without it `run` stops and asks you to run `lakebench deploy`
-first. The Spark Operator is shared cluster infrastructure: a cluster admin
-installs it once with `lakebench admin install-spark-operator` (see
+first. The Spark Operator, the Stackable operators (Hive recipes), the scratch
+StorageClass and the observability stack are shared cluster infrastructure:
+`deploy` only checks them, and a cluster admin installs them once with
+`lakebench admin install --component all lakebench.yaml` (see
 [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)).
 
 Minimum config:
@@ -270,7 +273,7 @@ See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blo
   expected to work. Run `lakebench config storage` to check yours. See
   [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md).
 - [Kubeflow Spark Operator 2.5.1+](https://github.com/kubeflow/spark-operator),
-  installed once per cluster with `lakebench admin install-spark-operator`.
+  installed once per cluster with `lakebench admin install --component spark-operator`.
   `deploy` adds its namespace to the operator's watch list itself, under the
   cluster lock; do not edit `spark.jobNamespaces` by hand.
 - [Stackable Hive Operator](https://docs.stackable.tech/home/stable/hive/) for
@@ -295,7 +298,7 @@ See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blo
 | `compare` | Compare stored runs; show performance only when their results match |
 | `config recommend` | Recommend a scale factor for the connected cluster |
 | `config recipes` | List recipes and their support state per workload and mode |
-| `admin` | Cluster-admin setup and repair: `install-spark-operator`, `install-scratch-storage-class`, `doctor`, `status`, `repair-operator`, `release-lock`, `migrate-deployment`, `reclaim-bucket` |
+| `admin` | Cluster-admin setup and repair: `install --component`, `doctor`, `status`, `repair-operator`, `release-lock`, `migrate-deployment`, `reclaim-bucket` (`install-spark-operator` and `install-scratch-storage-class` are aliases of `install --component`) |
 | `financial` | AML operator actions (`score`, `reference-score`, `replay`, `reproduce`) |
 | `reproduce` | Record or verify a reproduction package from a run |
 | `destroy` | Tear down the resources this deployment owns |

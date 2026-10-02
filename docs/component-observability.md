@@ -1,6 +1,6 @@
 # Observability
 
-Lakebench deploys observability via the `kube-prometheus-stack` Helm chart, which bundles Prometheus, Grafana, kube-state-metrics and node-exporter in a single install (lakebench disables node-exporter on OpenShift, where it needs host access the SCCs block). Prometheus and Grafana versions are not independently configurable -- they come from whatever `observability.chart_version` (default `87.19.2`, currently bundling Prometheus v3.13.1 and Grafana v13.1.x) resolves to.
+Observability runs on the `kube-prometheus-stack` Helm chart, which bundles Prometheus, Grafana, kube-state-metrics and node-exporter in a single install (lakebench disables node-exporter on OpenShift, where it needs host access the SCCs block). Prometheus and Grafana versions are not independently configurable -- they come from whatever `observability.chart_version` (default `87.19.2`, currently bundling Prometheus v3.13.1 and Grafana v13.1.x) resolves to.
 
 HTML reports are generated from local metrics and do not require Prometheus or Grafana.
 
@@ -43,10 +43,11 @@ loads with a note; any other value is refused by the commands that change
 data.
 
 The Spark and Trino PodMonitors are applied whenever the stack is enabled.
-`observability.enabled: true` always installs (or reuses) the full stack, and the
-Prometheus PVC uses the chart's default StorageClass. `dashboards_enabled` sets the
-chart's `grafana.enabled`, and `retention` and `storage` set the Prometheus retention
-and PVC size.
+`observability.enabled: true` always uses the full shared stack, and the
+Prometheus PVC uses the chart's default StorageClass. For a fresh `lakebench admin
+install --component observability`, `dashboards_enabled` sets the chart's
+`grafana.enabled`, and `retention` and `storage` set the Prometheus retention and PVC
+size; an installed release keeps the values it was installed with.
 
 Set `observability.enabled: true` to deploy the stack.
 
@@ -65,7 +66,8 @@ The `MetricsCollector` class in `metrics/collector.py` records job metrics, quer
 
 When `observability.enabled` is `true`, Lakebench uses one shared `kube-prometheus-stack` Helm release for the whole cluster. The chart installs cluster-wide objects (CRDs, cluster roles, admission webhooks), so it is a shared cluster component, not part of a deployment:
 
-- `deploy` installs it into the `lakebench-observability` namespace only when no release named `lakebench-observability` exists anywhere on the cluster, under the cluster lease. An existing release is reused and never upgraded or modified.
+- A cluster admin installs it once with `lakebench admin install --component observability <config>`, into the `lakebench-observability` namespace, under the cluster lease, only when no release named `lakebench-observability` exists anywhere on the cluster. That command also applies the shared dashboard ConfigMap, and re-applies it when it differs from this lakebench's. An existing release is never upgraded or modified.
+- `deploy` only checks that the release is there (a missing one fails the step with that command) and applies the deployment's PodMonitors and Pushgateway in its own namespace.
 - `destroy` never uninstalls it; another deployment may be using it. Each deployment's PodMonitors and Pushgateway live in its own namespace and go with it. The Lakebench Overview dashboard ConfigMap is shared: it lives in `lakebench-observability` and destroy leaves it in place. The one exception is a release an older lakebench installed into the deployment's own namespace, which destroy removes because it served only that namespace.
 - To remove the shared stack when no deployment uses it: `helm uninstall lakebench-observability -n lakebench-observability`.
 

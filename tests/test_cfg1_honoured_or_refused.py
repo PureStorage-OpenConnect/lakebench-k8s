@@ -108,8 +108,8 @@ _HIVE_OP = {"architecture": {"catalog": {"hive": {"operator": {"install": True}}
 @pytest.mark.parametrize(
     ("extra", "names"),
     [
-        (_SPARK_OP, "lakebench admin install-spark-operator"),
-        (_HIVE_OP, "docs/component-hive.md"),
+        (_SPARK_OP, "lakebench admin install --component spark-operator"),
+        (_HIVE_OP, "lakebench admin install --component stackable"),
     ],
 )
 @pytest.mark.parametrize("purpose", [LoadPurpose.RUN, LoadPurpose.MUTATE])
