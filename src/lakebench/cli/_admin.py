@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, NoReturn
 
 import typer
 from rich.markup import escape
@@ -944,6 +944,12 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# A pending release that has not changed for this long is taken as left by a
+# killed helm call, not one still running (lakebench's own helm calls under
+# the lease are bounded well inside it).
+_PENDING_STALE_S = 600
+
+
 @admin_app.command("repair-operator")
 def repair_operator(
     config_file: Annotated[
@@ -969,24 +975,28 @@ def repair_operator(
     """Repair the shared Spark Operator: stale watch entries, a pending release, a small /tmp.
 
     Under the cluster lease it reads the release state, the watch list (the
-    Helm values and the controller's ``--namespaces``) and the Active
-    namespaces, then:
+    Helm values and the ``--namespaces`` of the controller and webhook
+    Deployments) and the Active namespaces, then:
 
     - rolls a release left ``pending-upgrade`` or ``pending-rollback`` (an
-      interrupted helm call) back to its last deployed revision, only when
-      that revision's watch list names no deleted namespace and drops no
-      namespace the controller watches now;
-    - sets the watch list, in one upgrade, to the namespaces either source
-      lists that still exist and are Active (``default`` only when nothing
-      else is left: an empty list means "watch every namespace");
+      interrupted helm call) back to its last deployed revision, when the
+      release has not changed for 10 minutes and that revision's watch list
+      names no deleted namespace;
+    - sets the watch list, with one upgrade, to the namespaces any of the
+      three sources lists (before a rollback included) that still exist and
+      are Active (``default`` only when nothing else is left: an empty list
+      means "watch every namespace"). When some sources watch every
+      namespace and others list namespaces it changes nothing and exits 3;
     - raises the controller's /tmp emptyDir sizeLimit to
       ``--controller-tmp-size`` when it is smaller (spark-submit's Ivy cache
       fills the chart's 1Gi and the kubelet evicts the controller).
 
-    Everything is read again inside the lease, so a namespace a deploy
-    re-created after an earlier read is kept. ``--dry-run`` reads without
-    the lease and only prints.
+    Everything is read inside the lease, so a namespace a deploy re-created
+    after an earlier read is kept. ``--dry-run`` reads without the lease and
+    only prints.
     """
+    import time
+
     from lakebench.deploy.cluster_lock import (
         ADMIN_MAX_HOLD_S,
         LEASE_REQUEST_TIMEOUT,
@@ -1023,7 +1033,13 @@ def repair_operator(
 
     core_v1 = _get_core_v1(context=kube_ctx)
     mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
+    rel = mgr.HELM_RELEASE_NAME
     pending_states = ("pending-upgrade", "pending-rollback")
+    deployments = (mgr.CONTROLLER_DEPLOYMENT, mgr.WEBHOOK_DEPLOYMENT)
+
+    def _fail(msg: str, code: ExitCode = ExitCode.FAILED) -> NoReturn:
+        print_error(msg)
+        raise typer.Exit(code)
 
     def _active_namespaces(leased: bool) -> set[str]:
         # Iterate list_namespace via _continue: a missed page silently
@@ -1031,55 +1047,60 @@ def repair_operator(
         kw = {"_request_timeout": LEASE_REQUEST_TIMEOUT} if leased else {}
         names: set[str] = set()
         cont: str | None = None
-        while True:
-            page = (
-                core_v1.list_namespace(_continue=cont, **kw)
-                if cont
-                else core_v1.list_namespace(**kw)
-            )
-            for n in page.items:
-                phase = getattr(n.status, "phase", None) if n.status else None
-                if phase == "Active":
-                    names.add(n.metadata.name)
-            cont = getattr(page.metadata, "_continue", None) or getattr(
-                page.metadata, "continue_", None
-            )
-            if not cont or not isinstance(cont, str):
-                return names
+        try:
+            while True:
+                page = (
+                    core_v1.list_namespace(_continue=cont, **kw)
+                    if cont
+                    else core_v1.list_namespace(**kw)
+                )
+                for n in page.items:
+                    phase = getattr(n.status, "phase", None) if n.status else None
+                    if phase == "Active":
+                        names.add(n.metadata.name)
+                cont = getattr(page.metadata, "_continue", None) or getattr(
+                    page.metadata, "continue_", None
+                )
+                if not cont or not isinstance(cont, str):
+                    return names
+        except Exception as e:  # noqa: BLE001 -- any failure: nothing was changed
+            _fail(f"Cannot list the cluster's namespaces: {e}")
 
-    def _plan(leased: bool) -> dict:
+    def _read_lists() -> dict[str, list[str] | None]:
+        lists: dict[str, list[str] | None] = {}
+        try:
+            lists["helm values"] = mgr._get_watched_namespaces()  # noqa: SLF001
+        except _WatchListReadError as e:
+            _fail(f"Cannot read the Spark Operator watch list: {e}")
+        for deploy in deployments:
+            try:
+                lists[deploy] = mgr._get_active_namespaces(deployment=deploy)  # noqa: SLF001
+            except _DeploymentReadError as e:
+                # Unreadable is not "watches every namespace": reconciling
+                # without it could drop what that Deployment watches now.
+                _fail(f"Cannot read the --namespaces of {deploy}: {e}")
+        return lists
+
+    def _plan(leased: bool, carry: frozenset[str] = frozenset()) -> dict[str, Any]:
         state = mgr.release_state()
         if state is None:
-            print_error("Cannot read the Spark Operator Helm release state")
-            raise typer.Exit(ExitCode.FAILED)
-        if state[0] == "absent":
-            print_error(
-                f"No {mgr.HELM_RELEASE_NAME} release in namespace {ns}. A cluster admin "
-                "installs it: lakebench admin install --component spark-operator"
+            _fail("Cannot read the Spark Operator Helm release state")
+        if state.status == "absent":
+            _fail(
+                f"No {rel} release in namespace {ns}. A cluster admin installs it: "
+                "lakebench admin install --component spark-operator",
+                ExitCode.PREREQUISITE,
             )
-            raise typer.Exit(ExitCode.PREREQUISITE)
-        if state[0] == "pending-install":
+        if state.status == "pending-install":
             # No deployed revision to return to; only a person can tell an
             # install still running from one that was killed.
-            print_error(
-                f"Release {mgr.HELM_RELEASE_NAME} is pending-install (revision {state[1]}). "
-                f"A cluster admin checks 'helm status {mgr.HELM_RELEASE_NAME} -n {ns}' and, "
-                "when no install is running, uninstalls and re-installs it."
+            _fail(
+                f"Release {rel} is pending-install (revision {state.revision}). A cluster "
+                f"admin checks 'helm status {rel} -n {ns}' and, when no install is "
+                "running, uninstalls and re-installs it.",
+                ExitCode.REFUSED,
             )
-            raise typer.Exit(ExitCode.REFUSED)
-        try:
-            values = mgr._get_watched_namespaces()  # noqa: SLF001 -- reconciliation needs live state
-        except _WatchListReadError as e:
-            print_error(f"Cannot read the Spark Operator watch list: {e}")
-            raise typer.Exit(ExitCode.FAILED) from e
-        try:
-            live = mgr._get_active_namespaces()  # noqa: SLF001
-        except _DeploymentReadError as e:
-            # Unreadable is not "watches every namespace": reconciling
-            # against only the Helm values could drop what the controller
-            # watches now.
-            print_error(f"Cannot read the Spark Operator controller's --namespaces: {e}")
-            raise typer.Exit(ExitCode.FAILED) from e
+        lists = _read_lists()
         active = _active_namespaces(leased)
         resize_from: str | None = None
         try:
@@ -1095,56 +1116,112 @@ def repair_operator(
                 )
             elif vol.size_limit is not None and (vol.limit_bytes or 0) < want:
                 resize_from = vol.size_limit
-        watch_all = values is None and live is None
+        listed = [set(x) for x in lists.values() if x is not None]
+        every = [k for k, x in lists.items() if x is None]
+        # After a rollback (carry set) a source that watches every
+        # namespace is the rolled-back revision, which is set back below.
+        watch_all = not carry and len(every) == len(lists)
+        mixed = [] if carry or watch_all else every
         target: list[str] = []
         needs_set = False
-        if not watch_all:
-            # Keep every entry either source lists whose namespace still
-            # exists and is Active, annotated or not (a non-lakebench
-            # workload there still needs reconciling); drop deleted and
-            # Terminating ones, the crash-loop this command prevents.
-            sources = set(values or []) | set(live or [])
-            target = sorted(n for n in sources if n in active) or ["default"]
-            needs_set = target != sorted(values or []) or target != sorted(live or [])
+        union: set[str] = set(carry).union(*listed)
+        if not watch_all and not mixed:
+            # Keep every entry a source lists whose namespace still exists
+            # and is Active, annotated or not (a non-lakebench workload
+            # there still needs reconciling); drop deleted and Terminating
+            # ones, the crash-loop this command prevents.
+            target = sorted(n for n in union if n in active) or ["default"]
+            needs_set = any(x is None or sorted(set(x)) != target for x in lists.values())
         return {
             "state": state,
-            "values": values,
-            "live": live,
+            "lists": lists,
             "active": active,
             "watch_all": watch_all,
+            "mixed": mixed,
+            "union": frozenset(union),
             "target": target,
             "needs_set": needs_set,
             "resize_from": resize_from,
         }
 
-    def _report(p: dict) -> None:
-        status, revision = p["state"]
-        if status in pending_states:
-            console.print(
-                f"Release {esc(mgr.HELM_RELEASE_NAME)} is {esc(status)} (revision {revision})"
+    def _rollback_verdict(p: dict[str, Any]) -> tuple[int | None, str | None]:
+        """(revision to roll back to, None) or (None, why not)."""
+        state = p["state"]
+        if state.updated is None:
+            return None, "its last change time cannot be read, so a helm call may still be running"
+        age = time.time() - state.updated
+        if age < _PENDING_STALE_S:
+            return None, (
+                f"it changed {age:.0f} s ago and a helm call may still be running; "
+                f"retry in {_PENDING_STALE_S - age:.0f} s"
             )
+        good = mgr.last_good_revision(state.revision)
+        if good is None:
+            return None, "no earlier deployed revision could be read from 'helm history'"
+        try:
+            good_list = mgr._get_watched_namespaces(revision=good)  # noqa: SLF001
+        except _WatchListReadError as e:
+            return None, f"revision {good}'s values cannot be read: {e}"
+        if good_list is not None:
+            gone = sorted(set(good_list) - p["active"] - {"default"})
+            if gone:
+                return None, (
+                    f"revision {good} watches {gone}, which no longer exist; rolling back "
+                    "to it would crash-loop the operator"
+                )
+        return good, None
+
+    def _fmt(x: list[str] | None) -> str:
+        return "every namespace" if x is None else esc(sorted(x))
+
+    def _report(p: dict[str, Any], verdict: tuple[int | None, str | None] | None) -> None:
+        state = p["state"]
+        pending = state.status in pending_states
+        if pending:
+            console.print(f"Release {esc(rel)} is {esc(state.status)} (revision {state.revision})")
+            if verdict is not None:
+                good, why = verdict
+                if why:
+                    console.print(f"  not rolling back: {esc(why)}")
+                else:
+                    console.print(f"  roll back to revision {good}, then set the watch list")
         if p["watch_all"]:
             print_info("Spark Operator watches all namespaces; no watch list to reconcile")
-        elif p["needs_set"]:
-            console.print("Reconciled watch list:")
-            console.print(f"  helm values: {esc(sorted(p['values'] or []))}")
-            console.print(f"  controller:  {esc(sorted(p['live'] or []))}")
-            console.print(f"  after:       {esc(p['target'])}")
-        else:
+        elif p["mixed"] or p["needs_set"]:
+            console.print("Watch list:")
+            for name, x in p["lists"].items():
+                console.print(f"  {esc(name)}: {_fmt(x)}")
+            if p["needs_set"]:
+                console.print(f"  after: {esc(p['target'])}")
+        elif not pending:
             print_info("Watch list already reconciled; no changes needed")
         if p["resize_from"] is not None:
             console.print(
                 f"Controller /tmp emptyDir: {esc(p['resize_from'])} -> {esc(controller_tmp_size)}"
             )
 
-    def _nothing_to_do(p: dict) -> bool:
+    def _nothing_to_do(p: dict[str, Any]) -> bool:
         return (
-            p["state"][0] not in pending_states and not p["needs_set"] and p["resize_from"] is None
+            p["state"].status not in pending_states
+            and not p["needs_set"]
+            and not p["mixed"]
+            and p["resize_from"] is None
+        )
+
+    def _refuse_mixed(p: dict[str, Any]) -> NoReturn:
+        _fail(
+            f"{', '.join(p['mixed'])} watch every namespace while the rest list namespaces. "
+            "Narrowing would stop reconciling every namespace not listed, and widening "
+            "would change what the operator watches for every deployment, so nothing was "
+            "changed. A cluster admin decides which is meant and re-applies the release "
+            "with no deploy or destroy running, then re-runs repair-operator.",
+            ExitCode.REFUSED,
         )
 
     if dry_run:
         p = _plan(leased=False)
-        _report(p)
+        pending = p["state"].status in pending_states
+        _report(p, _rollback_verdict(p) if pending else None)
         if not _nothing_to_do(p):
             print_info("--dry-run set; not applying")
         return
@@ -1152,54 +1229,42 @@ def repair_operator(
     try:
         with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S, max_hold_s=ADMIN_MAX_HOLD_S):
             p = _plan(leased=True)
-            _report(p)
+            pending = p["state"].status in pending_states
+            verdict = _rollback_verdict(p) if pending else None
+            _report(p, verdict)
             if _nothing_to_do(p):
                 return
-            status, revision = p["state"]
-            if status in pending_states:
-                good = mgr.last_good_revision(revision)
-                good_list = (
-                    mgr._get_watched_namespaces(revision=good)  # noqa: SLF001
-                    if good is not None
-                    else None
-                )
-                keep = set(p["live"] or []) & p["active"]
-                safe = (
-                    good is not None
-                    and good_list is not None
-                    and set(good_list) <= p["active"] | {"default"}
-                    and keep <= set(good_list)
-                )
-                if not safe or good is None:
-                    print_error(
-                        f"Release {mgr.HELM_RELEASE_NAME} is {status}, and its last deployed "
-                        f"revision ({good}) would watch {good_list}: a deleted namespace, or "
-                        "without a namespace the controller watches now. Not rolling back. A "
-                        f"cluster admin checks 'helm history {mgr.HELM_RELEASE_NAME} -n {ns}' "
-                        "and rolls back to a revision whose watch list is safe, then re-runs "
-                        "repair-operator."
+            if verdict is not None:
+                good, why = verdict
+                if why is not None or good is None:
+                    _fail(
+                        f"Release {rel} is {p['state'].status}: {why}. Not rolling back. A "
+                        f"cluster admin checks 'helm history {rel} -n {ns}' and the operator "
+                        "pods, and re-runs repair-operator once no helm call is running.",
+                        ExitCode.REFUSED,
                     )
-                    raise typer.Exit(ExitCode.REFUSED)
                 if not mgr.rollback_to(good):
-                    print_error(f"helm rollback to revision {good} failed; see the log above")
-                    raise typer.Exit(ExitCode.FAILED)
-                print_success(f"rolled {mgr.HELM_RELEASE_NAME} back to revision {good}")
-                p = _plan(leased=True)
+                    _fail(f"helm rollback to revision {good} failed; see the log above")
+                print_success(f"rolled {rel} back to revision {good}")
+                # The rolled-back revision may lack a namespace the pending
+                # one or a Deployment listed (a killed add): carry them into
+                # the set, filtered to what is still Active.
+                p = _plan(leased=True, carry=frozenset() if p["watch_all"] else p["union"])
+            if p["mixed"]:
+                _refuse_mixed(p)
             if p["needs_set"]:
                 if not mgr._set_watch_list_impl(p["target"]):  # noqa: SLF001
-                    print_error(
-                        "could not set the watch list; the operator may still be inconsistent. "
-                        "Retry after investigating the Helm state."
+                    _fail(
+                        "could not set the watch list; the operator may still be "
+                        "inconsistent. Retry after investigating the Helm state."
                     )
-                    raise typer.Exit(ExitCode.FAILED)
                 print_success(f"reconciled Spark Operator watch list: {p['target']}")
             if p["resize_from"] is not None:
                 if not mgr.apply_controller_tmp_size(controller_tmp_size):
-                    print_error(
+                    _fail(
                         "could not resize the controller /tmp emptyDir; see the log above. "
                         "The watch list repair (if any) was applied."
                     )
-                    raise typer.Exit(ExitCode.FAILED)
                 print_success(f"controller /tmp emptyDir sizeLimit is now {controller_tmp_size}")
     except ClusterLockHeld as e:
         print_error(str(e))

@@ -161,10 +161,12 @@ re-run `lakebench destroy`. When the list names a `deployment/...`, an
 operator Deployment's pod template still lists the namespace while the helm
 values do not, usually an upgrade that did not apply (check `helm history
 spark-operator -n spark-operator`). `lakebench admin repair-operator` reads
-both the Helm values and the controller's `--namespaces` and sets the list,
-in one upgrade, to the namespaces either names that still exist; run it,
-then destroy again. Destroy also keeps the namespace (exit 1) when the
-operator restart after the removal fails.
+the Helm values and the `--namespaces` of both the controller and the
+webhook Deployment, and sets the list with one upgrade to the namespaces any
+of them names that still exist; run it, then destroy again. Destroy also
+keeps the namespace (exit 1) when the operator restart after the removal
+fails; the namespace is already off the list then, so re-run destroy once
+the operator pods are Ready.
 
 **Ctrl-C does not stop the command at once.** If the command holds the
 cluster lease, it prints "interrupt received while holding the cluster
@@ -174,11 +176,12 @@ Ctrl-C twice more to abort at once; the lease is still released. If a helm
 upgrade was running, run `helm history spark-operator -n spark-operator`:
 a `pending-upgrade` revision blocks every deployment's watch-list change.
 `lakebench admin repair-operator` rolls it back to the last deployed
-revision when that revision watches no deleted namespace and drops none the
-controller watches now, then reconciles the list. Otherwise it exits 3 and
-a cluster admin picks a revision from the history (`helm rollback
-spark-operator <revision> -n spark-operator`) and runs repair-operator
-again.
+revision when the release has not changed for 10 minutes (a helm call may
+still be running before that) and that revision watches no deleted
+namespace, then sets the list it read before the rollback, so a namespace
+the interrupted upgrade added is kept. Otherwise it exits 3 with the reason;
+`--dry-run` shows the verdict. Do not run `helm rollback` by hand: it skips
+the deleted-namespace check and the lease.
 
 **An interrupted `run` left a job running.** `run` deletes the jobs it
 created when it is interrupted, but leaves any it cannot show to be its own
@@ -222,7 +225,9 @@ the controller's `/tmp` sizeLimit and any storage evictions still on record
 **Fix (cluster admin):** `lakebench admin repair-operator --dry-run`, then
 `lakebench admin repair-operator`. It raises the controller's `/tmp` to 8Gi
 under the `lakebench-cluster-lock` lease with `--reuse-values`, keeps the
-watch list and the installed chart version, and rolls the controller once.
+installed chart version, and rolls the controller. The same run also
+reconciles the watch list (dropping deleted or Terminating namespaces), which
+restarts the operator before the resize when it changes.
 `lakebench admin install --component spark-operator` sets the same size on a
 fresh install (`--controller-tmp-size` to choose another). The size is stored in the
 release's values, so later watch-list edits carry it forward.

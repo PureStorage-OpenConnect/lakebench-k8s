@@ -303,31 +303,49 @@ def _page(*names: str) -> MagicMock:
     return page
 
 
+_OLD = 1_000.0  # a release last changed long ago (epoch seconds)
+
+
+def _state(status: str = "deployed", revision: int = 3, updated: float | None = _OLD):
+    from lakebench.modules.pipeline_engines.spark.operator import ReleaseState
+
+    return ReleaseState(status, revision, updated)
+
+
+_SENTINEL = object()
+
+
 class _Repair:
     """A repair-operator harness: a fake lease that records when it is held,
-    a manager mock whose reads record whether they ran under it, and Active
-    namespaces that may differ inside and outside the lease."""
+    a manager mock whose reads and writes record whether they ran under it,
+    and Active namespaces that may differ inside and outside the lease.
+
+    ``live`` is both Deployments' ``--namespaces`` unless ``webhook`` is
+    given; after a rollback the reads return ``after`` when given."""
 
     def __init__(
         self,
         *,
         values=None,
         live=None,
+        webhook=_SENTINEL,
         active=(),
         active_in_lease=None,
-        state=("deployed", 3),
+        state=None,
+        after=None,
         tmp=TmpVolume(True, "8Gi"),
     ):
         from contextlib import contextmanager
 
         self.held = False
-        self.reads: list[tuple[str, bool]] = []
+        self.rolled_back = False
+        self.calls: list[tuple[str, bool]] = []
         self.core = MagicMock()
         outside = _page(*active)
         inside = _page(*(active if active_in_lease is None else active_in_lease))
 
         def list_ns(**_kw):
-            self.reads.append(("namespaces", self.held))
+            self.calls.append(("namespaces", self.held))
             return inside if self.held else outside
 
         self.core.list_namespace.side_effect = list_ns
@@ -343,33 +361,60 @@ class _Repair:
         self.lock = MagicMock(side_effect=lock)
         self.mgr = MagicMock()
         self.mgr.HELM_RELEASE_NAME = "spark-operator"
+        self.mgr.CONTROLLER_DEPLOYMENT = "spark-operator-controller"
+        self.mgr.WEBHOOK_DEPLOYMENT = "spark-operator-webhook"
         self.revision_lists: dict[int, list[str] | None] = {}
-        states = list(state) if isinstance(state, list) else [state]
+        before = {
+            "values": values,
+            "spark-operator-controller": live,
+            "spark-operator-webhook": live if webhook is _SENTINEL else webhook,
+        }
+        after = after or {}
+        st = state or _state()
 
-        def rec(name, value):
+        def now(key):
+            if self.rolled_back and key in after:
+                return after[key]
+            return before[key]
+
+        def release_state():
+            self.calls.append(("state", self.held))
+            if self.rolled_back:
+                return after.get("state", _state("deployed", st.revision + 1))
+            return st
+
+        def watched(revision=None):
+            self.calls.append(("values", self.held))
+            if revision is not None:
+                return self.revision_lists.get(revision)
+            return now("values")
+
+        def deployment(operator_ns=None, deployment=None):
+            self.calls.append((deployment or "spark-operator-controller", self.held))
+            return now(deployment or "spark-operator-controller")
+
+        def tmp_volume():
+            self.calls.append(("tmp", self.held))
+            return tmp
+
+        def write(name, result=True):
             def f(*_a, **_kw):
-                self.reads.append((name, self.held))
-                return value() if callable(value) else value
+                self.calls.append((name, self.held))
+                if name == "rollback":
+                    self.rolled_back = True
+                return result
 
             return f
 
-        def watched(revision=None):
-            self.reads.append(("values", self.held))
-            if revision is not None:
-                return self.revision_lists.get(revision)
-            return values
-
-        self.mgr.release_state.side_effect = rec(
-            "state", lambda: states.pop(0) if len(states) > 1 else states[0]
-        )
+        self.mgr.release_state.side_effect = release_state
         self.mgr._get_watched_namespaces.side_effect = watched
-        self.mgr._get_active_namespaces.side_effect = rec("live", live)
-        self.mgr.controller_tmp_volume.side_effect = rec("tmp", tmp)
-        self.mgr._set_watch_list_impl.return_value = True
-        self.mgr.rollback_to.return_value = True
-        self.mgr.apply_controller_tmp_size.return_value = True
+        self.mgr._get_active_namespaces.side_effect = deployment
+        self.mgr.controller_tmp_volume.side_effect = tmp_volume
+        self.mgr._set_watch_list_impl.side_effect = write("set")
+        self.mgr.rollback_to.side_effect = write("rollback")
+        self.mgr.apply_controller_tmp_size.side_effect = write("resize")
 
-    def invoke(self, *args: str):
+    def invoke(self, *args: str, now: float = _OLD + 3600):
         with (
             patch("lakebench.cli._admin._get_core_v1", return_value=self.core),
             patch(
@@ -377,8 +422,16 @@ class _Repair:
                 return_value=self.mgr,
             ),
             patch("lakebench.deploy.cluster_lock.cluster_lock", self.lock),
+            patch("time.time", return_value=now),
         ):
             return runner.invoke(admin_app, ["repair-operator", *args])
+
+    def writes(self) -> list[str]:
+        return [n for n, _ in self.calls if n in ("set", "rollback", "resize")]
+
+
+def _flat(r) -> str:
+    return " ".join(r.output.split())
 
 
 class TestRepairOperator:
@@ -387,7 +440,7 @@ class TestRepairOperator:
         r = h.invoke()
         assert r.exit_code == 0, r.output
         assert "watches all namespaces" in r.output
-        h.mgr._set_watch_list_impl.assert_not_called()
+        assert h.writes() == []
 
     def test_reconcile_drops_only_deleted_namespaces_in_dry_run(self):
         """Keep every entry whose namespace still exists and is Active
@@ -400,16 +453,16 @@ class TestRepairOperator:
         )
         r = h.invoke("--dry-run")
         assert r.exit_code == 0, r.output
-        assert "helm values: ['ns-a', 'ns-gone', 'ns-stale']" in r.output
-        assert "after:       ['ns-a', 'ns-stale']" in r.output
+        assert "helm values: ['ns-a', 'ns-gone', 'ns-stale']" in _flat(r)
+        assert "after: ['ns-a', 'ns-stale']" in _flat(r)
         assert not h.lock.called
-        h.mgr._set_watch_list_impl.assert_not_called()
+        assert h.writes() == []
 
     def test_repair_rereads_inside_lease(self):
         """A namespace a deploy re-created after an unlocked read must be kept:
-         every read runs under the lease and the reconciled list comes from it
-        . Reverted (read before the lease, drop one by one),
-         ns-b is removed."""
+        every read and write runs under the lease and the reconciled list
+        comes from it. Reverted (read before the lease, drop one by one),
+        ns-b is removed."""
         h = _Repair(
             values=["ns-a", "ns-b", "ns-gone"],
             live=["ns-a", "ns-b", "ns-gone"],
@@ -418,13 +471,27 @@ class TestRepairOperator:
         )
         r = h.invoke()
         assert r.exit_code == 0, r.output
-        assert all(held for _, held in h.reads), h.reads
+        assert all(held for _, held in h.calls), h.calls
         h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a", "ns-b"])
         h.mgr._remove_namespace_from_watch_impl.assert_not_called()
 
-    def test_one_upgrade_unions_values_and_controller(self):
-        """Helm values and the controller's --namespaces disagree after a
-        killed upgrade: the target is their union, filtered to Active."""
+    def test_controller_drift_alone_is_repaired(self):
+        """A killed upgrade left the values right and the controller template
+        stale: the values already equal the target, the controller does not."""
+        h = _Repair(values=["ns-a"], live=["ns-a", "ns-gone"], active=("ns-a",))
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a"])
+
+    def test_webhook_drift_alone_is_repaired(self):
+        """Destroy names deployment/spark-operator-webhook when only the
+        webhook still lists the namespace; repair must see it."""
+        h = _Repair(values=["ns-a"], live=["ns-a"], webhook=["ns-a", "ns-gone"], active=("ns-a",))
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a"])
+
+    def test_one_upgrade_unions_values_and_deployments(self):
         h = _Repair(values=["ns-a"], live=["ns-b", "ns-gone"], active=("ns-a", "ns-b"))
         r = h.invoke()
         assert r.exit_code == 0, r.output
@@ -443,91 +510,205 @@ class TestRepairOperator:
         assert r.exit_code == 0, r.output
         h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a"])
 
-    def test_unreadable_controller_fails_closed(self):
+    def test_a_watch_all_controller_is_never_narrowed(self):
+        """Values list namespaces but the controller watches all: setting the
+        values' list would silently stop reconciling every other namespace."""
+        h = _Repair(values=["ns-a"], live=None, active=("ns-a", "ns-b"))
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        assert "watch every namespace" in _flat(r)
+        assert h.writes() == []
+
+    def test_watch_all_values_with_listing_deployments_refuse(self):
+        h = _Repair(values=None, live=["ns-a"], active=("ns-a",))
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        assert h.writes() == []
+
+    def test_unreadable_webhook_fails_closed(self):
         from lakebench.modules.pipeline_engines.spark.operator import _DeploymentReadError
 
-        h = _Repair(values=["ns-a", "ns-gone"], active=("ns-a",))
-        h.mgr._get_active_namespaces.side_effect = _DeploymentReadError("timeout")
+        h = _Repair(values=["ns-a", "ns-gone"], live=["ns-a"], active=("ns-a",))
+
+        def read(operator_ns=None, deployment=None):
+            if deployment == "spark-operator-webhook":
+                raise _DeploymentReadError("forbidden")
+            return ["ns-a"]
+
+        h.mgr._get_active_namespaces.side_effect = read
         r = h.invoke()
         assert r.exit_code == 1
-        h.mgr._set_watch_list_impl.assert_not_called()
+        assert "spark-operator-webhook" in _flat(r)
+        assert h.writes() == []
 
     def test_unreadable_release_state_fails_closed(self):
-        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",), state=None)
+        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",))
+        h.mgr.release_state.side_effect = None
+        h.mgr.release_state.return_value = None
         r = h.invoke()
         assert r.exit_code == 1
-        h.mgr._set_watch_list_impl.assert_not_called()
+        assert h.writes() == []
+
+    def test_namespace_list_error_is_a_message_not_a_traceback(self):
+        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",))
+        h.core.list_namespace.side_effect = RuntimeError("apiserver timeout")
+        r = h.invoke()
+        assert r.exit_code == 1
+        assert "Cannot list the cluster's namespaces" in _flat(r)
+        assert not isinstance(r.exception, RuntimeError)
 
     def test_failed_set_exits_nonzero(self):
         h = _Repair(values=["ns-a", "ns-gone"], live=["ns-a", "ns-gone"], active=("ns-a",))
+        h.mgr._set_watch_list_impl.side_effect = None
         h.mgr._set_watch_list_impl.return_value = False
         r = h.invoke()
         assert r.exit_code == 1
 
-    def test_pending_release_rolls_back_to_a_safe_revision(self):
-        """A pending-upgrade release blocks every later upgrade. Its last
-        deployed revision watches only Active namespaces and keeps what the
-        controller watches now, so repair rolls back, re-reads and then
-        reconciles."""
+    def test_pending_release_rolls_back_then_sets_with_what_it_dropped(self):
+        """A deploy's add of ns-b was killed after helm applied it: the
+        release is pending, the Deployments list ns-b and the last deployed
+        revision does not. Repair rolls back (that revision watches no
+        deleted namespace) and then sets the list it read before, so ns-b is
+        kept. Every step runs under the lease."""
         h = _Repair(
-            values=["ns-a", "ns-gone"],
-            live=["ns-a"],
-            active=("ns-a",),
-            state=[("pending-upgrade", 5), ("deployed", 6)],
+            values=["ns-a", "ns-b"],
+            live=["ns-a", "ns-b"],
+            active=("ns-a", "ns-b"),
+            state=_state("pending-upgrade", 5),
+            after={
+                "values": ["ns-a"],
+                "spark-operator-controller": ["ns-a"],
+                "spark-operator-webhook": ["ns-a"],
+            },
         )
         h.mgr.last_good_revision.return_value = 4
         h.revision_lists[4] = ["ns-a"]
         r = h.invoke()
         assert r.exit_code == 0, r.output
         h.mgr.last_good_revision.assert_called_once_with(5)
+        assert h.writes() == ["rollback", "set"]
         h.mgr.rollback_to.assert_called_once_with(4)
-        assert all(held for _, held in h.reads), h.reads
+        h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a", "ns-b"])
+        assert all(held for _, held in h.calls), h.calls
+
+    def test_rollback_to_a_watch_all_revision_is_set_back(self):
+        """A watch-all revision cannot crash-loop the operator; after it the
+        pre-rollback list is set back rather than left watching everything."""
+        h = _Repair(
+            values=["ns-a"],
+            live=["ns-a"],
+            active=("ns-a",),
+            state=_state("pending-upgrade", 5),
+            after={
+                "values": None,
+                "spark-operator-controller": None,
+                "spark-operator-webhook": None,
+            },
+        )
+        h.mgr.last_good_revision.return_value = 4
+        h.revision_lists[4] = None
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        assert h.writes() == ["rollback", "set"]
         h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a"])
 
     def test_pending_release_refuses_a_revision_naming_a_deleted_namespace(self):
         """Rolling back to a list naming a deleted namespace crash-loops the
         operator for every tenant: refuse and name the manual step."""
-        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",), state=("pending-upgrade", 5))
+        h = _Repair(
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 5)
+        )
         h.mgr.last_good_revision.return_value = 4
         h.revision_lists[4] = ["ns-a", "ns-gone"]
         r = h.invoke()
         assert r.exit_code == 3, r.output
-        assert "helm history" in " ".join(r.output.split())
-        h.mgr.rollback_to.assert_not_called()
-        h.mgr._set_watch_list_impl.assert_not_called()
+        assert "helm history" in _flat(r)
+        assert "ns-gone" in _flat(r)
+        assert h.writes() == []
 
-    def test_pending_release_refuses_a_revision_dropping_a_watched_namespace(self):
+    def test_a_recent_pending_release_is_not_rolled_back(self):
+        """A helm call outside the lease (an admin, an unlocked add) may still
+        be running: rolling back under it makes two writers."""
         h = _Repair(
-            values=["ns-a", "ns-b"],
-            live=["ns-a", "ns-b"],
-            active=("ns-a", "ns-b"),
-            state=("pending-rollback", 7),
+            values=["ns-a"],
+            live=["ns-a"],
+            active=("ns-a",),
+            state=_state("pending-upgrade", 5, updated=_OLD),
         )
-        h.mgr.last_good_revision.return_value = 6
-        h.revision_lists[6] = ["ns-a"]
+        h.mgr.last_good_revision.return_value = 4
+        h.revision_lists[4] = ["ns-a"]
+        r = h.invoke(now=_OLD + 30)
+        assert r.exit_code == 3, r.output
+        assert "may still be running" in _flat(r)
+        assert h.writes() == []
+
+    def test_a_pending_release_with_no_time_is_not_rolled_back(self):
+        h = _Repair(
+            values=["ns-a"],
+            live=["ns-a"],
+            active=("ns-a",),
+            state=_state("pending-rollback", 5, updated=None),
+        )
+        h.mgr.last_good_revision.return_value = 4
+        h.revision_lists[4] = ["ns-a"]
         r = h.invoke()
         assert r.exit_code == 3, r.output
-        h.mgr.rollback_to.assert_not_called()
+        assert h.writes() == []
+
+    def test_pending_release_with_unreadable_revision_values_refuses(self):
+        from lakebench.modules.pipeline_engines.spark.operator import _WatchListReadError
+
+        h = _Repair(
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 5)
+        )
+        h.mgr.last_good_revision.return_value = 4
+
+        def watched(revision=None):
+            if revision is not None:
+                raise _WatchListReadError("helm get values failed")
+            return ["ns-a"]
+
+        h.mgr._get_watched_namespaces.side_effect = watched
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        assert h.writes() == []
 
     def test_pending_release_without_a_deployed_revision_refuses(self):
-        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",), state=("pending-upgrade", 1))
+        h = _Repair(
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 1)
+        )
         h.mgr.last_good_revision.return_value = None
         r = h.invoke()
         assert r.exit_code == 3, r.output
-        h.mgr.rollback_to.assert_not_called()
+        assert "None" not in _flat(r)
+        assert h.writes() == []
+
+    def test_dry_run_reports_the_rollback_verdict(self):
+        h = _Repair(
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 5)
+        )
+        h.mgr.last_good_revision.return_value = 4
+        h.revision_lists[4] = ["ns-a", "ns-gone"]
+        r = h.invoke("--dry-run")
+        assert r.exit_code == 0, r.output
+        assert "not rolling back" in _flat(r)
+        assert "already reconciled" not in _flat(r)
+        assert not h.lock.called
+        assert h.writes() == []
 
     def test_pending_install_refuses(self):
-        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",), state=("pending-install", 1))
+        h = _Repair(
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-install", 1)
+        )
         r = h.invoke()
         assert r.exit_code == 3, r.output
-        h.mgr.rollback_to.assert_not_called()
-        h.mgr._set_watch_list_impl.assert_not_called()
+        assert h.writes() == []
 
     def test_absent_release_is_a_prerequisite(self):
-        h = _Repair(state=("absent", 0))
+        h = _Repair(state=_state("absent", 0, None))
         r = h.invoke()
         assert r.exit_code == 4, r.output
-        assert "admin install --component spark-operator" in " ".join(r.output.split())
+        assert "admin install --component spark-operator" in _flat(r)
 
     def test_waits_up_to_three_watch_list_holds(self):
         from lakebench.deploy.cluster_lock import ADMIN_MAX_HOLD_S

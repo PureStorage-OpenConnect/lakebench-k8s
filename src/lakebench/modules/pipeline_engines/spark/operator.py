@@ -13,10 +13,10 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from lakebench.k8s import pinned_helm, pinned_kubectl, pinned_oc
-from lakebench.k8s.lease_state import LeaseHoldExceeded, lease_clamp
+from lakebench.k8s.lease_state import LeaseHoldExceeded, lease_clamp, lease_held
 from lakebench.modules.pipeline_engines.spark.operator_scratch import (
     DEFAULT_CONTROLLER_TMP_SIZE,
     TmpVolume,
@@ -33,9 +33,12 @@ class _DeploymentReadError(Exception):
     """Raised when the controller deployment spec cannot be read."""
 
 
-# The watch-list hold budget, phase by phase (DESIGN ch01 3.7). Each phase is
-# one deadline shared by its steps, bounded by the lease's hold budget; a step
-# with too little of its phase left fails closed before it starts.
+# The watch-list hold budget, phase by phase: the design's split of the
+# lease's 750 s hold. Each phase is one deadline shared by its steps and is
+# also bounded by what the hold has left, so the hold budget, not this table,
+# is what stops a long sequence: a step with too little left fails closed
+# before it starts. WATCH_POD_POLL_S is destroy's _OPERATOR_POD_WAIT_S and
+# WATCH_RECOVERY_S is k8s._pinned's HELM_RECOVERY_RESERVE_S (a test ties them).
 WATCH_HELM_PHASE_S = 180  # the helm upgrade, conflict retries included
 WATCH_ROLLOUT_PHASE_S = 180  # awaiting the OpenShift patch rollout, both Deployments
 WATCH_RESTART_PHASE_S = 180  # the restart and both rollout waits
@@ -80,10 +83,14 @@ class _Phase:
             raise LeaseHoldExceeded(f"{what}: no time left in its phase; not started")
         return left
 
-    def helm_attempt_s(self, what: str) -> float:
+    def helm_attempt_s(self, what: str) -> float | None:
         """The subprocess timeout for one helm attempt, or raise when less than
         ``_HELM_ATTEMPT_MIN_S`` is left (a killed upgrade is worse than one
-        never started)."""
+        never started). None outside the lease: there k8s._pinned does not
+        stop helm with SIGTERM first or bound its own ``--timeout``, and a
+        bare SIGKILL would leave the release pending for every deployment."""
+        if not lease_held():
+            return None
         left = self.remaining()
         if left < _HELM_ATTEMPT_MIN_S:
             raise LeaseHoldExceeded(
@@ -125,6 +132,32 @@ class OperatorStatus:
     watched_namespaces: list[str] | None = None  # None = watches all
 
 
+class ReleaseState(NamedTuple):
+    """``helm status`` of the operator release."""
+
+    status: str  # deployed, pending-upgrade, ... or "absent"
+    revision: int
+    updated: float | None  # info.last_deployed as epoch seconds, None if unparseable
+
+
+def _helm_time(value: object) -> float | None:
+    """Epoch seconds of a helm RFC 3339 time (nanosecond fraction allowed)."""
+    from datetime import datetime
+
+    if not isinstance(value, str) or not value:
+        return None
+    m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)$", value.strip())
+    if not m:
+        return None
+    # Python 3.10's fromisoformat takes exactly six fraction digits.
+    frac = "." + (m.group(2) or ".")[1:7].ljust(6, "0")
+    tz = "+00:00" if m.group(3) == "Z" else m.group(3)
+    try:
+        return datetime.fromisoformat(m.group(1) + frac + tz).timestamp()
+    except ValueError:
+        return None
+
+
 def watch_list_fix_hint() -> str:
     """User-facing remedy for a namespace missing from ``spark.jobNamespaces``.
 
@@ -152,6 +185,7 @@ class SparkOperatorManager:
     HELM_RELEASE_NAME = "spark-operator"
     DEFAULT_NAMESPACE = "spark-operator"
     CONTROLLER_DEPLOYMENT = "spark-operator-controller"
+    WEBHOOK_DEPLOYMENT = "spark-operator-webhook"
 
     # ``spark.jobNamespaces`` is shared cluster state, so concurrent deploys
     # contend for it.  Helm rejects an upgrade while another is in flight;
@@ -363,12 +397,23 @@ class SparkOperatorManager:
             )
 
             if result.returncode != 0:
+                err = (result.stderr or "").strip()
+                if "notfound" in err.lower().replace(" ", ""):
+                    return OperatorStatus(
+                        installed=False,
+                        version=None,
+                        namespace=None,
+                        ready=False,
+                        message="SparkApplication CRD not found",
+                    )
+                # An API that is down, a refused read or a bad context is not
+                # "not installed": nobody should be told to install over it.
                 return OperatorStatus(
-                    installed=False,
+                    installed=None,
                     version=None,
                     namespace=None,
                     ready=False,
-                    message="SparkApplication CRD not found",
+                    message=f"could not read the SparkApplication CRD: {err or 'kubectl failed'}",
                 )
 
             # Check if operator deployment exists
@@ -385,7 +430,18 @@ class SparkOperatorManager:
                 text=True,
             )
 
-            if result.returncode != 0 or "No resources" in result.stdout:
+            if result.returncode != 0:
+                return OperatorStatus(
+                    installed=None,
+                    version=None,
+                    namespace=None,
+                    ready=False,
+                    message=(
+                        "could not list the operator Deployments: "
+                        f"{(result.stderr or '').strip() or 'kubectl failed'}"
+                    ),
+                )
+            if "No resources" in result.stdout:
                 return OperatorStatus(
                     installed=True,
                     version=None,
@@ -527,8 +583,11 @@ class SparkOperatorManager:
         except Exception:
             return None
 
-    def _get_active_namespaces(self, operator_ns: str | None = None) -> list[str] | None:
-        """Get namespaces from the running controller deployment spec.
+    def _get_active_namespaces(
+        self, operator_ns: str | None = None, deployment: str | None = None
+    ) -> list[str] | None:
+        """Get namespaces from an operator Deployment's spec (the controller
+        unless *deployment* names another, such as the webhook).
 
         Reads the ``--namespaces=...`` arg from the deployment's pod template.
         This is the ground truth -- what the controller will actually watch
@@ -548,7 +607,7 @@ class SparkOperatorManager:
                     "kubectl",
                     "get",
                     "deployment",
-                    "spark-operator-controller",
+                    deployment or self.CONTROLLER_DEPLOYMENT,
                     "-n",
                     ns,
                     "-o",
@@ -668,6 +727,8 @@ class SparkOperatorManager:
                     return None  # Empty string -- watches all
                 return [ns_value]
             if isinstance(ns_value, list):
+                if "" in ns_value:
+                    return None  # the chart renders --namespaces="" (all)
                 filtered = [ns for ns in ns_value if ns]
                 return filtered if filtered else None
             return None  # Unknown type -- assume watches all
@@ -1102,9 +1163,11 @@ class SparkOperatorManager:
                 f"failed to remove namespace '{namespace}' from the Spark "
                 "Operator watch list. The operator may crash-loop on the "
                 "stale entry, which would break SparkApplication reconciliation "
-                "for every namespace on the cluster. Run "
-                "`lakebench admin repair-operator` to reconcile the watch "
-                "list against live namespaces."
+                "for every namespace on the cluster. The namespace was NOT "
+                "deleted. Run `lakebench admin repair-operator` to reconcile the "
+                "watch list against live namespaces (when the restart after the "
+                "removal failed the list is already right), then destroy again "
+                "once the operator pods are Ready."
             )
         return True
 
@@ -1498,7 +1561,7 @@ class SparkOperatorManager:
         Returns:
             True if both deployments restarted and rolled out successfully.
         """
-        deployments = ["spark-operator-controller", "spark-operator-webhook"]
+        deployments = [self.CONTROLLER_DEPLOYMENT, self.WEBHOOK_DEPLOYMENT]
         phase = _Phase(WATCH_RESTART_PHASE_S)
 
         for deploy in deployments:
@@ -1681,9 +1744,9 @@ class SparkOperatorManager:
             return False
         return None
 
-    def release_state(self) -> tuple[str, int] | None:
-        """``(helm status, revision)`` of this manager's release; ``("absent",
-        0)`` when there is none; None when it cannot be read."""
+    def release_state(self) -> ReleaseState | None:
+        """Status, revision and last-change time of this manager's release;
+        ``("absent", 0, None)`` when there is none; None when unreadable."""
         import json
 
         try:
@@ -1696,12 +1759,17 @@ class SparkOperatorManager:
             return None
         if result.returncode != 0:
             if re.search(r"release:? not found", (result.stderr or "").lower()):
-                return ("absent", 0)
+                return ReleaseState("absent", 0, None)
             return None
         try:
             doc = json.loads(result.stdout or "{}")
-            return (str((doc.get("info") or {}).get("status") or ""), int(doc.get("version") or 0))
-        except (ValueError, TypeError):
+            info = doc.get("info") or {}
+            return ReleaseState(
+                str(info.get("status") or ""),
+                int(doc.get("version") or 0),
+                _helm_time(info.get("last_deployed")),
+            )
+        except (ValueError, TypeError, AttributeError):
             return None
 
     def last_good_revision(self, before: int) -> int | None:
@@ -1716,17 +1784,17 @@ class SparkOperatorManager:
                 text=True,
             )
             rows = json.loads(result.stdout or "[]") if result.returncode == 0 else None
-        except (OSError, subprocess.SubprocessError, ValueError):
+            if not isinstance(rows, list):
+                return None
+            good = [
+                int(r.get("revision") or 0)
+                for r in rows
+                if isinstance(r, dict)
+                and str(r.get("status") or "") in ("deployed", "superseded")
+                and int(r.get("revision") or 0) < before
+            ]
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
             return None
-        if not isinstance(rows, list):
-            return None
-        good = [
-            int(r.get("revision") or 0)
-            for r in rows
-            if isinstance(r, dict)
-            and str(r.get("status") or "") in ("deployed", "superseded")
-            and int(r.get("revision") or 0) < before
-        ]
         return max(good) if good else None
 
     def rollback_to(self, revision: int) -> bool:
@@ -1800,15 +1868,19 @@ class SparkOperatorManager:
             return False
         deadline = time.monotonic() + lease_clamp(15.0)
         while True:
-            try:
-                live = self._get_active_namespaces()
-            except _DeploymentReadError as e:
-                live = None
-                logger.warning("cannot read the controller args after the upgrade: %s", e)
-            if live is not None and sorted(live) == wanted:
+            got: dict[str, list[str] | None] = {}
+            for deploy in (self.CONTROLLER_DEPLOYMENT, self.WEBHOOK_DEPLOYMENT):
+                try:
+                    got[deploy] = self._get_active_namespaces(deployment=deploy)
+                except _DeploymentReadError as e:
+                    got[deploy] = None
+                    logger.warning("cannot read %s args after the upgrade: %s", deploy, e)
+            if all(v is not None and sorted(set(v)) == wanted for v in got.values()):
                 return True
             if time.monotonic() >= deadline:
-                logger.error("controller watches %s after the upgrade, wanted %s", live, wanted)
+                logger.error(
+                    "operator Deployments watch %s after the upgrade, wanted %s", got, wanted
+                )
                 return False
             time.sleep(1)
 
@@ -1926,7 +1998,7 @@ class SparkOperatorManager:
         """Wait for both operator Deployments to finish rolling out, within one
         ``timeout_s`` budget for the two (bounded by the lease's hold budget)."""
         return self._await_rollouts(
-            [self.CONTROLLER_DEPLOYMENT, "spark-operator-webhook"], _Phase(timeout_s)
+            [self.CONTROLLER_DEPLOYMENT, self.WEBHOOK_DEPLOYMENT], _Phase(timeout_s)
         )
 
     def _verify_tmp_size(self, tmp_size: str) -> bool:
@@ -2185,7 +2257,9 @@ class SparkOperatorManager:
         status.ready = False
         status.message = (
             "the Spark Operator's watch list could not be read; SparkApplications may "
-            f"never reconcile. {watch_list_fix_hint()}"
+            "never reconcile, so this stops rather than submit them. Check "
+            "`helm status spark-operator` and the operator pods in the operator's "
+            "namespace; a cluster admin runs `lakebench admin doctor`."
         )
         return status
 
