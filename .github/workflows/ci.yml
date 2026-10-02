@@ -212,7 +212,7 @@ jobs:
           # trust-order begin
           if { [ "$EVENT" = "pull_request" ] && [ "$BASE_REF" = "main" ]; } \
             || { [ "$EVENT" != "pull_request" ] \
-              && { [ "$REF" = "refs/heads/main" ] || [ "${REF#refs/tags/}" != "$REF" ]; }; }; then
+              && { [ "${REF:-}" = "refs/heads/main" ] || [ "${REF:-}" != "${REF#refs/tags/}" ]; }; }; then
             trust_order="origin/main origin/integrate/v1.5.0"
           else
             trust_order="origin/integrate/v1.5.0 origin/main"

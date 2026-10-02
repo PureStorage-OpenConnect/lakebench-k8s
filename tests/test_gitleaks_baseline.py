@@ -177,7 +177,15 @@ def test_ci_history_scan_uses_the_trusted_baseline(tmp_path):
 
     def ci(**env: str) -> subprocess.CompletedProcess:
         full = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        full.update({"EVENT": "push", "BASE_REF": "", "RUNNER_TEMP": str(runner)}, **env)
+        full.update(
+            {
+                "EVENT": "push",
+                "BASE_REF": "",
+                "REF": "refs/heads/lane/x",
+                "RUNNER_TEMP": str(runner),
+            },
+            **env,
+        )
         full["PATH"] = f"{pybin}{os.pathsep}{full.get('PATH', '')}"
         return subprocess.run(
             ["bash", "-c", _ci_scan_script()], cwd=repo, capture_output=True, text=True, env=full
@@ -237,3 +245,29 @@ def test_ci_history_scan_uses_the_trusted_baseline(tmp_path):
     _git(repo, "update-ref", "refs/remotes/origin/main", published)
     res = ci()
     assert res.returncode == 0 and "from origin/integrate/v1.5.0" in res.stdout, res.stdout
+
+    # An allowlist integrate has and main lacks (public defaults): a lane or
+    # train branch on integrate passes with integrate's config; what goes to
+    # main is held to main's config until the allowlist is on main.
+    _git(repo, "reset", "-q", "--hard", main)
+    _git(repo, "update-ref", "refs/remotes/origin/main", main)
+    toml = (repo / ".gitleaks.toml").read_text() + "\n[[allowlists]]\nregexes = ['''^PSFB''']\n"
+    integrate = commit(".gitleaks.toml", toml, "integrate: allowlist the public default")
+    _git(repo, "update-ref", "refs/remotes/origin/integrate/v1.5.0", integrate)
+    commit("d.txt", f"k: {_planted_key('Z')}\n", "uses the public default")
+    for ref in ("refs/heads/lane/x", "refs/heads/train/t", "refs/heads/integrate/v1.5.0"):
+        res = ci(REF=ref)
+        assert res.returncode == 0 and "config from origin/integrate/v1.5.0" in res.stdout, (
+            ref + res.stdout + res.stderr
+        )
+    res = ci(EVENT="pull_request", REF="refs/pull/1/merge", BASE_REF="integrate/v1.5.0")
+    assert res.returncode == 0 and "config from origin/integrate/v1.5.0" in res.stdout, res.stdout
+    for env in (
+        {"REF": "refs/heads/main"},
+        {"REF": "refs/tags/v1.7.0"},
+        {"EVENT": "pull_request", "REF": "refs/pull/2/merge", "BASE_REF": "main"},
+    ):
+        res = ci(**env)
+        assert res.returncode == 1 and "config from origin/main" in res.stdout, (
+            str(env) + res.stdout + res.stderr
+        )
