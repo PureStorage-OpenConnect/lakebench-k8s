@@ -123,9 +123,20 @@ def listing_sha256(objects: Iterable[Mapping[str, Any]]) -> str:
     return hashlib.sha256(canonical_json(triples).encode()).hexdigest()
 
 
+#: Bucket-level prefix of the objects Lakebench itself keeps in a bucket
+#: (the bucket owner marker). They are never corpus data.
+RESERVED_PREFIX = ".lakebench/"
+
+
 def list_scope(client: Any, bucket: str, scope: str) -> list[dict[str, Any]]:
     """Every object under *scope* in *bucket*, through the boto3
-    ``list_objects_v2`` paginator. Errors propagate to the caller."""
+    ``list_objects_v2`` paginator. Lakebench's own bucket objects (the
+    owner marker under ``RESERVED_PREFIX``, at the bucket root) are never
+    counted: a scope is never empty (``datagen_scope``) nor under that
+    prefix (refused here), and only keys inside the scope are kept, even
+    from a backend that returns others. Errors propagate to the caller."""
+    if scope.startswith(RESERVED_PREFIX):
+        raise ValueError(f"a corpus scope is never under {RESERVED_PREFIX}")
     out: list[dict[str, Any]] = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=scope):
@@ -135,9 +146,12 @@ def list_scope(client: Any, bucket: str, scope: str) -> list[dict[str, Any]]:
     return out
 
 
-def listing_digest(client: Any, bucket: str, prefix: str) -> str:
-    """``listing_sha256`` of everything under ``datagen_scope(prefix)``."""
-    return listing_sha256(list_scope(client, bucket, datagen_scope(prefix)))
+def listing_digest(client: Any, bucket: str, prefix: str) -> str | None:
+    """``listing_sha256`` of everything under ``datagen_scope(prefix)``, or
+    None when the scope holds no object (as ``read_corpus_markers``
+    records it: an empty scope is not a corpus)."""
+    objects = list_scope(client, bucket, datagen_scope(prefix))
+    return listing_sha256(objects) if objects else None
 
 
 def corpus_series_sha256(markers: Mapping[int, Sequence[Mapping[str, Any]]]) -> str | None:
@@ -274,6 +288,11 @@ def _read_into(out: MarkerSet, client: Any, bucket: str, prefix: str) -> None:
         out.error = f"listing {out.scope} failed: {_reason(e)}"
         return
     out.objects = len(objects)
+    if not objects:
+        # An empty scope is not a corpus: no digest, so two empty listings
+        # never read as one corpus (a series cannot inherit from one).
+        out.problems.append(f"no objects under {out.scope}")
+        return
     out.bronze_listing_sha256 = listing_sha256(objects)
 
     marker_dir = f"{out.scope}{MARKER_DIR}/"

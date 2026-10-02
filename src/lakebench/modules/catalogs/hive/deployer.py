@@ -253,8 +253,8 @@ class HiveDeployer:
                     message=(
                         f"Stackable platform not fully installed "
                         f"(missing or not running: {', '.join(missing)}). "
-                        f"Option 1: Set architecture.catalog.hive.operator.install: true\n"
-                        f"Option 2: Install manually:\n  {install_cmds}"
+                        "A cluster admin installs them once:\n"
+                        f"  {install_cmds}"
                     ),
                     elapsed_seconds=time.time() - start,
                 )

@@ -130,7 +130,7 @@ Trino configured with the REST catalog connector.
 ### 4. Generate and run
 
 ```bash
-lakebench generate lakebench.yaml --wait
+lakebench generate lakebench.yaml
 lakebench run lakebench.yaml
 ```
 

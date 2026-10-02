@@ -23,7 +23,18 @@
   "differs_from_record": "No datagen stage or datagen calls (--skip-generate; the record ran --generate: 30 s, 2 pods). silver executor_count 4 (record 8), so silver memory_gb_requested 240 (record 480). silver and gold output_size_gb are the end-of-run bucket sizes 9.094713 / 0.657642 (record measured each bucket at its stage end: 8.111473 / 0.333316). QpH 1800 (fake 2 s per query) vs record 427.0; pre QpH 1800 vs 316.7; qph_spread 1800/1800/0.0 vs 417.0/440.2/0.0541; maintenance_value_reason '+0.0% inside the within-round spread' vs record '+9.9% is under the 11% drift'. File counts total 65/61 as the record, but split 64+1 / 60+1 by the harness (the record's split across silver.transactions and gold.daily_dashboards is not stored). Everything else traced (rows, input sizes, bucket_gb, scale_ratio 1.009, total_data_processed_gb 20.912, compaction_ratio 1.07, maintenance outcome counts 36/16, effective ids, settle flags, aml section apart from the run_id normalisation above, verdict) equals the record.",
   "unsure": "Nothing material. The 1800 s statement timeouts assume less than 30 s passes between MaintenanceBudget creation and the last statement, which holds with instant fakes; the settle probe count assumes the default maintenance_settle config (probe_query None, probe_samples 1), as batch_c360 confirms. The re-derivation of aml is mechanical: both new values were checked equal to the record by parsing, not by running the harness.",
   "calls_count": "126 calls",
-  "aml_vs_record": "tm_operations equals the record's exactly, values and key order; normalise() changes nothing in it (no run id or T-timestamp string). financial_scoring equals the record's in value; normalise() turns run_id '20261001-114528-37810a-c1' into '<run_id>-c1' (the only string it touches), and the key order is the fixture's sorted order rather than the record's emit order, which the comparison ignores (dict equality)."
+  "aml_vs_record": "tm_operations equals the record's exactly, values and key order; normalise() changes nothing in it (no run id or T-timestamp string). financial_scoring equals the record's in value; normalise() turns run_id '20261001-114528-37810a-c1' into '<run_id>-c1' (the only string it touches), and the key order is the fixture's sorted order rather than the record's emit order, which the comparison ignores (dict equality).",
+  "er9h": {
+   "author": "independent second agent (ER-9h golden update), derived by reading the uncommitted lane diff; pytest, the harness, run(), _run_sustained and the CLI were not run",
+   "tree": "lane/v17-identity-er9h, uncommitted working tree on integrate 9afa879 (cli/_run.py, cli/_sustained.py, corpus_digest.py, metrics/corpus_identity.py, tests/harness/run_harness.py)",
+   "position": "calls[126..128], appended after the finally block's three get_bucket_size calls (cli/_run.py:3107-3112); nothing records between those and the new site. calls 126 -> 129.",
+   "site": "cli/_run.py:3205-3208 (batch finally block, inside `if run_metrics:`, after build_pipeline_benchmark, before save_run at :3209) calls record_corpus_observation(run_metrics, cfg) with s3=None. config_snapshot.experiment_inputs is a dict (metrics/collector.py:2276), so the helper does not return early.",
+   "calls[126]": "S3 init: record_corpus_observation builds S3Client from cfg.platform.storage.s3 (metrics/corpus_identity.py:209-219), via lakebench.s3.S3Client, which the harness patches to FakeS3 (tests/harness/run_harness.py:1501); FakeS3.__init__ records endpoint, keys, region, path_style, verify_ssl (run_harness.py:893-911), the same values as the finally block's init (ca_cert is passed but not recorded).",
+   "calls[127]": "S3 raw_client: observe_corpus reads s3.raw_client once (metrics/corpus_identity.py:161); FakeS3.raw_client records it and returns _FakeBoto (run_harness.py:927-930).",
+   "calls[128]": "S3 paginate list_objects_v2 runchar-bronze pacs008/: read_corpus_markers -> _read_into -> list_scope (corpus_digest.py:263-292, 137-146); get_paginator itself records nothing, paginate records (Bucket, Prefix) (run_harness.py:857-872). Bucket cfg.platform.storage.s3.buckets.bronze = runchar-bronze (default_bucket_names, as the get_bucket_size calls show). bronze_datagen_prefix (deploy/datagen.py:40-53): schema financial, path_template 'pacs008' set by the scenario (tests/harness/run_harness.py:1403), so 'pacs008'; datagen_scope (corpus_digest.py:94-101) -> 'pacs008/'. The bucket starts with 'runchar-', so no refusal.",
+   "after": "The page is empty, so no marker or series.json GET (corpus_digest.py:294-356); resolve_lineage reads the local lineage table only (metrics/corpus_identity.py:511-549); no further seam call before save_run.",
+   "other_sections": "unchanged. experiment's top-level keys are fixed (metrics/experiment.py:811-828), so metrics_keys.experiment is the same; the observation adds only experiment.corpus fields (id_v2 None, id_v2_unavailable, declared, problems), which no trace section reads (build_trace, run_harness.py:1687-1746). compute_verdict reads no corpus or experiment field (metrics/verdict.py), so success, verdict and verdict_reasons are unchanged. No journal event. unscripted stays []."
+  }
  },
  "exit_code": 0,
  "unscripted": [],
@@ -977,6 +988,26 @@
    "get_bucket_size",
    "runchar-gold",
    ""
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-bronze",
+   "pacs008/"
   ]
  ],
  "submits": [

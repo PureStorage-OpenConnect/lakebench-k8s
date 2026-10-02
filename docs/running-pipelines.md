@@ -449,8 +449,9 @@ that, capped at the profile's maximum. The formula is
 
 At scale 100 that gives bronze-verify 7 (c360) or 11 (financial),
 silver-build 18 and gold-finalize 11. The 28 maximum is a Lakebench-imposed
-ceiling (K8s API polling, below), not a cluster limit. The auto-sizer and the
-global `platform.compute.spark.executor` block do not change these counts;
+ceiling (K8s API polling, below), not a cluster limit. The auto-sizer does not
+change these counts (v1.7 removed the `platform.compute.spark.executor`
+block, which never did);
 `lakebench info <config>` (hidden and deprecated, but the only command that prints the per-job counts) shows the resolved per-job values. In continuous
 mode the streaming jobs have their own profiles and are capped to a
 concurrent CPU budget when the cluster is smaller than the profiles need.

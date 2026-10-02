@@ -178,7 +178,9 @@ class TestSeriesHash:
             {0: [marker(node=1), marker(node=2)]},  # node 0 missing, stray node 2
             {0: [marker(node=0), marker(node=0)]},  # node 0 twice
             {0: [marker(node=0, h=H1), marker(node=1, h=H2)]},  # mixed arguments
-            {0: [marker(node=0, h=None), marker(node=1, h=None)]},  # pre-DAT-3 shape
+            {
+                0: [marker(node=0, h=None), marker(node=1, h=None)]
+            },  # shape of an image that writes no marker hash
             {0: [marker(node=0, total=2), marker(node=1, total=3)]},
             {1: [marker(1, total=1, cycles=2)]},  # cycle 0 missing
             {0: [marker(total=1, cycles=1)], 1: [marker(1, total=1, cycles=2)]},
@@ -915,3 +917,110 @@ class TestThirdPassCases:
         corpus = corpus_of(obs=obs)
         assert corpus["lineage"].startswith("declared:")
         assert needle in corpus["lineage_notes"][0]
+
+
+# ---------------------------------------------------------------------------
+# ER-9h: the observation is recorded once, before the save
+# ---------------------------------------------------------------------------
+
+
+class TestRecordObservation:
+    def test_observation_lands_in_the_inputs_and_the_block(self):
+        run = _metrics(_cfg())
+        s3 = SimpleNamespace(raw_client=bucket(two_nodes(), series()))
+        ci.record_corpus_observation(run, _cfg(), s3)
+        obs = run.config_snapshot["experiment_inputs"]["corpus_observation"]
+        assert obs["bronze_listing_sha256"] and obs["markers"]["corpus_series_sha256"]
+        corpus = run.to_dict()["experiment"]["corpus"]
+        assert len(corpus["id_v2"]) == 16 and corpus["lineage"] == D
+
+    def test_failing_store_is_recorded_not_raised(self):
+        class Broken:
+            @property
+            def raw_client(self):
+                raise ConnectionError("endpoint unreachable")
+
+        run = _metrics(_cfg())
+        ci.record_corpus_observation(run, _cfg(), Broken())
+        obs = run.config_snapshot["experiment_inputs"]["corpus_observation"]
+        assert obs["bronze_listing_sha256"] is None
+        assert "corpus observation failed" in obs["markers"]["error"]
+
+    def test_record_without_inputs_is_left_alone(self):
+        run = SimpleNamespace(config_snapshot={})
+        ci.record_corpus_observation(run, _cfg(), SimpleNamespace(raw_client=bucket()))
+        assert run.config_snapshot == {}
+
+    @pytest.mark.parametrize(
+        "path,anchor",
+        [
+            ("src/lakebench/cli/_run.py", "metrics_path = metrics_storage.save_run(run_metrics)"),
+            ("src/lakebench/cli/_run.py", "return metrics_storage.save_run(run_metrics)"),
+            (
+                "src/lakebench/cli/_sustained.py",
+                "metrics_path = metrics_storage.save_run(run_metrics)",
+            ),
+        ],
+    )
+    def test_every_run_save_records_the_observation_first(self, path, anchor):
+        src = (ROOT / path).read_text()
+        at = src.index(anchor)
+        assert "record_corpus_observation(run_metrics, cfg" in src[max(0, at - 400) : at]
+
+
+class TestOwnerMarkerIsNotCorpus:
+    def test_owner_marker_never_counts(self):
+        """The bucket owner marker under .lakebench/ is never corpus data,
+        so a marker written or rewritten by deploy leaves the digest alone."""
+
+        class Unfiltered(FakeBoto):
+            """A backend that returns keys outside the requested prefix."""
+
+            def get_paginator(self, op):
+                fake = self
+
+                class P:
+                    def paginate(self, Bucket, Prefix):  # noqa: N803
+                        keys = sorted(fake.objects)
+                        yield {
+                            "Contents": [
+                                {"Key": k, "Size": len(fake.objects[k]), "ETag": fake.etags[k]}
+                                for k in keys
+                            ]
+                        }
+
+                return P()
+
+        plain = bucket(two_nodes(), series())
+        objs = dict(plain.objects)
+        objs[".lakebench/owner.json"] = b'{"deployment": "x"}'
+        objs[f"{SCOPE[:-1]}_v2/part-9.parquet"] = b"y"  # a sibling prefix
+        marked = Unfiltered(objs)
+        a = cd.read_corpus_markers(plain, BUCKET, SCOPE)
+        b = cd.read_corpus_markers(marked, BUCKET, SCOPE)
+        assert a.bronze_listing_sha256 == b.bronze_listing_sha256
+        assert not any(
+            o["Key"].startswith(".lakebench/") for o in cd.list_scope(marked, BUCKET, SCOPE)
+        )
+
+    def test_empty_scope_has_no_digest(self):
+        ms = cd.read_corpus_markers(bucket(data=()), BUCKET, SCOPE)
+        assert ms.bronze_listing_sha256 is None
+        assert ms.problems == [f"no objects under {SCOPE}"]
+
+    def test_scope_under_the_reserved_prefix_refused(self):
+        with pytest.raises(ValueError, match="never under"):
+            cd.list_scope(bucket(), BUCKET, ".lakebench/x/")
+
+
+def test_unavailable_reasons_name_no_plan_id():
+    import re
+
+    plan_id = re.compile(r"\b(?:DAT|CD|ER|EVD|SAF|QA|LB)-[0-9]+")
+    for text in (ci.NO_MARKER, ci.NOT_OBSERVED, ci.UNREADABLE_MARKER, ci.NOT_ONE_CORPUS):
+        assert not plan_id.search(text), text
+
+
+def test_listing_digest_of_an_empty_scope_is_none():
+    assert cd.listing_digest(bucket(data=()), BUCKET, SCOPE) is None
+    assert cd.is_sha256_hex(cd.listing_digest(bucket(), BUCKET, SCOPE))

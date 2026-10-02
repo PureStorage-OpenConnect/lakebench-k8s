@@ -58,16 +58,17 @@ The deployment engine follows this fixed sequence:
    watches the deployment namespace. If the namespace is not watched, deploy
    adds it to `spark.jobNamespaces` with `helm upgrade`, under the
    `lakebench-cluster-lock` lease so concurrent deploys do not overwrite each
-   other. With `platform.compute.spark.operator.install: true`, deploy also
-   installs the operator when it is missing; with `install: false` (the
-   default), a missing or broken operator fails the deploy.
+   other. Deploy never installs the shared operator: a missing or broken
+   operator fails the deploy, and a cluster admin installs it once with
+   `lakebench admin install-spark-operator`
+   (`platform.compute.spark.operator.install: true` is refused).
 10. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
     (StatefulSet) with the connector configured to point at the catalog.
     Skipped unless `architecture.query_engine.type` is `trino`.
 11. **Spark Thrift Server** -- Deployed when the query engine is `spark-thrift`.
 12. **DuckDB** -- Deployed when the query engine is `duckdb`.
-13. **Observability** -- Only when `observability.enabled` is true or the
-    `--include-observability` flag is used. Prometheus and Grafana come from
+13. **Observability** -- Only when `observability.enabled` is true.
+    Prometheus and Grafana come from
     one shared `kube-prometheus-stack` release in the `lakebench-observability`
     namespace. Deploy installs it only if no such release exists on the
     cluster, never modifies an existing one, and applies this deployment's
@@ -83,7 +84,6 @@ deploying.
 |---|---|---|
 | `--file` | `-f` | Config file (alternative to the positional argument) |
 | `--dry-run` | | Show what would be deployed without making changes |
-| `--include-observability` | | Deploy Prometheus and Grafana monitoring stack |
 | `--yes` | `-y` | Skip the confirmation prompt |
 | `--timeout` | `-t` | Global deployment timeout in seconds, checked between steps (default 3600, `0` = no timeout) |
 | `--local` | | Deploy locally with podman or docker instead of Kubernetes |
@@ -104,10 +104,11 @@ Deploy without confirmation:
 lakebench deploy my-config.yaml --yes
 ```
 
-Deploy with the full observability stack:
+Deploy with the full observability stack: set `observability.enabled: true`
+in the config, then
 
 ```bash
-lakebench deploy my-config.yaml --include-observability --yes
+lakebench deploy my-config.yaml --yes
 ```
 
 Dry run (show plan without deploying):
@@ -139,7 +140,7 @@ lakebench status --namespace my-lakehouse
 
 ## Accessing Monitoring (Observability Stack)
 
-When deployed with `--include-observability`, Prometheus and Grafana run in
+With `observability.enabled: true`, Prometheus and Grafana run in
 the shared `lakebench-observability` namespace (Grafana credentials:
 `admin` / `lakebench`). The chart shortens service names, so list them:
 

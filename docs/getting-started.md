@@ -176,7 +176,7 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure; with the default `platform.compute.spark.operator.install: false`, `deploy` does not install it and fails if it is missing (with `install: true` it installs a missing operator). Whatever `install` says, `deploy` always checks the operator and adds its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure: `deploy` never installs it and fails if it is missing (a cluster admin installs it once with `lakebench admin install-spark-operator`; `platform.compute.spark.operator.install: true` is refused). `deploy` always checks the operator and adds its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
 
 The supported installation path is:
 
@@ -210,22 +210,9 @@ Which catalog operators you need depends on your recipe choice:
 | `polaris-*` | Apache Polaris | **None** -- Lakebench deploys Polaris directly |
 
 For **Hive** recipes (the default), the Stackable operators are required.
-You have two options:
-
-**Option A: Auto-install** (add to your config YAML):
-
-```yaml
-architecture:
-  catalog:
-    hive:
-      operator:
-        install: true    # lakebench deploy will install Stackable operators
-```
-
-This installs all four Stackable operators (commons, listener, secret, hive)
-via Helm during `lakebench deploy`. Requires cluster-admin.
-
-**Option B: Manual install:**
+They are shared cluster infrastructure: a cluster admin installs them once,
+and `lakebench deploy` never does
+(`architecture.catalog.hive.operator.install: true` is refused):
 
 ```bash
 helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \
@@ -402,7 +389,7 @@ Alternatively, run each step separately for more control:
 ```bash
 lakebench deploy lakebench.yaml --yes     # deploy infrastructure
 lakebench status lakebench.yaml           # verify deployment
-lakebench generate lakebench.yaml --wait  # generate test data (~5 min at scale 1)
+lakebench generate lakebench.yaml  # generate test data (~5 min at scale 1)
 lakebench run lakebench.yaml              # run pipeline + benchmark
 ```
 
@@ -448,7 +435,7 @@ lakebench report --list
 
 ```bash
 lakebench deploy lakebench-polaris.yaml --yes
-lakebench generate lakebench-polaris.yaml --wait
+lakebench generate lakebench-polaris.yaml
 lakebench compare lakebench.yaml lakebench-polaris.yaml
 ```
 
@@ -494,9 +481,9 @@ idempotent -- components that already exist are skipped.
 **Generate fails or times out:** Increase the timeout with `--timeout 14400`
 (4 hours). The Rust generator has no checkpoint-resume, so a re-run starts
 from the beginning, and because the failed run left partial data in bronze,
-the re-run needs `--regenerate` (`lakebench generate lakebench.yaml --wait
+the re-run needs `--regenerate` (`lakebench generate lakebench.yaml
 --regenerate`), which empties the bronze bucket first. Without it `generate`
-exits 2 and names the non-empty prefix.
+exits 3 (refused) and names the non-empty prefix.
 
 **A pipeline stage fails:** Re-run just that stage:
 
@@ -653,7 +640,7 @@ guidance before scaling up. At scale 100+ you will want to increase the `--timeo
 and run commands:
 
 ```bash
-lakebench generate lakebench.yaml --wait --timeout 14400
+lakebench generate lakebench.yaml --timeout 14400
 lakebench run lakebench.yaml --timeout 7200
 ```
 
@@ -756,7 +743,7 @@ optional re-score after a rule change or replay:
 
 ```bash
 lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
-lakebench generate examples/polaris-iceberg-spark-financial.yaml --wait
+lakebench generate examples/polaris-iceberg-spark-financial.yaml
 lakebench run      examples/polaris-iceberg-spark-financial.yaml
 
 # Optional re-score. Path prefix is pacs008/ under the default template.

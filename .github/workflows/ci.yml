@@ -414,3 +414,98 @@ jobs:
 
       - name: Verify wheel installs
         run: pip install dist/*.whl && lakebench version
+
+      # Named ci-dist, not dist: release.yml calls this workflow in the same
+      # run and uploads its own dist, and artifact names are per run.
+      - name: Upload the wheel for the clean-venv job
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ci-dist
+          path: dist/*.whl
+          retention-days: 7
+          if-no-files-found: error
+
+  # The wheel in a fresh venv, with nothing from the repository or the dev
+  # extra around it: once alone, so a runtime import of a package that is not
+  # a dependency fails here, and once with [aml], whose six numeric pins must
+  # install as REFERENCE_PY_DEPS names them on both ends of the supported
+  # Python range.
+  clean-venv:
+    name: Clean-venv install (Python ${{ matrix.python-version }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ci-dist
+          path: dist
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Wheel alone
+        run: |
+          python -m venv "$RUNNER_TEMP/plain"
+          "$RUNNER_TEMP/plain/bin/pip" install dist/*.whl
+          "$RUNNER_TEMP/plain/bin/lakebench" version
+          "$RUNNER_TEMP/plain/bin/lakebench" --help > /dev/null
+          "$RUNNER_TEMP/plain/bin/lakebench" init --no-interactive --name smoke -o "$RUNNER_TEMP/smoke.yaml"
+          test -s "$RUNNER_TEMP/smoke.yaml"
+          "$RUNNER_TEMP/plain/bin/python" - <<'PY'
+          # Every module, so a module-level import of an undeclared package
+          # fails here. spark/scripts has no __init__.py, so the walk does not
+          # reach the driver-pod scripts, which import pyspark.
+          import importlib
+          import pkgutil
+          from pathlib import Path
+
+          import lakebench
+
+          names = [m.name for m in pkgutil.walk_packages(lakebench.__path__, "lakebench.")]
+          for name in names:
+              importlib.import_module(name)
+          assert len(names) > 100, names
+          print(f"imported {len(names)} modules")
+
+          # Package data the commands read at run time.
+          pkg = Path(lakebench.__file__).parent
+          assert len(list((pkg / "templates").rglob("*.j2"))) > 20, "templates missing"
+          assert len(list((pkg / "spark" / "scripts").glob("*.py"))) > 10, "Spark scripts missing"
+          for rel in (
+              "config/datagen_lineage.yaml",
+              "config/validated_combinations.yaml",
+              "spark/data/aml/aml_preregistration.json",
+              "py.typed",
+          ):
+              assert (pkg / rel).is_file(), f"{rel} missing from the wheel"
+          PY
+
+      - name: Wheel with the aml extra
+        run: |
+          python -m venv "$RUNNER_TEMP/aml"
+          "$RUNNER_TEMP/aml/bin/pip" install "$(ls dist/*.whl)[aml]"
+          "$RUNNER_TEMP/aml/bin/lakebench" version
+          "$RUNNER_TEMP/aml/bin/python" - <<'PY'
+          import importlib.metadata as md
+
+          import pyarrow  # noqa: F401  (fidelity_gate's parquet engine)
+          import sklearn.ensemble  # noqa: F401
+
+          import lakebench.aml.fidelity_gate  # noqa: F401
+          import lakebench.aml.reference_score  # noqa: F401
+          from lakebench.modules.pipeline_engines.spark.job import REFERENCE_PY_DEPS
+
+          # The six whose version changes a reference-model number (CHECKED in
+          # tests/test_reference_pins.py); the other four pins are helpers.
+          pins = dict(spec.split("==") for spec in REFERENCE_PY_DEPS)
+          for name in ("numpy", "scipy", "pandas", "scikit-learn", "joblib", "threadpoolctl"):
+              got = md.version(name)
+              assert got == pins[name], f"{name} {got} installed, REFERENCE_PY_DEPS pins {pins[name]}"
+              print(f"{name}=={got}")
+          PY

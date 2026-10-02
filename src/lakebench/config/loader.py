@@ -258,9 +258,16 @@ def load_yaml(path: Path) -> dict[str, Any]:
             raw = f.read()
         text = _substitute_env_vars(raw)
         content = yaml.safe_load(text)
-        return content if content else {}
     except yaml.YAMLError as e:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
+    if not content:
+        return {}
+    if not isinstance(content, dict):
+        raise ConfigParseError(
+            f"{path} is not a config: its top level is a YAML {type(content).__name__}, "
+            "not a mapping of keys such as `name:` and `architecture:`"
+        )
+    return content
 
 
 def load_config(
@@ -373,7 +380,10 @@ def _load_and_validate(
     except ValidationError as e:
         # Messages are rewritten against the model's own locations, before
         # the locations are re-rooted to where the user wrote each key.
-        errors = [_explain_error(dict(err)) for err in e.errors()]
+        # include_input=False: the input of a model-level error is the whole
+        # block, which can carry a datagen seed or a key, and callers print
+        # these dicts.
+        errors = [_explain_error(dict(err)) for err in e.errors(include_input=False)]
         if _top_level_workload:
             errors = [
                 {**err, "loc": tuple(err["loc"][1:])}
@@ -397,10 +407,11 @@ def _load_and_validate(
             msg = err["msg"]
             error_messages.append(f"  - {loc}: {msg}")
 
-        raise ConfigValidationError(  # noqa: B904
+        # from None: the chained ValidationError still holds the input.
+        raise ConfigValidationError(
             "Configuration validation failed:\n" + "\n".join(error_messages),
             errors=errors,
-        )
+        ) from None
     return cfg, resolution
 
 
@@ -539,6 +550,12 @@ def save_config(config: LakebenchConfig, path: str | Path) -> None:
     """
     path = Path(path)
     data = config.model_dump(mode="json", exclude_defaults=False)
+    # benchmark.streams is the throughput stream count for `lakebench
+    # benchmark`; `lakebench run` refuses an explicit value above 1, so the
+    # default is written only when the config set it.
+    bench = (data.get("architecture") or {}).get("benchmark") or {}
+    if "streams" not in config.architecture.benchmark.model_fields_set:
+        bench.pop("streams", None)
     # Write the canonical locations, so the saved file reloads without
     # deprecation warnings: 'workload' is a top-level key and the continuous
     # settings block is 'pipeline.continuous' (the model stores them at
@@ -626,7 +643,7 @@ def generate_example_config_yaml() -> str:
 #
 # Key behavior: commenting out an optional section does NOT disable it --
 # Pydantic fills in defaults. To truly disable something, set its 'enabled'
-# or 'install' field to false explicitly.
+# field to false explicitly.
 #
 # Full reference: docs/configuration.md
 # Recipe guide:   docs/recipes.md
@@ -709,7 +726,8 @@ platform:
     #                                    # before `deploy` runs -- a cluster admin
     #                                    # installs it once with
     #                                    # `lakebench admin install-scratch-storage-class`.
-    #   size: 100Gi
+    #                                    # Each executor's PVC size comes from its job
+    #                                    # profile (silver-build 300Gi).
     #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Consumed by
     #                                    # `admin install-scratch-storage-class`. Examples:
     #                                    #   pxd.portworx.com (Portworx)
@@ -722,24 +740,13 @@ platform:
 
   # compute:
   #   spark:
-  #     operator:
-  #       install: false             # Set true to auto-install Spark Operator.
-  #                                  # Default is false -- install the operator
-  #                                  # manually or set true for auto-install.
+  #     operator:                  # Shared; a cluster admin installs it once with
+  #                                  # `lakebench admin install-spark-operator`.
   #       namespace: spark-operator
   #       version: "2.5.1"           # v2.x uses webhook for volume injection
   #
-  #     driver:
-  #       cores: 4
-  #       memory: 8g
-  #
-  #     # Default executor sizing (proven at 1 TB+ scale)
-  #     executor:
-  #       instances: 8
-  #       cores: 4
-  #       memory: 48g
-  #       memory_overhead: 12g       # Critical for stability
-  #
+  #     ## Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed
+  #     ## in the job profiles, proven at 1 TB+ scale.
   #     ## Per-job executor count overrides (null = auto from scale factor).
   #     ## Per-executor sizing (cores, memory, PVC) stays fixed from proven profiles.
   #     # bronze_executors: null
@@ -768,10 +775,8 @@ architecture:
     type: hive                     # hive | polaris | none
     ## Hive Metastore tuning (uncomment to override defaults)
     # hive:
-    #   operator:
-    #     install: false             # Set true to auto-install Stackable operators.
-    #                                # Requires cluster-admin. Installs commons,
-    #                                # listener, secret, and hive operators.
+    #   operator:                    # Shared; a cluster admin installs the Stackable
+    #                                # operators once (docs/component-hive.md).
     #     namespace: stackable
     #     version: "25.7.0"
     #   resources:
@@ -860,11 +865,13 @@ architecture:
   #   mode: power                    # power: single sequential stream (per-query latency)
   #                                  # throughput: N concurrent streams (aggregate QpH)
   #                                  # composite: geometric mean of power + throughput
-  #   streams: 4                     # Concurrent streams (throughput/composite only;
-  #                                  # ignored in power mode)
+  #                                  # `lakebench run` measures power only and refuses
+  #                                  # throughput, composite, cache: cold and streams
+  #                                  # above 1; `lakebench benchmark` runs them all.
+  #   streams: 4                     # Concurrent streams (lakebench benchmark only)
   #   cache: hot                     # hot: caches stay populated between queries
   #                                  # cold: metadata cache flushed before each run
-  #   iterations: 1                  # Runs per query. 1 = raw timing, 3+ = median
+  #   iterations: 3                  # Runs per query. 1 = raw timing, 3+ = median
 
   ## Table name overrides (namespace.table format)
   # tables:

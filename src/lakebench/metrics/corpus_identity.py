@@ -116,7 +116,10 @@ EVIDENCE_PATTERN = "tests/fixtures/datagen_reference/compare-{digest12}.json"
 COMPARE_CASES: dict[str, int] = {"F0": 43, "F1": 43, "F2": 43, "C0": 42, "C2": 42}
 
 NOT_OBSERVED = "corpus not observed at run end (no corpus observation in this record)"
-NO_MARKER = "corpus has no generator marker hash (datagen image before DAT-3)"
+NO_MARKER = (
+    "corpus has no generator marker hash (written by a datagen image that does not "
+    "write corpus markers)"
+)
 UNREADABLE_MARKER = "corpus markers are in a format this Lakebench does not read"
 NOT_ONE_CORPUS = "corpus markers do not describe one complete corpus (see corpus.problems)"
 
@@ -186,6 +189,52 @@ def observe_corpus(cfg: Any, s3: Any, *, lineage_path: Path | None = None) -> di
 
 def _reason(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def record_corpus_observation(run: Any, cfg: Any, s3: Any = None) -> None:
+    """Persist ``observe_corpus`` into *run*'s
+    ``config_snapshot.experiment_inputs.corpus_observation``, once, right
+    before the record is saved. Datagen has normally ended by then; a run
+    that ends while it still writes (a timeout, an interrupt) records an
+    incomplete marker set, which is a corpus problem, and a listing digest
+    a later repetition will not match, so nothing inherits from it.
+    *s3* is the ``S3Client`` that reaches the run's bronze bucket (a local
+    run passes its local store's); None builds one from the config. A
+    record without ``experiment_inputs`` (from before them) is left alone.
+    Never raises."""
+    inputs: Any = None
+    try:
+        snapshot = getattr(run, "config_snapshot", None)
+        inputs = snapshot.get("experiment_inputs") if isinstance(snapshot, dict) else None
+        if not isinstance(inputs, dict):
+            return
+        if s3 is None:
+            from lakebench.s3 import S3Client
+
+            s3c = cfg.platform.storage.s3
+            s3 = S3Client(
+                endpoint=s3c.endpoint,
+                access_key=s3c.access_key,
+                secret_key=s3c.secret_key,
+                region=s3c.region,
+                path_style=s3c.path_style,
+                ca_cert=s3c.ca_cert,
+                verify_ssl=s3c.verify_ssl,
+            )
+        inputs["corpus_observation"] = observe_corpus(cfg, s3)
+    except Exception as e:  # noqa: BLE001 -- evidence, never a save failure
+        if not isinstance(inputs, dict):
+            return
+        try:
+            inputs["corpus_observation"] = {
+                "format": 1,
+                "markers": MarkerSet(error=f"corpus observation failed: {_reason(e)}").to_dict(),
+                "series": None,
+                "bronze_listing_sha256": None,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------

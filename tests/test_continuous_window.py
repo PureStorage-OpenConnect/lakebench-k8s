@@ -320,7 +320,7 @@ def test_submission_failures_are_reported_while_the_operator_retries(capsys):
     watch(JobStatus(name="s", state=JobState.RUNNING, message=""), 600.0)
     assert [f["attempt"] for f in watch.failures] == [1, 2]  # repeats are not re-reported
     assert watch.running_at is not None
-    out = capsys.readouterr().out
+    out = "".join(capsys.readouterr())
     assert "submission attempt 1 failed" in out and "iceberg-aws-bundle" in out
     assert journal.record.call_count == 2
 
@@ -397,7 +397,7 @@ def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path,
     with pytest.raises(typer.Exit) as exc:
         _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, False, 120)
     assert exc.value.exit_code == 1
-    assert "Could not create the benchmark runner" in capsys.readouterr().out
+    assert "Could not create the benchmark runner" in "".join(capsys.readouterr())
     jm.submit_job.assert_not_called()
     jm.deploy_scripts_configmap.assert_not_called()
 
@@ -914,9 +914,9 @@ def test_a_refused_trickle_starts_nothing(monkeypatch, tmp_path, capsys):
         _sustained._run_sustained(
             _cont_cfg(1, max_files_per_trigger=50), tmp_path / "c.yaml", 60, True, 900
         )
-    assert exc.value.exit_code == 1
+    assert exc.value.exit_code == 2  # usage: the window and trickle do not fit
     op.check_status.assert_not_called()
-    assert "max_files_per_trigger" in capsys.readouterr().out
+    assert "max_files_per_trigger" in "".join(capsys.readouterr())
 
 
 def test_the_run_uses_the_resolved_trickle(monkeypatch, tmp_path):

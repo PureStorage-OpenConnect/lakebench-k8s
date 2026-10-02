@@ -41,9 +41,9 @@ and patches `fsGroup` and `seccompProfile` out of the operator Deployments
 
 Do not edit `spark.jobNamespaces` by hand. `lakebench deploy` adds its
 namespace to the watch list and `lakebench destroy` removes it, both under
-the `lakebench-cluster-lock` lease in `lakebench-system`. Deploy does this
-whatever `platform.compute.spark.operator.install` says; `install: true`
-only adds installing a missing operator.
+the `lakebench-cluster-lock` lease in `lakebench-system`. Deploy never
+installs the operator; `platform.compute.spark.operator.install: true` is
+refused by every command that changes data.
 
 ### Learnings
 - Spark Operator version (2.5.1) is different from Apache Spark runtime version (3.5.x / 4.0.x / 4.1.x)
@@ -143,8 +143,7 @@ platform:
   storage:
     scratch:
       enabled: true
-      storage_class: px-csi-scratch  # Portworx, repl=1
-      size: 100Gi
+      storage_class: px-csi-scratch  # Portworx, repl=1 (PVC size per job profile)
 ```
 
 ### Spark Conf Essentials
@@ -185,10 +184,9 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 
 ## Stackable Installation
 
-**Auto-install** -- set `architecture.catalog.hive.operator.install: true` in
-your config and `lakebench deploy` handles it. Requires cluster-admin.
-
-**Manual install:**
+The Stackable operators are shared cluster infrastructure: a cluster admin
+installs them once, and `lakebench deploy` never does
+(`architecture.catalog.hive.operator.install: true` is refused).
 
 ```bash
 # Install Stackable operators (required for Hive)

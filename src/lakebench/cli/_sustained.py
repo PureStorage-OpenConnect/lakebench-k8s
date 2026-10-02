@@ -33,6 +33,7 @@ from lakebench.cli._helpers import (
     write_run_report,
 )
 from lakebench.config.schema import is_continuous_mode
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import (
     K8sConnectionError,
@@ -90,6 +91,10 @@ def _c360_continuous_gate_problems(rows_by_job: dict[str, int | None]) -> list[s
     return problems
 
 
+class _OwnershipUnverifiable(Exception):
+    """The reset's ownership check could not run (cluster or API unreadable)."""
+
+
 def _reset_ownership_problem(cfg) -> str | None:
     """Why this run may not delete continuous state, or None when it may.
 
@@ -115,9 +120,12 @@ def _reset_ownership_problem(cfg) -> str | None:
     try:
         core_v1.read_namespace(ns)
     except ApiException as e:
-        return f"namespace {ns} not readable ({e.status}); cannot verify bucket ownership"
+        # Could not check: a prerequisite (exit 4), not a refusal.
+        raise _OwnershipUnverifiable(
+            f"namespace {ns} not readable ({e.status}); cannot verify bucket ownership"
+        ) from e
     except Exception as e:  # noqa: BLE001
-        return f"cannot reach the cluster to verify ownership: {e}"
+        raise _OwnershipUnverifiable(f"cannot reach the cluster to verify ownership: {e}") from e
     identity = build_identity_from_config(cfg, context=kube_ctx)
     v = verify_namespace_identity(core_v1, ns, identity.name, identity.api_server)
     if v.verdict is not IdentityVerdict.MATCH:
@@ -281,16 +289,21 @@ def _stop_leftover_streams(job_manager, namespace: str, timeout_s: int = 120) ->
                 raise
             if time.time() > deadline:
                 print_error(f"{app}-driver still running {timeout_s}s after deletion")
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.FAILED)
             time.sleep(3)
 
 
 def _require_reset_ownership(cfg) -> None:
     """typer.Exit unless this run provably owns the namespace and buckets."""
+    unverifiable = False
     try:
         problem = _reset_ownership_problem(cfg)
+    except _OwnershipUnverifiable as e:
+        problem = str(e)
+        unverifiable = True
     except Exception as e:  # noqa: BLE001
         problem = f"ownership could not be verified: {e}"
+        unverifiable = True
     if problem:
         print_error(f"Refusing to reset continuous state: {problem}")
         print_info(
@@ -299,7 +312,8 @@ def _require_reset_ownership(cfg) -> None:
             "`lakebench deploy`, or on backends without bucket tagging, bucket "
             "names prefixed with the deployment name."
         )
-        raise typer.Exit(1)
+        # Checked and refused is 3; could not check (S3 or the API) is 4.
+        raise typer.Exit(ExitCode.PREREQUISITE if unverifiable else ExitCode.REFUSED)
 
 
 def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
@@ -344,7 +358,7 @@ def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
             n = client.delete_prefix(bucket, prefix)
         except Exception as e:
             print_error(f"Could not clear {bucket}/{prefix}: {e}")
-            raise typer.Exit(1) from e
+            raise typer.Exit(ExitCode.FAILED) from e
         if n:
             print_info(f"Cleared {n} objects from {bucket}/{prefix}")
 
@@ -2687,7 +2701,7 @@ def _run_sustained(
     trickle = resolve_trickle(cfg, run_duration)
     if trickle["problem"]:
         print_error(trickle["problem"])
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
     cfg.architecture.pipeline.sustained.max_files_per_trigger = trickle["value"]
     _arrival = trickle["arrival_seconds"]
     print_info(
@@ -2704,7 +2718,7 @@ def _run_sustained(
     )
     if schedule["problem"]:
         print_error(schedule["problem"])
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
     for msg in schedule["warnings"]:
         print_warning(msg)
     sustained_cfg.retention_interval = schedule["retention_interval"]
@@ -2730,7 +2744,7 @@ def _run_sustained(
     os.environ["LB_RUN_ID"] = run_id
     from lakebench.metrics import build_config_snapshot
 
-    config_snapshot = build_config_snapshot(cfg, run_mode="continuous")
+    config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts
@@ -2776,14 +2790,14 @@ def _run_sustained(
                 hint = " -- run 'lakebench deploy' first to install it"
             print_error(f"Spark Operator not ready: {status.message}{hint}")
             pipeline_success = False
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.PREREQUISITE)
 
         # Ensure operator watches the target namespace (always try to heal)
         ns_status = operator.ensure_namespace_watched(can_heal=True)
         if ns_status.watching_namespace is False:
             print_error(ns_status.message)
             pipeline_success = False
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.PREREQUISITE)
 
         print_success(f"Spark Operator ready (version: {status.version or 'unknown'})")
 
@@ -2798,7 +2812,7 @@ def _run_sustained(
         if _short:
             print_error(_short)
             pipeline_success = False
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.USAGE)
         if not skip_benchmark and cfg.architecture.query_engine.type.value == "none":
             print_info("No query engine in this recipe: no in-stream rounds and no result check")
             skip_benchmark = True
@@ -2816,7 +2830,7 @@ def _run_sustained(
             except Exception as e:  # noqa: BLE001
                 print_error(f"Could not create the benchmark runner: {e}")
                 pipeline_success = False
-                raise typer.Exit(1) from None
+                raise typer.Exit(ExitCode.FAILED) from None
 
         # Packaging and size errors in the scripts maps surface here, before
         # the reset below drops any state; the maps are applied after it.
@@ -2830,7 +2844,7 @@ def _run_sustained(
         except ScriptsMapError as e:
             print_error(f"Spark scripts not deployed: {e}")
             _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
-            raise typer.Exit(1) from None
+            raise typer.Exit(ExitCode.FAILED) from None
 
         # Start datagen before the stages below: the AML preflight needs parquet
         # data to infer a schema from, and datagen then runs concurrently with
@@ -2865,7 +2879,7 @@ def _run_sustained(
                     print_info(f"Raw data is not replaced automatically: {_raw_problem}.")
                 _refuse_c360_reset(cfg, _existing)
                 pipeline_success = False
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.REFUSED)
         _stop_leftover_streams(job_manager, cfg.get_namespace())
         _reset_continuous_state(cfg, clear_raw=not skip_generate)
         # Deploy the scripts ConfigMaps (includes streaming scripts) -- must
@@ -2878,11 +2892,11 @@ def _run_sustained(
         except ScriptsMapError as e:
             print_error(f"Spark scripts not deployed: {e}")
             _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
-            raise typer.Exit(1) from None
+            raise typer.Exit(ExitCode.FAILED) from None
         if not scripts_ok:
             print_error("Failed to deploy Spark scripts ConfigMap -- pipeline cannot proceed")
             _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
         print_success("Spark scripts deployed")
         if skip_generate:
             console.print()
@@ -2895,7 +2909,7 @@ def _run_sustained(
             if datagen_result.status != DeploymentStatus.SUCCESS:
                 print_error(f"Failed to start datagen: {datagen_result.message}")
                 pipeline_success = False
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.FAILED)
             print_success("Datagen started (continuous mode)")
         dims = cfg.get_scale_dimensions()
         console.print(f"  Scale: {dims.scale}")
@@ -2944,7 +2958,7 @@ def _run_sustained(
             if preflight_status.state == JobState.FAILED:
                 print_error(f"bronze-verify preflight submit failed: {preflight_status.message}")
                 pipeline_success = False
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.FAILED)
             # Preflight budget must scale with data. This bronze-verify reads
             # whatever raw pacs.008 already sits under the bronze prefix -- and
             # when a `generate` step precedes `run --sustained` (the standard
@@ -2967,7 +2981,7 @@ def _run_sustained(
             if not preflight_result.success:
                 print_error(f"bronze-verify preflight failed: {preflight_result.message}")
                 pipeline_success = False
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.FAILED)
             print_success(
                 f"bronze-verify preflight complete in {preflight_result.elapsed_seconds:.0f}s"
             )
@@ -2985,7 +2999,7 @@ def _run_sustained(
                 job_manager, monitor, console, timeout_seconds=_reset_timeout
             ):
                 pipeline_success = False
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.FAILED)
 
         # The corpus is finite and usually written within minutes; a finished
         # datagen Job holds no cores, so the streaming budget stops reserving
@@ -3022,7 +3036,7 @@ def _run_sustained(
             if job_status.state == JobState.FAILED:
                 print_error(f"Failed to submit {job_name}: {job_status.message}")
                 pipeline_success = False
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.FAILED)
             print_success(f"Submitted: lakebench-{job_name}")
             for warning in getattr(job_manager, "budget_warnings", None) or []:
                 print_warning(warning)
@@ -3053,7 +3067,7 @@ def _run_sustained(
                 if not running.success:
                     print_error(f"lakebench-{job_name} did not start: {running.message}")
                     pipeline_success = False
-                    raise typer.Exit(1)
+                    raise typer.Exit(ExitCode.FAILED)
         finally:
             for w in stream_watch.values():
                 w.close()
@@ -3810,20 +3824,22 @@ def _run_sustained(
             )
 
         # LB-127 P0 fix: a flagged failure MUST exit non-zero. Every other
-        # failure site in this function raises typer.Exit(1); the gate above
+        # failed step in this function raises typer.Exit(ExitCode.FAILED); the gate above
         # only set the flag (so the record loop + benchmark aggregation could
         # still persist). Raise now, inside the try, so the finally block still
         # runs (metrics + journal persist with success=False) and the process
         # exits 1 -- the exact signal an exit-code-only UAT runner reads, which
         # is the whole point of closing LB-044.
         if not pipeline_success:
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
     except K8sConnectionError as e:
+        # K8sConnectionError means the kube config did not load
+        # (k8s/client.py), so nothing was submitted: a prerequisite (4).
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     except typer.Exit:
         raise
     except BaseException:
@@ -3891,6 +3907,10 @@ def _run_sustained(
             except Exception as e:
                 console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
+            # The corpus this run read, once, before the save (corpus id v2).
+            from lakebench.metrics.corpus_identity import record_corpus_observation
+
+            record_corpus_observation(run_metrics, cfg)
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")

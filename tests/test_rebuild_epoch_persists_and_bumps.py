@@ -175,7 +175,7 @@ def test_delta_appid_moves_across_two_force_rebuilds(monkeypatch):
 
 
 def test_cli_fail_hard_on_bump_exception_no_silent_continue():
-    """B1: bump failure must be typer.Exit(1), not silent-continue.
+    """B1: bump failure must be typer.Exit(ExitCode.FAILED), not silent-continue.
 
     The previous behaviour caught any exception from _bump_silver_rebuild_epoch,
     printed a warning, and still exported LB_FORCE_REBUILD=1 alongside the
@@ -184,7 +184,7 @@ def test_cli_fail_hard_on_bump_exception_no_silent_continue():
     silent zero-row write, exit 0, silver missing all of cycle 2 (invariant 3).
 
     The fix hoists the bump above the cycle loop (once per invocation) and
-    raises typer.Exit(1) on any failure.
+    raises typer.Exit(ExitCode.FAILED) on any failure.
     """
     import inspect
 
@@ -203,7 +203,7 @@ def test_cli_fail_hard_on_bump_exception_no_silent_continue():
         "epoch' and misreporting on invariant 5."
     )
     bump_block = src[force_block_pos:cycle_loop_pos]
-    assert "raise typer.Exit(1) from e" in bump_block, (
+    assert "raise typer.Exit(ExitCode.FAILED) from e" in bump_block, (
         "A bump failure must fail hard; the previous 'proceeding with "
         "--force-rebuild flag only' path was invariant-3 silent data loss."
     )

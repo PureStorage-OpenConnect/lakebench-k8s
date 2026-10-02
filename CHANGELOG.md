@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
-  add; `config upgrade` refuses one too. A nameless config no longer gets a
+  add (`config upgrade` is removed, see Removed). A nameless config no longer gets a
   name written to `.lakebench/state.json`; that file is only read. Because
   v1.6 gave every nameless config in a directory the name in that file,
   nothing ties a v1.6 deployment to any one of them, so `destroy`, `stop`,
@@ -21,9 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deployment and still load it under that name. Without that file,
   `destroy`, `stop` and `admin` refuse a nameless config.
 - **Removed config keys are refused by the commands that change data**
-  (the list above, except `config upgrade`), with what to do instead.
-  `destroy`, `stop`, `status`, `logs`, `report`, `info`, `config show`,
-  `config upgrade` and `admin` still load such a config and list the
+  (the list above), with what to do instead.
+  `destroy`, `stop`, `status`, `logs`, `report`, `info`, `config show`
+  and `admin` still load such a config and list the
   dropped keys in one "Upgrade notes" block on stderr. An old
   `datagen.file_size` is treated the same way.
 - **Counts are bounded at load.** `trino.worker.replicas` 1 to 256,
@@ -35,6 +35,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bounds sit far above anything lakebench sizes (200 workers at the top
   scale; generator threads follow the pod CPU). A config with a zero,
   negative or out-of-range count, which v1.6 accepted, is refused.
+- **Settings that were recorded but not honoured are refused.**
+  `platform.compute.spark.driver`, `platform.compute.spark.executor` and
+  `platform.storage.scratch.size` sized nothing (each Spark job takes its
+  driver, executor and scratch sizing from its job profile), yet were
+  autosized, graded by `validate` and recorded in `metrics.json`. They are
+  removed: the commands that change data refuse a config that sets them,
+  with the fix (`<job>_executors` for counts, `driver_memory` and
+  `driver_cores` for the driver), and `destroy`, `status` and the read-only
+  commands drop them with a note. The autosizer no longer reports executor
+  "caps" on them, so a run whose only cuts were those no longer carries the
+  "auto-sizing cuts" limit in its experiment identity; `validate` no longer
+  grades executor counts and memory.
+- **`operator.install: true` is refused.** The Spark Operator
+  (`platform.compute.spark.operator.install`) and the Stackable operators
+  (`architecture.catalog.hive.operator.install`) are shared cluster
+  infrastructure that a cluster admin installs once; deploy only checks them.
+  `false` loads as before; teardown and read-only commands load `true` as
+  `false` with a note.
+- **`lakebench run` refuses benchmark settings it does not run.** `run`
+  measures one hot power pass with one stream. A config whose
+  `architecture.benchmark` sets `mode: throughput` or `composite`,
+  `cache: cold`, or `streams` above 1 is refused by `run` (use
+  `lakebench benchmark --mode`, `--cold` or `--streams`), and the run's
+  `config_snapshot.benchmark` records the pass that ran instead of the
+  config's values.
+- **Perf-gate fingerprint version 2 and baseline store schema 2.** The
+  fingerprint now also hashes each Spark job's profile and the Spark conf its
+  manifest writes (location and credential keys left out), the query
+  engine's sizing and the catalog's resources; a run stamps
+  `config_snapshot.fingerprint_version` and `fingerprint_inputs` when it
+  starts and the gate reads them. Baselines record `fingerprint_version` and
+  the run's dependency pinset. Runs and baselines from before version 2 are
+  refused by name until re-recorded, a run on another dependency set than
+  its baseline is refused, and `record` refuses a run without a pinset. A
+  run now records the sha256 of its config file (`config_sha256`) and the
+  gate refuses a run of any other file. A continuous pinned config must pin
+  its three streaming executor counts. The user's `spark.conf` entries
+  enter the fingerprint as a hash, never in plain text. The three pinned
+  configs drop the removed keys and `streams: 4`.
 - **Flat top-level config keys are deprecated.** `endpoint:`, `scale:` and
   the other flat spellings still load, each with a note naming the nested
   key to write. Both spellings set: the flat value still wins, with a note.
@@ -78,6 +117,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pinned AML libraries (scikit-learn 1.7.2, numpy 2.2.6, pandas 2.3.3, scipy
   1.15.3) instead of the newest releases. These pins support Python 3.10 to
   3.13.
+- `metrics.json` `config_snapshot`: `spark.driver` and `spark.executor` are
+  gone, `scratch.size` is replaced by `scratch.size_per_job` (from the job
+  profiles), and the HTML report shows each job's requested executors
+  instead of the unused executor block.
+- A config validation error no longer echoes the input it failed on: a
+  model-level error used to print the whole block, which could carry a
+  datagen seed or a key.
 - Config errors name the nearest key: an unknown key gets "did you mean"
   from its own section, then from the whole schema (for a key written in
   the wrong section), and an unknown recipe names the nearest recipe.
@@ -123,6 +169,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SHA256SUMS` is refused, and so is a checksum mismatch on any release.
 - The package ships a `py.typed` marker, so type checkers read its
   annotations.
+- **Exit codes follow one table.** `lakebench` has a single
+  exit-code enum, `lakebench.exit_codes.ExitCode`, importable without loading
+  the CLI, and the table in `docs/exit-codes.md` is generated from it. Every
+  command now exits with a code from that table: 1 a failed run or step, 2 a
+  usage or config error before anything ran, 3 a refusal by the safety model,
+  4 a missing prerequisite before anything ran, 5 not confirmed, 6 incomplete
+  and safe to re-run, 14 a requirement unmet. An error Lakebench does not
+  classify prints one `ERROR` line, not a traceback, and exits 1
+  (`LAKEBENCH_DEBUG=1` prints the traceback). Scripts that test exit codes
+  need these changes:
+  - a declined confirmation prompt exits 5 (was 3), and so does a prompt with
+    no answer (`deploy` and `generate` off a terminal without `--yes`, end of
+    input), a cancelled `init` wizard (was 0), `destroy` without `--force`
+    off a terminal, and `run` without `--yes` when the namespace does not
+    exist (all were 1);
+  - `destroy` with the namespace still terminating exits 6 (was 4);
+  - a datagen timeout in `run` exits 1 (was 5); the run record keeps the
+    distinction: its `verdict.reasons` contains "datagen timed out";
+  - a config that fails to load or validate, an unsupported workload, recipe
+    and mode combination, and an argument a command checks itself (an
+    unknown recipe, component, stage or example, a missing file, conflicting
+    options) exit 2 (were 1); `run --stage` with an unknown name is now
+    refused before anything runs;
+  - a non-empty bronze prefix without `--regenerate` exits 3 (was 2), and a
+    bronze bucket that cannot be read to check it exits 4 (was 2);
+  - refusals by the safety model exit 3 (were 1): a namespace or bucket owned
+    by another deployment or without lakebench ownership proof (`deploy`,
+    `destroy`, `clean`), "Destroy NOT completed" because the namespace is a
+    newer deployment, a cluster lease another process holds (`destroy`,
+    `admin`), a continuous run that would reset data without
+    `--force-reset`, a non-empty bucket `admin reclaim-bucket` will not
+    retag. A command whose failed steps include any other failure still
+    exits 1;
+  - a Kubernetes config that does not load or an API that cannot be
+    reached, a bronze bucket or namespace that cannot be read for an
+    ownership or emptiness check, a failed `run` prerequisite and a Spark
+    Operator that is not ready exit 4 (were 1 or 2);
+  - `reproduce PACKAGE` exits 14 for performance or correctness drift (were
+    1 and 2), for commit drift without `--allow-commit-drift` and for a run
+    that does not follow the package (were 2), and 1 when its pipeline could
+    not run (was 2).
+
+- **Errors are one line and markup-safe; machine output is plain.**
+  `ERROR`, `WARN`, `OK` and progress lines now go to stderr, and their text
+  is printed verbatim: a value such as `s3a://b/[x]/y` or `[/tmp]` no longer
+  vanishes or crashes the command with a Rich `MarkupError`, and a long
+  message is not wrapped. `query --format json|csv`, `results --format
+  json|csv` and `compare --format json|csv` (without `-o`, which used to
+  print the table instead) write to plain stdout, with notices such as
+  "N rows in Xs" on stderr, so the output pipes into a parser. urllib3
+  retry lines and warnings are silenced. A config whose top level is not a
+  YAML mapping is refused with one line naming the problem instead of an
+  `AttributeError`.
+
+- `pydantic-settings` is no longer a dependency: nothing imported it, so
+  every install pulled it in for nothing and the binary bundled it.
+- `botocore`, `pydantic-core` and `urllib3` are declared dependencies:
+  Lakebench imports them directly, and they came only through boto3,
+  pydantic and kubernetes. Their floors are ones the existing floors already
+  imply, so they add no constraint; a fresh install resolves the same
+  versions as before.
 ### Fixed
 
 - Trino compaction of the Customer 360 silver table no longer fails with
@@ -218,9 +325,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   their next deploy; other combinations are unchanged.
 
 ### Added
-- **Corpus id v2.** A run whose corpus observation was recorded
-  (the generator's per-node markers and `series.json` under the datagen
-  prefix, read once before the record is saved) gains in
+- **Corpus id v2.** Every `run` (batch, continuous and `--local`)
+  now records its corpus observation (one listing of the datagen prefix
+  and a read of the generator's per-node markers and `series.json`, taken
+  just before the record is saved, in
+  `config_snapshot.experiment_inputs.corpus_observation`; Lakebench's own
+  bucket objects under `.lakebench/` are never counted; a prefix holding no
+  object records no listing digest and the corpus problem "no objects under
+  <prefix>", so such a run is not comparable) and gains in
   `experiment.corpus`: `id_v2` (null when it cannot be computed, with the
   reason in `id_v2_unavailable`), `id_version`, `args_sha256`, `declared`
   (the config's corpus settings, for display), and, when markers exist,
@@ -235,6 +347,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   stored id or identity digest moves.
 
 ### Removed
+- **`config upgrade` refuses.** It rewrote configs lossily, in place
+  by default, and wrote the S3 secret key into the result in plaintext. It
+  now exits 2 before opening any file and names the replacement,
+  `lakebench init --from OLD.yaml -o NEW.yaml`.
+- **Dead flags.** `generate --wait` / `-w` (generate always waited;
+  there was no `--no-wait`), `admin release-lock --expired-only` (always on;
+  `release-lock` releases only an expired lease unless `--force` is given)
+  and `deploy --include-observability` (set `observability.enabled: true`
+  in the config instead). Each is now an unknown option and exits 2.
 - `lbrun.py`, the run-from-a-checkout wrapper. Use
   `PYTHONPATH=src python -m lakebench` instead.
 

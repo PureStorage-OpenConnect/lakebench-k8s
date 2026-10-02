@@ -19,6 +19,7 @@ from lakebench.config.schema import (
     QueryEngineType,
     require_polaris_client_secret,
 )
+from lakebench.exit_codes import REFUSAL_DETAIL
 from lakebench.k8s import K8sClient, K8sResourceError
 
 logger = logging.getLogger(__name__)
@@ -656,13 +657,6 @@ class DeploymentEngine:
             "scratch_storage_class": cfg.platform.storage.scratch.storage_class,
             "scratch_provisioner": cfg.platform.storage.scratch.provisioner,
             "scratch_parameters": cfg.platform.storage.scratch.parameters,
-            # Spark
-            "spark_driver_cores": cfg.platform.compute.spark.driver.cores,
-            "spark_driver_memory": cfg.platform.compute.spark.driver.memory,
-            "spark_executor_instances": cfg.platform.compute.spark.executor.instances,
-            "spark_executor_cores": cfg.platform.compute.spark.executor.cores,
-            "spark_executor_memory": cfg.platform.compute.spark.executor.memory,
-            "spark_executor_memory_overhead": cfg.platform.compute.spark.executor.memory_overhead,
             # Spark Thrift Server
             "spark_thrift_cores": cfg.architecture.query_engine.spark_thrift.cores,
             "spark_thrift_memory": cfg.architecture.query_engine.spark_thrift.memory,
@@ -1037,6 +1031,7 @@ class DeploymentEngine:
                 status=DeploymentStatus.FAILED,
                 message=f"Namespace ownership refused: {stamp.hint}{extra}",
                 elapsed_seconds=time.time() - start,
+                details={REFUSAL_DETAIL: "deploy.identity_foreign"},
             )
         if stamp.verdict is IdentityVerdict.ABSENT:
             return DeploymentResult(
@@ -1054,6 +1049,7 @@ class DeploymentEngine:
                     "migrate-deployment command ships)."
                 ),
                 elapsed_seconds=time.time() - start,
+                details={REFUSAL_DETAIL: "deploy.identity_foreign"},
             )
 
         # Every deploy stamps a new nonce, so a destroy already running on
@@ -1447,6 +1443,7 @@ class DeploymentEngine:
                     status=DeploymentStatus.FAILED,
                     message=f"Bucket ownership refused: {v.hint}",
                     elapsed_seconds=time.time() - start,
+                    details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                 )
             # R2: an ABSENT (legacy, untagged) bucket must NOT be claimed
             # silently. Freshly-created buckets ARE our own untagged
@@ -1473,6 +1470,7 @@ class DeploymentEngine:
                             "with another team's storage). " + (v.hint or "")
                         ),
                         elapsed_seconds=time.time() - start,
+                        details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                     )
             if v.verdict is IdentityVerdict.NOT_FOUND:
                 # Should not happen after ensure_buckets returned. Skip.
@@ -1525,6 +1523,13 @@ class DeploymentEngine:
                         status=DeploymentStatus.FAILED,
                         message=msg,
                         elapsed_seconds=time.time() - start,
+                        # No name-prefix claim is a refusal; a sibling list
+                        # that could not be read is a permission gap (1).
+                        details=(
+                            {}
+                            if enumeration_failed
+                            else {REFUSAL_DETAIL: "deploy.identity_foreign"}
+                        ),
                     )
                 if not unsupported_warned:
                     logger.warning(
@@ -1787,8 +1792,8 @@ class DeploymentEngine:
                 hint = ""
                 if not spark_op_cfg.install:
                     hint = (
-                        " (operator.install is false -- set to true for "
-                        "auto-install, or install the operator manually)"
+                        " (a cluster admin installs it once with "
+                        "'lakebench admin install-spark-operator')"
                     )
                 return DeploymentResult(
                     component="spark-operator",

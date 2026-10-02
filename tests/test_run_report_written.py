@@ -44,7 +44,7 @@ def test_write_run_report_writes_next_to_metrics(tmp_path, success):
 def test_write_run_report_never_raises(tmp_path, capsys):
     storage = MetricsStorage(tmp_path)
     assert write_run_report(storage, "no-such-run") is None
-    assert "Could not write report.html" in " ".join(capsys.readouterr().out.split())
+    assert "Could not write report.html" in " ".join(capsys.readouterr().err.split())
 
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench" / "cli"

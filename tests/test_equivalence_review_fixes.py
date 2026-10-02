@@ -493,7 +493,12 @@ class TestFixPass:
         exp = stub_experiment(["Q1_full_aggregation_scan"], mode="sustained")
         exp["results"]["fingerprints"] = {"Q1_full_aggregation_scan": None}  # aggregated rounds
         exp["results"]["by_design"] = True  # the old deviation's marker no longer excuses it
-        run = SimpleNamespace(raw={"experiment": exp}, run_id="r", mode="sustained", scores={})
+        run = SimpleNamespace(
+            raw={"experiment": exp, "provenance": {"deps": {"pinset_sha256": "a" * 64}}},
+            run_id="r",
+            mode="sustained",
+            scores={},
+        )
         with (
             mock.patch.object(pg, "run_refusals", return_value=[]),
             mock.patch.object(pg.BaselineStore, "pinned", return_value=SimpleNamespace()),

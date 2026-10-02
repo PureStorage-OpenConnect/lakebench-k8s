@@ -38,7 +38,7 @@ Rule: `deploy` preflight refuses with an actionable error when any of these is m
 
 Single installation per cluster. Version-asserted at preflight.
 
-Spark Operator, Stackable operators, Prometheus/Grafana Helm release. `deploy` refuses if the operator is absent or at an unsupported version, unless the config opts in to installing it (`platform.compute.spark.operator.install: true` for the Spark Operator), in which case `deploy` installs a missing operator. `lakebench admin install-spark-operator` (and friends) install them; a cluster admin runs `admin` once, a developer runs `deploy` many times without touching the operator install.
+Spark Operator, Stackable operators, Prometheus/Grafana Helm release. `deploy` refuses if the operator is absent or at an unsupported version; it never installs one (`platform.compute.spark.operator.install: true` is refused at load). `lakebench admin install-spark-operator` (and friends) install them; a cluster admin runs `admin` once, a developer runs `deploy` many times without touching the operator install.
 
 ### Category 4 -- shared mutable state
 

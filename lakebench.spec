@@ -13,9 +13,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
-# Collect pydantic and pydantic-settings data files (validators, schemas)
+# Collect pydantic data files (validators, schemas)
 pydantic_datas = collect_data_files("pydantic")
-pydantic_settings_datas = collect_data_files("pydantic_settings")
 
 a = Analysis(
     ["src/lakebench/__main__.py"],
@@ -43,8 +42,7 @@ a = Analysis(
         # declared and records a corpus problem.
         ("src/lakebench/config/datagen_lineage.yaml", "lakebench/config"),
     ]
-    + pydantic_datas
-    + pydantic_settings_datas,
+    + pydantic_datas,
     hiddenimports=[
         # Core dependencies
         "kubernetes",
@@ -54,7 +52,6 @@ a = Analysis(
         "botocore",
         "pydantic",
         "pydantic._internal",
-        "pydantic_settings",
         "typer",
         "rich",
         "jinja2",
@@ -62,7 +59,6 @@ a = Analysis(
         "httpx",
         # Submodules that dynamic imports may miss
         *collect_submodules("pydantic"),
-        *collect_submodules("pydantic_settings"),
         *collect_submodules("kubernetes.client"),
     ],
     hookspath=[],

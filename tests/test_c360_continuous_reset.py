@@ -100,9 +100,36 @@ def test_c360_state_reset_refuses_without_ownership(monkeypatch):
     monkeypatch.setattr(_sustained, "_reset_ownership_problem", lambda c: "bucket c-b: FOREIGN")
     client = MagicMock()
     monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
-    with pytest.raises(typer.Exit):
+    with pytest.raises(typer.Exit) as exc:
         _sustained._reset_continuous_state(cfg, clear_raw=True)
+    assert exc.value.exit_code == 3  # refused (CLI-1)
     client.delete_prefix.assert_not_called()
+
+
+def test_c360_state_reset_that_cannot_check_ownership_is_a_prerequisite(monkeypatch):
+    """The cluster or namespace could not be read: exit 4, not 3 (retry later)."""
+    cfg = _c360_cfg()
+
+    def unreadable(_c):
+        raise _sustained._OwnershipUnverifiable("cannot reach the cluster to verify ownership")
+
+    monkeypatch.setattr(_sustained, "_reset_ownership_problem", unreadable)
+    client = MagicMock()
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
+    with pytest.raises(typer.Exit) as exc:
+        _sustained._reset_continuous_state(cfg, clear_raw=True)
+    assert exc.value.exit_code == 4
+    client.delete_prefix.assert_not_called()
+
+
+def test_reset_ownership_problem_raises_when_the_namespace_is_unreadable(monkeypatch):
+    from kubernetes.client.rest import ApiException
+
+    core = MagicMock()
+    core.read_namespace.side_effect = ApiException(status=403)
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    with pytest.raises(_sustained._OwnershipUnverifiable):
+        _sustained._reset_ownership_problem(_c360_cfg())
 
 
 class _StopAfterFirstStream(Exception):
@@ -220,7 +247,7 @@ def test_existing_state_refuses_without_force_reset(monkeypatch, tmp_path, capsy
         monkeypatch, tmp_path, _c360_cfg(), existing=["c-s/", "c-b/customer/interactions/"]
     )
     assert events == ["ownership"]  # nothing stopped, deleted or submitted
-    out = capsys.readouterr().out
+    out = "".join(capsys.readouterr())
     assert "--force-reset" in out and "silver.customer_interactions_enriched" in out
     assert "c-b/customer/interactions/" in out
 
@@ -304,7 +331,7 @@ def test_fresh_generate_on_never_run_deployment_proceeds(monkeypatch, tmp_path, 
     )
     assert events[:4] == ["ownership", "stop-streams", "reset-s3:clear_raw=True", "datagen"]
     assert any(e.startswith("submit:bronze-ingest") for e in events)
-    out = " ".join(capsys.readouterr().out.split())
+    out = " ".join("".join(capsys.readouterr()).split())
     assert "Refusing" not in out and "a separate generate is not needed" in out
 
 
@@ -330,7 +357,7 @@ def test_raw_only_but_unsafe_to_replace_still_refuses(monkeypatch, tmp_path, cap
         raw_problem="a lakebench-datagen Job is still running",
     )
     assert events == ["ownership"]
-    out = " ".join(capsys.readouterr().out.split())
+    out = " ".join("".join(capsys.readouterr()).split())
     assert "still running" in out and "--force-reset" in out
 
 

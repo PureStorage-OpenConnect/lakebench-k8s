@@ -250,8 +250,7 @@ def _check_spark_operator(cfg) -> PrereqResult:
                 "(The managed path holds the cluster lease and rewrites the "
                 "operator watch list under a read-modify-write; a raw helm "
                 "install bypasses both and can crash-loop the shared operator "
-                "for every other running deployment.)\n"
-                "Or set platform.compute.spark.operator.install: true"
+                "for every other running deployment.)"
             ),
         )
     except Exception as e:

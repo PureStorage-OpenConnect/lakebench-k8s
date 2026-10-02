@@ -187,9 +187,6 @@ class TestAutoSizingScaleOnly:
         )
         resolve_auto_sizing(config)
 
-        assert config.platform.compute.spark.executor.instances == 2
-        assert config.platform.compute.spark.executor.memory == "4g"
-        assert config.platform.compute.spark.executor.cores == 2
         assert config.architecture.query_engine.trino.worker.replicas == 1
         assert config.architecture.query_engine.trino.worker.memory == "8Gi"
         assert config.architecture.workload.datagen.parallelism == 2
@@ -209,8 +206,6 @@ class TestAutoSizingScaleOnly:
         )
         resolve_auto_sizing(config)
 
-        assert config.platform.compute.spark.executor.instances >= 4
-        assert config.platform.compute.spark.executor.memory == "16g"
         assert config.architecture.query_engine.trino.worker.replicas == 2
         assert config.architecture.workload.datagen.parallelism == 4
         # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
@@ -229,8 +224,6 @@ class TestAutoSizingScaleOnly:
         )
         resolve_auto_sizing(config)
 
-        assert config.platform.compute.spark.executor.instances >= 8
-        assert config.platform.compute.spark.executor.memory == "32g"
         assert config.architecture.query_engine.trino.worker.replicas == 4
         assert config.architecture.query_engine.trino.worker.memory == "48Gi"
         assert config.architecture.workload.datagen.parallelism >= 8
@@ -250,8 +243,6 @@ class TestAutoSizingScaleOnly:
         )
         resolve_auto_sizing(config)
 
-        assert config.platform.compute.spark.executor.instances >= 16
-        assert config.platform.compute.spark.executor.memory == "48g"
         assert config.architecture.query_engine.trino.worker.replicas >= 8
         # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
         # the pod CPU request); memory from the measured RSS model, which for
@@ -261,16 +252,6 @@ class TestAutoSizingScaleOnly:
         assert config.architecture.workload.datagen.memory == "4Gi"
         assert config.architecture.workload.datagen.generators == 0
 
-    def test_memory_overhead_derived(self):
-        """Memory overhead should be ~25% of executor memory."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 10}}},
-        )
-        resolve_auto_sizing(config)
-        # 16g * 0.25 = 4g
-        assert config.platform.compute.spark.executor.memory_overhead == "4g"
-
 
 # ---------------------------------------------------------------------------
 # resolve_auto_sizing -- user overrides preserved
@@ -279,18 +260,6 @@ class TestAutoSizingScaleOnly:
 
 class TestAutoSizingUserOverride:
     """Tests that user-specified values are preserved."""
-
-    def test_user_executor_instances_preserved(self):
-        """Explicitly set executor.instances should not be overwritten."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1}}},
-            platform={"compute": {"spark": {"executor": {"instances": 16}}}},
-        )
-        resolve_auto_sizing(config)
-
-        # User set instances=16, should not be overridden to 2
-        assert config.platform.compute.spark.executor.instances == 16
 
     def test_user_trino_replicas_preserved(self):
         """Explicitly set trino worker replicas should not be overwritten."""
@@ -314,20 +283,6 @@ class TestAutoSizingUserOverride:
         resolve_auto_sizing(config)
 
         assert config.architecture.workload.datagen.parallelism == 32
-
-    def test_mixed_user_and_auto(self):
-        """User sets some fields, auto-sizer fills the rest."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 100}}},
-            platform={"compute": {"spark": {"executor": {"instances": 4}}}},
-        )
-        resolve_auto_sizing(config)
-
-        # instances preserved (user set)
-        assert config.platform.compute.spark.executor.instances == 4
-        # memory auto-sized (user didn't set)
-        assert config.platform.compute.spark.executor.memory == "32g"
 
     def test_user_explicit_mode_preserved(self):
         """User setting mode=batch on large scale should keep batch resources."""
@@ -382,31 +337,6 @@ class TestAutoSizingUserOverride:
 class TestAutoSizingClusterCap:
     """Tests for cluster capacity capping."""
 
-    def test_cluster_cap_reduces_executors(self):
-        """When cluster is small, executor count is capped."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1000}}},
-        )
-
-        # Small cluster: 4 nodes, 8 cores each = 32 cores total
-        cap = ClusterCapacity(
-            total_cpu_millicores=32000,
-            total_memory_bytes=128 * 1024**3,
-            node_count=4,
-            largest_node_cpu_millicores=8000,
-            largest_node_memory_bytes=32 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Co-resident: Trino coord (4 CPU) + 8 workers*8 CPU (64) + infra (1) = 69 CPU
-        # But cluster only has 32 cores, so available for Spark ≈ 0 after co-resident
-        # Executor count is capped to at least 1
-        assert config.platform.compute.spark.executor.instances >= 1
-        # But certainly not the full guidance of 16-32 executors
-        assert config.platform.compute.spark.executor.instances <= 3
-
     def test_cluster_cap_reduces_trino_workers(self):
         """When cluster is small, Trino worker count is capped."""
         config = LakebenchConfig(
@@ -447,11 +377,8 @@ class TestAutoSizingClusterCap:
 
         resolve_auto_sizing(config, cap)
 
-        # 85% of 16Gi ≈ 13Gi
-        # Executor memory (48g) should be capped
-        exec_mem = config.platform.compute.spark.executor.memory
-        # Should be capped to ~13g
-        assert exec_mem != "48g"
+        # 85% of 16Gi ≈ 13Gi: the Trino worker tier memory is capped to it.
+        assert config.architecture.query_engine.trino.worker.memory == "13Gi"
 
     def test_no_cluster_cap_still_works(self):
         """Auto-sizing works fine without cluster capacity."""
@@ -462,7 +389,37 @@ class TestAutoSizingClusterCap:
         resolve_auto_sizing(config, None)
 
         # Should still have auto-sized values from scale
-        assert config.platform.compute.spark.executor.memory == "16g"
+        assert config.architecture.query_engine.trino.worker.replicas == 2
+        assert config.architecture.workload.datagen.parallelism == 4
+
+
+class TestAutosizerLeavesSparkToTheProfiles:
+    """Spark sizing is the job profiles'; the autosizer neither sets nor cuts it."""
+
+    def test_no_spark_executor_change_or_cut(self):
+        # A small cluster used to "cap" executor memory and instances on
+        # fields nothing read; those cuts were recorded as Lakebench caps.
+        config = LakebenchConfig(
+            name="test",
+            architecture={"workload": {"datagen": {"scale": 1000}}},
+        )
+        cap = ClusterCapacity(
+            total_cpu_millicores=32000,
+            total_memory_bytes=128 * 1024**3,
+            node_count=4,
+            largest_node_cpu_millicores=8000,
+            largest_node_memory_bytes=16 * 1024**3,
+        )
+        cuts = resolve_auto_sizing(config, cap)
+        assert not [c for c in cuts if c.startswith("spark.")], cuts
+
+    def test_financial_scratch_is_not_overridden(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}},
+        )
+        resolve_auto_sizing(config)
+        assert not hasattr(config.platform.storage.scratch, "size")
 
 
 # ---------------------------------------------------------------------------
@@ -472,27 +429,6 @@ class TestAutoSizingClusterCap:
 
 class TestAutoSizingClusterAware:
     """Tests for cluster-aware scaling: cap small scales, scale up large."""
-
-    def test_large_cluster_does_not_boost_executors(self):
-        """Big cluster with scale=1: executors stay at tier guidance (2)."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1}}},
-        )
-
-        # Large cluster: 8 nodes, 32 cores each = 256 cores total
-        cap = ClusterCapacity(
-            total_cpu_millicores=256000,
-            total_memory_bytes=512 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=32000,
-            largest_node_memory_bytes=64 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Tier guidance for scale=1: 2 executors -- should NOT be boosted
-        assert config.platform.compute.spark.executor.instances == 2
 
     def test_large_cluster_does_not_boost_trino_workers(self):
         """Big cluster should NOT boost Trino worker count beyond tier."""
@@ -599,7 +535,6 @@ class TestAutoSizingClusterAware:
 
         resolve_auto_sizing(config, cap)
 
-        executor = config.platform.compute.spark.executor
         datagen = config.architecture.workload.datagen
         coord = config.architecture.query_engine.trino.coordinator
         worker = config.architecture.query_engine.trino.worker
@@ -610,10 +545,6 @@ class TestAutoSizingClusterAware:
         # Datagen phase: datagen + co-resident must fit
         datagen_total = datagen.parallelism * int(datagen.cpu) + co_resident
         assert datagen_total <= 64, f"datagen phase: {datagen_total} > 64"
-
-        # Spark phase: executors + co-resident must fit
-        spark_total = executor.instances * executor.cores + co_resident
-        assert spark_total <= 64, f"spark phase: {spark_total} > 64"
 
     def test_no_overprovisioning(self):
         """Total CPU demand per phase must not exceed cluster capacity.
@@ -642,7 +573,6 @@ class TestAutoSizingClusterAware:
             coord = config.architecture.query_engine.trino.coordinator
             worker = config.architecture.query_engine.trino.worker
             datagen = config.architecture.workload.datagen
-            executor = config.platform.compute.spark.executor
 
             co_resident = int(coord.cpu) + worker.replicas * int(worker.cpu) + 1
             cluster_cores = cap.total_cpu_millicores // 1000
@@ -653,36 +583,6 @@ class TestAutoSizingClusterAware:
                 f"scale={scale}: datagen phase demand {datagen_demand} CPU "
                 f"exceeds cluster capacity {cluster_cores} CPU"
             )
-
-            # Spark phase
-            spark_demand = executor.instances * executor.cores + co_resident
-            assert spark_demand <= cluster_cores, (
-                f"scale={scale}: spark phase demand {spark_demand} CPU "
-                f"exceeds cluster capacity {cluster_cores} CPU"
-            )
-
-    def test_large_scale_scales_up_executors(self):
-        """Scale=102 on a big cluster should scale executors beyond tier guidance."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 102}}},
-        )
-
-        # 8 nodes × 40 cores = 320 cores
-        cap = ClusterCapacity(
-            total_cpu_millicores=320000,
-            total_memory_bytes=8 * 432 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=40000,
-            largest_node_memory_bytes=432 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Tier guidance for scale=102 (performance): 8 executors
-        # With 320 cores and ~37 co-resident, phase budget ≈ 254
-        # Each executor uses 8 cores → can fit ~31
-        assert config.platform.compute.spark.executor.instances > 8
 
     def test_large_scale_scales_up_datagen(self):
         """Scale=102 on a big cluster should scale datagen beyond tier guidance."""
@@ -725,27 +625,6 @@ class TestAutoSizingClusterAware:
         # Tier guidance: 4 workers -- should NOT be boosted
         assert config.architecture.query_engine.trino.worker.replicas == 4
 
-    def test_medium_scale_not_scaled_up(self):
-        """Scale=10 on a big cluster: executors stay at tier guidance."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 10}}},
-        )
-
-        cap = ClusterCapacity(
-            total_cpu_millicores=320000,
-            total_memory_bytes=8 * 432 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=40000,
-            largest_node_memory_bytes=432 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Tier guidance for scale=10 (balanced): 4 executors -- no scaling up
-        assert config.platform.compute.spark.executor.instances == 4
-        assert config.architecture.workload.datagen.parallelism == 4
-
     def test_streaming_mode_splits_phase_budget(self):
         """STREAMING mode should give datagen less budget than MEDALLION mode."""
         cap = ClusterCapacity(
@@ -784,8 +663,28 @@ class TestAutoSizingClusterAware:
             f"batch datagen ({batch_datagen})"
         )
 
+    def test_medium_scale_not_scaled_up(self):
+        """Scale=10 on a big cluster: datagen stays at tier guidance."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={"workload": {"datagen": {"scale": 10}}},
+        )
+
+        cap = ClusterCapacity(
+            total_cpu_millicores=320000,
+            total_memory_bytes=8 * 432 * 1024**3,
+            node_count=8,
+            largest_node_cpu_millicores=40000,
+            largest_node_memory_bytes=432 * 1024**3,
+        )
+
+        resolve_auto_sizing(config, cap)
+
+        # Tier guidance for scale=10 (balanced): 4 pods -- no scaling up
+        assert config.architecture.workload.datagen.parallelism == 4
+
     def test_streaming_mode_no_overprovisioning(self):
-        """In STREAMING mode, datagen + Spark executor demand should fit the cluster."""
+        """In STREAMING mode, datagen stays inside its share of the phase budget."""
 
         for scale in (10, 50, 100, 500):
             config = LakebenchConfig(
@@ -809,60 +708,15 @@ class TestAutoSizingClusterAware:
             coord = config.architecture.query_engine.trino.coordinator
             worker = config.architecture.query_engine.trino.worker
             datagen = config.architecture.workload.datagen
-            executor = config.platform.compute.spark.executor
 
             co_resident = int(coord.cpu) + worker.replicas * int(worker.cpu) + 1
             cluster_cores = cap.total_cpu_millicores // 1000
-
-            # Datagen demand
             datagen_demand = datagen.parallelism * int(datagen.cpu)
-
-            # Spark executor demand (global -- autosizer value)
-            spark_demand = executor.instances * executor.cores
-
-            # In streaming mode both run at the same time
-            total = datagen_demand + spark_demand + co_resident
-            assert total <= cluster_cores, (
-                f"scale={scale}: streaming total demand {total} CPU "
-                f"exceeds cluster capacity {cluster_cores} CPU "
-                f"(datagen={datagen_demand}, spark={spark_demand}, "
-                f"co_resident={co_resident})"
+            share = (cluster_cores - co_resident) * 0.9 * 0.4
+            assert datagen_demand <= share, (
+                f"scale={scale}: streaming datagen demand {datagen_demand} CPU "
+                f"exceeds its share {share:.0f} CPU"
             )
-
-    def test_financial_schema_bumps_scratch(self):
-        """schema=financial bumps scratch.size to 200Gi when unset (ENG-2C.10)."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "workload": {"schema": "financial", "datagen": {"scale": 1}},
-            },
-        )
-        resolve_auto_sizing(config)
-        assert config.platform.storage.scratch.size == "200Gi"
-
-    def test_customer360_scratch_untouched(self):
-        """schema=customer360 leaves scratch.size at its declared default."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "workload": {"schema": "customer360", "datagen": {"scale": 1}},
-            },
-        )
-        resolve_auto_sizing(config)
-        # ScratchStorageConfig default is 100Gi (from schema.py).
-        assert config.platform.storage.scratch.size == "100Gi"
-
-    def test_financial_user_scratch_preserved(self):
-        """Explicit user scratch.size wins over the financial schema default."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "workload": {"schema": "financial", "datagen": {"scale": 1}},
-            },
-            platform={"storage": {"scratch": {"size": "500Gi"}}},
-        )
-        resolve_auto_sizing(config)
-        assert config.platform.storage.scratch.size == "500Gi"
 
     def test_batch_mode_unchanged(self):
         """MEDALLION mode should still give each phase the full budget."""
@@ -885,7 +739,6 @@ class TestAutoSizingClusterAware:
         resolve_auto_sizing(config, cap)
 
         # Should still scale up (sequential phases -- each gets full budget)
-        assert config.platform.compute.spark.executor.instances > 8
         assert config.architecture.workload.datagen.parallelism > 10
 
 

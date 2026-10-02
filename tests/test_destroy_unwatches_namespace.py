@@ -117,6 +117,34 @@ class TestDestroyIsNotBlocked:
         assert "admin repair-operator" in ns_results[-1].message
         watch_results = [r for r in results if r.component == "spark-operator-watch"]
         assert watch_results and watch_results[-1].status == DeploymentStatus.FAILED
+        # A broken watch list is a failure a repair fixes, not a refusal (exit 1).
+        from lakebench.cli._exit import refused_result_code
+
+        assert refused_result_code(results) is None
+
+    def test_held_lease_is_a_refusal(self):
+        """Another process holds the cluster lease: the watch list was not
+        touched and destroy exits 3 (lease.held), not 1."""
+        from lakebench.cli._exit import refused_result_code
+        from lakebench.deploy.cluster_lock import ClusterLockHeld
+        from lakebench.exit_codes import ExitCode
+        from lakebench.modules.pipeline_engines.spark.operator import (
+            WatchListMutationError,
+        )
+
+        held = ClusterLockHeld("h@u@s", "2026-10-01T00:00:00Z", 300, "2026-10-01T00:05:00Z")
+        err = WatchListMutationError("another lakebench process holds the cluster lock (h@u@s)")
+        err.__cause__ = held
+        manager = MagicMock()
+        manager.remove_namespace_from_watch.side_effect = err
+        results = _run_destroy(_engine(), MagicMock(return_value=manager))
+        watch = [r for r in results if r.component == "spark-operator-watch"]
+        assert watch and watch[-1].details["refusal"] == "lease.held"
+        # The namespace step is SKIPPED, so the lease is the only failure the
+        # watch-list path adds (this harness's unmocked teardown adds others).
+        ns = [r for r in results if r.component == "namespace"]
+        assert ns and ns[-1].status == DeploymentStatus.SKIPPED
+        assert refused_result_code([watch[-1], ns[-1]]) == ExitCode.REFUSED
 
     def test_no_unwatch_when_namespace_is_not_ours_to_delete(self):
         """create_namespace=False means we never owned it -- leave it alone."""

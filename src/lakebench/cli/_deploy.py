@@ -14,6 +14,7 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
+from lakebench.cli._exit import refused_result_code
 from lakebench.cli._helpers import (
     _journal_safe,
     check_datagen_scale,
@@ -30,6 +31,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
@@ -48,13 +50,13 @@ def _preflight_check(cfg) -> None:
     if not s3.endpoint:
         print_error("S3 endpoint not configured (platform.storage.s3.endpoint)")
         print_info("Run 'lakebench config validate' for detailed diagnostics")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # 2. Inline S3 credentials must be present (secret_ref is not consumed
     # and a secret_ref-only config is refused at load)
     if not (s3.access_key and s3.secret_key):
         print_error("S3 credentials not configured (set access_key and secret_key)")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # 3. Check Stackable CRDs if catalog=hive
     if cfg.architecture.catalog.type.value == "hive":
@@ -103,7 +105,7 @@ def _preflight_check(cfg) -> None:
                     "Or switch to a Polaris recipe (no operators needed):\n"
                     "  Set recipe: polaris-iceberg-spark-trino in your config"
                 )
-                raise typer.Exit(1)
+                raise typer.Exit(ExitCode.PREREQUISITE)
 
 
 def _build_component_list(cfg) -> str:
@@ -159,7 +161,7 @@ def _deploy_local_mode(
         check_local_supported(cfg)
     except LocalModeError as e:
         print_error(str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     resolved_workdir = workdir or default_workdir(cfg.name)
     print_local_plan(cfg, resolved_workdir)
@@ -185,11 +187,11 @@ def _deploy_local_mode(
     except LocalModeError as e:
         print_error(str(e))
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except Exception as e:  # noqa: BLE001 -- container CLI failures vary widely
         print_error(f"Local deploy failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
 
     elapsed = int(time.time() - started)
     _journal_safe(
@@ -234,13 +236,6 @@ def deploy(
         typer.Option(
             "--dry-run",
             help="Show what would be deployed without making changes",
-        ),
-    ] = False,
-    include_observability: Annotated[
-        bool,
-        typer.Option(
-            "--include-observability",
-            help="Deploy Prometheus and Grafana monitoring stack",
         ),
     ] = False,
     yes: Annotated[
@@ -299,7 +294,7 @@ def deploy(
     4. Catalog (Hive Metastore or Polaris)
     5. Spark RBAC (then Unity Catalog, only if catalog.type is unity)
     6. Spark Operator check and watch-list entry for the namespace (always
-       runs; operator.install: true also installs a missing operator)
+       runs; never installs the shared operator)
     7. Query Engine (Trino / Spark Thrift / DuckDB)
     8. Observability (if enabled)
     """
@@ -312,20 +307,16 @@ def deploy(
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
             console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
-
-    # Enable observability if flag is set
-    if include_observability:
-        cfg.observability.enabled = True
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     # Local mode has its own path: no namespace, no operator, no preflight
     # against a cluster that is not there.
@@ -424,7 +415,7 @@ def deploy(
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
 
     # Summary
     console.print()
@@ -500,4 +491,5 @@ def deploy(
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        # An ownership refusal (deploy.identity_foreign) is 3, any other failed step 1.
+        raise typer.Exit(refused_result_code(results) or ExitCode.FAILED)

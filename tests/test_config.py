@@ -86,12 +86,9 @@ class TestLakebenchConfig:
         assert config.platform.storage.s3.path_style is True
 
         # Compute defaults (proven values)
-        assert config.platform.compute.spark.driver.cores == 4
-        assert config.platform.compute.spark.driver.memory == "8g"
-        assert config.platform.compute.spark.executor.instances == 8
-        assert config.platform.compute.spark.executor.cores == 4
-        assert config.platform.compute.spark.executor.memory == "48g"
-        assert config.platform.compute.spark.executor.memory_overhead == "12g"
+        # Per-executor sizing is the job profiles', not the config's.
+        assert not hasattr(config.platform.compute.spark, "driver")
+        assert not hasattr(config.platform.compute.spark, "executor")
 
         # Architecture defaults
         assert config.architecture.catalog.type.value == "hive"
@@ -427,12 +424,12 @@ class TestScratchStorageConfig:
     """Tests for scratch storage configuration."""
 
     def test_scratch_storage_defaults(self):
-        """Default scratch config: disabled, px-csi-scratch, 100Gi."""
+        """Default scratch config: disabled, px-csi-scratch, no size (job profiles)."""
         config = LakebenchConfig(name="test")
         scratch = config.platform.storage.scratch
         assert scratch.enabled is False
         assert scratch.storage_class == "px-csi-scratch"
-        assert scratch.size == "100Gi"
+        assert not hasattr(scratch, "size")
 
     def test_scratch_legacy_create_sc_field_ignored(self):
         """create_storage_class is a legacy field.
@@ -458,7 +455,6 @@ class TestScratchStorageConfig:
                     "scratch": {
                         "enabled": True,
                         "storage_class": "my-sc",
-                        "size": "200Gi",
                     }
                 }
             },
@@ -466,7 +462,6 @@ class TestScratchStorageConfig:
         scratch = config.platform.storage.scratch
         assert scratch.enabled is True
         assert scratch.storage_class == "my-sc"
-        assert scratch.size == "200Gi"
 
     def test_scratch_provisioner_default(self):
         """BUG-001: Default scratch provisioner is Portworx."""
@@ -601,9 +596,11 @@ class TestGeneratedYamlDrift:
         assert "LEGEND" in yaml_content
 
     def test_spark_operator_note(self):
-        """Generated YAML should document that spark operator defaults to false."""
+        """Generated YAML says a cluster admin installs the Spark Operator."""
         yaml_content = generate_example_config_yaml()
-        assert "default is false" in yaml_content.lower()
+        assert "lakebench admin install-spark-operator" in yaml_content
+        assert "install: false" not in yaml_content
+        assert "install: true" not in yaml_content
 
     def test_benchmark_section_engine_agnostic(self):
         """Benchmark section should not be Trino-specific."""
