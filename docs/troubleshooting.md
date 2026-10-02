@@ -178,7 +178,8 @@ a `pending-upgrade` revision blocks every deployment's watch-list change.
 `lakebench admin repair-operator` rolls it back once the pending revision
 is at least 10 minutes old by the API server's clock (a helm call may still
 be running before that), to the newest deployed revision that watches no
-deleted namespace, then sets the list it read before the rollback, so a
+deleted namespace (an operator that watches every namespace only to a
+revision that does too), then sets the list it read before the rollback, so a
 namespace the interrupted upgrade added is kept. Otherwise it exits 3 with
 the reason; `--dry-run` shows the verdict. Do not run `helm rollback` by
 hand: it skips the deleted-namespace check and the lease. The one exception

@@ -1184,12 +1184,23 @@ def repair_operator(
                 listed = mgr._get_watched_namespaces(revision=rev)  # noqa: SLF001
             except _WatchListReadError as e:
                 return None, f"revision {rev}'s values cannot be read: {e}"
+            if p["watch_all"] and listed is not None:
+                # The operator watches every namespace now; a revision with a
+                # list would stop reconciling all the others, silently.
+                unsafe.append(f"{rev} lists {sorted(listed)}")
+                continue
             if listed is not None:
                 gone = sorted(set(listed) - p["active"] - {"default"})
                 if gone:
                     unsafe.append(f"{rev} watches {gone}")
                     continue
             return rev, None
+        if p["watch_all"]:
+            return None, (
+                "the operator watches every namespace and no earlier deployed revision "
+                f"does ({'; '.join(unsafe)}); rolling back would stop reconciling every "
+                "namespace not listed. A cluster admin decides which is meant"
+            )
         return None, (
             "every earlier deployed revision names a namespace that no longer exists ("
             + "; ".join(unsafe)

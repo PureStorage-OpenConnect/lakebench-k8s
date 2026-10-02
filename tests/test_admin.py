@@ -689,6 +689,39 @@ class TestRepairOperator:
         assert r.exit_code == 0, r.output
         h.mgr.rollback_to.assert_called_once_with(3)
 
+    def test_a_watch_all_operator_is_not_rolled_back_to_a_list(self):
+        """A killed widening upgrade left every source watching all: a
+        rollback to the listing revision would narrow the operator."""
+        h = _Repair(
+            values=None, live=None, active=("ns-a", "ns-b"), state=_state("pending-upgrade", 6)
+        )
+        h.mgr.good_revisions.return_value = [5]
+        h.revision_lists[5] = ["ns-a"]
+        r = h.invoke()
+        assert r.exit_code == 3, r.output
+        assert "stop reconciling" in _flat(r)
+        assert h.writes() == []
+
+    def test_a_watch_all_operator_rolls_back_to_a_watch_all_revision(self):
+        h = _Repair(
+            values=None,
+            live=None,
+            active=("ns-a",),
+            state=_state("pending-upgrade", 6),
+            after={
+                "values": None,
+                "spark-operator-controller": None,
+                "spark-operator-webhook": None,
+            },
+        )
+        h.mgr.good_revisions.return_value = [5, 4]
+        h.revision_lists[5] = ["ns-a"]
+        h.revision_lists[4] = None
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        assert h.writes() == ["rollback"]
+        h.mgr.rollback_to.assert_called_once_with(4)
+
     def test_mixed_sources_refuse_before_any_rollback(self):
         """Deployments watch every namespace (the deployed revision had "")
         while a killed upgrade's values list one: rolling back and setting
