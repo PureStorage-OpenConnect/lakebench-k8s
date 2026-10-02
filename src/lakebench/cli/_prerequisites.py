@@ -77,8 +77,8 @@ def run_prerequisites(
 
     # 5-7. The shared registry (deploy/prereqs.py): scratch
     # StorageClass, Spark Operator, Stackable (Hive), observability, the
-    # OpenShift SCC ClusterRole and S3. docs/prerequisites.md is generated
-    # from the same entries, and `plan` runs them too.
+    # OpenShift SCC ClusterRole and S3; the deploy-phase entries are left to
+    # deploy. docs/prerequisites.md is generated from the same entries.
     report.checks.extend(_registry_checks(cfg))
 
     # 8. Namespace writable

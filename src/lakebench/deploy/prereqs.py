@@ -142,6 +142,10 @@ _DEFAULT_SC_ANNOTATIONS = (
 )
 
 
+def _refused(e: Exception) -> bool:
+    return getattr(e, "status", None) == 403
+
+
 def _check_deps_storage_class(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
     from lakebench.deps.manifest import PVC_NAME
 
@@ -150,22 +154,27 @@ def _check_deps_storage_class(cfg: LakebenchConfig, r: ClusterReader) -> PrereqR
         # The class is read only when the PVC is created: an existing PVC
         # keeps the set where it is, whatever the cluster's classes are now.
         have = r.pvc_storage_class(cfg.get_namespace(), PVC_NAME)
-        if have is not None:
-            if name and name != have:
-                return _warn(
-                    f"PVC {PVC_NAME} exists on StorageClass {have or '(none)'}, not "
-                    f"{name}; the set stays there until the PVC is deleted"
-                )
-            return _ok(f"PVC {PVC_NAME} exists on StorageClass {have or '(none)'}")
+    except Exception as e:  # noqa: BLE001 -- only a refused read is softened
+        if not _refused(e):
+            raise
+        have = None  # unreadable: check the class as if the PVC were new
+    if have is not None:
+        if name and name != have:
+            return _warn(
+                f"PVC {PVC_NAME} exists on StorageClass {have or '(none)'}, not "
+                f"{name}; the set stays there until the PVC is deleted"
+            )
+        return _ok(f"PVC {PVC_NAME} exists on StorageClass {have or '(none)'}")
+    try:
         if name:
             if name in r.storage_class_names():
                 return _ok(f"StorageClass {name} exists (platform.deps.storage_class)")
             return _fail(f"StorageClass {name} not found (platform.deps.storage_class)")
         defaults = sorted(r.default_storage_class_names())
     except Exception as e:  # noqa: BLE001 -- only a refused read is softened
-        if getattr(e, "status", None) != 403:
+        if not _refused(e):
             raise
-        return _warn("cannot read StorageClasses or PVCs (403); deploy checks the class")
+        return _warn("cannot read StorageClasses (403); deploy checks the class")
     if not defaults:
         return _fail(
             "platform.deps.storage_class is empty and the cluster has no default StorageClass"

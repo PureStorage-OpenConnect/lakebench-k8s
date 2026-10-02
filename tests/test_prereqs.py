@@ -326,21 +326,42 @@ def test_deps_storage_class(deps, scs, default, pvc, status, text):
     assert res.status is status and text in res.message
 
 
-@pytest.mark.parametrize("status,want", [(403, PrereqStatus.WARN), (500, PrereqStatus.UNKNOWN)])
-def test_deps_storage_class_unreadable(status, want):
-    """A refused read is a warning (deploy checks the class itself); any other
-    error is UNKNOWN, as for every check."""
+def _http(status):
+    err = RuntimeError(f"HTTP {status}")
+    err.status = status  # type: ignore[attr-defined]
+    return err
+
+
+@pytest.mark.parametrize(
+    "pvc_status,sc_status,want,text",
+    [
+        # PVC unreadable: the class is still checked.
+        (403, None, PrereqStatus.OK, "default StorageClass px-csi-db"),
+        (403, 403, PrereqStatus.WARN, "cannot read StorageClasses (403)"),
+        (None, 403, PrereqStatus.WARN, "cannot read StorageClasses (403)"),
+        (500, None, PrereqStatus.UNKNOWN, "HTTP 500"),
+        (None, 500, PrereqStatus.UNKNOWN, "HTTP 500"),
+    ],
+)
+def test_deps_storage_class_unreadable(pvc_status, sc_status, want, text):
+    """A refused read is a warning, or falls through to the class check (deploy
+    checks the class itself); any other error is UNKNOWN, as for every check."""
 
     class Refused(FakeReader):
         def pvc_storage_class(self, namespace, name):
-            err = RuntimeError(f"HTTP {status}")
-            err.status = status  # type: ignore[attr-defined]
-            raise err
+            if pvc_status:
+                raise _http(pvc_status)
+            return None
+
+        def default_storage_class_names(self):
+            if sc_status:
+                raise _http(sc_status)
+            return {"px-csi-db"}
 
     r = Refused()
     r.deps["app.kubernetes.io/name=spark-operator"] = [_controller()]
     res = _result(pr.run_prereqs(_cfg(), r), "deps-storage-class")
-    assert res.status is want
+    assert res.status is want and text in res.message
 
 
 def test_run_preflight_leaves_deploy_phase_entries_to_deploy(monkeypatch):
