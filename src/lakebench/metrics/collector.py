@@ -6,12 +6,14 @@ import hashlib
 import logging
 import re
 import statistics
+from collections.abc import Collection
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
 from lakebench._clock import utc_now
+from lakebench.metrics import provenance as _prov
 from lakebench.metrics.experiment import effective_trickle, experiment_inputs
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 from lakebench.metrics.provenance import run_provenance
@@ -427,9 +429,11 @@ class PipelineMetrics:
     # loaded without one is the legacy policy (set by the storage loader).
     maintenance_policy_id: str = MAINTENANCE_POLICY_ID
 
-    # Which lakebench produced the run (metrics/provenance.py, GOALS P9.1):
-    # {lakebench_version, git_sha, git_dirty}. None on records from before
-    # the field existed.
+    # What produced the run (metrics/provenance.py): which lakebench
+    # ({lakebench_version, git_sha, git_dirty, install}, and end_sample at
+    # run end), config_sha256 and config_path, the scripts ConfigMaps, the
+    # dependency set, the images the pods ran and scratch as ran. Provenance,
+    # never identity. None on records from before the field existed.
     provenance: dict[str, Any] | None = None
 
     # Lakebench-imposed cuts to fit the cluster (config.autosizer), in the
@@ -2564,9 +2568,17 @@ class MetricsCollector:
     def __init__(self):
         """Initialize metrics collector."""
         self.current_run: PipelineMetrics | None = None
+        # The run's job manager, read again at run end (provenance.deps may
+        # be recorded after the scripts ConfigMaps are applied).
+        self._job_manager: Any = None
 
     def start_run(
-        self, run_id: str, deployment_name: str, config: dict[str, Any]
+        self,
+        run_id: str,
+        deployment_name: str,
+        config: dict[str, Any],
+        *,
+        config_path: str | Path | None = None,
     ) -> PipelineMetrics:
         """Start a new pipeline run.
 
@@ -2574,18 +2586,84 @@ class MetricsCollector:
             run_id: Unique run identifier
             deployment_name: Name of the deployment
             config: Configuration snapshot
+            config_path: The config file the run loaded, recorded as
+                ``provenance.config_path``.
 
         Returns:
             New PipelineMetrics instance
         """
+        provenance: dict[str, Any] = dict(run_provenance())
+        # One source: the snapshot hashed the file's bytes when it was built
+        # (build_config_snapshot), and the perf gate compares that value.
+        provenance["config_sha256"] = config.get("config_sha256")
+        provenance["config_path"] = _prov.config_path_of(config_path)
+        provenance["deps"] = _prov.NOT_RECORDED
+        self._job_manager = None
         self.current_run = PipelineMetrics(
             run_id=run_id,
             deployment_name=deployment_name,
             start_time=utc_now(),
             config_snapshot=config,
-            provenance=dict(run_provenance()),
+            provenance=provenance,
         )
         return self.current_run
+
+    def _run_provenance(self) -> dict[str, Any] | None:
+        run = self.current_run
+        if run is None:
+            return None
+        if run.provenance is None:
+            run.provenance = {}
+        return run.provenance
+
+    def record_job_manager(self, job_manager: Any) -> None:
+        """Record the scripts ConfigMaps and dependency set *job_manager*
+        holds (call after ``deploy_scripts_configmap``); read again at run
+        end."""
+        self._job_manager = job_manager
+        prov = self._run_provenance()
+        if prov is None:
+            return
+        try:
+            prov.update(_prov.job_manager_fields(job_manager))
+        except Exception as e:  # noqa: BLE001 -- provenance never fails a run
+            logger.warning("Could not record the job manager's provenance: %s", e)
+
+    def observe_images(self, namespace: str, at: str, apps: Collection[str]) -> set[str]:
+        """Read the images this run's pods run (one pod list): the Spark
+        applications in *apps*, the Trino coordinator and the Thrift server.
+        *at* names the point of the run. Returns the roles seen; never
+        raises."""
+        prov = self._run_provenance()
+        if prov is None:
+            return set()
+        return _prov.observe_images(prov, namespace, at, utc_now().isoformat(), apps)
+
+    def stage_image_watch(self, namespace: str, app: str, at: str) -> _prov.StageImageWatch:
+        """A watch that reads batch stage *app*'s images while it runs
+        (``on_status`` from the progress callback, ``finish`` after the
+        wait); a Spark role never seen is listed in
+        ``provenance.images_observed_missing``."""
+        collector = self
+
+        class _Watch(_prov.StageImageWatch):
+            def finish(self) -> list[str]:
+                missing = super().finish()
+                prov = collector._run_provenance()
+                if missing and prov is not None:
+                    prov.setdefault("images_observed_missing", []).append(
+                        {"at": at, "roles": missing}
+                    )
+                return missing
+
+        return _Watch(lambda: self.observe_images(namespace, at, {app}))
+
+    def record_scratch(self, job_type: str, status: Any) -> None:
+        """Record *job_type*'s scratch from the SparkApplication status the
+        monitor read (``JobStatus.scratch``)."""
+        prov = self._run_provenance()
+        if prov is not None:
+            _prov.record_scratch(prov, job_type, status)
 
     def end_run(self, success: bool = True) -> PipelineMetrics | None:
         """End the current pipeline run.
@@ -2604,8 +2682,38 @@ class MetricsCollector:
             self.current_run.end_time - self.current_run.start_time
         ).total_seconds()
         self.current_run.success = success
+        self._end_provenance()
 
         return self.current_run
+
+    def _end_provenance(self) -> None:
+        """Re-read which code is on disk, and say so when it is not the code
+        the run started with: a supported state frozen at start is then
+        withdrawn (config.support.withdraw_if_code_changed)."""
+        run = self.current_run
+        prov = self._run_provenance()
+        if run is None or prov is None:
+            return
+        try:
+            if self._job_manager is not None:
+                prov.update(_prov.job_manager_fields(self._job_manager))
+            prov["end_sample"] = _prov.end_sample(prov)
+            if not prov.get("images_observed"):
+                prov["images_observed"] = {
+                    "not_observed": (
+                        "local run: no cluster pods"
+                        if (run.config_snapshot or {}).get("local")
+                        else "no pod of this run with a started container was seen"
+                    )
+                }
+            prov.setdefault("scratch_as_ran", {})
+            inputs = (run.config_snapshot or {}).get("experiment_inputs")
+            if isinstance(inputs, dict) and isinstance(inputs.get("support"), dict):
+                from lakebench.config.support import withdraw_if_code_changed
+
+                inputs["support"] = withdraw_if_code_changed(inputs["support"], prov)
+        except Exception as e:  # noqa: BLE001 -- provenance never fails a run
+            logger.warning("Could not take the run-end provenance sample: %s", e)
 
     def record_job(self, metrics: JobMetrics) -> None:
         """Record metrics for a job.

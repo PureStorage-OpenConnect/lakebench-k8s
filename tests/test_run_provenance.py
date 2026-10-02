@@ -82,11 +82,7 @@ def test_package_inside_a_foreign_checkout_records_no_sha(tmp_path, monkeypatch)
     fake = pkg / "provenance.py"
     fake.write_text("")
     monkeypatch.setattr(prov_mod, "__file__", str(fake))
-    prov_mod.run_provenance.cache_clear()
-    try:
-        prov = prov_mod.run_provenance()
-    finally:
-        prov_mod.run_provenance.cache_clear()
+    prov = prov_mod.run_provenance()
     assert prov["git_sha"] is None and prov["git_dirty"] is None
 
 

@@ -3,6 +3,8 @@
 
 # Python
 __pycache__/
+# Generated at build time by hatch_build.py, never tracked.
+src/lakebench/_build_info.py
 *.py[cod]
 *.pyo
 *.pyd

@@ -450,6 +450,7 @@ class SparkJobMonitor:
                     success=True,
                     message=f"{job_name} running",
                     elapsed_seconds=elapsed,
+                    final_status=status,
                 )
             if status.state == JobState.SUBMISSION_FAILED:
                 sub_failed_since = sub_failed_since or time.time()

@@ -1503,6 +1503,10 @@ class JobStatus:
     # metadata.uid of the SparkApplication submit_job created; None otherwise.
     # The interrupt cleanup deletes only this object (cli/_interrupt.py).
     uid: str | None = None
+    # Executor scratch PVC in the application's spec.sparkConf as the cluster
+    # holds it ({"size_limit", "storage_class"}, metrics/provenance.py); None
+    # when the spec was not read.
+    scratch: dict[str, Any] | None = None
 
 
 class SparkJobManager:
@@ -1533,6 +1537,10 @@ class SparkJobManager:
         # Set by deploy_scripts_configmap: {"scripts_sha256", "scripts_maps"}
         # for run provenance. None until the maps are applied.
         self.scripts_provenance: dict[str, Any] | None = None
+        # The dependency set the run's pods use, for provenance.deps
+        # (metrics/provenance.py). None until a dependency check records it;
+        # the run record then says "not_recorded".
+        self.deps: dict[str, Any] | None = None
 
         # Cache cluster capacity for streaming concurrent budget calculation
         try:
@@ -1688,6 +1696,8 @@ class SparkJobManager:
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
 
+        from lakebench.metrics.provenance import scratch_from_spark_conf
+
         custom_api = k8s_client.CustomObjectsApi()
 
         try:
@@ -1747,6 +1757,7 @@ class SparkJobManager:
                 if status.get("executorState")
                 else 0,
                 submission_attempts=int(status.get("submissionAttempts") or 0),
+                scratch=scratch_from_spark_conf((obj.get("spec") or {}).get("sparkConf")),
             )
 
         except ApiException as e:
