@@ -448,7 +448,8 @@ lakebench compare lakebench.yaml lakebench-polaris.yaml
 first from step 4, the second just made) and runs nothing itself. It prints
 how each side resolved, the verdict (LIKE-FOR-LIKE, NOT COMPARABLE, NOT
 ESTABLISHED, NOT LIKE-FOR-LIKE or CONFOUNDED, also its exit code), the one
-condition the pair is missing with the command that supplies it, and each
+condition the pair is missing with the command that supplies it (where
+one exists), and each
 score's median, range and n. Give the two configs different names: a name
 is one deployment.
 

@@ -19,11 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (was 0), 12 NOT LIKE-FOR-LIKE and 13 CONFOUNDED (both were 0); 2 for a ref
   that resolves to no record, the same runs on both sides, an unreadable
   record or two configs with one name and different contents. Every
-  verdict prints the one condition the pair is missing and the command
-  that supplies it. Each score shows each side's median, range and n; no
+  verdict prints the one condition the pair is missing and, where one
+  exists, the command that supplies it. Each score shows each side's median, range and n; no
   winner is named and no delta is coloured (the winner rule is not in this
   release), so the 2% noise floor and `noise_floor_pct` are gone, and a
-  NOT COMPARABLE or NOT ESTABLISHED pair shows no delta. A member whose
+  NOT COMPARABLE or NOT ESTABLISHED pair shows no delta. A row a
+  Lakebench limit bound carries the limit (`capped_by`, BOUNDED BY)
+  whatever the verdict. A member whose
   verdict did not pass is excluded and listed. The automatic
   `lakebench-output/comparisons/compare-<ts>/comparison.json` is no longer
   written; pass `-o`. `--format json` writes the `cmp2` document (`verdict`,

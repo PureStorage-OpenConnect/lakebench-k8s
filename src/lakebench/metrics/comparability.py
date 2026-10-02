@@ -1002,7 +1002,13 @@ def pair_verdict(
                     f"generator digest differs ({', '.join(sorted(map(str, digests)))})",
                 ],
                 notes=notes,
-                cause=Cause("side_not_one", side=label, group=CORPUS, key="generator digest"),
+                cause=Cause(
+                    "side_not_one",
+                    side=label,
+                    group=CORPUS,
+                    key="generator digest",
+                    detail=", ".join(sorted(map(str, digests))),
+                ),
             )
 
     ca, cb = classified[label_a][0], classified[label_b][0]

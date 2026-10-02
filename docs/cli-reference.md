@@ -82,7 +82,8 @@ A side is one or more comma-separated refs. Each ref is tried in this order:
 4. A config (`.yaml`/`.yml`): the latest run record of its deployment name,
    by `start_time`. When that record belongs to a series, every member the
    series manifest names is taken; a series whose manifest is missing is
-   refused (pass the run ids instead).
+   refused (pass the run ids instead). A record in the runs directories
+   that cannot be read is skipped with a warning naming it.
 
 Side A is the baseline and B the candidate; deltas are B relative to A.
 
@@ -90,7 +91,7 @@ Side A is the baseline and B the candidate; deltas are B relative to A.
 |---|---|---|---|
 | `--runs-dir` | | `lakebench-output/runs` | Directory of `run-<id>/` records; repeat it to search several. Series manifests are read from each directory's sibling `series/` |
 | `--format` | | `table` | Output format: table, json, csv |
-| `--output` | `-o` | (none) | Write the comparison to this file (JSON, or CSV with `--format csv`). Nothing is written without it |
+| `--output` | `-o` | (none) | Write the comparison to this file (JSON, or CSV with `--format csv`). Nothing is written without it. A path that is one of the inputs, is named `metrics.json`, or lies inside a runs or series directory is refused |
 
 ```bash
 lakebench compare 20260929-212900-5105a0 20260929-214442-825153
@@ -130,17 +131,20 @@ an unreadable record or manifest, a removed flag, an unsupported format)
 exit 2.
 
 **The missing condition.** Every verdict comes with the one condition the
-pair lacks, for the first ladder step that failed, and the command that
-supplies it, for example "corpus scale differs (1 vs 10). Missing: the same
-corpus. Set `architecture.workload.datagen.scale: 1` in b.yaml, then
-`lakebench run b.yaml --regenerate`". Commands name the side's config from
-its record (`provenance.config_path`), or "the config of deployment
-<name>" for a record that does not carry it. A continuous side cannot be
-repeated with `--repeat`, so its hint says to run it again with
-`--continuous` and pass the run ids. Two continuous runs whose in-stream
-rounds differ are not one experiment when they are on one side, because
-rounds are an outcome of speed: compare single runs, or re-run with a
-longer `--duration`.
+pair lacks, for the first ladder step that failed, and, where one exists,
+the command that supplies it, for example "corpus scale differs (1 vs 10).
+Missing: the same corpus. Set `architecture.workload.datagen.scale: 1` in
+b.yaml, then `lakebench run b.yaml --generate --regenerate`" (a continuous
+side regenerates with `lakebench run <config> --continuous`). Some
+conditions have no command: two table formats that run different
+maintenance operations, compaction by different engines, a Lakebench
+bound, a differing round count. Commands name the side's config from its
+record (`provenance.config_path`), or "the config of deployment <name>"
+for a record that does not carry it. A continuous side cannot be repeated
+with `--repeat`, so its hint says to run it again with `--continuous` and
+pass the run ids. Two continuous runs whose in-stream rounds differ are not
+one experiment when they are on one side: rounds are an outcome of speed,
+so compare single runs.
 
 **Metrics.** Each score is shown with the median, range and n of each side
 and the delta of the medians. No winner is named and no colour marks a
@@ -153,9 +157,12 @@ better side: the winner rule is not in this release. Each row's
 | `not_directional` | The score has no better side (correctness, guard and diagnostic scores, scores that follow the config, a score the registry does not know, or a mode-dependent score on a record without a mode) |
 | `confounded` | The pair is confounded |
 | `not_assessed` | Every other directional row: on a NOT LIKE-FOR-LIKE pair because the pair is not like-for-like, otherwise because the winner rule is not in this release |
-| `capped` | A Lakebench limit bound the row on a passed member of either side (a bound kind the row depends on, or the trickle of a continuous run): the figure measures that limit, not the system, and the row says BOUNDED BY it |
+| `capped` | On a like-for-like pair, a Lakebench limit bound the row on a passed member of either side (a bound kind the row depends on, or the trickle of a continuous run): the figure measures that limit, not the system |
 
-Directions come from the metric registry (`metrics/metric_registry.py`).
+Whatever its assessment, a row that a Lakebench limit bound on either side
+lists the limit in `capped_by` (`bound_by` in the CSV), and the table says
+BOUNDED BY it. Directions come from the metric registry
+(`metrics/metric_registry.py`).
 
 **Output.** `--format json` (and `-o`) writes the `cmp2` document:
 `verdict`, `exit_code`, `step`, `attribution`, `missing` (`condition`,

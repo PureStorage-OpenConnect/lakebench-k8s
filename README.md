@@ -164,7 +164,7 @@ lakebench compare config-hive.yaml config-polaris.yaml
 `compare` reads the two configs' latest stored runs; it never deploys, runs
 or destroys anything. It reports the verdict as its exit code and names the
 one condition a pair that is not like-for-like is missing, with the command
-that supplies it.
+that supplies it where one exists.
 
 For all recipes, see [`examples/`](https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/examples) or run `lakebench init --advanced`
 for the full interactive wizard.

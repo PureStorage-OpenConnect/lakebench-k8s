@@ -2,9 +2,9 @@
 
 Read-only. compare reads metrics.json files (and series manifests) and
 writes nothing unless ``-o`` is given; it deploys, runs and destroys
-nothing, so this module imports nothing that reaches a cluster. Resolution,
-the verdict, the missing condition and the per-metric assessment are in
-``metrics/compare.py``.
+nothing and makes no cluster call. This module imports no cluster client.
+Resolution, the verdict, the missing condition and the per-metric
+assessment are in ``metrics/compare.py``.
 """
 
 from __future__ import annotations
@@ -111,16 +111,17 @@ def compare(
         raise typer.Exit(ExitCode.USAGE) from None
 
     if output is not None:
-        target = output.resolve()
-        if any(target == p.resolve() for p in (*a.inputs, *b.inputs)):
-            print_error(f"-o {output} is one of the inputs; write the comparison elsewhere")
+        problem = _output_problem(output, [*a.inputs, *b.inputs], dirs)
+        if problem:
+            print_error(f"-o {output} {problem}; write the comparison elsewhere")
             raise typer.Exit(ExitCode.USAGE)
 
+    doc = cmpmod.build_comparison(a, b)
+    hidden = cmpmod.hidden_for(a, b)
     # The resolution comes first, on stderr, so machine output stays clean.
     for side in (a, b):
-        err_console.print(esc(cmpmod.resolution_line(side)), highlight=False, soft_wrap=True)
-
-    doc = cmpmod.build_comparison(a, b)
+        line = cmpmod.redact(cmpmod.resolution_line(side), hidden)
+        err_console.print(esc(line), highlight=False, soft_wrap=True)
     for w in doc["warnings"]:
         print_warning(w)
 
@@ -138,6 +139,26 @@ def compare(
     code = int(doc["exit_code"])
     if code:
         raise typer.Exit(code)
+
+
+def _output_problem(output: Path, inputs: list[Path], runs_dirs: list[Path]) -> str | None:
+    """Why ``-o`` may not be written: it is an input, a run record, or a
+    file inside a runs or series directory."""
+    target = output.resolve()
+    for p in inputs:
+        try:
+            same = target == p.resolve() or (output.exists() and output.samefile(p))
+        except OSError:
+            same = False
+        if same:
+            return "is one of the inputs"
+    if output.name == "metrics.json":
+        return "would overwrite a run record"
+    for d in runs_dirs:
+        for root in (d.resolve(), d.resolve().parent / "series"):
+            if target.is_relative_to(root):
+                return f"is inside {root}"
+    return None
 
 
 _VERDICT_STYLE = {

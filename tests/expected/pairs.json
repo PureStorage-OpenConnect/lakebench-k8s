@@ -86,7 +86,7 @@
         "exit_code": 12,
         "condition": "equal in-stream rounds",
         "command": null,
-        "hint": "in-stream rounds differ (5 vs 4), an outcome of speed. Missing: equal in-stream rounds. Re-run both with a longer `--duration`"
+        "hint": "in-stream rounds differ (5 vs 4), an outcome of speed. Missing: equal in-stream rounds. No setting makes them equal; the figures are medians over different numbers of rounds"
       }
     },
     "P3": {
@@ -170,7 +170,7 @@
         "exit_code": 12,
         "condition": "the same maintenance",
         "command": null,
-        "hint": "effective maintenance differs (m2-2026-09-26:expire=not_run,compaction=not_run vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported) under the same maintenance setting: the compositions run different maintenance. Missing: the same maintenance. Compare with maintenance off: `architecture.pipeline.pre_benchmark_maintenance: false` in both configs, then re-run both"
+        "hint": "effective maintenance differs (m2-2026-09-26:expire=not_run,compaction=not_run vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported): Iceberg and Delta run different maintenance operations. Missing: the same maintenance. No setting aligns them (with maintenance off the two still record different operations); compare compositions of one table format"
       }
     },
     "P5": {
@@ -255,7 +255,7 @@
         "exit_code": 12,
         "condition": "the same maintenance",
         "command": null,
-        "hint": "effective maintenance differs (m2-2026-09-26:expire=ran,compaction=ran vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported) under the same maintenance setting: the compositions run different maintenance. Missing: the same maintenance. Compare with maintenance off: `architecture.pipeline.pre_benchmark_maintenance: false` in both configs, then re-run both"
+        "hint": "effective maintenance differs (m2-2026-09-26:expire=ran,compaction=ran vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported): Iceberg and Delta run different maintenance operations. Missing: the same maintenance. No setting aligns them (with maintenance off the two still record different operations); compare compositions of one table format"
       }
     },
     "P7": {
@@ -294,8 +294,8 @@
         "verdict": "NOT COMPARABLE",
         "exit_code": 10,
         "condition": "the same corpus",
-        "command": "lakebench run <the config of deployment pipe-pol-aml1> --regenerate",
-        "hint": "corpus seed differs (777001 vs 777021). Missing: the same corpus. Set `architecture.workload.datagen.seed: 777001` in <the config of deployment pipe-pol-aml1>, then `lakebench run <the config of deployment pipe-pol-aml1> --regenerate`"
+        "command": "lakebench run <the config of deployment pipe-pol-aml1> --generate --regenerate",
+        "hint": "corpus seed differs (777001 vs 777021) (also differs: generator image). Missing: the same corpus. Set `architecture.workload.datagen.seed: 777001` in <the config of deployment pipe-pol-aml1>, then `lakebench run <the config of deployment pipe-pol-aml1> --generate --regenerate`"
       }
     },
     "P8": {
@@ -337,8 +337,8 @@
         "verdict": "NOT COMPARABLE",
         "exit_code": 10,
         "condition": "one generator",
-        "command": "lakebench run <the config of deployment lb16-cont2> --regenerate",
-        "hint": "the corpora came from different generators (docker.io/sillidata/lb-datagen:034f998 vs docker.io/sillidata/lb-datagen:14c4eee). Missing: one generator. Set `images.datagen` in <the config of deployment lb16-cont2> to A's image and run `lakebench run <the config of deployment lb16-cont2> --regenerate`, or record the re-pin's neutrality in config/datagen_lineage.yaml"
+        "command": "lakebench run <the config of deployment lb16-cont2> --continuous",
+        "hint": "the corpora came from different generators (docker.io/sillidata/lb-datagen:034f998 vs docker.io/sillidata/lb-datagen:14c4eee). Missing: one generator. Set `images.datagen` in <the config of deployment lb16-cont2> to A's image and run `lakebench run <the config of deployment lb16-cont2> --continuous`, or record the re-pin's neutrality in config/datagen_lineage.yaml"
       }
     },
     "P9": {
@@ -415,8 +415,8 @@
         "verdict": "NOT COMPARABLE",
         "exit_code": 10,
         "condition": "one generator",
-        "command": "lakebench run <the config of deployment lb16-val-trino> --regenerate",
-        "hint": "the corpora came from different generators (docker.io/sillidata/lb-datagen:b6f2905 vs docker.io/sillidata/lb-datagen:14c4eee). Missing: one generator. Set `images.datagen` in <the config of deployment lb16-val-trino> to A's image and run `lakebench run <the config of deployment lb16-val-trino> --regenerate`, or record the re-pin's neutrality in config/datagen_lineage.yaml"
+        "command": "lakebench run <the config of deployment lb16-val-trino> --generate --regenerate",
+        "hint": "the corpora came from different generators (docker.io/sillidata/lb-datagen:b6f2905 vs docker.io/sillidata/lb-datagen:14c4eee). Missing: one generator. Set `images.datagen` in <the config of deployment lb16-val-trino> to A's image and run `lakebench run <the config of deployment lb16-val-trino> --generate --regenerate`, or record the re-pin's neutrality in config/datagen_lineage.yaml"
       }
     },
     "P11": {
@@ -459,8 +459,8 @@
         "verdict": "NOT COMPARABLE",
         "exit_code": 10,
         "condition": "the same corpus",
-        "command": "lakebench run <the config of deployment pipe-aml-c1> --regenerate",
-        "hint": "corpus seed differs (43 vs 777001). Missing: the same corpus. Set `architecture.workload.datagen.seed: 43` in <the config of deployment pipe-aml-c1>, then `lakebench run <the config of deployment pipe-aml-c1> --regenerate`"
+        "command": "lakebench run <the config of deployment pipe-aml-c1> --continuous",
+        "hint": "corpus seed differs (43 vs 777001) (also differs: generator image). Missing: the same corpus. Set `architecture.workload.datagen.seed: 43` in <the config of deployment pipe-aml-c1>, then `lakebench run <the config of deployment pipe-aml-c1> --continuous`"
       }
     },
     "P12": {

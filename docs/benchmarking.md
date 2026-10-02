@@ -1124,8 +1124,8 @@ operation it ran (Trino `optimize` at 128MB and Spark Thrift Iceberg
 benchmark iterations and mode, in-stream rounds (continuous), and the
 Lakebench limits that bound. A delta between runs whose conditions differ
 may come from those conditions rather than the architecture. Each verdict
-is printed with the one condition the pair is missing and the command that
-supplies it. Medians, ranges and n are shown for every score, with the
+is printed with the one condition the pair is missing and, where one
+exists, the command that supplies it. Medians, ranges and n are shown for every score, with the
 delta of medians where the pair is comparable; no winner is named in this
 release. See the [CLI reference](cli-reference.md#compare).
 

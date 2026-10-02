@@ -1,8 +1,9 @@
 """Compare two sides of stored run records (``lakebench compare``).
 
 Pure: this module reads metrics.json files and series manifests and builds
-the comparison; it imports nothing that talks to a cluster and writes
-nothing. ``cli/_compare.py`` is the thin command over it.
+the comparison; it makes no cluster call and writes nothing (resolving a
+config ref loads the config, which imports cluster client modules without
+calling them). ``cli/_compare.py`` is the thin command over it.
 
 A side is a comma-separated list of refs, each tried in this order:
 
@@ -15,7 +16,7 @@ A side is a comma-separated list of refs, each tried in this order:
    deployment name, and when that record belongs to a series, every member
    of the series its manifest names.
 
-A member is a record whose verdict did not pass is excluded and listed. The
+A member whose verdict did not pass is excluded and listed. The
 pair is decided by ``comparability.pair_verdict`` over the passed members;
 ``missing_condition`` turns the ladder's structured cause into the one
 condition the pair lacks and the command that supplies it; ``assess`` says
@@ -213,7 +214,7 @@ def _find_run(run_id: str, runs_dirs: Sequence[Path]) -> Member:
 def _series_dirs(runs_dirs: Sequence[Path]) -> list[Path]:
     out: list[Path] = []
     for d in runs_dirs:
-        s = d.parent / "series"
+        s = d.resolve().parent / "series"
         if s not in out:
             out.append(s)
     return out
@@ -271,7 +272,16 @@ def _add_series(side: Side, series_id: str, runs_dirs: Sequence[Path]) -> None:
                 (label, str(entry.get("not_member_reason") or "not a member of the series"))
             )
             continue
-        m = _find_run(str(rid), runs_dirs)
+        try:
+            m = _find_run(str(rid), runs_dirs)
+        except CompareError as e:
+            if e.path != "compare.bad_ref":
+                raise
+            raise CompareError(
+                "compare.bad_ref",
+                f"series {series_id} lists run {rid}, which has no record in "
+                f"{_dirs_text(runs_dirs)}; pass --runs-dir for the directory that holds it",
+            ) from None
         stamp = m.record.get("series")
         stamp_id = stamp.get("id") if isinstance(stamp, Mapping) else None
         if stamp_id != series_id:
@@ -318,7 +328,10 @@ def _config_name(path: Path) -> str:
         raise CompareError("compare.bad_ref", f"cannot resolve the name of {path}: {e}") from None
 
 
-def _records_of(name: str, runs_dirs: Sequence[Path]) -> list[Member]:
+def _records_of(name: str, runs_dirs: Sequence[Path], skipped: list[Path]) -> list[Member]:
+    """Every run record of deployment *name*; files that cannot be read are
+    appended to *skipped* (the caller warns: one of them may be the
+    deployment's latest run)."""
     out: dict[str, Member] = {}
     for d in runs_dirs:
         if not d.is_dir():
@@ -327,6 +340,7 @@ def _records_of(name: str, runs_dirs: Sequence[Path]) -> list[Member]:
             try:
                 data = json.loads(p.read_text())
             except (OSError, ValueError):
+                skipped.append(p)
                 continue
             if not isinstance(data, dict) or data.get("deployment_name") != name:
                 continue
@@ -355,14 +369,22 @@ def _add_config(side: Side, path: Path, runs_dirs: Sequence[Path]) -> None:
     side.inputs.append(path)
     side.configs.append((path, name, _sha256(path)))
     side.deployment = side.deployment or name
-    candidates = _records_of(name, runs_dirs)
+    skipped: list[Path] = []
+    candidates = _records_of(name, runs_dirs, skipped)
+    for p in skipped:
+        side.warnings.append(
+            f"{side.label}: skipped unreadable record {p}; if it is {name}'s latest run, "
+            "pass the run ids instead"
+        )
     if not candidates:
         raise CompareError(
             "compare.bad_ref",
             f"no record for {path} (deployment {name}) in {_dirs_text(runs_dirs)}; "
             f"run it first: lakebench run {path}",
         )
-    latest = max(candidates, key=lambda m: (str(m.record.get("start_time") or ""), m.run_id))
+    from lakebench.metrics.storage import _sort_instant
+
+    latest = max(candidates, key=lambda m: (_sort_instant(m.record.get("start_time")), m.run_id))
     stamp = latest.record.get("series")
     series_id = stamp.get("id") if isinstance(stamp, Mapping) else None
     if series_id:
@@ -408,6 +430,12 @@ def resolve_side(label: str, text: str, runs_dirs: Sequence[Path]) -> Side:
                 f"no record for {ref} in {_dirs_text(runs_dirs)}; run it first: "
                 f"lakebench run {ref if ref.endswith(_CONFIG_SUFFIXES) else '<config>'}",
             )
+    if not side.members:
+        raise CompareError(
+            "compare.bad_ref",
+            f"side {label} ({text}) resolves to no run"
+            + (f": series {side.series} has no member" if side.series else ""),
+        )
     _mark_exclusions(side)
     if side.deployment is None and side.members:
         side.deployment = side.members[0].record.get("deployment_name")
@@ -457,11 +485,27 @@ def resolution_line(side: Side) -> str:
     """``A: a.yaml -> deployment d, series s, 3 runs: r1 passed, r3 FAILED
     (excluded)``."""
     head = f"{side.label}: {', '.join(side.refs)}"
+    deployments: list[str] = []
+    series: list[str] = []
+    for m in side.members:
+        dep = m.record.get("deployment_name")
+        if dep and str(dep) not in deployments:
+            deployments.append(str(dep))
+        stamp = m.record.get("series")
+        sid = stamp.get("id") if isinstance(stamp, Mapping) else None
+        if sid and str(sid) not in series:
+            series.append(str(sid))
+    if not deployments and side.deployment:
+        deployments.append(side.deployment)
+    if not series and side.series:
+        series.append(side.series)
     where = []
-    if side.deployment:
-        where.append(f"deployment {side.deployment}")
-    if side.series:
-        where.append(f"series {side.series}")
+    if deployments:
+        where.append(
+            ("deployments " if len(deployments) > 1 else "deployment ") + ", ".join(deployments)
+        )
+    if series:
+        where.append("series " + ", ".join(series))
     runs = []
     for m in side.members:
         if m.excluded is not None:
@@ -552,20 +596,68 @@ def _seed_out(v: Any, hidden: frozenset[int] | None) -> Any:
     return v
 
 
-def _redact_block(exp: Any, hidden: frozenset[int] | None) -> Any:
-    """A copy of a stored experiment block with every ``seed`` value in it
-    shown as ``_seed_out`` allows."""
+_RUN_ID_TOKEN = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
+_INT_TOKEN = re.compile(r"(?<![\w.-])\d+(?!\w|\.\d)")
+_DIGIT_TO_LETTER = str.maketrans("0123456789", "abcdefghij")
 
-    def walk(node: Any) -> Any:
-        if isinstance(node, dict):
-            return {k: (_seed_out(v, hidden) if k == "seed" else walk(v)) for k, v in node.items()}
-        if isinstance(node, list):
-            return [walk(v) for v in node]
+
+def _scrub_text(text: str, hidden: frozenset[int] | None) -> str:
+    """*text* with any hidden seed in it replaced. Only text that names a
+    seed is touched. With the seed list unreadable, every integer in it
+    except run ids is replaced."""
+    if "seed" not in text.lower():
+        return text
+    masked: list[str] = []
+
+    def mask(m: re.Match[str]) -> str:
+        masked.append(m.group(0))
+        return "\x00" + str(len(masked) - 1).translate(_DIGIT_TO_LETTER) + "\x00"
+
+    out = _RUN_ID_TOKEN.sub(mask, text)
+    out = _INT_TOKEN.sub(
+        lambda m: "<protected seed>" if hidden is None or int(m.group(0)) in hidden else m.group(0),
+        out,
+    )
+    return re.sub(
+        "\x00([a-j]+)\x00",
+        lambda m: masked[int(m.group(1).translate(str.maketrans("abcdefghij", "0123456789")))],
+        out,
+    )
+
+
+def redact(node: Any, hidden: frozenset[int] | None) -> Any:
+    """A copy of *node* (a comparison document, or any part of one) with
+    every protected seed hidden: a ``seed`` value, the ``a`` and ``b`` of an
+    entry whose ``key`` is ``seed``, and a hidden seed inside text that
+    names a seed. *hidden* empty hides nothing."""
+    if hidden is not None and not hidden:
         return node
+    if isinstance(node, Mapping):
+        seed_entry = node.get("key") == "seed"
+        out = {}
+        for k, v in node.items():
+            if k == "seed" or (seed_entry and k in ("a", "b")):
+                out[k] = _seed_out(v, hidden)
+            else:
+                out[k] = redact(v, hidden)
+        return out
+    if isinstance(node, list | tuple):
+        return [redact(v, hidden) for v in node]
+    if isinstance(node, str):
+        return _scrub_text(node, hidden)
+    return node
 
-    if not isinstance(exp, Mapping):
-        return exp
-    return walk(json.loads(json.dumps(exp, default=str)))
+
+def hidden_for(*sides: Side) -> frozenset[int] | None:
+    """The seeds a comparison of *sides* must not print: the protected,
+    spent and recorded AML seeds when any member is an AML run, else none."""
+    financial = any(
+        ((m.record.get("experiment") or {}).get("workload") or {}).get("name") == "financial"
+        or (m.record.get("config_snapshot") or {}).get("schema_type") == "financial"
+        for side in sides
+        for m in side.members
+    )
+    return _hidden_seeds() if financial else frozenset()
 
 
 def _val(v: Any) -> str:
@@ -635,21 +727,30 @@ _WORKLOAD_SETTING = {
 }
 
 
-def _identity_hint(
-    diffs: Mapping[str, list[cmp.Difference]],
-    a: Side,
-    b: Side,
-    hidden: frozenset[int] | None = None,
-) -> MissingCondition:
+def _regen(side: Side) -> str:
+    """The run that regenerates a side's corpus: a batch run needs
+    ``--generate --regenerate``; a continuous run regenerates its own data
+    and refuses ``--regenerate``."""
+    cfg = _cfg(side)
+    if _continuous(side):
+        return f"lakebench run {cfg} --continuous"
+    return f"lakebench run {cfg} --generate --regenerate"
+
+
+def _also(corpus: Mapping[str, cmp.Difference], key: str) -> str:
+    """`` (also differs: ...)`` naming the other settable corpus keys that
+    differ, so one re-run is not followed by another refusal."""
+    rest = [
+        k
+        for k in _CORPUS_HINT_ORDER
+        if k in corpus and k != key and k not in ("corpus id", "corpus id v2")
+    ]
+    return f" (also differs: {', '.join(rest)})" if rest else ""
+
+
+def _identity_hint(diffs: Mapping[str, list[cmp.Difference]], a: Side, b: Side) -> MissingCondition:
     workload = {d.key: d for d in diffs.get(cmp.WORKLOAD, [])}
-    corpus = {
-        d.key: (
-            cmp.Difference(d.group, d.key, _seed_out(d.a, hidden), _seed_out(d.b, hidden))
-            if d.key == "seed"
-            else d
-        )
-        for d in diffs.get(cmp.CORPUS, [])
-    }
+    corpus = {d.key: d for d in diffs.get(cmp.CORPUS, [])}
     cfg_b = _cfg(b)
     for key in ("workload", "mode"):
         if key in workload:
@@ -693,25 +794,24 @@ def _identity_hint(
         if key not in corpus:
             continue
         d = corpus[key]
+        also = _also(corpus, key)
+        cmd = _regen(b)
         if key in _CORPUS_SETTING:
             setting = _CORPUS_SETTING[key]
-            cmd = f"lakebench run {cfg_b} --regenerate"
             return MissingCondition(
                 "the same corpus",
                 cmd,
-                f"corpus {key} differs ({_val(d.a)} vs {_val(d.b)}). Missing: the same corpus. "
-                f"Set `{setting}: {_val(d.a)}` in {cfg_b}, then `{cmd}`",
+                f"corpus {key} differs ({_val(d.a)} vs {_val(d.b)}){also}. Missing: the same "
+                f"corpus. Set `{setting}: {_val(d.a)}` in {cfg_b}, then `{cmd}`",
             )
         if key in ("generator image", "generator digest"):
-            cmd = f"lakebench run {cfg_b} --regenerate"
             return MissingCondition(
                 "one generator",
                 cmd,
-                f"the corpora came from different generators ({_val(d.a)} vs {_val(d.b)}). "
+                f"the corpora came from different generators ({_val(d.a)} vs {_val(d.b)}){also}. "
                 f"Missing: one generator. Set `images.datagen` in {cfg_b} to A's image and run "
                 f"`{cmd}`, or record the re-pin's neutrality in config/datagen_lineage.yaml",
             )
-        cmd = f"lakebench run {cfg_b} --regenerate"
         return MissingCondition(
             "one corpus",
             cmd,
@@ -720,7 +820,7 @@ def _identity_hint(
         )
     if corpus:
         d = next(iter(corpus.values()))
-        cmd = f"lakebench run {cfg_b} --regenerate"
+        cmd = _regen(b)
         return MissingCondition(
             "the same corpus",
             cmd,
@@ -801,6 +901,13 @@ def _bound_line(side: Side, kind: str) -> str | None:
     return None
 
 
+def _table_format(side: Side) -> str | None:
+    tf = ((_first(side).get("experiment") or {}).get("architecture") or {}).get("table_format")
+    if isinstance(tf, Mapping):
+        tf = tf.get("type")
+    return str(tf) if tf else None
+
+
 def _maintenance_setting(side: Side) -> bool | None:
     """``pre_benchmark_maintenance`` as the side's first member ran it."""
     snap = _first(side).get("config_snapshot") or {}
@@ -817,18 +924,34 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
     key = cause.key or ""
     cfg_b = _cfg(b)
     va, vb = _val(cause.a), _val(cause.b)
+    continuous = _continuous(a) or _continuous(b)
+    off = (
+        "`architecture.pipeline.sustained.compaction_enabled: false` (or `--skip-maintenance`)"
+        if continuous
+        else "`architecture.pipeline.pre_benchmark_maintenance: false`"
+    )
     if key == "compaction operation":
         return MissingCondition(
             "the same maintenance",
             None,
             f"compaction differs by engine ({va} vs {vb}). Missing: the same maintenance. No "
-            "setting aligns them; compare with maintenance off: "
-            "`architecture.pipeline.pre_benchmark_maintenance: false` in both configs, then "
+            f"setting aligns them; compare with maintenance off: {off} in both configs, then "
             "re-run both",
         )
     if key in ("effective maintenance", "maintenance settings"):
+        fa, fb = _table_format(a), _table_format(b)
+        if key == "effective maintenance" and fa and fb and fa != fb:
+            return MissingCondition(
+                "the same maintenance",
+                None,
+                f"effective maintenance differs ({va} vs {vb}): {fa.capitalize()} and "
+                f"{fb.capitalize()} run different "
+                "maintenance operations. Missing: the same maintenance. No setting aligns "
+                "them (with maintenance off the two still record different operations); "
+                "compare compositions of one table format",
+            )
         want_a, want_b = _maintenance_setting(a), _maintenance_setting(b)
-        if want_a is not None and want_a != want_b:
+        if not continuous and want_a is not None and want_a != want_b:
             flag = str(want_a).lower()
             return MissingCondition(
                 "the same maintenance",
@@ -840,10 +963,9 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
         return MissingCondition(
             "the same maintenance",
             None,
-            f"{key} differs ({va} vs {vb}) under the same maintenance setting: the "
-            "compositions run different maintenance. Missing: the same maintenance. Compare "
-            "with maintenance off: `architecture.pipeline.pre_benchmark_maintenance: false` "
-            "in both configs, then re-run both",
+            f"{key} differs ({va} vs {vb}). Missing: the same maintenance. Set the same "
+            f"maintenance in both configs, or compare with maintenance off: {off} in both "
+            "configs, then re-run both",
         )
     if key == "benchmark iterations":
         cmd = f"lakebench benchmark {cfg_b}"
@@ -886,8 +1008,9 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
         return MissingCondition(
             f"equal {what}",
             None,
-            f"{what} differ ({va} vs {vb}), an outcome of speed. Missing: equal {what}. Re-run "
-            "both with a longer `--duration`",
+            f"{what} differ ({va} vs {vb}), an outcome of speed. Missing: equal {what}. No "
+            "setting makes them equal; the figures are medians over different numbers of "
+            "rounds",
         )
     return MissingCondition(
         "the same execution conditions",
@@ -907,8 +1030,7 @@ def _side_not_one_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
             "one experiment per side",
             None,
             f"{what} differ inside side {lb} ({_val(cause.a)} vs {_val(cause.b)}), an outcome "
-            "of speed. Missing: one experiment per side. Compare single runs, or re-run with a "
-            "longer `--duration`",
+            "of speed. Missing: one experiment per side. Compare single runs",
         )
     if cause.a is None and cause.b is None and cause.detail:
         what = f"{key} ({cause.detail})"
@@ -930,8 +1052,10 @@ def _side_not_one_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
 
 
 def _older(a: Side, b: Side) -> Side:
-    ta = str(_first(a).get("start_time") or "")
-    tb = str(_first(b).get("start_time") or "")
+    from lakebench.metrics.storage import _sort_instant
+
+    ta = _sort_instant(_first(a).get("start_time"))
+    tb = _sort_instant(_first(b).get("start_time"))
     return a if ta <= tb else b
 
 
@@ -942,9 +1066,7 @@ def _endpoint(side: Side) -> str | None:
     return str(ep) if ep else None
 
 
-def missing_condition(
-    pair: cmp.PairVerdict, a: Side, b: Side, hidden: frozenset[int] | None = None
-) -> MissingCondition:
+def missing_condition(pair: cmp.PairVerdict, a: Side, b: Side) -> MissingCondition:
     """The one condition the pair lacks for its first failed ladder step,
     and the command that supplies it (``command`` None when no command
     does)."""
@@ -979,7 +1101,7 @@ def missing_condition(
         v2_side = b if v1_side is a else a
         why = list((_first(v1_side).get("experiment") or {}).get("v2_unavailable") or [])
         because = f" ({', '.join(map(str, why))} not recorded)" if why else ""
-        cmd = f"lakebench run {_cfg(v1_side)} --regenerate"
+        cmd = _regen(v1_side)
         return MissingCondition(
             "one identity version",
             cmd,
@@ -1025,9 +1147,9 @@ def missing_condition(
     if kind == "side_not_one":
         return _side_not_one_hint(c, a, b)
     if kind == "identity":
-        return _identity_hint(pair.differences, a, b, hidden)
+        return _identity_hint(pair.differences, a, b)
     if kind == "corpus_problem":
-        cmd = f"lakebench run {cfg} --regenerate"
+        cmd = _regen(side)
         return MissingCondition(
             "one corpus",
             cmd,
@@ -1037,8 +1159,16 @@ def missing_condition(
     if kind == "not_established":
         return _not_established_hint(c, a, b)
     if kind == "results":
-        rid = b.passed[0].run_id if b.passed else (b.members[0].run_id if b.members else "?")
+        chosen = b.passed or b.members
+        member = chosen[0] if chosen else None
+        rid = member.run_id if member else "?"
         cmd = f"lakebench report --run {rid}"
+        from lakebench._constants import DEFAULT_OUTPUT_DIR
+
+        if member is not None and member.path.parent.name.startswith("run-"):
+            runs_dir = member.path.parent.parent
+            if runs_dir.resolve() != (Path(DEFAULT_OUTPUT_DIR) / "runs").resolve():
+                cmd += f" --metrics {runs_dir}"
         return MissingCondition(
             "equal results (invariant 2)",
             cmd,
@@ -1142,6 +1272,26 @@ class Assessment:
     capped_by: list[str] = field(default_factory=list)
 
 
+def row_caps(
+    metric: str, mode: str | None, bound_kinds: Iterable[str], trickle_held: bool
+) -> list[str]:
+    """The Lakebench limits that bound *metric* on either side: a bound
+    kind it depends on, or the trickle of a continuous run that held
+    intake. Every row carries them whatever its assessment."""
+    from lakebench.metrics.bounds import BOUND_TRICKLE
+    from lakebench.metrics.metric_registry import ModeRequired, capped_by
+
+    try:
+        return capped_by(
+            metric, list(bound_kinds), mode, extra=[BOUND_TRICKLE] if trickle_held else []
+        )
+    except (ModeRequired, ValueError):
+        # A mode-split key on a record without a mode: every mode's caps.
+        return capped_by(
+            metric, list(bound_kinds), None, extra=[BOUND_TRICKLE] if trickle_held else []
+        )
+
+
 def assess(
     metric: str,
     mode: str | None,
@@ -1151,35 +1301,33 @@ def assess(
     trickle_held: bool,
 ) -> Assessment:
     """What may be read from *metric*'s numbers (design section 8, the
-    release default: no step past the caps names a winner)."""
-    from lakebench.metrics.bounds import BOUND_TRICKLE
-    from lakebench.metrics.metric_registry import ModeRequired, capped_by, lookup
+    release default: no step past the caps names a winner). The outcome
+    follows the design's order; the caps that bound the row are in
+    ``capped_by`` whatever the outcome."""
+    from lakebench.metrics.metric_registry import ModeRequired, lookup
+
+    caps = row_caps(metric, mode, bound_kinds, trickle_held)
 
     if pair.verdict in (cmp.NOT_COMPARABLE, cmp.NOT_ESTABLISHED):
-        return Assessment(WITHHELD, pair_missing.condition, pair_missing.hint)
+        return Assessment(WITHHELD, pair_missing.condition, pair_missing.hint, caps)
     try:
         meta = lookup(metric, mode)
     except (ModeRequired, ValueError):
         meta = None
     if meta is None or not meta.directional:
-        return Assessment(NOT_DIRECTIONAL, None, None)
+        return Assessment(NOT_DIRECTIONAL, None, None, caps)
     if meta.group == "ml_loop":
         return Assessment(
             NOT_ASSESSED,
             "both sides ran the ML loop with the same loop definition, Spark version, "
             "executor counts and write-mode pair",
             "ML loop metrics are not assessed in this release",
+            caps,
         )
     if pair.verdict == cmp.CONFOUNDED:
-        return Assessment(CONFOUNDED_ROW, pair_missing.condition, pair_missing.hint)
+        return Assessment(CONFOUNDED_ROW, pair_missing.condition, pair_missing.hint, caps)
     if pair.verdict == cmp.NOT_LIKE_FOR_LIKE:
-        return Assessment(NOT_ASSESSED, "a like-for-like pair", pair_missing.hint)
-    try:
-        caps = capped_by(
-            metric, list(bound_kinds), mode, extra=[BOUND_TRICKLE] if trickle_held else []
-        )
-    except (ModeRequired, ValueError):
-        caps = []
+        return Assessment(NOT_ASSESSED, "a like-for-like pair", pair_missing.hint, caps)
     if caps:
         return Assessment(
             CAPPED,
@@ -1187,7 +1335,7 @@ def assess(
             f"this figure measures {', '.join(caps)}, not the system; no winner is named on it",
             caps,
         )
-    return Assessment(NOT_ASSESSED, "the winner rule", "winner rule not in this release")
+    return Assessment(NOT_ASSESSED, "the winner rule", "winner rule not in this release", caps)
 
 
 # ---------------------------------------------------------------------------
@@ -1195,7 +1343,7 @@ def assess(
 # ---------------------------------------------------------------------------
 
 
-def _side_doc(side: Side, hidden: frozenset[int] | None) -> dict[str, Any]:
+def _side_doc(side: Side) -> dict[str, Any]:
     from lakebench.metrics.bounds import binding_caps
     from lakebench.metrics.experiment import identity_digest, support_of
 
@@ -1232,9 +1380,7 @@ def _side_doc(side: Side, hidden: frozenset[int] | None) -> dict[str, Any]:
         "non_members": [{"run": r, "reason": why} for r, why in side.non_members],
         "n_attempted": len(side.members) + len(side.non_members),
         "n_passed": len(side.passed),
-        "experiment": (
-            _redact_block(side.passed[0].record.get("experiment"), hidden) if side.passed else None
-        ),
+        "experiment": side.passed[0].record.get("experiment") if side.passed else None,
         "support": support,
         "bound": bound,
     }
@@ -1255,22 +1401,10 @@ def _warnings(a: Side, b: Side) -> list[str]:
     return out
 
 
-def _redact_reason(reason: str, pair: cmp.PairVerdict, hidden: frozenset[int] | None) -> str:
-    """A ladder reason with a seed difference shown as ``_seed_out``
-    allows (the ladder formats ``seed differs (a vs b)``)."""
-    for d in pair.differences.get(cmp.CORPUS, []):
-        if d.key == "seed" and reason == str(d):
-            return str(
-                cmp.Difference(d.group, d.key, _seed_out(d.a, hidden), _seed_out(d.b, hidden))
-            )
-    return reason
-
-
 def build_comparison(a: Side, b: Side) -> dict[str, Any]:
     """The cmp2 document for resolved sides *a* and *b*."""
     pair = cmp.pair_verdict(a.ladder_records, b.ladder_records, a.label, b.label)
-    hidden = _hidden_seeds()
-    missing = missing_condition(pair, a, b, hidden)
+    missing = missing_condition(pair, a, b)
     mode = _mode(a) or _mode(b)
     withheld = pair.verdict in (cmp.NOT_COMPARABLE, cmp.NOT_ESTABLISHED)
     kinds: list[str] = []
@@ -1315,7 +1449,7 @@ def build_comparison(a: Side, b: Side) -> dict[str, Any]:
                 "capped_by": asm.capped_by,
             }
         )
-    return {
+    doc = {
         "schema": SCHEMA,
         "verdict": pair.verdict,
         "exit_code": pair.code,
@@ -1324,25 +1458,21 @@ def build_comparison(a: Side, b: Side) -> dict[str, Any]:
         "system": pair.system,
         "missing": missing.to_dict(),
         "cause": pair.to_dict()["cause"],
-        "reasons": [_redact_reason(r, pair, hidden) for r in pair.reasons],
+        "reasons": list(pair.reasons),
         "notes": list(pair.notes),
         "winner_rule": WINNER_RULE,
-        "sides": {"a": _side_doc(a, hidden), "b": _side_doc(b, hidden)},
+        "sides": {"a": _side_doc(a), "b": _side_doc(b)},
         "groups": {
-            g: [
-                {
-                    "key": d.key,
-                    "a": _seed_out(d.a, hidden) if d.key == "seed" else d.a,
-                    "b": _seed_out(d.b, hidden) if d.key == "seed" else d.b,
-                }
-                for d in ds
-            ]
+            g: [{"key": d.key, "a": d.a, "b": d.b} for d in ds]
             for g, ds in pair.differences.items()
             if ds
         },
         "warnings": _warnings(a, b),
         "metrics": rows,
     }
+    # One pass over the finished document, so no field can carry a
+    # protected seed past it.
+    return redact(json.loads(json.dumps(doc, default=str)), hidden_for(a, b))
 
 
 def to_json(doc: Mapping[str, Any]) -> str:

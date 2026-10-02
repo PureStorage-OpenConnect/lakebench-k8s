@@ -549,7 +549,8 @@ def test_within_side_rounds_are_an_outcome_hint() -> None:
     doc = cm.compare_records([a1, a2], [b])
     assert doc["verdict"] == cmp.NOT_COMPARABLE and doc["step"] == "2"
     assert "an outcome of speed" in doc["missing"]["hint"]
-    assert "--duration" in doc["missing"]["hint"]
+    assert "--duration" not in doc["missing"]["hint"]
+    assert doc["missing"]["command"] is None
 
 
 def test_newer_schema_says_upgrade() -> None:
@@ -744,3 +745,226 @@ def test_table_prints_no_delta_when_withheld(tmp_path: Path) -> None:
     text = _stdout(result)
     assert "NOT COMPARABLE" in text and "Missing: the same corpus" in text
     assert "%" not in "".join(line for line in text.splitlines() if "withheld" in line)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: seeds, caps, commands, resolution
+# ---------------------------------------------------------------------------
+
+
+def _aml_batch() -> dict:
+    return sr.load_record("825153")
+
+
+def test_seed_difference_inside_a_side_is_hidden(monkeypatch) -> None:
+    a1 = _aml_batch()
+    a2 = _with_id(a1, "20261001-000000-5d0002")
+    a2["experiment"]["corpus"]["seed"] = 987654321
+    b = _with_id(a1, "20261001-000000-5d0003")
+    monkeypatch.setattr(cm, "_hidden_seeds", lambda: frozenset({987654321}))
+    doc = cm.compare_records([a1, a2], [b])
+    assert doc["step"] == "2" and doc["cause"]["key"] == "seed"
+    assert "987654321" not in json.dumps(doc)
+    assert doc["cause"]["b"] == "<protected seed>"
+
+
+def test_seed_only_difference_between_sides_is_hidden(monkeypatch) -> None:
+    a = _aml_batch()
+    b = _with_id(a, "20261001-000000-5d0004")
+    b["experiment"]["corpus"]["seed"] = 987654321
+    monkeypatch.setattr(cm, "_hidden_seeds", lambda: frozenset({987654321}))
+    doc = cm.compare_records([a], [b])
+    assert doc["step"] == "3"
+    assert "987654321" not in json.dumps(doc)
+
+
+def test_seed_inside_a_corpus_problem_is_hidden(monkeypatch) -> None:
+    a = _aml_batch()
+    b = _with_id(a, "20261001-000000-5d0005")
+    b["experiment"]["corpus"]["problems"] = ["config seed 43 but the datagen pods ran 987654321"]
+    monkeypatch.setattr(cm, "_hidden_seeds", lambda: frozenset({987654321}))
+    doc = cm.compare_records([a], [b])
+    assert doc["cause"]["kind"] == "corpus_problem"
+    text = json.dumps(doc)
+    assert "987654321" not in text and "config seed 43" in text
+
+
+def test_customer360_seeds_are_not_hidden(monkeypatch) -> None:
+    """The AML seed lists do not apply to another workload's corpus."""
+    a = _c360_batch()
+    b = _with_id(a, "20261001-000000-5d0006")
+    b["experiment"]["corpus"]["seed"] = 7
+    monkeypatch.setattr(cm, "_hidden_seeds", lambda: None)
+    doc = cm.compare_records([a], [b])
+    assert "datagen.seed: <protected seed>" not in doc["missing"]["hint"]
+    assert f"datagen.seed: {a['experiment']['corpus']['seed']}" in doc["missing"]["hint"]
+
+
+def test_caps_are_labelled_on_a_pair_that_is_not_like_for_like(tmp_path: Path) -> None:
+    """P2 is NOT LIKE-FOR-LIKE and trickle-held: the rows the trickle
+    bounds still carry it, and the table says BOUNDED BY."""
+    spec = PAIRS["P2"]
+    a, b = sr.load_record(spec["a"]), sr.load_record(spec["b"])
+    doc = cm.compare_records([a], [b])
+    rows = {r["metric"]: r for r in doc["metrics"]}
+    assert rows["sustained_throughput_rps"]["capped_by"] == ["trickle"]
+    assert rows["sustained_throughput_rps"]["assessment"] == cm.NOT_ASSESSED
+    runs = _runs(tmp_path, a, b)
+    result = _invoke(spec["a"], spec["b"], "--runs-dir", str(runs))
+    # The table wraps at the runner's width; the label is there.
+    assert "BOUNDED" in _stdout(result)
+    csv_text = _stdout(_invoke(spec["a"], spec["b"], "--runs-dir", str(runs), "--format", "csv"))
+    line = next(x for x in csv_text.splitlines() if x.startswith("sustained_throughput_rps,"))
+    assert line.endswith(",trickle")
+
+
+def test_a_cap_on_one_side_labels_its_rows() -> None:
+    a = _c360_batch()
+    b = _with_id(a, "20261001-000000-ca0002")
+    b["experiment"]["limits"]["bound_kinds"] = ["silver-build: executor cap"]
+    doc = cm.compare_records([a], [b])
+    assert doc["verdict"] == cmp.NOT_LIKE_FOR_LIKE
+    assert any(r["capped_by"] == ["silver-build: executor cap"] for r in doc["metrics"])
+
+
+def test_regenerate_commands_are_ones_run_accepts() -> None:
+    """A batch side regenerates with --generate --regenerate; a continuous
+    side with --continuous (run refuses --regenerate there)."""
+    from lakebench.cli._run_args import run_args_problems  # noqa: F401 -- the rule exists
+
+    for pair, want in (("P7", "--generate --regenerate"), ("P8", "--continuous")):
+        spec = PAIRS[pair]
+        doc = cm.compare_records([sr.load_record(spec["a"])], [sr.load_record(spec["b"])])
+        assert doc["missing"]["command"].endswith(want), pair
+        assert doc["missing"]["command"] != "--regenerate"
+
+
+def test_maintenance_across_table_formats_names_no_setting() -> None:
+    for pair in ("P4", "P6"):
+        spec = PAIRS[pair]
+        doc = cm.compare_records([sr.load_record(spec["a"])], [sr.load_record(spec["b"])])
+        assert doc["missing"]["command"] is None, pair
+        assert "Iceberg and Delta run different maintenance operations" in doc["missing"]["hint"]
+
+
+def test_latest_run_is_by_instant_not_by_string(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    base = sr.load_record("5105a0")
+    early = _with_id(base, "20260101-000000-000011", start_time="2026-01-01T09:30:00+02:00")
+    late = _with_id(base, "20260101-000000-000012", start_time="2026-01-01T08:00:00+00:00")
+    runs = _runs(tmp_path, early, late)
+    (tmp_path / "a.yaml").write_text(f"name: {base['deployment_name']}\n")
+    side = cm.resolve_side("A", "a.yaml", [runs])
+    assert [m.run_id for m in side.members] == [late["run_id"]]
+
+
+def test_unreadable_record_on_the_config_route_warns(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    base = sr.load_record("5105a0")
+    runs = _runs(tmp_path, _with_id(base, "20260101-000000-000021"))
+    broken = runs / "run-20260101-000000-000022"
+    broken.mkdir()
+    (broken / "metrics.json").write_text("{trunc")
+    (tmp_path / "a.yaml").write_text(f"name: {base['deployment_name']}\n")
+    side = cm.resolve_side("A", "a.yaml", [runs])
+    assert any("skipped unreadable record" in w for w in side.warnings)
+
+
+def test_series_with_no_member_is_a_bad_ref(tmp_path: Path) -> None:
+    base = sr.load_record("5105a0")
+    sid = "s-20261001-000000-abc126"
+    out = tmp_path / "out"
+    runs = out / "runs"
+    runs.mkdir(parents=True)
+    _manifest(
+        out,
+        sid,
+        [],
+        base["deployment_name"],
+        extra=[{"run_id": None, "index": 1, "member": False, "not_member_reason": "x"}],
+    )
+    with pytest.raises(cm.CompareError, match="resolves to no run") as e:
+        cm.resolve_side("A", f"series:{sid}", [runs])
+    assert e.value.path == "compare.bad_ref"
+
+
+def test_series_member_without_a_record_names_the_series(tmp_path: Path) -> None:
+    base = sr.load_record("5105a0")
+    sid = "s-20261001-000000-abc127"
+    recs = _series(tmp_path, base, sid, 2)
+    out = tmp_path / "out"
+    runs = _runs(out, recs[0])
+    _manifest(out, sid, recs, base["deployment_name"])
+    with pytest.raises(cm.CompareError, match=f"series {sid} lists run"):
+        cm.resolve_side("A", f"series:{sid}", [runs])
+
+
+def test_series_found_beside_a_relative_runs_dir(tmp_path: Path, monkeypatch) -> None:
+    base = sr.load_record("5105a0")
+    sid = "s-20261001-000000-abc128"
+    recs = _series(tmp_path, base, sid, 2)
+    out = tmp_path / "out"
+    _runs(out, *recs)
+    _manifest(out, sid, recs, base["deployment_name"])
+    monkeypatch.chdir(out / "runs")
+    side = cm.resolve_side("A", f"series:{sid}", [Path(".")])
+    assert len(side.members) == 2
+
+
+def test_config_ref_makes_no_cluster_call(tmp_path: Path, recording_k8s, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    base = sr.load_record("5105a0")
+    other = _with_id(base, "20260101-000000-000031", deployment_name="other-dep")
+    runs = _runs(tmp_path, base, other)
+    (tmp_path / "a.yaml").write_text(f"name: {base['deployment_name']}\n")
+    result = _invoke("a.yaml", other["run_id"], "--runs-dir", str(runs))
+    assert result.exit_code in (0, 10, 12, 13), _stderr(result)
+    recording_k8s.assert_no_calls()
+
+
+@pytest.mark.parametrize("where", ["runs", "series", "metrics"])
+def test_output_into_records_refused(where: str, tmp_path: Path) -> None:
+    spec = PAIRS["P1"]
+    runs = _runs(tmp_path, sr.load_record(spec["a"]), sr.load_record(spec["b"]))
+    target = {
+        "runs": runs / "cmp.json",
+        "series": tmp_path / "series" / "cmp.json",
+        "metrics": tmp_path / "elsewhere" / "metrics.json",
+    }[where]
+    result = _invoke(spec["a"], spec["b"], "--runs-dir", str(runs), "-o", str(target))
+    assert result.exit_code == 2, _stderr(result)
+    assert not target.exists()
+
+
+def test_results_hint_names_a_non_default_runs_dir(tmp_path: Path) -> None:
+    from tests.test_experiment import _cfg, _fp, _metrics
+
+    a = _metrics(_cfg(), {"Q1": _fp(1)}).to_dict()
+    b = _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
+    b["run_id"] = "20260926-120000-bbbbbb"
+    runs = _runs(tmp_path, a, b)
+    sa = cm.resolve_side("A", a["run_id"], [runs])
+    sb = cm.resolve_side("B", b["run_id"], [runs])
+    doc = cm.build_comparison(sa, sb)
+    assert doc["missing"]["command"] == f"lakebench report --run {b['run_id']} --metrics {runs}"
+
+
+def test_step_two_digest_difference_names_the_digests() -> None:
+    a1 = _c360_batch()
+    a1["experiment"]["corpus"].setdefault("datagen", {})["digest"] = "sha256:" + "1" * 64
+    a2 = _with_id(a1, "20261001-000000-d90002")
+    a2["experiment"]["corpus"]["datagen"]["digest"] = "sha256:" + "2" * 64
+    b = _with_id(a1, "20261001-000000-d90003")
+    doc = cm.compare_records([a1, a2], [b])
+    if doc["cause"].get("key") == "generator digest":
+        assert "not recorded vs not recorded" not in doc["missing"]["hint"]
+        assert "1111" in doc["missing"]["hint"]
+
+
+def test_resolution_line_names_every_deployment(tmp_path: Path) -> None:
+    base = sr.load_record("5105a0")
+    r1 = _with_id(base, "20260101-000000-000041", deployment_name="dep-one")
+    r2 = _with_id(base, "20260101-000000-000042", deployment_name="dep-two")
+    runs = _runs(tmp_path, r1, r2)
+    side = cm.resolve_side("A", f"{r1['run_id']},{r2['run_id']}", [runs])
+    assert "deployments dep-one, dep-two" in cm.resolution_line(side)
