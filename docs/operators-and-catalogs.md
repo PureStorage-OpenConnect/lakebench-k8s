@@ -213,7 +213,7 @@ Lakebench automatically detects the platform type:
 On OpenShift, Spark pods require the `anyuid` SCC because they run as UID 185 (spark user).
 
 **Automatic Configuration:**
-- During `lakebench deploy`, the RBAC deployer automatically grants `anyuid` SCC to `lakebench-spark-runner`
+- During `lakebench deploy`, the RBAC and PostgreSQL steps grant `anyuid` to `lakebench-spark-runner` and `lakebench-postgres` through the RBAC API (the RoleBinding `system:openshift:scc:anyuid`; no `oc` needed). A refused grant fails the step; see [Prerequisites](prerequisites.md#openshift-scc-clusterrole)
 - The `lakebench validate` command checks if SCCs are already configured
 
 **Manual Configuration:**
@@ -267,6 +267,6 @@ lakebench validate test-config.yaml --verbose
 ### OpenShift SCC forbidden (UID 185)
 - **Cause:** lakebench-spark-runner ServiceAccount lacks `anyuid` SCC
 - **Fix:**
-  - Run `lakebench deploy` to auto-configure SCC
-  - Or manually: `oc adm policy add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>`
+  - `lakebench deploy` makes the grant itself and fails the RBAC step if it is refused
+  - A cluster admin can make it instead: `oc adm policy add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>` (and the same with `-z lakebench-postgres`)
 - **Verification:** `oc get events -n <namespace> --sort-by='.lastTimestamp'` shows SCC errors

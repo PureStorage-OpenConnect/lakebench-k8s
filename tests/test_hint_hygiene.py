@@ -338,9 +338,12 @@ def test_prerequisites_recommends_managed_spark_operator_install() -> None:
     """The Spark Operator prerequisite hint must recommend the managed
     ``lakebench admin install-spark-operator`` path.
     """
-    text = (SRC_ROOT / "cli" / "_prerequisites.py").read_text(encoding="utf-8")
-    assert "lakebench admin install-spark-operator" in text, (
-        "cli/_prerequisites.py must recommend `lakebench admin "
+    from lakebench.deploy.prereqs import PREREQS
+
+    # The run preflight's hint is the registry's fix text (DEP-4).
+    fix = next(p.fix for p in PREREQS if p.id == "spark-operator")
+    assert "lakebench admin install-spark-operator" in fix, (
+        "the spark-operator prerequisite must recommend `lakebench admin "
         "install-spark-operator` as the safe managed install path."
     )
 

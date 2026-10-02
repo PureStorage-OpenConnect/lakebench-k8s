@@ -13,10 +13,10 @@ import yaml
 
 from lakebench.k8s import (
     WaitStatus,
-    pinned_oc,
     wait_for_postgres_ready,
     wait_for_statefulset_ready,
 )
+from lakebench.k8s.security import SCCGrantError, ensure_scc_rolebinding
 
 from .engine import DeploymentResult, DeploymentStatus, image_tag
 
@@ -71,9 +71,19 @@ class PostgresDeployer:
                 manifest = yaml.safe_load(yaml_content)
                 self.k8s.apply_manifest(manifest, namespace=namespace)
 
-            # On OpenShift, grant anyuid SCC to the postgres service account
+            # On OpenShift, grant anyuid SCC to the postgres service account.
+            # A failed grant stops here: the pod would only be
+            # admission-rejected later, with a less useful message.
             if self.context.get("openshift_mode"):
-                self._grant_anyuid_scc(namespace)
+                try:
+                    self._grant_anyuid_scc(namespace)
+                except SCCGrantError as e:
+                    return DeploymentResult(
+                        component="postgres",
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                        elapsed_seconds=time.time() - start,
+                    )
 
             # Wait for StatefulSet to be ready
             result = wait_for_statefulset_ready(
@@ -136,41 +146,18 @@ class PostgresDeployer:
             )
 
     def _grant_anyuid_scc(self, namespace: str) -> None:
-        """Grant anyuid SCC to postgres service account on OpenShift.
+        """Grant anyuid SCC to the postgres service account on OpenShift.
 
-        This is required because the PostgreSQL container runs as UID 999.
-
-        Args:
-            namespace: Namespace where the service account exists
+        PostgreSQL runs as UID 999. The grant is the namespaced RoleBinding
+        ``system:openshift:scc:anyuid`` made through the API, so no ``oc`` is
+        needed on OCP 4.10+. Raises ``SCCGrantError`` when it cannot be made.
         """
-        import logging
+        from kubernetes import client as k8s_client
 
-        logger = logging.getLogger(__name__)
-
-        # Use oc command to add SCC (requires cluster-admin or appropriate RBAC)
-        try:
-            result = pinned_oc(
-                self.config,
-                [
-                    "adm",
-                    "policy",
-                    "add-scc-to-user",
-                    "anyuid",
-                    "-z",
-                    "lakebench-postgres",
-                    "-n",
-                    namespace,
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                logger.info(f"Granted anyuid SCC to lakebench-postgres in {namespace}")
-            else:
-                logger.warning(f"Could not grant anyuid SCC: {result.stderr}")
-        except FileNotFoundError:
-            # oc command not found, try kubectl approach
-            logger.warning("oc command not found, SCC may need manual configuration")
+        ensure_scc_rolebinding(
+            k8s_client.RbacAuthorizationV1Api(), namespace, "lakebench-postgres", "anyuid"
+        )
+        logger.info("Granted anyuid SCC to lakebench-postgres in %s", namespace)
 
     def get_connection_info(self) -> dict[str, str]:
         """Get PostgreSQL connection information.

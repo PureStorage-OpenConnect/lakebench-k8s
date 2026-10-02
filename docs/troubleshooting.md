@@ -226,13 +226,13 @@ errors on OpenShift. Container logs may show UID/GID mismatch errors.
 allow this UID. The pod needs the `anyuid` Security Context Constraint.
 
 **Fix:** `lakebench deploy` detects OpenShift automatically and binds the
-`anyuid` SCC to the `lakebench-spark-runner` service account. If you need to
-do this manually:
+`anyuid` SCC to the `lakebench-spark-runner` and `lakebench-postgres` service
+accounts, and fails the step if the grant is refused. If a cluster admin has
+to make the grant instead:
 
 ```bash
-oc adm policy add-scc-to-user anyuid \
-  -z lakebench-spark-runner \
-  -n <namespace>
+oc adm policy add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>
+oc adm policy add-scc-to-user anyuid -z lakebench-postgres -n <namespace>
 ```
 
 Verify the binding. On OpenShift 4.10 and later the grant is a namespaced

@@ -337,14 +337,10 @@ class TestSecurityVerifier:
         mock_k8s = MagicMock()
         verifier = SecurityVerifier(mock_k8s)
 
-        with patch("lakebench.k8s.security.k8s_client", create=True):
-            mock_api_ext = MagicMock()
-            mock_crds = MagicMock()
-            mock_crds.items = []  # No OpenShift CRDs
-            mock_api_ext.list_custom_resource_definition.return_value = mock_crds
-            with patch("kubernetes.client.ApiextensionsV1Api", return_value=mock_api_ext):
-                result = verifier.detect_platform()
-                assert result == PlatformType.VANILLA
+        apis = MagicMock()
+        apis.get_api_versions.return_value = MagicMock(groups=[])  # no security.openshift.io
+        with patch("kubernetes.client.ApisApi", return_value=apis):
+            assert verifier.detect_platform(strict=True) == PlatformType.VANILLA
 
     def test_security_check_result_passed(self):
         from lakebench.k8s.security import PlatformType, SecurityCheckResult

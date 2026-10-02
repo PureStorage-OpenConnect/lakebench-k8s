@@ -1464,30 +1464,34 @@ class SparkOperatorManager:
         )
         return result.returncode == 0 and "security.openshift.io" in result.stdout
 
-    def _assign_openshift_scc(self) -> None:
-        """Assign anyuid SCC to Spark Operator service accounts on OpenShift.
+    def _assign_openshift_scc(self, strict: bool = False) -> None:
+        """Grant anyuid to the Spark Operator ServiceAccounts on OpenShift.
 
-        The operator controller and webhook pods require fsGroup 185 which
-        violates the default restricted-v2 SCC.  Granting anyuid allows the
-        pods to start.
+        The controller and webhook pods need fsGroup 185, which the default
+        restricted-v2 SCC rejects. The grant is the namespaced RoleBinding
+        ``system:openshift:scc:anyuid`` in the operator namespace, made through
+        the RBAC API (``ensure_scc_rolebinding``); no ``oc`` is run, and an
+        existing grant is a read with no write.
+
+        ``strict`` (install): a grant that cannot be made raises
+        ``SCCGrantError``. Otherwise (the watch-list edits a deploy or destroy
+        makes on an operator that is already running) a failure is logged: the
+        grant was made at install, and the deploying user may have no rights
+        in the operator namespace.
         """
+        from kubernetes import client as k8s_client
+
+        from lakebench.k8s.security import SCCGrantError, ensure_scc_rolebinding
+
+        rbac_api = k8s_client.RbacAuthorizationV1Api()
         for sa in ("spark-operator-controller", "spark-operator-webhook"):
-            self._run(
-                [
-                    "oc",
-                    "adm",
-                    "policy",
-                    "add-scc-to-user",
-                    "anyuid",
-                    "-z",
-                    sa,
-                    "-n",
-                    self.namespace,
-                ],
-                capture_output=True,
-                text=True,
-            )
-        logger.info("Assigned anyuid SCC to Spark Operator service accounts")
+            try:
+                ensure_scc_rolebinding(rbac_api, self.namespace, sa, "anyuid")
+            except SCCGrantError as e:
+                if strict:
+                    raise
+                logger.warning("Spark Operator SCC not re-checked: %s", e)
+        logger.info("Spark Operator service accounts hold the anyuid SCC")
 
     def _patch_openshift_deployments(self) -> None:
         """Patch Spark Operator deployments for OpenShift compatibility.
@@ -1873,9 +1877,16 @@ class SparkOperatorManager:
                 return False
 
             # On OpenShift, assign SCCs and patch security contexts so
-            # operator pods can start under the restricted-v2 SCC.
+            # operator pods can start under the restricted-v2 SCC. At install a
+            # grant that cannot be made fails the install.
             if is_openshift:
-                self._assign_openshift_scc()
+                from lakebench.k8s.security import SCCGrantError
+
+                try:
+                    self._assign_openshift_scc(strict=True)
+                except SCCGrantError as e:
+                    logger.error("Spark Operator install: %s", e)
+                    return False
                 self._patch_openshift_deployments()
 
             # readyReplicas alone can still count the old pod during an

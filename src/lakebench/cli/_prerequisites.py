@@ -1,7 +1,8 @@
 """Prerequisite detection for Lakebench run command.
 
-Performs 8 checks before deploying or running the pipeline, each with
-an actionable error message if the check fails.
+Checks run before deploying or running the pipeline, each with an
+actionable error message if it fails. The cluster-side checks come from the
+shared registry in ``lakebench.deploy.prereqs``.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ class PrereqReport:
 def run_prerequisites(
     cfg, *, sustained: bool | None = None, datagen_runs: bool = True
 ) -> PrereqReport:
-    """Run all 9 prerequisite checks.
+    """Run the prerequisite checks.
 
     Returns a PrereqReport with results for each check. Does not exit
     on failure -- the caller decides how to handle failures.
@@ -64,15 +65,11 @@ def run_prerequisites(
     # 4. S3 endpoint configured
     report.checks.append(_check_s3_config(cfg))
 
-    # 5. S3 connectivity + credentials
-    report.checks.append(_check_s3_connectivity(cfg))
-
-    # 6. Spark Operator installed
-    report.checks.append(_check_spark_operator(cfg))
-
-    # 7. Stackable operators (Hive only)
-    if cfg.architecture.catalog.type.value == "hive":
-        report.checks.append(_check_stackable_operators(cfg))
+    # 5-7. The shared registry (deploy/prereqs.py): scratch
+    # StorageClass, Spark Operator, Stackable (Hive), observability, the
+    # OpenShift SCC ClusterRole and S3. docs/prerequisites.md is generated
+    # from the same entries, and `plan` runs them too.
+    report.checks.extend(_registry_checks(cfg))
 
     # 8. Namespace writable
     report.checks.append(_check_namespace(cfg))
@@ -173,141 +170,40 @@ def _check_s3_config(cfg) -> PrereqResult:
     )
 
 
-def _check_s3_connectivity(cfg) -> PrereqResult:
-    """Test S3 connectivity by listing buckets."""
-    s3 = cfg.platform.storage.s3
-    if not s3.endpoint or not s3.access_key:
-        return PrereqResult(
-            name="s3-connectivity",
-            passed=False,
-            message="S3 not configured (skipping connectivity test)",
-            hint="Configure S3 first",
-        )
+def _registry_checks(cfg) -> list[PrereqResult]:
+    """The registry's checks as preflight results. WARN passes (the message
+    says why); FAIL and UNKNOWN fail with the registry's fix as the hint."""
+    from lakebench.deploy.prereqs import KubeClusterReader, PrereqStatus, run_prereqs
+    from lakebench.k8s import get_k8s_client
+
     try:
-        from lakebench.s3 import test_s3_connectivity
-
-        result = test_s3_connectivity(
-            endpoint=s3.endpoint,
-            access_key=s3.access_key,
-            secret_key=s3.secret_key,
-            region=s3.region,
-            path_style=s3.path_style,
-        )
-        if result["overall_success"]:
-            return PrereqResult(
-                name="s3-connectivity",
-                passed=True,
-                message="S3 credentials valid (ListBuckets OK)",
+        # Loads the client config exactly as every other cluster call here.
+        get_k8s_client(context=cfg.platform.kubernetes.context, namespace=cfg.get_namespace())
+        reader = KubeClusterReader(cfg, load_config=False)
+    except Exception as e:  # noqa: BLE001
+        return [
+            PrereqResult(
+                name="cluster-prerequisites",
+                passed=False,
+                message=f"Cluster prerequisites not checked: {e}",
+                hint="Check kubectl context and cluster connectivity",
             )
-        msg = result.get("credentials_message") or result.get("endpoint_message", "unknown error")
-        return PrereqResult(
-            name="s3-connectivity",
-            passed=False,
-            message=f"S3 connection failed: {msg}",
-            hint="Check endpoint URL, credentials, and network access",
+        ]
+    results: list[PrereqResult] = []
+    for o in run_prereqs(cfg, reader):
+        status = o.result.status
+        if status is PrereqStatus.SKIPPED:
+            continue
+        passed = status in (PrereqStatus.OK, PrereqStatus.WARN)
+        hint = ""
+        if status is PrereqStatus.FAIL:
+            hint = o.prereq.fix
+        elif status is PrereqStatus.UNKNOWN:
+            hint = "Check K8s connectivity and permissions"
+        results.append(
+            PrereqResult(name=o.prereq.id, passed=passed, message=o.result.message, hint=hint)
         )
-    except Exception as e:
-        return PrereqResult(
-            name="s3-connectivity",
-            passed=False,
-            message=f"S3 test error: {e}",
-            hint="Check endpoint URL and credentials",
-        )
-
-
-def _check_spark_operator(cfg) -> PrereqResult:
-    """Check that the Spark Operator CRD exists."""
-    try:
-        from kubernetes import client as k8s_client
-
-        api_ext = k8s_client.ApiextensionsV1Api()
-        crds = api_ext.list_custom_resource_definition()
-        crd_names = {crd.metadata.name for crd in crds.items}
-        if "sparkapplications.sparkoperator.k8s.io" in crd_names:
-            return PrereqResult(
-                name="spark-operator",
-                passed=True,
-                message="Spark Operator CRD found",
-            )
-        op_install = getattr(
-            getattr(cfg.platform.compute, "spark", None),
-            "operator",
-            None,
-        )
-        auto = getattr(op_install, "install", False) if op_install else False
-        if auto:
-            return PrereqResult(
-                name="spark-operator",
-                passed=True,
-                message="Spark Operator not found (will auto-install)",
-            )
-        return PrereqResult(
-            name="spark-operator",
-            passed=False,
-            message="Spark Operator not installed",
-            hint=(
-                "Install: lakebench admin install-spark-operator\n"
-                "(The managed path holds the cluster lease and rewrites the "
-                "operator watch list under a read-modify-write; a raw helm "
-                "install bypasses both and can crash-loop the shared operator "
-                "for every other running deployment.)"
-            ),
-        )
-    except Exception as e:
-        return PrereqResult(
-            name="spark-operator",
-            passed=False,
-            message=f"CRD check failed: {e}",
-            hint="Check K8s connectivity",
-        )
-
-
-def _check_stackable_operators(cfg) -> PrereqResult:
-    """Check Stackable operator CRDs (Hive catalog only)."""
-    try:
-        from kubernetes import client as k8s_client
-
-        api_ext = k8s_client.ApiextensionsV1Api()
-        crds = api_ext.list_custom_resource_definition()
-        crd_names = {crd.metadata.name for crd in crds.items}
-        required = {
-            "hiveclusters.hive.stackable.tech": "hive-operator",
-            "secretclasses.secrets.stackable.tech": "secret-operator",
-        }
-        missing = [op for crd, op in required.items() if crd not in crd_names]
-        if not missing:
-            return PrereqResult(
-                name="stackable-operators",
-                passed=True,
-                message="Stackable operators found",
-            )
-        op_install = getattr(
-            getattr(getattr(cfg.architecture.catalog, "hive", None), "operator", None),
-            "install",
-            False,
-        )
-        if op_install:
-            return PrereqResult(
-                name="stackable-operators",
-                passed=True,
-                message=f"Missing {', '.join(missing)} (will auto-install)",
-            )
-        return PrereqResult(
-            name="stackable-operators",
-            passed=False,
-            message=f"Missing Stackable operators: {', '.join(missing)}",
-            hint=(
-                "Install operators, or switch to Polaris recipe (no operators needed):\n"
-                "  recipe: polaris-iceberg-spark-trino"
-            ),
-        )
-    except Exception as e:
-        return PrereqResult(
-            name="stackable-operators",
-            passed=False,
-            message=f"CRD check failed: {e}",
-            hint="Check K8s connectivity",
-        )
+    return results
 
 
 def _check_namespace(cfg) -> PrereqResult:
