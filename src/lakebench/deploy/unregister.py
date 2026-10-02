@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 # the metadata file is missing, which Spark's DROP cannot get past (it loads
 # the table first), so the entry is stuck until a Trino unregister.
 _FILES_GONE_RE = re.compile(
-    r"DELTA_TABLE_NOT_FOUND|DELTA_PATH_DOES_NOT_EXIST|\bPath does not exist:"
-    r"|NotFoundException|Failed to open input stream for file"
+    r"\[DELTA_TABLE_NOT_FOUND\]|\[DELTA_PATH_DOES_NOT_EXIST\]"
+    r"|org\.apache\.iceberg\.exceptions\.NotFoundException"
 )
 
 
@@ -102,11 +102,11 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
             sql = build_drop_table_sql(maint_engine, table)
             if table_format == "delta":
                 where, why = _table_location_bucket(
-                    query_sql, maint_engine, k8s, pod_name, namespace, table
+                    _query_marking_gone(query_sql), maint_engine, k8s, pod_name, namespace, table
                 )
                 if why == "missing":
                     continue
-                gone = why == "gone" or bool(_FILES_GONE_RE.search(why))
+                gone = why == "gone"
                 if not gone and where is None:
                     # Cannot tell where its files are: neither drop it (DROP
                     # deletes a managed table's directory) nor empty the bucket.
@@ -130,3 +130,20 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
         out.unregistered.append(table)
         logger.info("unregistered %s via %s before emptying %s", table, maint_engine, bucket)
     return out
+
+
+def _query_marking_gone(query_sql: Any) -> Any:
+    """``query_sql``, with a log-less Delta table's error reported in the
+    form destroy's location reader treats as "files gone". It matches on the
+    whole error, not the shortened text the reader keeps."""
+
+    def run(*args: Any, **kwargs: Any) -> str:
+        try:
+            return str(query_sql(*args, **kwargs))
+        except Exception as e:
+            text = str(e)
+            if re.search(r"\[DELTA_TABLE_NOT_FOUND\]|\[DELTA_PATH_DOES_NOT_EXIST\]", text):
+                raise RuntimeError("[DELTA_PATH_DOES_NOT_EXIST] " + text) from e
+            raise
+
+    return run

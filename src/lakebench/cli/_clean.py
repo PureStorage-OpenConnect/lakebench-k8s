@@ -494,8 +494,8 @@ def clean(
                     # tables whose files were gone and failed on them.
                     if not _unregister_before_empty(cfg, layer, bucket, errors):
                         print_error(
-                            f"Not emptying {layer}: a table there is still registered with "
-                            "its files; re-run clean once the engine can unregister it"
+                            f"Not emptying {layer}: its tables could not all be unregistered "
+                            "(see above); re-run clean once they can"
                         )
                         continue
                     deleted = s3.empty_bucket(bucket, progress_callback=_clean_progress)
@@ -617,8 +617,8 @@ def _unregister_before_empty(cfg, layer: str, bucket: str, errors: list[str]) ->
     for table, why in res.stuck:
         errors.append(f"{layer}: {table} still registered with its files gone ({why})")
         print_error(
-            f"{layer}: {table} is registered but its files are already gone, and this "
-            f"engine cannot drop it ({why}); unregister it through Trino "
-            "(CALL <catalog>.system.unregister_table)"
+            f"{layer}: {table} is registered but its files are already gone, and the "
+            f"engine could not drop it ({why}); remove the entry with Trino's "
+            "CALL <catalog>.system.unregister_table"
         )
     return res.may_empty

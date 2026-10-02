@@ -247,17 +247,40 @@ def test_an_unreadable_delta_location_is_a_failure_not_kept():
 
 
 def test_a_logless_delta_entry_is_dropped():
-    """What a clean by older code left: DESCRIBE DETAIL cannot load it."""
+    """What a clean by older code left: DESCRIBE DETAIL cannot load it. The
+    error comes through beeline's long prefix, past the reader's cut-off."""
+    long = (
+        "query_sql failed (rc=1): Error: org.apache.hive.service.cli.HiveSQLException: "
+        "Error running query: org.apache.spark.sql.delta.DeltaAnalysisException: "
+        "[DELTA_TABLE_NOT_FOUND] Delta table `silver`.`t` doesn't exist."
+    )
     res, sent = _run(
         _cfg("delta"),
         "silver",
         "my-clean-silver",
         ("spark-thrift", "pod", "spark_catalog"),
-        detail=lambda sql: RuntimeError(
-            "[DELTA_TABLE_NOT_FOUND] Delta table `silver`.`t` doesn't exist."
-        ),
+        detail=lambda sql: RuntimeError(long),
     )
     assert res.unregistered and sent[-1].startswith("DROP TABLE")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "java.io.FileNotFoundException: s3a://my-clean-silver/x (403 Forbidden)",
+        "java.lang.ClassNotFoundException: org.apache.hadoop.fs.s3a.S3AFileSystem",
+    ],
+)
+def test_other_not_found_errors_block_the_bucket(text):
+    """Only Iceberg's NotFoundException means the files are gone."""
+    res, _ = _run(
+        _cfg(),
+        "silver",
+        "my-clean-silver",
+        ("spark-thrift", "pod", "spark_catalog"),
+        exec_error=lambda sql: RuntimeError(text),
+    )
+    assert res.failed and not res.stuck and not res.may_empty
 
 
 def test_an_iceberg_entry_with_its_metadata_gone_is_stuck_not_blocking():
