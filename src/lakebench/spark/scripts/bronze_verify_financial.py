@@ -89,6 +89,20 @@ SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
+SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
+SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
+# Every silver table silver_stream_financial writes; the continuous reset
+# drops them all (its fresh-checkpoint refusal checks the same set).
+CONTINUOUS_SILVER_TABLES = (
+    SILVER_TXNS,
+    SILVER_EDGES,
+    SILVER_ENTITIES,
+    SILVER_ACCOUNTS,
+    SILVER_STATEMENTS,
+    SILVER_PROFILES,
+    SILVER_BATCH_VERSIONS,
+)
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 
 
@@ -232,9 +246,11 @@ def _continuous_reset(spark, df):
     # orphaned data in the silver bucket on every rerun. Entities and accounts
     # too: the continuous stream only appends dimension rows it has not seen,
     # so rows from an earlier run (another seed, scale or a pre-KYC corpus)
-    # would otherwise survive the reset.
+    # would otherwise survive the reset. Statements are appended and profiles
+    # folded into what is there, so they go too, with the batch-versions
+    # sidecar.
     # _drop_owned_table falls back to a plain DROP where Polaris refuses PURGE.
-    for t in (SILVER_TXNS, SILVER_EDGES, SILVER_ENTITIES, SILVER_ACCOUNTS):
+    for t in CONTINUOUS_SILVER_TABLES:
         _drop_owned_table(spark, t)
     _with_location(
         df.limit(0)
@@ -248,7 +264,7 @@ def _continuous_reset(spark, df):
     ).create()
     log(
         f"Continuous reset: empty {CATALOG}.{BRONZE_TABLE} created; "
-        f"dropped {SILVER_TXNS}, {SILVER_EDGES}, {SILVER_ENTITIES}, {SILVER_ACCOUNTS}"
+        f"dropped {', '.join(CONTINUOUS_SILVER_TABLES)}"
     )
     # The previous run's manifest table must not outlive the reset: this
     # run's datagen writes a new schedule, and scoring against the old one

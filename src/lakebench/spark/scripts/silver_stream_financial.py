@@ -1242,6 +1242,28 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         tagged_txns.unpersist(blocking=False)
 
 
+def refuse_reused_silver(spark, checkpoint_uri) -> None:
+    """Refuse a fresh checkpoint while any silver table this stream writes
+    holds rows: statements would be appended to and profiles folded into an
+    earlier run's, not only transactions and edges duplicated."""
+    refuse_fresh_checkpoint_over_data(
+        spark,
+        checkpoint_uri,
+        [
+            f"{CATALOG}.{t}"
+            for t in (
+                SILVER_TXNS,
+                SILVER_EDGES,
+                SILVER_ENTITIES,
+                SILVER_ACCOUNTS,
+                SILVER_STATEMENTS,
+                SILVER_PROFILES,
+                SILVER_BATCH_VERSIONS,
+            )
+        ],
+    )
+
+
 def main() -> None:
     # D-full complete: silver.transactions, silver.counterparty_edges,
     # silver.entities, silver.accounts, silver.account_statements,
@@ -1338,11 +1360,7 @@ def main() -> None:
     # B3: refuse a fresh checkpoint over populated silver -- the source
     # would start from the beginning and every existing row would be
     # duplicated. Uniform SilverAbort exit contract (see common.py).
-    refuse_fresh_checkpoint_over_data(
-        spark,
-        CHECKPOINT_URI,
-        [f"{CATALOG}.{SILVER_TXNS}", f"{CATALOG}.{SILVER_EDGES}"],
-    )
+    refuse_reused_silver(spark, CHECKPOINT_URI)
     # H2: match silver_build_financial's partition evolution so a
     # continuous-only deployment on a reused catalog does not drift on the
     # old days() spec. Iceberg partition evolution is metadata-only (~1s)

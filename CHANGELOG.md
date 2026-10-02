@@ -289,6 +289,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   since it now describes another benchmark.
 ### Fixed
 
+- An AML continuous run on a reused catalog no longer starts from an
+  earlier run's account statements and entity profiles. The reset before
+  the run dropped transactions, edges, entities and accounts only, so the
+  stream appended statements to and folded profiles into the old ones;
+  it now drops every silver table the stream writes, including the
+  batch-versions sidecar. The stream's refusal to start a fresh checkpoint
+  over populated silver checks all of them too, not only transactions and
+  edges.
 - A multi-cycle Customer 360 batch run no longer loses silver rows when a
   later cycle finds no silver table and rebuilds it. On Iceberg the rebuild
   tagged every row with that cycle, so an operator retry of the cycle, which
