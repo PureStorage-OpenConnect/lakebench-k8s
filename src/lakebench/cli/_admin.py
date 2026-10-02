@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -66,19 +67,26 @@ def _get_core_v1(context: str | None = None):
     """Return a kubernetes CoreV1Api, printing a clean refusal on failure.
 
     ``context`` selects the kubeconfig context (the config's
-    ``platform.kubernetes.context``); None means the current context. Every
-    client a command uses must come from the same context, or it reads one
-    cluster and changes another.
+    ``platform.kubernetes.context``); None means the kubeconfig's current
+    context, resolved by name and printed. Every client a command uses must
+    come from the same context, or it reads one cluster and changes another;
+    a bad context name is refused, never replaced by in-cluster credentials.
     """
+    from lakebench.k8s.target import ClusterTarget, ContextConflictError
+
     try:
         from kubernetes import client as k8s_client
-        from kubernetes import config as k8s_config
 
-        try:
-            k8s_config.load_kube_config(context=context or None)
-        except Exception:  # noqa: BLE001
-            k8s_config.load_incluster_config()
+        if context:
+            target = ClusterTarget.resolve(context=context).activate()
+        else:
+            # No configured context: the kubeconfig's current context,
+            # resolved by name once and named in the output (SAF-7).
+            target = ClusterTarget.current()
+            print_info(f"Cluster context: {escape(target.label)}")
         return k8s_client.CoreV1Api()
+    except ContextConflictError:
+        raise
     except Exception as e:  # noqa: BLE001
         print_error(f"cannot open Kubernetes client: {e}")
         raise typer.Exit(1) from e

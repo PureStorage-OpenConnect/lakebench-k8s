@@ -467,7 +467,7 @@ registries or custom builds.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `platform.kubernetes.context` | string | `""` | kubectl context name from `~/.kube/config`. Empty = use the currently active context (`kubectl config current-context`). Set this to target a specific cluster when you have multiple contexts configured. |
+| `platform.kubernetes.context` | string | `""` | kubectl context name from the kubeconfig (`$KUBECONFIG`, else `~/.kube/config`). Empty = the kubeconfig's current context (`kubectl config current-context`; with several files in `$KUBECONFIG`, the first file that sets one), resolved by name at the command's first cluster call, API or `kubectl`/`helm`/`oc`; every later call in that `lakebench` process uses that context, even if the current context changes while it runs. The command stops at its next client load or tool call if the context's API server or CA changes in the kubeconfig. A name that is not in the kubeconfig is refused. In-cluster credentials are used only when no kubeconfig file exists. Set this to target a specific cluster when you have multiple contexts configured. |
 | `platform.kubernetes.namespace` | string | `""` | Kubernetes namespace for all resources. Empty = use the deployment `name`. |
 | `platform.kubernetes.create_namespace` | bool | `true` | Create the namespace if it does not exist. |
 

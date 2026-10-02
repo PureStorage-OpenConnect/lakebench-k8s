@@ -294,6 +294,76 @@ def _journal_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_cluster_target():
+    """A process pins one cluster context (SAF-7, ``k8s/target.py``); the
+    suite is one process, so each test starts with no active target. The
+    hermetic kubeconfig above stays the default; tests that need other
+    contexts write one with ``write_kubeconfig``."""
+    from kubernetes import client as kclient
+
+    from lakebench.k8s import target
+
+    saved = kclient.Configuration._default
+    target._reset_for_tests()
+    yield
+    target._reset_for_tests()
+    kclient.Configuration._default = saved
+
+
+@pytest.fixture(autouse=True)
+def _no_implicit_tool_pin(request, monkeypatch):
+    """``cli_args()`` pins the kubeconfig's current context on a tool call
+    made before any API client (SAF-7). Here that would be the hermetic
+    ``test`` context, which CI may or may not see depending on import order,
+    so tests that build a tool argv with no configured context get the
+    no-kubeconfig answer (no flag). Tests of the pin itself are marked
+    ``tool_pin`` and see the real behaviour."""
+    if request.node.get_closest_marker("tool_pin"):
+        return
+    from lakebench.k8s import target
+
+    monkeypatch.setattr(target, "_pin_on_first_tool_call", lambda: None)
+
+
+def point_kubeconfig_at(monkeypatch, path) -> None:
+    """Make the kubernetes client's default kubeconfig location ``path``.
+
+    The library binds the location twice (``kubernetes.config`` re-exports
+    the ``kube_config`` module constant), and ``deploy/ownership.py`` reads
+    the package binding, so both are patched.
+    """
+    import kubernetes.config as kconfig
+    import kubernetes.config.kube_config as kube_config_mod
+
+    monkeypatch.setattr(kube_config_mod, "KUBE_CONFIG_DEFAULT_LOCATION", str(path))
+    monkeypatch.setattr(kconfig, "KUBE_CONFIG_DEFAULT_LOCATION", str(path))
+
+
+def write_kubeconfig(path, servers: dict[str, str], current: str) -> None:
+    """Write a token-auth kubeconfig with one context per ``servers`` entry.
+
+    ``servers`` maps a context name to its API server URL; each context gets
+    its own cluster and user entry.
+    """
+    import yaml
+
+    doc = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "current-context": current,
+        "clusters": [
+            {"name": f"cl-{n}", "cluster": {"server": url, "insecure-skip-tls-verify": True}}
+            for n, url in servers.items()
+        ],
+        "users": [{"name": f"u-{n}", "user": {"token": f"tok-{n}"}} for n in servers],
+        "contexts": [
+            {"name": n, "context": {"cluster": f"cl-{n}", "user": f"u-{n}"}} for n in servers
+        ],
+    }
+    path.write_text(yaml.safe_dump(doc))
+
+
+@pytest.fixture(autouse=True)
 def _fake_destroy_namespace_clock(monkeypatch):
     """Destroy waits (bounded) for the namespace to be NotFound (LB-157).
 
