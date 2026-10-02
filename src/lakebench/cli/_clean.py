@@ -31,6 +31,7 @@ from lakebench.config import (
 )
 from lakebench.exit_codes import ExitCode
 from lakebench.journal import DEFAULT_JOURNAL_DIR, CommandName, EventType, Journal
+from lakebench.k8s.target import ContextConflictError
 
 # Valid clean targets
 CLEAN_TARGETS = ["bronze", "silver", "gold", "data", "metrics", "journal"]
@@ -359,6 +360,8 @@ def clean(
                 other_deployments = list_lakebench_deployment_names(
                     _k8s.CoreV1Api(), exclude=cfg.get_namespace()
                 )
+            except ContextConflictError:
+                raise
             except Exception:
                 other_deployments = None
 

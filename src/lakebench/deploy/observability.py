@@ -176,20 +176,21 @@ def _find_helm_service(
     """
     label = f"release={HELM_RELEASE_NAME},app={app_label}"
 
-    # Attempt 1: K8s Python client
+    # Attempt 1: K8s Python client, on the process's active cluster target
+    # (or this context's, when none is active yet). Never reloads another
+    # context; a conflicting one raises rather than reaching another cluster.
+    from lakebench.k8s.target import ClusterTarget, ContextConflictError
+
     try:
         from kubernetes import client as k8s_client
-        from kubernetes import config as k8s_config
 
-        try:
-            k8s_config.load_incluster_config()
-        except k8s_config.ConfigException:
-            k8s_config.load_kube_config()
-
+        ClusterTarget.resolve(context=context or "").activate()
         v1 = k8s_client.CoreV1Api()
         svcs = v1.list_namespaced_service(namespace, label_selector=label)
         if svcs.items:
             return svcs.items[0].metadata.name
+    except ContextConflictError:
+        raise
     except Exception:
         pass
 

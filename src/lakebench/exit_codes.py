@@ -357,6 +357,12 @@ PATHS: tuple[ExitPath, ...] = (
     ),
     ExitPath("lease.held", _C.REFUSED, "another command holds the cluster lock lease", v16_code=1),
     ExitPath(
+        "context.changed",
+        _C.REFUSED,
+        "the kubeconfig changed under the command: a second context, or the pinned "
+        "context's server or CA moved",
+    ),
+    ExitPath(
         "destroy.unverified_cluster",
         _C.REFUSED,
         '"Destroy NOT completed": this cluster has no fingerprint, so buckets are kept',

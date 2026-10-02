@@ -167,6 +167,34 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
     except ImportError:  # pragma: no cover -- kubernetes lib is a hard dep
         return None
 
+    # The cluster this process's API clients are pinned to: its CA
+    # was hashed when the context was loaded, so a kubeconfig rewritten
+    # since cannot change what a deploy stamps or a destroy compares.
+    from lakebench.k8s.target import active_target
+
+    pinned = active_target()
+    if pinned is not None and (not context or context == pinned.context):
+        if pinned.ca_fp_known:
+            return pinned.ca_fingerprint
+        # The cluster entry could not be read at activation: read it now,
+        # but only from an entry that still names the pinned server; a
+        # rewritten one would hash another cluster's CA.
+        if pinned.in_cluster:
+            return _try_incluster_fingerprint()
+        from lakebench.k8s.target import _ca_fingerprint, _kubeconfig_cluster_block
+
+        block = _kubeconfig_cluster_block(str(pinned.context))
+        server = str((block or {}).get("server") or "").rstrip("/")
+        if block is None or (pinned.api_server and server != pinned.api_server):
+            logger.debug(
+                "api_server_fingerprint: context %r no longer names %s",
+                pinned.context,
+                pinned.api_server,
+            )
+            return None
+        # Hash the entry just checked, not a second read of the file.
+        return _ca_fingerprint(block)
+
     try:
         contexts, active = _kube_config.list_kube_config_contexts()
     except Exception as e:  # noqa: BLE001 -- kubeconfig may be missing
@@ -233,43 +261,10 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
 
 
 def _load_ca_bytes(cluster_block: dict[str, Any]) -> bytes:
-    """Return the CA certificate bytes for a kubeconfig cluster block.
+    """CA bytes of a kubeconfig cluster block (``k8s.target.load_ca_bytes``)."""
+    from lakebench.k8s.target import load_ca_bytes
 
-    kubeconfig stores the CA as either:
-    - ``certificate-authority-data``: base64-encoded PEM (inline),
-    - ``certificate-authority``: path to a PEM file on disk.
-
-    Some producers write hex instead of base64 into
-    ``certificate-authority-data`` when they emit the file. We treat
-    both encodings as valid CA material and decode to raw bytes so all
-    paths (workstation, in-cluster, inline, file) hash the same thing.
-    """
-    import base64
-    import binascii
-
-    inline = cluster_block.get("certificate-authority-data", "")
-    if isinstance(inline, bytes):
-        return inline
-    if isinstance(inline, str) and inline:
-        # Try base64 first (the standard); fall back to hex.
-        try:
-            return base64.b64decode(inline, validate=True)
-        except (binascii.Error, ValueError):
-            try:
-                return bytes.fromhex(inline)
-            except ValueError:
-                # Not decodable -- treat as the raw string bytes.
-                return inline.encode()
-
-    ca_path = cluster_block.get("certificate-authority")
-    if isinstance(ca_path, str) and ca_path:
-        try:
-            with open(ca_path, "rb") as f:
-                return f.read()
-        except OSError:
-            return b""
-
-    return b""
+    return load_ca_bytes(cluster_block)
 
 
 def _try_incluster_fingerprint() -> str | None:
@@ -1172,6 +1167,11 @@ def check_data_ownership(
                     "buckets are handled by name without an identity record."
                 ),
             )
+        if not context_name:
+            from lakebench.k8s.target import active_target
+
+            pinned = active_target()
+            context_name = pinned.label if pinned is not None else ""
         ctx = context_name or "(current context)"
         return DataOwnershipDecision(
             allowed=False,

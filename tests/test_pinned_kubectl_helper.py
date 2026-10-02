@@ -3,8 +3,10 @@
 Two things are checked here:
 
 1. The helper functions themselves append the correct
-   ``--context``/``--kube-context`` flag when a config is set and pass
-   the argv through unchanged when it is not.
+   ``--context``/``--kube-context`` flag when a config is set and, with
+   no cluster target active in the process, pass the argv through
+   unchanged when it is not (with a target active they use its context;
+   ``tests/test_k8s_target.py``).
 2. A repo-wide lint (AST-based) refuses any bare ``subprocess.run``,
    ``subprocess.Popen``, ``subprocess.check_call``, ``subprocess.check_output``
    or ``subprocess.call`` whose first positional argument is a list
@@ -49,6 +51,9 @@ LINT_WHITELIST = {SRC_ROOT / "k8s" / "_pinned.py"}
 # ---------------------------------------------------------------------------
 
 
+pytestmark = pytest.mark.tool_pin
+
+
 def _make_cfg(context: str = "") -> SimpleNamespace:
     """Duck-typed stand-in for LakebenchConfig.platform.kubernetes.context."""
     return SimpleNamespace(platform=SimpleNamespace(kubernetes=SimpleNamespace(context=context)))
@@ -79,10 +84,26 @@ def test_pinned_argv_appends_oc_context_when_set() -> None:
     assert argv == ["oc", "--context", "prod", "whoami"]
 
 
-def test_pinned_argv_no_flag_when_context_missing() -> None:
+def test_pinned_argv_pins_current_context_when_none_configured() -> None:
+    # The hermetic test kubeconfig's current context is "test" (conftest).
+    assert _pinned_argv("kubectl", None, ["get", "pods"]) == [
+        "kubectl",
+        "--context",
+        "test",
+        "get",
+        "pods",
+    ]
+    assert _pinned_argv("helm", "", ["list"]) == ["helm", "--kube-context", "test", "list"]
+    assert _pinned_argv("oc", _make_cfg(""), ["whoami"]) == ["oc", "--context", "test", "whoami"]
+
+
+def test_pinned_argv_no_flag_without_any_kubeconfig(tmp_path, monkeypatch) -> None:
+    from tests.conftest import point_kubeconfig_at
+
+    point_kubeconfig_at(monkeypatch, tmp_path / "missing")
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     assert _pinned_argv("kubectl", None, ["get", "pods"]) == ["kubectl", "get", "pods"]
     assert _pinned_argv("helm", "", ["list"]) == ["helm", "list"]
-    assert _pinned_argv("oc", _make_cfg(""), ["whoami"]) == ["oc", "whoami"]
 
 
 def test_pinned_kubectl_runs_with_context_flag() -> None:
@@ -120,13 +141,13 @@ def test_pinned_oc_pins_context() -> None:
     ]
 
 
-def test_pinned_kubectl_no_flag_when_context_missing() -> None:
+def test_pinned_kubectl_pins_current_context_when_none_configured() -> None:
     with patch("lakebench.k8s._pinned.subprocess.run") as run:
         run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         pinned_kubectl(None, ["get", "pods"])
         pinned_kubectl(_make_cfg(""), ["get", "pods"])
     for call in run.call_args_list:
-        assert call[0][0] == ["kubectl", "get", "pods"]
+        assert call[0][0] == ["kubectl", "--context", "test", "get", "pods"]
 
 
 def test_pinned_kubectl_popen_pins_context() -> None:

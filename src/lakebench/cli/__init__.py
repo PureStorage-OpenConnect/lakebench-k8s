@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
+from kubernetes.config import ConfigException
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -1184,7 +1186,16 @@ def status(
     console.print(Panel(f"Status for namespace: [bold]{esc(ns)}[/bold]", expand=False))
 
     try:
-        k8s = get_k8s_client(namespace=ns)
+        # The config's context, or (status --namespace with no config) the
+        # kubeconfig's current context resolved by name and printed.
+        if cfg is not None:
+            k8s = get_k8s_client(context=cfg.platform.kubernetes.context, namespace=ns)
+        else:
+            from lakebench.k8s.target import ClusterTarget
+
+            target = ClusterTarget.current()
+            print_info(f"Cluster context: {escape(target.label)}")
+            k8s = get_k8s_client(target=target, namespace=ns)
 
         # Check if namespace exists
         if not k8s.namespace_exists(ns):
@@ -1276,7 +1287,7 @@ def status(
             if e.status != 404:
                 logger.debug("Could not check datagen job: %s", e)
 
-    except K8sConnectionError as e:
+    except (K8sConnectionError, ConfigException) as e:
         print_error(f"Kubernetes connection failed: {e}")
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
 
@@ -1621,7 +1632,7 @@ def info(
 
     # Check cluster feasibility
     try:
-        k8s = get_k8s_client()
+        k8s = get_k8s_client(context=cfg.platform.kubernetes.context)
         cap = k8s.get_cluster_capacity()
         if cap is None:
             raise ValueError("Could not detect cluster capacity")
@@ -2132,6 +2143,14 @@ def logs(
 
     namespace = cfg.get_namespace()
     label_selector, container = COMPONENT_SELECTORS[component]
+    # logs runs only kubectl; pin the context before the first call so it names one cluster.
+    from lakebench.k8s.target import pin_command
+
+    try:
+        pin_command(cfg)
+    except ConfigException as e:
+        print_error(f"Kubernetes context: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
 
     console.print(
         f"Fetching logs for [bold]{esc(component)}[/bold] in namespace [bold]{esc(namespace)}[/bold]"
@@ -2621,7 +2640,11 @@ def recommend(
 
     if detected_cores is None or detected_mem is None:
         try:
-            k8s = get_k8s_client()
+            from lakebench.k8s.target import ClusterTarget
+
+            target = ClusterTarget.current()
+            console.print(f"[dim]Cluster context: {escape(target.label)}[/dim]")
+            k8s = get_k8s_client(target=target)
             cap = k8s.get_cluster_capacity()
             if cap is not None:
                 if detected_cores is None:
