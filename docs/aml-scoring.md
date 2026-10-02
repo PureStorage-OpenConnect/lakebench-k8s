@@ -353,8 +353,16 @@ the pipeline does on the corpus it was developed on, not what it does
 on a corpus it has never seen. The held-out evaluation and robustness
 seeds are registered as salted hashes in `heldout_hashes.json`, next to
 `aml_preregistration.json`, and are refused at config load unless
-`workload.datagen.corpus_role` declares the matching role, so
-accidentally scoring against them is not possible. The reference job
+`workload.datagen.corpus_role` declares the matching role. Even then,
+every command that reads or scores data (`run`, `benchmark`, `query`,
+`compare`, `reproduce` and the `financial` subcommands) refuses the
+protected corpus with exit 2 before any cluster call: its corpus is
+generated only with `lakebench generate --registered-corpus --yes`, which
+records the attempt in `~/.lakebench/aml_corpora.jsonl` first, and scored
+only by `scripts/aml_gate.py --registered`, which records the look. So
+accidentally scoring against them is not possible. The in-run scorer
+(`score-financial`) reads every manifest row too and refuses a corpus any
+of whose rows come from a held-out or spent seed. The reference job
 also recovers the corpus seed from every manifest row's instance seed
 and refuses a corpus whose manifest comes, wholly or partly, from a spent
 or held-out seed it was not declared for, whatever seed the deployment

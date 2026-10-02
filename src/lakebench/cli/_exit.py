@@ -11,7 +11,9 @@ Mapping (``exit_code_for``):
 - ``typer.Exit`` / ``SystemExit`` and Click's own usage errors pass through
   unchanged (Click prints a usage error and exits 2);
 - ``LakebenchError``: its own code;
-- ``ConfigError`` (including ``ConfigValidationError``): 2;
+- ``ConfigError`` (including ``ConfigValidationError``): 2; a
+  ``ConfigProtectedCorpusError`` (a protected AML seed or role) is reported
+  as ``run.protected_corpus``;
 - ``ClusterLockHeld`` (another process holds the cluster lease): 3;
 - ``K8sConnectionError`` and ``kubernetes.config.ConfigException``: 4;
 - Click ``Abort`` (a declined ``typer.confirm(abort=True)``, end of input
@@ -223,8 +225,18 @@ def error_for(exc: BaseException) -> LakebenchError | None:
             code=ExitCode.REFUSED,
         )
 
-    from lakebench.config import ConfigError, ConfigValidationError
+    from lakebench.config import ConfigError, ConfigProtectedCorpusError, ConfigValidationError
 
+    if isinstance(exc, ConfigProtectedCorpusError):
+        details = "; ".join(str(err.get("msg", "")) for err in exc.errors)
+        return LakebenchError(
+            "Refused: the config names a protected AML corpus.",
+            why=details or None,
+            next="Registered looks run only through `scripts/aml_gate.py --registered`; "
+            "use the calibration seed or another unregistered seed for everything else.",
+            path="run.protected_corpus",
+            code=ExitCode.USAGE,
+        )
     if isinstance(exc, ConfigValidationError):
         details = "; ".join(
             f"{'.'.join(str(x) for x in err.get('loc', ()))}: {err.get('msg', '')}"

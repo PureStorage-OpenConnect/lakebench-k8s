@@ -284,8 +284,9 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.protected_corpus",
         _C.USAGE,
-        "the config names a protected AML corpus role or seed",
-        planned=True,
+        "a command that reads or scores data was given a protected AML corpus (a config "
+        "whose role or seed is the evaluation or robustness one, or a run record from one), "
+        "or `generate --registered-corpus` a config that names none",
     ),
     ExitPath(
         "alias.refused",
@@ -345,8 +346,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "reproduce.held_out",
         _C.REFUSED,
-        "`reproduce` would regenerate a held-out corpus (its look has not run, its seed or "
-        "the look record cannot be read, or the config names one)",
+        "`reproduce` was given a package from a held-out corpus whose look has not run, "
+        "or whose seed or look record cannot be read",
     ),
     ExitPath(
         "destroy.incarnation_mismatch",

@@ -162,6 +162,13 @@ class ConfigValidationError(ConfigError):
         self.errors = errors or []
 
 
+class ConfigProtectedCorpusError(ConfigValidationError):
+    """The config names a seed or corpus role the AML protocol refuses
+    (``datagen_seed.ProtectedCorpusError``): a spent seed, a held-out seed
+    outside its registered run, or a role that does not match its seed. The
+    message never names a seed. Exit 2, path ``run.protected_corpus``."""
+
+
 class ConfigNameRequired(ConfigValidationError):
     """A nameless config was loaded by a command that may not use it.
 
@@ -486,6 +493,13 @@ def _load_and_validate(
     try:
         cfg = LakebenchConfig.model_validate(data, context=context)
     except ValidationError as e:
+        from lakebench.config.datagen_seed import ProtectedCorpusError
+
+        protected = [
+            err
+            for err in e.errors(include_input=False)
+            if isinstance((err.get("ctx") or {}).get("error"), ProtectedCorpusError)
+        ]
         # Messages are rewritten against the model's own locations, before
         # the locations are re-rooted to where the user wrote each key.
         # include_input=False: the input of a model-level error is the whole
@@ -518,7 +532,8 @@ def _load_and_validate(
             error_messages.append(f"  - {loc}: {msg}" if loc else f"  - {msg}")
 
         # from None: the chained ValidationError still holds the input.
-        raise ConfigValidationError(
+        cls = ConfigProtectedCorpusError if protected else ConfigValidationError
+        raise cls(
             "Configuration validation failed:\n" + "\n".join(error_messages),
             errors=errors,
         ) from None

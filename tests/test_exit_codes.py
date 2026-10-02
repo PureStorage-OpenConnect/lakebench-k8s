@@ -147,7 +147,6 @@ PLANNED_BY = {
     "admin.version_change_needs_flag": "SD-10",
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
-    "run.protected_corpus": "AM-22",
 }
 
 
@@ -541,7 +540,7 @@ def _scenario_financial_k8s_unreachable(monkeypatch, tmp_path):
         platform=SimpleNamespace(kubernetes=SimpleNamespace(context=None)),
         get_namespace=lambda: "ns-x",
     )
-    monkeypatch.setattr(fin, "_load_config", lambda path: cfg)
+    monkeypatch.setattr(fin, "_load_config", lambda path, verb="financial": cfg)
 
     def unreachable(**_k):
         raise K8sConnectionError("connection refused")
@@ -1210,6 +1209,16 @@ def _scenario_reproduce_held_out(monkeypatch, tmp_path):
     return _runner().invoke(app, ["reproduce", str(_look_package(tmp_path))])
 
 
+def _scenario_run_protected_corpus(monkeypatch, tmp_path):
+    """A config naming the (test) evaluation seed and role, with looks open
+    so it loads: run refuses it before any cluster call."""
+    from tests.fixtures import protected_corpus as pc
+
+    pc.use_heldout(monkeypatch)
+    cfg = pc.financial_config(tmp_path / "c.yaml", seed=pc.EV, role="evaluation")
+    return _runner().invoke(app, ["run", str(cfg), "--yes"])
+
+
 def _scenario_reproduce_existing_namespace(monkeypatch, tmp_path):
     import lakebench.cli._reproduce as rep
 
@@ -1611,6 +1620,7 @@ SCENARIOS = {
     "reproduce.verify_out_of_band": _scenario_reproduce_verify_out_of_band,
     "reproduce.report_required": _scenario_reproduce_report_required,
     "reproduce.held_out": _scenario_reproduce_held_out,
+    "run.protected_corpus": _scenario_run_protected_corpus,
     "reproduce.drift": _scenario_reproduce_drift,
     "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
     "reproduce.nonce_changed": _scenario_reproduce_nonce_changed,
@@ -1676,6 +1686,7 @@ EXPECTED_OUTPUT = {
     "run.args": "--force-reset only applies to a continuous run",
     "generate.multi_cycle": "does not apply to a multi-cycle config",
     "run.series_mismatch": "series incomplete: cycle(s) [0] missing",
+    "run.protected_corpus": "never runs on a protected AML corpus",
     "run.namespace_gone": "was deleted mid-run; stopping",
     "config.validation": "Config error",
     "config.name_required": "config has no name, so it cannot change data",

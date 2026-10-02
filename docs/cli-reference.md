@@ -569,6 +569,7 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | flag |  | Skip confirmation prompt |
 | `--regenerate` |  | flag |  | Clear the datagen prefix in the bronze bucket before generating, when this deployment owns the bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment cannot prove it owns. |
 | `--allow-stale-bronze` |  | flag |  | Generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; the run records it. |
+| `--registered-corpus` |  | flag |  | Generate the registered evaluation or robustness AML corpus (the config declares the role and its seed). Needs --yes. The attempt is recorded in ~/.lakebench/aml_corpora.jsonl (LB_AML_CORPORA_LEDGER) before the first cluster call. Without this flag a config that names a protected corpus is refused (exit 2). |
 
 Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
@@ -649,6 +650,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `1` `repeat.no_verified_corpus`: `run --repeat` found no verified corpus to reuse after repetition 1
 - `2` `run.args`: a `run` argument or combination is refused before any cluster call
 - `3` `run.series_mismatch`: a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds its series marker unfinished, unreadable, or written for another cycle count, window or generation than the config's
+- `2` `run.protected_corpus`: a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none
 - `3` `run.deps_mismatch`: the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded
 - `3` `run.bronze_nonempty`: datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset)
 - `3` `series.corpus_changed`: the bronze corpus changed during or between repetitions of `run --repeat`
@@ -1274,7 +1276,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `2` `reproduce.report_required`: `reproduce` of a registered look's package without --report (a look is never rerun)
 - `3` `reproduce.existing_namespace`: `reproduce` would reuse a namespace or bucket that already exists
 - `3` `reproduce.nonce_changed`: the deployment `reproduce` created was replaced before its run or its destroy
-- `3` `reproduce.held_out`: `reproduce` would regenerate a held-out corpus (its look has not run, its seed or the look record cannot be read, or the config names one)
+- `3` `reproduce.held_out`: `reproduce` was given a package from a held-out corpus whose look has not run, or whose seed or look record cannot be read
 - `14` `reproduce.drift`: `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol
 - `14` `reproduce.commit_drift`: `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift
 - `14` `reproduce.verify_out_of_band`: `reproduce --report` of a registered look: the report does not match the look record, or the record holds no report sha256
