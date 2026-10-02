@@ -468,8 +468,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "k8s.api_error",
         _C.PREREQUISITE,
-        "`logs` or `status` got an API error reading the deployment (a permission gap, "
-        "a server error); nothing changed",
+        "`logs` or `status` got an API error reading the deployment, or `stop` reading "
+        "its namespace (a permission gap, a server error); nothing changed",
         v16_code=0,
     ),
     ExitPath(

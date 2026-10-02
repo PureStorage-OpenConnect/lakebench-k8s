@@ -557,7 +557,8 @@ with its pods, while it runs. A SparkApplication that has `COMPLETED` or
 so the logs of a failed stage stay readable with `lakebench logs`. A job
 already gone is reported as not running. When a deletion fails, `stop` still
 tries every other one, prints one line per failure and exits 1. A missing
-namespace means nothing to stop (exit 0).
+namespace means nothing to stop (exit 0). A cluster that cannot be reached, or
+a refused read of the namespace, exits 4 before anything is deleted.
 
 ### benchmark
 

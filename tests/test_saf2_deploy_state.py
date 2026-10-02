@@ -606,13 +606,16 @@ def test_readonly_commands_create_no_files(tmp_path, fake_cluster, monkeypatch):
     runner = CliRunner()
     codes = [runner.invoke(app, ["status", str(cfg)]).exit_code]
     codes.append(runner.invoke(app, ["status", str(cfg), "--name", NAME]).exit_code)
-    codes.append(runner.invoke(app, ["logs", str(cfg), "hive", "--name", NAME]).exit_code)
+    logs = runner.invoke(app, ["logs", str(cfg), "hive", "--name", NAME])
+    codes.append(logs.exit_code)
     after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     assert after == before
     # Without --name a v1.6 directory is refused at load (2); with it the
     # guard passes and status and logs go on to their own reads of the
-    # (unreachable) test server, which exit 4.
+    # (unreachable) test server, which exit 4. A guard failure also exits 4
+    # (nameless.namespace_unreadable), so the read itself is asserted too.
     assert codes == [2, 4, 4], codes
+    assert "metastore" in logs.output and "Kubernetes API error" in logs.output, logs.output
 
 
 def _named(d: Path) -> Path:
@@ -1035,3 +1038,64 @@ def test_dry_run_reports_a_copied_state(tmp_path, monkeypatch, capsys):
     assert _deploy._record_deploy_nonce(cfg, cfg_path, dry_run=True, nonce=None) is None
     captured = capsys.readouterr()
     assert "exit 3" in captured.out + captured.err
+
+
+@pytest.mark.parametrize("case", ["namespace_missing", "nonce_mismatch", "proven"])
+def test_nameless_stop_with_name_deletes_only_after_the_guard(
+    case, tmp_path, fake_cluster, monkeypatch
+):
+    """`stop CFG --name X` on a nameless config: the guard runs before the
+    first list or delete, so a deployment the config cannot prove is its own
+    is refused (3) with no SparkApplication or Job call; a proven one is
+    stopped."""
+    import lakebench.cli as cli
+    from lakebench.cli import app
+    from tests import test_cli_cluster_ops as co
+
+    monkeypatch.chdir(tmp_path)
+    cfg = _nameless(tmp_path)
+    if case == "nonce_mismatch":
+        _v16_namespace(fake_cluster, nonce="n-now")
+        _v17_state(cfg, [("n-before", "confirmed")])
+    else:
+        _legacy_state(tmp_path)
+        if case == "proven":
+            _v16_namespace(fake_cluster)
+    custom = co.FakeCustom(apps=["lakebench-gold-refresh"])
+    batch = co.FakeBatch()
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "get_k8s_client", lambda **_k: calls.append("client") or co.FakeK8s())
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda: co.FakeCore())
+    monkeypatch.setattr("kubernetes.client.CustomObjectsApi", lambda: custom)
+    monkeypatch.setattr("kubernetes.client.BatchV1Api", lambda: batch)
+
+    res = CliRunner().invoke(app, ["stop", str(cfg), "--name", NAME])
+
+    if case == "proven":
+        assert res.exit_code == 0, res.output
+        assert custom.deleted == ["lakebench-gold-refresh"]
+        return
+    assert res.exit_code == 3, res.output
+    expected = {"namespace_missing": "does not exist", "nonce_mismatch": "carries nonce n-now"}
+    assert expected[case] in res.output, res.output
+    assert calls == [] and custom.deleted == [] and batch.deleted == []
+
+
+def test_nameless_logs_hint_keeps_the_name(tmp_path, fake_cluster, monkeypatch):
+    """A nameless config's `Next:` line carries --name, or following it
+    exits 2 (config.name_required)."""
+    import lakebench.cli as cli
+    from lakebench.cli import app
+    from tests import test_cli_cluster_ops as co
+
+    monkeypatch.chdir(tmp_path)
+    cfg = _nameless(tmp_path)
+    _legacy_state(tmp_path)
+    _v16_namespace(fake_cluster)
+    monkeypatch.setattr(cli, "get_k8s_client", lambda **_k: co.FakeK8s())
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda: co.FakeCore())
+
+    res = CliRunner().invoke(app, ["logs", str(cfg), "silver-build", "--name", NAME])
+
+    assert res.exit_code == 1, res.output  # logs.no_pod
+    assert f"lakebench status {cfg} --name {NAME}" in " ".join(res.output.split())

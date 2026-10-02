@@ -86,7 +86,7 @@ the CLI down every path listed here and checks the code.
 | `capacity.unknown` | 4 | the run's capacity check could not read the nodes or pods (the check fails closed) |
 | `deploy.state_unrecordable` | 4 | `deploy` could not read the namespace or write the nonce to the directory's state |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
-| `k8s.api_error` | 4 | `logs` or `status` got an API error reading the deployment (a permission gap, a server error); nothing changed |
+| `k8s.api_error` | 4 | `logs` or `status` got an API error reading the deployment, or `stop` reading its namespace (a permission gap, a server error); nothing changed |
 | `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
 | `nameless.namespace_unreadable` | 4 | a nameless config's namespace could not be read for its check |
 | `plan.missing_storage_class` | 4 | `plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, Stackable or another check), cannot check one of those three, finds too little free capacity, or cannot read a config value the sizing needs |

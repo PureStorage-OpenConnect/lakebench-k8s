@@ -1003,8 +1003,9 @@ def status(
         print_error(f"Drift: {', '.join(names)} not ready or not found")
         log_names = [ops.STATUS_LOG_COMPONENT[n] for n in names if n in ops.STATUS_LOG_COMPONENT]
         cfg_arg = str(config_file) if config_file else "CONFIG"
+        name_arg = f" --name {name}" if name else ""
         if log_names:
-            print_info(f"Next: lakebench logs {cfg_arg} {log_names[0]}, or {deploy_hint}")
+            print_info(f"Next: lakebench logs {cfg_arg} {log_names[0]}{name_arg}, or {deploy_hint}")
         else:
             print_info(f"Next: {deploy_hint}")
         raise typer.Exit(ExitCode.FAILED)
@@ -1946,7 +1947,7 @@ def logs(
     if not pods:
         raise LakebenchError(
             f"no pod for {component} ({source.what}) in namespace {namespace}",
-            next=f"lakebench status {config_file}",
+            next=f"lakebench status {config_file}" + (f" --name {name}" if name else ""),
             path="logs.no_pod",
             code=ExitCode.FAILED,
         )
@@ -1987,7 +1988,7 @@ def logs(
         raise LakebenchError(
             f"no pod of {component} has a log to read"
             + (" from a previous container" if previous else ""),
-            next=f"lakebench status {config_file}",
+            next=f"lakebench status {config_file}" + (f" --name {name}" if name else ""),
             path="logs.no_pod",
             code=ExitCode.FAILED,
         )
