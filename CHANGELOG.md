@@ -32,6 +32,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it created: if another deploy replaced it, nothing is deleted and
   reproduce exits 3 after printing its verdict. Run `lakebench destroy
   CONFIG` first to reuse a deployment's name.
+- **Continuous runs recorded before the round count was stored compare on
+  their rounds.** A continuous record whose experiment block has no
+  `limits.benchmark_rounds` (records from early 1.6 builds) now has
+  it read from its `pipeline_benchmark` rounds with a positive QpH, so two
+  continuous runs whose composite QpH is a median over different numbers of
+  in-stream rounds read comparable, not like-for-like. The stored C360
+  continuous pair Trino against Spark Thrift (runs 011043-e338c5 and
+  073533-9de9c9, 5 rounds against 4), which 1.6 and earlier 1.7 builds called
+  like-for-like, now reads not like-for-like; no identity digest moves.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
   `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to

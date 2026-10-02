@@ -968,8 +968,9 @@ def test_pinned_pair_verdicts(pair: str) -> None:
 
 def test_every_changed_pinned_verdict_is_listed() -> None:
     """RR-2: a pair whose verdict class moves from Before to After is one of
-    the pairs UPGRADING names (ch03 section 0.3: P1 to P3 like-for-like
-    become architecture differentials with the same class; P5 moves)."""
+    the pairs UPGRADING names (ch03 section 0.3: P1 and P3 like-for-like
+    become architecture differentials with the same class; P5 moves on the
+    compaction operation and P2 on the derived benchmark rounds)."""
     moved = []
     for name, spec in PAIRS.items():
         before = spec["before"]
@@ -980,7 +981,7 @@ def test_every_changed_pinned_verdict_is_listed() -> None:
         )
         if was != spec["after"]["verdict"]:
             moved.append(name)
-    assert moved == ["P5"]
+    assert moved == ["P2", "P5"]
 
 
 def _with_system_identity(rec: dict, endpoint: str) -> dict:
