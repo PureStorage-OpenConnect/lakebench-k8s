@@ -580,8 +580,8 @@ def write_sidecar(record: dict[str, Any], namespace: str) -> None:
     path = sidecar_path(namespace)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record, indent=2))
-    except OSError as e:
+        path.write_text(json.dumps(record, indent=2, default=str))
+    except (OSError, TypeError, ValueError) as e:
         logger.warning("could not write the datagen sidecar %s: %s", path, e)
 
 
