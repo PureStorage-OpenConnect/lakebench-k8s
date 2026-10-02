@@ -41,8 +41,10 @@ Write conflicts: an append that loses an optimistic-concurrency race (a
 concurrent metadata or protocol change, such as another stream adding the
 debug columns) commits nothing, so it is retried a few times with the same
 transaction id and attempt tag: Delta's (txnAppId, txnVersion) check keeps
-the retry exactly-once, and the tag still finds the one commit. The waits
-(at most 15 s) fall inside the micro-batch's time and are logged.
+the retry exactly-once, and the tag still finds the one commit. The
+retry waits (at most 15 s) and the create loser's wait (at most 30 s) fall
+inside the micro-batch's time; a retry and a wait that found the table are
+logged.
 
 Debug columns (I6): every write projects ``_stream_id STRING`` and
 ``_batch_id BIGINT`` in the silver row shape, matching the Iceberg stream

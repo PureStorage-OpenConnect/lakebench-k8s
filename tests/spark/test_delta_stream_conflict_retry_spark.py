@@ -172,7 +172,7 @@ def _managed_location(spark, name):
     return f"{wh}/silver.db/{name}"
 
 
-def test_create_loser_between_winners_log_and_catalog_waits(spark_session, ss, monkeypatch):
+def test_create_loser_between_winners_log_and_catalog_waits(spark_session, ss, capsys):
     """The winner's log has landed but its catalog entry has not: the
     loser's create fails with a non-empty-location error, which is not a
     concurrent-modification class, and it must still wait for the table."""
@@ -191,11 +191,15 @@ def test_create_loser_between_winners_log_and_catalog_waits(spark_session, ss, m
 
     t = threading.Thread(target=_register)
     t.start()
+    capsys.readouterr()
     try:
         ss._create_silver_table_if_not_exists(spark_session, frame.schema, tbl, "file:///unused/")
     finally:
         t.join(timeout=60)
     assert ss.table_exists(spark_session, tbl)
+    # The create failed and the loser waited (not a create that found the
+    # table already registered).
+    assert "Silver table created by a concurrent writer" in capsys.readouterr().out
     spark_session.sql(f"DROP TABLE IF EXISTS {tbl}")
 
 
