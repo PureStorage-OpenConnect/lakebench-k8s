@@ -204,8 +204,8 @@ READERS: dict[str, str] = {
     "architecture.query_engine.duckdb.version": "lakebench.deps.request:select_request",
     "architecture.pipeline.pattern": "lakebench.config.autosizer:_apply_cluster_scaling",
     "architecture.pipeline.mode": "lakebench.cli._run_args:run_mode",
-    "architecture.pipeline.cycles": "lakebench.cli._run:run",
-    "architecture.pipeline.pre_benchmark_maintenance": "lakebench.cli._run:run",
+    "architecture.pipeline.cycles": "lakebench.cli._run:_run_once",
+    "architecture.pipeline.pre_benchmark_maintenance": "lakebench.cli._run:_run_once",
     "architecture.pipeline.sustained.bronze_trigger_interval": (
         "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
     ),
@@ -301,7 +301,7 @@ READERS: dict[str, str] = {
     "architecture.workload.w1_max_vertices": (
         "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
     ),
-    "architecture.workload.tm_operations.enabled": "lakebench.cli._run:run",
+    "architecture.workload.tm_operations.enabled": "lakebench.cli._run:_run_once",
     "architecture.workload.tm_operations.seed": "lakebench.config.schema:TmOperationsConfig.env",
     "architecture.workload.tm_operations.analyst_accuracy": (
         "lakebench.config.schema:TmOperationsConfig.env"

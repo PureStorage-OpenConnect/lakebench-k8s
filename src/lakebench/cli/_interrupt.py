@@ -36,7 +36,8 @@ import logging
 import signal
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,6 +88,26 @@ class Owned:
     @property
     def key(self) -> str:
         return f"{self.kind}/{self.name}"
+
+
+@contextmanager
+def interrupt_scope() -> Iterator[None]:
+    """Around one ``run`` (or a whole ``--repeat`` series): on the way out,
+    a SIGINT or SIGTERM handler still owned by a ``RunInterrupt`` (a run
+    whose finally raised before it restored its handlers) is replaced by the
+    handler that instance saved, so nothing outlives the command."""
+    try:
+        yield
+    finally:
+        if threading.current_thread() is threading.main_thread():
+            for sig in INTERRUPT_SIGNALS:
+                try:
+                    current = signal.getsignal(sig)
+                    owner = getattr(current, "__self__", None)
+                    if isinstance(owner, RunInterrupt):
+                        owner.restore()
+                except (ValueError, OSError, TypeError) as e:
+                    logger.debug("run: could not check the handler for %s: %s", sig, e)
 
 
 def signal_name(signum: int) -> str:

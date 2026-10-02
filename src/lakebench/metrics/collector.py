@@ -469,6 +469,10 @@ class PipelineMetrics:
     # NamespaceWatch): {reason, at_elapsed}. None otherwise.
     abort_reason: dict[str, Any] | None = None
 
+    # A ``run --repeat N`` repetition: {id, index, size} (metrics/series.py).
+    # None for a run outside a series.
+    series: dict[str, Any] | None = None
+
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
     # None on a fresh run until it is saved; experiment_block() builds it then.
     experiment: dict[str, Any] | None = None
@@ -523,6 +527,8 @@ class PipelineMetrics:
             d["interrupted"] = self.interrupted
         if self.abort_reason is not None:
             d["abort_reason"] = self.abort_reason
+        if self.series is not None:
+            d["series"] = self.series
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment

@@ -304,6 +304,12 @@ class Recorder:
     fresh_bronze: bool = False
     #: The datagen Job this run deployed has not finished.
     datagen_running: bool = False
+    #: The silver-state ConfigMap's data (rebuild epochs) and its version.
+    silver_state: dict[str, str] = field(default_factory=dict)
+    silver_state_rv: int = 1
+    #: Objects in the bronze bucket the fake paginator lists, by key:
+    #: (size, etag). Empty: an empty bucket, as the goldens read it.
+    bronze_objects: dict[str, tuple[int, str]] = field(default_factory=dict)
     #: With ``interrupt``: the state the monitor reports before the signal
     #: ("completed", "failed"): the application ended, its log is being read.
     interrupt_after_state: str | None = None
@@ -662,6 +668,24 @@ class FakeCoreV1Api(_FakeApi):
                 _fake_pod("openshift-dns", "master-0", "1", "1Gi"),  # control plane
             ]
         )
+
+    def read_namespaced_config_map(self, name, namespace, **kw):
+        """The deployment's silver-state ConfigMap (rebuild epochs)."""
+        self._rec.add("CoreV1Api", "read_namespaced_config_map", name, namespace)
+        if name != "lakebench-silver-state" or namespace != self._rec.namespace:
+            raise self._rec.refuse(f"unscripted ConfigMap read {namespace}/{name}")
+        return SimpleNamespace(
+            metadata=SimpleNamespace(name=name, resource_version=str(self._rec.silver_state_rv)),
+            data=dict(self._rec.silver_state),
+        )
+
+    def replace_namespaced_config_map(self, name, namespace, body, **kw):
+        self._rec.add("CoreV1Api", "replace_namespaced_config_map", name, namespace)
+        if name != "lakebench-silver-state" or namespace != self._rec.namespace:
+            raise self._rec.refuse(f"unscripted ConfigMap replace {namespace}/{name}")
+        self._rec.silver_state = dict(body.data or {})
+        self._rec.silver_state_rv += 1
+        return body
 
     def list_namespaced_pod(self, namespace, label_selector="", **kw):
         self._rec.add("CoreV1Api", "list_namespaced_pod", namespace, label_selector)
@@ -1202,7 +1226,13 @@ class _FakeBoto:
                 rec.add("S3", "paginate list_objects_v2", Bucket, Prefix)
                 if not Bucket.startswith(f"{NAME}-"):
                     raise rec.refuse(f"listing of a bucket not of the deployment: {Bucket}")
-                return iter([{"KeyCount": 0, "Contents": []}])
+                # As S3 lists: only keys under Prefix (bronze bucket only).
+                contents = [
+                    {"Key": k, "Size": size, "ETag": f'"{etag}"'}
+                    for k, (size, etag) in sorted(rec.bronze_objects.items())
+                    if Bucket == f"{NAME}-bronze" and k.startswith(Prefix)
+                ]
+                return iter([{"KeyCount": len(contents), "Contents": contents}])
 
         return _Paginator()
 

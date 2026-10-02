@@ -148,9 +148,7 @@ PLANNED_BY = {
     "logs.no_pod": "CC-27",
     "plan.missing_storage_class": "CC-23",
     "plan.ok": "CC-23",
-    "repeat.no_verified_corpus": "CC-30",
     "run.protected_corpus": "AM-22",
-    "series.corpus_changed": "CC-30",
     "status.drift": "CC-27",
     "status.namespace_missing": "CC-27",
     "status.ok": "CC-27",
@@ -814,6 +812,57 @@ def _scenario_run_args(monkeypatch, tmp_path):
     return _runner().invoke(app, ["run", str(cfg), "--force-reset", "--yes"])
 
 
+def _series_scenario(monkeypatch, tmp_path, after_first=None, **changes):
+    """The QA-9 harness's batch run as a three-repetition series over a
+    two-object bronze; *after_first* changes the fake cluster after
+    repetition 1."""
+    import dataclasses
+
+    import lakebench.cli._series as series_mod
+    from tests.harness import run_harness
+
+    box = []
+    real_install = run_harness.install_fakes
+
+    def install(mp, rec, scenario):
+        rec.bronze_objects = {
+            "customer/interactions/part-0.parquet": (10, "a"),
+            "customer/interactions/part-1.parquet": (10, "b"),
+        }
+        box.append(rec)
+        return real_install(mp, rec, scenario)
+
+    monkeypatch.setattr(run_harness, "install_fakes", install)
+    real_call = series_mod._call
+    n = [0]
+
+    def call(*a, **k):
+        code = real_call(*a, **k)
+        n[0] += 1
+        if n[0] == 1 and after_first:
+            after_first(box[0])
+        return code
+
+    monkeypatch.setattr(series_mod, "_call", call)
+    scenario = dataclasses.replace(
+        run_harness.SCENARIOS["batch_c360"],
+        argv=["--skip-generate", "--yes", "--repeat", "3"],
+        **changes,
+    )
+    return run_harness.invoke_scenario(scenario, tmp_path, monkeypatch)[0]
+
+
+def _scenario_repeat_no_verified_corpus(monkeypatch, tmp_path):
+    return _series_scenario(monkeypatch, tmp_path, failing=("bronze-verify",))
+
+
+def _scenario_series_corpus_changed(monkeypatch, tmp_path):
+    def rewrite(rec):
+        rec.bronze_objects["customer/interactions/part-1.parquet"] = (10, "b2")
+
+    return _series_scenario(monkeypatch, tmp_path, after_first=rewrite)
+
+
 def _scenario_confirm_declined(monkeypatch, tmp_path):
     cfg = _init_config(tmp_path)
     return _runner().invoke(app, ["clean", "metrics", str(cfg)], input="n\n")
@@ -1329,6 +1378,8 @@ SCENARIOS = {
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
     "run.interrupted": _scenario_run_interrupted,
+    "repeat.no_verified_corpus": _scenario_repeat_no_verified_corpus,
+    "series.corpus_changed": _scenario_series_corpus_changed,
     "run.args": _scenario_run_args,
     "run.namespace_gone": _scenario_run_namespace_gone,
     "confirm.declined": _scenario_confirm_declined,
@@ -1387,6 +1438,8 @@ EXPECTED_OUTPUT = {
     "run.pass": "Local mode is sized",
     "run.verdict_failed": "Local mode is sized",
     "run.interrupted": "Interrupted by SIGINT during silver-build",
+    "repeat.no_verified_corpus": "no verified corpus to reuse",
+    "series.corpus_changed": "bronze changed between repetitions",
     "run.args": "--force-reset only applies to a continuous run",
     "run.namespace_gone": "was deleted mid-run; stopping",
     "config.validation": "Config error",

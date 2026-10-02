@@ -37,6 +37,9 @@ BATCH_STAGES: tuple[str, ...] = ("bronze-verify", "silver-build", "gold-finalize
 #: The shortest continuous window ``--duration`` accepts, in seconds.
 MIN_DURATION_S = 60
 
+#: The most repetitions ``--repeat`` runs in one series.
+MAX_REPEAT = 20
+
 
 @dataclass(frozen=True)
 class RunArgs:
@@ -59,6 +62,16 @@ class RunArgs:
     generate_only: bool = False
     yes: bool = False
     local: bool = False
+    repeat: int | None = None
+
+
+@dataclass(frozen=True)
+class RunContext:
+    """What the rules read besides the options: the resolved mode and the
+    config's cycle count."""
+
+    mode: str  # "batch" or "continuous"
+    cycles: int = 1
 
 
 @dataclass(frozen=True)
@@ -73,8 +86,8 @@ class RunPlan:
 class RunRule:
     """One refused argument or combination."""
 
-    #: True when the arguments break the rule.
-    broken: Callable[[RunArgs, str], bool]
+    #: True when the arguments break the rule, in the run's context.
+    broken: Callable[[RunArgs, RunContext], bool]
     #: What is refused, in one sentence (or built from the arguments).
     message: str | Callable[[RunArgs], str]
     #: What to do instead.
@@ -92,8 +105,8 @@ def _local_stages() -> tuple[str, ...]:
     return LOCAL_JOB_ORDER
 
 
-def _bad_stage(a: RunArgs, mode: str) -> bool:
-    if not a.stage or mode != "batch":
+def _bad_stage(a: RunArgs, c: RunContext) -> bool:
+    if not a.stage or c.mode != "batch":
         return False
     return a.stage not in (_local_stages() if a.local else BATCH_STAGES)
 
@@ -106,31 +119,31 @@ RUN_RULES: tuple[RunRule, ...] = (
         "`--stage` that is not `bronze-verify`, `silver-build` or `gold-finalize`",
     ),
     RunRule(
-        lambda a, mode: bool(a.stage) and mode == "continuous",
+        lambda a, c: bool(a.stage) and c.mode == "continuous",
         "--stage does not apply to a continuous run (its three streams run together)",
         "drop --stage, or run in batch mode",
         "`--stage` with a continuous run (flag or config)",
     ),
     RunRule(
-        lambda a, mode: a.deploy_only and a.generate_only,
+        lambda a, c: a.deploy_only and a.generate_only,
         "--deploy-only and --generate-only cannot be combined",
         "pick one: --generate-only also deploys",
         "`--deploy-only` with `--generate-only`",
     ),
     RunRule(
-        lambda a, mode: a.deploy_only and (bool(a.stage) or a.include_datagen or a.skip_generate),
+        lambda a, c: a.deploy_only and (bool(a.stage) or a.include_datagen or a.skip_generate),
         "--deploy-only only deploys: --stage, --generate and --skip-generate do not apply",
         "drop them, or drop --deploy-only",
         "`--deploy-only` with `--stage`, `--generate` or `--skip-generate`",
     ),
     RunRule(
-        lambda a, mode: a.generate_only and a.skip_generate,
+        lambda a, c: a.generate_only and a.skip_generate,
         "--generate-only and --skip-generate cannot be combined",
         "pick one",
         "`--generate-only` with `--skip-generate`",
     ),
     RunRule(
-        lambda a, mode: (
+        lambda a, c: (
             a.local and (a.deploy_only or a.generate_only or a.force_rebuild or a.skip_maintenance)
         ),
         "--local does not deploy, generate on its own, rebuild or run maintenance: "
@@ -140,55 +153,80 @@ RUN_RULES: tuple[RunRule, ...] = (
         "`--skip-maintenance`",
     ),
     RunRule(
-        lambda a, mode: a.regenerate and not (a.include_datagen or a.generate_only),
+        lambda a, c: a.regenerate and not (a.include_datagen or a.generate_only),
         "--regenerate only applies with --generate or --generate-only",
         "add --generate, or drop --regenerate",
         "`--regenerate` without `--generate` or `--generate-only`",
     ),
     RunRule(
-        lambda a, mode: (
-            a.regenerate and (a.local or (mode == "continuous" and not a.generate_only))
-        ),
+        lambda a, c: a.regenerate and (a.local or (c.mode == "continuous" and not a.generate_only)),
         "--regenerate does not apply to a local or continuous run (a continuous run "
         "clears and regenerates its own data)",
         "drop --regenerate",
         "`--regenerate` with `--local`, or with a continuous run other than `--generate-only`",
     ),
     RunRule(
-        lambda a, mode: a.skip_generate and a.include_datagen,
+        lambda a, c: a.skip_generate and a.include_datagen,
         "--skip-generate and --generate cannot be combined",
         "pick one",
         "`--skip-generate` with `--generate`",
     ),
     RunRule(
-        lambda a, mode: a.force_reset and mode == "batch",
+        lambda a, c: a.force_reset and c.mode == "batch",
         "--force-reset only applies to a continuous run",
         "drop --force-reset, or add --continuous",
         "`--force-reset` on a batch run",
     ),
     RunRule(
-        lambda a, mode: a.force_rebuild and mode == "continuous",
+        lambda a, c: a.force_rebuild and c.mode == "continuous",
         "--force-rebuild only applies to a batch run",
         "drop --force-rebuild, or run in batch mode",
         "`--force-rebuild` on a continuous run",
     ),
     RunRule(
-        lambda a, mode: a.duration is not None and mode == "batch",
+        lambda a, c: a.duration is not None and c.mode == "batch",
         "--duration only applies to a continuous run",
         "drop --duration, or add --continuous",
         "`--duration` on a batch run",
     ),
     RunRule(
-        lambda a, mode: a.duration is not None and a.duration < MIN_DURATION_S,
+        lambda a, c: a.duration is not None and a.duration < MIN_DURATION_S,
         f"--duration is below {MIN_DURATION_S} s",
         f"use --duration {MIN_DURATION_S} or more",
         f"`--duration` below {MIN_DURATION_S}",
     ),
     RunRule(
-        lambda a, mode: a.timeout is not None and a.timeout < 1,
+        lambda a, c: a.timeout is not None and a.timeout < 1,
         "--timeout must be at least 1 s",
         "use a positive --timeout, or leave it out for the scaled default",
         "`--timeout` below 1",
+    ),
+    RunRule(
+        lambda a, c: a.repeat is not None and not (1 <= a.repeat <= MAX_REPEAT),
+        f"--repeat must be between 1 and {MAX_REPEAT}",
+        f"use --repeat 1 to {MAX_REPEAT}",
+        f"`--repeat` below 1 or above {MAX_REPEAT}",
+    ),
+    RunRule(
+        lambda a, c: a.repeat is not None and c.mode == "continuous",
+        "--repeat does not apply to a continuous run (it generates its own data every run)",
+        "drop --repeat, or run in batch mode",
+        "`--repeat` with a continuous run",
+    ),
+    RunRule(
+        lambda a, c: a.repeat is not None and c.cycles > 1,
+        "--repeat does not apply to a multi-cycle run (cycles above 1)",
+        "set architecture.pipeline.cycles to 1, or drop --repeat",
+        "`--repeat` with `cycles` above 1",
+    ),
+    RunRule(
+        lambda a, c: (
+            a.repeat is not None and (bool(a.stage) or a.local or a.deploy_only or a.generate_only)
+        ),
+        "--repeat runs the whole batch pipeline: --stage, --local, --deploy-only and "
+        "--generate-only do not apply",
+        "drop them with --repeat",
+        "`--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`",
     ),
 )
 
@@ -205,8 +243,15 @@ def run_mode(args: RunArgs, cfg: Any) -> str:
 
 def run_args_problems(args: RunArgs, cfg: Any) -> list[RunRule]:
     """Every rule *args* break (empty when the run may start)."""
-    mode = run_mode(args, cfg)
-    return [rule for rule in RUN_RULES if rule.broken(args, mode)]
+    ctx = RunContext(mode=run_mode(args, cfg), cycles=_cycles(cfg))
+    return [rule for rule in RUN_RULES if rule.broken(args, ctx)]
+
+
+def _cycles(cfg: Any) -> int:
+    try:
+        return int(cfg.architecture.pipeline.cycles or 1)
+    except (AttributeError, TypeError, ValueError):
+        return 1
 
 
 def validate_run_args(args: RunArgs, cfg: Any) -> RunPlan:
