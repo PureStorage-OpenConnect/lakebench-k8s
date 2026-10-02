@@ -401,11 +401,18 @@ If your storage uses virtual-hosted bucket addressing (like AWS S3), set
 `path_style: false`. For MinIO and FlashBlade, leave it as `true` (the
 default).
 
-### 3. Validate the configuration
+### 3. Plan and validate the configuration
 
 ```bash
+lakebench plan lakebench.yaml
 lakebench config validate lakebench.yaml
 ```
+
+`plan` shows what the config needs: its minimum cluster, the cluster
+prerequisites (a missing scratch StorageClass, Spark Operator or Stackable
+fails with the `admin install` command a cluster admin runs), the Polaris
+client secret's source and the hosts the deploy contacts. Add `--offline`
+to size without a cluster.
 
 This checks YAML syntax, Pydantic schema validation, Kubernetes connectivity,
 and S3 reachability. Fix any errors before continuing. Before the first

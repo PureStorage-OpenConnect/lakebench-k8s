@@ -131,6 +131,7 @@ from lakebench.cli._clean import clean as _clean_fn  # noqa: E402
 from lakebench.cli._deploy import deploy as _deploy_fn  # noqa: E402
 from lakebench.cli._destroy import destroy as _destroy_fn  # noqa: E402
 from lakebench.cli._generate import generate as _generate_fn  # noqa: E402
+from lakebench.cli._plan import plan as _plan_fn  # noqa: E402
 from lakebench.cli._query import benchmark as _benchmark_fn  # noqa: E402
 from lakebench.cli._query import query as _query_fn  # noqa: E402
 from lakebench.cli._reproduce import reproduce as _reproduce_fn  # noqa: E402
@@ -144,6 +145,7 @@ app.command(name="run")(_run_fn)
 app.command(name="query")(_query_fn)
 app.command(name="benchmark")(_benchmark_fn)
 app.command(name="reproduce")(_reproduce_fn)
+app.command(name="plan")(_plan_fn)
 
 
 # Re-exports for backward compatibility (tests import these from lakebench.cli)

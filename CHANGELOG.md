@@ -154,6 +154,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **`lakebench plan CONFIG...`**, read-only: the components, recipe and
+  support state, the minimum cluster from the one sizing source (the
+  numbers the `run` preflight and the README tables use), the cluster
+  prerequisites with the `admin install --component` command for a missing
+  one (exit 4), the Polaris client secret's source, and the hosts the
+  deploy contacts. `--offline`, `--cores/--memory` and `--json` make no
+  cluster call. Several configs are compared by experiment identity and
+  execution conditions.
 - **Run provenance is complete.** `metrics.json` `provenance` now says how
   lakebench was installed (`install`), and a pip-installed run names the
   commit its wheel was built from (the build writes it into the package;
