@@ -266,7 +266,11 @@ class TestStamping:
         from lakebench.reports.generator import ReportGenerator
 
         html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(_metrics(_cfg()))
-        assert "Experiment" in html and "c360-1" in html and "Result fingerprints" in html
+        assert (
+            "Experiment" in html
+            and ex.WORKLOAD_VERSIONS["customer360"] in html
+            and "Result fingerprints" in html
+        )
         for label in (
             "Query access path",
             "Support state",

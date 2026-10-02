@@ -831,6 +831,19 @@ Each customer generates approximately 24 events across a 365-day date range.
 Scaling is linear: doubling the scale factor doubles customers, rows, and data
 volume.
 
+`spark.lb.gold.strategy` picks how Customer 360 gold-finalize aggregates
+silver: `auto` (the default: `simple_agg` below 500 GB of silver, else
+`two_phase_agg`), `simple_agg` or `two_phase_agg`. Both rebuild every gold
+day from all of silver. `incremental` and any other value are refused
+when a command that changes data (`deploy`, `run` and the others) loads a
+Customer 360 config: incremental gold runs only for cycles 2 and later of
+a multi-cycle run (see [Multi-Cycle Batch](#multi-cycle-batch)), and those
+cycles use it whatever the key says. The key is read by batch
+gold-finalize on the cluster only; `--local` runs do not pass `spark.conf`
+and use `auto`. The strategy that ran, and why (`auto`, `override` or
+`cycle`), is recorded per gold-finalize job in `metrics.json` as
+`jobs[].extra_metrics.gold_strategy` and `gold_strategy_source`.
+
 Executor counts auto-scale with the scale factor unless overridden by the
 `bronze_executors`, `silver_executors`, or `gold_executors` fields. Per-executor
 sizing (cores, memory, PVC size) is fixed from proven production profiles and
@@ -857,7 +870,9 @@ architecture:
 2. Cycle 1 runs standard `createOrReplace` for silver and gold tables.
 3. Cycles 2+ set `LB_SILVER_INCREMENTAL=true` and `LB_GOLD_INCREMENTAL=true`,
    switching silver-build to `.append()` and gold-finalize to incremental
-   merge based on a watermark on `max(interaction_date)`.
+   merge based on a watermark on `max(interaction_date)`. This is the only
+   case gold-finalize runs incrementally: a single-cycle run, or a repeat
+   run over a gold table that already has rows, rebuilds every gold day.
 4. After all cycles, if `pre_benchmark_maintenance` is true, Lakebench runs
    `expire_snapshots` (with `retention_threshold='0s'`, or the retention
    horizon when `workload.retention_workload` is set),

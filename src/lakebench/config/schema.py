@@ -2800,6 +2800,30 @@ class LakebenchConfig(ConfigModel):
 
     @field_validator("spark", mode="after")
     @classmethod
+    def refuse_unrunnable_gold_strategy(
+        cls, spark: SparkConfOverrides, info: ValidationInfo
+    ) -> SparkConfOverrides:
+        """A Customer 360 ``spark.lb.gold.strategy`` the gold scripts would
+        refuse (``incremental``, or a value naming no strategy) is refused
+        at load by the commands that change data, before anything deploys."""
+        from lakebench.config.c360_run import gold_override_problem
+
+        arch = info.data.get("architecture")
+        # No architecture: it failed validation and the load fails on that.
+        if arch is None or arch.workload.schema_type != WorkloadSchema.CUSTOMER360:
+            return spark
+        purpose = purpose_from_context(info.context)
+        if purpose is not None and purpose not in CHANGES_DATA:
+            return spark
+        problem = gold_override_problem(spark.conf)
+        if problem:
+            raise ValueError(
+                f"{problem}. Delete it from spark.conf, or set auto, simple_agg or two_phase_agg"
+            )
+        return spark
+
+    @field_validator("spark", mode="after")
+    @classmethod
     def refuse_owned_spark_conf(
         cls, spark: SparkConfOverrides, info: ValidationInfo
     ) -> SparkConfOverrides:
