@@ -175,14 +175,16 @@ def _statuses(record):
 def test_correct_corpus_passes_every_check(pipeline):
     from common import c360_check_facts
 
-    from lakebench.metrics.c360_correctness import pipeline_checks, verdict
+    from lakebench.metrics.c360_correctness import gating_outcome, pipeline_checks, verdict
 
     bronze, silver, gold = pipeline
     facts = c360_check_facts(silver, gold)
     rec = verdict(pipeline_checks(facts, _bronze_counts(bronze), _ctx()))
     st = _statuses(rec)
     assert rec["status"] == "pass", [c for c in rec["checks"] if c["status"] == "fail"]
-    assert rec["gating"] is False
+    assert rec["gating"] is True
+    # Every gated check ran and passed on a correct corpus (none unchecked).
+    assert gating_outcome(dict(rec, facts_present=True)) == (None, None)
     # The checks that matter here actually ran.
     for cid in (
         "bronze_rows_match_datagen",

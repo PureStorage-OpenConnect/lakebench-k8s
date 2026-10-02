@@ -66,12 +66,12 @@ remains open only as implementation work.
    difference from the request, and between compared runs, visible in the
    report and in comparisons.
 
-6. **Customer 360 has no expected-result definition.** [decided D6] Non-empty guards exist
-   (`bronze_verify.py:139`, `silver_build.py:449`, `gold_finalize.py:313`) and
-   the continuous zero-row gate (`cli/_sustained.py:48`), but a zero KPI count
-   is only logged and nothing checks gold KPIs against what the generator
-   produced. Remaining work [impl]: derive expected results from the
-   generator; the owner approves their meaning before they gate a run.
+6. **Customer 360 has no expected-result definition.** [decided D6, resolved]
+   Expected results are derived from the generator in
+   `metrics/c360_correctness.py`, and the owner approved 16 of them as
+   gating on 2026-09-27 (`GATING_CHECKS`, read by the CLI and the verdict's
+   `c360` gate). A batch run on the cluster is gated; continuous runs keep
+   the zero-row gate (`cli/_sustained.py`) and no expected-result check.
 
 7. **A benchmark exception leaves the run successful.** [impl] Existing gates
    cover failed queries and AML zero alerts, but an exception in the

@@ -130,11 +130,7 @@ class TestReportGeneratorBadge:
         # A c360 failure fails the verdict but does not set any of the
         # badge-only inputs, so the pass/fail bit here comes from the
         # verdict, not the badge's own reason list.
-        m.c360_correctness = {
-            "status": "fail",
-            "failed": ["silver_to_gold_days"],
-            "reason": "silver differs from gold",
-        }
+        m.c360_correctness = _c360_record(fail=("silver_to_gold_days",))
         rg = ReportGenerator.__new__(ReportGenerator)
         rg._fallback_output_dir = None
         passed_bit, reasons, _warnings = rg._compute_overall_status(m)
@@ -492,12 +488,16 @@ class TestC360Gate:
         assert "c360" not in v.gates
         assert v.status == "PASSED"
 
-    def test_reporting_only_record_never_fails(self) -> None:
+    def test_reporting_only_continuous_record_never_fails(self) -> None:
         m = _make_passing_metrics()
-        m.c360_correctness = dict(_c360_record(fail=("silver_to_gold_days",)), reporting_only=True)
+        bad = _c360_record(fail=("silver_to_gold_days",))
+        m.c360_correctness = dict(bad, reporting_only=True, mode="continuous")
         v = compute_verdict(m)
         assert "c360" not in v.gates
         assert v.status == "PASSED"
+        # On a batch record the flag does not switch the gate off.
+        m.c360_correctness = dict(bad, reporting_only=True)
+        assert compute_verdict(m).status == "FAILED"
 
     def test_empty_gating_list_is_reporting_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from lakebench.metrics import c360_correctness as c3
@@ -509,6 +509,9 @@ class TestC360Gate:
         v = compute_verdict(m)
         assert "c360" not in v.gates
         assert v.qualifiers.get("c360_failed_not_gating") == ["silver_to_gold_days"]
+        # Also for a record with no facts: an empty list gates nothing.
+        m.c360_correctness = _c360_record(facts=False)
+        assert compute_verdict(m).status == "PASSED"
 
     def test_gated_shape_judged_only_with_benchmark_checks(
         self, monkeypatch: pytest.MonkeyPatch
@@ -659,7 +662,7 @@ def test_success_survives_verdict_roundtrip(tmp_path: Path) -> None:
     )
     # A c360 fail alongside a job fail; both must surface without losing
     # the raw success bit.
-    m.c360_correctness = {"status": "fail", "failed": ["x"], "reason": "boom"}
+    m.c360_correctness = _c360_record(fail=("silver_to_gold_counts",))
     d = m.to_dict()
     assert "success" in d
     assert d["success"] is True

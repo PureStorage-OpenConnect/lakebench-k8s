@@ -276,14 +276,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `destroy` removes the `lakebench.deployment/deps-set` annotation right
   after its ownership check, before any teardown.
 - **Customer 360 batch runs are gated on sixteen expected-result checks.**
-  The fifteen exact checks (bronze rows, silver invariants, bronze to silver
-  to gold reconciliation, gold KPI identities) and the overall average
-  transaction value now fail the run and its verdict when they fail, cannot
-  be evaluated, or when gold-finalize logged no facts. Until now the
-  verdict failed on any failed check, statistical ones included, while a
-  run whose exact checks could not be evaluated, or that logged no facts,
-  read PASSED. A failed check outside the sixteen no longer fails the
-  verdict; it is listed in `verdict.qualifiers.c360_failed_not_gating`.
+  The fifteen invariant and reconcile checks (bronze rows, silver
+  invariants, bronze to silver to gold reconciliation, gold KPI identities)
+  and the overall average transaction value now fail the run and its
+  verdict when they fail or cannot be evaluated, or when gold-finalize
+  logged no facts or the check itself raised. Until now the verdict failed
+  on any failed check, statistical ones included, while a run whose exact
+  checks could not be evaluated, or that logged no facts, read PASSED. A
+  failed check outside the sixteen no longer fails the verdict; it is
+  printed, and listed in `metrics.json` under
+  `verdict.qualifiers.c360_failed_not_gating`. `--local` and `--stage` runs
+  make no Customer 360 check, as before.
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets

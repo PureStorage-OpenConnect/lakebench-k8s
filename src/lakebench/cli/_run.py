@@ -2751,8 +2751,10 @@ def run(
                 collector.current_run.c360_correctness = _c360_rec
                 for _line in _c360.summary_lines(_c360_rec):
                     (print_warning if _c360_rec["status"] != "pass" else print_info)(_line)
-            except Exception as e:  # noqa: BLE001 -- reporting only
-                _c360_rec = None
+            except Exception as e:  # noqa: BLE001 -- recorded, fails closed below
+                # Kept in the record so the verdict fails closed too.
+                _c360_rec = _c360.unevaluated_record(f"the check could not run: {e}")
+                collector.current_run.c360_correctness = _c360_rec
                 print_warning(f"Customer 360 expected-result check could not run: {e}")
             # The gated checks only (D6); a check that could not run fails closed.
             for _p in _c360.gating_problems(_c360_rec):

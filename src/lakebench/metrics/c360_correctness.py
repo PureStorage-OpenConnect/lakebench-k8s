@@ -34,9 +34,10 @@ from typing import Any
 # D6: the owner approves the meaning before any check gates a run. A check
 # id here makes its failure fail the run. Owner decision 2026-09-27: checks
 # 0 to 14 (every invariant and reconcile check) and 17 (the headline average
-# transaction value) of the expected-results table gate; the other
-# statistical and the benchmark shape checks stay reporting only. The
-# numbers are the table's, not the order a record lists its checks in.
+# transaction value) of the expected-results table gate;
+# the other statistical and the benchmark shape checks stay reporting only.
+# The numbers below are the table's; the same 16 ids sit at positions 0-14
+# and 17 of pipeline_checks' output for a run with a bronze-verify count.
 GATING_CHECKS: frozenset[str] = frozenset(
     {
         "bronze_rows_match_datagen",  # 0
@@ -850,12 +851,20 @@ def _gated_misses(
 ) -> list[tuple[str, Mapping[str, Any] | None]]:
     """``(check id, check or None)`` for each gated check that did not pass:
     failed, ``unchecked``, or absent from the record (None)."""
-    by_id = {c.get("id"): c for c in record.get("checks") or [] if isinstance(c, Mapping)}
+    entries: dict[Any, list[Mapping[str, Any]]] = {}
+    for c in record.get("checks") or []:
+        if isinstance(c, Mapping):
+            entries.setdefault(c.get("id"), []).append(c)
     out: list[tuple[str, Mapping[str, Any] | None]] = []
     for gid in sorted(gating):
-        c = by_id.get(gid)
-        if c is None or c.get("status") != "pass":
-            out.append((gid, c))
+        found = entries.get(gid)
+        if not found:
+            out.append((gid, None))
+            continue
+        # A repeated id passes only when every entry with it passed.
+        bad = next((c for c in found if c.get("status") != "pass"), None)
+        if bad is not None:
+            out.append((gid, bad))
     return out
 
 
@@ -877,7 +886,7 @@ def gating_problems(
     gating = _gated_ids(only)
     if not gating:
         return []
-    if record is None or not record.get("facts_present"):
+    if record is None or record.get("facts_present") is not True:
         if only is not None:
             return []  # already reported when the pipeline was judged
         why = (record or {}).get("reason") or "the check did not run"
@@ -901,18 +910,22 @@ def gating_outcome(record: Mapping[str, Any] | None) -> tuple[str | None, str | 
 
     The rule is ``gating_problems``'s: FAIL when a check in
     ``GATING_CHECKS`` failed, is ``unchecked`` or is absent, or when the
-    record has no facts (``facts_present`` false). A gated benchmark shape
-    is judged only when the record holds benchmark shape checks, as the CLI
-    judges it only after the benchmark ran. ``(None, None)`` when there is
-    no record, when ``GATING_CHECKS`` is empty, when only checks outside it
-    failed (``reporting_failures`` lists those), and for a record marked
-    ``reporting_only``.
+    record has no facts (``facts_present`` not true). A gated benchmark
+    shape is judged only when the record holds benchmark shape checks, as
+    the CLI judges it only after the benchmark ran. ``(None, None)`` when
+    there is no record, when ``GATING_CHECKS`` is empty, when only checks
+    outside it failed (``reporting_failures`` lists those), and for a
+    continuous record marked ``reporting_only``. The CLI never leaves a
+    batch run's record absent (``unevaluated_record``), so no record means
+    the run had no Customer 360 check to make.
     """
-    if not isinstance(record, Mapping) or record.get("reporting_only") is True:
+    if not isinstance(record, Mapping):
+        return None, None
+    if record.get("reporting_only") is True and record.get("mode") == "continuous":
         return None, None
     if not GATING_CHECKS:
         return None, None
-    if not record.get("facts_present"):
+    if record.get("facts_present") is not True:
         why = record.get("reason") or "the check did not run"
         return "FAIL", f"Customer 360 correctness gate failed: no expected-result facts ({why})"
     gating = _gated_ids(None)
@@ -929,6 +942,14 @@ def gating_outcome(record: Mapping[str, Any] | None) -> tuple[str | None, str | 
         f"{gid} {'not evaluated' if c is None else c.get('status')}" for gid, c in misses
     )
     return "FAIL", f"Customer 360 correctness gate failed: {detail}"
+
+
+def unevaluated_record(reason: str) -> dict[str, Any]:
+    """The record for a run whose check could not be evaluated at all: no
+    facts, so the gate fails closed in the CLI and in the verdict."""
+    v = verdict([], reason)
+    v["facts_present"] = False
+    return v
 
 
 def reporting_failures(record: Mapping[str, Any] | None) -> list[str]:

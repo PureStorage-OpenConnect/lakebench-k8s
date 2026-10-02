@@ -141,15 +141,71 @@ def test_verdict_gate_and_cli_gate_agree(rec, fails):
 def test_gating_outcome_scopes_out_what_cannot_gate(monkeypatch):
     assert c3.gating_outcome(None) == (None, None)
     bad = _gated_record(silver_to_gold_days=False)
-    assert c3.gating_outcome(dict(bad, reporting_only=True)) == (None, None)
     monkeypatch.setattr(c3, "GATING_CHECKS", frozenset())
     assert c3.gating_outcome(bad) == (None, None)
+    # An empty list is reporting only even for a record with no facts, as in
+    # the CLI.
+    no_facts = c3.unevaluated_record("boom")
+    assert c3.gating_outcome(no_facts) == (None, None)
+    assert c3.gating_problems(no_facts) == []
 
 
 def test_reporting_failures_lists_only_checks_outside_the_list():
     rec = _gated_record(interaction_mix=False, silver_to_gold_days=False, dates_in_window=None)
     assert c3.reporting_failures(rec) == ["interaction_mix"]
     assert c3.reporting_failures(None) == []
+
+
+def test_gated_ids_are_positions_0_to_14_and_17():
+    """The owner's numbers (checks 0-14 and 17) as pipeline_checks orders a
+    run with a bronze count: the same 16 ids as GATING_CHECKS."""
+    ctx = {
+        "window_start": "2024-01-01",
+        "window_end": "2025-01-01",
+        "customers": 1000,
+        "bronze_rows_expected": {"snappy": 10},
+    }
+    ids = [
+        c["id"] for c in c3.pipeline_checks(_facts(30), {"rows": 10, "silver_filter_rows": 9}, ctx)
+    ]
+    assert {ids[i] for i in (*range(15), 17)} == c3.GATING_CHECKS
+
+
+def test_repeated_gated_id_passes_only_when_every_entry_passes():
+    rec = _gated_record()
+    rec["checks"].insert(0, c3._check("bronze_to_silver_rows", "reconcile", False, 1, 0))
+    assert c3.gating_outcome(rec)[0] == "FAIL"
+    assert c3.gating_problems(rec)
+
+
+def test_facts_present_must_be_true():
+    rec = dict(_gated_record(), facts_present="false")
+    assert c3.gating_outcome(rec)[0] == "FAIL"
+    assert c3.gating_problems(rec)
+
+
+def test_reporting_only_needs_a_continuous_record():
+    bad = _gated_record(silver_to_gold_days=False)
+    assert c3.gating_outcome(dict(bad, reporting_only=True))[0] == "FAIL"
+    assert c3.gating_outcome(dict(bad, reporting_only=True, mode="continuous")) == (None, None)
+
+
+def test_unevaluated_record_fails_closed_in_both_gates():
+    rec = c3.unevaluated_record("the check could not run: KeyError('window_start')")
+    assert rec["status"] == "unknown" and rec["facts_present"] is False
+    assert c3.gating_outcome(rec)[0] == "FAIL"
+    assert c3.gating_problems(rec)
+
+
+def test_run_keeps_a_record_when_the_check_raises():
+    """A check that raised still leaves a record, so the verdict fails
+    closed and not only the CLI's pipeline_success."""
+    src = (ROOT / "src/lakebench/cli/_run.py").read_text()
+    i = src.index("_c360.evaluate_run(")
+    block = src[i : src.index("_c360.gating_problems(", i)]
+    handler = block[block.index("except Exception") :]
+    assert "_c360.unevaluated_record(" in handler
+    assert "collector.current_run.c360_correctness = _c360_rec" in handler
 
 
 def test_pass_requires_every_core_check():
