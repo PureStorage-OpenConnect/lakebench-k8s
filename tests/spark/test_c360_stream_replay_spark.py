@@ -93,11 +93,6 @@ def test_iceberg_bronze_fresh_checkpoint_is_not_skipped(result):
     assert result["ice_bronze_rows_after_fresh"] == result["bronze_rows"] + 10
 
 
-@pytest.mark.known_bug(
-    "LB-223",
-    match="PARSE_SYNTAX_ERROR",
-    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
-)
 def test_delta_silver_replay_is_skipped_and_reported(result):
     """Delta skips the replay; the writer sees it and reports 0 rows."""
     _section_ran(result, "delta_silver")
@@ -105,11 +100,6 @@ def test_delta_silver_replay_is_skipped_and_reported(result):
     assert result["delta_silver_rows"] == result["silver_rows"]
 
 
-@pytest.mark.known_bug(
-    "LB-223",
-    match="PARSE_SYNTAX_ERROR",
-    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
-)
 def test_delta_silver_fresh_checkpoint_is_not_skipped(result):
     """txnAppId carries the query id, so a fresh checkpoint still writes."""
     _section_ran(result, "delta_silver")

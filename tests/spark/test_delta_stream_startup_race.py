@@ -33,20 +33,10 @@ def _ran(result):
     assert result["errors"] == [], result
 
 
-@pytest.mark.known_bug(
-    "LB-223",
-    match="PARSE_SYNTAX_ERROR",
-    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
-)
 def test_no_errors(result):
     assert result["errors"] == [], result
 
 
-@pytest.mark.known_bug(
-    "LB-223",
-    match="PARSE_SYNTAX_ERROR",
-    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
-)
 def test_both_racers_wrote(result):
     """Both racers commit non-zero rows: neither is Delta-deduped by
     (appId, version) because they used distinct app ids."""
@@ -56,22 +46,12 @@ def test_both_racers_wrote(result):
     assert written["A"] > 0 and written["B"] > 0, written
 
 
-@pytest.mark.known_bug(
-    "LB-223",
-    match="PARSE_SYNTAX_ERROR",
-    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
-)
 def test_no_data_loss(result):
     """After both writes settle, the table holds both racers' rows."""
     _ran(result)
     assert result["table_rows"] == result["written"]["A"] + result["written"]["B"], result
 
 
-@pytest.mark.known_bug(
-    "LB-223",
-    match="PARSE_SYNTAX_ERROR",
-    reason="Delta createIfNotExists rejects the three-part spark_catalog.silver name",
-)
 def test_both_stream_ids_visible(result):
     """The I6 columns let operators see both racers' rows partitioned by
     stream id -- proves the not-exists branch wrote through the append
