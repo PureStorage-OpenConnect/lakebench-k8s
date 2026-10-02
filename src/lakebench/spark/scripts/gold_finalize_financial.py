@@ -40,7 +40,9 @@ from common import (
     log,
     log_job_metrics,
     one_line,
+    rule_stage_profile,
     sealed_txns_filter,
+    spark_jobs_submitted,
 )
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession
@@ -478,6 +480,11 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{run_id}'")
     log(f"[detection] cleared {GOLD_ALERTS} rows from runs other than {run_id}")
     timings["setup_s"] = time.time() - pass_start
+    # Each rule runs in its own Spark job group, so its jobs and stages can be
+    # attributed to it ([stage-profile] lines, read from the status store
+    # after the rule). The caller's group is restored after every rule.
+    sc = spark.sparkContext
+    caller_group = _job_group_props(sc)
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
@@ -486,6 +493,11 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             status_rows.append((rule_id, "error", "unknown-rule", target_typology, None))
             timings["rules"][rule_id] = {"elapsed_s": 0.0, "committed_s": None}
             continue
+        # Unique per invocation: the continuous loop runs the same rule every
+        # tick, and the status store keeps earlier ticks' jobs.
+        group = f"lb-rule-{rule_id}-{uuid.uuid4().hex[:8]}"
+        sc.setJobGroup(group, f"{rule_id} run {run_id}", interruptOnCancel=False)
+        first_job = spark_jobs_submitted(spark)
         rule_start = time.time()
         try:
             # Signature-based param filter, NOT ``__code__.co_varnames``
@@ -572,6 +584,8 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": None}
             status_rows.append((rule_id, "error", err, target_typology, None))
         finally:
+            rule_stage_profile(spark, group, rule_id, first_job=first_job)
+            _restore_job_group(sc, caller_group)
             cleanup_start = time.time()
             # The alerts frame and W1/W3/W17's intermediate frames (edges,
             # step, path levels) are persisted. Nothing outlives the rule's
@@ -601,6 +615,21 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     _project_derived_gold(spark, run_id)
     timings["finish_s"] = time.time() - finish_start
     return timings
+
+
+_JOB_GROUP_KEYS = ("spark.jobGroup.id", "spark.job.description", "spark.job.interruptOnCancel")
+
+
+def _job_group_props(sc) -> dict:
+    """The thread's job-group local properties (None when unset)."""
+    return {k: sc.getLocalProperty(k) for k in _JOB_GROUP_KEYS}
+
+
+def _restore_job_group(sc, props: dict) -> None:
+    """Put back the job-group properties ``_job_group_props`` read. A None
+    value removes the property, as it was before the rule's group was set."""
+    for k in _JOB_GROUP_KEYS:
+        sc.setLocalProperty(k, props.get(k))
 
 
 def _drop_rule_alerts(spark, rule_id: str) -> None:

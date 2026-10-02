@@ -2773,3 +2773,115 @@ def write_delta_table(
         else:
             log(f"Writing managed Delta table {fq_table} (mode={mode})")
         writer.saveAsTable(fq_table)
+
+
+def spark_jobs_submitted(spark):
+    """How many Spark jobs this application has submitted so far
+    (DAGScheduler.numTotalJobs), or None when it cannot be read."""
+    try:
+        return int(spark.sparkContext._jsc.sc().dagScheduler().numTotalJobs())
+    except Exception:  # noqa: BLE001 -- diagnostic only
+        return None
+
+
+def rule_stage_profile(spark, group, rule_id, top=3, first_job=None):
+    """Log the ``top`` stages of job group ``group`` by executor run time.
+
+    Reads the driver's AppStatusStore through py4j. The store is live with
+    ``spark.ui.enabled=false`` (only the UI server is off) and keeps the
+    last ``spark.ui.retainedStages`` stages. One line per stage, heaviest
+    first::
+
+        [stage-profile] rule=<id> group=<g> stage=<n> attempt=<a> tasks=<t>
+            wall_s=<s> exec_s=<s> shuffle_read_mb=<m> max_task_s=<s>
+            stages=<k> truncated=<true|false> name=<stage name>
+
+    ``wall_s`` is submission to completion, ``exec_s`` the summed executor
+    run time of the stage's tasks, ``max_task_s`` its longest task,
+    ``stages`` the number of stages the group ran that the store still
+    holds (skipped stages, whose output was reused, are not counted).
+    ``truncated=true`` means some of the group's jobs or stages had already
+    left the store (it keeps ``spark.ui.retainedJobs`` jobs and
+    ``spark.ui.retainedStages`` stages), so the list may miss stages.
+    Evicted jobs are not listed under the group at all, so they are found
+    by count: ``first_job`` is ``spark_jobs_submitted`` taken when the
+    group was set, and fewer retained group jobs than jobs submitted since
+    marks the profile truncated. A group that ran no stage logs ``stages=0``
+    and no stage line.
+
+    Best effort: any failure logs ``[stage-profile] rule=<id> group=<g>
+    unavailable reason=<one line>`` and returns None. Never raises, so
+    detection cannot fail because of it. Returns the logged rows.
+    """
+    try:
+        sc = spark.sparkContext
+        tracker = sc.statusTracker()
+        store = sc._jsc.sc().statusStore()
+        truncated = False
+        stage_ids = set()
+        job_ids = list(tracker.getJobIdsForGroup(group))
+        submitted = spark_jobs_submitted(spark)
+        if first_job is not None and submitted is not None:
+            truncated = len(job_ids) < submitted - first_job
+        for job_id in job_ids:
+            info = tracker.getJobInfo(job_id)
+            if info is None:
+                truncated = True
+                continue
+            stage_ids.update(int(s) for s in info.stageIds)
+        stages = []
+        for sid in sorted(stage_ids):
+            try:
+                sd = store.lastStageAttempt(sid)
+            except Exception:  # noqa: BLE001 -- evicted from the store
+                truncated = True
+                continue
+            if sd.status().toString() in ("SKIPPED", "PENDING"):
+                continue
+            sub, comp = sd.submissionTime(), sd.completionTime()
+            wall = (
+                round((comp.get().getTime() - sub.get().getTime()) / 1000.0, 1)
+                if sub.isDefined() and comp.isDefined()
+                else None
+            )
+            stages.append(
+                {
+                    "stage": sid,
+                    "attempt": int(sd.attemptId()),
+                    "tasks": int(sd.numTasks()),
+                    "wall_s": wall,
+                    "exec_s": round(int(sd.executorRunTime()) / 1000.0, 1),
+                    "shuffle_read_mb": round(int(sd.shuffleReadBytes()) / 1048576.0, 1),
+                    "name": one_line(sd.name(), limit=120),
+                }
+            )
+        stages.sort(key=lambda r: (-r["exec_s"], r["stage"]))
+        rows = stages[:top]
+        gw = sc._gateway
+        for r in rows:
+            quantile = gw.new_array(gw.jvm.double, 1)
+            quantile[0] = 1.0
+            summary = store.taskSummary(r["stage"], r["attempt"], quantile)
+            r["max_task_s"] = (
+                round(summary.get().executorRunTime().apply(0) / 1000.0, 1)
+                if summary.isDefined()
+                else None
+            )
+    except Exception as e:  # noqa: BLE001 -- diagnostic only
+        log(
+            f"[stage-profile] rule={rule_id} group={group} unavailable "
+            f"reason={one_line(f'{type(e).__name__}: {e}')}"
+        )
+        return None
+    flag = "true" if truncated else "false"
+    if not rows:
+        log(f"[stage-profile] rule={rule_id} group={group} stages=0 truncated={flag}")
+    for r in rows:
+        log(
+            f"[stage-profile] rule={rule_id} group={group} stage={r['stage']} "
+            f"attempt={r['attempt']} tasks={r['tasks']} wall_s={r['wall_s']} "
+            f"exec_s={r['exec_s']} shuffle_read_mb={r['shuffle_read_mb']} "
+            f"max_task_s={r['max_task_s']} stages={len(stages)} truncated={flag} "
+            f"name={r['name']}"
+        )
+    return rows

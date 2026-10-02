@@ -149,6 +149,72 @@ def _check(spark):
     ]
 
 
+def _check_stage_profile(spark):
+    """AML-1: each rule runs in its own job group, logs a [stage-profile]
+    line (stages, none, or unavailable) whatever its outcome, and the
+    caller's job group is back after the pass."""
+    import common
+    import detection_rules
+    import gold_finalize_financial as gf
+
+    from lakebench.metrics.stage_profile import parse_stage_profile
+
+    sc = spark.sparkContext
+    sc.setJobGroup("caller-group", "caller description", interruptOnCancel=False)
+    template = detection_rules._empty_alerts_df(spark, "x")
+    groups = {}
+
+    def ran_rule(silver_txns, run_id="unknown"):
+        groups["WX_ran"] = sc.getLocalProperty("spark.jobGroup.id")
+        # A shuffle, so the rule's group runs more than one stage.
+        silver_txns.groupBy("uetr").count().collect()
+        return template
+
+    def skip_rule(silver_txns, run_id="unknown"):
+        groups["WX_skip"] = sc.getLocalProperty("spark.jobGroup.id")
+        raise detection_rules.RuleSkipped("test-skip")
+
+    def error_rule(silver_txns, run_id="unknown"):
+        groups["WX_error"] = sc.getLocalProperty("spark.jobGroup.id")
+        raise RuntimeError("boom")
+
+    rules = {"WX_ran": ran_rule, "WX_skip": skip_rule, "WX_error": error_rule}
+    logged = []
+    real = (gf.log, common.log)
+
+    def capture(m):
+        logged.append(m)
+        real[1](m)
+
+    detection_rules._RULE_DISPATCH.update(rules)
+    gf.log = common.log = capture
+    try:
+        txns = spark.createDataFrame([(f"u{i}",) for i in range(5)], "uetr string")
+        gf.run_detection_rules(spark, txns, "run-sp", rules=tuple(rules))
+    finally:
+        gf.log, common.log = real
+        for r in rules:
+            del detection_rules._RULE_DISPATCH[r]
+
+    assert sc.getLocalProperty("spark.jobGroup.id") == "caller-group"
+    assert sc.getLocalProperty("spark.job.description") == "caller description"
+    for rule, group in groups.items():
+        assert group.startswith(f"lb-rule-{rule}-"), groups
+    assert len(set(groups.values())) == 3, groups
+    lines = [m for m in logged if m.startswith("[stage-profile]")]
+    for rule in rules:
+        assert any(f"rule={rule} group={groups[rule]} " in m for m in lines), (rule, lines)
+    profile, unavailable = parse_stage_profile("\n".join(lines))
+    assert unavailable == {}, unavailable
+    assert profile["WX_ran"], lines
+    top = profile["WX_ran"][0]
+    assert top["tasks"] >= 1 and top["exec_s"] >= 0 and top["stages"] >= 2, top
+    assert profile["WX_skip"] == [] and profile["WX_error"] == [], profile
+    sc.setLocalProperty("spark.jobGroup.id", None)
+    sc.setLocalProperty("spark.job.description", None)
+    sc.setLocalProperty("spark.job.interruptOnCancel", None)
+
+
 def _check_late_entity(spark):
     """Continuous mode: silver_stream commits a batch's transactions before its
     entities, so a gold tick can see a structuring subject's payments while the
@@ -194,6 +260,7 @@ if __name__ == "__main__":
     _spark = _session(sys.argv[1], sys.argv[2])
     try:
         _check(_spark)
+        _check_stage_profile(_spark)
         _check_late_entity(_spark)
     finally:
         _spark.stop()

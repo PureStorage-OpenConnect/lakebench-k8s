@@ -277,10 +277,44 @@ def _check(spark):
 
     txns, n_rows = _setup(spark)
     _alerts(spark, "run-x-c1")
-    inv = tm.run_tm_operations(
-        spark, txns, "run-x-c1", params=PARAMS, source_rows_fn=lambda s: n_rows
-    )
+    logged = []
+    real_log = tm.log
+    tm.log = lambda m: (logged.append(m), real_log(m))
+    try:
+        inv = tm.run_tm_operations(
+            spark, txns, "run-x-c1", params=PARAMS, source_rows_fn=lambda s: n_rows
+        )
+    finally:
+        tm.log = real_log
     status = {n: (s, d) for n, s, d in inv}
+
+    # AML-1: the [tm-ops] summary times each stage of the pass, and the
+    # phases account for the pass's elapsed time.
+    import json as _json
+
+    ops = [_json.loads(m[len("[tm-ops] ") :]) for m in logged if m.startswith("[tm-ops] ")]
+    assert len(ops) == 1, logged
+    phases = ops[0]["phases"]
+    # The summary is logged with sorted keys, so compare as a set.
+    assert set(phases) == {
+        "pin",
+        "reconcile",
+        "prior_state",
+        "inputs",
+        "simulate",
+        "write_ledger",
+        "write_dispositions",
+        "write_cases",
+        "coverage",
+        "read_back",
+        "recon_write",
+        "invariants",
+    }, phases
+    assert all(v >= 0 for v in phases.values()), phases
+    total, elapsed = sum(phases.values()), ops[0]["elapsed_seconds"]
+    # elapsed_seconds is rounded to 0.1 s and also covers the invariant log
+    # lines after the last phase.
+    assert abs(total - elapsed) <= 0.05 * elapsed + 0.1, (total, elapsed, phases)
     assert all(s == "pass" for s, _ in status.values()), status
     assert {
         "monitored_population",

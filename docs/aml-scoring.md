@@ -478,6 +478,32 @@ to 800, and refused above 800, where a datagen pod would exceed the 16 GiB per-p
 Lakebench-imposed cap). The pipeline has been run end to end only up to
 scale 100, on the pre-freeze generator.
 
+### Where gold-finalize spends its time
+
+The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
+`gold-finalize`) records, besides `alerts_by_rule`:
+
+- `rule_elapsed_s`: wall seconds per detection rule, for every rule that
+  started (ran, failed or skipped for a structural reason such as W1's
+  vertex cap), from the rule's start to its alerts' commit.
+- `stage_profile`: per rule, its three heaviest Spark stages by summed
+  executor run time (`exec_s`), with the stage's task count, wall time,
+  longest task (`max_task_s`), shuffle read in MB, the number of stages the
+  rule ran, and `truncated: true` when some of the rule's jobs or stages
+  had already left the driver's status store (it keeps the last 100 of
+  each), so the three may not be the heaviest. Each
+  rule runs in its own Spark job group, `lb-rule-<rule>-<id>`, which is
+  how its stages are told apart. An empty list means the rule ran no
+  stage. When the status store cannot be read, the rule is listed in
+  `stage_profile_unavailable` with the reason instead; detection is never
+  affected.
+- `tm_ops.phases`: wall seconds per stage of the TM operations pass
+  (`pin`, `reconcile`, `prior_state`, `inputs`, `simulate`,
+  `write_ledger`, `write_dispositions`, `write_cases`, `coverage`,
+  `read_back`, `recon_write`, `invariants`), which together make up
+  `tm_ops.elapsed_seconds`. Spark evaluates lazily, so a phase holds the
+  work its own reads and writes triggered.
+
 ## Known limitations in v1.6
 
 - **No counter-leakage hard negatives yet.** The generator does not yet

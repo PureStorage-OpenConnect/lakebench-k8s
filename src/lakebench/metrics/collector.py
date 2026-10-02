@@ -77,6 +77,18 @@ class JobMetrics:
     alerts_by_rule: dict[str, int] = field(default_factory=dict)
     rule_errors: dict[str, str] = field(default_factory=dict)
     rules_skipped: dict[str, str] = field(default_factory=dict)
+    # Wall seconds per rule from the same ``[detection]`` lines' trailing
+    # ``elapsed=Ts``: every rule that was attempted (ran, failed or skipped
+    # for a structural reason), not mode-excluded rules, which never start.
+    rule_elapsed_s: dict[str, float] = field(default_factory=dict)
+    # Heaviest Spark stages per rule from the ``[stage-profile]`` lines
+    # (common.rule_stage_profile), heaviest first: {"stage", "attempt",
+    # "tasks", "wall_s", "exec_s", "shuffle_read_mb", "max_task_s",
+    # "stages", "truncated", "name"}. An empty list means the rule's group
+    # ran no stage. ``stage_profile_unavailable`` holds the reason when the
+    # status store could not be read for a rule.
+    stage_profile: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    stage_profile_unavailable: dict[str, str] = field(default_factory=dict)
     # TM operations layer (GOALS P10, AML gold only), from the driver's
     # ``[tm-invariant]`` and ``[tm-ops]`` lines. ``tm_invariants`` is keyed
     # by cycle (as a string, the JSON key) then invariant name, each value
@@ -3032,13 +3044,14 @@ class MetricsCollector:
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"alerts=(?P<n>\d+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=[\d.]+s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
             re.MULTILINE,
         )
         for m in detection_re.finditer(logs):
             rule = m.group("rule")
             try:
                 metrics.alerts_by_rule[rule] = int(m.group("n"))
+                metrics.rule_elapsed_s[rule] = float(m.group("elapsed"))
             except ValueError:
                 continue
             mid = (m.group("mid") or "").strip()
@@ -3058,11 +3071,22 @@ class MetricsCollector:
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"skipped=(?P<reason>[A-Za-z0-9_-]+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=[\d.]+s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
             re.MULTILINE,
         )
         for m in skip_re.finditer(logs):
-            metrics.rules_skipped[m.group("rule")] = m.group("reason").strip()
+            reason = m.group("reason").strip()
+            metrics.rules_skipped[m.group("rule")] = reason
+            if reason != "mode-excluded":
+                try:
+                    metrics.rule_elapsed_s[m.group("rule")] = float(m.group("elapsed"))
+                except ValueError:
+                    pass
+
+        # AML-1: per-rule Spark stage profile (common.rule_stage_profile).
+        from lakebench.metrics.stage_profile import parse_stage_profile
+
+        metrics.stage_profile, metrics.stage_profile_unavailable = parse_stage_profile(logs)
 
         # P10 TM operations lines (tm_operations.py).
         from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_ops, parse_tm_status
