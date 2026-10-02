@@ -256,8 +256,12 @@ def experiment_inputs(
     from lakebench.modules.pipeline_engines.spark.conf_keys import user_spark_overrides
 
     # Local runs build no Spark job manifest, so the user conf never ran.
+    buckets = cfg.platform.storage.s3.buckets
+    layers = {buckets.bronze: "bronze", buckets.silver: "silver", buckets.gold: "gold"}
     user_conf = (
-        record_spark_conf(user_spark_overrides(cfg.spark.conf or {})) if system != "local" else {}
+        record_spark_conf(user_spark_overrides(cfg.spark.conf or {}), layers)
+        if system != "local"
+        else {}
     )
 
     corpus = {

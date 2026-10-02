@@ -660,12 +660,13 @@ reaches the pipeline's Spark jobs only, not the Spark Thrift server or
 `--local` runs. The run record keeps it as `architecture.spark_conf_user`:
 every key is named, but only tuning keys (SQL execution, shuffle, memory,
 speculation and the like) keep their values. A key that names a
-credential, a secret or an environment variable (`spark.executorEnv.*`), or
-whose value names a location (a URI, an IP address, an endpoint), is
-recorded as `<redacted>`. Any other value is recorded as
+credential, a secret, an endpoint, a location or an environment variable
+(`spark.executorEnv.*`), or whose value names a location (a URI or an IP
+address), is recorded as `<redacted>`. Any other value is recorded as
 `<redacted sha256:...>`, a digest of the value, which a short value does
 not protect: put secrets under a secret-named key or an environment
-variable. A per-bucket S3A key records its bucket as `<bucket-N>`. The
+variable. A per-bucket S3A key records its bucket's layer (`<bronze>`,
+`<silver>`, `<gold>`) or `<other-bucket>` instead of its name. The
 recorded map is the `spark conf` key of the experiment identity, so two
 runs whose recorded maps differ are not like-for-like, while two
 deployments that differ only in buckets and endpoints are. A difference

@@ -95,47 +95,69 @@ _SECRET_SEGMENT = re.compile(
 )
 # Environment variables are where secrets usually go.
 _ENV_PREFIXES = ("spark.executorEnv.", "spark.yarn.appMasterEnv.")
-_PER_BUCKET = re.compile(r"^(spark\.hadoop\.fs\.s3a\.bucket\.)([^.]+)\.(.+)$")
-_IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_PER_BUCKET_PREFIX = "spark.hadoop.fs.s3a.bucket."
+# A bare IPv4 address, or one after a scheme, credentials or a path; not a
+# four-part version string inside a coordinate.
+_IPV4 = re.compile(r"(?:^|[/@])\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:$|/)")
 
 
-def record_spark_conf(conf: dict[str, str]) -> dict[str, str]:
+def _bucket_label(key: str, layers: dict[str, str]) -> tuple[str, str | None]:
+    """*key* with a per-bucket S3A bucket name replaced by its layer
+    (``<bronze>``, ``<silver>``, ``<gold>``) or by ``<other-bucket>``, and
+    the bucket name (None when *key* is not per-bucket). Known names are
+    matched whole, longest first, so a dotted name is replaced whole."""
+    if not key.startswith(_PER_BUCKET_PREFIX):
+        return key, None
+    rest = key[len(_PER_BUCKET_PREFIX) :]
+    for name in sorted(layers, key=len, reverse=True):
+        if rest.startswith(name + "."):
+            return f"{_PER_BUCKET_PREFIX}<{layers[name]}>.{rest[len(name) + 1 :]}", name
+    name, _, tail = rest.partition(".")
+    return f"{_PER_BUCKET_PREFIX}<other-bucket>.{tail}", name
+
+
+def record_spark_conf(
+    conf: dict[str, str], bucket_layers: dict[str, str] | None = None
+) -> dict[str, str]:
     """The user's spark.conf as the run record (and the "spark conf" identity
     key) carries it, keys sorted.
 
     - Tuning keys (``conf_keys.RECORDABLE_SPARK_KEYS`` and prefixes) keep
       their value.
-    - A key that names a credential, a secret or an environment variable, or
-      whose value names a location (a URI, an IPv4 address, an endpoint or
-      location key), reads "<redacted>": no digest, because a short secret's
+    - A key that names a credential, a secret, an endpoint, a location or an
+      environment variable, or whose value names a location (a URI or an
+      IPv4 address), reads "<redacted>": no digest, because a short secret's
       digest can be guessed offline and a location differs per deployment,
       not per workload.
     - Every other value reads "<redacted sha256:16 hex>", so two runs that
       differ in it differ in identity.
 
-    A per-bucket S3A key names its bucket, which differs per deployment, so
-    the bucket segment is recorded as ``<bucket-N>`` (N by sorted bucket
-    name)."""
+    A per-bucket S3A key names its bucket, which differs per deployment:
+    the record names the bucket's layer from *bucket_layers* (bucket name to
+    "bronze", "silver" or "gold") instead, or ``<other-bucket>``. The
+    predicates run on that key, so a bucket name never decides a value's
+    form."""
     from lakebench.modules.pipeline_engines.spark.conf_keys import (
         RECORDABLE_SPARK_KEYS,
         RECORDABLE_SPARK_PREFIXES,
     )
 
-    buckets = sorted({m.group(2) for k in conf if (m := _PER_BUCKET.match(k))})
+    layers = dict(bucket_layers or {})
     out: dict[str, str] = {}
     for key, value in sorted(conf.items()):
         v = str(value)
-        name = key
-        m = _PER_BUCKET.match(key)
-        if m:
-            name = f"{m.group(1)}<bucket-{buckets.index(m.group(2)) + 1}>.{m.group(3)}"
-        last = key.rsplit(".", 1)[-1]
+        name, _bucket = _bucket_label(key, layers)
+        # Two unknown buckets with one setting: keep every value, in key order.
+        while name in out:
+            name += "+"
+        probe = re.sub(r"<[^>]+>", "b", name).rstrip("+")
+        last = probe.rsplit(".", 1)[-1]
         if key in RECORDABLE_SPARK_KEYS or key.startswith(RECORDABLE_SPARK_PREFIXES):
             out[name] = v
         elif (
-            is_credential_key(key)
-            or is_location_key(key)
-            or key.startswith(_ENV_PREFIXES)
+            is_credential_key(probe)
+            or is_location_key(probe)
+            or probe.startswith(_ENV_PREFIXES)
             or _SECRET_SEGMENT.search(last)
             or "endpoint" in last.lower()
             or "://" in v

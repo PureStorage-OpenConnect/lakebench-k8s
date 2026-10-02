@@ -93,7 +93,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `experiment.architecture.spark_conf_user` and enters the experiment
   identity as `spark conf`; only tuning keys keep their values there.
   Credential, secret-named, environment-variable and location values are
-  recorded as `<redacted>`, and other values by digest.
+  recorded as `<redacted>`, and other values by digest; a per-bucket S3A
+  key names the bucket's layer, not the bucket.
   `spark.conf` reaches the pipeline's Spark jobs only: not the Spark Thrift
   server, and not `--local` runs.
 - **`operator.install: true` is refused.** The Spark Operator

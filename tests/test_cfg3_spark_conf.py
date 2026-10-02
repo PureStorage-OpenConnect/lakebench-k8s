@@ -270,7 +270,7 @@ def test_spark_conf_enters_the_identity():
     assert magic_id == other_ns_id  # where it lives is not what it runs
     assert magic_id != directory_id and magic_id != base_id
     assert magic_id["spark conf"] == magic_opt["spark conf"]
-    key = "spark.hadoop.fs.s3a.bucket.<bucket-1>.committer.name"
+    key = "spark.hadoop.fs.s3a.bucket.<other-bucket>.committer.name"
     assert magic_opt["spark conf"][key].startswith("<redacted sha256:")
     assert magic_opt["spark conf"]["spark.eventLog.dir"] == "<redacted>"
     assert directory_opt["spark conf"][key] != magic_opt["spark conf"][key]
@@ -305,10 +305,10 @@ def test_record_redaction_rules():
         "spark.executorEnv.DB_PASS",
         "spark.executorEnv.OMP_NUM_THREADS",
         "spark.sql.catalog.x.header.Authorization",
-        "spark.hadoop.fs.s3a.bucket.<bucket-1>.access.key",
+        "spark.hadoop.fs.s3a.bucket.<other-bucket>.access.key",
         "spark.hadoop.fs.defaultFS",
         "spark.hadoop.javax.jdo.option.ConnectionURL",
-        "spark.hadoop.fs.s3a.bucket.<bucket-1>.endpoint",
+        "spark.hadoop.fs.s3a.bucket.<other-bucket>.endpoint",
         "spark.hadoop.some.host",
     }
     assert digested == {
@@ -318,6 +318,42 @@ def test_record_redaction_rules():
     }
     assert rec["spark.speculation"] == "true"
     assert list(rec) == sorted(rec)
+
+
+def test_record_names_bucket_layers_not_bucket_names():
+    from lakebench.metrics.fingerprint_inputs import record_spark_conf
+
+    def rec(raw, gold, committers):
+        layers = {raw: "bronze", gold: "gold"}
+        return record_spark_conf(
+            {
+                f"spark.hadoop.fs.s3a.bucket.{raw}.committer.name": committers[0],
+                f"spark.hadoop.fs.s3a.bucket.{gold}.committer.name": committers[1],
+            },
+            layers,
+        )
+
+    # Layer, not name order: swapping which layer gets which committer is a
+    # different record, though the names sort the other way.
+    a = rec("a-raw", "b-gold", ("magic", "directory"))
+    b = rec("b-raw", "a-gold", ("directory", "magic"))
+    assert a != b
+    # Same layout under other (dotted, credential-looking) names: same record.
+    c = rec("lb.tokens.raw", "lb-api-key-gold", ("magic", "directory"))
+    assert a == c
+    assert all(v.startswith("<redacted sha256:") for v in c.values())
+    assert set(c) == {
+        "spark.hadoop.fs.s3a.bucket.<bronze>.committer.name",
+        "spark.hadoop.fs.s3a.bucket.<gold>.committer.name",
+    }
+
+
+def test_version_strings_are_not_addresses():
+    from lakebench.metrics.fingerprint_inputs import record_spark_conf
+
+    rec = record_spark_conf({"spark.x.coord": "io.x:y_2.13:4.0.0.1", "spark.x.host": "10.1.2.3:80"})
+    assert rec["spark.x.coord"].startswith("<redacted sha256:")
+    assert rec["spark.x.host"] == "<redacted>"
 
 
 # -- drift: the owned set is exactly what the manifest writes ------------------
