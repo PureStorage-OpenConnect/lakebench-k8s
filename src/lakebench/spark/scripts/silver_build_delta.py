@@ -572,12 +572,12 @@ if incremental_mode:
 _cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
 _rebuild_epoch = int(os.environ.get("LB_REBUILD_EPOCH", "0"))
 
-# Cycles 2+ of a multi-cycle run append only their own bronze files; a full
-# build reads every file. Profile, size and read the same path.
 appending = incremental_mode and _table_exists(spark, silver_tbl)
-# A full build at a later cycle (no table to append to) reads this run's
-# files only, cycle 0 and cycles 1..k, as bronze-verify counts them, not
-# files an earlier and longer run left under the prefix.
+# Later cycles of a multi-cycle run append only their own bronze files. A
+# full build reads this run's files: every file in a single-cycle run, else
+# cycle 0's and cycles 1..k's (a later cycle that found no table), as
+# bronze-verify counts them, not files of later cycles an earlier run with
+# more cycles left under the prefix. Profile, size and read the same path.
 bronze_source = (
     c360_bronze_path(bronze_uri, True) if appending else c360_bronze_run_path(bronze_uri)
 )

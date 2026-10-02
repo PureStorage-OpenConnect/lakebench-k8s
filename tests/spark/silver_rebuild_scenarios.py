@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import sys
+from pathlib import Path
 
 from delta_silver_epoch_scenarios import (
     _clear_bronze,
@@ -65,12 +66,18 @@ def later_cycle_rebuild(spark, jars, root, fmt, strategy):
     rebuild_rc = silver_job(jars, work, 2, 0, strategy=strategy, log=log, fmt=fmt)
     held_after_rebuild = silver_cycles(spark, work, fmt)
     retry_rc = silver_job(jars, work, 2, 0, strategy=strategy, log=log, fmt=fmt)
+    held_after_retry = silver_cycles(spark, work, fmt)
+    # The next cycle appends after the rebuild as after any cycle.
+    stage_bronze(spark, work, 0, 3)
+    next_rc = silver_job(jars, work, 3, 0, strategy=strategy, log=log, fmt=fmt)
     return {
         "rcs": first,
         "rebuild_rc": rebuild_rc,
         "held_after_rebuild": held_after_rebuild,
         "retry_rc": retry_rc,
-        "held_after_retry": silver_cycles(spark, work, fmt),
+        "held_after_retry": held_after_retry,
+        "next_rc": next_rc,
+        "held_after_next": silver_cycles(spark, work, fmt),
         "log": log,
     }
 
@@ -83,11 +90,37 @@ def failed_probe(spark, jars, root, fmt):
     _clear_bronze(work)
     stage_bronze(spark, work, 1, 0)
     rc = silver_job(jars, work, 0, 0, log=log, fmt=fmt)
+    refused = "cannot tell whether" in log[-1]["tail"]
+    # --force-rebuild still rebuilds it.
+    forced_rc = silver_job(jars, work, 0, 0, force=True, log=log, fmt=fmt)
     return {
         "rcs": first,
         "dropped": dropped,
         "rc": rc,
-        "refused": "cannot tell whether" in log[-1]["tail"],
+        "refused": refused,
+        "forced_rc": forced_rc,
+        "held_after_forced": silver_cycles(spark, work, fmt),
+        "log": log,
+    }
+
+
+def unreadable_iceberg_metadata(spark, jars, root):
+    """The table's current metadata file cannot be read: the existence check
+    itself fails, which must not count as "no table"."""
+    work = _fresh(root, "metadata-iceberg")
+    log = []
+    first = run(spark, jars, work, 0, [0], log=log, fmt="iceberg")
+    meta = sorted(glob.glob(f"{_table_dir(work, 'iceberg')}/metadata/*.metadata.json"))
+    Path(meta[-1]).write_text("{")
+    _clear_bronze(work)
+    stage_bronze(spark, work, 1, 0)
+    rc = silver_job(jars, work, 0, 0, log=log, fmt="iceberg")
+    after = sorted(glob.glob(f"{_table_dir(work, 'iceberg')}/metadata/*.metadata.json"))
+    return {
+        "rcs": first,
+        "rc": rc,
+        "metadata_before": len(meta),
+        "metadata_after": len(after),
         "log": log,
     }
 
@@ -117,6 +150,7 @@ def main():
         "delta_simple": later_cycle_rebuild(spark, jars, root, "delta", "simple"),
         "probe_iceberg": failed_probe(spark, jars, root, "iceberg"),
         "probe_delta": failed_probe(spark, jars, root, "delta"),
+        "metadata_iceberg": unreadable_iceberg_metadata(spark, jars, root),
     }
     spark.stop()
     print(json.dumps(out))

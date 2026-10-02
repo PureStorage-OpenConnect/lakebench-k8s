@@ -56,9 +56,35 @@ def test_retry_of_a_later_cycle_rebuild_keeps_it(result, case):
     assert c["held_after_retry"] == THIS_RUN, _why(c)
 
 
+@pytest.mark.parametrize("case", ["iceberg_simple", "iceberg_streaming", "delta_simple"])
+def test_next_cycle_appends_after_the_rebuild(result, case):
+    c = result[case]
+    assert c["next_rc"] == 0, _why(c)
+    assert c["held_after_next"] == {**THIS_RUN, "0:3": 9}, _why(c)
+
+
 @pytest.mark.parametrize("case", ["probe_iceberg", "probe_delta"])
 def test_failed_row_probe_refuses_instead_of_rebuilding(result, case):
     c = result[case]
     assert c["rcs"] == [0] and c["dropped"] > 0, _why(c)
     assert c["rc"] != 0, _why(c)
     assert c["refused"], _why(c)
+
+
+@pytest.mark.parametrize("case", ["probe_iceberg", "probe_delta"])
+def test_failed_row_probe_with_force_rebuild_rebuilds(result, case):
+    c = result[case]
+    assert c["forced_rc"] == 0, _why(c)
+    assert c["held_after_forced"] == {"1:0": 9}, _why(c)
+
+
+def test_unreadable_iceberg_metadata_is_not_a_missing_table(result):
+    """The existence check fails; no rebuild commit is written over it.
+
+    Also true before the existence check failed closed, on this hadoop
+    catalog: createOrReplace then failed to load the same metadata. It pins
+    that an unreadable table is never rebuilt over."""
+    c = result["metadata_iceberg"]
+    assert c["rcs"] == [0], _why(c)
+    assert c["rc"] != 0, _why(c)
+    assert c["metadata_after"] == c["metadata_before"], _why(c)

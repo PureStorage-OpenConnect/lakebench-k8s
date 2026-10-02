@@ -10,6 +10,7 @@ Automatically selects the optimal processing strategy based on data size:
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -31,6 +32,7 @@ from common import (
     resolve_data_clock,
     sample_key_profile,
     set_utc_session,
+    table_exists,
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -287,12 +289,13 @@ def apply_dynamic_config(spark, profile: DataProfile):
 
 
 def _table_exists(spark, table_name: str) -> bool:
-    """Check if an Iceberg table exists."""
-    try:
-        spark.table(table_name)
-        return True
-    except Exception:
-        return False
+    """Check if a catalog table exists (see common.table_exists).
+
+    Only a genuine not-found is False: any other error (a metastore timeout,
+    an unreadable metadata file) raises, so it cannot send a populated table
+    down the full-rebuild path.
+    """
+    return table_exists(spark, table_name)
 
 
 def rows_added_by_last_commit(spark, silver_tbl):
@@ -372,6 +375,16 @@ def tag_batch(df_bronze, cycle, appending):
     """
     if appending:
         return df_bronze.withColumn("_batch_id", lit(int(cycle)).cast("bigint"))
+    if int(cycle) > 0:
+        # A rebuild at a later cycle whose own files the name pattern does not
+        # find would tag every row 0, and a retry would then delete nothing
+        # and append the cycle twice. Refuse instead.
+        own = re.compile(rf"/part-c0*{int(cycle)}-[^/]*$")
+        if not any(own.search(f) for f in df_bronze.inputFiles()):
+            raise SilverAbort(
+                f"silver-build: rebuilding at cycle {cycle}, but no bronze file is named "
+                f"part-c{int(cycle):03d}-*; cannot tag rows by cycle"
+            )
     n = regexp_extract(col("_metadata.file_path"), r"/part-c(\d+)-[^/]*$", 1)
     return df_bronze.withColumn("_batch_id", when(n == "", lit(0)).otherwise(n).cast("bigint"))
 
@@ -559,12 +572,12 @@ if incremental_mode:
 # writer DELETEs on the _batch_id key first.
 _cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
 
-# Cycles 2+ of a multi-cycle run append only their own bronze files; a full
-# build reads every file. Profile, size and read the same path.
 appending = incremental_mode and _table_exists(spark, silver_tbl)
-# A full build at a later cycle (no table to append to) reads this run's
-# files only, cycle 0 and cycles 1..k, as bronze-verify counts them, not
-# files an earlier and longer run left under the prefix.
+# Later cycles of a multi-cycle run append only their own bronze files. A
+# full build reads this run's files: every file in a single-cycle run, else
+# cycle 0's and cycles 1..k's (a later cycle that found no table), as
+# bronze-verify counts them, not files of later cycles an earlier run with
+# more cycles left under the prefix. Profile, size and read the same path.
 bronze_source = (
     c360_bronze_path(bronze_uri, True) if appending else c360_bronze_run_path(bronze_uri)
 )
