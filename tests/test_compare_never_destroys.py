@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+from lakebench.exit_codes import ExitCode
+
 CONFIG = """\
 name: {name}
 recipe: hive-iceberg-spark-trino
@@ -50,8 +52,21 @@ def test_compare_runs_no_destroy(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", record)
+    # An in-process destroy counts too.
+    import lakebench.cli._destroy as destroy_cli
+    import lakebench.deploy.destroy as destroy_mod
+
+    def in_process(*a, **k):
+        children.append(["destroy", "(in process)"])
+        raise RuntimeError("compare destroyed in process")
+
+    monkeypatch.setattr(destroy_cli, "_destroy_impl", in_process)
+    monkeypatch.setattr(destroy_mod, "destroy_all", in_process)
     for name in ("cmpa", "cmpb"):
         (tmp_path / f"{name}.yaml").write_text(CONFIG.format(name=name))
-    CliRunner().invoke(app, ["compare", "cmpa.yaml", "cmpb.yaml", "--yes"])
+    result = CliRunner().invoke(app, ["compare", "cmpa.yaml", "cmpb.yaml", "--yes"])
     destroys = [c for c in children if "destroy" in c]
     assert destroys == [], destroys
+    # Not vacuous: compare got past its config load and did not crash.
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.output
+    assert result.exit_code != ExitCode.USAGE, result.output
