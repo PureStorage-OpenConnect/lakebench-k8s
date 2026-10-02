@@ -651,9 +651,14 @@ refused at load by the commands that change data, naming the setting that
 controls it instead (for example `spark.sql.shuffle.partitions` follows the
 executor count, `platform.compute.spark.<job>_executors`); `destroy`, `status`
 and the read-only commands drop it with a note. `spark.driver.maxResultSize`
-is the one Lakebench-set key a user value replaces. The full owned set is
-`LAKEBENCH_OWNED_SPARK_KEYS` in
-`src/lakebench/modules/pipeline_engines/spark/conf_keys.py`.
+is the one Lakebench-set key a user value replaces. Also refused: keys a
+job script sets (`spark.sql.session.timeZone` and others), and the reserved
+`spark.kubernetes.*`, `spark.jars.*` and pod-sizing keys (executor and
+driver memory, overhead, cores, off-heap, PySpark memory). The full set is in
+`src/lakebench/modules/pipeline_engines/spark/conf_keys.py`. `spark.conf`
+reaches the pipeline's Spark jobs only, not the Spark Thrift server or
+`--local` runs; the run record keeps it as `architecture.spark_conf_user`
+with credential, endpoint and bucket values redacted.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

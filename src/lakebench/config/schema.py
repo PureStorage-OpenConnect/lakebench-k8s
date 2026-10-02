@@ -2672,8 +2672,11 @@ class LakebenchConfig(ConfigModel):
             raise ValueError("'name' is required")
         return self
 
-    @model_validator(mode="after")
-    def refuse_owned_spark_conf(self, info: ValidationInfo) -> LakebenchConfig:
+    @field_validator("spark", mode="after")
+    @classmethod
+    def refuse_owned_spark_conf(
+        cls, spark: SparkConfOverrides, info: ValidationInfo
+    ) -> SparkConfOverrides:
         """A user ``spark.conf`` key that Lakebench owns is refused.
 
         Lakebench writes it for every job after the user's conf, so the value
@@ -2688,28 +2691,36 @@ class LakebenchConfig(ConfigModel):
             owned_key_reason,
         )
 
-        conf = self.spark.conf
-        catalog = self.architecture.query_engine.trino.catalog_name
+        conf = spark.conf
+        # architecture is declared (so validated) before spark.
+        arch = info.data.get("architecture")
+        catalog = arch.query_engine.trino.catalog_name if arch is not None else "lakehouse"
         owned = [k for k in conf if is_owned_spark_key(k, catalog)]
         if not owned:
-            return self
+            return spark
         inert = [k for k in owned if V16_DEFAULT_SPARK_CONF.get(k) == str(conf[k])]
         refused = [k for k in owned if k not in inert]
         purpose = purpose_from_context(info.context)
         if refused and (purpose is None or purpose in CHANGES_DATA):
             raise ValueError(
                 "spark.conf sets keys Lakebench owns: "
-                + "; ".join(owned_key_reason(k) for k in refused)
+                + "; ".join(owned_key_reason(k, catalog) for k in refused)
                 + ". Delete them from spark.conf"
             )
         for key in owned:
-            why = "it carried its v1.6 default" if key in inert else owned_key_reason(key)
-            emit_note(
-                f"spark.conf '{key}' is ignored ({why}); Lakebench writes it for every job.",
-                kind="removed",
-            )
-        object.__setattr__(self.spark, "conf", {k: v for k, v in conf.items() if k not in owned})
-        return self
+            if key in inert:
+                text = (
+                    f"spark.conf '{key}' is ignored: it carried its v1.6 default, which "
+                    "Lakebench overwrote then too. Delete it from spark.conf."
+                )
+            else:
+                text = (
+                    f"spark.conf '{key}' is ignored ({owned_key_reason(key, catalog)}). "
+                    "Commands that change data refuse the config until it is deleted."
+                )
+            emit_note(text, kind="removed")
+        object.__setattr__(spark, "conf", {k: v for k, v in conf.items() if k not in owned})
+        return spark
 
     @model_validator(mode="after")
     def refuse_reserved_namespace(self) -> LakebenchConfig:

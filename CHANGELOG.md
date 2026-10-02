@@ -77,13 +77,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   dropped all of them: a config with a custom `spark.conf` now gets them back,
   which changes what such a config runs. A `spark.conf` key Lakebench sets
   for every job (shuffle partitions, the S3A connection pool and buffers,
-  the catalog, `spark.jars` and `spark.jars.*`, `spark.submit.pyFiles`,
-  adaptive execution, UI, `spark.kubernetes.*`, executor and driver sizing)
-  was silently overwritten and is now refused by the commands that change
-  data, naming what controls it; teardown and read commands drop it with a
+  the catalog, adaptive execution, UI) or a job script sets
+  (`spark.sql.session.timeZone`, `spark.sql.autoBroadcastJoinThreshold` and
+  three adaptive tunables) was silently overwritten and is now refused by
+  the commands that change data, naming what controls it. Also refused, as
+  reserved for Lakebench although v1.6 passed them through:
+  `spark.kubernetes.*` (so node selectors, tolerations and pod annotations
+  can no longer be set here), `spark.jars` and `spark.jars.*`,
+  `spark.submit.pyFiles`, and executor and driver memory, overhead, cores,
+  off-heap and PySpark memory, which would change the pod request outside
+  the capacity check. Teardown and read commands drop such a key with a
   note, and a key at its v1.6 schema default is dropped with a note
   everywhere. `spark.driver.maxResultSize` still takes a user value. A
-  non-default `spark.conf` is recorded as `experiment.architecture.spark_conf_user`.
+  non-default `spark.conf` is recorded as
+  `experiment.architecture.spark_conf_user`, with the values of credential,
+  endpoint and bucket keys redacted. `spark.conf` reaches the pipeline's
+  Spark jobs only: not the Spark Thrift server, and not `--local` runs.
 - **`operator.install: true` is refused.** The Spark Operator
   (`platform.compute.spark.operator.install`) and the Stackable operators
   (`architecture.catalog.hive.operator.install`) are shared cluster

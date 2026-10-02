@@ -101,11 +101,18 @@ def test_default_config_conf_is_unchanged_by_the_merge():
         ("spark.jars.packages", "resolved dependency set"),
         ("spark.jars.repositories", "Lakebench writes it"),
         ("spark.jars.ivy", "Lakebench writes it"),
-        ("spark.jars.ivySettings", "Lakebench writes it"),
-        ("spark.submit.pyFiles", "Lakebench writes it"),
+        ("spark.jars.ivySettings", "reserved for Lakebench"),
+        ("spark.submit.pyFiles", "reserved for Lakebench"),
         ("spark.sql.shuffle.partitions", "<job>_executors"),
         ("spark.executor.memory", "job profiles"),
-        ("spark.kubernetes.executor.podNamePrefix", "Lakebench writes it"),
+        ("spark.executor.memoryOverheadFactor", "capacity check"),
+        ("spark.driver.memoryOverhead", "capacity check"),
+        ("spark.memory.offHeap.size", "capacity check"),
+        ("spark.executor.pyspark.memory", "capacity check"),
+        ("spark.sql.session.timeZone", "a job script sets it"),
+        ("spark.sql.autoBroadcastJoinThreshold", "a job script sets it"),
+        ("spark.kubernetes.executor.podNamePrefix", "reserved for Lakebench"),
+        ("spark.kubernetes.node.selector.zone", "reserved for Lakebench"),
         ("spark.hadoop.fs.s3a.endpoint", "platform.storage.s3.endpoint"),
         ("spark.sql.catalog.lakehouse.uri", "Lakebench writes it"),
     ],
@@ -117,6 +124,43 @@ def test_owned_key_refused(tmp_path, key, needle, purpose):
         load_config(path, purpose=purpose, print_notes=False)
     assert f"{key} is owned by Lakebench" in str(e.value)
     assert needle in str(e.value)
+
+
+def test_refusal_is_located_at_spark(tmp_path):
+    path = _write(tmp_path, {"spark.sql.shuffle.partitions": "400"})
+    with pytest.raises(ConfigValidationError) as e:
+        load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
+    assert [tuple(err["loc"]) for err in e.value.errors] == [("spark",)]
+
+
+def test_record_never_carries_a_secret_or_location():
+    from lakebench.metrics.experiment import experiment_inputs
+
+    cfg = make_config(
+        spark={
+            "conf": {
+                "spark.hadoop.fs.s3a.secret.key": "SUPERSECRET",
+                "spark.hadoop.fs.azure.account.key.acct.dfs.core.windows.net": "AZSECRET",
+                "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://10.9.9.9:80",
+                "spark.speculation": "true",
+            }
+        }
+    )
+    arch = experiment_inputs(cfg, run_mode="batch")["architecture"]
+    text = repr(arch)
+    for leaked in ("SUPERSECRET", "AZSECRET", "10.9.9.9"):
+        assert leaked not in text
+    assert arch["spark_conf_user"]["spark.speculation"] == "true"
+    assert arch["spark_conf_user"]["spark.hadoop.fs.s3a.secret.key"] == "<redacted>"
+
+
+def test_local_run_records_no_spark_conf():
+    # The local runner builds no Spark job manifest: the conf never runs.
+    from lakebench.metrics.experiment import experiment_inputs
+
+    cfg = make_config(spark={"conf": {"spark.speculation": "true"}})
+    arch = experiment_inputs(cfg, run_mode="batch", system="local")["architecture"]
+    assert "spark_conf_user" not in arch
 
 
 def test_owned_catalog_key_follows_the_catalog_name(tmp_path):
@@ -189,7 +233,13 @@ _SPARK = (
 )
 
 
+_SENTINEL = "lb-sentinel"
+
+
 def _written_keys(catalog_name: str = "lakehouse") -> set[str]:
+    """Every key any manifest writes. Each build also carries every default
+    set to a sentinel in the user conf, which must survive: a later owned
+    write of a default key would silently replace the user's value."""
     written: set[str] = set()
     for recipe, schema, image, obs, ca, scratch in itertools.product(
         _RECIPES, ("customer360", "financial"), _SPARK, (False, True), (False, True), (False, True)
@@ -208,9 +258,13 @@ def _written_keys(catalog_name: str = "lakehouse") -> set[str]:
                 "workload": {"schema": schema, "datagen": {"seed": 43}},
                 "query_engine": {"trino": {"catalog_name": catalog_name}},
             },
+            spark={"conf": dict.fromkeys(SPARK_CONF_DEFAULTS, _SENTINEL)},
         )
         for jt in JobType:
-            written.update(_conf(cfg, jt))
+            conf = _conf(cfg, jt)
+            overwritten = [k for k in SPARK_CONF_DEFAULTS if conf.get(k) != _SENTINEL]
+            assert not overwritten, (recipe, schema, image, jt, overwritten)
+            written.update(conf)
     return written
 
 
@@ -234,3 +288,22 @@ def test_job_py_names_the_owned_set():
     # The design names the constants in job.py; it re-exports them.
     assert job_mod.LAKEBENCH_OWNED_SPARK_KEYS is LAKEBENCH_OWNED_SPARK_KEYS
     assert job_mod.SPARK_CONF_DEFAULTS is SPARK_CONF_DEFAULTS
+
+
+def test_keys_the_job_scripts_set_are_owned():
+    """A key a job script sets with spark.conf.set (always, or while a step
+    runs) would not hold for the whole job, so it is owned too."""
+    import re
+    from pathlib import Path
+
+    from lakebench.modules.pipeline_engines.spark.conf_keys import is_owned_spark_key
+
+    scripts = Path(job_mod.__file__).resolve().parents[3] / "spark" / "scripts"
+    found: set[str] = set()
+    for f in scripts.glob("*.py"):
+        text = f.read_text()
+        found.update(re.findall(r'spark\.conf\.set\(\s*"([^"]+)"', text))
+        if re.search(r"spark\.conf\.set\(\s*key\b", text):
+            found.update(re.findall(r'\bkey\s*=\s*"(spark\.[^"]+)"', text))
+    assert found
+    assert not [k for k in sorted(found) if not is_owned_spark_key(k)]

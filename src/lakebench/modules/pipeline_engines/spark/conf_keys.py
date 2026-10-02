@@ -131,10 +131,11 @@ LAKEBENCH_OWNED_SPARK_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Owned keys no current manifest writes: DEP-2's in-deployment dependency
-# set writes spark.jars (and may write the others), and the Unity catalog
-# writes a token. Owned now, so a user value can never replace the resolved
-# set. The drift test checks written == owned - these.
+# Owned keys no reachable manifest writes: the in-deployment dependency set
+# writes spark.jars (and may write the others), and the Unity catalog path,
+# which no supported combination reaches, writes a token. Owned now, so a
+# user value can never replace the resolved set. The drift test checks
+# written == owned - these.
 OWNED_AHEAD_OF_WRITER: frozenset[str] = frozenset(
     {
         "spark.jars",
@@ -147,17 +148,47 @@ OWNED_AHEAD_OF_WRITER: frozenset[str] = frozenset(
     }
 )
 
-# Owned by prefix: the pod shape is the job profile's, and everything under
-# spark.kubernetes. and spark.jars. is Lakebench's.
-LAKEBENCH_OWNED_SPARK_PREFIXES: tuple[str, ...] = ("spark.kubernetes.", "spark.jars.")
+# Keys a job script sets with spark.conf.set (spark/scripts), always or
+# while a step runs: a user value would not hold for the whole job.
+SCRIPT_SET_SPARK_KEYS: frozenset[str] = frozenset(
+    {
+        "spark.sql.session.timeZone",
+        "spark.sql.autoBroadcastJoinThreshold",
+        "spark.sql.adaptive.coalescePartitions.minPartitionSize",
+        "spark.sql.adaptive.skewJoin.skewedPartitionFactor",
+        "spark.sql.requireAllClusterKeysForCoPartition",
+    }
+)
+
+# Reserved by prefix: the pod shape and placement (spark.kubernetes.*) and
+# the jars (spark.jars.*) are Lakebench's. The sizing prefixes cover memory,
+# overhead and overhead factors, which would change the pod request outside
+# compute_peak_requirements().
+LAKEBENCH_OWNED_SPARK_PREFIXES: tuple[str, ...] = (
+    "spark.kubernetes.",
+    "spark.jars.",
+    "spark.executor.memory",
+    "spark.driver.memory",
+    "spark.executor.cores",
+    "spark.driver.cores",
+    "spark.executor.instances",
+    "spark.memory.offHeap.",
+    "spark.executor.pyspark.memory",
+)
 LAKEBENCH_OWNED_SIZING_KEYS: frozenset[str] = frozenset(
     {
         "spark.executor.memory",
         "spark.executor.cores",
         "spark.executor.instances",
         "spark.executor.memoryOverhead",
+        "spark.executor.memoryOverheadFactor",
         "spark.driver.memory",
+        "spark.driver.memoryOverhead",
+        "spark.driver.memoryOverheadFactor",
         "spark.driver.cores",
+        "spark.memory.offHeap.enabled",
+        "spark.memory.offHeap.size",
+        "spark.executor.pyspark.memory",
     }
 )
 
@@ -195,17 +226,29 @@ def is_owned_spark_key(key: str, catalog: str = "lakehouse") -> bool:
     return (
         key in _expand(catalog)
         or key in LAKEBENCH_OWNED_SIZING_KEYS
+        or key in SCRIPT_SET_SPARK_KEYS
         or key.startswith(LAKEBENCH_OWNED_SPARK_PREFIXES)
     )
 
 
-def owned_key_reason(key: str) -> str:
+def owned_key_reason(key: str, catalog: str = "lakehouse") -> str:
     """Why *key* cannot be set in spark.conf, and what to change instead."""
     instead = _INSTEAD.get(key)
-    if instead is None and key in LAKEBENCH_OWNED_SIZING_KEYS:
-        instead = "per-executor sizing is fixed in the job profiles"
-    if instead is None:
+    written = _expand(catalog) - {k.replace("{catalog}", catalog) for k in OWNED_AHEAD_OF_WRITER}
+    if instead is None and (
+        key in LAKEBENCH_OWNED_SIZING_KEYS
+        or key.startswith(("spark.executor.memory", "spark.driver.memory", "spark.memory.offHeap."))
+    ):
+        instead = (
+            "pod sizing is fixed in the job profiles and counted by the capacity check; "
+            "use platform.compute.spark.<job>_executors, driver_memory or driver_cores"
+        )
+    if instead is None and key in SCRIPT_SET_SPARK_KEYS:
+        instead = "a job script sets it, so a value here would not hold"
+    if instead is None and key in written:
         instead = "Lakebench writes it for every job"
+    if instead is None:
+        instead = "reserved for Lakebench (pod placement and shape, jars)"
     return f"{key} is owned by Lakebench: {instead}"
 
 
