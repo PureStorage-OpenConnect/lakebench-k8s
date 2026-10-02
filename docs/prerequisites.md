@@ -5,8 +5,8 @@
 
 What a cluster needs before `lakebench deploy` can succeed. Each entry is a
 read-only check in `src/lakebench/deploy/prereqs.py`, and the preflight of
-`lakebench run` runs these same checks, so this page and the checks cannot
-disagree. Besides these, `kubectl` and `helm` must be on `PATH`. `oc` is not
+`lakebench run` runs these same checks, except the ones marked as checked at
+deploy, so this page and the checks cannot disagree. Besides these, `kubectl` and `helm` must be on `PATH`. `oc` is not
 needed: Lakebench makes its OpenShift SCC grants through the Kubernetes API.
 
 | Check | Needed when |
@@ -74,9 +74,9 @@ Spark pods run as UID 185 and PostgreSQL as UID 999, so on OpenShift both Servic
 
 ## Dependency server StorageClass
 
-Check id `deps-storage-class`. Needed when: Always.
+Check id `deps-storage-class`. Needed when: Always. Checked at deploy, not by the `run` preflight.
 
-Each deployment runs its own dependency server, `lb-deps`, which keeps the resolved jars, wheels and DuckDB extensions on a 5Gi ReadWriteOnce PVC, `lb-deps-data`, from `platform.deps.storage_class` or, when that is empty, the cluster default StorageClass. The volume must be writable by UID 185 through `fsGroup`. A replicated StorageClass is recommended: if the volume is lost with its node, the server pod stays Pending, every `run` stops until the PVC is deleted and `deploy` is re-run, and that `deploy` resolves the set again from the public repositories or the configured mirrors. The class is read only when the PVC is created; to move an existing set, delete the PVC and re-run `deploy`.
+Each deployment runs its own dependency server, `lb-deps`, which keeps the resolved jars, wheels and DuckDB extensions on a 5Gi ReadWriteOnce PVC, `lb-deps-data`, from `platform.deps.storage_class` or, when that is empty, the cluster default StorageClass. The volume must be writable by UID 185 through `fsGroup`. A replicated StorageClass is recommended: if the volume is lost with its node, the server pod stays Pending, every `run` stops until the PVC is deleted and `deploy` is re-run, and that `deploy` resolves the set again from the public repositories or the configured mirrors. The class is read only when the PVC is created; to move an existing set, delete the PVC and re-run `deploy`. When the PVC exists the check reports its class and nothing else.
 
 **Fix:** Set `platform.deps.storage_class` to an existing StorageClass, or have a cluster admin mark one as the cluster default. Prefer a replicated one.
 
@@ -84,11 +84,11 @@ Each deployment runs its own dependency server, `lb-deps`, which keeps the resol
 
 ## Egress for the dependency resolve
 
-Check id `egress-hosts`. Needed when: Always.
+Check id `egress-hosts`. Needed when: Always. Checked at deploy, not by the `run` preflight.
 
-`deploy` resolves every jar, wheel and DuckDB extension the deployment uses once, in the `lb-deps` pod, from Maven Central and its Google mirror, from PyPI (pypi.org and files.pythonhosted.org) for the AML reference and DuckDB wheels, and from extensions.duckdb.org for DuckDB. After that no pod fetches a dependency from outside the deployment: Spark jobs, Spark Thrift and DuckDB read the set from `lb-deps`. The resolve runs again only when the request changes (a new image, version or mirror), so egress is needed at those deploys only. The check lists the hosts this config's resolve reads and does not probe them; an unreachable host fails the `deps` step of `deploy`, naming the repository and the mirror keys.
+`deploy` resolves every jar, wheel and DuckDB extension the deployment uses once, in the `lb-deps` pod, from Maven Central and its Google mirror, from PyPI (pypi.org and files.pythonhosted.org) for the AML reference and DuckDB wheels, and from extensions.duckdb.org for DuckDB. After that no pod fetches a dependency from outside the deployment: Spark jobs, Spark Thrift and DuckDB read the set from `lb-deps`. The resolve runs again when the request changes (a new image, version or mirror) and when the set must be rebuilt (a new or lost PVC, a damaged set), so egress is needed at those deploys only. The check lists the hosts this config's resolve reads and does not probe them. A host the resolve cannot connect to fails the `deps` step of `deploy`, naming the repository and the mirror keys; a proxy that answers with an error fails it naming the artifact and the repository.
 
-On a cluster without that egress, set the mirror keys under `platform.deps`. `maven_repository` becomes the only Maven repository; `pypi_index` replaces pypi.org as a PyPI simple index; `duckdb_extension_repository` replaces extensions.duckdb.org. Mirrors are read anonymously, over plain HTTP or over HTTPS with a publicly trusted certificate; mirror credentials and a private CA are not supported. Changing a mirror re-resolves at the next `deploy`. A mirror that serves the same bytes gives the same set hash, so runs before and after stay comparable; one that serves other bytes gives a different set, and those runs are not like-for-like.
+On a cluster without that egress, set the mirror keys under `platform.deps`. `maven_repository` becomes the only Maven repository; `pypi_index` replaces pypi.org as a PyPI simple index; `duckdb_extension_repository` replaces extensions.duckdb.org. Mirrors are read anonymously, over plain HTTP or over HTTPS with a publicly trusted certificate; mirror credentials and a private CA are not supported. Changing a mirror re-resolves at the next `deploy`. A mirror that serves the same bytes gives the same set hash, so runs before and after stay like-for-like; one that serves other bytes gives a different set, and those runs are not like-for-like.
 
 Image pulls are separate: the nodes pull the images named under `images` (and the Stackable Hive image for a Hive catalog) from their registries at every pod start.
 
