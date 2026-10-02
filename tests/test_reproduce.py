@@ -1161,3 +1161,187 @@ class TestExperimentChecks:
         ):
             reproduce(package=pkg_path)
         assert exc.value.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# EVD-11 (ER-13): ingest_ratio is a range guard, config-bound values are not
+# packaged, a registered look is verify-only
+# ---------------------------------------------------------------------------
+
+
+def _stored(run_id):
+    from tests.fixtures import stored_records as sr
+
+    return sr.load_metrics(run_id)
+
+
+def test_continuous_package_leaves_out_stream_stage_seconds():
+    from lakebench.cli._reproduce import _extract_expected_numbers
+
+    numbers = _extract_expected_numbers(_stored("011043-e338c5"))
+    assert "ingest_ratio" in numbers
+    # The stored record's stages each ran for the whole window (1800 s).
+    assert not {"bronze_seconds", "silver_seconds", "gold_seconds"} & set(numbers)
+    assert "query_seconds" in numbers  # a measured stage stays
+
+
+def test_honest_continuous_rerun_passes():
+    """A package from e338c5 (ingest_ratio 1.0167) against 095006's 1.0339:
+    two honest runs of one corpus; it failed as an exact correctness check."""
+    from lakebench.cli._reproduce import _compare, _extract_expected_numbers
+
+    expected = _extract_expected_numbers(_stored("011043-e338c5"))
+    actual = _extract_expected_numbers(_stored("095006-71b4a3"))
+    rows, _outcome = _compare(
+        {"ingest_ratio": expected["ingest_ratio"]},
+        {"ingest_ratio": actual["ingest_ratio"]},
+        {},
+        mode="sustained",
+    )
+    assert rows[0]["band"] == "guard" and rows[0]["status"] == "pass"
+    assert _outcome == 0
+
+
+@pytest.mark.parametrize("value", [1.08, 0.94])
+def test_ratio_outside_range_fails(value):
+    from lakebench.cli._reproduce import _compare
+
+    rows, outcome = _compare({"ingest_ratio": 1.0}, {"ingest_ratio": value}, {}, mode="sustained")
+    assert rows[0]["status"] == "fail" and outcome == 2
+
+
+def test_missing_ratio_fails():
+    from lakebench.cli._reproduce import _compare
+
+    rows, outcome = _compare({"ingest_ratio": 1.0}, {}, {}, mode="sustained")
+    assert rows[0]["status"] == "missing" and outcome == 2
+
+
+def test_older_package_stage_seconds_are_ignored():
+    from lakebench.cli._reproduce import _compare
+
+    rows, outcome = _compare(
+        {"silver_seconds": 1800.0}, {"silver_seconds": 600.0}, {}, mode="sustained"
+    )
+    assert rows[0]["status"] == "ignored" and outcome == 0
+    # The same key in a batch package is a measurement.
+    rows, outcome = _compare({"silver_seconds": 100.0}, {"silver_seconds": 300.0}, {}, mode="batch")
+    assert rows[0]["status"] == "fail" and outcome == 1
+
+
+def test_package_records_corpus_role():
+    from lakebench.cli._reproduce import _build_package
+
+    pkg = _build_package(_stored("212900-5105a0"), config_reference=None, commit_sha="abc1234")
+    assert "corpus_role" in pkg["reproduction_metadata"]
+
+
+def _look_package(tmp_path, role, seed, workload="financial"):
+    pkg = {
+        "schema_version": 1,
+        "reproduction_metadata": {
+            "commit_sha": "unknown",
+            "pipeline_mode": "batch",
+            "corpus_role": role,
+            "expected_numbers": {"scale_ratio": 1.0},
+            "experiment_identity": {"workload": workload, "seed": seed},
+        },
+    }
+    p = tmp_path / "pkg.yaml"
+    p.write_text(yaml.safe_dump(pkg))
+    return p
+
+
+def _stub_looks(monkeypatch, looks, spent=()):
+    from lakebench.config import datagen_seed
+
+    monkeypatch.setattr(datagen_seed, "load_looks", lambda path=None: list(looks))
+    monkeypatch.setattr(datagen_seed, "spent_seeds", lambda: frozenset(spent))
+
+
+def _no_run(monkeypatch):
+    import lakebench.cli._reproduce as r
+
+    def boom(*a, **k):
+        raise AssertionError("a registered look must never run the pipeline")
+
+    monkeypatch.setattr(r, "_run_pipeline", boom)
+    monkeypatch.setattr(r.subprocess, "run", boom)
+
+
+def test_spent_look_verify_only(tmp_path, monkeypatch, capsys):
+    import hashlib
+
+    from lakebench.cli._reproduce import _verify
+
+    report = tmp_path / "report.json"
+    report.write_text('{"look": "done"}')
+    digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    seed = 987654
+    _stub_looks(
+        monkeypatch,
+        [{"role": "evaluation", "seed": seed, "state": "complete", "report_sha256": digest}],
+        {seed},
+    )
+    _no_run(monkeypatch)
+    pkg = _look_package(tmp_path, "evaluation", seed)
+    _verify(pkg, None, None, False, False, False, report=report)  # exit 0: returns
+    with pytest.raises(typer.Exit) as e:
+        _verify(pkg, None, None, False, False, False, report=None)
+    assert e.value.exit_code == 2
+    other = tmp_path / "other.json"
+    other.write_text("{}")
+    with pytest.raises(typer.Exit) as e:
+        _verify(pkg, None, None, False, False, False, report=other)
+    assert e.value.exit_code == 14
+    assert str(seed) not in capsys.readouterr().out + capsys.readouterr().err
+
+
+def test_unspent_held_out_package_refused(tmp_path, monkeypatch):
+    from lakebench.cli._reproduce import _verify
+
+    _stub_looks(monkeypatch, [], ())
+    _no_run(monkeypatch)
+    with pytest.raises(typer.Exit) as e:
+        _verify(_look_package(tmp_path, "robustness", 555), None, None, False, False, False)
+    assert e.value.exit_code == 3
+
+
+def test_roleless_financial_package_with_a_look_is_verify_only(tmp_path, monkeypatch):
+    from lakebench.cli._reproduce import _verify
+
+    _stub_looks(monkeypatch, [{"role": "evaluation", "seed": 777, "state": "started"}], {777})
+    _no_run(monkeypatch)
+    with pytest.raises(typer.Exit) as e:
+        _verify(_look_package(tmp_path, None, 777), None, None, False, False, False, report=None)
+    assert e.value.exit_code == 2
+
+
+def test_ordinary_package_is_not_a_look(tmp_path, monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+
+    _stub_looks(monkeypatch, [], {42})
+    meta = {
+        "corpus_role": "development",
+        "experiment_identity": {"workload": "financial", "seed": 42},
+    }
+    assert _spent_look(meta) is None
+    meta = {"corpus_role": None, "experiment_identity": {"workload": "customer360", "seed": 42}}
+    assert _spent_look(meta) is None
+
+
+def test_report_flag_refused_for_an_ordinary_package(tmp_path, monkeypatch):
+    from lakebench.cli._reproduce import _verify
+
+    _stub_looks(monkeypatch, [], ())
+    with pytest.raises(typer.Exit) as e:
+        _verify(
+            _look_package(tmp_path, "development", 43),
+            None,
+            None,
+            False,
+            False,
+            False,
+            report=tmp_path / "x",
+        )
+    assert e.value.exit_code == 2

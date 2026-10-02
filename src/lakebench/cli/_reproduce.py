@@ -119,6 +119,23 @@ _METRIC_TABLE: dict[str, tuple[str, str]] = {
 }
 
 
+def _meta_in_mode(metric: str, mode: str | None) -> Any:
+    """The registry entry of *metric* in the run's *mode*, or None for a
+    key the registry does not know (a mode-split key with no mode reads as
+    unknown)."""
+    from lakebench.metrics.metric_registry import ModeRequired, lookup
+
+    try:
+        return lookup(metric, mode)
+    except ModeRequired:
+        return None
+
+
+def _band_in_mode(metric: str, mode: str | None) -> str | None:
+    meta = _meta_in_mode(metric, mode)
+    return getattr(meta, "band", None)
+
+
 def _is_stage_seconds(metric: str) -> bool:
     """True for open-namespace per-stage duration metrics."""
     return metric.endswith(STAGE_SECONDS_SUFFIX) and metric not in _METRIC_TABLE
@@ -235,7 +252,10 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
     if cpu_hr_per_tb > 0:
         numbers["datagen_cpu_hr_per_tb"] = float(cpu_hr_per_tb)
 
-    return numbers
+    # A value that follows a configured one (a continuous stream stage's
+    # seconds are the window length) measures nothing a reproduce can check.
+    mode = getattr(pb, "pipeline_mode", None) or "batch"
+    return {k: v for k, v in numbers.items() if _band_in_mode(k, mode) != "config_bound"}
 
 
 def _run_query_set(metrics: Any) -> str | None:
@@ -419,6 +439,10 @@ def _build_package(
             "source_run_id": getattr(metrics, "run_id", None),
             "deployment_name": getattr(metrics, "deployment_name", None),
             "pipeline_mode": pipeline_mode,
+            # The corpus role (development, calibration, evaluation,
+            # robustness): a package from a held-out corpus whose seed is
+            # spent is verified against its look's report, never rerun.
+            "corpus_role": (experiment.get("corpus") or {}).get("corpus_role"),
             "config_reference": config_reference,
             "expected_numbers": numbers,
             # QpH is only reproducible over the same query set.
@@ -630,6 +654,7 @@ def _compare(
     actual: dict[str, float],
     tolerances: dict[str, float],
     query_sets: tuple[str | None, str | None] | None = None,
+    mode: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Compare expected vs actual and return (rows, outcome).
 
@@ -661,6 +686,43 @@ def _compare(
         band = _classify(metric)
         tol = corr_tol if band == "correctness" else perf_tol
         actual_value = actual.get(metric)
+        meta = _meta_in_mode(metric, mode)
+        if getattr(meta, "band", None) == "config_bound":
+            # An older package recorded a value that follows the config (a
+            # continuous stage's seconds are the window): shown, not gated.
+            rows.append(
+                {
+                    "metric": metric,
+                    "expected": expected_value,
+                    "actual": actual_value,
+                    "drift_pct": None,
+                    "band": "config_bound",
+                    "tolerance_pct": None,
+                    "status": "ignored",
+                    "reason": "follows a configured value; not a measurement to reproduce",
+                }
+            )
+            continue
+        if getattr(meta, "band", None) == "guard" and meta.guard_range is not None:
+            # A range the run must sit in; the package's own value is only a
+            # record (two honest runs of one corpus differ by a few percent).
+            low, high = meta.guard_range
+            inside = actual_value is not None and low <= float(actual_value) <= high
+            rows.append(
+                {
+                    "metric": metric,
+                    "expected": expected_value,
+                    "actual": actual_value,
+                    "drift_pct": None,
+                    "band": "guard",
+                    "tolerance_pct": None,
+                    "status": "pass" if inside else ("missing" if actual_value is None else "fail"),
+                    "reason": f"must lie in [{low}, {high}]",
+                }
+            )
+            if not inside:
+                correctness_failed = True
+            continue
         if "qph" in metric and not qph_ok:
             # Different recorded sets: a performance failure. A package that
             # predates query-set ids: not compared, not failed (re-record it).
@@ -739,15 +801,15 @@ def _print_comparison(rows: list[dict[str, Any]], outcome: int) -> None:
 
     for row in rows:
         exp_s = f"{row['expected']:.2f}"
-        if row["actual"] is None or row.get("drift_pct") is None:
-            act_s = "-"
-            drift_s = "-"
-        else:
-            act_s = f"{row['actual']:.2f}"
-            drift_s = f"{row['drift_pct']:+.1f}%"
+        act_s = "-" if row["actual"] is None else f"{row['actual']:.2f}"
+        drift_s = "-" if row.get("drift_pct") is None else f"{row['drift_pct']:+.1f}%"
+        if row["band"] == "guard":
+            drift_s = str(row.get("reason") or "-")
         status = row["status"]
         if status == "pass":
             status_s = "[green]pass[/green]"
+        elif status == "ignored":
+            status_s = "[dim]ignored[/dim]"
         elif status == "missing":
             status_s = "[yellow]missing[/yellow]"
         elif status == "incomparable":
@@ -1098,6 +1160,89 @@ def _post_destroy_refusal(refusals: list[Any]) -> None:
         )
 
 
+def _package_corpus(meta: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """(workload, corpus role, seed) of a package: the recorded role, else
+    the run-start inputs' role (a package from before roles were recorded);
+    the seed as the experiment identity holds it."""
+    ident = meta.get("experiment_identity") or {}
+    role = meta.get("corpus_role")
+    if role is None:
+        inputs = (meta.get("config_snapshot") or {}).get("experiment_inputs") or {}
+        role = ((inputs.get("corpus") if isinstance(inputs, dict) else None) or {}).get(
+            "corpus_role"
+        )
+    return ident.get("workload"), role, ident.get("seed")
+
+
+def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
+    """Whether the package is from a registered look, as
+    ``("verify", look entry or None)``, ``("refuse", reason)``, or None for
+    an ordinary package. A held-out corpus whose seed is spent is verified
+    against its look's report and never regenerated; one whose seed is not
+    spent is never reproduced at all. A package without a role is a look
+    only when its seed has a recorded look (financial workloads only: the
+    spent seeds are AML seeds). Never prints a seed."""
+    from lakebench.config import datagen_seed
+
+    workload, role, seed = _package_corpus(meta)
+    protected = role in datagen_seed.PROTECTED_ROLES
+    if not protected and not (role is None and workload == "financial"):
+        return None
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        if protected:
+            return (
+                "refuse",
+                f"the {role} package's seed cannot be checked against the look record",
+            )
+        return None
+    try:
+        looks = [e for e in datagen_seed.load_looks() if int(e["seed"]) == seed]
+        spent = seed in datagen_seed.spent_seeds()
+    except Exception as e:  # noqa: BLE001 -- unreadable: fail closed
+        if protected:
+            return ("refuse", f"the look record cannot be read ({type(e).__name__})")
+        return (
+            "refuse",
+            f"the look record cannot be read ({type(e).__name__}); a financial "
+            "package is not reproduced without it",
+        )
+    if looks:
+        return ("verify", looks[0])
+    if protected:
+        if spent:
+            return ("verify", None)
+        return ("refuse", f"an {role} corpus whose look has not run is never reproduced")
+    return None
+
+
+def _verify_spent_look(entry: Any, role: Any, report: Path | None) -> None:
+    """A registered look's package: compare ``--report``'s sha256 with the
+    look record's ``report_sha256``; nothing is deployed or run."""
+    import hashlib
+
+    what = f"{role or 'held-out'} look"
+    print_info(f"  this package is from a registered {what}: verify-only, nothing is run")
+    if report is None:
+        print_error(
+            f"A registered {what} is never rerun. Pass --report PATH (the look's report) "
+            "to check it against the look record."
+        )
+        raise typer.Exit(ExitCode.USAGE)
+    recorded = (entry or {}).get("report_sha256") if isinstance(entry, dict) else None
+    if not recorded:
+        print_error(f"The look record holds no report sha256 for this {what}; nothing to check.")
+        raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
+    try:
+        digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    except OSError as e:
+        print_error(f"Cannot read --report {report}: {e}")
+        raise typer.Exit(ExitCode.USAGE) from None
+    if digest != recorded:
+        print_error(f"--report does not match the {what}'s recorded report (sha256 differs).")
+        raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
+    console.print(Panel(f"[green]Report matches the recorded {what}[/green]", expand=False))
+
+
 def _verify(
     package_path: Path,
     config_override: Path | None,
@@ -1105,8 +1250,11 @@ def _verify(
     keep: bool,
     dry_run: bool,
     allow_commit_drift: bool,
+    report: Path | None = None,
 ) -> None:
-    """Load a package, run the pipeline, compare; exit 0, or 14 outside tolerance."""
+    """Load a package, run the pipeline, compare; exit 0, or 14 outside
+    tolerance. A registered look's package is verified against its report
+    only (``_spent_look``)."""
     try:
         package = _load_package(package_path)
     except ReproduceError as e:
@@ -1114,6 +1262,17 @@ def _verify(
         raise typer.Exit(ExitCode.USAGE) from None
 
     meta = package["reproduction_metadata"]
+    look = _spent_look(meta)
+    if look is not None:
+        kind, detail = look
+        if kind == "refuse":
+            print_error(f"Refused: {detail}.")
+            raise typer.Exit(ExitCode.REFUSED)
+        _verify_spent_look(detail, _package_corpus(meta)[1], report)
+        return
+    if report is not None:
+        print_error("--report applies only to a package from a registered look")
+        raise typer.Exit(ExitCode.USAGE)
     expected = meta["expected_numbers"]
     tolerances = meta.get("tolerance_pct") or DEFAULT_TOLERANCES
 
@@ -1217,7 +1376,11 @@ def _verify(
 
     actual = _measure_actual_numbers(metrics)
     rows, outcome = _compare(
-        expected, actual, tolerances, (meta.get("query_set_id"), _run_query_set(metrics))
+        expected,
+        actual,
+        tolerances,
+        (meta.get("query_set_id"), _run_query_set(metrics)),
+        mode=meta.get("pipeline_mode") or "batch",
     )
     _print_comparison(rows, outcome)
     _post_destroy_refusal(refusals)
@@ -1294,7 +1457,7 @@ def reproduce(
             "--allow-commit-drift",
             help=(
                 "Verify mode: run even when HEAD differs from the recorded "
-                "commit. Default is to refuse with exit 2 -- comparing numbers "
+                "commit. Default is to refuse with exit 14 -- comparing numbers "
                 "across code paths cannot claim to reproduce anything."
             ),
         ),
@@ -1306,6 +1469,16 @@ def reproduce(
             help="Verify mode: parse the package and exit without running the pipeline",
         ),
     ] = False,
+    report: Annotated[
+        Path | None,
+        typer.Option(
+            "--report",
+            help=(
+                "Verify mode, registered looks only: the look's report; its sha256 "
+                "is checked against the look record and nothing is run"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Record or verify a reproduction package.
 
@@ -1317,8 +1490,12 @@ def reproduce(
 
     Verify mode: loads a package, runs the pipeline against the referenced
     config, and compares actuals against expected under the recorded
-    tolerance bands. Exits 0 on pass, 1 on performance drift, 2 on
-    correctness violation.
+    tolerance bands. Exits 0 on pass and 14 on performance or correctness
+    drift. ``ingest_ratio`` is a range guard ([0.95, 1.05]), and values that
+    follow the config (continuous stage seconds) are not gated. A package
+    from a registered evaluation or robustness look is never rerun: pass
+    ``--report PATH`` and its sha256 is checked against the look record
+    (0 on a match, 14 on a mismatch, 2 without ``--report``).
 
         lakebench reproduce path/to/package.yaml [--config CONFIG]
 
@@ -1347,4 +1524,5 @@ def reproduce(
         keep=keep,
         dry_run=dry_run,
         allow_commit_drift=allow_commit_drift,
+        report=report,
     )

@@ -719,6 +719,7 @@ lakebench reproduce PACKAGE.yaml [OPTIONS]
 | `--keep` | | `false` | Verify mode: keep the deployment after the run. reproduce never destroys before the run: it refuses an existing namespace or bucket |
 | `--allow-commit-drift` | | `false` | Verify mode: run even when HEAD differs from the recorded commit (refused with exit 14 otherwise) |
 | `--dry-run` | | `false` | Verify mode: parse the package and exit |
+| `--report` | | | Verify mode, registered looks only: the look's report; its sha256 is checked against the look record and nothing is run |
 
 Exit codes: `0` pass; `14` (requirement unmet) for performance or
 correctness drift, commit drift without `--allow-commit-drift`, or a run that
@@ -727,7 +728,11 @@ or benchmark results); `2` for a package or config refused before running
 (including `create_namespace: false` or `create_buckets: false`); `3` when
 the namespace or a bucket already exists, or when another deploy replaced the
 deployment reproduce created (then nothing is destroyed); `4` when the
-namespace or buckets cannot be read; `1` when the pipeline could not run. 1.6 used `1` for performance drift and
+namespace or buckets cannot be read; `1` when the pipeline could not run.
+A package from a registered evaluation or robustness look is never rerun:
+`--report` matching the look record exits `0`, a mismatch `14`, no
+`--report` `2`; a held-out package whose look has not run is refused with
+`3`. 1.6 used `1` for performance drift and
 `2` for correctness drift.
 
 ### financial

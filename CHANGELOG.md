@@ -181,6 +181,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **`reproduce` checks continuous runs the way they vary.** `ingest_ratio`
+  is a range guard: the rerun's value must lie in [0.95, 1.05] (an honest
+  continuous rerun of one corpus measured up to 1.034 and failed before).
+  Values that follow the config, such as a continuous stream stage's
+  seconds (the window length), are no longer packaged, and an older
+  package's are shown as ignored. A package records its corpus role; one
+  from a registered evaluation or robustness look is never rerun:
+  `reproduce PACKAGE --report PATH` compares the report's sha256 with the
+  look record (0 on a match, 14 on a mismatch, 2 without `--report`), and
+  a held-out package whose look has not run is refused (3).
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets
