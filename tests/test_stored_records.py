@@ -790,13 +790,26 @@ def test_partial_placeholder_leaf_is_rewritten() -> None:
 
 
 def test_many_text_credentials_scrub_in_linear_time() -> None:
+    """Eight times the input takes about eight times the work, not sixty-four.
+
+    CPU time of this process, not wall time, and a ratio, not a fixed bound:
+    under xdist the other workers share the CPUs, and coverage tracing on the
+    3.13 leg slows every line, so a 5 s wall-clock bound on 50,000 lines
+    failed there with nothing wrong (2.1 s serially without coverage)."""
     import time
 
-    text = "password=x\n" * 50_000
-    t0 = time.monotonic()
-    out = scrub.scrub_text(text)
-    assert time.monotonic() - t0 < 5.0
-    assert out.count("${LAKEBENCH_CREDENTIAL}") == 50_000
+    def cpu_seconds(n: int) -> float:
+        text = "password=x\n" * n
+        t0 = time.process_time()
+        out = scrub.scrub_text(text)
+        elapsed = time.process_time() - t0
+        assert out.count("${LAKEBENCH_CREDENTIAL}") == n
+        return elapsed
+
+    cpu_seconds(100)  # one-time costs (compiled patterns) out of the ratio
+    small, big = cpu_seconds(5_000), cpu_seconds(40_000)
+    # Linear measured about 8x; quadratic is 64x.
+    assert big < 16 * max(small, 0.01), (small, big)
 
 
 @pytest.mark.parametrize(
