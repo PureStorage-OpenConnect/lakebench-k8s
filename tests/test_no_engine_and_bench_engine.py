@@ -62,7 +62,7 @@ def test_no_engine_recipe_skips_the_benchmark_without_a_flag(recipe, capsys):
     cfg = _cfg(recipe=recipe)
     none, skip = no_query_engine_skip(cfg, skip_benchmark=False)
     assert none is True and skip is True
-    assert "no query engine" in capsys.readouterr().out.lower()
+    assert "no query engine" in "".join(capsys.readouterr()).lower()
 
 
 def test_an_engine_recipe_is_not_skipped():

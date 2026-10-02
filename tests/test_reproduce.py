@@ -646,7 +646,7 @@ class TestF3CommitDriftIsCorrectnessFailure:
     """A reproduce against a different commit measures a different code path.
     Refuse by default; allow only with --allow-commit-drift."""
 
-    def test_commit_drift_exits_2_by_default(self, tmp_path):
+    def test_commit_drift_exits_requirement_unmet_by_default(self, tmp_path):
         cfg = tmp_path / "cfg.yaml"
         cfg.write_text(_ONE_SAMPLE_CFG)
         pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="AAA1111")
@@ -656,7 +656,7 @@ class TestF3CommitDriftIsCorrectnessFailure:
         with mock.patch("lakebench.cli._reproduce._current_commit_sha", return_value="BBB2222"):
             with pytest.raises(typer.Exit) as exc:
                 reproduce(package=pkg_path, dry_run=True)
-            assert exc.value.exit_code == 2
+            assert exc.value.exit_code == 14  # requirement unmet (CLI-1; 2 in 1.6)
 
     def test_allow_commit_drift_bypasses(self, tmp_path):
         cfg = tmp_path / "cfg.yaml"

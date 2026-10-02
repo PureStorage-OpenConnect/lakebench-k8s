@@ -12,6 +12,7 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
+from lakebench.cli._exit import refused_result_code
 from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
@@ -19,12 +20,12 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
 from ._helpers import (
     DEPRECATED_SHORT_F_HELP,
-    EXIT_DECLINED,
     _journal_safe,
     console,
     deprecated_short_f_force,
@@ -84,28 +85,19 @@ def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
         )
         if not typer.confirm("Proceed?"):
             print_info("Destruction cancelled")
-            raise typer.Exit(EXIT_DECLINED)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
     try:
         removed, used_workdir = destroy_local(cfg, workdir=resolved, remove_data=remove_data)
     except Exception as e:  # noqa: BLE001 -- container CLI failures vary widely
         print_error(f"Local destroy failed: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
 
     print_success(f"Removed {removed} container(s)")
     if remove_data:
         print_info(f"Deleted {used_workdir}")
     else:
         print_info(f"Data kept in {used_workdir} (--remove-data to delete)")
-
-
-# Exit code when everything else succeeded but the namespace was still
-# Terminating at --namespace-timeout (LB-157). Distinct from 1 (a step
-# failed) so scripts can wait and re-check instead of treating it as broken.
-# 3 is reserved for EXIT_DECLINED (a declined confirmation prompt), which
-# destroy also returns; a wrapper that retries destroy on exit 3 would
-# otherwise loop when a human answers `n` under a TTY.
-EXIT_NAMESPACE_STILL_TERMINATING = 4
 
 
 def destroy(
@@ -197,8 +189,8 @@ def destroy(
                 "after the delete is issued (PVC and pod finalizers can "
                 "hold it for minutes). A namespace still terminating at "
                 "the deadline is not reported as deleted and destroy exits "
-                f"{EXIT_NAMESPACE_STILL_TERMINATING}. 0 skips the wait, so "
-                f"destroy exits {EXIT_NAMESPACE_STILL_TERMINATING} unless "
+                f"{int(ExitCode.INCOMPLETE)}. 0 skips the wait, so "
+                f"destroy exits {int(ExitCode.INCOMPLETE)} unless "
                 "the namespace is already gone."
             ),
         ),
@@ -239,16 +231,16 @@ def destroy(
         cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
             console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     if local:
         _destroy_local_mode(cfg, workdir, remove_data, force)
@@ -270,13 +262,13 @@ def destroy(
             confirm = typer.confirm("Are you sure you want to proceed?")
             if not confirm:
                 print_info("Destruction cancelled")
-                raise typer.Exit(EXIT_DECLINED)
+                raise typer.Exit(ExitCode.NOT_CONFIRMED)
         else:
             print_error(
                 "Refusing to destroy without --force in non-interactive mode. "
                 "Pass --force to skip confirmation."
             )
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
     console.print(
         Panel(
@@ -376,7 +368,7 @@ def destroy(
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
 
     # Summary
     destroy_elapsed = int(time.time() - destroy_start)
@@ -432,7 +424,7 @@ def destroy(
                 expand=False,
             )
         )
-        raise typer.Exit(EXIT_NAMESPACE_STILL_TERMINATING)
+        raise typer.Exit(ExitCode.INCOMPLETE)
     elif failed == 0:
         console.print(
             Panel(
@@ -456,4 +448,4 @@ def destroy(
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        raise typer.Exit(refused_result_code(results) or ExitCode.FAILED)

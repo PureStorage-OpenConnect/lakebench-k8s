@@ -258,9 +258,16 @@ def load_yaml(path: Path) -> dict[str, Any]:
             raw = f.read()
         text = _substitute_env_vars(raw)
         content = yaml.safe_load(text)
-        return content if content else {}
     except yaml.YAMLError as e:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
+    if not content:
+        return {}
+    if not isinstance(content, dict):
+        raise ConfigParseError(
+            f"{path} is not a config: its top level is a YAML {type(content).__name__}, "
+            "not a mapping of keys such as `name:` and `architecture:`"
+        )
+    return content
 
 
 def load_config(

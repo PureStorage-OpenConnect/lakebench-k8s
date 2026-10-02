@@ -36,8 +36,8 @@ Recipe defaults to `hive-iceberg-spark-trino`.
 The name is required by every command that changes data: `deploy`,
 `generate`, `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
 `financial` and `validate` refuse a config without one, and the error
-offers a name to add. `config upgrade` refuses one as well, so its output
-never carries a name the input did not choose.
+offers a name to add. (`config upgrade` is removed in v1.7 for every
+config; see the CHANGELOG.)
 
 Before v1.7 a nameless config got a time-based name (`lb-YYYYMMDD-HHMMSS`)
 written to `.lakebench/state.json` in the config's directory, which every
@@ -62,11 +62,10 @@ read-only commands create no files.
 
 A key that an earlier release accepted and that now does nothing (for
 example `images.pull_secrets` or `platform.storage.scratch.create_storage_class`)
-is refused by the commands that change data (the list above, except
-`config upgrade`), with what to do instead. `destroy`, `stop`, `status`,
-`logs`, `report`, `info`, `config show`, `config upgrade` and `admin` drop
-it and print an "Upgrade notes" block on stderr, so an old config can still
-be inspected, stopped, torn down and converted.
+is refused by the commands that change data (the list above), with what
+to do instead. `destroy`, `stop`, `status`, `logs`, `report`, `info`,
+`config show` and `admin` drop it and print an "Upgrade notes" block on
+stderr, so an old config can still be inspected, stopped and torn down.
 
 ### Flat Fields (deprecated)
 
@@ -876,7 +875,7 @@ resources are approximately:
 Recommended timeouts:
 
 ```bash
-lakebench generate lakebench.yaml --wait --timeout 14400  # 4 hours
+lakebench generate lakebench.yaml --timeout 14400  # 4 hours
 lakebench run lakebench.yaml --timeout 7200               # 2 hours
 ```
 

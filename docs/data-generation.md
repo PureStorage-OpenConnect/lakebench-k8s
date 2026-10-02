@@ -52,7 +52,6 @@ workload:
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting. `0` auto-computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
@@ -213,13 +212,13 @@ kubectl logs -n <namespace> -l job-name=lakebench-datagen --tail=50
 ## Re-running Data Generation
 
 `lakebench generate` (and `run --generate`) refuses to write into a bronze
-prefix that already holds data: it exits 2 and names the prefix, so an
+prefix that already holds data: it exits 3 (refused) and names the prefix, so an
 existing corpus is never overwritten by accident. To regenerate, pass
 `--regenerate`, which empties the whole bronze bucket (and aborts dangling
 multipart uploads) before datagen starts:
 
 ```bash
-lakebench generate my-config.yaml --wait --regenerate
+lakebench generate my-config.yaml --regenerate
 ```
 
 To keep the existing corpus instead, run the pipeline with `run

@@ -907,6 +907,7 @@ class TestOwnershipHooksFire:
         result = engine._deploy_namespace()
         assert result.status == DeploymentStatus.FAILED
         assert "ownership refused" in result.message
+        assert result.details["refusal"] == "deploy.identity_foreign"  # exit 3 (CLI-1)
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")
@@ -1168,7 +1169,7 @@ class TestOwnershipHooksFire:
                 force_legacy=False,
                 metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
-        assert exc.value.exit_code == 1
+        assert exc.value.exit_code == 3  # refused: the bucket belongs to another deployment
 
         # empty_bucket must never fire on any bucket.
         assert s3.empty_bucket.call_count == 0

@@ -50,6 +50,7 @@ Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures o
 
 - [Architecture](architecture.md) -- Component topology, medallion layers, catalog pluggability
 - [CLI Reference](cli-reference.md) -- All commands and flags
+- [Exit Codes](exit-codes.md) -- What each `lakebench` exit code means and which paths produce it
 - [Troubleshooting](troubleshooting.md) -- Common errors and fixes
 
 ## Development

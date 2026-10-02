@@ -19,6 +19,7 @@ from lakebench.config.schema import (
     QueryEngineType,
     require_polaris_client_secret,
 )
+from lakebench.exit_codes import REFUSAL_DETAIL
 from lakebench.k8s import K8sClient, K8sResourceError
 
 logger = logging.getLogger(__name__)
@@ -1030,6 +1031,7 @@ class DeploymentEngine:
                 status=DeploymentStatus.FAILED,
                 message=f"Namespace ownership refused: {stamp.hint}{extra}",
                 elapsed_seconds=time.time() - start,
+                details={REFUSAL_DETAIL: "deploy.identity_foreign"},
             )
         if stamp.verdict is IdentityVerdict.ABSENT:
             return DeploymentResult(
@@ -1047,6 +1049,7 @@ class DeploymentEngine:
                     "migrate-deployment command ships)."
                 ),
                 elapsed_seconds=time.time() - start,
+                details={REFUSAL_DETAIL: "deploy.identity_foreign"},
             )
 
         # Every deploy stamps a new nonce, so a destroy already running on
@@ -1440,6 +1443,7 @@ class DeploymentEngine:
                     status=DeploymentStatus.FAILED,
                     message=f"Bucket ownership refused: {v.hint}",
                     elapsed_seconds=time.time() - start,
+                    details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                 )
             # R2: an ABSENT (legacy, untagged) bucket must NOT be claimed
             # silently. Freshly-created buckets ARE our own untagged
@@ -1466,6 +1470,7 @@ class DeploymentEngine:
                             "with another team's storage). " + (v.hint or "")
                         ),
                         elapsed_seconds=time.time() - start,
+                        details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                     )
             if v.verdict is IdentityVerdict.NOT_FOUND:
                 # Should not happen after ensure_buckets returned. Skip.
@@ -1518,6 +1523,13 @@ class DeploymentEngine:
                         status=DeploymentStatus.FAILED,
                         message=msg,
                         elapsed_seconds=time.time() - start,
+                        # No name-prefix claim is a refusal; a sibling list
+                        # that could not be read is a permission gap (1).
+                        details=(
+                            {}
+                            if enumeration_failed
+                            else {REFUSAL_DETAIL: "deploy.identity_foreign"}
+                        ),
                     )
                 if not unsupported_warned:
                     logger.warning(

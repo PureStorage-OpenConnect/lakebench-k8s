@@ -41,7 +41,7 @@ def test_nameless_run_refused_names_suggestion(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg_path = _write(tmp_path, NAMELESS)
     result = runner.invoke(app, ["run", str(cfg_path), "--yes"])
-    assert result.exit_code != 0
+    assert result.exit_code == 2, result.output  # config.name_required
     out = " ".join(result.output.split())
     assert "cannot change data" in out
     assert "name: lb-" in out
@@ -87,7 +87,7 @@ def test_removed_key_refused_by_commands_that_change_data(argv, tmp_path, monkey
     monkeypatch.setenv("KUBECONFIG", "/nonexistent")
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, [argv[0], str(FIXTURES / "v14user.yaml"), *argv[1:]])
-    assert result.exit_code != 0
+    assert result.exit_code == 2, result.output  # config.name_required
     out = " ".join(result.output.split())
     for key in ("pull_secrets", "create_storage_class", "channels", "quality_distribution"):
         assert f"'{key}' was removed" in out, key
@@ -123,7 +123,7 @@ def test_destroy_refuses_a_v16_name_two_nameless_configs_share(tmp_path, monkeyp
     _write(tmp_path, NAMELESS, "a.yaml")
     b = _write(tmp_path, NAMELESS, "b.yaml")
     result = runner.invoke(app, ["destroy", str(b), "--force"])
-    assert result.exit_code != 0
+    assert result.exit_code == 2, result.output  # config.name_required
     out = " ".join(result.output.split())
     assert "nameless a.yaml" in out
     assert "name: lb-20260915-101530" in out
@@ -131,21 +131,21 @@ def test_destroy_refuses_a_v16_name_two_nameless_configs_share(tmp_path, monkeyp
 
 @pytest.mark.parametrize(
     "argv",
-    [["stop", "CFG"], ["clean", "bronze", "CFG", "--force"], ["config", "upgrade", "CFG"]],
-    ids=["stop", "clean", "config-upgrade"],
+    [["stop", "CFG"], ["clean", "bronze", "CFG", "--force"]],
+    ids=["stop", "clean"],
 )
-def test_nameless_config_refused_by_stop_clean_and_upgrade(argv, tmp_path, monkeypatch):
+def test_nameless_config_refused_by_stop_and_clean(argv, tmp_path, monkeypatch):
     # stop is a teardown (no v1.6 state here, so no deployment is this
-    # config's), clean changes data, and config upgrade must not bake a
-    # name the input never chose into its output. Each refuses and writes
-    # nothing.
+    # config's) and clean changes data. Each refuses and writes nothing.
+    # `config upgrade` is removed for every config (CC-5, SAF-3); its
+    # refusal opens no file (tests/test_cli_removed.py).
     monkeypatch.setenv("KUBECONFIG", "/nonexistent")
     monkeypatch.chdir(tmp_path)
     cfg_path = _write(tmp_path, NAMELESS)
     before = _listing(tmp_path)
     result = runner.invoke(app, [str(cfg_path) if a == "CFG" else a for a in argv])
     assert "Usage:" not in result.output
-    assert result.exit_code != 0
+    assert result.exit_code == 2, result.output  # config.name_required
     out = " ".join(result.output.split())
     assert "no name" in out
     assert _listing(tmp_path) == before
@@ -162,7 +162,7 @@ def test_v16_name_refused_after_the_deploying_config_is_named(argv, tmp_path, mo
     _write(tmp_path, {**NAMELESS, "name": "lb-20260915-101530"}, "a.yaml")
     b = _write(tmp_path, NAMELESS, "b.yaml")
     result = runner.invoke(app, [str(b) if a == "CFG" else a for a in argv])
-    assert result.exit_code != 0
+    assert result.exit_code == 2, result.output  # config.name_required
     out = " ".join(result.output.split())
     assert "nothing ties that deployment to this config" in out
 

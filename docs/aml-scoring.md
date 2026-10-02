@@ -430,7 +430,7 @@ datagen and the pipeline scripts, not the catalog choice.
 
 ```bash
 lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
-lakebench generate examples/polaris-iceberg-spark-financial.yaml --wait
+lakebench generate examples/polaris-iceberg-spark-financial.yaml
 lakebench run      examples/polaris-iceberg-spark-financial.yaml
 
 # Optional re-score (the manifest path assumes the default path template)

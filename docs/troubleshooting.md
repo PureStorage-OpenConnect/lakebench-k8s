@@ -398,7 +398,7 @@ names for Customer 360 are:
 ```bash
 lakebench destroy test-config.yaml --force
 lakebench deploy test-config.yaml
-lakebench generate test-config.yaml --wait --timeout 14400
+lakebench generate test-config.yaml --timeout 14400
 lakebench run test-config.yaml --timeout 7200
 ```
 

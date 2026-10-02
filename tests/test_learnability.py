@@ -160,7 +160,7 @@ class TestRecipesCommand:
 
     def test_unknown_recipe_lists_the_valid_ones(self):
         result = self._run("not-a-recipe")
-        assert result.exit_code == 1
+        assert result.exit_code == 2  # usage: unknown recipe
         assert "hive-iceberg-spark-trino" in result.output
 
 

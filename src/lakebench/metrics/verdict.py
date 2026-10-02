@@ -213,6 +213,11 @@ def compute_badge_status(
         reasons.append(f"Benchmark did not complete ({metrics.benchmark_error}); no QpH")
     elif not metrics.success:
         reasons.append("Pipeline crashed or was interrupted")
+    # Reasons the run recorded itself (e.g. "datagen timed out"), after the
+    # generic one so existing reasons keep their place.
+    for recorded in getattr(metrics, "failure_reasons", None) or []:
+        if recorded not in reasons:
+            reasons.append(recorded)
 
     pb = metrics.pipeline_benchmark
     is_sustained = _is_sustained(metrics)

@@ -15,16 +15,19 @@ from rich.table import Table
 
 from lakebench import __version__
 from lakebench._constants import DEFAULT_OUTPUT_DIR
+from lakebench.cli._exit import LakebenchGroup
 from lakebench.cli._helpers import (
     DEFAULT_CONFIG as DEFAULT_CONFIG,
 )
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
-    EXIT_DECLINED,
     _journal_safe,
     _strip_ansi,
     console,
+    emit_data,
+    esc,
     journal_open,
+    markup,
     print_error,
     print_info,
     print_success,
@@ -44,6 +47,7 @@ from lakebench.config import (
     load_config,
 )
 from lakebench.config.schema import is_continuous_mode
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
 from lakebench.k8s import (
@@ -65,6 +69,8 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="lakebench",
+    cls=LakebenchGroup,
+    pretty_exceptions_enable=False,
     help="Deploy and benchmark lakehouse architectures on Kubernetes",
     add_completion=False,
     no_args_is_help=True,
@@ -79,7 +85,7 @@ def _version_callback(value: bool) -> None:
     circuits subcommand dispatch (and works before any subcommand-
     validation errors would fire)."""
     if value:
-        console.print(f"Lakebench version {__version__}")
+        console.print(f"Lakebench version {esc(__version__)}")
         raise typer.Exit()
 
 
@@ -246,7 +252,7 @@ def _print_report_summary(metrics) -> None:
     if scores:
         console.print()
         for s in scores:
-            console.print(f"  {s}")
+            console.print(f"  {markup(s)}")
     console.print()
 
 
@@ -258,7 +264,7 @@ def _print_report_summary(metrics) -> None:
 @app.command()
 def version() -> None:
     """Show version information."""
-    console.print(f"Lakebench version {__version__}")
+    console.print(f"Lakebench version {esc(__version__)}")
 
 
 @app.command()
@@ -385,7 +391,7 @@ def init(
     if output.exists() and not force:
         print_error(f"File already exists: {output}")
         print_info("Use --force to overwrite")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     # Local mode short-circuits the wizard: there are no S3 credentials to
     # collect (Garage mints its own), no namespace, and only one supported
@@ -410,8 +416,8 @@ def init(
         from lakebench.init_wizard import _build_config_yaml, run_wizard
 
         result = run_wizard(console, advanced=advanced)
-        if result is None:
-            raise typer.Exit(0)
+        if result is None:  # Ctrl-C or end of input: nothing was written
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
         # Apply any CLI flag overrides onto wizard state. Rebuild the YAML
         # after applying overrides so flags actually reach the written file
@@ -434,7 +440,7 @@ def init(
         console.print()
         if not _typer.confirm(f"  Write configuration to {output}?", default=True):
             console.print("[yellow]Cancelled.[/yellow]")
-            raise typer.Exit(EXIT_DECLINED)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
         output.write_text(result.config_yaml)
         console.print()
@@ -442,7 +448,7 @@ def init(
         print_info("Next steps:")
         print_info("  1. lakebench config validate -- check config for errors")
         print_info("  2. lakebench deploy          -- deploy infrastructure")
-        print_info("  3. lakebench generate --wait -- generate test data")
+        print_info("  3. lakebench generate -- generate test data")
         print_info("  4. lakebench run             -- run pipeline + benchmark")
         return
 
@@ -550,8 +556,8 @@ def _write_local_config(output: Path, name: str, scale: float, workload_schema: 
     print_info(f"Scale: {scale} (~{scale * 10.0:.1f} GB bronze)")
     console.print()
     console.print("  Next:")
-    console.print(f"    [bold]lakebench deploy {output} --local[/bold]")
-    console.print(f"    [bold]lakebench run {output} --local --generate --yes[/bold]")
+    console.print(f"    [bold]lakebench deploy {esc(output)} --local[/bold]")
+    console.print(f"    [bold]lakebench run {esc(output)} --local --generate --yes[/bold]")
     console.print("  (--generate populates bronze on the first local run.)")
 
 
@@ -674,7 +680,7 @@ def validate(
     - Kubernetes namespace is accessible or can be created
     """
     config_file = resolve_config_path(config_file, file_option)
-    console.print(Panel(f"Validating: [bold]{config_file}[/bold]", expand=False))
+    console.print(Panel(f"Validating: [bold]{esc(config_file)}[/bold]", expand=False))
 
     # validate is read-only: it opens no journal and writes no file.
 
@@ -688,7 +694,7 @@ def validate(
 
     def _section_start(title: str) -> None:
         _section_items.clear()
-        console.print(f"\n [bold]{title}[/bold]")
+        console.print(f"\n [bold]{esc(title)}[/bold]")
 
     def _check_ok(msg: str, *, hint: str | None = None) -> None:
         _section_items.append(("ok", msg, hint))
@@ -704,17 +710,17 @@ def validate(
         ok = fail = warn = 0
         for status, msg, hint in _section_items:
             if status == "ok":
-                console.print(f"   [green]+[/green] {msg}")
+                console.print(f"   [green]+[/green] {esc(msg)}")
                 ok += 1
             elif status == "fail":
-                console.print(f"   [red]x[/red] {msg}")
+                console.print(f"   [red]x[/red] {esc(msg)}")
                 fail += 1
             else:
-                console.print(f"   [yellow]![/yellow] {msg}")
+                console.print(f"   [yellow]![/yellow] {esc(msg)}")
                 warn += 1
             if hint:
                 for line in hint.split("\n"):
-                    console.print(f"     [dim]{line}[/dim]")
+                    console.print(f"     [dim]{esc(line)}[/dim]")
         _section_items.clear()
         return ok, fail, warn
 
@@ -730,16 +736,16 @@ def validate(
             _check_ok(f"Name: {cfg.name}, Namespace: {cfg.get_namespace()}")
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]x[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1)  # noqa: B904
+            console.print(f"  [red]x[/red] {esc(loc)}: {esc(err['msg'])}")
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     p, f, w = _section_end()
     checks_passed += p
     checks_failed += f
@@ -1078,8 +1084,8 @@ def validate(
             warn_s = "s" if checks_warned > 1 else ""
             console.print(
                 Panel(
-                    f"[green]{checks_passed} passed[/green], "
-                    f"[yellow]{checks_warned} warning{warn_s}[/yellow]\n"
+                    f"[green]{esc(checks_passed)} passed[/green], "
+                    f"[yellow]{esc(checks_warned)} warning{esc(warn_s)}[/yellow]\n"
                     f"Run [bold]lakebench deploy[/bold] to deploy",
                     title="Validation Passed",
                     expand=False,
@@ -1088,7 +1094,7 @@ def validate(
         else:
             console.print(
                 Panel(
-                    f"[green]All {checks_passed} checks passed[/green]\n"
+                    f"[green]All {esc(checks_passed)} checks passed[/green]\n"
                     f"Run [bold]lakebench deploy[/bold] to deploy",
                     title="Validation Successful",
                     expand=False,
@@ -1097,13 +1103,13 @@ def validate(
     else:
         console.print(
             Panel(
-                f"[green]{checks_passed} passed[/green], [red]{checks_failed} failed[/red]\n"
+                f"[green]{esc(checks_passed)} passed[/green], [red]{esc(checks_failed)} failed[/red]\n"
                 f"Fix the issues above before deploying",
                 title="Validation Failed",
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
 
 @app.command()
@@ -1160,22 +1166,22 @@ def status(
             ns = ns or cfg.get_namespace()
         except ConfigError as e:
             print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     if local:
         from lakebench.cli._local import print_local_status, status_local
 
         if cfg is None:
             print_error("Local status needs a config file")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.USAGE)
         print_local_status(status_local(cfg, workdir=workdir))
         return
 
     if not ns:
         print_error("Specify --namespace or provide a config file")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
-    console.print(Panel(f"Status for namespace: [bold]{ns}[/bold]", expand=False))
+    console.print(Panel(f"Status for namespace: [bold]{esc(ns)}[/bold]", expand=False))
 
     try:
         k8s = get_k8s_client(namespace=ns)
@@ -1249,7 +1255,7 @@ def status(
                 if e.status == 404:
                     table.add_row(name, kind, "Not found", "[dim]-[/dim]")
                 else:
-                    table.add_row(name, kind, f"Error: {e.reason}", "[red]ERROR[/red]")
+                    table.add_row(name, kind, f"Error: {esc(e.reason)}", "[red]ERROR[/red]")
 
         console.print(table)
 
@@ -1263,8 +1269,8 @@ def status(
             if active > 0 or succeeded < completions:
                 console.print()
                 console.print(
-                    f"[bold]Datagen:[/bold] {succeeded}/{completions} pods completed, "
-                    f"{active} active"
+                    f"[bold]Datagen:[/bold] {esc(succeeded)}/{esc(completions)} pods completed, "
+                    f"{esc(active)} active"
                 )
         except k8s_client.rest.ApiException as e:
             if e.status != 404:
@@ -1272,7 +1278,7 @@ def status(
 
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
 
 
 @app.command()
@@ -1303,7 +1309,7 @@ def stop(
         cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN)  # no name-length check; stops
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     namespace = cfg.get_namespace()
     k8s = get_k8s_client(
@@ -1319,7 +1325,7 @@ def stop(
 
     console.print(
         Panel(
-            f"Stopping streaming jobs for: [bold]{cfg.name}[/bold]",
+            f"Stopping streaming jobs for: [bold]{esc(cfg.name)}[/bold]",
             expand=False,
         )
     )
@@ -1455,7 +1461,7 @@ def info(
         cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     # Auto-size resources based on scale (tier guidance only)
     from lakebench.config.autosizer import resolve_auto_sizing
@@ -1608,10 +1614,10 @@ def info(
         f"[dim]{label + ':':<{max_label + 1}}[/dim] [bold]{value}[/bold]" for label, value in lines
     )
 
-    console.print(Panel(formatted, title=f"Lakebench: {cfg.name}", expand=False))
+    console.print(Panel(formatted, title=f"Lakebench: {esc(cfg.name)}", expand=False))
 
     if guidance.warning:
-        console.print(f"  [yellow]Warning: {guidance.warning}[/yellow]")
+        console.print(f"  [yellow]Warning: {esc(guidance.warning)}[/yellow]")
 
     # Check cluster feasibility
     try:
@@ -1626,13 +1632,13 @@ def info(
 
         if cluster_cores >= needed_cores and cluster_gb >= needed_gb:
             console.print(
-                f"  [green]Cluster OK:[/green] {cluster_cores} cores / {cluster_gb} GB "
-                f"allocatable; peak request {needed_cores} cores / {needed_gb} GB"
+                f"  [green]Cluster OK:[/green] {esc(cluster_cores)} cores / {esc(cluster_gb)} GB "
+                f"allocatable; peak request {esc(needed_cores)} cores / {esc(needed_gb)} GB"
             )
         else:
             console.print(
-                f"  [red]Cluster undersized:[/red] {cluster_cores} cores / {cluster_gb} GB "
-                f"allocatable; peak request {needed_cores} cores / {needed_gb} GB"
+                f"  [red]Cluster undersized:[/red] {esc(cluster_cores)} cores / {esc(cluster_gb)} GB "
+                f"allocatable; peak request {esc(needed_cores)} cores / {esc(needed_gb)} GB"
             )
             console.print(
                 "  [dim]Run 'lakebench config recommend' to find max feasible scale[/dim]"
@@ -1741,7 +1747,7 @@ def report(
             deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
         except ConfigError as e:
             print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     # List runs mode
     if list_runs:
@@ -1750,7 +1756,7 @@ def report(
             print_warning(f"No runs found in {metrics_dir}")
             return
 
-        console.print(Panel(f"Available runs in [bold]{metrics_dir}[/bold]", expand=False))
+        console.print(Panel(f"Available runs in [bold]{esc(metrics_dir)}[/bold]", expand=False))
 
         table = Table()
         table.add_column("Run ID", style="cyan")
@@ -1782,16 +1788,16 @@ def report(
     # make sense with --render: they are opt-ins to a regenerate action.
     if force and not render:
         print_error("--force requires --render")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     if output_path is not None and not render:
         print_error("--output requires --render")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     # --force only makes sense with --output: the default timestamped path
     # is collision-free in practice, so --force there is a no-op that only
     # confuses the caller. Matches the help text.
     if force and output_path is None:
         print_error("--force requires --output (the default timestamped path is collision-free)")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     if render:
         try:
@@ -1810,11 +1816,15 @@ def report(
                 print_info("Pass --force to overwrite the file at --output.")
             else:
                 print_info("Retry in a moment; the timestamp will differ.")
-            raise typer.Exit(1)  # noqa: B904
+            # An existing --output file is a usage error; a default-path
+            # collision is a transient failure.
+            code = ExitCode.USAGE if output_path is not None else ExitCode.FAILED
+            raise typer.Exit(code)  # noqa: B904
         except ValueError as e:
             print_error(str(e))
             print_info("Use 'lakebench report --list' to see available runs")
-            raise typer.Exit(1)  # noqa: B904
+            # An unknown run id is a bad argument; no runs at all is a failed lookup.
+            raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)  # noqa: B904
 
         # Also print the summary when asked; keep the default quiet so
         # scripts that watch stdout for the path have a clean output.
@@ -1830,7 +1840,7 @@ def report(
         console.print(
             Panel(
                 f"[green]Report rendered[/green]\n\n"
-                f"Output: {report_path}\n\n"
+                f"Output: {esc(report_path)}\n\n"
                 f"The delivered run directory report.html is unchanged.",
                 title="Report Rendered",
                 expand=False,
@@ -1847,21 +1857,22 @@ def report(
     if metrics is None:
         print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
         print_info("Use 'lakebench report --list' to see available runs")
-        raise typer.Exit(1)
+        # An unknown run id is a bad argument; no runs at all is a failed lookup.
+        raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
 
     _print_report_summary(metrics)
 
     # Not run_dir(): that creates the directory, and report only reads here.
     delivered = storage.metrics_dir / f"run-{metrics.run_id}" / "report.html"
     if delivered.exists():
-        console.print(f"[dim]Delivered report: {delivered}[/dim]")
+        console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")
         console.print(
             "[dim]Run 'lakebench report --render' to write a fresh HTML "
             "at lakebench-output/reports/.[/dim]"
         )
     else:
         console.print(
-            f"[dim]No delivered report at {delivered}. "
+            f"[dim]No delivered report at {esc(delivered)}. "
             "Run 'lakebench report --render' to generate one.[/dim]"
         )
 
@@ -1918,7 +1929,7 @@ def results(
         warn_deprecated_short_f("--format / -o")
         if output_format is not None and output_format != format_short_f:
             print_error(f"both --format {output_format} and -f {format_short_f} given")
-            raise typer.Exit(2)
+            raise typer.Exit(ExitCode.USAGE)
         output_format = format_short_f
     if output_format is None:
         output_format = "table"
@@ -1936,7 +1947,7 @@ def results(
             deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
         except ConfigError as e:
             print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     if run_id:
         metrics = storage.load_run(run_id)
@@ -1946,18 +1957,19 @@ def results(
     if metrics is None:
         print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
         print_info("Use 'lakebench report --list' to see available runs")
-        raise typer.Exit(1)
+        # An unknown run id is a bad argument; no runs at all is a failed lookup.
+        raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
 
     pb = metrics.pipeline_benchmark
     if pb is None:
         print_warning("This run does not have pipeline benchmark data.")
         print_info("Pipeline benchmark is generated for runs after this feature was added.")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
-    # Machine-readable formats go to stdout with plain print: Rich wraps long
-    # lines at the terminal width and inserts markup, which breaks parsers.
+    # Machine-readable formats go to plain stdout (emit_data): Rich wraps
+    # long lines at the terminal width and parses markup, which breaks parsers.
     if output_format == "json":
-        print(_json.dumps(pb.to_dict(), indent=2))
+        emit_data(_json.dumps(pb.to_dict(), indent=2))
         return
 
     if output_format == "csv":
@@ -1976,15 +1988,15 @@ def results(
         for key in metric_keys:
             row = [key] + [matrix[stage].get(key, "") for stage in matrix]
             writer.writerow(row)
-        print(buf.getvalue(), end="")
+        emit_data(buf.getvalue())
         return
 
     # Table format (default)
     console.print()
     console.print(
         Panel(
-            f"[bold]Pipeline Benchmark:[/bold] {pb.deployment_name} (run {pb.run_id})\n"
-            f"Mode: {pb.pipeline_mode} | "
+            f"[bold]Pipeline Benchmark:[/bold] {esc(pb.deployment_name)} (run {esc(pb.run_id)})\n"
+            f"Mode: {esc(pb.pipeline_mode)} | "
             f"Time-to-Value: {pb.time_to_value_seconds:.1f}s | "
             f"Throughput: {pb.pipeline_throughput_gb_per_second:.3f} GB/s",
             expand=False,
@@ -2028,7 +2040,7 @@ def results(
     if pb.query_benchmark:
         qb = pb.query_benchmark
         console.print(
-            f"\n  Query Benchmark: {qb.mode} mode | QpH: {qb.qph:.1f} | {qb.total_seconds:.1f}s"
+            f"\n  Query Benchmark: {esc(qb.mode)} mode | QpH: {qb.qph:.1f} | {qb.total_seconds:.1f}s"
         )
 
     console.print(
@@ -2102,7 +2114,7 @@ def logs(
     if component not in COMPONENT_SELECTORS:
         print_error(f"Unknown component: {component}")
         print_info(f"Valid components: {', '.join(COMPONENT_SELECTORS.keys())}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
     config_file = resolve_config_path(config_file, file_option)
 
@@ -2110,13 +2122,13 @@ def logs(
         cfg = load_config(config_file, purpose=LoadPurpose.READ)  # no name-length check
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     namespace = cfg.get_namespace()
     label_selector, container = COMPONENT_SELECTORS[component]
 
     console.print(
-        f"Fetching logs for [bold]{component}[/bold] in namespace [bold]{namespace}[/bold]"
+        f"Fetching logs for [bold]{esc(component)}[/bold] in namespace [bold]{esc(namespace)}[/bold]"
     )
 
     # Build kubectl logs args (the "kubectl" itself is added by the pinned
@@ -2224,7 +2236,7 @@ def journal(
             print_warning(f"No events found for session {session_id}")
             return
 
-        console.print(Panel(f"Session: [bold]{session_id}[/bold]", expand=False))
+        console.print(Panel(f"Session: [bold]{esc(session_id)}[/bold]", expand=False))
         table = Table()
         table.add_column("Time", style="dim", width=19)
         table.add_column("Event", style="cyan")
@@ -2578,17 +2590,17 @@ def recommend(
 
         console.print(
             Panel(
-                f"[bold]Scale {target_scale:,}[/bold] ({format_data_size(reqs['data_gb'])})\n\n"
-                f"[dim]Tier:[/dim]             {reqs['tier']}\n"
+                f"[bold]Scale {target_scale:,}[/bold] ({esc(format_data_size(reqs['data_gb']))})\n\n"
+                f"[dim]Tier:[/dim]             {esc(reqs['tier'])}\n"
                 f"[dim]Rows:[/dim]             {dims.approx_rows:,}\n"
-                f"[dim]Mode:[/dim]             {mode_label}\n\n"
+                f"[dim]Mode:[/dim]             {esc(mode_label)}\n\n"
                 f"[yellow]Minimum Cluster Requirements:[/yellow]\n"
                 f"  CPU cores:       [bold]{reqs['total_cores']:,}[/bold]\n"
                 f"  Memory:          [bold]{reqs['total_mem_gi']:,} GB[/bold]\n\n"
                 f"[dim]Breakdown:[/dim]\n"
-                f"{workload_line}\n"
-                f"  Datagen:         {reqs['datagen_pods']} pods\n"
-                f"  Trino:           {reqs['trino_workers']} workers\n"
+                f"{esc(workload_line)}\n"
+                f"  Datagen:         {esc(reqs['datagen_pods'])} pods\n"
+                f"  Trino:           {esc(reqs['trino_workers'])} workers\n"
                 f"  + infra overhead",
                 title="Cluster Requirements",
                 expand=False,
@@ -2612,12 +2624,12 @@ def recommend(
                     detected_mem = int(cap.total_memory_bytes / (1024**3))
                 cluster_source = f"detected ({cap.node_count} nodes)"
         except Exception as e:
-            console.print(f"[yellow]Could not detect cluster capacity: {e}[/yellow]")
+            console.print(f"[yellow]Could not detect cluster capacity: {esc(e)}[/yellow]")
             console.print("[dim]Use --cores and --memory to specify manually[/dim]\n")
 
     if detected_cores is None or detected_mem is None:
         mode_label = "continuous" if is_sustained else "batch"
-        console.print(f"[bold]Cluster Sizing Reference[/bold] (mode: {mode_label})\n")
+        console.print(f"[bold]Cluster Sizing Reference[/bold] (mode: {esc(mode_label)})\n")
         console.print(
             "[dim]Tip: Connect to a cluster or use --cores/--memory for max scale calculation[/dim]\n"
         )
@@ -2647,15 +2659,15 @@ def recommend(
     max_scale_slow = find_max_scale(detected_cores, detected_mem, use_slow_datagen=True)
 
     mode_label = "continuous" if is_sustained else "batch"
-    console.print(f"[bold]Cluster Capacity[/bold] ({cluster_source}, mode: {mode_label})")
-    console.print(f"  CPU cores: [bold]{detected_cores}[/bold]")
-    console.print(f"  Memory:    [bold]{detected_mem} GB[/bold]\n")
+    console.print(f"[bold]Cluster Capacity[/bold] ({esc(cluster_source)}, mode: {esc(mode_label)})")
+    console.print(f"  CPU cores: [bold]{esc(detected_cores)}[/bold]")
+    console.print(f"  Memory:    [bold]{esc(detected_mem)} GB[/bold]\n")
 
     if max_scale == 0:
         console.print("[yellow]Cluster is below minimum requirements for scale 1.[/yellow]")
         reqs = compute_cluster_requirements(1)
         console.print(
-            f"[dim]Minimum for scale 1: {reqs['total_cores']} cores, {reqs['total_mem_gi']} GB RAM[/dim]"
+            f"[dim]Minimum for scale 1: {esc(reqs['total_cores'])} cores, {esc(reqs['total_mem_gi'])} GB RAM[/dim]"
         )
         return
 
@@ -2668,18 +2680,18 @@ def recommend(
             "[bold yellow]Slow datagen:[/bold yellow] Datagen runs with reduced parallelism (slower generation, same compute resources)\n"
         )
         console.print(
-            f"[green]Maximum scale (slow datagen):[/green] [bold]{max_scale_slow:,}[/bold] ({format_data_size(slow_reqs['data_gb'])})"
+            f"[green]Maximum scale (slow datagen):[/green] [bold]{max_scale_slow:,}[/bold] ({esc(format_data_size(slow_reqs['data_gb']))})"
         )
         console.print(
-            f"[dim]Standard max:              {max_scale_standard:,} ({format_data_size(std_reqs['data_gb'])})[/dim]\n"
+            f"[dim]Standard max:              {max_scale_standard:,} ({esc(format_data_size(std_reqs['data_gb']))})[/dim]\n"
         )
     else:
         console.print(
-            f"[green]Maximum scale:[/green] [bold]{max_scale_standard:,}[/bold] ({format_data_size(std_reqs['data_gb'])})"
+            f"[green]Maximum scale:[/green] [bold]{max_scale_standard:,}[/bold] ({esc(format_data_size(std_reqs['data_gb']))})"
         )
         if max_scale_slow > max_scale_standard:
             console.print(
-                f"[dim]With --slow-datagen:        {max_scale_slow:,} ({format_data_size(slow_reqs['data_gb'])})[/dim]"
+                f"[dim]With --slow-datagen:        {max_scale_slow:,} ({esc(format_data_size(slow_reqs['data_gb']))})[/dim]"
             )
         console.print()
 
@@ -2749,7 +2761,7 @@ def recommend(
     console.print()
     if use_slow_datagen:
         console.print("[dim]Slow datagen: generation runs slower to fit cluster resources[/dim]")
-    console.print(f"[dim]Next: lakebench init --scale {max_scale}[/dim]")
+    console.print(f"[dim]Next: lakebench init --scale {esc(max_scale)}[/dim]")
 
 
 # =============================================================================

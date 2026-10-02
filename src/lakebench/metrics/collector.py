@@ -379,6 +379,10 @@ class PipelineMetrics:
     # Why the benchmark did not complete, when it raised (the run then fails
     # and no QpH is recorded). None when it completed or was not attempted.
     benchmark_error: str | None = None
+    # Failure reasons the run recorded itself, for a failure no other field
+    # shows (for example "datagen timed out", whose exit code is 1 like any
+    # failed run). Each one is a FAIL reason in ``verdict.reasons``.
+    failure_reasons: list[str] = field(default_factory=list)
 
     # In-stream benchmark rounds (sustained mode only)
     benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
@@ -506,6 +510,8 @@ class PipelineMetrics:
             d["benchmark"] = self.benchmark.to_dict()
         if self.benchmark_error is not None:
             d["benchmark_error"] = self.benchmark_error
+        if self.failure_reasons:
+            d["failure_reasons"] = list(self.failure_reasons)
         if self.benchmark_rounds:
             d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
         if self.pipeline_benchmark is not None:

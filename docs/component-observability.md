@@ -82,10 +82,10 @@ The Helm release is named `lakebench-observability`. The chart shortens service 
 kubectl get svc -n lakebench-observability -l release=lakebench-observability
 ```
 
-To deploy the observability stack alongside infrastructure, set `observability.enabled: true` in your config YAML, or pass the `--include-observability` flag:
+To deploy the observability stack alongside infrastructure, set `observability.enabled: true` in your config YAML, then deploy as usual:
 
 ```bash
-lakebench deploy test-config.yaml --include-observability
+lakebench deploy test-config.yaml
 ```
 
 ## Grafana

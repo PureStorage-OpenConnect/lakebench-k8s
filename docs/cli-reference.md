@@ -18,6 +18,8 @@ Several commands prompt for confirmation before running. Use `--yes` / `-y`
 to skip the prompt; `destroy` and `clean` also accept `--force` as the same
 flag.
 
+Exit codes are listed in [Exit Codes](exit-codes.md).
+
 ## Commands
 
 ### init
@@ -78,7 +80,7 @@ configs first. With `--local` it deploys each stack itself before the run.
 | `--format` | | `table` | Output format: table, json, csv, html |
 | `--skip-benchmark` | | `false` | Skip benchmark phase |
 | `--local` | | `false` | Run both configs on this host with podman/docker |
-| `--generate` | | `false` | Generate data before each run. On a cluster, a side whose bronze prefix already holds data fails when its run reaches datagen (the inner `run` exits 2, and `compare` reports that side as failed); empty it first with `lakebench clean bronze <config>` |
+| `--generate` | | `false` | Generate data before each run. On a cluster, a side whose bronze prefix already holds data fails when its run reaches datagen (the inner `run` exits 3, refused, and `compare` reports that side as failed); empty it first with `lakebench clean bronze <config>` |
 | `--timeout` | | `7200` | Per-run timeout in seconds |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
@@ -139,12 +141,10 @@ lakebench config validate CONFIG_FILE   # validate config + test connectivity
 lakebench config storage CONFIG_FILE    # check the S3 backend supports what lakebench needs
 lakebench config recommend CONFIG_FILE  # show cluster sizing guidance for the config's mode
 lakebench config recipes [NAME]         # list recipes, what each one trades off, and support states
-lakebench config upgrade CONFIG_FILE    # upgrade a v1.2 config to v2 flat format (-o to write elsewhere)
 ```
 
 `config validate` and `validate` load the config as `deploy` does, so they
-fail on a config with no `name:` or with a removed key. `config upgrade`
-refuses a config with no `name:`.
+fail on a config with no `name:` or with a removed key.
 
 `config show` prints the config's support state and its peak requested
 resources. `config recipes` lists, for every recipe, its support state per
@@ -172,7 +172,7 @@ lakebench config storage [CONFIG_FILE] [OPTIONS]
 | `--full` / `--no-full` | `--full` | Create a temporary bucket for write and multipart checks. Use `--no-full` when the account cannot create buckets; write checks are then reported as skipped, not failed. |
 
 Exit code 0 means no required check failed. Exit code 1 means a required check
-failed or the config could not be loaded.
+failed; 2 means the config could not be loaded or names no S3 endpoint.
 
 Checks are graded. **Required** failures (connectivity, bucket enumeration,
 object operations, multipart abort) mean lakebench cannot run against the store.
@@ -213,7 +213,6 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--dry-run` | | `false` | Show what would be deployed without making changes |
-| `--include-observability` | | `false` | Deploy Prometheus and Grafana |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout) |
 | `--local` | | `false` | Deploy locally with podman/docker instead of Kubernetes |
@@ -246,10 +245,9 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting; `0` computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--regenerate` | | `false` | Empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 2) so existing datagen output is never overwritten silently. |
+| `--regenerate` | | `false` | Empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. |
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
@@ -279,7 +277,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
 | `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
 | `--skip-generate` | | `false` | Skip datagen even with `--generate` |
-| `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 2) so existing datagen output is never overwritten silently. No effect without `--generate`. |
+| `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. No effect without `--generate`. |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace |
 | `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
@@ -492,7 +490,7 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--local` | | `false` | Tear down the local stack instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
-| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 4 unless the namespace is already gone |
+| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 6 unless the namespace is already gone |
 | `--keep-buckets` | | `false` | Empty the S3 buckets but do not delete them |
 | `--force-legacy` | | `false` | Proceed on a namespace or bucket with no lakebench ownership annotation or tag. Foreign-owned namespaces and buckets are refused regardless |
 | `--allow-unverified-cluster` | | `false` | Bypass the API-server fingerprint match when it cannot be computed |
@@ -631,12 +629,15 @@ lakebench reproduce PACKAGE.yaml [OPTIONS]
 | `--config` | `-c` | package's config | Verify mode: config to run instead of the package's `config_reference` |
 | `--timeout` | `-t` | auto | Verify mode: per-job timeout in seconds |
 | `--keep` | | `false` | Verify mode: keep the deployment after the run (reproduce always destroys before the run) |
-| `--allow-commit-drift` | | `false` | Verify mode: run even when HEAD differs from the recorded commit (refused with exit 2 otherwise) |
+| `--allow-commit-drift` | | `false` | Verify mode: run even when HEAD differs from the recorded commit (refused with exit 14 otherwise) |
 | `--dry-run` | | `false` | Verify mode: parse the package and exit |
 
-Exit codes: `0` pass, `1` performance drift, `2` correctness drift or a
-refusal (different experiment identity, maintenance policy or result
-fingerprints).
+Exit codes: `0` pass; `14` (requirement unmet) for performance or
+correctness drift, commit drift without `--allow-commit-drift`, or a run that
+did not follow the package (different samples, maintenance policy, experiment
+or benchmark results); `2` for a package or config refused before running;
+`1` when the pipeline could not run. 1.6 used `1` for performance drift and
+`2` for correctness drift.
 
 ### financial
 
@@ -667,7 +668,7 @@ the cluster-wide `lakebench-cluster-lock` lease.
 | `admin repair-operator [CONFIG]` | `--dry-run`, `--controller-tmp-size` (default 8Gi), `-f/--file` | Remove stale watch-list entries and raise a controller `/tmp` smaller than the given size |
 | `admin migrate-deployment NAMESPACE [CONFIG]` | `--api-server-fingerprint`, `-f/--file` | Stamp identity annotations on a legacy pre-ownership namespace |
 | `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment (refused when the bucket holds objects unless `--force-nonempty`) |
-| `admin release-lock` | `--expired-only` (default), `--force` | Release a stale cluster lease |
+| `admin release-lock` | `--force` | Release an expired cluster lease; `--force` releases a live one (last resort) |
 
 The Spark Operator runs spark-submit in its controller pod, which caches
 jars under `/tmp`; the chart default of 1Gi is too small and gets the

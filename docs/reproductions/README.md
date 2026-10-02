@@ -13,11 +13,15 @@ deploys it, generates data, runs the pipeline, destroys the deployment again
 (unless `--keep`), compares actual vs expected, and exits:
 
 - **0** -- every metric within its tolerance band
-- **1** -- performance drift over the recorded band
-- **2** -- correctness violation (scale mismatch, a missing correctness
-  metric), or a refusal: commit drift without `--allow-commit-drift`, a
-  missing config, a different maintenance policy, sample count or
-  experiment identity, or different benchmark results
+- **14** -- requirement unmet: performance drift over the recorded band, a
+  correctness violation (scale mismatch, a missing correctness metric),
+  commit drift without `--allow-commit-drift`, or a run that differs from
+  the package (maintenance policy, sample count, experiment identity or
+  benchmark results)
+- **2** -- refused before running: a package that does not parse, a
+  missing config, or a config whose sample count or maintenance policy
+  differs from the package's
+- **1** -- the pipeline could not run, or its run could not be found
 
 See [docs/deep-dive/reproduce.md](../deep-dive/reproduce.md) for the full
 contract.
@@ -62,10 +66,10 @@ differs from the policy of the running version. `reproduce --record`
 refuses a source run from another policy.
 
 **`c360-scale-0-1.yaml` is a legacy package that `lakebench reproduce` refuses.** Every attempt
-exits 2, for several independent reasons:
+exits 14 or 2, for several independent reasons:
 
 - It was recorded at commit `ead6722`, so any other HEAD is commit drift
-  (exit 2 unless `--allow-commit-drift`).
+  (exit 14 unless `--allow-commit-drift`).
 - Its `config_reference` (`examples/c360-scale-0-1.yaml`) resolves
   relative to this directory, to `docs/reproductions/examples/...`, and no
   such example exists anywhere in the repository; `--config` is required.
