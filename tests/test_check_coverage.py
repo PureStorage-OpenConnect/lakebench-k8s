@@ -86,3 +86,20 @@ def test_slow_tests_import_no_floored_module():
         check=True,
     ).stdout.strip()
     assert out == "[]", out
+
+
+def test_spark_floors_cover_the_stream_files_and_fail_below():
+    """The Spark suite floors the AML silver stream, common.py and the Delta
+    silver stream as well as detection_rules.py, and each fails one point
+    under its floor."""
+    spark = cc.FLOORS["spark"]
+    for name in (
+        "lakebench/spark/scripts/silver_stream_financial.py",
+        "lakebench/spark/scripts/common.py",
+        "lakebench/spark/scripts/silver_stream_delta.py",
+        "lakebench/spark/scripts/detection_rules.py",
+    ):
+        assert name in spark, name
+        values = {k: (v - 1.0 if k == name else 100.0) for k, v in spark.items()}
+        failures, _ = cc.check(_report(**values), spark)
+        assert len(failures) == 1 and name in failures[0], failures

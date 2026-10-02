@@ -34,6 +34,15 @@ the coverage-unit artifact; src/ identical to the v1.7 kickoff commit
     unit   s3/client.py                  69.86%  (204/292)    new
     unit   metrics/experiment.py         93.89%  (430/458)    new
     unit   metrics/c360_correctness.py   62.46%  (213/341)    new
+Measured 2026-10-02 on the 4.0 Spark leg's command (pyspark 4.0.1,
+LB_REQUIRE_JARS=1, `pytest tests/spark --cov=src/lakebench/spark/scripts`)
+at the commit where the Spark tier first runs fully green on both lines
+(stale and skipped tests fixed, jars pinned); Spark children are not
+measured, only the pytest process:
+    spark  spark/scripts/detection_rules.py        91.74%  (589/642)  raised to 91
+    spark  spark/scripts/silver_stream_financial.py 71.88%  (230/320)  new
+    spark  spark/scripts/common.py                 56.34%  (542/962)  new
+    spark  spark/scripts/silver_stream_delta.py    48.00%  (60/125)   new
 The tests marked slow (the AML statistics job) import none of these modules,
 directly or through what they import, so deselecting them from the unit legs
 cannot lower any of these numbers and no separate slow-suite floors exist.
@@ -61,7 +70,10 @@ FLOORS: dict[str, dict[str, float]] = {
         "lakebench/s3/client.py": 69.0,
     },
     "spark": {
-        "lakebench/spark/scripts/detection_rules.py": 90.0,
+        "lakebench/spark/scripts/common.py": 56.0,
+        "lakebench/spark/scripts/detection_rules.py": 91.0,
+        "lakebench/spark/scripts/silver_stream_delta.py": 48.0,
+        "lakebench/spark/scripts/silver_stream_financial.py": 71.0,
     },
 }
 
