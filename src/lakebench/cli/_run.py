@@ -28,6 +28,7 @@ from lakebench.cli._helpers import (
     resolve_config_path,
     write_run_report,
 )
+from lakebench.cli._interrupt import restores_handlers
 from lakebench.cli._run_args import BATCH_STAGES
 from lakebench.config import (
     ConfigError,
@@ -1814,6 +1815,7 @@ def run(
         run_series(cfg, config_file, options, repeat, config_sha256=_config_sha256)
 
 
+@restores_handlers
 def _run_once(
     cfg: Any,
     config_file: Path,

@@ -759,6 +759,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `admin`/`lakebench`.
 ### Fixed
 
+- **A run that fails while saving its record no longer leaves its signal
+  handlers installed.** When the metrics save, the report or the journal
+  raised at the end of a batch or continuous run, the run's SIGINT/SIGTERM
+  handler stayed in the process, and a later cluster-lock acquire in the
+  same process (which guards only an unhandled SIGTERM) ran unguarded. The
+  handlers are now put back however the run ends.
 - **The capacity check counts the Spark driver's memory overhead.**
   The driver pod requests its heap plus the overhead Spark on Kubernetes
   adds to a Python driver, 40% of the heap (12.8 GiB for the 32 GiB
