@@ -116,6 +116,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
   `--regenerate` without `--generate` or `--generate-only`, or with
   `--local` or a continuous run other than `--generate-only`; `--skip-generate` with `--generate`;
+  `--generate` on a multi-cycle batch run (it generated the corpus twice; the run
+  generates each cycle without it);
   `--force-reset` on a batch run; `--force-rebuild` on a continuous run;
   `--duration` on a batch run or below 60; `--timeout` below 1. The full
   list is under `run` in docs/cli-reference.md. `reproduce` refuses a

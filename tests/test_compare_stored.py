@@ -1000,3 +1000,21 @@ def test_resolution_line_names_every_deployment(tmp_path: Path) -> None:
     runs = _runs(tmp_path, r1, r2)
     side = cm.resolve_side("A", f"{r1['run_id']},{r2['run_id']}", [runs])
     assert "deployments dep-one, dep-two" in cm.resolution_line(side)
+
+
+def test_a_multicycle_side_regenerates_without_generate() -> None:
+    """A multi-cycle batch run generates in its cycles and refuses
+    --generate: the hint that sets B to A's three cycles names plain run."""
+    import json as _json
+
+    from lakebench.cli._run_args import RUN_RULES, RunArgs, RunContext
+
+    spec = PAIRS["P7"]
+    a = _json.loads(_json.dumps(sr.load_record(spec["a"])))
+    a["cycles"] = [{}, {}, {}]
+    doc = cm.compare_records([a], [sr.load_record(spec["b"])])
+    cmd = doc["missing"]["command"]
+    assert cmd and cmd.startswith("lakebench run ") and "--generate" not in cmd, cmd
+    flags = [f for f in cmd.split() if f.startswith("--")]
+    args = RunArgs(include_datagen="--generate" in flags, regenerate="--regenerate" in flags)
+    assert not [r for r in RUN_RULES if r.broken(args, RunContext(mode="batch", cycles=3))]

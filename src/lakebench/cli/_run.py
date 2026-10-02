@@ -1605,7 +1605,10 @@ def run(
         bool,
         typer.Option(
             "--generate",
-            help="Run datagen before pipeline stages (batch mode only; continuous always runs datagen)",
+            help=(
+                "Run datagen before pipeline stages (single-cycle batch only: a multi-cycle "
+                "run generates in its cycles and refuses it; continuous always runs datagen)"
+            ),
         ),
     ] = False,
     skip_deploy: Annotated[
@@ -1748,8 +1751,9 @@ def run(
     After gold finalize, runs a query benchmark (QpH).
     Use --skip-benchmark to skip the benchmark stage.
 
-    With --generate (batch mode), generates data first, then runs the full
-    pipeline. Continuous mode always runs datagen automatically.
+    With --generate (single-cycle batch), generates data first, then runs the
+    full pipeline. A multi-cycle run generates each cycle's slice without it.
+    Continuous mode always runs datagen automatically.
 
     With --continuous, runs the continuous pipeline instead:
     starts datagen, then launches bronze-ingest, silver-stream,
@@ -2461,8 +2465,8 @@ def _run_once(
         # regenerate on: only a bucket this deployment may not empty refuses.
         if total_cycles > 1:
             # Every cycle generates its own bronze (cycle 0 of an owned
-            # bucket clears it, including a --generate corpus written just
-            # above): the namespace's fleet sidecar, and any fleet this run
+            # bucket clears it; --generate is refused on a multi-cycle run):
+            # the namespace's fleet sidecar, and any fleet this run
             # read before the cycles, describe a corpus it replaces, and the
             # cycle pods' fleet is not read, so the record carries no fleet.
             # Dropped before the gate, which may clear part of bronze and

@@ -413,7 +413,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--generate-only` | | `false` | Deploy + generate data and exit |
 | `--continuous` | | `false` | Run the continuous pipeline instead of batch. `--sustained` is a deprecated hidden alias. |
 | `--duration` | | config value | Continuous run duration in seconds |
-| `--generate` | | `false` | Run datagen before pipeline (batch mode only) |
+| `--generate` | | `false` | Run datagen before pipeline (single-cycle batch only; a multi-cycle run generates in its cycles and refuses it) |
 | `--yes` | `-y` | `false` | Skip confirmation prompts |
 | `--local` | | `false` | Run locally with podman/docker instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |

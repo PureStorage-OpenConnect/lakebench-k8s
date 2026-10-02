@@ -747,14 +747,31 @@ _WORKLOAD_SETTING = {
 }
 
 
-def _regen(side: Side) -> str:
+def _regen(side: Side, cycles: int | None = None) -> str:
     """The run that regenerates a side's corpus: a batch run needs
-    ``--generate --regenerate``; a continuous run regenerates its own data
-    and refuses ``--regenerate``."""
+    ``--generate --regenerate``; a multi-cycle batch run generates in its
+    cycles (cycle 0 clears an owned datagen prefix) and refuses
+    ``--generate``; a continuous run regenerates its own data and refuses
+    ``--regenerate``. *cycles* is the cycle count the side will run with
+    (the hint's own setting), else the one it recorded."""
     cfg = _cfg(side)
     if _continuous(side):
         return f"lakebench run {cfg} --continuous"
+    if cycles is None:
+        from lakebench.metrics.comparability import _cycles
+
+        rec = _first(side)
+        cycles = _cycles(rec.get("experiment") or {}, rec)
+    if cycles > 1:
+        return f"lakebench run {cfg}"
     return f"lakebench run {cfg} --generate --regenerate"
+
+
+def _target_cycles(corpus: Mapping[str, cmp.Difference]) -> int | None:
+    """A's cycle count when the hint sets B's to it, else None."""
+    d = corpus.get("cycles")
+    a = d.a if d is not None else None
+    return a if isinstance(a, int) and not isinstance(a, bool) else None
 
 
 def _also(corpus: Mapping[str, cmp.Difference], key: str) -> str:
@@ -815,7 +832,7 @@ def _identity_hint(diffs: Mapping[str, list[cmp.Difference]], a: Side, b: Side) 
             continue
         d = corpus[key]
         also = _also(corpus, key)
-        cmd = _regen(b)
+        cmd = _regen(b, _target_cycles(corpus))
         if key in _CORPUS_SETTING:
             setting = _CORPUS_SETTING[key]
             return MissingCondition(
@@ -840,7 +857,7 @@ def _identity_hint(diffs: Mapping[str, list[cmp.Difference]], a: Side, b: Side) 
         )
     if corpus:
         d = next(iter(corpus.values()))
-        cmd = _regen(b)
+        cmd = _regen(b, _target_cycles(corpus))
         return MissingCondition(
             "the same corpus",
             cmd,
