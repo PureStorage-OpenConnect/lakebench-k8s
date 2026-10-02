@@ -3,6 +3,7 @@ facts are reported with both line numbers, a pointer line is not."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -159,6 +160,37 @@ def test_identifier_inside_a_longer_one_is_not_the_fact(tmp_path):
     _repo(repo2, DOC + "\nThe image is lb-datagen:1.6.0.\n")
     rc, out = _run(repo2, "Pin `lb-datagen:1.6.0` in the config.\n")
     assert rc == 1, out
+
+
+def test_identifier_found_under_a_path_or_option_prefix(tmp_path):
+    repo = _repo(
+        tmp_path, DOC + "\nImage docker.io/org/lb-datagen:1.6.0, flag --executor-memory=48g.\n"
+    )
+    for ident in ("lb-datagen:1.6.0", "executor-memory=48g"):
+        rc, out = _run(repo, f"Use `{ident}` here.\n")
+        assert rc == 1 and f"(fact: {ident})" in out, (ident, out)
+        # Pointing at the doc that states it excuses it.
+        rc, out = _run(repo, f"Use `{ident}`, see [sizing](docs/sizing.md).\n")
+        assert rc == 0, (ident, out)
+
+
+def test_a_backticked_corpus_path_is_a_pointer_not_a_fact(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "docs" / "results-1.6.0.md").write_text("Results.\n")
+    (repo / "docs" / "releasing.md").write_text("The record is docs/results-1.6.0.md.\n")
+    rc, out = _run(repo, "The release record is `docs/results-1.6.0.md`.\n")
+    assert rc == 0, out
+
+
+def test_planted_repo_ignores_an_inherited_git_dir(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run([*git, "init", "-q"], cwd=repo, check=True, env=env)
+    subprocess.run([*git, "add", "docs/sizing.md"], cwd=repo, check=True, env=env)
+    monkeypatch.setenv("GIT_DIR", str(ROOT / ".git"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "no-such-index"))
+    assert cdo.corpus_files(repo, None) == ["docs/sizing.md"]
 
 
 def test_a_corpus_that_is_not_a_git_checkout_cannot_run(tmp_path):

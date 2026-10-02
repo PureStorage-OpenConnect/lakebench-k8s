@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -133,9 +134,11 @@ def _unit_facts(line: str) -> list[str]:
 
 
 def _ident_pattern(ident: str) -> re.Pattern[str]:
-    # Whole token: lb-datagen:1.6.0 is not found inside lb-datagen:1.6.0.1,
-    # but a sentence's closing full stop is allowed after it.
-    return re.compile(rf"(?<![\w.:/-]){re.escape(ident)}(?![\w:/-]|\.\w)", re.IGNORECASE)
+    # Whole token on the right: lb-datagen:1.6.0 is not found inside
+    # lb-datagen:1.6.0.1, but a sentence's closing full stop may follow. On
+    # the left a path or option prefix is allowed, so it is found in
+    # docker.io/sillidata/lb-datagen:1.6.0 and in --executor-memory=48g.
+    return re.compile(rf"(?<![\w.:]){re.escape(ident)}(?![\w:/-]|\.\w)", re.IGNORECASE)
 
 
 def _clean_ref(ref: str) -> str:
@@ -200,10 +203,14 @@ def check(file: Path, repo: Path, corpus: Sequence[str]) -> list[Report]:
     for n, raw in enumerate(lines, 1):
         line_spans = spans.get(n, [])
         facts = [(f, c.unit_at.get(f, [])) for f in _unit_facts(raw)]
-        facts += [(s, c.ident_at(s)) for s in line_spans if re.search(r"\d", s)]
         refs: set[str] = set()
+        idents = []
         for ref in [m.group(1) for m in _LINK.finditer(raw)] + line_spans:
-            refs |= _resolve(ref, c.paths)
+            named = _resolve(ref, c.paths)
+            refs |= named
+            if not named and ref in line_spans and re.search(r"\d", ref):
+                idents.append(ref)  # a span naming a corpus file is a pointer, not a fact
+        facts += [(s, c.ident_at(s)) for s in idents]
         for fact, where in facts:
             # A pointer excuses a fact only when it names a file that holds it.
             if where and not refs & {rel for rel, _ in where}:
@@ -221,8 +228,15 @@ def corpus_files(repo: Path, globs: Sequence[str] | None) -> list[str]:
         for g in globs:
             found.update(p.relative_to(repo).as_posix() for p in repo.glob(g) if p.is_file())
         return sorted(found)
+    # No inherited GIT_* variables: under a git hook they name the hook's
+    # repository, and git would list that index instead of repo's.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     res = subprocess.run(
-        ["git", "ls-files", "-z", "*.md"], cwd=repo, capture_output=True, text=True, check=True
+        ["git", "-C", str(repo), "ls-files", "-z", "*.md"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
     )
     return sorted(p for p in res.stdout.split("\0") if p and p not in DEFAULT_EXCLUDE)
 
