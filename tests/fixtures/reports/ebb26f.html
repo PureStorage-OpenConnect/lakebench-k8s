@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lakebench Scorecard - pipe-aml-c1</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --success: #16a34a;
+            --danger: #dc2626;
+            --warning: #d97706;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid var(--border);
+        }
+
+        h1 {
+            font-size: 1.875rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-success {
+            background: #dcfce7;
+            color: var(--success);
+        }
+
+        .status-failed {
+            background: #fecaca;
+            color: var(--danger);
+        }
+
+        .status-warning {
+            background: #fef3c7;
+            color: var(--warning);
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .card-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+        .card-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .card-delta {
+            font-size: 0.75rem;
+            margin-top: 0.25rem;
+        }
+
+        .card-hint {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+            font-style: italic;
+        }
+
+        .card-hint2 {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 0.125rem;
+        }
+
+        .delta-positive {
+            color: var(--success);
+        }
+
+        .delta-negative {
+            color: var(--danger);
+        }
+
+        section {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        section h2 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .mono {
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            font-size: 0.875rem;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .config-key {
+            color: var(--text-muted);
+        }
+
+        footer {
+            text-align: center;
+            padding-top: 2rem;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="provenance-label" style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem;">
+            internal benchmark, single-owner recorded
+        </div>
+        <header>
+            <h1>Lakebench Scorecard</h1>
+            <div class="subtitle">
+                Deployment: <strong>pipe-aml-c1</strong> |
+                Run ID: <code class="mono">20260929-205000-ebb26f</code> |
+                <span class="status status-success" title="Pipeline completed, data complete (ingest/scale ratio 0.95-1.05), all jobs succeeded, no failed queries">
+                    PASSED
+                </span>
+                <span class="confidence-chip" title="run-count qualifier" style="display: inline-block; margin-left: 0.5em; padding: 0.1em 0.5em; border-radius: 9999px; background: rgba(148,163,184,0.15); color: var(--warning); font-size: 0.65em; font-weight: 600; text-transform: none;">single_run</span>
+            </div>
+            
+        </header>
+
+        
+        <section class="read-first" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--success);">
+            <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
+                Read this first
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+                <div><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style="color: var(--success);">PASSED</strong></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> sustained pipeline completed, all gates passed</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> <code class="mono">none (id 4862ac7677e9, scale 1.0)</code></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Limits present:</span> 1</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Record digest:</span> <code class="mono">83096ae7e667c1b8</code></div>
+            </div>
+        </section>
+        
+
+        
+        <div style="margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.875rem;">
+            <strong>Continuous</strong> pipeline |
+            Financial (FinServ-Crime, AML) at scale 1.0 |
+            hive-iceberg-spark-trino |
+            31m 54s
+        </div>
+        
+
+        
+        <div class="cards">
+            <div class="card">
+                <div class="card-label">Data Freshness</div>
+                <div class="card-value">202.0s</div>
+                <div class="card-hint">worst-case gold staleness during streaming window</div>
+                <div class="card-hint2">&#8595; lower is better | 3.4 min lag</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Sustained Throughput</div>
+                <div class="card-value">6,481 rows/s<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-hint">rows entering bronze per second</div>
+                <div class="card-hint2">&#8593; higher is better | 23,331,600 rows/hr</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Compute Efficiency</div>
+                <div class="card-value">0.46 GB/core-hr<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></div>
+                <div class="card-hint">GB processed per core-hour requested</div>
+                <div class="card-hint2">&#8593; higher is better</div>
+            </div>
+            <div class="card">
+                <div class="card-label">In-Stream QpH</div>
+                <div class="card-value">409.3<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=4</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-hint">median of <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</div>
+                <div class="card-hint2">&#8593; higher is better | ~7 queries/min</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Total CPU-hours</div>
+                <div class="card-value">54.0</div>
+                <div class="card-hint">total compute across all stages</div>
+                <div class="card-hint2">extrapolates to ~2,438/day</div>
+            </div>
+        </div>
+        <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
+            <span>Duration: 31m 54s</span>
+            <span>Data Processed: 24.81 GB</span>
+            <span>Avg Pipeline Throughput: 0.01 GB/s<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></span>
+        </div>
+        
+
+        
+        <section>
+            <h2>Bottleneck Identification</h2>
+            <p style="margin-bottom: 1rem; color: var(--text-muted); font-style: italic;">
+                Latency is balanced across stages (no single bottleneck).
+            </p>
+            <div style="display: flex; width: 100%; border-radius: 4px; overflow: hidden; margin-bottom: 0.75rem;">
+                <div style="flex: 18.50; background: #f59e0b; height: 28px; min-width: 0;" title="bronze: share of CPU"></div><div style="flex: 37.00; background: #6366f1; height: 28px; min-width: 0;" title="silver: share of CPU"></div><div style="flex: 44.40; background: #eab308; height: 28px; min-width: 0;" title="gold: share of CPU"></div><div style="flex: 0.11; background: #06b6d4; height: 28px; min-width: 0;" title="query: share of CPU"></div>
+            </div>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">
+                <span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #f59e0b; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>bronze (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">18%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #6366f1; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>silver (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">37%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #eab308; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>gold (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">44%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #06b6d4; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>query (<span data-lb-derived="pct" data-lb-inputs="config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">0%</span>)</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Stage</th>
+                        <th>Latency</th>
+                        <th>% of Total</th>
+                        <th>CPU-sec</th>
+                        <th>% of CPU</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>bronze</td><td>8.2s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].latency_ms;pipeline_benchmark.stages[0].latency_ms|pipeline_benchmark.stages[1].latency_ms|pipeline_benchmark.stages[2].latency_ms|pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">6.1%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds" data-lb-fmt=",.0f">36,001</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">18.5%</span></td></tr><tr><td>silver</td><td>57.0s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].latency_ms;pipeline_benchmark.stages[0].latency_ms|pipeline_benchmark.stages[1].latency_ms|pipeline_benchmark.stages[2].latency_ms|pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">42.7%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds" data-lb-fmt=",.0f">72,002</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">37.0%</span></td></tr><tr><td>gold</td><td>68.2s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].latency_ms;pipeline_benchmark.stages[0].latency_ms|pipeline_benchmark.stages[1].latency_ms|pipeline_benchmark.stages[2].latency_ms|pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">51.1%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds" data-lb-fmt=",.0f">86,402</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">44.4%</span></td></tr><tr><td>query</td><td>70ms</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].latency_ms|pipeline_benchmark.stages[1].latency_ms|pipeline_benchmark.stages[2].latency_ms|pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">0.1%</span></td><td><span data-lb-derived="total" data-lb-inputs="config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=",.0f">211</span></td><td><span data-lb-derived="pct" data-lb-inputs="config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">0.1%</span></td></tr>
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+        <section>
+            <h2>Data Validity</h2>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">
+                <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Ingest Ratio:</strong> 1.05 Healthy</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Streaming Jobs:</strong> <span data-lb-derived="count" data-lb-inputs="truthy(streaming[*].success)" data-lb-fmt=",d">3</span>/<span data-lb-derived="count" data-lb-inputs="count(streaming)" data-lb-fmt=",d">3</span> passed</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Query Failures:</strong> <span data-lb-derived="count" data-lb-inputs="falsy(benchmark.queries[*].success)" data-lb-fmt=",d">0</span> failed</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #fef3c7; color: var(--warning);"><strong>Benchmark Rounds:</strong> <span data-lb-derived="count" data-lb-inputs="count(pipeline_benchmark.benchmark_rounds)" data-lb-fmt=",d">4</span> rounds completed (minimum 5 for trend analysis)</div>
+            </div>
+        </section>
+        
+
+        
+        <section>
+            <h2>Table Maintenance</h2>
+            <table>
+                <thead>
+                    <tr><th>Metric</th><th>Value</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Maintenance policy</td><td><code class="mono">m2-2026-09-26</code></td></tr>
+                    <tr><td>In-window QpH trend</td><td>first round 416.2, last round 402.4 (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.benchmark_rounds[3].qph|-1*pipeline_benchmark.benchmark_rounds[0].qph;pipeline_benchmark.benchmark_rounds[0].qph" data-lb-fmt="+.1f" data-lb-suffix="%">-3.3%</span>) over <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</td></tr>
+                    <tr><td>Silver data files</td><td>12 at the first probed round, 42 at the last</td></tr>
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+        <section>
+            <h2>Pipeline Stages</h2>
+            <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
+                Mode: sustained | Freshness: <strong>202.0s</strong> | Throughput: <strong>6,481 rows/s<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></strong> | Data: <strong>24.8 GB</strong> | Rows: 51,506,579
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        
+                        <th>Stage</th>
+                        <th>Engine</th>
+                        <th>Time</th>
+                        <th>In Rows</th>
+                        <th title="Rows processed per second">Rows/s</th>
+                        <th title="Average micro-batch processing time">Latency</th>
+                        <th title="Worst-case staleness of stage output">Freshness (s)</th>
+                        <th>Executors</th>
+                        <th>Cores x Mem</th>
+                        <th title="executor_count x cores x elapsed / 3600">CPU-hours</th>
+                        <th>QpH</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+                <tr>
+                    <td><strong>bronze</strong></td>
+                    <td>spark</td>
+                    <td>1800.0s</td>
+                    <td>11,666,091</td>
+                    <td>6,481<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>8.2s</td>
+                    <td>-</td>
+                    <td>5</td>
+                    <td>4 x 8G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds*/3600" data-lb-fmt=".1f">10.0</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>silver</strong></td>
+                    <td>spark</td>
+                    <td>1800.0s</td>
+                    <td>11,474,373</td>
+                    <td>6,159<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>57.0s</td>
+                    <td>-</td>
+                    <td>10</td>
+                    <td>4 x 32G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds*/3600" data-lb-fmt=".1f">20.0</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>gold</strong></td>
+                    <td>spark</td>
+                    <td>1800.0s</td>
+                    <td>28,754,133</td>
+                    <td>15,974<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>68.2s</td>
+                    <td>202.0</td>
+                    <td>12</td>
+                    <td>4 x 32G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds*/3600" data-lb-fmt=".1f">24.0</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>query</strong></td>
+                    <td>trino</td>
+                    <td>70.4s</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>- x -G</td>
+                    <td>-</td>
+                    <td>409.3</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                </tbody>
+            </table>
+            
+        <div class="cards" style="margin-top: 1.5rem;">
+            <div class="card">
+                <div class="card-label">Ingest Ratio</div>
+                <div class="card-value">1.05</div>
+                <div class="card-delta" style="color: var(--text-muted);">
+                    <span style="color: var(--success);">Healthy</span>
+                </div>
+                <div class="card-hint">bronze rows / datagen rows</div>
+            </div>
+        </div>
+        
+            <section><h3>Transaction Monitoring Operations</h3>
+<p>P10 gate (continuous, per operations pass): <strong style="color: var(--success);">pass</strong></p>
+<p style="color: var(--text-muted); font-size: 0.8125rem;">Dispositions are simulated from the datagen ground truth: L1 analyst accuracy 0.9, investigator accuracy 0.95, QA sample 0.05, seed 20260924. As of 2024-10-16.</p>
+<h4>Workflow invariants</h4><table><thead><tr><th>Cycle</th><th>Invariant</th><th>Status</th><th>Detail</th></tr></thead><tbody><tr><td>1</td><td>all <span data-lb-derived="count" data-lb-inputs="count(tm_operations.invariants[&quot;1&quot;])" data-lb-fmt=",d">13</span></td><td><span style="color: var(--success, green);">pass</span></td><td></td></tr></tbody></table>
+<h4>Coverage and completeness</h4><table><thead><tr><th>Section</th><th>Item</th><th>Payments</th></tr></thead><tbody><tr><td>completeness</td><td>bronze</td><td>2,710,746</td></tr><tr><td>completeness</td><td>customers</td><td>55,438</td></tr><tr><td>completeness</td><td>excluded</td><td>25,074,200</td></tr><tr><td>completeness</td><td>monitored</td><td>1,597,678</td></tr><tr><td>completeness</td><td>silver</td><td>2,127,471</td></tr><tr><td>completeness</td><td>source</td><td>26,671,878</td></tr><tr><td>completeness</td><td>unaccounted</td><td>0</td></tr><tr><td>dq</td><td>dq_missing_agent_bic</td><td>0</td></tr><tr><td>dq</td><td>dq_nonpositive_amount</td><td>0</td></tr><tr><td>dq</td><td>dq_self_transfer</td><td>0</td></tr><tr><td>dq</td><td>dq_unconvertible_currency</td><td>0</td></tr><tr><td>exclusion</td><td>dq_unconvertible_currency</td><td>0</td></tr><tr><td>exclusion</td><td>in_flight_to_bronze</td><td>23,961,132</td></tr><tr><td>exclusion</td><td>in_flight_to_silver</td><td>583,275</td></tr><tr><td>exclusion</td><td>no_customer_party</td><td>529,793</td></tr></tbody></table>
+<h4>Cycle funnel</h4><table><thead><tr><th>payments</th><th>monitored</th><th>alerts</th><th>escalated</th><th>cases</th><th>sars</th></tr></thead><tbody><tr><td>26,671,878</td><td>1,597,678</td><td>19,761</td><td>2,134</td><td>2,134</td><td>258</td></tr></tbody></table><p>L1 escalation rate <span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.l1_escalation_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">11.3%</span>; QA disagreement <span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.qa_disagreement_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">13.7%</span> on 908 re-reviewed; 19,314 alerts on non-customers (outside the monitored population).</p>
+<h4>Queue health</h4><table><thead><tr><th>Open alerts 0-30 d</th><th>31-60 d</th><th>61-90 d</th><th>90+ d</th><th>Open cases</th><th>Open cases &gt; 60 d</th><th>SLA breaches</th></tr></thead><tbody><tr><td>1,108</td><td>0</td><td>0</td><td>0</td><td>250</td><td>0</td><td>361</td></tr></tbody></table>
+<h4>Scenario performance</h4><table><thead><tr><th>Scenario</th><th>Customer alerts</th><th>Escalated</th><th title="Share of decided alerts escalated or on a SAR case">Productive rate</th><th>SAR conversion</th></tr></thead><tbody><tr><td>W17_layering_chain</td><td>722</td><td>113</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W17_layering_chain.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">16.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W17_layering_chain.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">8.2%</span></td></tr><tr><td>W2_structuring</td><td>214</td><td>22</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W2_structuring.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">9.9%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W2_structuring.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">0.9%</span></td></tr><tr><td>W3_round_tripping</td><td>42</td><td>31</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W3_round_tripping.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">79.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W3_round_tripping.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">69.0%</span></td></tr><tr><td>W4_risk_propagation</td><td>18,783</td><td>1,968</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W4_risk_propagation.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">9.8%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W4_risk_propagation.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">1.0%</span></td></tr></tbody></table>
+<p>SARs filed: <strong>272</strong>; determination-to-filing median 16 d, p95 28 d, <span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.filed_over_30_days_pct" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">4.4%</span> over 30 days; continuing-activity reviews due: 272 (opened 272, folded into an open investigation 0, waiting on a case pending filing 0, covered by the SAR that case filed 0).</p>
+<table><thead><tr><th>Filing limit</th><th>SARs filed</th><th>Filed late</th></tr></thead><tbody><tr><td>120_day_continuing</td><td>14</td><td>0</td></tr><tr><td>30_day</td><td>242</td><td>3</td></tr><tr><td>60_day_no_suspect</td><td>16</td><td>0</td></tr></tbody></table><p>Continuing-activity SARs filed more than 120 days after the prior SAR: 0.</p>
+</section>
+        <section>
+            <h3>Detection Scorecard</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Rule</th>
+                        <th>Target typology</th>
+                        <th title="New alert versions measured by time to detect, summed over gold-refresh ticks">New alert versions</th>
+                        <th title="Fraction of planted instances detected by this rule. Uncalibrated: measured in-sample on this run's own corpus; v1.6 publishes no held-out result (docs/aml-scoring.md).">Recall (uncalibrated)</th>
+                        <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance</th>
+                        <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>
+                        <th title="Share of this rule's alerts that touch none of its target typology's txns. NOT a production ops-queue false-positive rate; see docs/aml-scoring.md.">Off-target</th>
+                        <th title="Share of the txns in this rule's alerts that are planted target txns">Txn precision</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>W1_connected_components</td><td>gather_scatter</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>no data</td></tr><tr><td>W2_structuring</td><td>micro_structuring</td><td><span data-lb-derived="total" data-lb-inputs="streaming[2].ttd_by_rule.W2_structuring.alerts" data-lb-fmt=",d">1,117</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>ran</td></tr><tr><td>W3_round_tripping</td><td>cycle</td><td><span data-lb-derived="total" data-lb-inputs="streaming[2].ttd_by_rule.W3_round_tripping.alerts" data-lb-fmt=",d">495</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>ran</td></tr><tr><td>W4_risk_propagation</td><td>rapid_layering</td><td><span data-lb-derived="total" data-lb-inputs="streaming[2].ttd_by_rule.W4_risk_propagation.alerts" data-lb-fmt=",d">201,503</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>ran</td></tr><tr><td>W5_sanctions_match</td><td>sanctions_match</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>no data</td></tr><tr><td>W6_pep_counterparty</td><td>pep_match</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>no data</td></tr><tr><td>W7_cross_border_high_risk</td><td>corridor_high_risk</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>no data</td></tr><tr><td>W8_dormant_reactivation</td><td>dormant_reactivation</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>no data</td></tr><tr><td>W17_layering_chain</td><td>stack</td><td><span data-lb-derived="total" data-lb-inputs="streaming[2].ttd_by_rule.W17_layering_chain.alerts" data-lb-fmt=",d">13,984</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>ran</td></tr>
+                </tbody>
+            </table>
+            <div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.8125rem;">Continuous run: counts are new alert versions measured by time to detect, summed over gold-refresh ticks (an alert is counted again when its evidence changes; alerts without a matched silver transaction are not counted), not gold.alerts rows. Recall is not scored in continuous mode: stopping the streams can interrupt a detection pass, and scoring refuses a partial one.</div>
+        </section>
+        
+        </section>
+        
+
+        
+
+        
+        <section>
+            <h2>Continuous Pipeline</h2>
+            <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
+                <span data-lb-derived="count" data-lb-inputs="count(streaming)" data-lb-fmt=",d">3</span> continuous jobs | <span data-lb-derived="total" data-lb-inputs="streaming[*].total_rows_processed" data-lb-fmt=",d">51,894,597</span> total rows processed
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Batches</th>
+                        <th>Rows Processed</th>
+                        <th>Throughput</th>
+                        <th title="Average micro-batch processing time">Avg Batch</th>
+                        <th title="Worst-case staleness of stage output">Freshness</th>
+                        <th>Executors</th>
+                        <th>Cores x Mem</th>
+                        <th title="executor_count x cores x elapsed_seconds">CPU-sec</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+            <tr>
+                <td><code class="mono">lakebench-bronze-ingest</code></td>
+                <td><span class="status status-success">Pass</span></td>
+                <td>1800s</td>
+                <td>60</td>
+                <td>11,666,091</td>
+                <td>6,481 rows/s<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                <td>8.2s</td>
+                <td>-</td>
+                <td>5</td>
+                <td>4c x 8G</td>
+                <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*streaming[0].elapsed_seconds" data-lb-fmt=",.0f">36,001</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">lakebench-silver-stream</code></td>
+                <td><span class="status status-success">Pass</span></td>
+                <td>1800s</td>
+                <td>26</td>
+                <td>11,474,373</td>
+                <td>6,159 rows/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                <td>57.0s</td>
+                <td>-</td>
+                <td>10</td>
+                <td>4c x 32G</td>
+                <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*streaming[1].elapsed_seconds" data-lb-fmt=",.0f">72,002</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">lakebench-gold-refresh</code></td>
+                <td><span class="status status-success">Pass</span></td>
+                <td>1800s</td>
+                <td>6</td>
+                <td>28,754,133</td>
+                <td>15,974 rows/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                <td>68.2s</td>
+                <td>202s</td>
+                <td>12</td>
+                <td>4c x 32G</td>
+                <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*streaming[2].elapsed_seconds" data-lb-fmt=",.0f">86,402</span></td>
+            </tr>
+            
+                </tbody>
+            </table>
+            <div style="margin-top: 0.75rem; color: var(--text-muted); font-size: 0.8rem;">Total compute: <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count|pipeline_benchmark.stages[1].executor_count|pipeline_benchmark.stages[2].executor_count" data-lb-fmt=",.0f">27</span> executors | <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*streaming[0].elapsed_seconds*/3600|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*streaming[1].elapsed_seconds*/3600|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*streaming[2].elapsed_seconds*/3600" data-lb-fmt=".1f">54.0</span> CPU-hours requested | <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_memory_gb|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_memory_gb|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_memory_gb" data-lb-fmt=",.0f">744</span> GB memory</div>
+        </section>
+        
+
+        
+
+        
+        <section>
+            <h2>Trino Query Benchmark</h2>
+            <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
+                <span data-lb-derived="count" data-lb-inputs="truthy(benchmark.queries[*].success)" data-lb-fmt=",d">8</span>/<span data-lb-derived="count" data-lb-inputs="count(benchmark.queries)" data-lb-fmt=",d">8</span> queries passed |
+                QpH: <strong>409.3</strong> |
+                Mode: power (1 iter) |
+                Cache: hot |
+                Total: 70.38s
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Query</th>
+                        <th>Description</th>
+                        <th>Class</th>
+                        <th>Duration</th>
+                        <th>Rows</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+            <tr>
+                <td><code class="mono">FQ1_txn_full_scan</code></td>
+                <td>Silver transactions full aggregation</td>
+                <td>scan</td>
+                <td>10.87s</td>
+                <td>1</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ2_top_corridors_window</code></td>
+                <td>Top payment corridors by volume (last 30 days)</td>
+                <td>filter_prune</td>
+                <td>5.15s</td>
+                <td>100</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ6_structuring_scan</code></td>
+                <td>Structuring-band transaction detection (W2 shape)</td>
+                <td>filter_prune</td>
+                <td>7.14s</td>
+                <td>500</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ3_entity_edge_risk</code></td>
+                <td>Entity out-degree + volume via edges</td>
+                <td>aggregation</td>
+                <td>13.97s</td>
+                <td>200</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ7_cross_border_concentration</code></td>
+                <td>Cross-border corridor concentration</td>
+                <td>aggregation</td>
+                <td>7.14s</td>
+                <td>100</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ4_running_balance_window</code></td>
+                <td>Running balance for high-activity accounts</td>
+                <td>analytics</td>
+                <td>14.63s</td>
+                <td>74,957</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ5_alert_triage</code></td>
+                <td>Alert triage by priority + rule</td>
+                <td>operational</td>
+                <td>4.09s</td>
+                <td>11</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ8_alert_to_entity_join</code></td>
+                <td>Case investigation: alert -> entity -> recent txns</td>
+                <td>operational</td>
+                <td>4.59s</td>
+                <td>100</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+                </tbody>
+            </table>
+            
+        </section>
+        
+
+        
+        <section>
+            <h2>In-Stream Benchmark Rounds</h2>
+            <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
+                <span data-lb-derived="count" data-lb-inputs="count(benchmark_rounds)" data-lb-fmt=",d">4</span> rounds during streaming | Median QpH: <strong>409.3</strong> | Median gold event age: 693.4 d (corpus event time, not freshness)
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Query</th>
+                        <th>Round 1</th><th>Round 2</th><th>Round 3</th><th>Round 4</th>
+                        <th>&#916;</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code class='mono'>FQ3_entity_edge_risk</code></td><td>13.0s</td><td>13.8s</td><td>16.6s</td><td>14.1s</td><td style="color: var(--danger);">+1.1s</td></tr><tr><td><code class='mono'>FQ4_running_balance_window</code></td><td>12.5s</td><td>12.6s</td><td>16.6s</td><td>17.8s</td><td style="color: var(--danger);">+5.2s</td></tr><tr><td><code class='mono'>FQ1_txn_full_scan</code></td><td>11.9s</td><td>7.8s</td><td>10.4s</td><td>11.3s</td><td style="color: var(--success);">-0.6s</td></tr><tr><td><code class='mono'>FQ6_structuring_scan</code></td><td>9.3s</td><td>6.1s</td><td>6.7s</td><td>7.6s</td><td style="color: var(--success);">-1.7s</td></tr><tr><td><code class='mono'>FQ2_top_corridors_window</code></td><td>7.7s</td><td>4.6s</td><td>4.7s</td><td>5.6s</td><td style="color: var(--success);">-2.1s</td></tr><tr><td><code class='mono'>FQ7_cross_border_concentration</code></td><td>6.1s</td><td>6.9s</td><td>8.2s</td><td>7.4s</td><td style="color: var(--danger);">+1.3s</td></tr><tr><td><code class='mono'>FQ8_alert_to_entity_join</code></td><td>4.6s</td><td>4.6s</td><td>4.6s</td><td>3.9s</td><td style="color: var(--success);">-0.7s</td></tr><tr><td><code class='mono'>FQ5_alert_triage</code></td><td>4.1s</td><td>4.6s</td><td>4.1s</td><td>3.9s</td><td style="color: var(--text-muted);">-0.2s</td></tr>
+                    <tr style="border-top: 2px solid var(--border); font-weight: 600;">
+                        <td>QpH</td>
+                        <td><strong>416.2</strong></td><td><strong>472.2</strong></td><td><strong>400.0</strong></td><td><strong>402.4</strong></td>
+                        <td style="color: var(--danger);"><strong>-13.8</strong></td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+        <section>
+            <h2>Stability Over Time</h2>
+            <p style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 0.75rem;">
+                X-axis: round index
+            </p>
+            <svg viewBox="0 0 700 200" xmlns="http://www.w3.org/2000/svg" style="width: 100%; max-width: 700px; height: auto;"><rect x="60" y="20" width="580" height="140" fill="none" stroke="#e2e8f0"/><text x="52" y="164.0" text-anchor="end" fill="#2563eb" font-size="10">400</text><text x="52" y="94.0" text-anchor="end" fill="#2563eb" font-size="10">436</text><text x="52" y="24.0" text-anchor="end" fill="#2563eb" font-size="10">472</text><text x="60.0" y="178" text-anchor="middle" fill="#64748b" font-size="10">0</text><text x="253.33333333333331" y="178" text-anchor="middle" fill="#64748b" font-size="10">1</text><text x="446.66666666666663" y="178" text-anchor="middle" fill="#64748b" font-size="10">2</text><text x="640.0" y="178" text-anchor="middle" fill="#64748b" font-size="10">3</text><polyline points="60.0,128.6 253.3,20.0 446.7,160.0 640.0,155.3" fill="none" stroke="#2563eb" stroke-width="2"/><circle cx="60.0" cy="128.6" r="3" fill="#2563eb"/><circle cx="253.3" cy="20.0" r="3" fill="#2563eb"/><circle cx="446.7" cy="160.0" r="3" fill="#2563eb"/><circle cx="640.0" cy="155.3" r="3" fill="#2563eb"/><text x="60" y="198" fill="#2563eb" font-size="11">QpH</text></svg>
+            <p style="color: var(--text-muted); font-style: italic; margin-top: 0.75rem;">Insufficient data for trend analysis (minimum 5 rounds required).</p>
+        </section>
+        
+
+
+        
+
+        
+
+        
+        <section>
+            <h2>Configuration</h2>
+            <div class="config-grid">
+                
+                <div class="config-item">
+                    <span class="config-key">Name</span>
+                    <span class="mono">pipe-aml-c1</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Scale</span>
+                    <span class="mono">1.0</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Approx Bronze GB</span>
+                    <span class="mono">8.4</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Processing Pattern</span>
+                    <span class="mono">medallion</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">S3 Endpoint</span>
+                    <span class="mono">http://10.0.1.50:80</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Catalog Type</span>
+                    <span class="mono">hive</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Table Format</span>
+                    <span class="mono">iceberg</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Query Engine</span>
+                    <span class="mono">trino</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Trino Workers</span>
+                    <span class="mono">1</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Datagen Image</span>
+                    <span class="mono">docker.io/sillidata/lb-datagen:034f998</span>
+                </div>
+                
+            </div>
+        </section>
+        <section><h2>Experiment</h2><table><tbody><tr><td>Workload</td><td><code class='mono'>financial aml-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>datagen-v2-rs-0.3</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>4862ac7677e9e1d4</code></td></tr><tr><td>Seed</td><td><code class='mono'>777001</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>1.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>sustained</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:034f998</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>unresolved: no datagen fleet record for this run (data generated elsewhere or earlier)</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on; recorded outcomes]</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;30m&#x27;, &#x27;retention_interval&#x27;: 600, &#x27;compaction_interval&#x27;: 1200}</code></td></tr><tr><td>In-stream QpH rounds</td><td><code class='mono'>4</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>declared by the config, not observed from the datagen pods</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 1, in-stream rounds 4</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>trickle: max_files_per_trigger 1 (auto), the pipeline kept pace [trickle (offered load, not capacity)]</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Rules executed</td><td><code class='mono'>W17_layering_chain, W2_structuring, W3_round_tripping, W4_risk_propagation</code></td></tr><tr><td>Rules skipped</td><td><code class='mono'>none</code></td></tr><tr><td>Trickle rate (files per trigger)</td><td><code class='mono'>1</code></td></tr></tbody></table><h3>Result fingerprints</h3><p>continuous: AML continuous results depend on when detection and TM passes ran relative to arrival, so they are not a function of the corpus alone</p></section>
+
+        <footer>
+            Generated by Lakebench | (timestamp removed)
+        </footer>
+    </div>
+</body>
+</html>

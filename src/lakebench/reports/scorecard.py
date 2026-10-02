@@ -81,6 +81,7 @@ class FinancialScorecardBlock:
     def _render_detail_html(self, metrics: PipelineMetrics) -> str:
         if metrics is None:
             return ""
+        from lakebench.reports import derived as dv
 
         # Detection metrics come from the gold-finalize job. gold_finalize
         # re-detects over the WHOLE cumulative silver each cycle and does a
@@ -120,14 +121,18 @@ class FinancialScorecardBlock:
         # silver-matched transaction or in a tick without a TTD line are not
         # counted. The column header and footnote say so.
         continuous_alerts = False
+        alerts_paths: dict[str, list[str]] = {}
         if not source_jobs:
-            for sm in getattr(metrics, "streaming", None) or []:
+            for si, sm in enumerate(getattr(metrics, "streaming", None) or []):
                 if getattr(sm, "job_type", "") != "gold-refresh":
                     continue
                 for rule, row in (getattr(sm, "ttd_by_rule", None) or {}).items():
                     n = row.get("alerts") if isinstance(row, dict) else None
                     if isinstance(n, (int, float)):
                         alerts_by_rule[rule] = alerts_by_rule.get(rule, 0) + int(n)
+                        alerts_paths.setdefault(rule, []).append(
+                            dv.path("streaming", si, "ttd_by_rule", rule, "alerts")
+                        )
                         continuous_alerts = True
 
         # Nothing AML-specific to show (e.g. a c360 run mislabelled, or a
@@ -141,16 +146,18 @@ class FinancialScorecardBlock:
             RULE_TARGETS = {}
 
         recall_by_typology: dict[str, dict] = {}
+        typology_index: dict[str, int] = {}
         total_alerts = None
         fp_rate = None
         fp_by_rule: dict = {}
         chance_by_rule: dict = {}
         txn_prec_by_rule: dict = {}
         if scoring:
-            for t in scoring.get("typologies", []) or []:
+            for ti, t in enumerate(scoring.get("typologies", []) or []):
                 tt = t.get("typology_type")
                 if tt:
                     recall_by_typology[tt] = t
+                    typology_index[tt] = ti
             total_alerts = scoring.get("total_alerts")
             fp_rate = scoring.get("fp_rate")
             fp_by_rule = dict(scoring.get("fp_rate_by_rule") or {})
@@ -168,17 +175,36 @@ class FinancialScorecardBlock:
         # A batch rule with no count ran and emitted nothing; a continuous
         # rule missing from the histogram is unknown, not zero.
         missing_alerts = "-" if continuous_alerts else "0"
+
+        def _rule_pct(table: dict, key: str, rule: str, digits: int = 1) -> str:
+            val = table.get(rule)
+            if val is None:
+                return "-"
+            return dv.pct(
+                float(val), num_path=dv.path("financial_scoring", key, rule), digits=digits
+            )
+
+        def _typ_pct(typ: str, key: str) -> str:
+            return dv.pct(
+                float(recall_by_typology[typ][key]),
+                num_path=dv.path("financial_scoring", "typologies", typology_index[typ], key),
+            )
+
+        def _alerts(rule: str, alerts: int | None) -> str:
+            if alerts is None:
+                return missing_alerts
+            if rule in alerts_paths:
+                return dv.total(alerts, paths=alerts_paths[rule], fmt=",d")
+            return f"{alerts:,}"
+
         body_rows: list[str] = []
         for rule in rules:
             typ = RULE_TARGETS.get(rule)
             alerts = alerts_by_rule.get(rule)
             incidental_cell = "-"
-            fp_val = fp_by_rule.get(rule)
-            fp_cell = f"{float(fp_val) * 100:.1f}%" if fp_val is not None else "-"
-            chance_val = chance_by_rule.get(rule)
-            chance_cell = f"{float(chance_val) * 100:.1f}%" if chance_val is not None else "-"
-            txn_val = txn_prec_by_rule.get(rule)
-            txn_cell = f"{float(txn_val) * 100:.2f}%" if txn_val is not None else "-"
+            fp_cell = _rule_pct(fp_by_rule, "fp_rate_by_rule", rule)
+            chance_cell = _rule_pct(chance_by_rule, "chance_by_rule", rule)
+            txn_cell = _rule_pct(txn_prec_by_rule, "txn_precision_by_rule", rule, digits=2)
             if rule in rule_errors:
                 # A crashed rule is not "ran, 0 alerts".
                 status = '<span style="color: var(--danger, red);">error</span>'
@@ -194,21 +220,19 @@ class FinancialScorecardBlock:
                 # A rule with no planted typology to score recall against.
                 status = "ran" if alerts is not None or not continuous_alerts else "no data"
                 recall_cell = "n/a (attribute)"
-                alerts_cell = f"{alerts:,}" if alerts is not None else missing_alerts
+                alerts_cell = _alerts(rule, alerts)
             else:
-                alerts_cell = f"{alerts:,}" if alerts is not None else missing_alerts
+                alerts_cell = _alerts(rule, alerts)
                 trow = recall_by_typology.get(typ)
                 if trow and trow.get("incidental_recall") is not None:
-                    incidental_cell = f"{float(trow['incidental_recall']) * 100:.1f}%"
+                    incidental_cell = _typ_pct(typ, "incidental_recall")
                 if trow and trow.get("detection_status") == "rule_error":
                     status = '<span style="color: var(--danger, red);">error</span>'
                     recall_cell = "n/a"
                 elif trow and trow.get("detection_status") == "partial":
                     status = '<span style="color: var(--warning);">partial</span>'
                     recall_cell = (
-                        f"{float(trow['recall']) * 100:.1f}%"
-                        if trow.get("recall") is not None
-                        else "n/a"
+                        _typ_pct(typ, "recall") if trow.get("recall") is not None else "n/a"
                     )
                 elif trow and trow.get("detection_status") == "rule_skipped":
                     status = '<span style="color: var(--warning);">not run</span>'
@@ -221,7 +245,7 @@ class FinancialScorecardBlock:
                     alerts_cell = "-"
                 elif trow and trow.get("recall") is not None:
                     status = '<span style="color: var(--success, green);">scored</span>'
-                    recall_cell = f"{float(trow['recall']) * 100:.1f}%"
+                    recall_cell = _typ_pct(typ, "recall")
                 else:
                     status = "ran" if alerts is not None else "no data"
                     recall_cell = "-"
@@ -254,7 +278,11 @@ class FinancialScorecardBlock:
                 + "</div>"
             )
         if total_alerts is not None:
-            fp_str = f"{fp_rate * 100:.1f}%" if fp_rate is not None else "n/a"
+            fp_str = (
+                dv.pct(float(fp_rate), num_path="financial_scoring.fp_rate")
+                if fp_rate is not None
+                else "n/a"
+            )
             footer += (
                 '<div style="margin-top: 0.5rem; color: var(--text-muted); '
                 'font-size: 0.8125rem;">'
@@ -319,12 +347,34 @@ def continuous_trend_rows(pb, *, delta_limitation: bool) -> list[str]:
     trend = pb.qph_trend() if pb is not None else None
     if not trend:
         return rows
-    change = trend.get("change_pct")
-    change_txt = f" ({change:+.1f}%)" if change is not None else ""
+    from lakebench.reports import derived as dv
+
+    # The change between the first and last rounds with a QpH, derived from
+    # those two rounds of the record.
+    positive = [i for i, r in enumerate(pb.benchmark_rounds) if r.qph > 0]
+    change_txt = ""
+    if trend.get("change_pct") is not None and positive:
+        first_i, last_i = positive[0], positive[-1]
+        first_p = dv.path("pipeline_benchmark", "benchmark_rounds", first_i, "qph")
+        last_p = dv.path("pipeline_benchmark", "benchmark_rounds", last_i, "qph")
+        first = pb.benchmark_rounds[first_i].qph
+        last = pb.benchmark_rounds[last_i].qph
+        change_html = dv.pct(
+            last - first,
+            first,
+            num_path=[last_p, dv.product(-1, first_p)],
+            den_path=first_p,
+            signed=True,
+        )
+        change_txt = f" ({change_html})"
     rows.append(
         "<tr><td>In-window QpH trend</td>"
         f"<td>first round {trend['first_round_qph']:.1f}, last round "
-        f"{trend['last_round_qph']:.1f}{change_txt} over {trend['rounds']} rounds</td></tr>"
+        f"{trend['last_round_qph']:.1f}{change_txt} over "
+        + dv.count(
+            trend["rounds"], path="pipeline_benchmark.benchmark_rounds[*].qph", where="positive"
+        )
+        + " rounds</td></tr>"
     )
     if "silver_data_files_start" in trend:
         rows.append(
@@ -340,8 +390,27 @@ def continuous_trend_rows(pb, *, delta_limitation: bool) -> list[str]:
     return rows
 
 
-def _fmt_pct(v) -> str:
-    return f"{float(v) * 100:.1f}%" if v is not None else "n/a"
+def _fmt_pct(v, p: str | None = None) -> str:
+    """A stored fraction as a percentage; a derived span when its record
+    path *p* is known."""
+    if v is None:
+        return "n/a"
+    if p is None:
+        # Called without the record (a direct unit call): no path to name.
+        return f"{float(v) * 100:.1f}%"
+    from lakebench.reports import derived as dv
+
+    return dv.pct(float(v), num_path=p)
+
+
+def _p(base: str | None, *parts: str) -> str | None:
+    """*parts* under the ops block's record path, or None when unknown."""
+    if base is None:
+        return None
+    from lakebench.reports import derived as dv
+
+    tail = dv.path(*parts)
+    return f"{base}{tail}" if tail.startswith("[") else f"{base}.{tail}"
 
 
 def _fmt_n(v) -> str:
@@ -352,7 +421,12 @@ def _safe_tm_section(metrics, gold_jobs: list) -> str:
     """The TM section in its own guard: a malformed ``tm_operations`` or
     ``tm_ops`` blanks this section only, never the detection table."""
     try:
-        return _render_tm_operations(gold_jobs, getattr(metrics, "tm_operations", None))
+        all_jobs = list(getattr(metrics, "jobs", None) or [])
+        job_index = {id(j): i for i, j in enumerate(all_jobs)}
+        job_paths = [f"jobs[{job_index[id(j)]}]" for j in gold_jobs or []]
+        return _render_tm_operations(
+            gold_jobs, getattr(metrics, "tm_operations", None), job_paths=job_paths
+        )
     except Exception:  # noqa: BLE001 -- render must never crash the report
         return (
             "<section><h3>Transaction Monitoring Operations</h3>"
@@ -360,7 +434,9 @@ def _safe_tm_section(metrics, gold_jobs: list) -> str:
         )
 
 
-def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
+def _render_tm_operations(
+    gold_jobs: list, verdict: dict | None = None, *, job_paths: list[str] | None = None
+) -> str:
     """TM operations pack (GOALS P10.3, core sections) from the last
     gold-finalize job's ``tm_ops`` summary, plus every cycle's invariants.
 
@@ -372,21 +448,27 @@ def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
 
     verdict = verdict if isinstance(verdict, dict) else {}
     ops = verdict.get("ops") if isinstance(verdict.get("ops"), dict) else None
-    cycles: list[tuple[str, str, dict]] = []
+    ops_path: str | None = "tm_operations.ops" if ops else None
+    cycles: list[tuple[str, str, dict, str | None]] = []
     if not ops:
-        for j in reversed(gold_jobs or []):
+        paths = job_paths or []
+        for k in range(len(gold_jobs or []) - 1, -1, -1):
+            j = gold_jobs[k]
             if getattr(j, "tm_ops", None):
                 ops = j.tm_ops
+                ops_path = f"{paths[k]}.tm_ops" if k < len(paths) else None
                 break
     if verdict.get("invariants"):
         # Run-level record: batch (merged over cycles) or continuous (one
         # entry per operations pass).
         for c, inv in sorted(verdict["invariants"].items(), key=lambda kv: int(kv[0])):
-            cycles.append(("", str(c), inv))
+            cycles.append(("", str(c), inv, _p("tm_operations", "invariants", str(c))))
     else:
+        paths = job_paths or []
         for idx, j in enumerate(gold_jobs or [], start=1):
+            base = f"{paths[idx - 1]}.tm_invariants" if idx - 1 < len(paths) else None
             for c, inv in sorted((getattr(j, "tm_invariants", None) or {}).items()):
-                cycles.append((str(idx), c, inv))
+                cycles.append((str(idx), c, inv, _p(base, str(c))))
     if not ops and not cycles and not verdict:
         return ""
     ops = ops or {}
@@ -415,7 +497,9 @@ def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
     # Invariants: one row per (cycle, invariant) that did not pass, else a
     # one-line all-pass statement per cycle.
     inv_rows = []
-    for _job, c, inv in cycles:
+    from lakebench.reports import derived as dv
+
+    for _job, c, inv, inv_path in cycles:
         bad = {n: r for n, r in inv.items() if r.get("status") != "pass"}
         if bad:
             for n, r in sorted(bad.items()):
@@ -426,7 +510,9 @@ def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
                 )
         else:
             inv_rows.append(
-                f"<tr><td>{escape(c)}</td><td>all {len(inv)}</td>"
+                f"<tr><td>{escape(c)}</td><td>all "
+                + (dv.count(len(inv), path=inv_path) if inv_path else str(len(inv)))
+                + "</td>"
                 '<td><span style="color: var(--success, green);">pass</span></td><td></td></tr>'
             )
     if inv_rows:
@@ -463,8 +549,10 @@ def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
             + "</tr></thead><tbody><tr>"
             + "".join(f"<td>{_fmt_n(funnel.get(k))}</td>" for k in order)
             + "</tr></tbody></table>"
-            f"<p>L1 escalation rate {_fmt_pct(ops.get('l1_escalation_rate'))}; "
-            f"QA disagreement {_fmt_pct(ops.get('qa_disagreement_rate'))} on "
+            f"<p>L1 escalation rate "
+            f"{_fmt_pct(ops.get('l1_escalation_rate'), _p(ops_path, 'l1_escalation_rate'))}; "
+            f"QA disagreement "
+            f"{_fmt_pct(ops.get('qa_disagreement_rate'), _p(ops_path, 'qa_disagreement_rate'))} on "
             f"{_fmt_n(ops.get('qa_sample'))} re-reviewed; "
             f"{_fmt_n(ops.get('alerts_out_of_scope'))} alerts on non-customers "
             "(outside the monitored population).</p>"
@@ -486,8 +574,9 @@ def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
     if scen:
         rows = [
             f"<tr><td>{escape(rid)}</td><td>{_fmt_n(v.get('alerts'))}</td>"
-            f"<td>{_fmt_n(v.get('escalated'))}</td><td>{_fmt_pct(v.get('productive_rate'))}</td>"
-            f"<td>{_fmt_pct(v.get('sar_conversion'))}</td></tr>"
+            f"<td>{_fmt_n(v.get('escalated'))}</td>"
+            f"<td>{_fmt_pct(v.get('productive_rate'), _p(ops_path, 'scenarios', rid, 'productive_rate'))}</td>"
+            f"<td>{_fmt_pct(v.get('sar_conversion'), _p(ops_path, 'scenarios', rid, 'sar_conversion'))}</td></tr>"
             for rid, v in sorted(scen.items())
         ]
         parts.append(
@@ -502,7 +591,7 @@ def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
             f"<p>SARs filed: <strong>{_fmt_n(ops.get('sars_filed'))}</strong>; "
             f"determination-to-filing median {_fmt_n(ops.get('filing_days_median'))} d, "
             f"p95 {_fmt_n(ops.get('filing_days_p95'))} d, "
-            f"{_fmt_pct(ops.get('filed_over_30_days_pct'))} over 30 days; "
+            f"{_fmt_pct(ops.get('filed_over_30_days_pct'), _p(ops_path, 'filed_over_30_days_pct'))} over 30 days; "
             f"continuing-activity reviews due: {_fmt_n(ops.get('continuing_reviews_due'))} "
             f"(opened {_fmt_n(ops.get('continuing_reviews_opened'))}, folded into an open "
             f"investigation {_fmt_n(ops.get('continuing_reviews_folded'))}, waiting on a case "
