@@ -113,3 +113,57 @@ def test_the_set_matches_the_tables_the_stream_bootstraps():
         == len(reset)
         == len(_tuple_names("silver_stream_financial.py", "refuse_reused_silver"))
     )
+
+
+def test_the_reset_drops_the_gold_tables_gold_refresh_writes():
+    """gold-refresh bootstraps one table per DDL in _bootstrap_gold_tables;
+    the reset's CONTINUOUS_GOLD_TABLES must name each of them, and its loop
+    must drop them."""
+    reset = _func("bronze_verify_financial.py", "_continuous_reset")
+    loops = [
+        n
+        for n in ast.walk(reset)
+        if isinstance(n, ast.For)
+        and isinstance(n.iter, ast.Name)
+        and n.iter.id == "CONTINUOUS_GOLD_TABLES"
+        and any(
+            isinstance(c, ast.Call) and getattr(c.func, "id", "") == "_drop_owned_table"
+            for c in ast.walk(n)
+        )
+    ]
+    assert loops, "_continuous_reset no longer drops CONTINUOUS_GOLD_TABLES"
+    # The DDL names gold-refresh bootstraps, mapped to the env keys of the
+    # tables they create (gold_finalize_financial defines both).
+    boot = _func("gold_refresh_financial.py", "_bootstrap_gold_tables")
+    ddls = {
+        e.id
+        for loop in ast.walk(boot)
+        if isinstance(loop, ast.For) and isinstance(loop.iter, ast.Tuple)
+        for e in loop.iter.elts
+        if isinstance(e, ast.Name)
+    }
+    assert ddls, "gold-refresh's bootstrap DDL loop was not found"
+    finalize = (_SCRIPTS / "gold_finalize_financial.py").read_text()
+    ddl_table = dict(
+        re.findall(
+            r"^(DDL_[A-Z]+) = f\"\"\"\s*CREATE TABLE IF NOT EXISTS \{CATALOG\}\.\{(GOLD_[A-Z]+)\}",
+            finalize,
+            re.M,
+        )
+    )
+    gold_env = {
+        const: (key, default)
+        for const, key, default in re.findall(
+            r'^(GOLD_[A-Z]+) = env\("([A-Z_]+)", "([a-z_.]+)"\)', finalize, re.M
+        )
+    }
+    wanted = {gold_env[ddl_table[d]] for d in ddls}
+    tree = ast.parse((_SCRIPTS / "bronze_verify_financial.py").read_text())
+    tup = next(
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "CONTINUOUS_GOLD_TABLES" for t in n.targets)
+    )
+    dropped = {(c.args[0].value, c.args[1].value) for c in tup.elts if isinstance(c, ast.Call)}
+    assert wanted == dropped

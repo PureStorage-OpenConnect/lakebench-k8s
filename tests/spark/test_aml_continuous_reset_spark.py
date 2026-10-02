@@ -30,6 +30,15 @@ STREAM_SILVER = (
     "silver.entity_profiles",
     "silver.silver_batch_versions",
 )
+# The gold tables gold-refresh writes besides the TM ones the reset already
+# dropped; a reader (score_financial) would take their rows as this run's.
+STREAM_GOLD = (
+    "gold.alerts",
+    "gold.risk_scores",
+    "gold.entity_clusters",
+    "gold.daily_dashboards",
+    "gold.detection_status",
+)
 
 
 @pytest.fixture(scope="module")
@@ -75,3 +84,14 @@ def test_fresh_checkpoint_refuses_any_populated_stream_table(spark, load_script,
     _populate(spark, [table])
     with pytest.raises(common.SilverAbort):
         ssf.refuse_reused_silver(spark, str(tmp_path / "fresh-ckpt"))
+
+
+def test_reset_drops_the_gold_tables_gold_refresh_writes(spark, load_script, monkeypatch):
+    """Until gold-refresh's first tick, the previous run's alerts and
+    detection status would read as this run's."""
+    monkeypatch.setenv("LB_CATALOG_TYPE", "polaris")
+    bvf = load_script("bronze_verify_financial")
+    _populate(spark, STREAM_GOLD)
+    bvf._continuous_reset(spark, spark.createDataFrame([("x",)], "msg_id string"))
+    left = [t for t in STREAM_GOLD if _exists(spark, t)]
+    assert left == [], f"the continuous reset left {left}"

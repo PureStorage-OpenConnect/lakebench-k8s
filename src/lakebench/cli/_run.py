@@ -1301,6 +1301,10 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout, interrupt
         status = job_manager.submit_job(
             JobType.SCORE_FINANCIAL,
             arguments=["--manifest", manifest_uri, "--output", output_uri],
+            # The score refuses a gold.detection_status another run wrote; it
+            # needs this run's id for that (job.py exports one only with
+            # observability on).
+            cycle_env={"LB_RUN_ID": run_id},
         )
         if interrupt is not None:
             interrupt.submitted(status)
@@ -2416,7 +2420,9 @@ def run(
 
             # Cycle env vars for incremental mode (cycles 2+)
             # LB_RUN_ID ties gold.alerts / gold.detection_status rows to this
-            # run's metrics.json; without it every pod drew its own uuid.
+            # run's metrics.json; without it every pod drew its own uuid. The
+            # "<run>-c<n>" form is parsed back: score_financial accepts it as
+            # this run, and tm_operations reads the cycle from it.
             cycle_env: dict[str, str] = {"LB_RUN_ID": f"{run_id}-c{cycle_idx + 1}"}
             if total_cycles > 1:
                 # c360 silver appends read only this cycle's bronze files

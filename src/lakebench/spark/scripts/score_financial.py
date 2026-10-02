@@ -27,6 +27,7 @@ executes at scale-100 without a shuffle spill.
 from __future__ import annotations
 
 import argparse
+import os
 
 from common import env, log
 from pyspark.sql import SparkSession
@@ -171,6 +172,24 @@ def _run_subject_check(spark, manifest, status_rows) -> dict:
         return subject_customer_check(spark, manifest, entities, id_map, scoped)
     except Exception as e:  # noqa: BLE001 -- reported, not raised
         return {"status": "unchecked", "reason": f"{type(e).__name__}: {e}"[:300]}
+
+
+def check_status_run(status_run_id: str, own_run_id: str) -> None:
+    """Refuse to score a detection status another run wrote.
+
+    ``own_run_id`` is this job's LB_RUN_ID. Batch gold jobs run per cycle as
+    ``<run>-c<n>``, so that form of this run counts as this run. Without a run
+    id (``lakebench financial score`` outside a run) the status decides.
+    """
+    if not own_run_id:
+        return
+    if status_run_id == own_run_id or status_run_id.startswith(own_run_id + "-c"):
+        return
+    raise SystemExit(
+        f"{CATALOG}.{GOLD_STATUS} names run {status_run_id}, not this run ({own_run_id}): "
+        "gold still holds another run's alerts, so recall would be that run's. Wait for "
+        "this run's gold-finalize or gold-refresh, or reset the deployment's gold."
+    )
 
 
 def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
@@ -447,6 +466,7 @@ def main() -> None:
             "expected exactly one. Re-run gold-finalize."
         )
     current_run_id = run_ids[0]
+    check_status_run(current_run_id, os.environ.get("LB_RUN_ID", "").strip())
     pending = sorted(r["rule_id"] for r in status_rows if r.get("status") == "pending")
     if pending:
         raise SystemExit(
