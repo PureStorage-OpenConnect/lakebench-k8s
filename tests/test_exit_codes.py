@@ -138,8 +138,6 @@ PLANNED_BY = {
     "admin.version_change_in_use": "SD-10",
     "admin.version_change_needs_flag": "SD-10",
     "alias.refused": "CC-28",
-    "capacity.shortfall": "CC-24",
-    "capacity.unknown": "CC-24",
     "compare.confounded": "ER-11",
     "compare.equal_names": "CC-3",
     "compare.like_for_like": "ER-11",
@@ -747,6 +745,39 @@ def _scenario_run_prereq_failed(monkeypatch, tmp_path):
     return _runner().invoke(app, ["run", str(_init_config(tmp_path))])
 
 
+def _capacity_run(monkeypatch, tmp_path, found):
+    """``run`` whose preflight is the real capacity check on a fake reading."""
+    from unittest import mock
+
+    from lakebench.cli import _prerequisites as pre
+
+    k8s = mock.MagicMock()
+    k8s.get_free_capacity.return_value = found
+
+    def run_prerequisites(cfg, **kw):
+        with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
+            return pre.PrereqReport(checks=[pre._check_cluster_capacity(cfg, **kw)])
+
+    monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", run_prerequisites)
+    return _runner().invoke(app, ["run", str(_init_config(tmp_path))])
+
+
+def _scenario_capacity_unknown(monkeypatch, tmp_path):
+    from lakebench.k8s.client import CapacityUnknown
+
+    return _capacity_run(
+        monkeypatch, tmp_path, CapacityUnknown("listing nodes failed (403 Forbidden)")
+    )
+
+
+def _scenario_capacity_shortfall(monkeypatch, tmp_path):
+    from lakebench.k8s.client import ClusterCapacity, FreeCapacity
+
+    gib = 1024**3
+    small = ClusterCapacity(8_000, 32 * gib, 1, 8_000, 32 * gib)
+    return _capacity_run(monkeypatch, tmp_path, FreeCapacity(small, small, ((8_000, 32 * gib),)))
+
+
 def _scenario_run_namespace_missing_no_yes(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -1110,6 +1141,8 @@ SCENARIOS = {
     "run.bronze_nonempty": _scenario_run_bronze_nonempty,
     "run.datagen_timeout": _scenario_run_datagen_timeout,
     "run.prereq_failed": _scenario_run_prereq_failed,
+    "capacity.unknown": _scenario_capacity_unknown,
+    "capacity.shortfall": _scenario_capacity_shortfall,
     "run.namespace_missing_no_yes": _scenario_run_namespace_missing_no_yes,
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
@@ -1148,6 +1181,8 @@ def test_scenarios_cover_exactly_the_live_paths():
 # Text in the combined output that shows the scenario took its named path,
 # where the code alone has more than one producer.
 EXPECTED_OUTPUT = {
+    "capacity.unknown": "capacity could not be read: listing nodes failed",
+    "capacity.shortfall": "Insufficient free cluster capacity",
     "run.datagen_timeout": "wait budget",
     "destroy.redeployed": "Destroy Incomplete",
     "lease.held": "Destroy Incomplete",

@@ -401,14 +401,12 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "capacity.shortfall",
         _C.PREREQUISITE,
-        "free cluster capacity is below the run's peak",
-        planned=True,
+        "free cluster capacity is below the run's floor, or its largest pod fits no node",
     ),
     ExitPath(
         "capacity.unknown",
         _C.PREREQUISITE,
-        "capacity could not be read on every node",
-        planned=True,
+        "the run's capacity check could not read the nodes or pods (the check fails closed)",
     ),
     ExitPath(
         "plan.missing_storage_class",
