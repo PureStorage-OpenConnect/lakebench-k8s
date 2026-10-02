@@ -386,8 +386,8 @@ def _c360_gate(metrics: PipelineMetrics) -> tuple[str | None, str | None]:
     ``c360_correctness.gating_outcome`` decides: FAIL when a check in its
     ``GATING_CHECKS`` failed, did not run or is absent, or when the record
     has no facts. A run without a ``c360_correctness`` record, a record
-    whose only failures are checks outside that list, and a record marked
-    ``reporting_only`` return ``(None, None)``.
+    whose only failures are checks outside that list, and a continuous
+    record marked ``reporting_only`` return ``(None, None)``.
     """
     rec = metrics.c360_correctness
     if not isinstance(rec, Mapping):

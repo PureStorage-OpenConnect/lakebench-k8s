@@ -915,9 +915,10 @@ def gating_outcome(record: Mapping[str, Any] | None) -> tuple[str | None, str | 
     the CLI judges it only after the benchmark ran. ``(None, None)`` when
     there is no record, when ``GATING_CHECKS`` is empty, when only checks
     outside it failed (``reporting_failures`` lists those), and for a
-    continuous record marked ``reporting_only``. The CLI never leaves a
-    batch run's record absent (``unevaluated_record``), so no record means
-    the run had no Customer 360 check to make.
+    continuous record marked ``reporting_only``. A record is absent when
+    the run made no check (``--local``, ``--stage``, continuous) or stopped
+    before the check (a failed or interrupted stage, which other gates
+    judge); a check that raised leaves an ``unevaluated_record``.
     """
     if not isinstance(record, Mapping):
         return None, None
