@@ -297,10 +297,12 @@ class TestReportContainsQualifiers:
         html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
         assert "BOUNDED BY" not in html
 
-    def test_qph_card_carries_n_from_iterations(self, tmp_path):
+    def test_qph_card_labels_iterations_as_samples_not_runs(self, tmp_path):
+        # Five iterations inside one run are samples per query, not five runs.
         storage, m = _metrics_with_experiment(tmp_path, n_iterations=5)
         html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
-        assert "n=5" in html
+        assert "5 samples/query" in html
+        assert "n=5" not in html
 
 
 class TestReadFirstPanel:

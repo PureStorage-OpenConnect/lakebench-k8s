@@ -948,6 +948,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
 ### Fixed
+- **Report numbers that misled.** Platform CPU and memory no longer count
+  containers more than once: the Prometheus queries exclude cAdvisor's
+  pod-level and pause-container series and take each (pod, container) once
+  when the kubelet is scraped twice; `platform_metrics.query_version` is 2,
+  and a report of an older record says its figures are overstated. The
+  stage table labels its max columns "sum of per-pod peaks". Table Maintenance shows each QpH with its query
+  count and the change as "QpH change, paired over N queries" (a pre round
+  of 8 queries and a post round of 12 are no longer set beside each other
+  as the effect). QpH tags read `n=1 run, 3 samples/query` or `n=1 run, 4
+  rounds` instead of counting samples or rounds as runs. The benchmark
+  section is titled with the recorded query engine, not always "Trino". A
+  batch scale ratio above 1.05 shows amber ("above the scale") instead of
+  green "Complete". The continuous stability section shows the recorded
+  `qph_degradation_pct` instead of a trend the page computed itself.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the

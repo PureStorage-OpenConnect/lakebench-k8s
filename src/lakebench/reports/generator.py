@@ -51,11 +51,75 @@ def _format_duration_ms(ms: float | None) -> str:
     return "-"
 
 
+# Above this the batch corpus holds more data than the scale asks for; the
+# ratio shows amber, not "Complete".
+SCALE_RATIO_HIGH = 1.05
+
+
+def _scale_warning(ratio: float) -> str:
+    """The tag beside a batch scale ratio card: red below 0.95, amber above
+    1.05, none inside."""
+    if 0 < ratio < 0.95:
+        return ' <span style="color: var(--danger);">INCOMPLETE</span>'
+    if ratio > SCALE_RATIO_HIGH:
+        return ' <span style="color: var(--warning);">ABOVE SCALE</span>'
+    return ""
+
+
 def _scale_ratio_pct(ratio: float) -> str:
     """The batch scale ratio as a derived percentage (reports/derived.py)."""
     from lakebench.reports import derived as dv
 
     return dv.pct(ratio, num_path="pipeline_benchmark.scores.scale_ratio")
+
+
+_QUERY_ENGINE_NAMES = {"trino": "Trino", "spark-thrift": "Spark Thrift", "duckdb": "DuckDB"}
+
+
+def _query_engine_title(metrics) -> str:
+    """The benchmark section title naming the engine that ran it."""
+    # What ran the benchmark first (its record's engine), then the
+    # experiment block's architecture, then the config snapshot.
+    engine = getattr(getattr(metrics, "benchmark", None), "engine", None)
+    if not engine:
+        try:
+            exp = metrics.experiment_block() or {}
+        except Exception:  # noqa: BLE001 -- a bad block must not break the render
+            exp = {}
+        qe = (exp.get("architecture") or {}).get("query_engine")
+        if isinstance(qe, dict):
+            engine = qe.get("type")
+    if not engine:
+        engine = (metrics.config_snapshot or {}).get("query_engine")
+    if not engine or str(engine) == "none":
+        return "Query benchmark"
+    return f"{_QUERY_ENGINE_NAMES.get(str(engine), str(engine))} query benchmark"
+
+
+def _samples_per_query(bench) -> int | None:
+    """Times each query ran inside the run: iterations, once per stream."""
+    iterations = int(getattr(bench, "iterations", 0) or 0)
+    streams = max(int(getattr(bench, "streams", 1) or 1), 1)
+    return iterations * streams or None
+
+
+def _recorded_samples(metrics) -> int | None:
+    """Samples per query the record states (``repetitions.
+    benchmark_samples_per_query``, the fewest any successful query had)."""
+    try:
+        exp = metrics.experiment_block() or {}
+    except Exception:  # noqa: BLE001 -- a bad block must not break the render
+        return None
+    n = (exp.get("repetitions") or {}).get("benchmark_samples_per_query")
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
+
+
+def _runs_of(metrics) -> int:
+    """Independent runs behind the record (``repetitions.runs``), 1 when the
+    record does not say."""
+    from lakebench.reports.formatter import n_runs_of
+
+    return n_runs_of(metrics) or 1
 
 
 def _passed_of(passed: int, total: int, list_key: str) -> str:
@@ -820,25 +884,75 @@ class ReportGenerator:
                 f"({_ls_esc(pb.maintenance_live_streams_reason)}); QpH measured after "
                 "maintenance ran with writers active</td></tr>"
             )
+        # Pre and post QpH are each over the queries that round ran, which can
+        # be different sets (a pre round of 8 against a post round of 12), so
+        # each carries its query count and the change is the paired figure,
+        # over the queries both rounds ran.
+        from lakebench.reports import derived as dv
+
+        pre_bench = pb.pre_compaction_benchmark or {}
+        pre_queries = pre_bench.get("queries") if isinstance(pre_bench, dict) else None
+        post_queries = pb.query_benchmark.queries if pb.query_benchmark else None
+
+        def _ok_names(queries) -> list[str] | None:
+            # QpH is taken over the queries that succeeded.
+            if not isinstance(queries, list):
+                return None
+            return [
+                str(q.get("name"))
+                for q in queries
+                if isinstance(q, dict) and q.get("success", False)
+            ]
+
+        pre_ok = _ok_names(pre_queries)
+        post_ok = _ok_names(post_queries)
+        pre_n = len(pre_ok) if pre_ok is not None else None
+        post_n = len(post_ok) if post_ok is not None else None
+
+        def _over(n: int | None, p: str) -> str:
+            if not n:
+                return ""
+            return f" (over {dv.count(n, path=f'{p}[*].success', where='truthy')} queries)"
+
         if pre_qph > 0:
-            rows.append(f"<tr><td>Pre-compaction QpH</td><td>{pre_qph:.1f}</td></tr>")
+            rows.append(
+                f"<tr><td>Pre-compaction QpH{_over(pre_n, 'pipeline_benchmark.pre_compaction_benchmark.queries')}</td>"
+                f"<td>{pre_qph:.1f}</td></tr>"
+            )
         if post_qph > 0:
+            label = (
+                f"Post-compaction QpH{_over(post_n, 'pipeline_benchmark.query_benchmark.queries')}"
+            )
             caveat = _post_qph_caveat(pb)
             if caveat:
                 from html import escape as _stop_esc
 
                 rows.append(
-                    f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f} "
+                    f"<tr><td>{label}</td><td>{post_qph:.1f} "
                     '<span style="color: var(--danger); font-weight: 600">'
                     f"(warning: {_stop_esc(caveat)}, so this is not a clean "
                     "measurement)</span></td></tr>"
                 )
             else:
-                rows.append(f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f}</td></tr>")
+                rows.append(f"<tr><td>{label}</td><td>{post_qph:.1f}</td></tr>")
+        if (
+            pre_qph > 0
+            and post_qph > 0
+            and pre_ok is not None
+            and post_ok is not None
+            and set(pre_ok) != set(post_ok)
+        ):
+            rows.append(
+                "<tr><td>Pre and post QpH</td><td>unpaired: the two rounds' successful "
+                "queries differ, so the ratio of these two QpH figures is not the "
+                "maintenance effect; only a paired change is</td></tr>"
+            )
+        paired = pb.maintenance_paired_queries
+        paired_label = (
+            f"QpH change, paired over {paired:,} queries" if paired else "QpH change, paired"
+        )
         if value_pct is not None and pre_qph > 0:
             color = "var(--success)" if value_pct > 0 else "var(--danger)"
-            from lakebench.reports import derived as dv
-
             value_html = dv.pct(
                 value_pct,
                 num_path="pipeline_benchmark.scores.maintenance_value_pct",
@@ -846,14 +960,14 @@ class ReportGenerator:
                 signed=True,
             )
             rows.append(
-                f"<tr><td>QpH improvement</td>"
+                f"<tr><td>{paired_label}</td>"
                 f'<td style="color: {color}; font-weight: 600">{value_html}</td></tr>'
             )
         elif pre_qph > 0 and pb.maintenance_value_reason:
             from html import escape
 
             rows.append(
-                "<tr><td>QpH improvement</td>"
+                f"<tr><td>{paired_label}</td>"
                 f"<td>not reported ({escape(pb.maintenance_value_reason)})</td></tr>"
             )
         settle_s = pb.maintenance_settle_seconds
@@ -959,6 +1073,14 @@ class ReportGenerator:
                 indicators.append(
                     ("Scale Ratio", "status-failed", f"{_scale_ratio_pct(ratio)} INCOMPLETE")
                 )
+            elif ratio > SCALE_RATIO_HIGH:
+                indicators.append(
+                    (
+                        "Scale Ratio",
+                        "status-warning",
+                        f"{_scale_ratio_pct(ratio)} above the scale (more data than the scale asks for)",
+                    )
+                )
             else:
                 indicators.append(
                     ("Scale Ratio", "status-success", f"{_scale_ratio_pct(ratio)} Complete")
@@ -997,12 +1119,12 @@ class ReportGenerator:
         if pb and pb.benchmark_rounds:
             n_rounds = len(pb.benchmark_rounds)
             rounds_html = dv.count(n_rounds, path="pipeline_benchmark.benchmark_rounds")
-            if n_rounds < 5:
+            if n_rounds < 4:
                 indicators.append(
                     (
                         "Benchmark Rounds",
                         "status-warning",
-                        f"{rounds_html} rounds completed (minimum 5 for trend analysis)",
+                        f"{rounds_html} rounds completed (fewer than 4: no QpH degradation recorded)",
                     )
                 )
             else:
@@ -1195,22 +1317,27 @@ class ReportGenerator:
         if not chart:
             return ""
 
-        # Trend analysis -- requires minimum 5 rounds per spec Section 7.5
-        if len(qph_values) >= 5:
-            first_half = qph_values[: len(qph_values) // 2]
-            second_half = qph_values[len(qph_values) // 2 :]
-            avg_first = sum(first_half) / len(first_half)
-            avg_second = sum(second_half) / len(second_half)
-            if avg_second < avg_first * 0.9:
-                trend = "QpH is declining over time -- the pipeline may not sustain this load."
-            elif avg_second > avg_first * 1.1:
-                trend = "QpH is improving over time (system warming up)."
-            else:
-                trend = "QpH is stable across rounds."
-        elif len(qph_values) >= 2:
-            trend = "Insufficient data for trend analysis (minimum 5 rounds required)."
+        # The degradation the record holds (first-half against second-half
+        # median QpH, computed once by the collector); the page computes no
+        # trend of its own.
+        from lakebench.reports import derived as dv
+
+        degradation = pb.qph_degradation_pct
+        if degradation is not None:
+            trend = (
+                "QpH degradation, first-half to second-half median: "
+                + dv.pct(
+                    degradation,
+                    num_path="pipeline_benchmark.scores.qph_degradation_pct",
+                    scale=1.0,
+                )
+                + " (positive is slower; recorded)."
+            )
         else:
-            trend = ""
+            trend = (
+                "QpH degradation not recorded (it needs at least 4 rounds and a QpH "
+                "in each half of them)."
+            )
 
         trend_html = (
             f'<p style="color: var(--text-muted); font-style: italic; margin-top: 0.75rem;">'
@@ -1683,7 +1810,10 @@ class ReportGenerator:
 
         qph: float | None = None
         qph_note = ""
-        qph_n_samples: int | None = None
+        # Rounds and samples are repetition inside this one run, never runs.
+        qph_rounds_html: str | None = None
+        qph_rounds: int | None = None
+        qph_samples: int | None = None
         if pb and pb.benchmark_rounds:
             round_qphs = [r.qph for r in pb.benchmark_rounds if r.qph > 0]
             if round_qphs:
@@ -1698,11 +1828,12 @@ class ReportGenerator:
                     where="positive",
                 )
                 qph_note = f"median of {n_html} rounds"
-                qph_n_samples = len(round_qphs)
+                qph_rounds_html = n_html
+                qph_rounds = len(round_qphs)
         elif metrics.benchmark and metrics.benchmark.qph > 0:
             qph = metrics.benchmark.qph
             qph_note = "single benchmark"
-            qph_n_samples = 1
+            qph_samples = _samples_per_query(metrics.benchmark)
 
         freshness_val: float | None = None
         freshness_hint = "worst-case gold staleness during streaming window"
@@ -1721,7 +1852,10 @@ class ReportGenerator:
             qph_raw,
             "",
             caps_bound=caps_bound if qph is not None else None,
-            n_runs=qph_n_samples if qph is not None else None,
+            n_runs=_runs_of(metrics) if qph is not None else None,
+            samples=qph_samples,
+            rounds=qph_rounds,
+            rounds_html=qph_rounds_html,
             support_state=support_state if qph is not None else None,
         )
         if qph is None:
@@ -1860,22 +1994,15 @@ class ReportGenerator:
 
         # QpH from pipeline benchmark or standalone benchmark
         qph = pb.query_benchmark.qph if pb.query_benchmark else 0.0
-        qph_n: int | None = None
+        # Samples per query are iterations inside this run, labelled as such
+        # beside the run count, never passed as runs.
+        qph_bench = pb.query_benchmark
         if qph == 0.0 and metrics.benchmark:
             qph = metrics.benchmark.qph
-        # Samples: benchmark iterations if a standalone benchmark ran, else
-        # unknown for a pipeline_benchmark record (kept as n=1 as a floor so
-        # the user is not told the value is repeated when it may not be).
-        if metrics.benchmark is not None:
-            qph_n = int(getattr(metrics.benchmark, "iterations", 0) or 0) or 1
-        elif qph > 0:
-            qph_n = 1
+            qph_bench = metrics.benchmark
+        qph_samples = _recorded_samples(metrics) or _samples_per_query(qph_bench)
 
-        scale_warning = (
-            ' <span style="color: var(--danger);">INCOMPLETE</span>'
-            if 0 < pb.scale_ratio < 0.95
-            else ""
-        )
+        scale_warning = _scale_warning(pb.scale_ratio)
 
         ttv = pb.time_to_value_seconds
         ttv_hint2 = _direction_hint(
@@ -1892,7 +2019,8 @@ class ReportGenerator:
             f"{qph:,.1f}" if qph > 0 else "N/A",
             "",
             caps_bound=caps_bound if qph > 0 else None,
-            n_runs=qph_n if qph > 0 else None,
+            n_runs=_runs_of(metrics) if qph > 0 else None,
+            samples=qph_samples if qph > 0 else None,
             support_state=support_state if qph > 0 else None,
         )
         pipeline_throughput_display = format_measurement(
@@ -2267,7 +2395,8 @@ class ReportGenerator:
             f"{b.qph:.1f}",
             "",
             caps_bound=caps_bound_from(metrics),
-            n_runs=int(getattr(b, "iterations", 0) or 0) or 1,
+            n_runs=_runs_of(metrics),
+            samples=_samples_per_query(b),
             support_state=support_state_of(metrics),
         )
 
@@ -2368,7 +2497,7 @@ class ReportGenerator:
 
         return f"""
         <section>
-            <h2>Trino Query Benchmark</h2>
+            <h2>{_html_escape(_query_engine_title(metrics))}</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
                 {passed_html} queries passed |
                 QpH: <strong>{b.qph:.1f}</strong> |
@@ -2573,11 +2702,7 @@ class ReportGenerator:
         if not pb:
             return ""
 
-        scale_warning = (
-            ' <span style="color: var(--danger);">INCOMPLETE</span>'
-            if 0 < pb.scale_ratio < 0.95
-            else ""
-        )
+        scale_warning = _scale_warning(pb.scale_ratio)
         caps_bound = caps_bound_from(metrics)
         support_state = support_state_of(metrics)
         throughput_display = format_measurement(
@@ -3160,6 +3285,22 @@ class ReportGenerator:
                 f"<td>{_sum('memory_max_bytes', agg['mem_max'], gib=True)}</td></tr>"
             )
 
+        # Records collected before the per-container queries summed each
+        # pod's cgroup total, its pause container and any duplicate kubelet
+        # scrape into the pod, so their figures are inflated by an unknown
+        # factor; say so rather than present them under the new labels.
+        from lakebench.observability.platform_collector import POD_QUERY_VERSION
+
+        version_note = ""
+        if (platform_metrics.get("query_version") or 1) < POD_QUERY_VERSION:
+            version_note = (
+                '<p style="color: var(--warning); font-size: 0.875rem;">'
+                "Collected by an older Lakebench whose queries summed each pod's own "
+                "total, its pause container and any duplicate scrape with its "
+                "containers: the CPU and memory figures below count containers more "
+                "than once and overstate use by an unknown factor.</p>"
+            )
+
         # Collection error
         error_note = ""
         collection_error = platform_metrics.get("collection_error")
@@ -3236,6 +3377,7 @@ class ReportGenerator:
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
                 Platform metrics collected over {duration:.0f}s | {dv.count(len(pods), path="platform_metrics.pods")} pods observed | {active_html} active{ghost_note}
             </div>
+            {version_note}
             {error_note}
             {tier2_html}
             {s3_html}
@@ -3244,10 +3386,10 @@ class ReportGenerator:
                     <tr>
                         <th>Stage</th>
                         <th>Pods</th>
-                        <th>CPU Avg (cores)</th>
-                        <th>CPU Max (cores)</th>
-                        <th>Mem Avg</th>
-                        <th>Mem Max</th>
+                        <th title="Sum of each pod's average">CPU Avg (cores, sum of per-pod averages)</th>
+                        <th title="Each pod's peak, taken at its own moment, summed; not a concurrent peak">CPU Max (cores, sum of per-pod peaks)</th>
+                        <th title="Sum of each pod's average">Mem Avg (sum of per-pod averages)</th>
+                        <th title="Each pod's peak, taken at its own moment, summed; not a concurrent peak">Mem Max (sum of per-pod peaks)</th>
                     </tr>
                 </thead>
                 <tbody>

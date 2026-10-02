@@ -1183,7 +1183,8 @@ class TestReportGenerator:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Trino Query Benchmark" in html
+        # The title names the recorded query engine; this record names none.
+        assert "<h2>Query benchmark</h2>" in html
         assert "820.4" in html
         assert "Q1_full_aggregation_scan" in html
         assert "QpH" in html
@@ -1202,7 +1203,7 @@ class TestReportGenerator:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Trino Query Benchmark" not in html
+        assert "query benchmark</h2>" not in html.lower()
 
     def test_generate_report_specific_nonexistent(self, tmp_path):
         metrics_dir = tmp_path / "metrics"
