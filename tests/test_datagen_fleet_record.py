@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -229,3 +230,83 @@ def test_generate_refusal_keeps_the_sidecar(tmp_path, monkeypatch):
     res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes"])
     assert res.exit_code == ExitCode.REFUSED, res.output
     assert side.exists()
+
+
+def test_multi_cycle_run_never_borrows_an_older_sidecar(tmp_path, monkeypatch):
+    """pipeline.cycles > 1 regenerates bronze in every cycle (deploy_cycle):
+    the sidecar of the corpus it replaces is dropped before the gate and
+    the record carries no fleet rather than that older generate's."""
+    import tests.harness.run_harness as harness
+    from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+
+    _stale(tmp_path)
+
+    def deploy_cycle(self, *a, **k):
+        self._rec.add("Datagen", "deploy_cycle")
+        return DeploymentResult(
+            component="datagen", status=DeploymentStatus.FAILED, message="cycle refused"
+        )
+
+    monkeypatch.setattr(harness.FakeDatagenDeployer, "deploy_cycle", deploy_cycle, raising=False)
+    # The gate passes (tests/test_bronze_gate.py covers it); the old
+    # sidecar must already be gone when it runs.
+    seen: list[bool] = []
+
+    def gate(*_a, **_k):
+        seen.append(_sidecar(tmp_path).exists())
+        return SimpleNamespace(record=lambda: None)
+
+    monkeypatch.setattr("lakebench.cli._run.enforce_bronze_gate", gate)
+    config = harness.base_config(architecture={"pipeline": {"mode": "batch", "cycles": 2}})
+    scenario = dataclasses.replace(
+        SCENARIOS["batch_c360"], argv=["--skip-generate", "--yes"], config=config
+    )
+    trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
+    assert seen == [False]
+    assert ["Datagen", "deploy_cycle"] in trace["calls"]
+    assert not _sidecar(tmp_path).exists()
+    record = saved_record(tmp_path)
+    assert record, "the run saved no record"
+    assert "datagen_fleet" not in record
+    assert STALE_ID not in json.dumps(record)
+    assert _datagen(record)["digest"] is None
+
+
+@pytest.mark.parametrize("command", ["generate", "run"])
+def test_regenerate_gate_failure_leaves_no_old_sidecar(command, tmp_path, monkeypatch):
+    """--regenerate can empty part of bronze and then fail inside the gate:
+    the sidecar is gone before the gate runs, so a later run over the
+    partly cleared corpus does not attach the replaced corpus's fleet."""
+    import typer
+
+    _stale(tmp_path)
+
+    def gate(*_a, **_k):
+        raise typer.Exit(1)
+
+    if command == "generate":
+        from typer.testing import CliRunner
+
+        from lakebench.cli import app
+        from lakebench.config import load_config
+        from tests.test_datagen_timeout_and_regenerate import _stub_run_deps, _write_cfg
+
+        monkeypatch.chdir(tmp_path)
+        cfg_file = _write_cfg(tmp_path)
+        side = _sidecar(tmp_path).with_name(
+            f"{load_config(cfg_file).get_namespace()}-datagen-metrics.json"
+        )
+        _sidecar(tmp_path).rename(side)
+        _stub_run_deps(monkeypatch)
+        monkeypatch.setattr("lakebench.cli._generate.enforce_bronze_gate", gate)
+        res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes", "--regenerate"])
+        assert res.exit_code == 1, res.output
+        assert not side.exists()
+    else:
+        monkeypatch.setattr("lakebench.cli._run.enforce_bronze_gate", gate)
+        scenario = dataclasses.replace(
+            SCENARIOS["batch_c360"], argv=["--generate", "--regenerate", "--yes"]
+        )
+        trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
+        assert trace["exit_code"] == 1
+    assert not _sidecar(tmp_path).exists()

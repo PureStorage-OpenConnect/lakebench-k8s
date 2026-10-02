@@ -134,7 +134,10 @@ A run is refused, never compared, when:
   "Result check" in `benchmarking.md`); a run whose corpus did not settle, or
   whose result fingerprints differ from the baseline's, is refused like a
   batch run;
-- its datagen fleet reported `data_quality` other than `complete`;
+- its datagen fleet reported `data_quality` other than `complete` (from 1.7
+  a continuous run that generates records its own fleet, read at window end:
+  datagen pods removed by their TTL before then make it `partial` or
+  `empty`);
 - its snapshot records a `config_sha256` that is not the pinned file's, or
   (a v1.7 run) records none;
 - it is a batch run whose time to value was taken differently from the
@@ -332,8 +335,8 @@ file. Code-default changes outside the Spark manifest's conf and sizing are
 not fingerprinted: the Spark pods' environment, the restart policy, and the
 continuous bronze-verify preflight and AML scoring jobs, which are not
 stages the gate times. A change there is compared, not refused, like any
-other code change. The datagen sidecar does not record the image
-that wrote it, so a run that reuses a recent sidecar from a different image is
+other code change. The gate does not compare the datagen image the fleet
+record names, so a run that reuses a recent sidecar from a different image is
 not caught either.
 
 Continuous runs are not checked for realised executor counts.

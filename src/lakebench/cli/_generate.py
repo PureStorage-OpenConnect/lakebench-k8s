@@ -228,15 +228,20 @@ def generate(
                 _dt.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
             )
 
+        # The namespace's fleet sidecar describes the corpus this generate
+        # replaces; the new one is written when its pods are read. With
+        # --regenerate it goes before the gate, which may empty part of
+        # bronze and then fail.
+        from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+        if regenerate:
+            drop_sidecar(cfg.get_namespace())
         # Refuse to write over an existing bronze prefix unless
         # --regenerate (owned bucket: clear the datagen prefix) or
         # --allow-stale-bronze (any other bucket).
         enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
-        # The namespace's fleet sidecar describes the corpus this generate
-        # replaces; the new one is written when its pods are read.
-        from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-        drop_sidecar(cfg.get_namespace())
+        if not regenerate:
+            drop_sidecar(cfg.get_namespace())
 
         engine = DeploymentEngine(cfg)
         datagen = DatagenDeployer(engine, allow_stale_bronze=allow_stale_bronze)

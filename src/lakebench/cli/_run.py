@@ -2257,17 +2257,21 @@ def _run_once(
 
                 from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
+                # The namespace's fleet sidecar describes a corpus this run
+                # is about to replace. With --regenerate it goes before the
+                # gate, which may empty part of bronze and then fail.
+                from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+                if regenerate:
+                    drop_sidecar(cfg.get_namespace())
                 # Refuse a non-empty bronze prefix unless --regenerate
                 # (owned bucket: clear the datagen prefix) or
                 # --allow-stale-bronze (any other bucket, recorded).
                 _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
                 if collector.current_run is not None:
                     collector.current_run.datagen_stale_bronze = _gate.record()
-                # The namespace's fleet sidecar describes a corpus this run
-                # is about to replace.
-                from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-                drop_sidecar(cfg.get_namespace())
+                if not regenerate:
+                    drop_sidecar(cfg.get_namespace())
 
                 dg_engine = DeploymentEngine(cfg)
                 datagen_deployer = DatagenDeployer(dg_engine, allow_stale_bronze=allow_stale_bronze)
@@ -2456,6 +2460,15 @@ def _run_once(
         # owned bucket is cleared as 1.6 did, so the gate runs with
         # regenerate on: only a bucket this deployment may not empty refuses.
         if total_cycles > 1 and not (include_datagen and not skip_generate):
+            # Every cycle generates its own bronze: the namespace's fleet
+            # sidecar describes a corpus this run replaces, and the cycle
+            # pods' fleet is not read, so the record carries no fleet
+            # rather than an older generate's. Dropped before the gate,
+            # which may clear part of bronze and then fail.
+            from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+            drop_sidecar(cfg.get_namespace())
+            _generated_here = True
             _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)
             if collector.current_run is not None:
                 collector.current_run.datagen_stale_bronze = _gate.record()

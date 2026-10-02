@@ -71,14 +71,17 @@ continuous run without `--skip-generate`): that run records the fleet
 of its own pods as `datagen_fleet`, and `experiment.corpus.datagen` reads
 the generator image digest from it. A run that does not generate takes the
 namespace's sidecar, the record of the generate that wrote its corpus
-(batch only: a continuous `--skip-generate` run records no fleet).
+(batch only: a continuous `--skip-generate` run records no fleet). A batch
+run with `pipeline.cycles` above 1 generates every cycle's bronze but does
+not read those pods, so it removes the sidecar and records no fleet;
+`run --local` reads the sidecar and does not write one.
 `lakebench generate` and a run that generates remove the sidecar before
 they empty or regenerate the corpus, so a corpus they replaced is never
 attributed to a later run, even when their own pods cannot be read or the
 generate fails.
 
-`lakebench run`, when it builds the pipeline scorecard, uses that fleet
-record and enriches the datagen
+A batch `lakebench run`, when it builds the pipeline scorecard, uses that
+fleet record and enriches the datagen
 `StageMetrics` with `executor_count`, `executor_cores`, and derived
 `cpu_seconds_requested`. Downstream `total_core_hours` now includes
 datagen. Same formula as the Spark stages; same units.

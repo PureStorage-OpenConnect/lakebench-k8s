@@ -927,9 +927,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   run". Before, only `lakebench generate` wrote the sidecar, and a batch
   `run --generate` attached whatever an older generate had left, which could
   describe a corpus the run had replaced. `lakebench generate` and a run
-  that generates now remove that sidecar before they replace the corpus, so
-  a generate that fails leaves none; a batch run that does not generate
-  still takes it.
+  that generates now remove that sidecar before they replace the corpus
+  (with `--regenerate`, before the bronze check that empties it), so a
+  generate that fails leaves none; a batch run that does not generate still
+  takes it. A batch run with `pipeline.cycles` above 1 records no fleet
+  (its cycle pods are not read) and removes the sidecar; `run --local` is
+  unchanged. A continuous run's fleet is read at window end, so the perf
+  gate's `data_quality` refusal now applies to continuous records too.
 
 - **Delta continuous Customer 360 works again.** Its silver stream failed
   on the first micro-batch on every `hive-delta-*` recipe: it passed the
