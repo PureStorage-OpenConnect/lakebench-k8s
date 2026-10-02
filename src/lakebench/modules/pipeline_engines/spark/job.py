@@ -1485,6 +1485,9 @@ class JobStatus:
     executor_count: int = 0
     # Operator submission attempts (status.submissionAttempts); 0 when unknown.
     submission_attempts: int = 0
+    # metadata.uid of the SparkApplication submit_job created; None otherwise.
+    # The interrupt cleanup deletes only this object (cli/_interrupt.py).
+    uid: str | None = None
 
 
 class SparkJobManager:
@@ -1575,13 +1578,15 @@ class SparkJobManager:
 
         for attempt in range(4):  # 1 initial + 3 retries
             try:
-                custom_api.create_namespaced_custom_object(
+                created = custom_api.create_namespaced_custom_object(
                     group="sparkoperator.k8s.io",
                     version="v1beta2",
                     namespace=self.namespace,
                     plural="sparkapplications",
                     body=manifest,
                 )
+                meta = created.get("metadata") if isinstance(created, dict) else None
+                uid = meta.get("uid") if isinstance(meta, dict) else None
 
                 logger.info(f"Submitted Spark job: {job_name}")
 
@@ -1592,6 +1597,7 @@ class SparkJobManager:
                     # What was requested after the concurrent budget and any
                     # override, so the scorecard's CPU-hours match it.
                     executor_count=int(manifest["spec"]["executor"].get("instances") or 0),
+                    uid=uid if isinstance(uid, str) and uid else None,
                 )
 
             except ApiException as e:

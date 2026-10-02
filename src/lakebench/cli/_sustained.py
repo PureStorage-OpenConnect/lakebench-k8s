@@ -555,7 +555,9 @@ def _refuse_c360_reset(cfg, existing: list[str]) -> None:
     )
 
 
-def _run_c360_continuous_reset(job_manager, monitor, console, *, timeout_seconds: int) -> bool:
+def _run_c360_continuous_reset(
+    job_manager, monitor, console, *, timeout_seconds: int, interrupt=None
+) -> bool:
     """Drop the c360 continuous tables through a bronze-verify preflight.
 
     False when the job fails; the caller then starts no stream over tables
@@ -566,13 +568,19 @@ def _run_c360_continuous_reset(job_manager, monitor, console, *, timeout_seconds
 
     console.print()
     console.print("[bold]Preflight: resetting continuous tables via bronze-verify...[/bold]")
+    if interrupt is not None:
+        interrupt.creating("SparkApplication", "lakebench-bronze-verify")
     status = job_manager.submit_job(JobType.BRONZE_VERIFY, cycle_env={"LB_CONTINUOUS_RESET": "1"})
+    if interrupt is not None:
+        interrupt.submitted(status)
     if status.state == JobState.FAILED:
         print_error(f"continuous reset submit failed: {status.message}")
         return False
     result = monitor.wait_for_completion(
         "lakebench-bronze-verify", timeout_seconds=timeout_seconds, poll_interval=15
     )
+    if interrupt is not None and result.success:
+        interrupt.finished("SparkApplication", "lakebench-bronze-verify")
     if not result.success:
         print_error(f"continuous reset failed: {result.message}")
         return False
@@ -2778,6 +2786,19 @@ def _run_sustained(
         (JobType.SILVER_STREAM, "silver-stream"),
         (JobType.GOLD_REFRESH, "gold-refresh"),
     ]
+    # Ctrl-C and SIGTERM seal the record INTERRUPTED and stop the streams,
+    # the datagen Job and any preflight this run created, by uid
+    # (cli/_interrupt.py). Installed before the operator check, whose
+    # watch-list heal can take the cluster lease.
+    from lakebench.cli._interrupt import RunInterrupt
+
+    _interrupt = RunInterrupt(cfg.get_namespace(), run_id)
+    _interrupt.install()
+    _stage = "operator-check"
+    _interrupted: dict | None = None
+    # Exit 130 at the end: an interrupt, or a late signal in a run that had
+    # not failed (a failed run keeps its own exit).
+    _exit_interrupted = False
 
     try:
         # Check Spark operator
@@ -2863,6 +2884,7 @@ def _run_sustained(
         # bronze_verify LB_CONTINUOUS_RESET (c360, LB-142).
         # Ownership first: stopping streams in a namespace this run does
         # not own would already be the damage the gate exists to prevent.
+        _stage = "reset"
         _require_reset_ownership(cfg)
         if cfg.architecture.workload.schema_type.value != "financial" and not force_reset:
             # c360 keeps existing state unless the operator asks to drop it:
@@ -2904,32 +2926,38 @@ def _run_sustained(
             _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
             raise typer.Exit(ExitCode.FAILED)
         print_success("Spark scripts deployed")
+        dims = cfg.get_scale_dimensions()
         if skip_generate:
             console.print()
             print_info("Skipping datagen deploy (--skip-generate)")
         else:
+            _stage = "datagen"
             console.print()
             console.print("[bold]Starting datagen...[/bold]")
             datagen = DatagenDeployer(engine)
+            _interrupt.creating("Job", "lakebench-datagen")
             datagen_result = datagen.deploy()
             if datagen_result.status != DeploymentStatus.SUCCESS:
+                _interrupt.not_created("Job", "lakebench-datagen")
                 print_error(f"Failed to start datagen: {datagen_result.message}")
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
+            _interrupt.datagen_created()
             print_success("Datagen started (continuous mode)")
-        dims = cfg.get_scale_dimensions()
+            # Only when this run started datagen: --skip-generate journalled
+            # a datagen start that never happened.
+            _journal_safe(
+                j.record,
+                EventType.GENERATE_START,
+                message="Datagen started for continuous pipeline",
+                details={
+                    "scale": dims.scale,
+                    "parallelism": cfg.architecture.workload.datagen.parallelism,
+                    "target_gb": round(dims.approx_bronze_gb, 1),
+                },
+            )
         console.print(f"  Scale: {dims.scale}")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
-        _journal_safe(
-            j.record,
-            EventType.GENERATE_START,
-            message="Datagen started for continuous pipeline",
-            details={
-                "scale": dims.scale,
-                "parallelism": cfg.architecture.workload.datagen.parallelism,
-                "target_gb": round(dims.approx_bronze_gb, 1),
-            },
-        )
 
         # LB-091: AML sustained mode needs the bronze Iceberg table to
         # exist before bronze_ingest_financial starts -- the streaming
@@ -2955,12 +2983,15 @@ def _run_sustained(
             _wait_for_bronze_data(cfg, timeout_seconds=300)
 
             console.print("[bold]Preflight: registering bronze table via bronze-verify...[/bold]")
+            _stage = "preflight"
+            _interrupt.creating("SparkApplication", "lakebench-bronze-verify")
             preflight_status = job_manager.submit_job(
                 JobType.BRONZE_VERIFY,
                 # Reset, not register: see bronze_verify_financial
                 # CONTINUOUS_RESET.
                 cycle_env={"LB_REGISTER_TABLE": "schema"},
             )
+            _interrupt.submitted(preflight_status)
             if preflight_status.state == JobState.FAILED:
                 print_error(f"bronze-verify preflight submit failed: {preflight_status.message}")
                 pipeline_success = False
@@ -2988,6 +3019,7 @@ def _run_sustained(
                 print_error(f"bronze-verify preflight failed: {preflight_result.message}")
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
+            _interrupt.finished("SparkApplication", "lakebench-bronze-verify")
             print_success(
                 f"bronze-verify preflight complete in {preflight_result.elapsed_seconds:.0f}s"
             )
@@ -3001,8 +3033,9 @@ def _run_sustained(
             _reset_timeout = aml_bronze_verify_timeout_budget(
                 cfg.architecture.workload.datagen.get_effective_scale()
             )
+            _stage = "preflight"
             if not _run_c360_continuous_reset(
-                job_manager, monitor, console, timeout_seconds=_reset_timeout
+                job_manager, monitor, console, timeout_seconds=_reset_timeout, interrupt=_interrupt
             ):
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
@@ -3015,8 +3048,12 @@ def _run_sustained(
         job_manager.datagen_running = not _datagen_released(
             cfg.get_namespace(), deployed_here=not skip_generate
         )
+        if not job_manager.datagen_running:
+            # Finished (or gone): nothing of it to stop on an interrupt.
+            _interrupt.finished("Job", "lakebench-datagen")
 
         # Launch all streaming jobs concurrently
+        _stage = "streams-start"
         console.print()
         console.print("[bold]Launching continuous jobs...[/bold]")
 
@@ -3038,7 +3075,9 @@ def _run_sustained(
         requested_executors: dict[str, int] = {}
         stream_env = _streaming_job_env(run_id, run_duration)
         for job_type, job_name in streaming_jobs:
+            _interrupt.creating("SparkApplication", f"lakebench-{job_name}")
             job_status = job_manager.submit_job(job_type, cycle_env=stream_env)
+            _interrupt.submitted(job_status)
             if job_status.state == JobState.FAILED:
                 print_error(f"Failed to submit {job_name}: {job_status.message}")
                 pipeline_success = False
@@ -3111,6 +3150,7 @@ def _run_sustained(
                 )
 
         # Monitor for configured duration, running benchmark rounds at intervals
+        _stage = "window"
         console.print()
         print_info(
             f"Streaming pipeline running for {run_duration}s ({run_duration / 60:.0f} min)..."
@@ -3382,6 +3422,7 @@ def _run_sustained(
             )
 
         window_end = utc_naive(datetime.now(timezone.utc)) + _shift
+        _stage = "collect"
         window_seconds = (window_end - window_start).total_seconds()
         # A stream that died or restarted inside the window did not process
         # continuously.
@@ -3542,6 +3583,7 @@ def _run_sustained(
         # the query set over tables that are then a function of the corpus
         # alone. Not part of the window: nothing here is scored.
         settle: dict = {"settled": False}
+        _stage = "settle"
         result_check: dict = {}
         # Bucket sizes and object counts as of the window, before any settle
         # micro-batches add files.
@@ -3598,8 +3640,12 @@ def _run_sustained(
                     )
 
         # Stop streaming jobs
+        _stage = "stop-streams"
         _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
+        for _job_type, job_name in submitted:
+            _interrupt.finished("SparkApplication", f"lakebench-{job_name}")
+        _stage = "result-check"
 
         _journal_safe(
             j.record,
@@ -3848,21 +3894,45 @@ def _run_sustained(
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
     except typer.Exit:
         raise
+    except KeyboardInterrupt as e:
+        # SIGINT or SIGTERM anywhere (the settle phase can last 30 min). Sealed
+        # first; then the streams, the datagen Job and an unfinished preflight
+        # this run created are deleted by uid. The finally must not then stop
+        # the streams by name: one left with 409 is not ours, and one skipped
+        # was skipped on request. Not re-raised: the finally exits 130.
+        _interrupted = _interrupt.seal(at_stage=_stage, prior_failure=not pipeline_success, exc=e)
+        pipeline_success = False
+        streams_stopped = True
+        _exit_interrupted = True
+        console.print()
+        print_warning(f"Interrupted by {_interrupted['signal']} during {_stage}")
+        _interrupt.stop_owned(_interrupted, console)
     except BaseException:
-        # An error or Ctrl-C anywhere (the settle phase can last 30 min)
-        # is not a pass.
+        # Any other error is not a pass.
         pipeline_success = False
         raise
     finally:
+        # A signal from here on does not stop the record being written (a
+        # third one still does, cli/_interrupt.py).
+        _interrupt.begin_seal()
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
-        if _total_s3_objects is None:
+        if _total_s3_objects is None and _interrupted is None:
+            # Not after an interrupt: partial data, and a long listing would
+            # hold the record back from a user who has just pressed Ctrl-C.
             _total_s3_objects = _measure_bucket_sizes(cfg, collector)
+        if _interrupted is None and _interrupt.late_signal():
+            # Interrupted while the run was being wound up: sealed the same way.
+            _interrupted = _interrupt.seal(at_stage="results", prior_failure=not pipeline_success)
+            _exit_interrupted = pipeline_success
+            pipeline_success = False
 
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
+            run_metrics.interrupted = _interrupted
             # Collect platform metrics from Prometheus (best-effort)
-            _collect_platform_metrics(cfg, run_metrics)
+            if _interrupted is None:
+                _collect_platform_metrics(cfg, run_metrics)
 
             # Build pipeline benchmark (stage-matrix view)
             try:
@@ -3874,7 +3944,9 @@ def _run_sustained(
                     datagen_output_rows=_datagen_output_rows,
                     datagen_output_files=_datagen_output_files,
                 )
-                pb.total_s3_objects = _total_s3_objects
+                # 0 when not measured (an interrupted run), as before for a
+                # failed listing.
+                pb.total_s3_objects = _total_s3_objects or 0
                 run_metrics.pipeline_benchmark = pb
                 if is_continuous_mode(pb.pipeline_mode):
                     if pb.sustained_throughput_rps > 0:
@@ -3915,12 +3987,35 @@ def _run_sustained(
 
             sample_run_end(run_metrics, cfg)
             # The corpus this run read, once, before the save (corpus id v2).
+            # After an interrupt too: it never raises, and a corpus cut short
+            # records as incomplete, so nothing inherits from it.
             from lakebench.metrics.corpus_identity import record_corpus_observation
 
             record_corpus_observation(run_metrics, cfg)
+            if _interrupted is None and _interrupt.late_signal():
+                # A signal since the check above (Prometheus, the scores):
+                # the record still says so. After the save, it is too late.
+                _interrupted = _interrupt.seal(
+                    at_stage="results", prior_failure=not pipeline_success
+                )
+                _exit_interrupted = pipeline_success
+                pipeline_success = False
+                run_metrics.success = False
+                run_metrics.interrupted = _interrupted
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
             write_run_report(metrics_storage, run_id)
 
-        _journal_safe(j.end_command, success=pipeline_success)
+        _journal_safe(
+            j.end_command,
+            success=pipeline_success,
+            message=(
+                f"interrupted ({_interrupted['signal']} during {_interrupted['at_stage']})"
+                if _interrupted is not None
+                else ""
+            ),
+        )
+        _interrupt.restore()
+        if _exit_interrupted:
+            raise typer.Exit(ExitCode.INTERRUPTED)

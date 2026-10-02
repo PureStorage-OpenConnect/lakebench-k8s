@@ -476,8 +476,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.interrupted",
         _C.INTERRUPTED,
-        "`run` interrupted; the record is sealed as interrupted",
-        planned=True,
+        "`run` interrupted by SIGINT or SIGTERM; the record is sealed as interrupted "
+        "and the run's unfinished jobs are stopped",
     ),
 )
 
