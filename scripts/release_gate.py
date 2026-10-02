@@ -470,10 +470,15 @@ def _version_line_only(freeze: str) -> bool:
     rc, out = _git_out("diff", "-U0", freeze, "HEAD", "--", VERSION_FILE)
     if rc != 0:
         return False
-    changed = [
-        ln[1:] for ln in out.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))
-    ]
-    return all(ln.startswith("__version__ = ") for ln in changed)
+    lines = [ln for ln in out.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
+    added = [ln[1:] for ln in lines if ln.startswith("+")]
+    removed = [ln[1:] for ln in lines if ln.startswith("-")]
+    version = re.compile(r'__version__ = "[^"]+"')
+    return (
+        len(added) == 1
+        and len(removed) <= 1
+        and all(version.fullmatch(ln) for ln in added + removed)
+    )
 
 
 def _generated_blocks_only(freeze: str, rel: str) -> str | None:

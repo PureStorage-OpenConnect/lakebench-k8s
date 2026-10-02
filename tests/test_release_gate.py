@@ -600,6 +600,9 @@ def test_post_freeze_version_bump_allowed_other_edits_not(frozen):
     init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9"\n')
     _git(repo, "commit", "-qam", "bump")
     assert rg.check_freeze().status == rg.PASS, rg.check_freeze().detail
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9"; import os\n')
+    _git(repo, "commit", "-qam", "code on the version line")
+    assert "beyond __version__" in rg.check_freeze().detail
     init.write_text('"""Lakebench, edited."""\n\n__version__ = "9.9.9"\n')
     _git(repo, "commit", "-qam", "edit")
     assert "beyond __version__" in rg.check_freeze().detail
