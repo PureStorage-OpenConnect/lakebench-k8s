@@ -1,7 +1,7 @@
 """Tests for deployer modules (P2).
 
 Covers:
-- HiveDeployer: auto-install Stackable operators, skip, fail
+- HiveDeployer: skip, and fail naming admin install when Stackable is missing
 - DuckDBDeployer: skip guard, dry-run, template rendering, _wait_for_ready
 - ObservabilityDeployer: skip, dry-run, helm values
 - DatagenDeployer: _parse_size_to_bytes, dry-run
@@ -16,127 +16,19 @@ import pytest
 from tests.conftest import make_config
 
 # ===========================================================================
-# HiveDeployer -- Stackable auto-install
+# HiveDeployer -- deploy verifies Stackable, never installs it
+# (the install moved to deploy/shared_components.py; tests in
+# tests/test_shared_components.py)
 # ===========================================================================
 
 
-class TestHiveDeployerAutoInstall:
-    """Tests for HiveDeployer._install_stackable_operators()."""
-
-    def _make_deployer(self, install: bool = True, version: str = "25.7.0"):
-        from lakebench.deploy.hive import HiveDeployer
-
-        cfg = make_config(
-            architecture={
-                "catalog": {"hive": {"operator": {"install": install, "version": version}}}
-            }
-        )
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = False
-        deployer = HiveDeployer(engine)
-        return deployer
-
-    @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
-    @patch("subprocess.run")
-    def test_install_runs_four_helm_commands(self, mock_run, _sleep):
-        deployer = self._make_deployer()
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        deployer._is_stackable_available = MagicMock(side_effect=[True])
-
-        result = deployer._install_stackable_operators()
-        assert result is True
-        assert mock_run.call_count == 4
-
-        # Verify install order
-        cmds = [c.args[0] for c in mock_run.call_args_list]
-        assert cmds[0][2] == "commons-operator"
-        assert cmds[1][2] == "listener-operator"
-        assert cmds[2][2] == "secret-operator"
-        assert cmds[3][2] == "hive-operator"
-
-    @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
-    @patch("subprocess.run")
-    def test_install_first_command_has_create_namespace(self, mock_run, _sleep):
-        deployer = self._make_deployer()
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        deployer._is_stackable_available = MagicMock(side_effect=[True])
-
-        deployer._install_stackable_operators()
-
-        first_cmd = mock_run.call_args_list[0].args[0]
-        assert "--create-namespace" in first_cmd
-        # Others should not have --create-namespace
-        for c in mock_run.call_args_list[1:]:
-            assert "--create-namespace" not in c.args[0]
-
-    @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
-    @patch("subprocess.run")
-    def test_install_uses_configured_version(self, mock_run, _sleep):
-        deployer = self._make_deployer(version="24.3.0")
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        deployer._is_stackable_available = MagicMock(side_effect=[True])
-
-        deployer._install_stackable_operators()
-
-        for c in mock_run.call_args_list:
-            cmd = c.args[0]
-            idx = cmd.index("--version")
-            assert cmd[idx + 1] == "24.3.0"
-
-    @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
-    @patch("subprocess.run")
-    def test_install_skips_already_installed(self, mock_run, _sleep):
-        deployer = self._make_deployer()
-        # First two succeed, third is already installed, fourth succeeds
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="", stderr=""),
-            MagicMock(returncode=0, stdout="", stderr=""),
-            MagicMock(returncode=1, stdout="", stderr="cannot re-use a name that is still in use"),
-            MagicMock(returncode=0, stdout="", stderr=""),
-        ]
-        deployer._is_stackable_available = MagicMock(side_effect=[True])
-
-        result = deployer._install_stackable_operators()
-        assert result is True
-
-    @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
-    @patch("subprocess.run")
-    def test_install_fails_on_helm_error(self, mock_run, _sleep):
-        deployer = self._make_deployer()
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Error: chart not found")
-
-        result = deployer._install_stackable_operators()
-        assert result is False
-
-    @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
-    @patch("subprocess.run")
-    def test_install_fails_on_timeout(self, mock_run, _sleep):
-        import subprocess as sp
-
-        deployer = self._make_deployer()
-        mock_run.side_effect = sp.TimeoutExpired(cmd="helm", timeout=120)
-
-        result = deployer._install_stackable_operators()
-        assert result is False
-
-    @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
-    @patch("subprocess.run")
-    def test_install_fails_helm_not_found(self, mock_run, _sleep):
-        deployer = self._make_deployer()
-        mock_run.side_effect = FileNotFoundError("helm")
-
-        result = deployer._install_stackable_operators()
-        assert result is False
-
-
 class TestHiveDeployerDeploy:
-    """Tests for HiveDeployer.deploy() auto-install integration."""
+    """Tests for HiveDeployer.deploy()."""
 
-    def _make_deployer(self, install: bool = False):
+    def _make_deployer(self):
         from lakebench.deploy.hive import HiveDeployer
 
-        cfg = make_config(architecture={"catalog": {"hive": {"operator": {"install": install}}}})
+        cfg = make_config()
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = False
@@ -167,45 +59,41 @@ class TestHiveDeployerDeploy:
         assert result.status == DeploymentStatus.SUCCESS
         assert "Would deploy" in result.message
 
-    def test_deploy_fails_without_stackable_install_false(self):
+    @patch("subprocess.run")
+    def test_deploy_fails_naming_admin_install_and_runs_no_helm(self, mock_run):
+        """DEP-3: a missing Stackable fails the step with the admin command,
+        and deploy never installs it. Reverted (the v1.6 auto-install), the
+        step ran four helm installs."""
         from lakebench.deploy.engine import DeploymentStatus
 
-        deployer = self._make_deployer(install=False)
+        deployer = self._make_deployer()
         deployer._is_stackable_available = MagicMock(return_value=False)
         deployer._check_stackable_crds = MagicMock(
             return_value={
                 "hiveclusters.hive.stackable.tech": False,
-                "secretclasses.secrets.stackable.tech": False,
+                "secretclasses.secrets.stackable.tech": True,
             }
         )
+        deployer._deploy_stackable = MagicMock()
 
         result = deployer.deploy()
         assert result.status == DeploymentStatus.FAILED
-        # A cluster admin installs the shared operators; the config cannot.
-        assert "A cluster admin installs them once" in result.message
-        assert "helm install hive-operator" in result.message
-        assert "operator.install: true" not in result.message
+        assert "lakebench admin install --component stackable" in result.message
+        assert "hive-operator" in result.message
+        assert "helm install" not in result.message
+        mock_run.assert_not_called()
+        deployer._deploy_stackable.assert_not_called()
 
-    @patch("lakebench.modules.catalogs.hive.deployer.time.sleep")
-    @patch("subprocess.run")
-    def test_deploy_auto_installs_when_install_true(self, mock_run, _sleep):
+    def test_deploy_uses_stackable_when_present(self):
         from lakebench.deploy.engine import DeploymentStatus
 
-        deployer = self._make_deployer(install=True)
-        # First call: not available; after install: available
-        deployer._is_stackable_available = MagicMock(side_effect=[False, True])
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-        # Mock _deploy_stackable to avoid K8s calls
+        deployer = self._make_deployer()
+        deployer._is_stackable_available = MagicMock(return_value=True)
         deployer._deploy_stackable = MagicMock(
-            return_value=MagicMock(
-                status=DeploymentStatus.SUCCESS,
-            )
+            return_value=MagicMock(status=DeploymentStatus.SUCCESS)
         )
-
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert mock_run.call_count == 4  # Four helm install calls
+        assert deployer.deploy().status == DeploymentStatus.SUCCESS
+        deployer._deploy_stackable.assert_called_once()
 
 
 # ===========================================================================
@@ -340,7 +228,7 @@ class TestObservabilityDeployerSkip:
         deployer = ObservabilityDeployer(engine)
         result = deployer.deploy()
         assert result.status == DeploymentStatus.SUCCESS
-        assert "Would deploy" in result.message
+        assert "Would check the shared observability stack" in result.message
 
     def test_destroy_dry_run(self):
         from lakebench.deploy.engine import DeploymentStatus
@@ -357,13 +245,10 @@ class TestObservabilityDeployerSkip:
         assert "left in place" in result.message
 
     def test_helm_values_retention_and_storage(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
+        from lakebench.deploy.observability import build_helm_values
 
         cfg = make_config(observability={"enabled": True, "retention": "14d", "storage": "20Gi"})
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = ObservabilityDeployer(engine)
-        values = deployer._build_helm_values("test-ns")
+        values = build_helm_values(cfg.observability)
         assert values["prometheus.prometheusSpec.retention"] == "14d"
         assert (
             "20Gi"
@@ -374,13 +259,10 @@ class TestObservabilityDeployerSkip:
         )
 
     def test_helm_values_grafana_disabled(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
+        from lakebench.deploy.observability import build_helm_values
 
         cfg = make_config(observability={"enabled": True, "dashboards_enabled": False})
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = ObservabilityDeployer(engine)
-        values = deployer._build_helm_values("test-ns")
+        values = build_helm_values(cfg.observability)
         assert values["grafana.enabled"] == "false"
 
 

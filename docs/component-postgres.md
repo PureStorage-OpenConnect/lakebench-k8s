@@ -42,7 +42,7 @@ The StorageClass you choose for PostgreSQL directly affects metadata durability:
 Lakebench deploys infrastructure in a fixed sequence defined in the deployment engine (`src/lakebench/deploy/engine.py`):
 
 1. Namespace, Secrets, S3 buckets
-2. Scratch StorageClass check (verify only; a cluster admin installs it with `lakebench admin install-scratch-storage-class`)
+2. Scratch StorageClass check (verify only; a cluster admin installs it with `lakebench admin install --component scratch-storage-class`)
 3. **PostgreSQL** (StatefulSet + Service)
 4. Catalog service (Hive Metastore or Polaris), then Spark RBAC, then Unity Catalog when that is the catalog
 5. Spark Operator check and watch-list entry

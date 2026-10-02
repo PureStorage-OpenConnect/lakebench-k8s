@@ -138,8 +138,7 @@ kubectl logs -n spark-operator -l app.kubernetes.io/component=controller --tail=
 ```
 
 **Fix:** re-run `lakebench deploy <config>`. Deploy adds the namespace to
-`spark.jobNamespaces`, and `lakebench
-run` re-adds it before submitting jobs. Both take the
+`spark.jobNamespaces`, and `lakebench run` re-adds it before submitting jobs. Both take the
 `lakebench-cluster-lock` lease first, so a concurrent deploy or destroy of
 another deployment cannot lose its entry. `lakebench validate` reports a
 missing entry as a warning, or as expected before the first deploy.
@@ -216,8 +215,8 @@ the controller's `/tmp` sizeLimit and any storage evictions still on record
 `lakebench admin repair-operator`. It raises the controller's `/tmp` to 8Gi
 under the `lakebench-cluster-lock` lease with `--reuse-values`, keeps the
 watch list and the installed chart version, and rolls the controller once.
-`lakebench admin install-spark-operator` sets the same size on install or
-upgrade (`--controller-tmp-size` to choose another). The size is stored in the
+`lakebench admin install --component spark-operator` sets the same size on a
+fresh install (`--controller-tmp-size` to choose another). The size is stored in the
 release's values, so later watch-list edits carry it forward.
 
 Baking the jars into the Spark image, so `spark.jars.packages` is empty at

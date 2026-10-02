@@ -344,7 +344,7 @@ class TestObservabilityDeployer:
         deployer = ObservabilityDeployer(engine)
         result = deployer.deploy()
         assert result.status == DeploymentStatus.SUCCESS
-        assert "Would deploy" in result.message
+        assert "Would check the shared observability stack" in result.message
 
     def test_observability_deployer_destroy_dry_run(self):
         from lakebench.deploy.engine import DeploymentStatus

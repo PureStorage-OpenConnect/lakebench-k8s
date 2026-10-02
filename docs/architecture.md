@@ -308,21 +308,22 @@ The deployment engine creates resources in a strict dependency order:
 4. **S3 buckets** -- creates the deployment's buckets
 5. **Scratch StorageClass check** -- verifies the scratch class exists (if
    scratch is enabled); it never creates it. A cluster admin installs it once
-   with `lakebench admin install-scratch-storage-class`
+   with `lakebench admin install --component scratch-storage-class`
 6. **PostgreSQL** -- StatefulSet with persistent volume
 7. **Hive Metastore** -- skipped unless the catalog is Hive
 8. **Polaris** -- skipped unless the catalog is Polaris
 9. **Spark RBAC** -- ServiceAccount, Role, RoleBinding (plus SCC on OpenShift)
 10. **Unity Catalog** -- skipped unless the catalog is Unity (not a supported
     combination)
-11. **Spark Operator** -- verifies the shared operator (a cluster admin
-    installs it once; deploy never does) and adds the namespace to its watch
-    list under the cluster lease
+11. **Spark Operator** -- verifies the shared operator (deploy never installs
+    it; `lakebench admin install --component spark-operator` does) and adds
+    the namespace to its watch list under the cluster lease
 12. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
 13. **Spark Thrift Server** -- if selected
 14. **DuckDB** -- if selected
-15. **Observability** -- one step for Prometheus, Grafana and the
-    deployment's Pushgateway (if enabled)
+15. **Observability** -- checks the shared Prometheus and Grafana release
+    (installed by `lakebench admin install --component observability`) and
+    applies the deployment's PodMonitors and Pushgateway (if enabled)
 
 Destruction follows the reverse order: an ownership check, Spark jobs and pods
 first, then table removal from the catalog (metadata only, no table

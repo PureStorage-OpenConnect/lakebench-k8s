@@ -47,6 +47,9 @@ SCHEMA_READERS = frozenset(
         "SustainedConfig.effective_silver_bronze_wait_seconds",
         "DatagenConfig.resolve_scale_from_target_size",
         "LakebenchConfig.get_namespace",
+        # operator.install: true is refused (deploy never installs operators).
+        "SparkOperatorConfig._refuse_install",
+        "StackableOperatorConfig._refuse_install",
         "LakebenchConfig.get_scale_dimensions",
         "LakebenchConfig.apply_recipe_defaults",
     }

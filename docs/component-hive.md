@@ -21,9 +21,13 @@ leave it unset) to use it.
 The Stackable Hive Operator (plus commons, listener, and secret operators)
 must be present on the cluster before deploying a Hive catalog.
 
-They are shared cluster infrastructure: a cluster admin installs them once,
-and `lakebench deploy` only checks that they are there. The config names
-where they run and which version:
+A cluster admin installs all four once, under the cluster lease, with:
+
+```bash
+lakebench admin install --component stackable lakebench.yaml
+```
+
+It installs at `version` in `namespace`:
 
 ```yaml
 architecture:
@@ -31,28 +35,17 @@ architecture:
     hive:
       operator:
         namespace: "stackable"      # Where the operators run
-        version: "25.7.0"           # Stackable chart version
+        version: "25.7.0"           # SDP chart version a fresh install uses
 ```
 
-`operator.install: true` is refused by every command that changes data;
-`destroy`, `status` and the read-only commands load it as `false` with a
-note. Install the operators with:
-
-```bash
-helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \
-  --version 25.7.0 --namespace stackable --create-namespace
-helm install listener-operator oci://oci.stackable.tech/sdp-charts/listener-operator \
-  --version 25.7.0 --namespace stackable
-helm install secret-operator oci://oci.stackable.tech/sdp-charts/secret-operator \
-  --version 25.7.0 --namespace stackable
-helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
-  --version 25.7.0 --namespace stackable
-```
-
-Lakebench checks for the `hiveclusters.hive.stackable.tech` and
-`secretclasses.secrets.stackable.tech` CRDs, and that their operators are
-running, at deploy time. If either is missing, deployment fails with an
-error that lists the Helm install commands.
+An SDP that is already installed (in any namespace) is left as it is; a
+partial install from an interrupted run is completed at the installed
+version. `lakebench deploy` never installs the operators. It checks for the
+`hiveclusters.hive.stackable.tech` and `secretclasses.secrets.stackable.tech`
+CRDs, and that their operators are running; if either is missing, the Hive
+step fails with the `admin install` command. The v1.6 key
+`operator.install: true` is refused by the commands that change data
+(`destroy`, `status` and `admin` still load it, as false).
 
 ### Managed Resources
 

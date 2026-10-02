@@ -605,8 +605,7 @@ def operator_watch_verdict(
     """Validate's verdict for a namespace missing from ``spark.jobNamespaces``.
 
     Returns ``(level, message, hint)``. ``deploy`` adds the namespace under
-    the ``lakebench-cluster-lock`` lease whatever ``operator.install`` says,
-    and ``run`` re-adds it before submitting jobs, so a missing entry is not
+    the ``lakebench-cluster-lock`` lease, and ``run`` re-adds it before submitting jobs, so a missing entry is not
     itself a blocker: before a deploy (namespace absent) it is expected, on
     an existing deployment it is drift worth a warning. It fails only when
     these credentials cannot make that add (``can_edit_release`` False), in
@@ -947,28 +946,11 @@ def validate(
             }
             missing = [op for crd, op in required_crds.items() if crd not in crd_names]
             if missing:
-                hive_op_cfg = cfg.architecture.catalog.hive.operator
-                if hive_op_cfg.install:
-                    _check_warn(
-                        f"Missing Stackable operators: {', '.join(missing)}",
-                        hint="Will be auto-installed during deploy (install: true)",
-                    )
-                else:
-                    install_hint = "A cluster admin installs them once:\n" + "\n".join(
-                        f"  helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
-                        f"--version {hive_op_cfg.version} --namespace {hive_op_cfg.namespace}"
-                        " --create-namespace"
-                        for op in [
-                            "commons-operator",
-                            "listener-operator",
-                            "secret-operator",
-                            "hive-operator",
-                        ]
-                    )
-                    _check_fail(
-                        f"Missing Stackable operators: {', '.join(missing)}",
-                        hint=install_hint,
-                    )
+                _check_fail(
+                    f"Missing Stackable operators: {', '.join(missing)}",
+                    hint="A cluster admin installs them once:\n"
+                    "  lakebench admin install --component stackable <config>",
+                )
             else:
                 _check_ok("Stackable operators installed (Hive)")
         except Exception:
@@ -990,7 +972,6 @@ def validate(
         spark_op_cfg = cfg.platform.compute.spark.operator
         operator = SparkOperatorManager(
             namespace=spark_op_cfg.namespace,
-            version=spark_op_cfg.version,
             job_namespace=cfg.get_namespace(),
             kube_context=cfg.platform.kubernetes.context,
         )
@@ -1031,25 +1012,13 @@ def validate(
                     "Namespace watching unverified (helm values unavailable)",
                 )
         elif status.installed:
-            if spark_op_cfg.install:
-                _check_warn(
-                    f"Installed but not ready: {status.message}",
-                    hint="Operator will be repaired during deploy",
-                )
-            else:
-                _check_warn(f"Installed but not ready: {status.message}")
+            _check_warn(f"Installed but not ready: {status.message}")
         else:
-            if spark_op_cfg.install:
-                _check_warn(
-                    "Not installed",
-                    hint="Will be auto-installed during deploy (install: true)",
-                )
-            else:
-                _check_fail(
-                    "Not installed",
-                    hint="A cluster admin installs it once (takes the cluster lock):\n"
-                    "  lakebench admin install-spark-operator",
-                )
+            _check_fail(
+                "Not installed",
+                hint="A cluster admin installs it once (takes the cluster lock):\n"
+                "  lakebench admin install --component spark-operator <config>",
+            )
     except Exception as e:
         _check_warn(f"Could not check status: {e}")
     p, f, w = _section_end()

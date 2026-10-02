@@ -319,8 +319,16 @@ _LEASED_FUNCTIONS = {
     # admin verbs' calls inside their lease, and the namespace stamp deploy
     # and migrate-deployment make (inside the lease for the latter).
     "cli/_admin.py": {
-        "install_scratch_storage_class",
         "_migrate_secretclass",
+    },
+    # admin install: the component reads it repeats inside the lease, and
+    # the StorageClass create.
+    "deploy/shared_components.py": {
+        "_crd_present",
+        "_running_pod_namespaces",
+        "_deployments",
+        "status",
+        "install",
     },
     "deploy/ownership.py": {
         "stamp_namespace",
@@ -415,7 +423,7 @@ def test_leased_paths_run_on_main_thread():
     }
     assert lease_modules >= {
         "cli/_admin.py",
-        "deploy/observability.py",
+        "deploy/shared_components.py",
         "modules/pipeline_engines/spark/operator.py",
     }
 
@@ -695,7 +703,8 @@ def test_signal_child_never_targets_our_own_group():
 
 def test_admin_verbs_report_a_leased_timeout_as_an_error():
     """[static] every admin lease block maps a leased timeout to a one-line exit."""
-    text = (SRC / "cli/_admin.py").read_text(encoding="utf-8")
-    blocks = text.count("max_hold_s=ADMIN_MAX_HOLD_S")
-    assert blocks == 5
-    assert text.count("except (subprocess.TimeoutExpired, LeaseHoldExceeded)") == blocks
+    for rel, expected in (("cli/_admin.py", 3), ("deploy/shared_components.py", 1)):
+        text = (SRC / rel).read_text(encoding="utf-8")
+        blocks = text.count("max_hold_s=ADMIN_MAX_HOLD_S")
+        assert blocks == expected, rel
+        assert text.count("except (subprocess.TimeoutExpired, LeaseHoldExceeded)") == blocks

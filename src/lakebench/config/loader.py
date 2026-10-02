@@ -717,11 +717,11 @@ platform:
     #   storage_class: px-csi-scratch    # Name of the StorageClass to use. Must exist
     #                                    # before `deploy` runs -- a cluster admin
     #                                    # installs it once with
-    #                                    # `lakebench admin install-scratch-storage-class`.
+    #                                    # `lakebench admin install --component scratch-storage-class`.
     #                                    # Each executor's PVC size comes from its job
     #                                    # profile (silver-build 300Gi).
     #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Consumed by
-    #                                    # `admin install-scratch-storage-class`. Examples:
+    #                                    # `admin install --component scratch-storage-class`. Examples:
     #                                    #   pxd.portworx.com (Portworx)
     #                                    #   rancher.io/local-path (local-path)
     #                                    #   ebs.csi.aws.com (AWS EBS)
@@ -732,8 +732,9 @@ platform:
 
   # compute:
   #   spark:
-  #     operator:                  # Shared; a cluster admin installs it once with
-  #                                  # `lakebench admin install-spark-operator`.
+  #     operator:                    # Deploy never installs it; a cluster admin
+  #                                  # runs `lakebench admin install --component
+  #                                  # spark-operator` once per cluster.
   #       namespace: spark-operator
   #       version: "2.5.1"           # v2.x uses webhook for volume injection
   #
@@ -767,8 +768,9 @@ architecture:
     type: hive                     # hive | polaris | none
     ## Hive Metastore tuning (uncomment to override defaults)
     # hive:
-    #   operator:                    # Shared; a cluster admin installs the Stackable
-    #                                # operators once (docs/component-hive.md).
+    #   operator:                    # Deploy never installs them; a cluster admin
+    #                                # runs `lakebench admin install --component
+    #                                # stackable` once per cluster.
     #     namespace: stackable
     #     version: "25.7.0"
     #   resources:

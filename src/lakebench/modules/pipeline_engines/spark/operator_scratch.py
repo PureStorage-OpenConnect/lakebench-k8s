@@ -26,7 +26,7 @@ from typing import Any
 # ``controller.volumes[0]``, mounted at /tmp by ``controller.volumeMounts``).
 CONTROLLER_TMP_VOLUME = "tmp"
 
-# What ``admin install-spark-operator`` and ``admin repair-operator`` set.
+# What ``admin install --component spark-operator`` and ``admin repair-operator`` set.
 # One Spark line's jars are ~1.2 GB; the UAT matrix resolves three Spark
 # minors (each with its own AWS SDK bundle) plus Iceberg and Delta, so a
 # controller that lives through a full matrix holds 3-4 GB.

@@ -44,8 +44,8 @@ The deployment engine follows this fixed sequence:
 4. **Scratch StorageClass** -- Verifies that the scratch StorageClass for Spark
    shuffle volumes exists. Deploy never creates it: it is shared cluster-scoped
    infrastructure. If it is missing, deploy stops and points to
-   `lakebench admin install-scratch-storage-class`, which a cluster admin runs
-   once. Skipped if `platform.storage.scratch.enabled` is false.
+   `lakebench admin install --component scratch-storage-class`, which a
+   cluster admin runs once. Skipped if `platform.storage.scratch.enabled` is false.
 5. **PostgreSQL** -- Deploys a PostgreSQL StatefulSet as the metadata backend for
    the catalog service.
 6. **Hive Metastore or Polaris** -- Deploys the catalog selected by
@@ -62,10 +62,12 @@ The deployment engine follows this fixed sequence:
    watches the deployment namespace. If the namespace is not watched, deploy
    adds it to `spark.jobNamespaces` with `helm upgrade`, under the
    `lakebench-cluster-lock` lease so concurrent deploys do not overwrite each
-   other. Deploy never installs the shared operator: a missing or broken
-   operator fails the deploy, and a cluster admin installs it once with
-   `lakebench admin install-spark-operator`
-   (`platform.compute.spark.operator.install: true` is refused).
+   other. Deploy never installs, upgrades or repairs the operator: a missing
+   or broken one fails the deploy, and a cluster admin installs it once with
+   `lakebench admin install --component spark-operator`. The v1.6 key
+   `platform.compute.spark.operator.install: true` is refused by the commands
+   that change data. With `observability.enabled`, the deploy preflight stops
+   before creating anything when the shared observability stack is missing.
 10. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
     (StatefulSet) with the connector configured to point at the catalog.
     Skipped unless `architecture.query_engine.type` is `trino`.
@@ -74,10 +76,12 @@ The deployment engine follows this fixed sequence:
 13. **Observability** -- Only when `observability.enabled` is true.
     Prometheus and Grafana come from
     one shared `kube-prometheus-stack` release in the `lakebench-observability`
-    namespace. Deploy installs it only if no such release exists on the
-    cluster, never modifies an existing one, and applies this deployment's
-    PodMonitors and dashboard in its own namespace. Destroy never uninstalls
-    the shared release.
+    namespace, which a cluster admin installs once with `lakebench admin
+    install --component observability` (that command also applies the shared
+    Grafana dashboard). Deploy never installs or modifies it: a missing release
+    fails the step, and deploy applies only this deployment's PodMonitors and
+    Pushgateway, in its own namespace. Destroy never uninstalls the shared
+    release.
 
 Run `lakebench validate` to check the operator and StorageClass before
 deploying.

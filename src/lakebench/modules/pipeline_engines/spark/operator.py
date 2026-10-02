@@ -203,19 +203,25 @@ class SparkOperatorManager:
         digest = hashlib.sha256("\n".join(cleaned).encode("utf-8")).hexdigest()
         return f"sha256:{digest}"
 
-    def _watch_list_pin(self) -> list[str]:
+    def _watch_list_pin(self) -> list[str] | None:
         """``--version``/backfill args for a watch-list-only ``helm upgrade``.
 
         Adding or removing a namespace must not change the shared operator's
         chart. Without ``--version`` Helm resolves whatever the local repo
         serves (a silent upgrade for every deployment on the cluster); with
         the config's version a developer's older pin would downgrade an
-        admin's newer install. So pin the installed release's chart when
-        check_status() has read it, and fall back to the configured version.
+        admin's newer install. So pin the installed release's chart, read
+        afresh here (the callers hold the cluster lease, so it cannot change
+        before the upgrade). None when it cannot be read: the caller refuses
+        the upgrade rather than guess a version.
         """
-        pin = self._installed_version or self.target_version
+        pin = self._get_helm_version()
         if not pin:
-            return []
+            logger.error(
+                "Cannot read the installed Spark Operator chart version; refusing a watch-list "
+                "upgrade that could move the shared operator to another chart"
+            )
+            return None
         return [
             "--version",
             pin,
@@ -240,11 +246,9 @@ class SparkOperatorManager:
                 If not set, the chart default (``default``) is used.
         """
         self.namespace = namespace or self.DEFAULT_NAMESPACE
-        self.target_version = version  # Version to install if not present
-        # Chart version of the running release, cached by check_status().
-        # Watch-list edits pin it so adding or removing a namespace never
-        # moves the shared operator to another chart (see _watch_list_pin).
-        self._installed_version: str | None = None
+        # The chart a fresh install uses (admin install only). Watch-list edits
+        # never use it: they pin the installed chart (see _watch_list_pin).
+        self.target_version = version
         self.job_namespace = job_namespace
         # The config's kubeconfig context. helm and kubectl otherwise use the
         # ambient current context, so a stale or different current context
@@ -375,8 +379,6 @@ class SparkOperatorManager:
 
             # Get version from Helm release if possible
             version = self._get_helm_version()
-            if version:
-                self._installed_version = version
 
             # Check namespace watching -- use the deployment spec args as
             # ground truth, NOT Helm values (which can be out of sync after
@@ -439,7 +441,7 @@ class SparkOperatorManager:
         exactly: the watch-list edits pin ``--version`` to this value, so a
         look-alike release elsewhere (``my-spark-operator``) must never be
         read. A chart string that does not end in a version yields None,
-        and callers fall back to the configured version.
+        and the watch-list edits then refuse rather than guess a version.
         """
         import json
         import re
@@ -451,6 +453,7 @@ class SparkOperatorManager:
                     "list",
                     "-n",
                     self.namespace,
+                    "--all",
                     "-f",
                     f"^{self.HELM_RELEASE_NAME}$",
                     "-o",
@@ -771,18 +774,12 @@ class SparkOperatorManager:
             "--set",
             f"spark.jobNamespaces={{{ns_set_without}}}",
         ]
-        # Pin the installed chart (see _watch_list_pin). With no version
-        # known, Helm resolves whatever the repo serves while --reuse-values
-        # carries forward only the stored values, so backfill regardless.
+        # Pin the installed chart (see _watch_list_pin); with no readable
+        # version the upgrade would let Helm pick the repo's latest chart.
         pin = self._watch_list_pin()
-        cmd.extend(
-            pin
-            or [
-                "--set",
-                f"prometheus.metrics.jobSubmitLatencyBuckets="
-                f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
-            ]
-        )
+        if pin is None:
+            return False
+        cmd.extend(pin)
         result = self._run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(
@@ -901,7 +898,10 @@ class SparkOperatorManager:
                 "--set",
                 f"spark.jobNamespaces={{{ns_set}}}",
             ]
-            cmd.extend(self._watch_list_pin())
+            pin = self._watch_list_pin()
+            if pin is None:
+                return False
+            cmd.extend(pin)
 
             try:
                 result = self._run(cmd, capture_output=True, text=True)
@@ -1319,7 +1319,10 @@ class SparkOperatorManager:
             # so omitting this lets Helm re-resolve to whatever the repo now
             # serves.  A namespace add would then silently upgrade the
             # operator out from under a pinned config.
-            cmd.extend(self._watch_list_pin())
+            pin = self._watch_list_pin()
+            if pin is None:
+                return False
+            cmd.extend(pin)
 
             try:
                 result = self._run(cmd, capture_output=True, text=True)
@@ -1583,7 +1586,7 @@ class SparkOperatorManager:
                 capture_output=True,
                 text=True,
             )
-        except FileNotFoundError:
+        except (OSError, subprocess.SubprocessError):
             return None
         if result.returncode == 0:
             return True
@@ -1798,13 +1801,39 @@ class SparkOperatorManager:
             return False
         return self._verify_tmp_size(tmp_size)
 
+    def refresh_chart_repo(self) -> str | None:
+        """Add and update the chart repo (admin install runs this before it
+        takes the lease); a problem, or None. helm returns 0 for a repo
+        already added with the same URL; a non-zero "already exists" means the
+        name points at another URL, which must not supply the shared chart."""
+        for args, timeout in (
+            (["helm", "repo", "add", self.HELM_REPO_NAME, self.HELM_REPO_URL], 60),
+            (["helm", "repo", "update", self.HELM_REPO_NAME], 120),
+        ):
+            try:
+                r = self._run(args, capture_output=True, text=True, timeout=timeout)
+            except (OSError, subprocess.SubprocessError) as e:
+                return f"{' '.join(args[:3])} failed: {e}"
+            if r.returncode != 0:
+                return f"{' '.join(args[:3])} failed: {(r.stderr or '').strip()[:300]}"
+        return None
+
     def install(
         self,
         version: str | None = None,
         values: dict[str, Any] | None = None,
         tmp_size: str | None = None,
+        add_repo: bool = True,
     ) -> bool:
-        """Install or upgrade the Spark Operator via Helm.
+        """Fresh install of the Spark Operator via Helm; never an upgrade.
+
+        Called only by ``lakebench admin install --component spark-operator``
+        (``deploy/shared_components.py``), under the cluster lease, after it
+        found no release. ``helm install`` (not ``upgrade --install``) makes
+        helm itself refuse a release that appeared since that read, so an
+        installed operator's version and watch list are never touched here.
+        With no ``job_namespace`` the chart's ``["default"]`` watch list is
+        kept; deploys add their namespaces under the lease.
 
         On OpenShift, automatically:
         - Uses webhook port 9443 (non-root can't bind 443)
@@ -1813,33 +1842,29 @@ class SparkOperatorManager:
           (the Helm chart hardcodes these and they can't be overridden
           via values due to deep merge behavior)
 
-        An existing release is upgraded with ``--reuse-values`` and the
-        backfill, never re-installed from defaults: a plain ``upgrade
-        --install`` resets ``spark.jobNamespaces`` to the chart's
-        ``["default"]`` and unwatches every tenant. With no version given it
-        stays on the installed chart. The controller's /tmp emptyDir is
-        sized to *tmp_size* on both paths (operator_scratch).
-
         Args:
-            version: Chart version (default: the manager's target version,
-                then the installed chart, then the repo's latest)
+            version: Chart version (default: the manager's target version)
             values: Custom Helm values
-            tmp_size: Controller /tmp emptyDir sizeLimit (default 8Gi; an
-                upgrade without it keeps a larger size already set)
+            tmp_size: Controller /tmp emptyDir sizeLimit (default 8Gi)
+            add_repo: Add and refresh the chart repo first (admin install does
+                that before taking the lease)
 
         Returns:
             True if installation succeeded
         """
         logger.info(f"Installing Spark Operator to namespace {self.namespace}")
         version = version or self.target_version
+        if not version:
+            logger.error("No chart version given; refusing an unpinned Spark Operator install")
+            return False
 
         exists = self._release_exists()
-        if exists is None:
+        if exists is not False:
             logger.error(
-                "Cannot tell whether Helm release %s exists in %s; refusing to install "
-                "over it (a fresh install would reset the watch list)",
+                "Helm release %s in %s %s; admin install only installs a missing operator",
                 self.HELM_RELEASE_NAME,
                 self.namespace,
+                "already exists" if exists else "cannot be read",
             )
             return False
 
@@ -1848,72 +1873,57 @@ class SparkOperatorManager:
             logger.info("OpenShift detected -- will assign anyuid SCC after install")
 
         try:
-            # Add Helm repo
-            self._run(
-                ["helm", "repo", "add", self.HELM_REPO_NAME, self.HELM_REPO_URL],
-                capture_output=True,
-                check=True,
-            )
-
-            self._run(
-                ["helm", "repo", "update"],
-                capture_output=True,
-                check=True,
-            )
+            if add_repo:
+                self._run(
+                    ["helm", "repo", "add", self.HELM_REPO_NAME, self.HELM_REPO_URL],
+                    capture_output=True,
+                    check=True,
+                    timeout=60,
+                )
+                self._run(
+                    ["helm", "repo", "update", self.HELM_REPO_NAME],
+                    capture_output=True,
+                    check=True,
+                    timeout=120,
+                )
 
             # On OpenShift, use a non-privileged port for the webhook
             # (non-root can't bind to port 443).
             webhook_port = "9443" if is_openshift else "443"
 
-            # Build Helm install command
             cmd = [
                 "helm",
-                "upgrade",
-                "--install",
+                "install",
                 self.HELM_RELEASE_NAME,
                 self.HELM_CHART_NAME,
                 "--namespace",
                 self.namespace,
                 "--create-namespace",
+                "--version",
+                version,
+                # Bounds helm's own waits (hooks) below the subprocess kill;
+                # without --wait it does not bound resource creation, so a
+                # killed install can still leave a pending-install release,
+                # which admin install's next status read refuses.
+                "--timeout",
+                "150s",
                 "--set",
                 "webhook.enable=true",
                 "--set",
                 f"webhook.port={webhook_port}",
             ]
-
-            if exists:
-                # Keep the stored values (the watch list above all) and the
-                # installed chart unless a version was asked for.
-                pin = version or self._get_helm_version()
-                if not pin:
-                    logger.error(
-                        "Cannot read the installed chart version and none was given; "
-                        "refusing an unpinned upgrade of the shared operator"
-                    )
-                    return False
-                size = self._upgrade_tmp_size(tmp_size)
-                if size is None:
-                    return False
-                tmp_size = size
-                cmd.append("--reuse-values")
-                cmd.extend(["--version", pin])
-                cmd.extend(self._reuse_values_backfill(pin, tmp_size))
-            else:
-                # Tell the operator which namespace(s) to watch
-                if self.job_namespace:
-                    cmd.extend(["--set", f"spark.jobNamespaces={{{self.job_namespace}}}"])
-                if version:
-                    cmd.extend(["--version", version])
-                tmp_size = tmp_size or DEFAULT_CONTROLLER_TMP_SIZE
-                cmd.extend(controller_tmp_helm_set_args(tmp_size))
+            # Tell the operator which namespace(s) to watch
+            if self.job_namespace:
+                cmd.extend(["--set", f"spark.jobNamespaces={{{self.job_namespace}}}"])
+            tmp_size = tmp_size or DEFAULT_CONTROLLER_TMP_SIZE
+            cmd.extend(controller_tmp_helm_set_args(tmp_size))
 
             # Add custom values
             if values:
                 for key, value in values.items():
                     cmd.extend(["--set", f"{key}={value}"])
 
-            # Run install
-            result = self._run(cmd, capture_output=True, text=True)
+            result = self._run(cmd, capture_output=True, text=True, timeout=180)
 
             if result.returncode != 0:
                 logger.error(f"Helm install failed: {result.stderr}")
@@ -1932,15 +1942,11 @@ class SparkOperatorManager:
                     return False
                 self._patch_openshift_deployments()
 
-            # readyReplicas alone can still count the old pod during an
-            # upgrade; wait for the new ReplicaSets.
-            if exists and not self._wait_for_rollout():
-                return False
             if not self._wait_for_ready(timeout=120):
                 return False
             return self._verify_tmp_size(tmp_size)
 
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
             logger.error(f"Failed to install Spark Operator: {e}")
             return False
 
@@ -1964,83 +1970,6 @@ class SparkOperatorManager:
 
         logger.error(f"Spark Operator not ready after {timeout}s")
         return False
-
-    def ensure_installed(self, _after_wait: bool = False) -> OperatorStatus:
-        """Ensure Spark Operator is installed and ready.
-
-        If not installed, installs it automatically.
-        If installed but not watching the target namespace, adds it.
-
-        Returns:
-            OperatorStatus after ensuring installation
-        """
-        status = self.check_status()
-
-        if status.ready:
-            # Operator is running -- ensure it watches our namespace
-            if self.job_namespace and status.watching_namespace is False:
-                logger.info(
-                    "Spark Operator not watching '%s' -- adding via helm upgrade",
-                    self.job_namespace,
-                )
-                if not self._add_namespace_to_watch(self.job_namespace):
-                    return OperatorStatus(
-                        installed=True,
-                        version=status.version,
-                        namespace=status.namespace,
-                        ready=False,
-                        message=(
-                            f"Failed to add namespace '{self.job_namespace}' "
-                            f"to spark.jobNamespaces via helm upgrade"
-                        ),
-                    )
-                status = self.check_status()
-            return status
-
-        if not status.installed:
-            logger.info("Spark Operator not found, installing...")
-            if self.install(version=self.target_version):
-                return self.check_status()
-            else:
-                return OperatorStatus(
-                    installed=False,
-                    version=None,
-                    namespace=None,
-                    ready=False,
-                    message="Failed to install Spark Operator",
-                )
-
-        # CRD exists but the operator is not ready. With a release in place
-        # this is usually a controller restart (an eviction, a watch-list
-        # rollout): wait for it. Upgrading here would mutate the shared
-        # operator outside the cluster lease and pin it to this tenant's
-        # config version, so an existing release is left to the admin
-        # commands.
-        exists = self._release_exists()
-        if exists is False:
-            logger.info("Spark Operator release missing, installing...")
-            if self.install(version=self.target_version):
-                return self.check_status()
-            return status
-        logger.info("Spark Operator not ready, waiting for it to recover...")
-        if self._wait_for_ready(timeout=120):
-            status = self.check_status()
-            if (
-                not _after_wait
-                and status.ready
-                and self.job_namespace
-                and status.watching_namespace is False
-            ):
-                # The ready branch above adds the namespace under the lease;
-                # at most once, so a flapping controller cannot recurse.
-                return self.ensure_installed(_after_wait=True)
-            return status
-        status.message = (
-            f"{status.message}. lakebench does not reinstall a shared operator from "
-            "deploy; a cluster admin can run 'lakebench admin doctor' and "
-            "'lakebench admin repair-operator'."
-        )
-        return status
 
     def ensure_namespace_watched(self, *, can_heal: bool = False) -> OperatorStatus:
         """Ensure the Spark Operator watches the target namespace.

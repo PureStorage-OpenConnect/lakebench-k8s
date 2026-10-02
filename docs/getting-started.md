@@ -14,12 +14,14 @@ Before you begin, make sure your environment has the following.
 If you are the **cluster admin** setting up Lakebench on a shared cluster for the first time, the fastest path is:
 
 ```bash
-lakebench admin install-spark-operator            # once per cluster
-lakebench admin install-scratch-storage-class     # once per cluster, if using scratch PVCs
-lakebench admin doctor                            # confirm everything is in place
+lakebench admin install --component all lakebench.yaml --dry-run   # what it would install
+lakebench admin install --component all lakebench.yaml             # once per cluster
+lakebench admin doctor lakebench.yaml                              # confirm everything is in place
 ```
 
-Developers then use ordinary `lakebench deploy` / `run` / `destroy` without cluster-admin privileges. Every `admin` mutation takes a cluster-wide lease so concurrent admins on different workstations do not race each other; see `lakebench admin --help` for the full subcommand tree.
+`--component all` installs what the config uses: the scratch StorageClass (when `platform.storage.scratch.enabled`), the Spark Operator, the Stackable operators (Hive recipes) and the observability stack (when `observability.enabled`). Name components one at a time with `--component spark-operator` and so on. A component that is already installed is left as it is, whatever version the config names (it warns when they differ), so the command is safe to re-run: on a cluster that has everything installed and ready it changes nothing and exits 0. The one thing it refreshes is the shared Grafana dashboard ConfigMap, when it differs from this Lakebench's.
+
+Developers then use ordinary `lakebench deploy` / `run` / `destroy` without cluster-admin privileges; `deploy` never installs a shared component, and stops with the `admin install` command when one is missing. Every `admin` mutation takes a cluster-wide lease so concurrent admins on different workstations do not race each other; deploys and destroys wait for `admin install` up to 10 minutes, and one that waits longer fails, naming the holder, without changing anything shared; see `lakebench admin --help` for the full subcommand tree.
 
 ### Kubernetes cluster
 
@@ -183,7 +185,7 @@ Look for `(default)` next to one of the class names.
 **Scratch StorageClass**: if you enable `platform.storage.scratch` (Portworx-backed shuffle volumes on OpenShift, for example), the named `StorageClass` must exist before `deploy` runs. `deploy` will refuse with an actionable error rather than create it -- a `StorageClass` is shared infrastructure and a create-race between parallel deploys could strip it out from under an in-flight run. A cluster admin installs it once with:
 
 ```bash
-lakebench admin install-scratch-storage-class
+lakebench admin install --component scratch-storage-class lakebench.yaml
 ```
 
 ### S3-compatible object storage
@@ -200,29 +202,15 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure: `deploy` never installs it and fails if it is missing (a cluster admin installs it once with `lakebench admin install-spark-operator`; `platform.compute.spark.operator.install: true` is refused). `deploy` always checks the operator and adds its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure: `deploy` never installs it and fails if it is missing. `deploy` checks the operator and adds its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
 
 The supported installation path is:
 
 ```bash
-lakebench admin install-spark-operator
+lakebench admin install --component spark-operator lakebench.yaml
 ```
 
-`admin install-spark-operator` takes the cluster-wide `lakebench-cluster-lock` lease before running `helm upgrade`, so concurrent `admin` invocations from different workstations cannot race each other. Confirm the install with `lakebench admin doctor`.
-
-Falling back to raw Helm still works:
-
-```bash
-helm repo add spark-operator https://kubeflow.github.io/spark-operator
-helm install spark-operator spark-operator/spark-operator \
-  --version 2.5.1 \
-  --namespace spark-operator \
-  --create-namespace \
-  --set spark.jobNamespaces="" \
-  --set webhook.enable=true
-```
-
-but no lock is taken, so two parallel Helm installs may still stomp each other. Prefer the `admin` command on any cluster used by more than one engineer.
+`admin install` takes the cluster-wide `lakebench-cluster-lock` lease and runs `helm install` (never an upgrade) at the config's `platform.compute.spark.operator.version`, so concurrent `admin` invocations from different workstations cannot race each other. An operator that is already installed is left alone: `--version` naming another version is refused (exit 2, or exit 3 with `--allow-version-change`, which lists the deployments using it and any deleted namespaces still in its watch list); a config pin that differs is kept, with a warning. Lakebench does not automate a version change, because `helm upgrade` leaves the CRDs the chart ships in `crds/` at the installed version. Confirm the install with `lakebench admin doctor`.
 
 ### Catalog operator (depends on your recipe)
 
@@ -233,21 +221,17 @@ Which catalog operators you need depends on your recipe choice:
 | `hive-*` | Hive Metastore | Stackable commons, secret, listener, and hive operators |
 | `polaris-*` | Apache Polaris | **None** -- Lakebench deploys Polaris directly |
 
-For **Hive** recipes (the default), the Stackable operators are required.
-They are shared cluster infrastructure: a cluster admin installs them once,
-and `lakebench deploy` never does
-(`architecture.catalog.hive.operator.install: true` is refused):
+For **Hive** recipes (the default), the Stackable operators are required. A
+cluster admin installs all four (commons, listener, secret, hive) once, at the
+config's `architecture.catalog.hive.operator.version` (SDP 25.7.0 by default):
 
 ```bash
-helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \
-  --version 25.7.0 --namespace stackable --create-namespace
-helm install secret-operator oci://oci.stackable.tech/sdp-charts/secret-operator \
-  --version 25.7.0 --namespace stackable
-helm install listener-operator oci://oci.stackable.tech/sdp-charts/listener-operator \
-  --version 25.7.0 --namespace stackable
-helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
-  --version 25.7.0 --namespace stackable
+lakebench admin install --component stackable lakebench.yaml
 ```
+
+`deploy` never installs them; the v1.6 key
+`architecture.catalog.hive.operator.install: true` is refused with this
+command.
 
 For **Polaris** recipes, skip the Stackable install entirely. See the
 [Polaris Quick Start](quickstart-polaris.md) for details.

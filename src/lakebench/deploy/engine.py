@@ -1780,7 +1780,7 @@ class DeploymentEngine:
         parallel deploys, a destroy would strip the class out from under
         every other user of the cluster). We verify presence at deploy
         preflight and refuse with a pointer to
-        ``lakebench admin install-scratch-storage-class`` when the class
+        ``lakebench admin install --component scratch-storage-class`` when the class
         is missing.
         """
         import time
@@ -1815,7 +1815,7 @@ class DeploymentEngine:
                 hint = (
                     f"StorageClass '{scratch_cfg.storage_class}' does not exist. "
                     "A cluster admin can install it with: "
-                    "`lakebench admin install-scratch-storage-class`. "
+                    "`lakebench admin install --component scratch-storage-class <config>`. "
                     "Or set scratch.enabled=false to disable scratch PVCs."
                 )
                 return DeploymentResult(
@@ -1858,13 +1858,14 @@ class DeploymentEngine:
             return False
 
     def _deploy_spark_operator(self) -> DeploymentResult:
-        """Ensure the Spark Operator is ready and watches the target namespace.
+        """Verify the Spark Operator and add the namespace to its watch list.
 
-        When ``install=true``, installs the operator if missing.
-        When ``install=false``, still verifies the operator exists and
-        watches the target namespace -- adds it via ``helm upgrade`` if
-        needed.  Fails deployment if the operator is missing or broken,
-        rather than silently skipping and letting ``run`` fail later.
+        Deploy never installs, upgrades or repairs the shared operator: a
+        cluster admin installs it once with ``lakebench admin install
+        --component spark-operator``. The only shared change deploy makes is
+        the watch-list add (and the RBAC recreate), under the cluster lease.
+        A missing or broken operator fails the step rather than letting
+        ``run`` fail later.
         """
         import time
 
@@ -1874,13 +1875,12 @@ class DeploymentEngine:
         job_ns = self.config.get_namespace()
 
         if self.dry_run:
-            action = "install" if spark_op_cfg.install else "verify"
             return DeploymentResult(
                 component="spark-operator",
                 status=DeploymentStatus.SUCCESS,
                 message=(
-                    f"Would {action} Spark Operator v{spark_op_cfg.version} "
-                    f"in namespace '{spark_op_cfg.namespace}'"
+                    f"Would verify the Spark Operator in namespace '{spark_op_cfg.namespace}' "
+                    f"and add '{job_ns}' to its watch list"
                 ),
                 elapsed_seconds=0,
             )
@@ -1888,32 +1888,28 @@ class DeploymentEngine:
         try:
             from lakebench.spark import SparkOperatorManager
 
+            # No version: the watch-list edits pin the installed chart, read
+            # inside the lease, and never fall back to this config's pin.
             operator = SparkOperatorManager(
                 namespace=spark_op_cfg.namespace,
-                version=spark_op_cfg.version,
                 job_namespace=job_ns,
                 kube_context=self.config.platform.kubernetes.context,
             )
-
-            if spark_op_cfg.install:
-                # Full install/upgrade path
-                status = operator.ensure_installed()
-            else:
-                # install=false: don't install, but DO ensure the operator
-                # watches the target namespace (add via helm upgrade).
-                status = operator.ensure_namespace_watched(can_heal=True)
+            status = operator.ensure_namespace_watched(can_heal=True)
 
             if not status.ready:
-                hint = ""
-                if not spark_op_cfg.install:
-                    hint = (
-                        " (a cluster admin installs it once with "
-                        "'lakebench admin install-spark-operator')"
+                if not status.installed and not status.message.startswith("Error checking"):
+                    message = (
+                        f"Spark Operator not installed: {status.message}. A cluster admin "
+                        "installs it once: lakebench admin install --component spark-operator "
+                        "<config>"
                     )
+                else:
+                    message = f"Spark Operator not ready: {status.message}"
                 return DeploymentResult(
                     component="spark-operator",
                     status=DeploymentStatus.FAILED,
-                    message=f"Spark Operator not ready: {status.message}{hint}",
+                    message=message,
                     elapsed_seconds=time.time() - start,
                 )
 

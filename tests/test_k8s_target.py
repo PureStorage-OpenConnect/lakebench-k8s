@@ -618,7 +618,12 @@ def test_admin_with_config_uses_config_context(kubeconfig, hosts, tmp_path) -> N
     from lakebench.cli import app
 
     res = CliRunner().invoke(app, ["admin", "doctor", str(_config_file(tmp_path))])
-    assert res.exit_code == 0, res.output
+    # The fake API server answers 404, so doctor's registry checks fail (exit
+    # 1, SD-10); what matters here is that every read went to context A.
+    assert (
+        res.exit_code in (0, 1) and res.exception is None or isinstance(res.exception, SystemExit)
+    ), res.output
+    assert "lakebench admin doctor" in res.output
     assert hosts and set(hosts) == {SERVER_A}
 
 
