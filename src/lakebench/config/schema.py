@@ -2740,7 +2740,8 @@ class LakebenchConfig(ConfigModel):
         from lakebench.config.c360_run import gold_override_problem
 
         arch = info.data.get("architecture")
-        if arch is not None and arch.workload.schema_type != WorkloadSchema.CUSTOMER360:
+        # No architecture: it failed validation and the load fails on that.
+        if arch is None or arch.workload.schema_type != WorkloadSchema.CUSTOMER360:
             return spark
         purpose = purpose_from_context(info.context)
         if purpose is not None and purpose not in CHANGES_DATA:
