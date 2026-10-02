@@ -147,7 +147,7 @@ def test_counts_scale_and_respect_the_cap(scale, silver, gold):
 
 @pytest.mark.parametrize(
     ("scale", "cores", "memory"),
-    [(1, 118, 980), (10, 118, 980), (100, 222, 1948)],
+    [(1, 118, 987), (10, 118, 987), (100, 222, 1955)],
 )
 def test_peak_requirements(scale, cores, memory):
     """Gotcha 34: the preflight and the docs read compute_peak_requirements."""
@@ -377,3 +377,56 @@ class TestPreflightBetweenOldAndNewMinimum:
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
             assert not _check_cluster_capacity(cfg).passed
+
+
+# -- driver pod overhead (LB-227) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("heap", "mib"),
+    [("32g", 32768 + 13107), ("8g", 8192 + 3276), ("2g", 2048 + 819), ("512m", 512 + 384)],
+)
+def test_driver_pod_counts_spark_non_jvm_overhead(heap, mib):
+    """Spark on Kubernetes gives a Python driver max(0.4 x heap, 384 MiB) of
+    overhead when the manifest sets none (BasicDriverFeatureStep)."""
+    from lakebench.modules.pipeline_engines.spark.job import _driver_pod_bytes
+
+    assert _driver_pod_bytes(heap) == mib * 1024**2
+
+
+def test_manifest_sets_no_driver_overhead():
+    # The count above holds only while the manifest leaves the overhead to Spark.
+    cfg = _config("financial", 1)
+    for jt in _STAGES + (JobType.SILVER_BUILD,):
+        m = SparkJobManager(cfg, _capacity_k8s(434))._build_manifest(jt)
+        assert "memoryOverhead" not in m["spec"]["driver"]
+        conf = m["spec"]["sparkConf"]
+        assert not [k for k in conf if "memoryOverhead" in k and "driver" in k]
+        assert "spark.kubernetes.memoryOverheadFactor" not in conf
+
+
+@pytest.mark.parametrize("schema", ["financial", "customer360"])
+def test_continuous_budget_counts_driver_overhead(schema, monkeypatch):
+    from lakebench.config.schema import parse_spark_memory
+    from lakebench.modules.pipeline_engines.spark import job as job_mod
+
+    cfg = _config(schema, 1)
+    with_overhead = job_mod.streaming_request_under_budget(cfg, 10_000_000).memory_gb
+    monkeypatch.setattr(job_mod, "_driver_pod_bytes", parse_spark_memory)
+    heap_only = job_mod.streaming_request_under_budget(cfg, 10_000_000).memory_gb
+    overhead = (
+        sum(
+            max(
+                int(
+                    0.4
+                    * parse_spark_memory(get_job_profile(jt.value, schema)["driver_memory"])
+                    / 2**20
+                ),
+                384,
+            )
+            for jt in _STAGES
+        )
+        * 2**20
+    )
+    assert with_overhead - heap_only in (overhead // 1024**3, -(-overhead // 1024**3))
+    assert with_overhead > heap_only
