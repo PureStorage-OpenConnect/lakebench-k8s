@@ -48,6 +48,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   mirrors for clusters without public egress, and `storage_class` picks the
   PVC's StorageClass. Mirror URLs with credentials, a query or another
   scheme are refused at load.
+- Two new prerequisite checks, on `docs/prerequisites.md` and in the
+  preflight of `run`: `deps-storage-class` fails when
+  `platform.deps.storage_class` names a missing StorageClass, or is empty on
+  a cluster with no default StorageClass, and the page recommends a
+  replicated one; `egress-hosts` lists the hosts this config's resolve reads
+  (Maven, PyPI, DuckDB extensions, or the configured mirrors) without
+  probing them, and the page describes the mirror keys.
 
 ### Breaking changes
 - **`run` refuses arguments it used to ignore, before any cluster call.**

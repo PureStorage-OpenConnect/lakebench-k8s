@@ -16,6 +16,8 @@ needed: Lakebench makes its OpenShift SCC grants through the Kubernetes API.
 | [Stackable operators (Hive catalog)](#stackable) | `architecture.catalog.type: hive` |
 | [Shared observability stack](#observability-stack) | `observability.enabled: true` |
 | [OpenShift anyuid SCC](#openshift-scc-clusterrole) | OpenShift |
+| [Dependency server StorageClass](#deps-storage-class) | Always |
+| [Egress for the dependency resolve](#egress-hosts) | Always |
 | [S3 endpoint and credentials](#s3-reachable-and-credentials) | Always |
 
 <a id="scratch-storage-class"></a>
@@ -67,6 +69,30 @@ Check id `openshift-scc-clusterrole`. Needed when: OpenShift.
 Spark pods run as UID 185 and PostgreSQL as UID 999, so on OpenShift both ServiceAccounts need the `anyuid` SCC (the Spark Operator's get it at operator install). `deploy` grants it the way `oc adm policy add-scc-to-user` does on OpenShift 4.10 and later: the RoleBinding `system:openshift:scc:anyuid` in the ServiceAccount's own namespace, bound to the ClusterRole of the same name, made through the API. Before writing it checks with a LocalSubjectAccessReview whether the ServiceAccount may already use the SCC (an admin's grant), and afterwards that the grant took effect. The deploying user needs permission to create RoleBindings in the namespace and to bind that ClusterRole. A grant that cannot be made fails the deploy step; it is never a warning. OpenShift before 4.10, which has no such ClusterRole, is not supported.
 
 **Fix:** If `deploy` stops with `cannot grant SCC anyuid to SA <sa> in namespace <ns>`, a cluster admin runs `oc adm policy add-scc-to-user anyuid -z <sa> -n <ns>` for `lakebench-spark-runner` and `lakebench-postgres`, then `deploy` is re-run.
+
+<a id="deps-storage-class"></a>
+
+## Dependency server StorageClass
+
+Check id `deps-storage-class`. Needed when: Always.
+
+Each deployment runs its own dependency server, `lb-deps`, which keeps the resolved jars, wheels and DuckDB extensions on a 5Gi ReadWriteOnce PVC, `lb-deps-data`, from `platform.deps.storage_class` or, when that is empty, the cluster default StorageClass. The volume must be writable by UID 185 through `fsGroup`. A replicated StorageClass is recommended: if the volume is lost with its node, the server pod stays Pending, every `run` stops until the PVC is deleted and `deploy` is re-run, and that `deploy` resolves the set again from the public repositories or the configured mirrors. The class is read only when the PVC is created; to move an existing set, delete the PVC and re-run `deploy`.
+
+**Fix:** Set `platform.deps.storage_class` to an existing StorageClass, or have a cluster admin mark one as the cluster default. Prefer a replicated one.
+
+<a id="egress-hosts"></a>
+
+## Egress for the dependency resolve
+
+Check id `egress-hosts`. Needed when: Always.
+
+`deploy` resolves every jar, wheel and DuckDB extension the deployment uses once, in the `lb-deps` pod, from Maven Central and its Google mirror, from PyPI (pypi.org and files.pythonhosted.org) for the AML reference and DuckDB wheels, and from extensions.duckdb.org for DuckDB. After that no pod fetches a dependency from outside the deployment: Spark jobs, Spark Thrift and DuckDB read the set from `lb-deps`. The resolve runs again only when the request changes (a new image, version or mirror), so egress is needed at those deploys only. The check lists the hosts this config's resolve reads and does not probe them; an unreachable host fails the `deps` step of `deploy`, naming the repository and the mirror keys.
+
+On a cluster without that egress, set the mirror keys under `platform.deps`. `maven_repository` becomes the only Maven repository; `pypi_index` replaces pypi.org as a PyPI simple index; `duckdb_extension_repository` replaces extensions.duckdb.org. Mirrors are read anonymously, over plain HTTP or over HTTPS with a publicly trusted certificate; mirror credentials and a private CA are not supported. Changing a mirror re-resolves at the next `deploy`. A mirror that serves the same bytes gives the same set hash, so runs before and after stay comparable; one that serves other bytes gives a different set, and those runs are not like-for-like.
+
+Image pulls are separate: the nodes pull the images named under `images` (and the Stackable Hive image for a Hive catalog) from their registries at every pod start.
+
+**Fix:** Allow egress from the deployment's namespace to the listed hosts during `deploy`, or point `platform.deps.maven_repository`, `platform.deps.pypi_index` and `platform.deps.duckdb_extension_repository` at mirrors the cluster can reach.
 
 <a id="s3-reachable-and-credentials"></a>
 
