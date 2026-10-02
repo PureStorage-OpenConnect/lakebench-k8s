@@ -882,7 +882,7 @@ EXPECTED_STDERR = {
 
 
 def test_scenarios_cover_exactly_the_live_paths():
-    """A live path needs a scenario; a path with a scenario must not keep an owner."""
+    """A live path needs a scenario; a path with a scenario must not stay planned."""
     assert set(SCENARIOS) == {p.name for p in PATHS if p.live}
 
 

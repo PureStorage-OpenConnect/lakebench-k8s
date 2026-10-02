@@ -66,7 +66,7 @@ differs from the policy of the running version. `reproduce --record`
 refuses a source run from another policy.
 
 **`c360-scale-0-1.yaml` is a legacy package that `lakebench reproduce` refuses.** Every attempt
-exits 2, for several independent reasons:
+exits 14 or 2, for several independent reasons:
 
 - It was recorded at commit `ead6722`, so any other HEAD is commit drift
   (exit 14 unless `--allow-commit-drift`).

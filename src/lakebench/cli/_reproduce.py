@@ -936,7 +936,7 @@ def _verify(
     print_info(f"  metrics recorded: {len(expected)}")
 
     # F3: commit drift means the code path measured is not the code path
-    # the package claims. Exit 2 (correctness) unless the caller opts in.
+    # the package claims. Exit 14 (requirement unmet) unless the caller opts in.
     # R4: normalise both sides to a 7-char prefix -- a hand-edited package
     # might carry a 40-char full SHA, and _current_commit_sha returns a
     # 7-char short SHA. Direct equality would spuriously fire on the same
