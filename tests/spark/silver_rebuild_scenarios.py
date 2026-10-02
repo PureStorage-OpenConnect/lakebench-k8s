@@ -125,6 +125,39 @@ def unreadable_iceberg_metadata(spark, jars, root):
     }
 
 
+def cleaned_delta(spark, jars, root):
+    """`lakebench clean silver` empties the bucket and keeps the catalog
+    entry; the next run builds silver afresh, without --force-rebuild."""
+    work = _fresh(root, "cleaned-delta")
+    log = []
+    first = run(spark, jars, work, 0, [0, 0], log=log, fmt="delta")
+    shutil.rmtree(_table_dir(work, "delta"))
+    _clear_bronze(work)
+    second = run(spark, jars, work, 1, [0, 0], log=log, fmt="delta")
+    return {"rcs": [first, second], "held": silver_cycles(spark, work, "delta"), "log": log}
+
+
+def logless_delta_with_files(spark, jars, root):
+    """The Delta log is gone but data files remain: refused, files kept."""
+    work = _fresh(root, "logless-delta")
+    log = []
+    first = run(spark, jars, work, 0, [0], log=log, fmt="delta")
+    table = _table_dir(work, "delta")
+    shutil.rmtree(f"{table}/_delta_log")
+    files = sorted(glob.glob(f"{table}/**/*.parquet", recursive=True))
+    _clear_bronze(work)
+    stage_bronze(spark, work, 1, 0)
+    rc = silver_job(jars, work, 0, 0, log=log, fmt="delta")
+    after = sorted(glob.glob(f"{table}/**/*.parquet", recursive=True))
+    return {
+        "rcs": first,
+        "rc": rc,
+        "refused": "still holds files" in log[-1]["tail"],
+        "files_kept": bool(files) and after == files,
+        "log": log,
+    }
+
+
 def main():
     from pyspark.sql import SparkSession
 
@@ -151,6 +184,8 @@ def main():
         "probe_iceberg": failed_probe(spark, jars, root, "iceberg"),
         "probe_delta": failed_probe(spark, jars, root, "delta"),
         "metadata_iceberg": unreadable_iceberg_metadata(spark, jars, root),
+        "cleaned_delta": cleaned_delta(spark, jars, root),
+        "logless_delta": logless_delta_with_files(spark, jars, root),
     }
     spark.stop()
     print(json.dumps(out))

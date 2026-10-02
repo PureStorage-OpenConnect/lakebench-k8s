@@ -278,6 +278,49 @@ def _table_exists(spark, table_name: str) -> bool:
     return table_exists(spark, table_name)
 
 
+_LOGLESS = ("DELTA_TABLE_NOT_FOUND", "DELTA_PATH_DOES_NOT_EXIST")
+
+
+def drop_logless_entry(spark, silver_tbl):
+    """Drop a catalog entry whose Delta table has no files left; True if dropped.
+
+    ``lakebench clean silver`` empties the silver bucket and keeps the
+    catalog, so the next build met an entry at a location with no Delta log
+    and every read of it failed (DELTA_TABLE_NOT_FOUND), forced or not. Such
+    an entry holds no rows, so it is dropped and the build starts the table
+    afresh. An entry whose location still holds any file is refused instead:
+    those files are not a table Lakebench can read, and they are not deleted.
+    Any other error from the check is raised. The table is managed, so the
+    metastore deletes its (empty) location on DROP; a writer that added files
+    between the listing and the DROP would lose them, which only another job
+    of this deployment could do.
+    """
+    try:
+        spark.table(silver_tbl).schema  # noqa: B018 -- forces resolution
+        return False
+    except Exception as e:  # noqa: BLE001
+        if not any(code in str(e) for code in _LOGLESS):
+            return False  # not found, or another error table_exists reports
+    db, name = silver_tbl.split(".")[-2:]
+    jvm = spark._jvm
+    ident = jvm.org.apache.spark.sql.catalyst.TableIdentifier(name, jvm.scala.Some(db))
+    location = str(spark._jsparkSession.sessionState().catalog().getTableMetadata(ident).location())
+    path = jvm.org.apache.hadoop.fs.Path(location)
+    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+    if fs.exists(path) and fs.listFiles(path, True).hasNext():
+        raise SilverAbort(
+            f"silver-build: {silver_tbl} has no Delta log but {location} still holds files; "
+            "refusing to rebuild over them. Remove those files if their data may go (or "
+            "empty the silver bucket with `lakebench clean silver`)."
+        )
+    log(
+        f"{silver_tbl}: no files left at {location} (the bucket was emptied, for example "
+        "by `lakebench clean silver`); dropping the catalog entry and building it afresh"
+    )
+    spark.sql(f"DROP TABLE IF EXISTS {silver_tbl}")
+    return True
+
+
 def _delta_write_props() -> dict[str, str]:
     """Common Delta table properties for silver writes."""
     return {
@@ -571,6 +614,9 @@ if incremental_mode:
 # resolve_txn_epoch's, checked against the table's log below.
 _cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
 _rebuild_epoch = int(os.environ.get("LB_REBUILD_EPOCH", "0"))
+
+if not _is_unity_catalog():
+    drop_logless_entry(spark, silver_tbl)
 
 appending = incremental_mode and _table_exists(spark, silver_tbl)
 # Later cycles of a multi-cycle run append only their own bronze files. A

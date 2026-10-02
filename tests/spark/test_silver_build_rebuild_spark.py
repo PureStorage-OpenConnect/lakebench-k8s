@@ -88,3 +88,17 @@ def test_unreadable_iceberg_metadata_is_not_a_missing_table(result):
     assert c["rcs"] == [0], _why(c)
     assert c["rc"] != 0, _why(c)
     assert c["metadata_after"] == c["metadata_before"], _why(c)
+
+
+def test_clean_silver_then_run_builds_afresh(result):
+    """The catalog entry outlived its files; it was dropped, not read."""
+    c = result["cleaned_delta"]
+    assert c["rcs"] == [[0, 0], [0, 0]], _why(c)
+    assert c["held"] == {"1:0": 9, "1:1": 9}, _why(c)
+
+
+def test_logless_entry_with_files_left_refuses_and_keeps_them(result):
+    c = result["logless_delta"]
+    assert c["rcs"] == [0], _why(c)
+    assert c["rc"] != 0 and c["refused"], _why(c)
+    assert c["files_kept"], _why(c)
