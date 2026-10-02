@@ -98,10 +98,14 @@ or `ingest_ratio` (continuous).
    namespace or bucket that appears in the meantime is refused, not
    adopted. It confirms the namespace carries that nonce (exit 3 if
    another deploy replaced it, before generating or running anything),
-   generates and runs the pipeline, and, unless `--keep` is set,
-   destroys only that namespace incarnation (`uid#nonce`). If the
-   namespace was redeployed while the run went on, the destroy deletes
-   nothing, reproduce prints its verdict and then exits 3.
+   generates and runs the pipeline, and checks the nonce again after the
+   run, with or without `--keep` (exit 3, nothing destroyed, no verdict:
+   the measurement may not be its own). The run it compares is the first
+   one on this deployment started after the run step began. Unless
+   `--keep` is set it then destroys only that namespace incarnation
+   (`uid#nonce`); if a redeploy landed between that check and the
+   destroy, the destroy deletes nothing, reproduce prints its verdict and
+   then exits 3.
 6. Exits 14 if the run took a different number of samples per query,
    ran under a different maintenance policy, or is not the package's
    experiment or returned different benchmark results.

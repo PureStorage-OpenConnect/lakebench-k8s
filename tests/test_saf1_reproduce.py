@@ -53,6 +53,7 @@ class FakeEngine:
 
     calls: list[tuple[str, Any]] = []
     after_deploy: Any = None
+    during_run: Any = None
     destroy_results: list[DeploymentResult] = []
 
     def __init__(self, cfg: Any, dry_run: bool = False, require_new: bool = False, **_: Any):
@@ -99,9 +100,21 @@ def pipeline(monkeypatch):
     monkeypatch.setattr(
         gen_mod, "generate", lambda **k: FakeEngine.calls.append(("generate", None))
     )
-    monkeypatch.setattr(run_mod, "run", lambda **k: FakeEngine.calls.append(("run", None)))
+    FakeEngine.during_run = None
+
+    def run(**_):
+        FakeEngine.calls.append(("run", None))
+        if FakeEngine.during_run is not None:
+            FakeEngine.during_run()
+
+    monkeypatch.setattr(run_mod, "run", run)
     result = object()
-    monkeypatch.setattr(rep, "_find_reproduce_run", lambda *a, **k: result)
+
+    def find(storage, name, watermark):
+        FakeEngine.calls.append(("find", watermark))
+        return result
+
+    monkeypatch.setattr(rep, "_find_reproduce_run", find)
     return result
 
 
@@ -142,6 +155,7 @@ def test_reproduce_has_no_yes_flag_to_bypass(tmp_path):
 
     res = CliRunner().invoke(app, ["reproduce", str(tmp_path / "pkg.yaml"), "-y"])
     assert res.exit_code == 2, res.output
+    assert "No such option" in res.output
 
 
 @pytest.mark.parametrize("which", ["bronze", "silver", "gold"])
@@ -209,7 +223,7 @@ def test_reproduce_refuses_settings_that_need_existing_resources(tmp_path, pipel
     with recording() as rec:
         with pytest.raises(UsageError, match=key):
             _run_pipeline(p, None, False)
-        assert rec.calls == [] or rec.mutations() == []
+        assert rec.mutations() == []
     assert FakeEngine.calls == []
 
 
@@ -251,7 +265,7 @@ def test_reproduce_destroys_only_own_incarnation(cfg_path, pipeline):
         ns = client.CoreV1Api().read_namespace(cfg.get_namespace())
         uid = ns.metadata.uid
         own = ns.metadata.annotations[ANNOTATION_DEPLOY_NONCE]
-    assert _names(FakeEngine.calls) == ["deploy_all", "generate", "run", "destroy_all"]
+    assert _names(FakeEngine.calls) == ["deploy_all", "generate", "run", "find", "destroy_all"]
     nonce, require_new = FakeEngine.calls[0][1]
     assert require_new is True and nonce == own
     assert FakeEngine.calls[-1] == ("destroy_all", f"{uid}#{own}")
@@ -384,6 +398,8 @@ def test_engine_require_new_refuses_an_existing_bucket(s3_cls, record, write_tag
     eng, _ = _engine()
     client = MagicMock()
     client._init_error = None
+    # The check passes; silver then appears before its create (a race).
+    client.bucket_exists.return_value = False
     client.ensure_buckets.return_value = {
         "lakebench-bronze": True,
         "lakebench-silver": False,
@@ -543,3 +559,218 @@ def test_destroy_expect_incarnation_must_equal_the_nameless_check(tmp_path, monk
     )
     assert res.exit_code == 3, res.output
     assert called == []
+
+
+def _redeploy(ns: str):
+    def go():
+        from kubernetes import client
+
+        client.CoreV1Api().patch_namespace(
+            ns, {"metadata": {"annotations": {ANNOTATION_DEPLOY_NONCE: "theirs"}}}
+        )
+
+    return go
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_reproduce_refuses_a_redeploy_during_the_run(cfg_path, pipeline, keep):
+    """With or without --keep: no verdict from a run that may not be ours, and
+    nothing destroyed."""
+    from lakebench.cli._reproduce import _run_pipeline
+
+    cfg = _cfg(cfg_path)
+    FakeEngine.during_run = _redeploy(cfg.get_namespace())
+    with recording(cfg.get_namespace()) as rec:
+        rec.for_config(cfg)
+        with pytest.raises(SafetyRefusal) as ei:
+            _run_pipeline(cfg_path, None, keep)
+        assert _deletes(rec) == []
+    assert ei.value.path == "reproduce.nonce_changed"
+    assert _names(FakeEngine.calls) == ["deploy_all", "generate", "run"]
+
+
+def test_reproduce_watermark_is_taken_after_generate(cfg_path, pipeline, monkeypatch):
+    """A run another shell started during deploy or generate is older than
+    the watermark, so it is not taken for this reproduce's run."""
+    from datetime import datetime, timezone
+
+    import lakebench.cli._generate as gen_mod
+    from lakebench.cli._reproduce import _run_pipeline
+
+    stamps: list = []
+    monkeypatch.setattr(gen_mod, "generate", lambda **k: stamps.append(datetime.now(timezone.utc)))
+    cfg = _cfg(cfg_path)
+    with recording(cfg.get_namespace()) as rec:
+        rec.for_config(cfg)
+        _run_pipeline(cfg_path, None, True)
+    watermark = next(arg for name, arg in FakeEngine.calls if name == "find")
+    assert stamps and watermark >= stamps[0]
+
+
+def test_reproduce_journals_the_incarnation_it_created(cfg_path, pipeline, monkeypatch):
+    from kubernetes import client
+
+    from lakebench.cli._reproduce import _run_pipeline
+    from lakebench.journal import EventType
+
+    journal = MagicMock()
+    monkeypatch.setattr("lakebench.cli._helpers.journal_open", lambda *a, **k: journal)
+    cfg = _cfg(cfg_path)
+    with recording(cfg.get_namespace()) as rec:
+        rec.for_config(cfg)
+        _run_pipeline(cfg_path, None, True)
+        ns = client.CoreV1Api().read_namespace(cfg.get_namespace())
+    want = f"{ns.metadata.uid}#{ns.metadata.annotations[ANNOTATION_DEPLOY_NONCE]}"
+    events = [
+        c
+        for c in journal.record.call_args_list
+        if c.args[0] is EventType.REPRODUCE_CREATED_INCARNATION
+    ]
+    assert len(events) == 1 and events[0].kwargs["details"]["incarnation"] == want
+
+
+def test_a_refused_destroy_turns_a_protocol_mismatch_into_3(monkeypatch, tmp_path):
+    """The refused destroy outranks exit 14: the measurement may not be ours."""
+    import lakebench.cli._reproduce as rep
+    from lakebench.cli import app
+    from tests.test_exit_codes import _reproduce_package
+
+    pkg = _reproduce_package(tmp_path, "abc")
+    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
+
+    def pipeline(config_file, timeout, keep, refusals=None):
+        refusals.append(SafetyRefusal("Destroy NOT started", path="destroy.incarnation_mismatch"))
+        return object()
+
+    monkeypatch.setattr(rep, "_run_pipeline", pipeline)
+    # Only the post-run check (the run's own sample count, 99) mismatches.
+    monkeypatch.setattr(
+        rep, "_sample_mismatch", lambda meta, n, *a, **k: "samples differ" if n == 99 else None
+    )
+    for check in ("_policy_refusal", "_experiment_refusal"):
+        monkeypatch.setattr(rep, check, lambda *a, **k: None)
+    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 99)
+    res = CliRunner().invoke(app, ["reproduce", str(pkg)])
+    assert res.exit_code == 3, res.output
+
+
+def test_engine_require_new_accepts_its_own_create_after_a_lost_response():
+    """The create landed but its response was lost: the retry finds the
+    namespace carrying this deploy's nonce and goes on, instead of refusing
+    (and leaking) its own namespace."""
+    eng, k8s = _engine(exists=True)
+    eng.deploy_nonce = "mine"
+    eng._namespace_created_this_run.add(eng.config.get_namespace())
+    k8s.get_namespace_annotation.return_value = "mine"
+    with (
+        patch.object(eng, "_namespace_already_using_name", return_value=None),
+        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
+        patch("lakebench.deploy.ownership.write_deploy_nonce") as nonce,
+        patch("kubernetes.client.CoreV1Api") as core,
+    ):
+        from lakebench.deploy.ownership import IdentityVerdict
+
+        stamp.return_value = MagicMock(verdict=IdentityVerdict.MATCH)
+        result = eng._deploy_namespace()
+    assert not (result.details or {}).get(REFUSAL_DETAIL), result.message
+    core.return_value.create_namespace.assert_not_called()
+    assert stamp.call_args.kwargs["force_legacy"] is True
+    assert nonce.call_args.kwargs["nonce"] == "mine"
+
+
+def test_engine_require_new_refuses_a_seeded_name_with_another_nonce():
+    eng, k8s = _engine(exists=True)
+    eng.deploy_nonce = "mine"
+    eng._namespace_created_this_run.add(eng.config.get_namespace())
+    k8s.get_namespace_annotation.return_value = "theirs"
+    with (
+        patch.object(eng, "_namespace_already_using_name", return_value=None),
+        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
+    ):
+        result = eng._deploy_namespace()
+    assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
+    stamp.assert_not_called()
+
+
+def test_engine_require_new_create_carries_the_nonce():
+    eng, _ = _engine(exists=False)
+    eng.deploy_nonce = "mine"
+    core = MagicMock()
+    with (
+        patch.object(eng, "_namespace_already_using_name", return_value=None),
+        patch("kubernetes.client.CoreV1Api", return_value=core),
+        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
+        patch("lakebench.deploy.ownership.write_deploy_nonce"),
+    ):
+        from lakebench.deploy.ownership import IdentityVerdict
+
+        stamp.return_value = MagicMock(verdict=IdentityVerdict.MATCH)
+        eng._deploy_namespace()
+    body = core.create_namespace.call_args.kwargs["body"]
+    assert body["metadata"]["annotations"][ANNOTATION_DEPLOY_NONCE] == "mine"
+
+
+def test_engine_stamps_the_recorded_nonce_not_a_fresh_one():
+    """The real namespace step writes engine.deploy_nonce (the one deploy
+    recorded); reproduce and the nameless checks both depend on it."""
+    eng, k8s = _engine(require_new=False, exists=False)
+    eng.deploy_nonce = "recorded"
+    with (
+        patch.object(eng, "_namespace_already_using_name", return_value=None),
+        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
+        patch("lakebench.deploy.ownership.write_deploy_nonce") as nonce,
+        patch("kubernetes.client.CoreV1Api"),
+    ):
+        from lakebench.deploy.ownership import IdentityVerdict
+
+        stamp.return_value = MagicMock(verdict=IdentityVerdict.MATCH)
+        eng._deploy_namespace()
+    assert nonce.call_args.kwargs["nonce"] == "recorded"
+
+
+@patch("lakebench.deploy.ownership.record_created_buckets")
+@patch("lakebench.s3.S3Client")
+def test_engine_require_new_checks_every_bucket_before_creating_any(s3_cls, record):
+    eng, _ = _engine()
+    client = MagicMock()
+    client._init_error = None
+    client.bucket_exists.side_effect = lambda b: b == "lakebench-gold"
+    s3_cls.return_value = client
+    result = eng._deploy_buckets()
+    assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
+    assert "lakebench-gold" in result.message
+    client.ensure_buckets.assert_not_called()
+    client.create_bucket.assert_not_called()
+    record.assert_not_called()
+
+
+def test_engine_require_new_refuses_preprovisioned_buckets():
+    eng, _ = _engine()
+    eng.config.platform.storage.s3.create_buckets = False
+    with patch.object(eng, "_record_preprovisioned_empty_buckets") as adopt:
+        result = eng._deploy_buckets()
+    assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
+    adopt.assert_not_called()
+
+
+def test_plain_deploy_does_not_require_new(cfg_path, monkeypatch):
+    """`lakebench deploy` keeps adopting its own namespace on a re-run."""
+    import lakebench.cli._deploy as deploy_mod
+    from lakebench.cli import app
+
+    seen: list = []
+
+    class Engine(FakeEngine):
+        def __init__(self, cfg, dry_run=False, require_new=False, **kw):
+            seen.append(require_new)
+            super().__init__(cfg, dry_run=dry_run, require_new=require_new, **kw)
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
+    cfg = _cfg(cfg_path)
+    with recording(cfg.get_namespace()) as rec:
+        rec.for_config(cfg)
+        res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes"])
+    assert res.exit_code == 0, res.output
+    assert seen == [False]

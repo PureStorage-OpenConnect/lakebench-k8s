@@ -836,7 +836,8 @@ def _refuse_existing(cfg: Any, config_file: Path) -> None:
     reproduce destroys only what it created in this invocation, and measures
     against empty buckets, so it creates its namespace and buckets itself:
     an existing namespace or bucket is refused, never destroyed or adopted.
-    Every read error stops it (exit 4) rather than reading as absent.
+    A read error stops it (exit 4) rather than reading as absent; a context
+    conflict (the kubeconfig changed under the command) is raised as is.
     """
     from lakebench.exit_codes import PrerequisiteError, SafetyRefusal, UsageError
     from lakebench.k8s.target import ContextConflictError
@@ -878,7 +879,8 @@ def _refuse_existing(cfg: Any, config_file: Path) -> None:
         ) from e
     if present:
         raise SafetyRefusal(
-            f"reproduce needs a new deployment; namespace {namespace} exists",
+            f"reproduce needs a new deployment; namespace {namespace} exists "
+            "(or is still terminating from an earlier destroy)",
             why="reproduce destroys only a deployment it created in this run",
             next=f"lakebench destroy {config_file}, then re-run, or give the package's "
             "config a new name",
@@ -918,8 +920,9 @@ def _refuse_existing(cfg: Any, config_file: Path) -> None:
                 f"reproduce needs new buckets; bucket {bucket} exists",
                 why="reproduce measures against empty buckets it created, and destroys "
                 "only what it created",
-                next="remove the bucket if it is yours, or give the package's config "
-                "new bucket names",
+                next="give the package's config new bucket names, or, if the bucket is "
+                "left from an earlier deployment of yours, empty and delete it with your "
+                "S3 tools",
                 path="reproduce.existing_namespace",
             )
 
@@ -1010,11 +1013,7 @@ def _run_pipeline(
     _refuse_existing(cfg, config_file)
     namespace = cfg.get_namespace()
 
-    # Watermark BEFORE deploy, so any run started by this reproduce falls
-    # strictly after it.
     deployment_name = cfg.name
-    start_watermark = datetime.now(timezone.utc)
-
     own = uuid.uuid4().hex
     try:
         recorded = _deploy_impl(config_file, yes=True, nonce=own, require_new=True)
@@ -1040,17 +1039,26 @@ def _run_pipeline(
 
     try:
         _generate_cmd(config_file=config_file, timeout=timeout or 14400, yes=True)
+        # Watermark just before the run, so a run another shell started on
+        # this deployment during deploy or generate is not taken for ours.
+        start_watermark = datetime.now(timezone.utc)
         _run_cmd(config_file=config_file, yes=True, timeout=timeout)
+        # The deployment must still be the one this reproduce made, --keep or
+        # not: a redeploy during generate or run means the measurement may
+        # not be ours, and nothing is destroyed.
+        _own_incarnation(cfg, config_file, own)
+        result = _find_reproduce_run(storage, deployment_name, start_watermark)
+        if result is None:
+            raise ReproduceError("Could not load the run this reproduce produced")
+    except SafetyRefusal:
+        raise  # says itself that nothing was destroyed
     except BaseException:
         print_warning(
             f"reproduce stopped before its destroy; namespace {namespace} ({created}) is "
-            f"left: `lakebench destroy {config_file}` removes it"
+            f"left: `lakebench destroy {config_file}` removes it while it is still that "
+            "deployment"
         )
         raise
-
-    result = _find_reproduce_run(storage, deployment_name, start_watermark)
-    if result is None:
-        raise ReproduceError("Could not load the run this reproduce produced")
 
     if not keep:
         try:

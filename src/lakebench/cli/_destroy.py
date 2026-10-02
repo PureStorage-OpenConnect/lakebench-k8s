@@ -293,6 +293,12 @@ def _destroy_impl(
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
+    if expected_incarnation is not None and local:
+        raise UsageError(
+            "--expect-incarnation does not apply to --local: a local stack has no "
+            "namespace to check"
+        )
+
     # Load configuration
     try:
         # A namespace too long to finish deploying (LB-153) still has to be

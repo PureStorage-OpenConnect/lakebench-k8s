@@ -543,7 +543,7 @@ registries or custom builds.
 | `platform.storage.s3.buckets.bronze` | string | `<name>-bronze` | Bronze layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.buckets.silver` | string | `<name>-silver` | Silver layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.buckets.gold` | string | `<name>-gold` | Gold layer S3 bucket name. Unset, it is derived from the deployment `name`. |
-| `platform.storage.s3.create_buckets` | bool | `true` | Create buckets if they do not exist. |
+| `platform.storage.s3.create_buckets` | bool | `true` | Create buckets if they do not exist. `reproduce` refuses `false`. |
 | `platform.storage.s3.ca_cert` | string | `""` | Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs. Empty = use system default CAs. The PEM content is read at deploy time and embedded into a Kubernetes Secret for all components. |
 | `platform.storage.s3.verify_ssl` | bool | `true` | Verify SSL certificates for HTTPS endpoints. Set `false` only for development with self-signed certs when you don't have the CA certificate file. |
 

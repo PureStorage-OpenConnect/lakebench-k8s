@@ -535,7 +535,9 @@ Exit codes: `0` everything removed; `1` a step failed (see the summary);
 `2` the config did not load, including a nameless config with no `--name`
 in a directory that cannot name its deployment; `3` a nameless config could
 not prove the deployment is its own, or the namespace was redeployed since
-that check (nothing deleted either way); `5` the confirmation prompt was
+that check (nothing deleted either way), or a redeploy was found partway
+through (destroy stops there, and the steps before it may have removed
+components); `5` the confirmation prompt was
 declined (no side effects); `6` everything else succeeded but the namespace
 was still terminating at `--namespace-timeout` (usually a PVC or pod
 finalizer; check with `kubectl get ns <namespace>` before re-deploying
