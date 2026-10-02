@@ -105,3 +105,34 @@ def test_continuous_skip_generate_records_no_fleet_of_its_own(tmp_path, monkeypa
     scenario = SCENARIOS["continuous_c360_skip_generate"]
     record = _run(tmp_path, monkeypatch, "continuous_c360_skip_generate", list(scenario.argv))
     assert "datagen_fleet" not in record
+
+
+def test_continuous_drops_the_old_sidecar_when_datagen_starts(tmp_path, monkeypatch):
+    """The corpus is replaced when datagen starts: a run interrupted inside
+    its window leaves no sidecar describing the corpus it replaced."""
+    import signal
+
+    _stale(tmp_path)
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        scenario = dataclasses.replace(SCENARIOS["continuous_c360"], events=((300.0, "SIGINT"),))
+        trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert trace["exit_code"] == 130
+    record = saved_record(tmp_path)
+    assert record["verdict"]["status"] == "INTERRUPTED"
+    assert STALE_ID not in json.dumps(record)
+    assert not _sidecar(tmp_path).exists()
+
+
+def test_generate_drops_the_old_sidecar_when_its_fleet_cannot_be_read(tmp_path, monkeypatch):
+    from lakebench.metrics import datagen_aggregator
+
+    monkeypatch.chdir(tmp_path)
+    _stale(tmp_path)
+    datagen_aggregator.drop_sidecar(NAMESPACE)
+    assert not _sidecar(tmp_path).exists()
+    # Never raises on a record json cannot encode, or a missing file.
+    datagen_aggregator.drop_sidecar(NAMESPACE)
+    datagen_aggregator.write_sidecar({"x": object()}, NAMESPACE)

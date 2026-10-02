@@ -3096,6 +3096,11 @@ def _run_sustained(
             console.print()
             console.print("[bold]Starting datagen...[/bold]")
             datagen = DatagenDeployer(engine)
+            # The namespace's fleet sidecar describes the corpus this run
+            # replaces.
+            from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+            drop_sidecar(cfg.get_namespace())
             _interrupt.creating("Job", "lakebench-datagen")
             datagen_result = datagen.deploy()
             if datagen_result.status != DeploymentStatus.SUCCESS:
@@ -3639,11 +3644,6 @@ def _run_sustained(
         # that ends before the corpus is consumed then honestly reads as
         # saturated. Unmeasured (None) when any pod has not reported, or the
         # pods were already garbage-collected (ttlSecondsAfterFinished).
-        if not skip_generate:
-            # The sidecar describes the corpus this run replaced.
-            from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-            drop_sidecar(cfg.get_namespace())
         try:
             from lakebench.metrics.datagen_aggregator import collect_from_k8s
 
@@ -3651,18 +3651,22 @@ def _run_sustained(
                 namespace=cfg.get_namespace(),
                 job_completions=cfg.architecture.workload.datagen.parallelism,
             )
-            if not skip_generate:
-                # This run's own datagen pods: the record's fleet, and the
-                # namespace's sidecar for a later run over this corpus.
-                from lakebench.metrics.datagen_aggregator import fleet_record, write_sidecar
-
-                _run_fleet = fleet_record(_fleet, cfg.get_namespace())
-                write_sidecar(_run_fleet, cfg.get_namespace())
             if _fleet.data_quality == "complete" and _fleet.total_rows_written > 0:
                 _datagen_output_rows = _fleet.total_rows_written
                 _datagen_output_files = int(_fleet.total_files_written or 0)
         except Exception as e:
+            _fleet = None
             logger.warning("Could not read datagen row counts: %s", e)
+        if _fleet is not None and not skip_generate:
+            # This run's own datagen pods: the record's fleet, and the
+            # namespace's sidecar for a later run over this corpus.
+            try:
+                from lakebench.metrics.datagen_aggregator import fleet_record, write_sidecar
+
+                _run_fleet = fleet_record(_fleet, cfg.get_namespace())
+                write_sidecar(_run_fleet, cfg.get_namespace())
+            except Exception as e:  # noqa: BLE001 -- the record then says no fleet
+                logger.warning("Could not record the datagen fleet: %s", e)
 
         # Capture driver logs BEFORE stopping jobs (pods are deleted on stop)
         console.print()

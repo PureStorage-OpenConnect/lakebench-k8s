@@ -380,6 +380,10 @@ def generate(
                 print_info(f"  written to {out_path}")
             except Exception as e:
                 logger.warning("failed to collect per-pod datagen metrics: %s", e)
+                # The old sidecar describes the corpus this generate replaced.
+                from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+                drop_sidecar(cfg.get_namespace())
 
             _journal_safe(
                 j.record,
