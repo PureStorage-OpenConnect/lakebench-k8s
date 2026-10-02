@@ -134,7 +134,6 @@ def test_plan_counts_the_driver_override():
 
     plan = plan_requirements(_config(driver_memory="64g"))
     assert plan.spark.memory_gb == 570
-    assert not plan.overrides_not_counted
 
 
 @pytest.mark.parametrize("value", ["16Gi", "1.5g", "16 g", "lots", "16384", "0g", "\u0661\u0666g"])

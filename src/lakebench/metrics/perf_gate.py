@@ -366,6 +366,34 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
         for k in added:
             os.environ.pop(k, None)
     mode = normalise_mode(cfg.architecture.pipeline.mode.value)
+    # A baseline measures the proven profile: a pinned executor count that
+    # differs from what the profile asks at the pinned scale, or a driver
+    # override, sizes the run some other way.
+    from lakebench.modules.pipeline_engines.spark.job import (
+        BATCH_JOB_TYPES,
+        STREAMING_JOB_TYPES,
+        executor_override,
+        get_executor_count,
+    )
+
+    schema = cfg.architecture.workload.schema_type.value
+    scale = cfg.architecture.workload.datagen.get_effective_scale()
+    off_profile = []
+    for jt in STREAMING_JOB_TYPES if mode == "sustained" else BATCH_JOB_TYPES:
+        pinned = executor_override(jt, cfg)
+        asks = get_executor_count(jt, scale, schema)
+        if pinned is not None and pinned != asks:
+            off_profile.append(f"{jt} {pinned} (profile asks {asks})")
+    spark_compute = cfg.platform.compute.spark
+    if off_profile or spark_compute.driver_cores is not None or spark_compute.driver_memory:
+        what = list(off_profile)
+        if spark_compute.driver_cores is not None or spark_compute.driver_memory:
+            what.append("a driver override")
+        raise PerfGateError(
+            f"pinned config {path} does not size the run by the proven profile: "
+            + "; ".join(what)
+            + ". Pin each executor count at the profile's count, or leave it unset"
+        )
     if mode == "sustained":
         # The continuous concurrent budget caps unpinned executor counts by
         # cluster size, and the fingerprint records the count before that

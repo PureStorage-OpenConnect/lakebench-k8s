@@ -1167,7 +1167,6 @@ def info(
         _scale_executor_count,
     )
 
-    spark = cfg.platform.compute.spark
     s3 = cfg.platform.storage.s3
     arch = cfg.architecture
     workload = arch.workload
@@ -1190,10 +1189,10 @@ def info(
         for j in _JOB_PROFILES
     }
     # Per-job executor counts with auto/override labels
+    from lakebench.modules.pipeline_engines.spark.job import executor_override
+
     override_map = {
-        "bronze-verify": spark.bronze_executors,
-        "silver-build": spark.silver_executors,
-        "gold-finalize": spark.gold_executors,
+        j: executor_override(j, cfg) for j in ("bronze-verify", "silver-build", "gold-finalize")
     }
     executor_parts = []
     for job_name, override_val in override_map.items():
@@ -1205,9 +1204,7 @@ def info(
 
     # Streaming executor counts
     streaming_override_map = {
-        "bronze-ingest": spark.bronze_ingest_executors,
-        "silver-stream": spark.silver_stream_executors,
-        "gold-refresh": spark.gold_refresh_executors,
+        j: executor_override(j, cfg) for j in ("bronze-ingest", "silver-stream", "gold-refresh")
     }
     streaming_executor_parts = []
     for job_name, override_val in streaming_override_map.items():

@@ -184,6 +184,64 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
+    # The financial operations jobs (replay, reproduce, the reference
+    # detector) took silver-build's profile through a fallback that is now an
+    # error (MissingSizingProfile); these are literal copies of it, so their
+    # manifests do not change.
+    "replay-financial": {
+        "driver_cores": 4,
+        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "executor_cores": 4,
+        "executor_memory": "48g",
+        "executor_memory_overhead": "12g",
+        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
+        # on device" mid-silver-build: c360's window + wide-join shuffle
+        # spill exceeds 150Gi per executor once the max_executors cap
+        # (28) means data-per-executor stops decreasing with scale.
+        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
+        # only costs bare block storage. Do not shrink.
+        "scratch_size": "300Gi",
+        "base_executors": 8,  # scale <= 10
+        "executors_per_100_scale": 12,  # add 12 per 100 scale units
+        "max_executors": _MAX_EXECUTORS_SAFE,
+        "base_partitions": 64,
+    },
+    "reproduce-financial": {
+        "driver_cores": 4,
+        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "executor_cores": 4,
+        "executor_memory": "48g",
+        "executor_memory_overhead": "12g",
+        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
+        # on device" mid-silver-build: c360's window + wide-join shuffle
+        # spill exceeds 150Gi per executor once the max_executors cap
+        # (28) means data-per-executor stops decreasing with scale.
+        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
+        # only costs bare block storage. Do not shrink.
+        "scratch_size": "300Gi",
+        "base_executors": 8,  # scale <= 10
+        "executors_per_100_scale": 12,  # add 12 per 100 scale units
+        "max_executors": _MAX_EXECUTORS_SAFE,
+        "base_partitions": 64,
+    },
+    "score-financial-reference": {
+        "driver_cores": 4,
+        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "executor_cores": 4,
+        "executor_memory": "48g",
+        "executor_memory_overhead": "12g",
+        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
+        # on device" mid-silver-build: c360's window + wide-join shuffle
+        # spill exceeds 150Gi per executor once the max_executors cap
+        # (28) means data-per-executor stops decreasing with scale.
+        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
+        # only costs bare block storage. Do not shrink.
+        "scratch_size": "300Gi",
+        "base_executors": 8,  # scale <= 10
+        "executors_per_100_scale": 12,  # add 12 per 100 scale units
+        "max_executors": _MAX_EXECUTORS_SAFE,
+        "base_partitions": 64,
+    },
 }
 
 
@@ -410,11 +468,12 @@ def local_peak_memory_gb() -> int:
     return max(int(p["driver_memory"].rstrip("g")) for p in _LOCAL_JOB_PROFILES.values())
 
 
-def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
-    """Derive executor count from scale factor and job profile.
+def executor_count(profile: dict[str, Any], scale: float, *, capped: bool = True) -> int:
+    """The executor count *profile* asks for at *scale*: the one count function.
 
-    Uses base counts for small scales and adds more executors
-    linearly for larger datasets. Capped at max_executors.
+    Uses base counts for small scales and adds more executors linearly for
+    larger datasets; capped at ``max_executors`` unless *capped* is False
+    (the uncapped count is what the run record compares the cap with).
     """
     base = profile["base_executors"]
     if scale <= 10:
@@ -423,7 +482,54 @@ def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
     # yields a float, which would put a non-integer executor count in the
     # manifest.
     extra = int((scale - 10) * profile["executors_per_100_scale"] // 100)
-    return min(base + extra, profile["max_executors"])
+    return min(base + extra, profile["max_executors"]) if capped else base + extra
+
+
+def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
+    return executor_count(profile, scale)
+
+
+class MissingSizingProfile(LookupError):
+    """A Spark job type with no ``_JOB_PROFILES`` entry: it has no proven sizing."""
+
+    def __init__(self, job_type: str) -> None:
+        super().__init__(f"no sizing profile for Spark job type {job_type!r}")
+        self.job_type = job_type
+
+
+#: The per-job executor overrides: job type -> (``platform.compute.spark``
+#: field, key in ``config_snapshot.spark.executor_overrides`` and in
+#: ``experiment.architecture.spark_executor_overrides``). The one table every
+#: reader of an override uses.
+EXECUTOR_OVERRIDE_FIELDS: dict[str, tuple[str, str]] = {
+    "bronze-verify": ("bronze_executors", "bronze"),
+    "silver-build": ("silver_executors", "silver"),
+    "gold-finalize": ("gold_executors", "gold"),
+    "bronze-ingest": ("bronze_ingest_executors", "bronze_ingest"),
+    "silver-stream": ("silver_stream_executors", "silver_stream"),
+    "gold-refresh": ("gold_refresh_executors", "gold_refresh"),
+}
+
+
+def executor_override(job_type: str, config: Any | None) -> int | None:
+    """The executor count *config* sets for *job_type*, or None (the scale
+    count applies). An explicit count wins over the scale count and the
+    continuous concurrent budget."""
+    if config is None:
+        return None
+    spark = config.platform.compute.spark
+    # Read by name (the schema walk proves each field has this reader); the
+    # names are the first column of EXECUTOR_OVERRIDE_FIELDS (a test holds
+    # the two equal).
+    value = {
+        "bronze-verify": spark.bronze_executors,
+        "silver-build": spark.silver_executors,
+        "gold-finalize": spark.gold_executors,
+        "bronze-ingest": spark.bronze_ingest_executors,
+        "silver-stream": spark.silver_stream_executors,
+        "gold-refresh": spark.gold_refresh_executors,
+    }.get(job_type)
+    return int(value) if value is not None else None
 
 
 def bronze_ingest_checkpoint_uri(cfg) -> str:
@@ -605,6 +711,9 @@ def _job_requirement(
     from lakebench.config.schema import parse_spark_memory
 
     executors = _scale_executor_count(profile, scale)
+    override = executor_override(job_type, config)
+    if override is not None:
+        executors = override
 
     exec_mem = parse_spark_memory(profile["executor_memory"])
     exec_overhead = parse_spark_memory(profile["executor_memory_overhead"])
@@ -850,12 +959,7 @@ def streaming_request_under_budget(
     budget = _streaming_concurrent_budget(
         config, cluster_cpu_millicores, datagen_running=datagen_running
     )
-    spark_cfg = config.platform.compute.spark
-    explicit = {
-        JobType.BRONZE_INGEST: spark_cfg.bronze_ingest_executors,
-        JobType.SILVER_STREAM: spark_cfg.silver_stream_executors,
-        JobType.GOLD_REFRESH: spark_cfg.gold_refresh_executors,
-    }
+    explicit = {jt: executor_override(jt.value, config) for jt in _STREAMING_PIPELINE_ORDER}
     gib = 1024**3
     cores_m = mem = 0
     capped: list[str] = []
@@ -1898,10 +2002,9 @@ class SparkJobManager:
         # AML bronze-verify needs a bigger scratch PVC than c360 to survive
         # the CTAS fallback path (LB-118).
         _schema = getattr(getattr(cfg.architecture.workload, "schema_type", None), "value", None)
-        profile = _resolve_job_profile(job_type.value, _schema) or _resolve_job_profile(
-            "silver-build", _schema
-        )
-        assert profile is not None  # silver-build always exists
+        profile = _resolve_job_profile(job_type.value, _schema)
+        if profile is None:
+            raise MissingSizingProfile(job_type.value)
         scale = cfg.architecture.workload.datagen.scale
         executor_count = _scale_executor_count(profile, scale)
 
@@ -1922,15 +2025,7 @@ class SparkJobManager:
                 executor_count = budget[job_type]
 
         # Per-job executor override (user escape hatch)
-        override_map = {
-            JobType.BRONZE_VERIFY: cfg.platform.compute.spark.bronze_executors,
-            JobType.SILVER_BUILD: cfg.platform.compute.spark.silver_executors,
-            JobType.GOLD_FINALIZE: cfg.platform.compute.spark.gold_executors,
-            JobType.BRONZE_INGEST: cfg.platform.compute.spark.bronze_ingest_executors,
-            JobType.SILVER_STREAM: cfg.platform.compute.spark.silver_stream_executors,
-            JobType.GOLD_REFRESH: cfg.platform.compute.spark.gold_refresh_executors,
-        }
-        override = override_map.get(job_type)
+        override = executor_override(job_type.value, cfg)
         if job_type in _STREAMING_JOB_TYPES and override is None and capped_from != executor_count:
             # After the override check: an explicit count wins over the
             # budget, so there is nothing to warn about then.

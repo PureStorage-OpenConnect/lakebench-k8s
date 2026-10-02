@@ -599,10 +599,10 @@ class TestPerJobExecutorOverrides:
         config = LakebenchConfig(
             name="test",
             architecture={"workload": {"datagen": {"scale": 100}}},
-            platform={"compute": {"spark": {"silver_executors": 30}}},
+            platform={"compute": {"spark": {"silver_executors": 24}}},
         )
         assert config.architecture.workload.datagen.scale == 100
-        assert config.platform.compute.spark.silver_executors == 30
+        assert config.platform.compute.spark.silver_executors == 24
         assert config.platform.compute.spark.bronze_executors is None
 
 

@@ -67,6 +67,13 @@ Two hashes, both recorded with the baseline:
   `trino.worker.replicas: pinned 2, run 8`). A change to a job profile or
   to the conf Lakebench writes moves the pinned config's fingerprint too, so
   its baseline is refused until re-recorded.
+- **Proven sizing only.** A pinned config must size its run by the job
+  profiles: each `*_executors` it sets must equal the count the profile asks
+  for at the pinned scale, and it sets no driver override; `load_pinned`
+  refuses it otherwise. A run whose recorded overrides differ from the
+  profile's counts, or that carries a driver override or an executor
+  override bound (`limits.bound_kinds`), is refused as a run and as a
+  baseline, as it is for release evidence.
 - **Fingerprint version.** A run recorded before v1.7 has no
   `fingerprint_version` (version 1) and is refused by name ("run predates
   fingerprint v2"); a baseline recorded under version 1 is refused the same

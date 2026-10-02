@@ -1934,7 +1934,11 @@ def build_pipeline_benchmark(
                 _s_scale = run.config_snapshot.get("scale", 10)
                 _s_execs = _get_exec_count(sj.job_type, _s_scale, _s_schema)
                 # Check config overrides (streaming jobs may have explicit counts)
-                _override_key = sj.job_type.replace("-", "_")
+                from lakebench.modules.pipeline_engines.spark.job import (
+                    EXECUTOR_OVERRIDE_FIELDS,
+                )
+
+                _override_key = EXECUTOR_OVERRIDE_FIELDS.get(sj.job_type, ("", ""))[1]
                 _overrides = run.config_snapshot.get("spark", {}).get("executor_overrides", {})
                 _override_val = _overrides.get(_override_key)
                 if _override_val is not None:

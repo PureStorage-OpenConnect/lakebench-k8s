@@ -68,22 +68,22 @@ READERS: dict[str, str] = {
     "platform.compute.spark.operator.namespace": "lakebench.deploy.destroy:destroy_all",
     "platform.compute.spark.operator.version": "lakebench.deploy.destroy:destroy_all",
     "platform.compute.spark.bronze_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_manifest"
+        "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
     "platform.compute.spark.silver_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_manifest"
+        "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
     "platform.compute.spark.gold_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_manifest"
+        "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
     "platform.compute.spark.bronze_ingest_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:streaming_request_under_budget"
+        "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
     "platform.compute.spark.silver_stream_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:streaming_request_under_budget"
+        "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
     "platform.compute.spark.gold_refresh_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:streaming_request_under_budget"
+        "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
     "platform.compute.spark.driver_memory": (
         "lakebench.modules.pipeline_engines.spark.job:effective_driver"

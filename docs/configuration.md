@@ -396,9 +396,25 @@ platform:
 ### Executor Override Guide
 
 The per-job executor overrides (`silver_executors`, `gold_executors`, etc.)
-bypass the auto-scaling formula. Use them when your cluster has more
-capacity than the formula provisions, or when you need deterministic
-resource allocation for benchmarking.
+replace the auto-scaling formula for one job. Each takes 1 to 28 (the
+proven executor ceiling); a larger value is refused by the commands that
+change data, and `destroy`, `status` and the read-only commands drop it with
+a note. The capacity check, `deploy`, `config show` and `info` count the
+override, so a config sized past the cluster is refused before it runs.
+
+An override changes what a run measures:
+
+- It enters the experiment record (`architecture.spark_executor_overrides`;
+  the driver overrides as `architecture.spark_driver_overrides`) and the
+  identity, as an architecture difference: two runs with different overrides
+  are not like-for-like.
+- An override below what the profile asks for at the run's scale binds the
+  run. It is labelled in `limits.bound` ("silver-build: executor override 4
+  (profile asks 8)") and enters "Lakebench limits that bound".
+- A run with any override that differs from the profile's count, or with a
+  driver override, is not the proven sizing: it cannot be release evidence or
+  a perf-gate baseline, and a pinned perf-gate config must pin each count at
+  the profile's count (or leave it unset).
 
 Higher executor counts increase driver memory pressure because the Spark
 driver manages per-executor K8s API watches and aggregates serialized task
@@ -420,8 +436,7 @@ to a Python driver pod (40% of the heap).
 | 13--20    | 4--24g       | Stable; driver_memory override may be needed |
 | 21--24    | 24g          | Proven stable with 24g driver |
 | 25--28    | 24g          | Safe range; recommended maximum (the job profiles cap auto counts at 28, a Lakebench-imposed ceiling) |
-| 29--32    | 24g+         | Risk of K8s API polling storms |
-| 33+       | any          | Not recommended -- fabric8 client overwhelms K8s API |
+| 29+       | --           | Refused: K8s API polling storms from 32 up |
 
 `spark.driver.maxResultSize` is set automatically based on the effective
 executor count: `min(16, max(8, count // 2))` GiB on Spark 4 and
@@ -610,14 +625,14 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.compute.spark.operator.install` | boolean | `false` | advanced | Refused when `true`: deploy never installs the shared operator; a cluster admin runs `lakebench admin install --component spark-operator`. `false` loads as before. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | advanced | Namespace for the Spark Operator. |
 | `platform.compute.spark.operator.version` | string | `2.5.1` | advanced | Chart version a fresh `admin install` uses. v2.x required. An installed operator keeps its version. |
-| `platform.compute.spark.bronze_executors` | integer or null | `null` | advanced | Override bronze-verify executor count. Null = auto from scale. |
-| `platform.compute.spark.silver_executors` | integer or null | `null` | advanced | Override silver-build executor count. Null = auto from scale. |
-| `platform.compute.spark.gold_executors` | integer or null | `null` | advanced | Override gold-finalize executor count. Null = auto from scale. |
-| `platform.compute.spark.bronze_ingest_executors` | integer or null | `null` | advanced | Override bronze-ingest executor count. Null = auto from scale. |
-| `platform.compute.spark.silver_stream_executors` | integer or null | `null` | advanced | Override silver-stream executor count. Null = auto from scale. |
-| `platform.compute.spark.gold_refresh_executors` | integer or null | `null` | advanced | Override gold-refresh executor count. Null = auto from scale. |
+| `platform.compute.spark.bronze_executors` | integer or null | `null` | advanced | Override bronze-verify executor count (1--28). Null = auto from scale. |
+| `platform.compute.spark.silver_executors` | integer or null | `null` | advanced | Override silver-build executor count (1--28). Null = auto from scale. |
+| `platform.compute.spark.gold_executors` | integer or null | `null` | advanced | Override gold-finalize executor count (1--28). Null = auto from scale. |
+| `platform.compute.spark.bronze_ingest_executors` | integer or null | `null` | advanced | Override bronze-ingest executor count (1--28). Null = auto from scale. |
+| `platform.compute.spark.silver_stream_executors` | integer or null | `null` | advanced | Override silver-stream executor count (1--28). Null = auto from scale. |
+| `platform.compute.spark.gold_refresh_executors` | integer or null | `null` | advanced | Override gold-refresh executor count (1--28). Null = auto from scale. |
 | `platform.compute.spark.driver_memory` | string or null | `null` | advanced | Global driver memory override (e.g., `16g`). Null = profile default. |
-| `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Override driver cores. Null = profile default (typically 4). |
+| `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Override driver cores (1--16). Null = profile default (typically 4). |
 
 ### Platform -- PostgreSQL
 

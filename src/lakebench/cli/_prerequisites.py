@@ -566,8 +566,16 @@ def _decide_capacity(
         f"{plan.floor.memory_gb} GB, driven by {plan.floor_driver} plus "
         f"{plan.co_resident.label}"
     )
-    if plan.overrides_not_counted:
-        summary += "; per-job executor overrides are not counted"
+    from lakebench.modules.pipeline_engines.spark.job import executor_override
+
+    overrides = [
+        f"{r.job_type} {executor_override(r.job_type, cfg)}"
+        for r in plan.spark.per_job
+        if executor_override(r.job_type, cfg) is not None
+    ]
+    if overrides:
+        summary += f"; with executor overrides {', '.join(overrides)}"
+    lower = "Lower or unset the executor overrides, reduce" if overrides else "Reduce"
     hint_lines = "\n".join(f"  {s}" for s in shortfalls)
 
     unread = f"; free capacity could not be read ({fallback})" if fallback else ""
@@ -575,14 +583,14 @@ def _decide_capacity(
         cluster_line = (
             f"\nCluster: {free.node_count} worker node(s), {alloc_cores:.1f} cores / "
             f"{alloc_gb:.1f} GB allocatable (free capacity could not be read)."
-            "\nReduce 'scale' or use a larger cluster."
+            f"\n{lower} 'scale' or use a larger cluster."
         )
     else:
         cluster_line = (
             f"\nCluster: {free.node_count} schedulable node(s), {free_cores:.1f} cores / "
             f"{free_gb:.1f} GB free of {alloc_cores:.1f} cores / {alloc_gb:.1f} GB "
             "allocatable."
-            "\nReduce 'scale', free the cluster, or use a larger one."
+            f"\n{lower} 'scale', free the cluster, or use a larger one."
         )
     if verdict.status == "refused" or scratch_short or pod_short:
         return PrereqResult(
