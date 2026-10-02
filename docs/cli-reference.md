@@ -279,7 +279,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--timeout` | `-t` | auto | Timeout per job in seconds. When omitted: `max(3600, scale * 120)`; the AML workload adds 900 s and never goes below its bronze-verify budget |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
 | `--skip-preflight` (alias `--skip-deploy`) | | `false` | Skip prerequisite checks and infrastructure validation |
-| `--skip-generate` | | `false` | Skip datagen even with `--generate` |
+| `--skip-generate` | | `false` | Skip datagen (refused with `--generate`) |
 | `--regenerate` | | `false` | With `--generate`: empty the bronze bucket before generating. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. No effect without `--generate`. |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. On Delta the silver table's own log has the last word: the rebuild writes under an epoch above every one the table has used, even if the counter reads lower |
@@ -292,6 +292,24 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | `false` | Skip confirmation prompts |
 | `--local` | | `false` | Run locally with podman/docker instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
+
+**Refused arguments.** `run` checks every option before it makes any
+cluster call, and exits 2 (usage) naming the first refused one:
+
+- `--stage` that is not `bronze-verify`, `silver-build` or `gold-finalize`;
+- `--stage` with a continuous run (flag or config);
+- `--deploy-only` with `--generate-only`;
+- `--local` with `--deploy-only` or `--generate-only`;
+- `--regenerate` without `--generate` or `--generate-only`;
+- `--skip-generate` with `--generate`;
+- `--force-reset` on a batch run, `--force-rebuild` on a continuous run;
+- `--duration` on a batch run, or below 60;
+- `--timeout` below 1.
+
+`--local` with a continuous run, and any workload, recipe and mode `run`
+does not support, are refused just after these, also before any cluster
+call. Benchmark settings `run` does not honour are refused when the config
+loads.
 
 The run command executes 7 phases:
 

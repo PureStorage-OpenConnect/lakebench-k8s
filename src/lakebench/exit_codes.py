@@ -249,7 +249,11 @@ PATHS: tuple[ExitPath, ...] = (
         "v1.6 state names a deployment",
         v16_code=0,
     ),
-    ExitPath("run.args", _C.USAGE, "a `run` argument or combination is refused", planned=True),
+    ExitPath(
+        "run.args",
+        _C.USAGE,
+        "a `run` argument or combination is refused before any cluster call",
+    ),
     ExitPath(
         "config.upgrade_refused",
         _C.USAGE,
