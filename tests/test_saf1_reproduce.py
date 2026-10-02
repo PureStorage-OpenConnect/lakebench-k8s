@@ -818,3 +818,103 @@ def test_own_incarnation_retries_one_failed_read(monkeypatch):
     )
     with patch("kubernetes.client.CoreV1Api"), pytest.raises(PrerequisiteError, match="after run"):
         rep._own_incarnation(cfg, Path("c.yaml"), "own", after="run")
+
+
+# ---------------------------------------------------------------------------
+# deploy --require-new (hidden): the harness's deploy refuses, never adopts
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_require_new_reaches_the_engine(cfg_path, monkeypatch):
+    import lakebench.cli._deploy as deploy_mod
+    from lakebench.cli import app
+
+    seen: list = []
+
+    class Engine(FakeEngine):
+        def __init__(self, cfg, dry_run=False, require_new=False, **kw):
+            seen.append(require_new)
+            super().__init__(cfg, dry_run=dry_run, require_new=require_new, **kw)
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
+    cfg = _cfg(cfg_path)
+    with recording(cfg.get_namespace()) as rec:
+        rec.for_config(cfg)
+        res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes", "--require-new"])
+    assert res.exit_code == 0, res.output
+    assert seen == [True]
+
+
+def test_deploy_require_new_refusal_exits_3(cfg_path, monkeypatch):
+    """The engine's refusal reaches the user as exit 3, nothing adopted."""
+    import lakebench.cli._deploy as deploy_mod
+    from lakebench.cli import app
+
+    class Engine(FakeEngine):
+        def deploy_all(self, **_):
+            assert self.require_new
+            return [
+                DeploymentResult(
+                    component="namespace",
+                    status=DeploymentStatus.FAILED,
+                    message="Refused: namespace exists",
+                    details={REFUSAL_DETAIL: "reproduce.existing_namespace"},
+                )
+            ]
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
+    cfg = _cfg(cfg_path)
+    with recording(cfg.get_namespace()) as rec:
+        rec.for_config(cfg)
+        res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes", "--require-new"])
+    assert res.exit_code == 3, res.output
+
+
+def test_deploy_require_new_is_hidden():
+    from lakebench.cli import app
+
+    res = CliRunner().invoke(app, ["deploy", "--help"])
+    assert res.exit_code == 0 and "--require-new" not in res.output
+
+
+@pytest.mark.parametrize("other", ["--local", "--force-legacy"])
+def test_deploy_require_new_refuses_contradicting_flags(cfg_path, other):
+    from lakebench.cli import app
+
+    with recording() as rec:
+        res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes", "--require-new", other])
+        assert rec.calls == []
+    assert res.exit_code == 2, res.output
+    assert "--require-new does not combine" in res.output
+
+
+def test_expect_incarnation_mismatch_says_the_expectation_was_not_met(cfg_path, monkeypatch):
+    """With the flag the refusal names the caller's expectation, not a
+    redeploy after a check this command never made."""
+    from lakebench.cli import app
+
+    class Engine:
+        def __init__(self, cfg, **_):
+            pass
+
+        def destroy_all(self, **kw):
+            return [
+                DeploymentResult(
+                    component="ownership-check",
+                    status=DeploymentStatus.FAILED,
+                    message="Destroy NOT started",
+                    details={"incarnation_mismatch": True, "expected": "u#x", "found": "u#y"},
+                )
+            ]
+
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+    res = CliRunner().invoke(
+        app, ["destroy", str(cfg_path), "--yes", "--expect-incarnation", "u#x"]
+    )
+    assert res.exit_code == 3, res.output
+    assert "not the incarnation the caller expected" in res.output
+    assert "redeployed after this command checked it" not in res.output

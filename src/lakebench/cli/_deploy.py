@@ -431,6 +431,18 @@ def deploy(
             ),
         ),
     ] = False,
+    require_new: Annotated[
+        bool,
+        typer.Option(
+            "--require-new",
+            hidden=True,
+            help=(
+                "Refuse (exit 3) instead of adopting a namespace or bucket that "
+                "already exists, including one created while this deploy runs. For "
+                "harnesses that destroy only what they deployed; it only adds a refusal."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Deploy lakehouse infrastructure.
 
@@ -446,6 +458,15 @@ def deploy(
     7. Query Engine (Trino / Spark Thrift / DuckDB)
     8. Observability (if enabled)
     """
+    if require_new and (local or force_legacy):
+        from lakebench.exit_codes import UsageError
+
+        raise UsageError(
+            "--require-new does not combine with "
+            + ("--local: a local stack has no namespace" if local else "--force-legacy")
+            + "; it refuses anything that already exists",
+            path="cli.bad_argument",
+        )
     _deploy_impl(
         resolve_config_path(config_file, file_option),
         dry_run=dry_run,
@@ -454,6 +475,7 @@ def deploy(
         local=local,
         workdir=workdir,
         force_legacy=force_legacy,
+        require_new=require_new,
     )
 
 

@@ -326,6 +326,7 @@ def _destroy_impl(
     # A nameless config destroys only a deployment it can prove is its own
     # (its state or stamps); the incarnation it proved is the only one destroy may touch.
     verified_incarnation = guard_nameless(cfg, config_file, allow_absent=False)
+    caller_expected = expected_incarnation is not None
     if expected_incarnation is not None:
         if verified_incarnation is not None and verified_incarnation != expected_incarnation:
             from lakebench.exit_codes import SafetyRefusal
@@ -471,7 +472,10 @@ def _destroy_impl(
         raise SafetyRefusal(
             mismatch.message,
             why=(
-                "the namespace was redeployed after this command checked it"
+                "the namespace is not the incarnation the caller expected (another "
+                "deploy replaced it, or the expected value is wrong)"
+                if caller_expected and (mismatch.details or {}).get("found")
+                else "the namespace was redeployed after this command checked it"
                 if (mismatch.details or {}).get("found")
                 else "the namespace is gone (another destroy may have finished it)"
             ),
