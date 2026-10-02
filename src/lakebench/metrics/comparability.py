@@ -837,7 +837,7 @@ def _member_passed(record: Mapping[str, Any]) -> tuple[bool, str | None]:
     from lakebench.metrics import verdict as verdict_mod
 
     status = verdict_mod.verdict_status(record)
-    ok = status not in _EXCLUDED_STATUSES and verdict_mod.passed(record)
+    ok = status not in _EXCLUDED_STATUSES and verdict_mod.stored_passed(record)
     recompute = getattr(verdict_mod, "verdict_from_record", None)
     if ok and recompute is not None:
         again = recompute(record)
@@ -845,7 +845,11 @@ def _member_passed(record: Mapping[str, Any]) -> tuple[bool, str | None]:
             again.get("status") if isinstance(again, Mapping) else None
         )
         if again_status != "PASSED":
-            return False, f"recomputed {again_status}"
+            reasons = getattr(again, "reasons", None) or (
+                again.get("reasons") if isinstance(again, Mapping) else None
+            )
+            why = next((str(r) for r in reasons or [] if not str(r).startswith("Gate '")), None)
+            return False, f"recomputed {again_status}" + (f": {why}" if why else "")
     return ok, status
 
 

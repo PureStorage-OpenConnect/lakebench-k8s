@@ -110,12 +110,15 @@ def _make_passing_metrics() -> PipelineMetrics:
         end_time=datetime(2026, 9, 27, 0, 1, tzinfo=timezone.utc),
         total_elapsed_seconds=60.0,
         success=True,
+        # Every layer has rows, so the EVD-1 layer_rows gate passes.
         jobs=[
             JobMetrics(
-                job_name="lakebench-bronze-verify",
-                job_type="bronze-verify",
+                job_name=f"lakebench-{stage}",
+                job_type=stage,
                 success=True,
+                output_rows=100,
             )
+            for stage in ("bronze-verify", "silver-build", "gold-finalize")
         ],
     )
 

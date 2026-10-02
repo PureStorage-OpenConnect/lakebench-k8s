@@ -26,6 +26,9 @@ from tests.fixtures import stored_records as sr
 
 ROOT = Path(__file__).resolve().parents[1]
 PAIRS = json.loads((ROOT / "tests" / "expected" / "pairs.json").read_text())["pairs"]
+#: The pinned pair these tests use as a like-for-like pair. P1 was until ER-3:
+#: its two records skip W5 and W6 (no watchlist), so EVD-1 reads them failed.
+LIKE_FOR_LIKE = "P3"
 
 
 def _runs(tmp_path: Path, *records: dict, name: str = "runs") -> Path:
@@ -140,7 +143,7 @@ def test_p2_degraded_side_is_not_a_winner() -> None:
 
 
 def test_zero_cluster_calls(tmp_path: Path, recording_k8s, monkeypatch) -> None:
-    spec = PAIRS["P1"]
+    spec = PAIRS[LIKE_FOR_LIKE]
     runs = _runs(tmp_path, sr.load_record(spec["a"]), sr.load_record(spec["b"]))
     monkeypatch.chdir(tmp_path)
     before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
@@ -155,7 +158,7 @@ def test_zero_cluster_calls(tmp_path: Path, recording_k8s, monkeypatch) -> None:
 def test_comparison_module_imports_no_cluster_client(tmp_path: Path) -> None:
     """A fresh interpreter builds a comparison without importing kubernetes
     or any lakebench module that reaches a cluster."""
-    spec = PAIRS["P1"]
+    spec = PAIRS[LIKE_FOR_LIKE]
     code = (
         "import sys, json\n"
         "from lakebench.metrics import compare as cm\n"
@@ -564,7 +567,7 @@ def test_newer_schema_says_upgrade() -> None:
 
 
 def test_like_for_like_names_no_command() -> None:
-    spec = PAIRS["P1"]
+    spec = PAIRS[LIKE_FOR_LIKE]
     doc = cm.compare_records([sr.load_record(spec["a"])], [sr.load_record(spec["b"])])
     assert doc["missing"]["command"] is None
     assert "no winner" in doc["missing"]["hint"]
@@ -687,7 +690,7 @@ def test_delta_is_relative_to_the_magnitude_of_a() -> None:
 
 
 def test_json_and_csv_shapes(tmp_path: Path) -> None:
-    spec = PAIRS["P1"]
+    spec = PAIRS[LIKE_FOR_LIKE]
     runs = _runs(tmp_path, sr.load_record(spec["a"]), sr.load_record(spec["b"]))
     j = _invoke(spec["a"], spec["b"], "--runs-dir", str(runs), "--format", "json")
     doc = json.loads(_stdout(j))
@@ -729,7 +732,7 @@ def test_output_file_written_only_when_asked(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_output_over_an_input_refused(tmp_path: Path) -> None:
-    spec = PAIRS["P1"]
+    spec = PAIRS[LIKE_FOR_LIKE]
     runs = _runs(tmp_path, sr.load_record(spec["a"]), sr.load_record(spec["b"]))
     target = runs / f"run-{spec['a']}" / "metrics.json"
     before = target.read_bytes()
@@ -956,7 +959,7 @@ def test_config_ref_makes_no_cluster_call(tmp_path: Path, recording_k8s, monkeyp
 
 @pytest.mark.parametrize("where", ["runs", "series", "metrics"])
 def test_output_into_records_refused(where: str, tmp_path: Path) -> None:
-    spec = PAIRS["P1"]
+    spec = PAIRS[LIKE_FOR_LIKE]
     runs = _runs(tmp_path, sr.load_record(spec["a"]), sr.load_record(spec["b"]))
     target = {
         "runs": runs / "cmp.json",

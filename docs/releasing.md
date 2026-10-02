@@ -117,8 +117,8 @@ all four with the repository's full history.
 
 - `records`: every run cited in the UAT results table is release evidence.
   A record is refused when it has no experiment block; did not pass; did not
-  measure rows in every layer (the verdict's `layer_rows` gate; refused until
-  the verdict computes it); missed an expected stage (bronze, silver, gold
+  measure rows in every layer (the verdict's `layer_rows` gate, with no
+  layer passed on bytes alone); missed an expected stage (bronze, silver, gold
   and the benchmark, unless the recipe has no query engine; AML batch also
   scoring; C360 continuous also the result check) or skipped one; for AML,
   ran a rule set other than the expected one or errored a rule; returned

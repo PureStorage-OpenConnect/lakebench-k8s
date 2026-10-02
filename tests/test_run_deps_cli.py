@@ -69,7 +69,7 @@ def test_a_pod_on_another_set_fails_the_run(tmp_path, monkeypatch, base):
     assert calls, "the run-end pod check did not run"
     assert trace["exit_code"] == 1
     assert record["success"] is False
-    assert record["verdict"]["gates"]["deps"] == "FAIL"
+    assert record["verdict"]["gates"]["dependency_set"] == "FAIL"
     deps = record["provenance"]["deps"]
     assert deps["pods_checked"] == 1 and deps["pod_mismatches"][0]["pod"] == "lakebench-trino-0"
 
@@ -90,7 +90,7 @@ def test_an_unreadable_pod_check_fails_the_run(tmp_path, monkeypatch):
     )
     trace, record = _run("batch_c360", tmp_path, monkeypatch)
     assert trace["exit_code"] == 1 and record["success"] is False
-    assert record["verdict"]["gates"]["deps"] == "FAIL"
+    assert record["verdict"]["gates"]["dependency_set"] == "FAIL"
 
 
 def test_an_interrupted_batch_run_skips_the_check(tmp_path, monkeypatch):

@@ -44,6 +44,7 @@ from lakebench.k8s import (
     pinned_kubectl_popen,
 )
 from lakebench.metrics.continuous_window import parse_events, utc_naive
+from lakebench.metrics.verdict import apply_save_gate
 
 logger = logging.getLogger(__name__)
 
@@ -2944,6 +2945,7 @@ def _run_sustained(
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.RUN, {"sustained": True, "duration": run_duration})
     _deps_check_failed = False
+    _verdict_failed = False
     _exception_in_flight = False
     _k8s_unreachable = False
 
@@ -4289,6 +4291,10 @@ def _run_sustained(
                 pipeline_success = False
                 run_metrics.success = False
                 run_metrics.interrupted = _interrupted
+            # The exit code follows the verdict of the record as it is
+            # saved (the samples below write nothing the verdict reads).
+            _ok = apply_save_gate(run_metrics, pipeline_success, print_error)
+            _verdict_failed, pipeline_success = pipeline_success and not _ok, _ok
             # The end load sample, then the corpus this run read (corpus id
             # v2), both after an interrupt too: they never raise, the sample is
             # bounded and reads the nodes and the other namespaces' pods, and
@@ -4321,7 +4327,8 @@ def _run_sustained(
             raise typer.Exit(ExitCode.INTERRUPTED)
         if _abort is not None:
             raise typer.Exit(ExitCode.FAILED)
-        if _deps_check_failed and not _exception_in_flight:
-            # The run-end dependency check failed after the pipeline itself
-            # finished: the exit code says so (exit 0 is not a pass).
+        if (_deps_check_failed or _verdict_failed) and not _exception_in_flight:
+            # The run-end dependency check or the record's verdict failed
+            # after the pipeline itself finished: the exit code says so
+            # (exit 0 is not a pass).
             raise typer.Exit(ExitCode.FAILED)

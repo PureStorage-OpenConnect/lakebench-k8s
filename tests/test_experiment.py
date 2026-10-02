@@ -69,8 +69,13 @@ def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
     # end_run(success=True) call would compute a FAILED verdict and be
     # refused by compare. These tests build a synthetic completed run to
     # exercise the comparability ladder itself, not to test a failed run;
-    # mark it complete so the verdict computes PASSED.
+    # mark it complete so the verdict computes PASSED. Every layer has rows,
+    # so the verdict's layer_rows gate (EVD-1) passes too.
     run.success = True
+    run.jobs = [
+        JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
+        for s in ("bronze-verify", "silver-build", "gold-finalize")
+    ]
     return run
 
 
@@ -493,7 +498,12 @@ class TestCompareCommand:
         b = dict(b)
         b["run_id"] = "20260926-120000-bbbbbb"
         for m, q in ((a, qph[0]), (b, qph[1])):
-            m.setdefault("pipeline_benchmark", {})["scores"] = {"composite_qph": q}
+            # scale_ratio: a batch pipeline benchmark always records it, and
+            # the verdict fails a ratio of 0 (EVD-1).
+            m.setdefault("pipeline_benchmark", {})["scores"] = {
+                "composite_qph": q,
+                "scale_ratio": 1.0,
+            }
         return a, b
 
     def _comparison(self, a, b, **kw):
@@ -531,7 +541,7 @@ class TestCompareCommand:
         c = self._comparison(a, b, qph=(100.0, 200.0))
         assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "5"
         assert "invariant 2" in c["missing"]["condition"]
-        (row,) = c["metrics"]
+        (row,) = [r for r in c["metrics"] if r["metric"] == "composite_qph"]
         assert row["a"]["median"] == 100.0 and row["b"]["median"] == 200.0
         assert row["assessment"] == "withheld" and row["delta_pct"] is None
 
