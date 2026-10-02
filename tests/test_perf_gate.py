@@ -1167,6 +1167,7 @@ def _real_run(snap: dict, run_id: str, silver_s: float = 200.0):
                 elapsed_seconds=secs,
                 success=True,
                 input_size_gb=gb,
+                output_rows=1000,  # rows in every layer (the verdict's layer_rows gate)
                 executor_count=ex,
                 executor_cores=4,
             )

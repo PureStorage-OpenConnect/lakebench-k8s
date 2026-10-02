@@ -506,6 +506,11 @@ class PipelineMetrics:
     # None for a run outside a series.
     series: dict[str, Any] | None = None
 
+    # The one batch stage ``run --stage`` ran (bronze-verify, silver-build or
+    # gold-finalize). The verdict's record gates then judge that stage's
+    # layer only. None for a whole pipeline.
+    stage_only: str | None = None
+
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
     # None on a fresh run until it is saved; experiment_block() builds it then.
     experiment: dict[str, Any] | None = None
@@ -578,6 +583,8 @@ class PipelineMetrics:
             d["record_kind"] = self.record_kind
         if self.parent_run_id is not None:
             d["parent_run_id"] = self.parent_run_id
+        if self.stage_only is not None:
+            d["stage_only"] = self.stage_only
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment

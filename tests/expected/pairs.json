@@ -7,7 +7,8 @@
     "EVD-7 work (ER-10a, ER-10b, ER-11) adds the After column here, with the WI id in the commit message and a second-agent review (SPEC section 6 rule 4).",
     "after (ER-10b, EVD-7): what comparability.pair_verdict returns for the pair: verdict, code, ladder step, LIKE-FOR-LIKE attribution, the differing keys per OD-2 group (comparability.classify key names), the System relation and notes. Hand-derived from each pair's raw records (architecture fields, effective-maintenance ids, verdict status) and the ch03 section 0.3 After column; verdict-level only (metric rendering, hints and not_assessed are ER-11).",
     "P2 and P4 (owner decision 10-01): limits.benchmark_rounds is derived at read time from the record's pipeline_benchmark rounds with QpH > 0 when the block does not store it; P2 moves to NOT LIKE-FOR-LIKE on benchmark rounds (5 vs 4), P4 loses the benchmark rounds difference (5 vs 5).",
-    "compare (ER-11, EVD-8): what `lakebench compare A B` reports for the pair: the After verdict and its exit code, and the one missing condition, its command (null when no command supplies it) and the hint, from the design's ch03 section 7 hint table applied to each pair's first failed ladder step. Hand-checked by a second agent against that table and the raw records."
+    "compare (ER-11, EVD-8): what `lakebench compare A B` reports for the pair: the After verdict and its exit code, and the one missing condition, its command (null when no command supplies it) and the hint, from the design's ch03 section 7 hint table applied to each pair's first failed ladder step. Hand-checked by a second agent against that table and the raw records.",
+    "P1 (ER-3, EVD-1): both records skip W5_sanctions_match and W6_pep_counterparty with reason no-watchlist (a corpus generated before the screening track). EXPECTED_SKIPS allows only W1's giant-component and vertex-cap, so the verdict recomputed from each record is FAILED and the pair is NOT COMPARABLE at step 1. Hand-derived from the two records' gold-finalize rules_skipped; listed in UPGRADING."
   ],
   "pairs": {
     "P1": {
@@ -23,29 +24,23 @@
         "result_refusals": 0
       },
       "after": {
-        "verdict": "LIKE-FOR-LIKE",
-        "code": 0,
-        "step": "8",
-        "attribution": "architecture differential",
+        "verdict": "NOT COMPARABLE",
+        "code": 10,
+        "step": "1",
+        "attribution": null,
         "workload": [],
         "corpus": [],
-        "architecture": [
-          "recipe",
-          "catalog"
-        ],
+        "architecture": [],
         "conditions": [],
-        "system": "same",
-        "notes": [
-          "system identity not recorded; assumed the same",
-          "dependency set not recorded"
-        ]
+        "system": null,
+        "notes": []
       },
       "compare": {
-        "verdict": "LIKE-FOR-LIKE",
-        "exit_code": 0,
-        "condition": "the winner rule (not in this release)",
-        "command": null,
-        "hint": "like-for-like; no winner is named in this release"
+        "verdict": "NOT COMPARABLE",
+        "exit_code": 10,
+        "condition": "a passed run",
+        "command": "lakebench run <the config of deployment lb16-lb186>",
+        "hint": "A: run 20260927-011123-497f02 did not pass (recomputed FAILED: rule W5_sanctions_match skipped (no-watchlist), not an allowed skip). Missing: a passed run. Fix it and re-run: `lakebench run <the config of deployment lb16-lb186>`"
       }
     },
     "P2": {

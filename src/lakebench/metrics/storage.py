@@ -695,6 +695,7 @@ class MetricsStorage:
             series=data.get("series"),
             record_kind=str(data.get("record_kind") or "run"),
             parent_run_id=data.get("parent_run_id"),
+            stage_only=data.get("stage_only"),
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),
