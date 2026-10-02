@@ -40,8 +40,6 @@ _EXAMPLE_ENV = {
     "LAKEBENCH_S3_SECRET_KEY": "placeholder",
 }
 
-EM_DASH = "\u2014"
-
 
 @dataclass
 class Result:
@@ -185,33 +183,16 @@ def check_changelog() -> Result:
     return Result("changelog", FAIL, f"CHANGELOG.md has no '## [{version}]' section")
 
 
-def find_em_dashes(paths: Sequence[Path]) -> list[str]:
-    """Return 'path:line' for every line containing U+2014."""
-    hits = []
-    for path in paths:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
-            continue
-        for n, line in enumerate(lines, 1):
-            if EM_DASH in line:
-                hits.append(f"{path.relative_to(ROOT)}:{n}")
-    return hits
-
-
-# Everything a reader of the repository or the CLI sees. CLI help strings
-# live in the Python sources under src/lakebench/cli, so those are scanned
-# whole.
-EM_DASH_SCOPE = ("*.md", "**/*.md", ".github/**", "examples/**", "src/lakebench/cli/**/*.py")
-
-
-def check_em_dashes() -> Result:
-    paths = [p for p in _tracked(*EM_DASH_SCOPE) if p.is_file()]
-    hits = find_em_dashes(paths)
-    if hits:
-        shown = hits[:20] + ([f"... and {len(hits) - 20} more"] if len(hits) > 20 else [])
-        return Result("em-dashes", FAIL, f"{len(hits)} lines with U+2014:\n" + "\n".join(shown))
-    return Result("em-dashes", PASS, f"{len(paths)} files clean")
+def check_prose() -> Result:
+    """scripts/prose_guard.py over every tracked file: em dashes, emoji, AI
+    attribution, and allowlist entries that no longer match a hit."""
+    problems = _load_script("prose_guard").check()
+    if problems:
+        shown = problems[:20] + (
+            [f"... and {len(problems) - 20} more"] if len(problems) > 20 else []
+        )
+        return Result("prose", FAIL, f"{len(problems)} prose problems:\n" + "\n".join(shown))
+    return Result("prose", PASS, "tracked files clean")
 
 
 # UAT evidence for a release lives at this path (docs/releasing.md). The
@@ -876,7 +857,7 @@ def build_checks(tag: str | None = None, perf_runs: dict[str, str] | None = None
         Check("examples", check_examples, "every examples/*.yaml validates"),
         Check("version", make_version_check(tag), "single version source; tag matches"),
         Check("changelog", check_changelog, "CHANGELOG.md has a section for the version"),
-        Check("em-dashes", check_em_dashes, "no U+2014 in *.md, .github/, examples/, CLI"),
+        Check("prose", check_prose, "no em dash, emoji or AI attribution in a tracked file"),
         Check("uat-results", check_uat_results, "uat/results-<version>.md exists"),
         Check("records", check_records, "every cited run record is release evidence"),
         Check(

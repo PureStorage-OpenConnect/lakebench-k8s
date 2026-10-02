@@ -179,11 +179,16 @@ Prose, in code, comments, docs and commit messages:
 
 - No em dash character (U+2014). Use `--` or restructure the sentence.
 - No emoji.
+- No AI attribution (above).
 - No filler: cut stock phrases that announce a point instead of making it,
   and say the thing.
 - Full sentences. Bullets are for genuine lists and tables for genuine
   comparisons.
 - User-facing docs open with the answer or the recommendation.
+
+The em dash, emoji and AI-attribution rules are checked on every tracked
+file by `scripts/prose_guard.py`, which the unit tests run; it names the
+file, the line and the fix. The rest is for review.
 
 Code:
 

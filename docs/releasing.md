@@ -9,7 +9,7 @@ A release is a `v*` tag on a commit that is on `main`. Pushing the tag runs
    version, which must be a final release: no dev or pre-release suffix
    (`scripts/check_version.py`);
 3. `gate`: the release-only checks of `scripts/release_gate.py` with
-   `--require-all` (examples, version, changelog, em dashes, UAT results,
+   `--require-all` (examples, version, changelog, prose, UAT results,
    and the release evidence checks below);
 4. the wheel and sdist, and the PyInstaller binaries for linux-amd64,
    macos-amd64 and macos-arm64, each smoke-tested;
@@ -158,7 +158,7 @@ Lakebench limit bound is never recorded as a baseline or compared with one.
 The `perf-baselines` check fails when a required pinned perf config
 (`benchmarks/perf/`) has no accepted baseline, has no run, or its run
 regressed or was refused. It is not in the release workflow's `--only` list
-(`release.yml` runs examples, version, changelog, em-dashes, uat-results,
+(`release.yml` runs examples, version, changelog, prose, uat-results,
 records, support-record, freeze and expected-results), so it does not block a tag by itself: run it locally as part
 of the whole gate above before tagging. Check in the `metrics.json` of each
 required perf run as `uat/perf/run-<id>/metrics.json` so the result can be

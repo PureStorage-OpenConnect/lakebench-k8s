@@ -1,0 +1,4 @@
+# Hits scripts/prose_guard.py lets stay, one per line:
+#   path:line:kind  # reason
+# kind is em-dash, emoji, ai-attribution or undecodable. An entry whose hit
+# is gone fails the guard, so remove it with the hit.

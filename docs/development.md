@@ -228,6 +228,11 @@ one.
   not in its corpus. It exits 1 on any report and 2 when it cannot run;
   rewrite a reported line as a pointer. Its unit tests run in CI on planted
   files.
+- `python scripts/prose_guard.py` fails on an em dash, an emoji or an AI
+  attribution line in any tracked file (`tests/test_prose_style.py` runs it
+  in the unit tier, and the release gate's `prose` check runs it too). A
+  hit that has to stay goes in `scripts/prose_allowlist.txt` as
+  `path:line:kind  # reason`; an entry whose hit is gone fails the guard.
 
 ## The Spark tier
 
