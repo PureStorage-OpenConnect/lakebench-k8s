@@ -7,6 +7,7 @@ import logging
 import random
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -143,6 +144,80 @@ class ClusterCapacity:
     largest_node_memory_bytes: int
 
 
+@dataclass(frozen=True)
+class FreeCapacity:
+    """What the schedulable nodes can still take, for the run preflight.
+
+    ``free`` is allocatable minus the requests of every non-terminal pod
+    outside the excluded namespace, in total and on the node with the most
+    free memory; ``allocatable`` is the same nodes before those requests.
+    Both are ``ClusterCapacity`` so ``config.sizing.check_capacity`` reads
+    either.
+    """
+
+    free: ClusterCapacity
+    allocatable: ClusterCapacity
+    #: (free millicores, free bytes) of each schedulable node, for the
+    #: check that one pod fits one node in both dimensions at once.
+    free_by_node: tuple[tuple[int, int], ...] = ()
+
+    def pod_fits(self, cpu_cores: float, memory_gb: float) -> bool:
+        """Whether some schedulable node has *cpu_cores* and *memory_gb*
+        (GiB) free at once."""
+        need_m = cpu_cores * 1000
+        need_b = memory_gb * 1024**3
+        return any(c >= need_m and m >= need_b for c, m in self.free_by_node)
+
+
+@dataclass(frozen=True)
+class CapacityUnknown:
+    """The capacity could not be read; the preflight refuses (fails closed).
+
+    ``pods_only`` says the node list was read and only the pod side failed
+    (the pod list, or a pod on a node the list does not show), so the
+    nodes' allocatable is still known; ``deploy`` checks that instead.
+    """
+
+    reason: str
+    pods_only: bool = False
+
+
+@dataclass(frozen=True)
+class ScratchCapacity:
+    """Published storage capacity for one StorageClass, or why there is none.
+
+    ``total_bytes`` is the sum of its ``CSIStorageCapacity`` objects; None
+    with a ``reason`` when the driver publishes none or they cannot be read.
+    """
+
+    total_bytes: int | None
+    reason: str = ""
+
+
+#: Taint effects that keep ordinary pods off a node.
+_BLOCKING_TAINTS = ("NoSchedule", "NoExecute")
+
+
+def _quantity(value: Any) -> float:
+    """A Kubernetes quantity ("1500m", "129497084Ki", "2") as a number of
+    base units (lakebench.quantity, the one parser)."""
+    from lakebench.quantity import parse
+
+    return float(parse(str(value)))
+
+
+def _schedulable(node: Any) -> bool:
+    """Ready, not cordoned, and no NoSchedule or NoExecute taint. A
+    control-plane node counts when nothing keeps pods off it."""
+    if getattr(node.spec, "unschedulable", False):
+        return False
+    for taint in getattr(node.spec, "taints", None) or []:
+        if taint.effect in _BLOCKING_TAINTS:
+            return False
+    conditions = getattr(node.status, "conditions", None) or []
+    return any(c.type == "Ready" and c.status == "True" for c in conditions)
+
+
 class K8sClient:
     """Kubernetes client for resource management.
 
@@ -186,6 +261,7 @@ class K8sClient:
         self._rbac_v1 = client.RbacAuthorizationV1Api()
         self._batch_v1 = client.BatchV1Api()
         self._custom = client.CustomObjectsApi()
+        self._storage_v1 = client.StorageV1Api()
 
     @property
     def namespace(self) -> str:
@@ -231,15 +307,20 @@ class K8sClient:
             )
         return None
 
-    def test_connectivity(self) -> tuple[bool, str]:
+    def test_connectivity(self, timeout: Any = None) -> tuple[bool, str]:
         """Test connectivity to the Kubernetes cluster.
+
+        Args:
+            timeout: ``_request_timeout`` for the probe (seconds, or a
+                ``(connect, read)`` pair); None keeps the client default.
 
         Returns:
             Tuple of (success, message)
         """
         try:
             # Try to get API versions - lightweight call
-            version = client.VersionApi().get_code()
+            kw = {} if timeout is None else {"_request_timeout": timeout}
+            version = client.VersionApi().get_code(**kw)
             return True, f"Connected to Kubernetes {version.git_version}"
         except ApiException as e:
             return False, f"API error: {e.reason}"
@@ -979,6 +1060,124 @@ class K8sClient:
             largest_node_cpu_millicores=max_cpu,
             largest_node_memory_bytes=max_mem,
         )
+
+    def get_free_capacity(
+        self,
+        exclude_namespace: str = "",
+        *,
+        count_own: Callable[[Any], bool] | None = None,
+    ) -> FreeCapacity | CapacityUnknown:
+        """Free capacity of the schedulable nodes, for the run preflight.
+
+        Unlike ``get_cluster_capacity`` (allocatable totals, used to size a
+        run), this subtracts what other pods already request, so a busy
+        cluster that fits by total but not by what is free is refused. Pods
+        in *exclude_namespace* (the deployment's own) are not subtracted,
+        since the preflight counts that deployment's Trino, catalog and
+        Postgres itself, except those *count_own* selects (leftover Spark
+        pods, a datagen Job still running).
+
+        Fails closed: a forbidden or failed node or pod list, a pod on a
+        node the node list does not show, or no schedulable node gives
+        ``CapacityUnknown`` with the reason.
+        """
+        try:
+            nodes = self._core_v1.list_node().items
+        except ApiException as e:
+            return CapacityUnknown(f"listing nodes failed ({e.status} {e.reason})")
+        except Exception as e:  # noqa: BLE001 -- any failure means "unknown"
+            return CapacityUnknown(f"listing nodes failed ({type(e).__name__})")
+        try:
+            pods = self._core_v1.list_pod_for_all_namespaces(
+                field_selector="status.phase!=Succeeded,status.phase!=Failed"
+            ).items
+        except ApiException as e:
+            return CapacityUnknown(f"listing pods failed ({e.status} {e.reason})", pods_only=True)
+        except Exception as e:  # noqa: BLE001
+            return CapacityUnknown(f"listing pods failed ({type(e).__name__})", pods_only=True)
+
+        from lakebench.quantity import QuantityError, pod_request
+
+        known = {n.metadata.name for n in nodes}
+        used: dict[str, list[float]] = {}
+        try:
+            for pod in pods:
+                node_name = getattr(pod.spec, "node_name", None)
+                if not node_name:
+                    continue  # not scheduled yet: holds no node's capacity
+                if node_name not in known:
+                    return CapacityUnknown(
+                        f"pod {pod.metadata.namespace}/{pod.metadata.name} runs on node "
+                        f"{node_name}, which the node list does not show",
+                        pods_only=True,
+                    )
+                if (
+                    exclude_namespace
+                    and pod.metadata.namespace == exclude_namespace
+                    and not (count_own is not None and count_own(pod))
+                ):
+                    continue
+                cpu, mem = pod_request(pod)
+                acc = used.setdefault(node_name, [0.0, 0.0])
+                acc[0] += cpu
+                acc[1] += mem
+            rows = []
+            for node in nodes:
+                if not _schedulable(node):
+                    continue
+                alloc = node.status.allocatable or {}
+                a_cpu = _quantity(alloc.get("cpu", 0))
+                a_mem = _quantity(alloc.get("memory", 0))
+                u_cpu, u_mem = used.get(node.metadata.name, [0.0, 0.0])
+                rows.append((a_cpu, a_mem, max(a_cpu - u_cpu, 0.0), max(a_mem - u_mem, 0.0)))
+        except QuantityError as e:
+            return CapacityUnknown(f"a node or pod resource quantity cannot be read: {e}")
+        except Exception as e:  # noqa: BLE001 -- a malformed object is "unknown"
+            return CapacityUnknown(f"reading node or pod resources failed ({type(e).__name__})")
+        if not rows:
+            return CapacityUnknown("no schedulable node (all cordoned, tainted or not Ready)")
+
+        # The largest-pod check uses one node's free cores and memory
+        # together: the node with the most free memory (executor pods are
+        # memory-bound), ties broken by free cores.
+        best = max(rows, key=lambda r: (r[3], r[2]))
+        biggest = max(rows, key=lambda r: (r[1], r[0]))
+        free = ClusterCapacity(
+            total_cpu_millicores=int(sum(r[2] for r in rows) * 1000),
+            total_memory_bytes=int(sum(r[3] for r in rows)),
+            node_count=len(rows),
+            largest_node_cpu_millicores=int(best[2] * 1000),
+            largest_node_memory_bytes=int(best[3]),
+        )
+        allocatable = ClusterCapacity(
+            total_cpu_millicores=int(sum(r[0] for r in rows) * 1000),
+            total_memory_bytes=int(sum(r[1] for r in rows)),
+            node_count=len(rows),
+            largest_node_cpu_millicores=int(biggest[0] * 1000),
+            largest_node_memory_bytes=int(biggest[1]),
+        )
+        return FreeCapacity(
+            free=free,
+            allocatable=allocatable,
+            free_by_node=tuple((int(r[2] * 1000), int(r[3])) for r in rows),
+        )
+
+    def get_scratch_capacity(self, storage_class: str) -> ScratchCapacity:
+        """The ``CSIStorageCapacity`` the CSI driver publishes for
+        *storage_class*, summed over its topology segments."""
+        try:
+            items = self._storage_v1.list_csi_storage_capacity_for_all_namespaces().items
+        except ApiException as e:
+            return ScratchCapacity(None, f"CSIStorageCapacity not readable ({e.status} {e.reason})")
+        except Exception as e:  # noqa: BLE001
+            return ScratchCapacity(None, f"CSIStorageCapacity not readable ({type(e).__name__})")
+        mine = [i for i in items if i.storage_class_name == storage_class and i.capacity]
+        if not mine:
+            return ScratchCapacity(None, "no CSIStorageCapacity published for it")
+        try:
+            return ScratchCapacity(int(sum(_quantity(i.capacity) for i in mine)))
+        except Exception as e:  # noqa: BLE001
+            return ScratchCapacity(None, f"CSIStorageCapacity unreadable ({type(e).__name__})")
 
     @staticmethod
     def _parse_cpu_to_millicores(cpu: str) -> int:

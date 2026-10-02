@@ -2857,6 +2857,7 @@ def _run_sustained(
     skip_maintenance: bool = False,
     force_reset: bool = False,
     autosize_cuts: list[str] | None = None,
+    preflight: dict | None = None,
 ) -> None:
     """Run the sustained streaming pipeline.
 
@@ -2872,6 +2873,8 @@ def _run_sustained(
             The maintenance loop is on by default because unmaintained
             streaming snapshots grow unbounded, but a run whose primary
             goal is measuring raw freshness/throughput may want it off.
+        preflight: The run preflight's capacity outcome, recorded as
+            ``provenance.preflight``.
     """
     import uuid
 
@@ -2953,6 +2956,7 @@ def _run_sustained(
     config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
     record_deps_provenance(collector.current_run, deps_handle)
+    collector.record_preflight(preflight)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
 

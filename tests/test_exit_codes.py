@@ -144,13 +144,9 @@ PLANNED_BY = {
     "admin.version_change_in_use": "SD-10",
     "admin.version_change_needs_flag": "SD-10",
     "alias.refused": "CC-28",
-    "capacity.shortfall": "CC-24",
-    "capacity.unknown": "CC-24",
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
     "logs.no_pod": "CC-27",
-    "plan.missing_storage_class": "CC-23",
-    "plan.ok": "CC-23",
     "repeat.no_verified_corpus": "CC-30",
     "run.protected_corpus": "AM-22",
     "series.corpus_changed": "CC-30",
@@ -755,6 +751,70 @@ def _scenario_run_prereq_failed(monkeypatch, tmp_path):
     return _runner().invoke(app, ["run", str(_init_config(tmp_path))])
 
 
+def _capacity_run(monkeypatch, tmp_path, found):
+    """``run`` whose preflight is the real capacity check on a fake reading."""
+    from unittest import mock
+
+    from lakebench.cli import _prerequisites as pre
+
+    k8s = mock.MagicMock()
+    k8s.get_free_capacity.return_value = found
+
+    def run_prerequisites(cfg, **kw):
+        with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
+            return pre.PrereqReport(checks=[pre._check_cluster_capacity(cfg, **kw)])
+
+    monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", run_prerequisites)
+    return _runner().invoke(app, ["run", str(_init_config(tmp_path))])
+
+
+def _scenario_capacity_unknown(monkeypatch, tmp_path):
+    from lakebench.k8s.client import CapacityUnknown
+
+    return _capacity_run(
+        monkeypatch, tmp_path, CapacityUnknown("listing nodes failed (403 Forbidden)")
+    )
+
+
+def _scenario_capacity_shortfall(monkeypatch, tmp_path):
+    from lakebench.k8s.client import ClusterCapacity, FreeCapacity
+
+    gib = 1024**3
+    small = ClusterCapacity(8_000, 32 * gib, 1, 8_000, 32 * gib)
+    return _capacity_run(monkeypatch, tmp_path, FreeCapacity(small, small, ((8_000, 32 * gib),)))
+
+
+def _plan_online(monkeypatch, tmp_path, **status_by_id):
+    """``plan`` online against a fake cluster whose prerequisites report
+    *status_by_id* (others ok) and whose capacity check passes."""
+    from unittest import mock
+
+    from lakebench.cli import _prerequisites as pre
+    from lakebench.deploy.prereqs import PREREQS, PrereqOutcome, PrereqResult, PrereqStatus
+
+    k8s = mock.MagicMock()
+    k8s.test_connectivity.return_value = (True, "ok")
+    k8s.get_cluster_capacity.return_value = None
+    monkeypatch.setattr("lakebench.k8s.get_k8s_client", lambda **kw: k8s)
+    outcomes = [
+        PrereqOutcome(p, PrereqResult(PrereqStatus(status_by_id.get(p.id, "ok")), p.id))
+        for p in PREREQS
+    ]
+    monkeypatch.setattr("lakebench.deploy.prereqs.run_prereqs", lambda cfg: outcomes)
+    monkeypatch.setattr(
+        pre, "_check_cluster_capacity", lambda cfg, **kw: pre.PrereqResult("cc", True, "ok")
+    )
+    return _runner().invoke(app, ["plan", str(_init_config(tmp_path))])
+
+
+def _scenario_plan_ok(monkeypatch, tmp_path):
+    return _plan_online(monkeypatch, tmp_path)
+
+
+def _scenario_plan_missing_storage_class(monkeypatch, tmp_path):
+    return _plan_online(monkeypatch, tmp_path, **{"scratch-storage-class": "fail"})
+
+
 def _scenario_run_namespace_missing_no_yes(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -1343,6 +1403,10 @@ SCENARIOS = {
     "run.deps_missing": _scenario_run_deps_missing,
     "run.deps_stale": _scenario_run_deps_stale,
     "run.deps_mismatch": _scenario_run_deps_mismatch,
+    "capacity.unknown": _scenario_capacity_unknown,
+    "plan.ok": _scenario_plan_ok,
+    "plan.missing_storage_class": _scenario_plan_missing_storage_class,
+    "capacity.shortfall": _scenario_capacity_shortfall,
     "run.namespace_missing_no_yes": _scenario_run_namespace_missing_no_yes,
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
@@ -1398,6 +1462,10 @@ def test_scenarios_cover_exactly_the_live_paths():
 # Text in the combined output that shows the scenario took its named path,
 # where the code alone has more than one producer.
 EXPECTED_OUTPUT = {
+    "plan.missing_storage_class": "Next: (cluster admin) lakebench admin install --component",
+    "plan.ok": "ok: Kubeflow Spark Operator 2.x",
+    "capacity.unknown": "capacity could not be read: listing nodes failed",
+    "capacity.shortfall": "Insufficient free cluster capacity",
     "run.datagen_timeout": "wait budget",
     "destroy.redeployed": "Destroy Incomplete",
     "destroy.unverified_cluster": "Destroy Incomplete",

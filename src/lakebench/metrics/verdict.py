@@ -509,6 +509,12 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         not_gating = c360_correctness.reporting_failures(metrics.c360_correctness)
         if not_gating:
             qualifiers["c360_failed_not_gating"] = not_gating
+    preflight = (getattr(metrics, "provenance", None) or {}).get("preflight") or {}
+    if preflight.get("capacity") == "skipped":
+        # --skip-preflight: nothing checked that the cluster could hold it.
+        qualifiers["capacity"] = "capacity not checked"
+    if preflight.get("scratch") == "not_measurable":
+        qualifiers["scratch_capacity"] = "scratch capacity not checked"
 
     return Verdict.strictest(
         exit_ok=exit_ok,

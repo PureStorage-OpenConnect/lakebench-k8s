@@ -83,8 +83,15 @@ def _capacity_from(
         return cap, False, "user-provided"
     if detect_capacity is None:
         return None, False, ""
+    from lakebench.k8s.target import ContextConflictError
+
     try:
         detected = detect_capacity()
+    except ContextConflictError:
+        # A second context in one process, or a context whose server or CA
+        # changed: the CLI's handler exits 3 (context.changed). Falling back
+        # to the reference table would hide it behind exit 0.
+        raise
     except Exception as e:  # report and fall back to the reference table
         console.print(f"[yellow]Could not detect cluster capacity: {esc(e)}[/yellow]")
         return None, False, ""

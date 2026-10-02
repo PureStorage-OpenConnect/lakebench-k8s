@@ -9,7 +9,13 @@ from unittest import mock
 import pytest
 
 from lakebench.config import LakebenchConfig
-from lakebench.k8s.client import ClusterCapacity, K8sClient
+from lakebench.k8s.client import (
+    CapacityUnknown,
+    ClusterCapacity,
+    FreeCapacity,
+    K8sClient,
+    ScratchCapacity,
+)
 from lakebench.quantity import QuantityError, parse, to_bytes, to_gib, to_millicores
 
 GIB = 1024**3
@@ -126,9 +132,12 @@ def _check(cfg, cores=434, gb=4349, node_cores=40, node_gb=402):
     from lakebench.cli._prerequisites import _check_cluster_capacity
 
     k8s = mock.MagicMock()
-    k8s.get_cluster_capacity.return_value = ClusterCapacity(
-        cores * 1000, gb * GIB, 8, node_cores * 1000, node_gb * GIB
+    cap = ClusterCapacity(cores * 1000, gb * GIB, 8, node_cores * 1000, node_gb * GIB)
+    # The preflight reads free capacity (CC-24): all of it free here.
+    k8s.get_free_capacity.return_value = FreeCapacity(
+        free=cap, allocatable=cap, free_by_node=((node_cores * 1000, node_gb * GIB),)
     )
+    k8s.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")
     with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
         return _check_cluster_capacity(cfg)
 
@@ -167,19 +176,23 @@ def test_unreadable_node_quantity_fails_the_check():
     from lakebench.cli._prerequisites import _check_cluster_capacity
 
     k8s = mock.MagicMock()
-    k8s.get_cluster_capacity.side_effect = QuantityError("'40x' is not a Kubernetes quantity")
+    k8s.get_free_capacity.side_effect = QuantityError("'40x' is not a Kubernetes quantity")
     with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
         result = _check_cluster_capacity(_config())
     assert not result.passed
-    assert "cannot read a resource quantity" in result.message
+    assert "capacity could not be read" in result.message and "40x" in result.message
 
 
-def test_unreachable_cluster_still_skips():
-    from lakebench.cli._prerequisites import _check_cluster_capacity
+def test_unreachable_cluster_refuses_run_and_skips_for_deploy():
+    # run's preflight fails closed (CC-24); deploy, which has no
+    # --skip-preflight, warns and leaves the refusal to run (LB-247).
+    from lakebench.cli._prerequisites import _check_cluster_capacity, deploy_capacity_check
 
     with mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("no cluster")):
-        result = _check_cluster_capacity(_config())
-    assert result.passed and "skipped" in result.message
+        run_check = _check_cluster_capacity(_config())
+        deploy_check = deploy_capacity_check(_config())
+    assert not run_check.passed and "capacity could not be read" in run_check.message
+    assert deploy_check.passed and "skipped" in deploy_check.message
 
 
 def test_thrift_counts_the_pod_not_the_heap():
@@ -218,11 +231,16 @@ def test_bad_node_allocatable_fails_the_real_capacity_read():
     from lakebench.cli._prerequisites import _check_cluster_capacity
 
     node = mock.MagicMock()
+    node.metadata.name = "w1"
     node.metadata.labels = {}
+    node.spec.unschedulable = False
+    node.spec.taints = []
+    node.status.conditions = [mock.MagicMock(type="Ready", status="True")]
     node.status.allocatable = {"cpu": "40", "memory": "402 gigs"}
     client = K8sClient.__new__(K8sClient)
     client._core_v1 = mock.MagicMock()
     client._core_v1.list_node.return_value.items = [node]
+    client._core_v1.list_pod_for_all_namespaces.return_value.items = []
     with mock.patch("lakebench.k8s.get_k8s_client", return_value=client):
         result = _check_cluster_capacity(_config())
     assert not result.passed
@@ -244,7 +262,7 @@ def test_unreadable_config_fails_even_without_the_cluster(cluster):
         patch = mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("down"))
     else:
         k8s = mock.MagicMock()
-        k8s.get_cluster_capacity.return_value = None
+        k8s.get_free_capacity.return_value = CapacityUnknown("listing nodes failed (403)")
         patch = mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s)
     with patch:
         result = _check_cluster_capacity(_config(trino))

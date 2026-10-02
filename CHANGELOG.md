@@ -56,7 +56,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (the page recommends a replicated class); `egress-hosts` lists the hosts
   this config's resolve reads (Maven, PyPI, DuckDB extensions, or the
   configured mirrors) without probing them, and the page describes the
-  mirror keys. Nothing prints these two results yet; the `plan` command will.
+  mirror keys. `lakebench plan` prints both.
 
 ### Breaking changes
 - **`compare` compares stored records and runs nothing.** `lakebench compare
@@ -390,6 +390,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   query is not assessed in `compare` either, and `reproduce` reads it as
   the smaller set it executed. A mix of engines reads
   `compaction=ran(mixed(<op>+<op>))`. See `docs/benchmarking.md`.
+- **`lakebench plan CONFIG...`**, read-only: the components, recipe and
+  support state, the minimum cluster from the one sizing source (the
+  numbers the `run` preflight and the README tables use), the cluster
+  prerequisites and free capacity (exit 4 when one fails, with the
+  `admin install --component` command for a missing shared component), the
+  Polaris client secret's source (never its value), and the hosts outside
+  the cluster the deployment contacts. `--offline`, `--cores/--memory` and
+  `--json` make no cluster call. A config `deploy` would refuse at load is
+  exit 2. Several configs are compared by experiment identity and
+  execution conditions.
 - **Run provenance is complete.** `metrics.json` `provenance` now says how
   lakebench was installed (`install`), and a pip-installed run names the
   commit its wheel was built from (the build writes it into the package;
@@ -532,6 +542,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deploy, run or destroy waiting for the lease to change the watch list now
   waits up to 37.5 min (was 10 min), three holds at that budget; a deploy
   waits no longer than its `--timeout` allows.
+- **The run capacity preflight counts free capacity and fails closed.** It
+  compares the request with what the schedulable nodes can still take
+  (allocatable minus what pods in other namespaces request), not with total
+  allocatable, so a busy cluster that fits only on paper is refused. A
+  node or pod list that cannot be read, a pod on a node the list does not
+  show, or no schedulable node now refuses the run (exit 4, "capacity could
+  not be read") where it used to pass. An untainted control-plane node
+  counts, so a single-node cluster is checked rather than skipped. With
+  scratch enabled the scratch request is compared with the StorageClass's
+  `CSIStorageCapacity`; none published is a warning, recorded as
+  `provenance.preflight.scratch: not_measurable`. A batch or continuous
+  cluster run records `provenance.preflight` (provenance, not identity;
+  `--local` runs have no preflight), and a run with
+  `--skip-preflight` records `capacity: skipped` with the verdict qualifier
+  "capacity not checked". `deploy`'s capacity check reads free capacity
+  too, and sizes against the worker nodes' allocatable as deploy does.
+  When only the pod side cannot be read (a pod list it may not read) it
+  checks the workers' allocatable instead; when it cannot read capacity
+  otherwise (an unreachable cluster, a node list it may not read, no worker
+  or no schedulable node) it skips with a warning (deploy has no
+  `--skip-preflight`), and `run`'s preflight refuses until it can.
+- **`recommend` exits 3 on a context conflict** while reading capacity,
+  instead of falling back to the reference table and exiting 0.
 - **Deploy records its nonce beside the config.** Every `deploy` writes
   the nonce it stamps on the namespace to `.lakebench/<name>.json` first
   (last five kept, under a host-local lock), and the namespace gets
@@ -920,7 +953,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is named, and `admin --controller-tmp-size` no longer takes `1K` or
   `1 Gi`, which Kubernetes rejects too. A config value the check cannot read now fails it (`run` exits
   4) where it used to pass as "Capacity check skipped"; an unreachable
-  cluster still skips it. DuckDB's Spark-style memory (`4g`) is counted
+  cluster skips only `deploy`'s check (the `run` preflight fails closed,
+  above). DuckDB's Spark-style memory (`4g`) is counted
   as the pod deploy renders (`4Gi`).
 - **The capacity check, `config show` and `info` count driver overrides.**
   They read the job profiles only, so `platform.compute.spark.driver_memory`
@@ -1214,6 +1248,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `PYTHONPATH=src python -m lakebench` instead.
 
 ### Known limitations
+- **The capacity preflight sums free capacity across nodes.** Ten nodes
+  with 12 cores free each read as 120 free cores, though each holds one
+  8-core pod; only the largest pod is checked against a single node. The
+  scratch check sums the StorageClass's `CSIStorageCapacity` and ignores
+  `maximumVolumeSize`, and with scratch disabled the executors' node disk
+  is not checked.
 - **Continuous above scale 50 should generate first.** The autosizer sizes
   the datagen Job to about 90% of the CPU left after the always-on pods,
   and the capacity preflight counts it beside the streams, so a continuous

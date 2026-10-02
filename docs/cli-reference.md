@@ -257,6 +257,55 @@ profiles'. Before the first deploy, a
 namespace the Spark Operator does not watch yet is reported as advisory:
 `deploy` adds it to the watch list under the cluster lock.
 
+### plan
+
+Show what each config needs before anything is deployed. Read-only.
+
+```
+lakebench plan CONFIG... [OPTIONS]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--offline` | | `false` | Make no cluster call: size without a cluster |
+| `--cores` | | | Cluster CPU cores to size against (with `--memory`; implies offline) |
+| `--memory` | | | Cluster memory in GB to size against (with `--cores`) |
+| `--name` | | | The deployment name for a config that sets none |
+| `--json` | | `false` | Print the plan as JSON (always offline) |
+
+For each config `plan` prints the components and recipe with their support
+state; the minimum cluster from the same sizing function the `run` capacity
+preflight and the README tables use, with the scratch request ("not
+requested (scratch disabled)" when off); the cluster prerequisites from the
+registry `deploy` checks (`docs/prerequisites.md`) and the run's free
+capacity check; where the Polaris client secret comes from (a `${VAR}`
+reference is named, a value is never printed); and the hosts outside the
+cluster the deployment contacts (the hosts the dependency server resolves
+the jars, wheels and DuckDB extensions from at deploy, which are the
+`egress-hosts` prerequisite's list: Maven Central and its Google mirror,
+PyPI where used, or the `platform.deps` mirrors; the observability chart
+when enabled; the image registries). With several
+configs it then names the experiment-identity and execution-condition
+differences between each one and the first; configs on different cluster
+contexts are planned one at a time (a second context in one process is
+refused, exit 3).
+
+Online, any prerequisite that fails, a scratch StorageClass, Spark Operator
+or Stackable that cannot be checked, or too little free capacity ends with
+exit 4; a missing shared component prints `Next: (cluster admin) lakebench
+admin install --component <component>`. An unreachable cluster is exit 4
+with "use --offline". With `--offline`, `--cores/--memory` or `--json`
+there is no cluster call and prerequisites read "not checked (offline)";
+`--cores/--memory` checks the aggregate only (the node shape is unknown, so
+the largest pod is not checked) and is exit 4 when the config does not
+fit. A config that does not load, or that `deploy` would refuse at load
+(for example a name too long for the names derived from it), is exit 2.
+
+```bash
+lakebench plan lakebench.yaml --offline
+lakebench plan hive.yaml polaris.yaml --cores 434 --memory 4349
+```
+
 ### deploy
 
 Deploy lakehouse infrastructure to Kubernetes.
@@ -276,9 +325,17 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 
 Before it creates anything, deploy runs `run`'s cluster capacity check
 (read-only, without datagen: deploy does not generate) and refuses with exit
-4 when the cluster's allocatable capacity or its largest node cannot hold
-the config's pipeline and always-on pods; a cluster it cannot reach does not
-block it. `--dry-run` prints the result without refusing.
+4 when the cluster's free capacity (allocatable minus what pods in other
+namespaces request) or its largest free node cannot hold the config's
+pipeline and always-on pods, sized against the worker nodes' allocatable
+as the deploy itself sizes. When only the pod side of free capacity cannot
+be read (a pod list it may not read, a pod on a node the list does not
+show) it checks the workers' allocatable instead. When it cannot read
+capacity otherwise (an unreachable cluster, a node list it may not read,
+no worker or no schedulable node) it skips the check with a warning, since
+deploy has no `--skip-preflight` and `run`'s preflight refuses until the
+capacity can be read. A worker node quantity it cannot read refuses.
+`--dry-run` prints the result without refusing.
 
 Deploys components in order: namespace, secrets, S3 buckets, scratch
 StorageClass check (it must already exist; `lakebench admin install
@@ -344,7 +401,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--stage` | `-s` | all | Run a specific stage only (`bronze-verify`, `silver-build`, `gold-finalize`) |
 | `--timeout` | `-t` | auto | Timeout per job in seconds. When omitted: `max(3600, scale * 120)`; the AML workload adds 900 s and never goes below its bronze-verify budget |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
-| `--skip-preflight` | | `false` | Skip prerequisite checks and infrastructure validation, the cluster capacity check included |
+| `--skip-preflight` | | `false` | Skip prerequisite checks (including the capacity check) and infrastructure validation; the record says `capacity: skipped` and the verdict "capacity not checked" |
 | `--skip-deploy` | | `false` | Skip the deploy and the infrastructure readiness check (namespace and components); the read-only prerequisite checks, cluster capacity included, still run and fail the run with exit 4 |
 | `--skip-generate` | | `false` | Skip datagen (refused with `--generate`) |
 | `--regenerate` | | `false` | With `--generate`: clear the datagen prefix before generating, when this deployment owns the bronze bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment does not own. A multi-cycle run clears an owned prefix before cycle 0 without it. Refused without `--generate` or `--generate-only`, and in a local or continuous run. |
@@ -862,6 +919,7 @@ No flags. Prints the installed lakebench version.
 
 ```bash
 lakebench init                        # create config
+lakebench plan                        # what it needs: sizing, prerequisites, egress
 lakebench config validate             # check connectivity
 lakebench deploy --yes                # deploy infrastructure
 lakebench generate --timeout 14400    # generate data (large scales need hours)

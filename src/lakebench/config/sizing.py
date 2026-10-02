@@ -608,6 +608,7 @@ def check_capacity(
     datagen_runs: bool = True,
     check_pod: bool = True,
     sizing_capacity: ClusterCapacity | None | object = SAME_CAPACITY,
+    allocatable: ClusterCapacity | None = None,
 ) -> CapacityVerdict:
     """Can *capacity* hold *cfg*? The one capacity decision: the ``run``
     preflight and ``recommend`` both call it.
@@ -623,8 +624,11 @@ def check_capacity(
     caller that has not resolved the config itself (``info``,
     ``recommend``). ``run`` resolved its config against the capacity it
     fetched (or None when that fetch failed) and passes that, so the plan
-    checked is the one it deploys even if *capacity* differs (a later
+    checked is the one it deploys even if *capacity* differs (the run
     preflight checks free capacity, while ``run`` sizes against the total).
+
+    *allocatable*, when given, says *capacity* is what is free now: each
+    shortfall then names the need, the free amount and the allocatable one.
     """
     from lakebench.config.schema import is_continuous_mode
 
@@ -641,6 +645,20 @@ def check_capacity(
     avail_gb = capacity.total_memory_bytes / gib
     node_cores = capacity.largest_node_cpu_millicores / 1000.0
     node_gb = capacity.largest_node_memory_bytes / gib
+    if allocatable is None:
+        has_cores = f"cluster has {avail_cores:.1f} allocatable"
+        has_gb = f"cluster has {avail_gb:.1f} GB allocatable"
+        node_word = "biggest node has"
+    else:
+        has_cores = (
+            f"cluster has {avail_cores:.1f} free of "
+            f"{allocatable.total_cpu_millicores / 1000.0:.1f} allocatable"
+        )
+        has_gb = (
+            f"cluster has {avail_gb:.1f} GB free of "
+            f"{allocatable.total_memory_bytes / gib:.1f} GB allocatable"
+        )
+        node_word = "the node with the most free memory has"
 
     def _pipeline(spark_v: int, pod_v: float, unit: str) -> str:
         if dg is not None and _ceil(pod_v) > spark_v:
@@ -652,13 +670,13 @@ def check_capacity(
         shortfalls.append(
             f"CPU: need {plan.floor.cpu_cores} cores "
             f"({_pipeline(spark.cpu_cores, dg.pod_cpu_cores if dg else 0, ' cores')} + "
-            f"{co.cpu_cores} {co.label}), cluster has {avail_cores:.1f} allocatable"
+            f"{co.cpu_cores} {co.label}), {has_cores}"
         )
     if plan.floor.memory_gb > avail_gb:
         shortfalls.append(
             f"Memory: need {plan.floor.memory_gb} GB "
             f"({_pipeline(spark.memory_gb, dg.pod_memory_gb if dg else 0, ' GB')} + "
-            f"{co.memory_gb} GB {co.label}), cluster has {avail_gb:.1f} GB allocatable"
+            f"{co.memory_gb} GB {co.label}), {has_gb}"
         )
     pod = plan.largest_pod
     pod_fits = True
@@ -666,13 +684,13 @@ def check_capacity(
         pod_fits = False
         shortfalls.append(
             f"Largest pod ({pod.cpu_from}) needs {_n(pod.cpu_cores, 'core')}, "
-            f"biggest node has {node_cores:.1f}"
+            f"{node_word} {node_cores:.1f}"
         )
     if check_pod and pod.memory_gb > node_gb:
         pod_fits = False
         shortfalls.append(
             f"Largest pod ({pod.memory_from}) needs {pod.memory_gb:g} GB, "
-            f"biggest node has {node_gb:.1f} GB"
+            f"{node_word} {node_gb:.1f} GB"
         )
 
     warnings: list[str] = []
@@ -699,12 +717,19 @@ def check_capacity(
     # budget and warns naming each capped stage, so an aggregate shortfall
     # is fatal only if even the capped request does not fit. A pod that
     # fits no node stays fatal: capping counts does not shrink a pod.
-    if pod_fits and is_continuous_mode(plan.mode):
+    # The run caps against the capacity it sized with (the allocatable
+    # total), not against what is free now, so the capped request is
+    # computed on that base and then compared with *capacity*. With no
+    # sizing capacity (run could not read the cluster) nothing is capped.
+    from lakebench.k8s.client import ClusterCapacity as _Capacity
+
+    budget_base = size_against if isinstance(size_against, _Capacity) else None
+    if pod_fits and is_continuous_mode(plan.mode) and budget_base is not None:
         from lakebench.modules.pipeline_engines.spark.job import streaming_request_under_budget
 
         try:
             capped = streaming_request_under_budget(
-                resolved, capacity.total_cpu_millicores, datagen_running=datagen_runs
+                resolved, budget_base.total_cpu_millicores, datagen_running=datagen_runs
             )
         except Exception as e:  # fall through to the refusal below
             logging.getLogger(__name__).debug("Capped continuous request unavailable: %s", e)

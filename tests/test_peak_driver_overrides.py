@@ -10,7 +10,7 @@ from unittest import mock
 import pytest
 
 from lakebench.config import LakebenchConfig
-from lakebench.k8s.client import ClusterCapacity
+from lakebench.k8s.client import ClusterCapacity, FreeCapacity, ScratchCapacity
 from lakebench.modules.pipeline_engines.spark.job import (
     BATCH_JOB_TYPES,
     STREAMING_JOB_TYPES,
@@ -115,10 +115,13 @@ def test_preflight_counts_the_driver_override():
 
     cfg = _config(driver_memory="64g")
     k8s = mock.MagicMock()
-    # Enough for the default peak (525 + co-resident), not for 570.
-    k8s.get_cluster_capacity.return_value = ClusterCapacity(
-        200_000, 560 * GIB, 8, 64_000, 256 * GIB
+    # Enough for the default peak (525 + co-resident), not for 570; all of
+    # it free (the preflight reads free capacity, CC-24).
+    cap = ClusterCapacity(200_000, 560 * GIB, 8, 64_000, 256 * GIB)
+    k8s.get_free_capacity.return_value = FreeCapacity(
+        free=cap, allocatable=cap, free_by_node=((64_000, 256 * GIB),)
     )
+    k8s.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")
     with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
         result = _check_cluster_capacity(cfg)
     assert not result.passed, result.message

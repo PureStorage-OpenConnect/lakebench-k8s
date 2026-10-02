@@ -179,7 +179,7 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath("run.pass", _C.OK, "`run` finished and its verdict passed"),
     ExitPath("compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like"),
     ExitPath("status.ok", _C.OK, "`status` finds the deployment as configured", planned=True),
-    ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity", planned=True),
+    ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity"),
     # 1
     ExitPath(
         "unhandled_exception",
@@ -435,20 +435,19 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "capacity.shortfall",
         _C.PREREQUISITE,
-        "free cluster capacity is below the run's peak",
-        planned=True,
+        "free cluster capacity is below the run's floor, or its largest pod fits no node",
     ),
     ExitPath(
         "capacity.unknown",
         _C.PREREQUISITE,
-        "capacity could not be read on every node",
-        planned=True,
+        "the run's capacity check could not read the nodes or pods (the check fails closed)",
     ),
     ExitPath(
         "plan.missing_storage_class",
         _C.PREREQUISITE,
-        "`plan` finds the scratch StorageClass missing",
-        planned=True,
+        "`plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, "
+        "Stackable or another check), cannot check one of those three, finds too "
+        "little free capacity, or cannot read a config value the sizing needs",
     ),
     ExitPath(
         "k8s.unreachable",
