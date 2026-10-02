@@ -65,6 +65,10 @@ PINSET_NOT_RECORDED = "not_recorded"
 #: an unresolved digest on one side is not a difference).
 BOTH_SIDES_ONLY = frozenset({"generator digest"})
 
+#: The Architecture key valued with the image digests a run's pods ran
+#: (exp2 only); compared by ``observed_images_equal``.
+OBSERVED_IMAGES_KEY = "observed image digests"
+
 #: The Conditions group, in display order. ``benchmark rounds`` is present
 #: on continuous records only; ``investigator sessions`` is an optional key
 #: (``OPTIONAL_IDENTITY_KEYS``) and not listed here, so default identities
@@ -399,7 +403,7 @@ def classify(exp: Mapping[str, Any], record: Mapping[str, Any] | None = None) ->
         architecture["access paths"] = access_paths(exp)
         observed = (exp.get("lakebench") or {}).get("images_observed")
         if observed:
-            architecture["observed image digests"] = observed
+            architecture[OBSERVED_IMAGES_KEY] = observed
     else:
         architecture["query access path"] = arch.get("query_access_path")
     has_pinset, pinset, notes = dependency_pinset(exp, record)
@@ -513,6 +517,48 @@ def seeds_equal(a: Any, b: Any) -> bool | None:
     return bool(a == b)
 
 
+def _digest(image_id: Any) -> str:
+    """The ``sha256:...`` part of a pod imageID; a registry mirror can
+    report the same image under another repository name."""
+    text = str(image_id)
+    return text.rsplit("@", 1)[-1] if "@" in text else text
+
+
+def observed_images_equal(a: Any, b: Any) -> bool | None:
+    """Whether two runs' observed image digests agree, over the roles both
+    observed. None when there is nothing to compare: a side observed no
+    digest (``"not_observed"``), or the two share no role. Which roles were
+    seen depends on timing (a short stage's executors may never be read),
+    so a role seen on one side only is not a difference."""
+    if not isinstance(a, Mapping) or not isinstance(b, Mapping):
+        return None
+    common = set(a) & set(b)
+    if not common:
+        return None
+    return all(_digest(a[r]) == _digest(b[r]) for r in common)
+
+
+def observed_images_note(a: Any, b: Any) -> str | None:
+    """A note when the observed image digests of a pair were compared on
+    part of the roles, or not at all; None when every role was compared or
+    neither side carries the key (every record from before 1.7)."""
+    if a is None and b is None:
+        return None
+    if not isinstance(a, Mapping) or not isinstance(b, Mapping):
+        return "observed image digests not compared: a side observed none"
+    one_sided = sorted(set(a) ^ set(b))
+    if not set(a) & set(b):
+        return "observed image digests not compared: the runs observed no role in common"
+    if one_sided:
+        return (
+            "observed image digests compared on "
+            + ", ".join(sorted(set(a) & set(b)))
+            + "; not observed on both sides: "
+            + ", ".join(one_sided)
+        )
+    return None
+
+
 def diff_group(a: Classified, b: Classified, group: str, *, skip: Any = ()) -> list[Difference]:
     """Key-by-key differences of one group (System is compared by
     ``system_relation``, not here). A key present on one side only differs;
@@ -529,6 +575,10 @@ def diff_group(a: Classified, b: Classified, group: str, *, skip: Any = ()) -> l
             if seeds_equal(va, vb) is True:
                 continue
             out.append(Difference(group, key, va, vb))
+            continue
+        if key == OBSERVED_IMAGES_KEY:
+            if observed_images_equal(va, vb) is False:
+                out.append(Difference(group, key, va, vb))
             continue
         if (key in ka) != (key in kb) or va != vb:
             out.append(Difference(group, key, va, vb))
@@ -924,6 +974,12 @@ def pair_verdict(
     pinsets = [c.keys(ARCHITECTURE).get("dependency pinset") for c in (ca, cb)]
     if all(p in (None, PINSET_NOT_RECORDED) for p in pinsets):
         notes.append("dependency set not recorded")
+    images_note = observed_images_note(
+        ca.keys(ARCHITECTURE).get(OBSERVED_IMAGES_KEY),
+        cb.keys(ARCHITECTURE).get(OBSERVED_IMAGES_KEY),
+    )
+    if images_note and images_note not in notes:
+        notes.append(images_note)
     diffs = {ARCHITECTURE: arch, CONDITIONS: cond}
 
     def verdict(name: str, step: str, reasons: list[str], attribution: str | None = None):

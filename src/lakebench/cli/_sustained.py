@@ -2909,7 +2909,7 @@ def _run_sustained(
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
-    collector.start_run(run_id, cfg.name, config_snapshot)
+    collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
 
@@ -3084,6 +3084,7 @@ def _run_sustained(
             raise typer.Exit(ExitCode.FAILED)
         print_success("Spark scripts deployed")
         dims = cfg.get_scale_dimensions()
+        collector.record_job_manager(job_manager)
         if skip_generate:
             console.print()
             print_info("Skipping datagen deploy (--skip-generate)")
@@ -3270,6 +3271,7 @@ def _run_sustained(
                     print_error(f"lakebench-{job_name} did not start: {running.message}")
                     pipeline_success = False
                     raise typer.Exit(ExitCode.FAILED)
+                collector.record_scratch(job_name, running.final_status)
         finally:
             for w in stream_watch.values():
                 w.close()
@@ -3284,6 +3286,11 @@ def _run_sustained(
                     }
                     for name, w in stream_watch.items()
                 }
+        collector.observe_images(
+            cfg.get_namespace(),
+            at="streams running",
+            apps={f"lakebench-{n}" for _, n in submitted},
+        )
         # The window in cluster time (pod log clocks), not this host's.
         clock_offset = cluster_clock_offset_seconds()
         from datetime import timedelta as _td
@@ -3814,6 +3821,11 @@ def _run_sustained(
         # still this run's (a redeployment's streams have the same names).
         _stage = "stop-streams"
         _ns_watch.check(time.time() - start)
+        # Images again before the streams stop: a driver or executor that
+        # restarted inside the window may have pulled another digest.
+        collector.observe_images(
+            namespace, at="before stop", apps={f"lakebench-{n}" for _, n in submitted}
+        )
         _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
         for _job_type, job_name in submitted:

@@ -92,6 +92,10 @@ dev = [
     "packaging>=23.0",
     "tomli>=2.0; python_version < '3.11'",
     "moto>=5.0.0",  # AWS mocking for tests
+    # tests/test_provenance_evd5.py builds the wheel the way CI does
+    # (python -m build --no-isolation), so the build hook runs in the suite.
+    "build>=1.0",
+    "hatchling>=1.21",
     "pre-commit>=3.0.0",
 ]
 build = [
@@ -112,8 +116,16 @@ path = "src/lakebench/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/lakebench"]
 
+# Writes lakebench/_build_info.py (the build's git commit) into the wheel and
+# the sdist, so a pip-installed run names the commit it was built from
+# (hatch_build.py, metrics/provenance.py).
+[tool.hatch.build.hooks.custom]
+
 [tool.hatch.build.targets.sdist]
 exclude = [
+    # A git worktree's .git is a file pointing at the repository; an sdist
+    # that carries it unpacks as a checkout of that worktree.
+    ".git",
     ".gitignore",
     ".github/",
     "/datagen_rs/",

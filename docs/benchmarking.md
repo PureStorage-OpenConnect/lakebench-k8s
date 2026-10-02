@@ -815,9 +815,24 @@ The JSON structure includes:
   "run_id": "20260201-143052-a1b2c3",
   "maintenance_policy_id": "m2-2026-09-26",
   "provenance": {
-    "lakebench_version": "1.6.0",
-    "git_sha": "<40-char commit, or null outside a git checkout>",
-    "git_dirty": false
+    "lakebench_version": "1.7.0",
+    "git_sha": "<40-char commit, or null when unknown>",
+    "git_dirty": false,
+    "install": "checkout",
+    "end_sample": { "git_sha": "...", "code_changed_during_run": false },
+    "config_sha256": "<sha256 of the config file>",
+    "config_path": "/abs/path/to/config.yaml",
+    "scripts_sha256": "<sha256 over the Spark scripts ConfigMaps>",
+    "scripts_maps": { "common": "<sha256>" },
+    "deps": "not_recorded",
+    "images_observed": {
+      "spark_driver": "<registry>/spark@sha256:...",
+      "spark_executor": "<registry>/spark@sha256:...",
+      "trino_coordinator": "<registry>/trino@sha256:..."
+    },
+    "scratch_as_ran": {
+      "silver-build": { "size_limit": "300Gi", "storage_class": "px-csi-scratch" }
+    }
   },
   "pipeline_benchmark": {
     "pipeline_mode": "batch",
@@ -838,10 +853,49 @@ The JSON structure includes:
 ```
 
 `maintenance_policy_id` names the table-maintenance policy the run was
-measured under (see `docs/perf-regression-gate.md`); `provenance` records
-the lakebench version and, from a git checkout, the commit and whether
-tracked files had uncommitted changes. Container image versions are in
-`config_snapshot.images`.
+measured under (see `docs/perf-regression-gate.md`). `provenance` records
+what produced the run. The experiment block's `lakebench` copy carries the
+code fields, `deps` and `images_observed`: the dependency pinset
+(`deps.pinset_sha256`) is part of the experiment identity, and `compare`
+reads the observed image digests as an architecture key, comparing each
+role both runs observed (a role seen by one run only, or a run that
+observed none, is not a difference). The rest is provenance only:
+
+- `lakebench_version`, `git_sha`, `git_dirty`, `install` and
+  `tree_sha256`. From a git checkout (`install: checkout`) the commit and
+  whether the package had uncommitted changes; from a pip-installed wheel
+  (`install: wheel`) the commit and tree state the wheel was built from,
+  which the build writes into the package. `unknown` is any other install
+  (the single-file binary), with a null commit. `tree_sha256` hashes the
+  package's files on disk.
+- `end_sample`: the same fields read again when the run ends, and
+  `code_changed_during_run`: true when the package files changed, or the
+  commit, version or install did. An edit inside an installed wheel or an
+  already-modified checkout counts. When the code changed, a support state
+  of `supported` is withdrawn to `unverified`.
+- `config_sha256` (the same value the perf gate checks in
+  `config_snapshot`) and `config_path`, the config file as given, made
+  absolute.
+- `scripts_sha256`, `scripts_maps` and `scripts_files_sha256`: the Spark
+  scripts ConfigMaps the run applied and read back.
+- `deps`: the dependency set the job manager recorded for the run's pods,
+  or `"not_recorded"` when it recorded none.
+- `images_observed`: the image digests this run's pods ran (`imageID` from
+  the pod status): the Spark driver and executors of the run's own
+  applications, and the running Trino coordinator and Spark Thrift server.
+  A batch stage is read while it runs, until a driver and an executor
+  digest are seen (at most four reads, 15 s apart, and once more after the
+  stage when no driver digest was seen); a stage whose driver or executor
+  was never seen
+  is listed in `images_observed_missing`. A continuous run is read when
+  the streams are running and again before they stop. The first digest
+  seen per role is kept; a later different one is listed in
+  `images_observed_changed`. When pods cannot be listed (RBAC) it reads
+  `{"not_observed": "<reason>"}`. The image references the config asked
+  for are in `config_snapshot.images`.
+- `scratch_as_ran`: per Spark job, the executor scratch PVC size and
+  storage class in the SparkApplication as the cluster held it (both null
+  when the job had no scratch PVC).
 
 ### HTML Reports
 

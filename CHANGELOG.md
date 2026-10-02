@@ -145,6 +145,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **Run provenance is complete.** `metrics.json` `provenance` now says how
+  lakebench was installed (`install`), and a pip-installed run names the
+  commit its wheel was built from (the build writes it into the package;
+  before, a wheel recorded no commit). It also records the config file's
+  sha256 and path, the Spark scripts ConfigMaps applied, the dependency set
+  (`"not_recorded"` until one is recorded), the image digests this run's
+  Spark, Trino and Thrift pods actually ran, and each Spark job's scratch
+  PVC as the cluster held it. The code is read again at run end, including
+  a hash of the package files; a run whose lakebench code changed while it
+  ran is not `supported`. See `docs/benchmarking.md`, "Metrics JSON".
 - `[aml]` install extra (`pip install "lakebench-k8s[aml]"`) for running the
   AML reference detector and the local AML gate. It pins numpy, scipy,
   pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster

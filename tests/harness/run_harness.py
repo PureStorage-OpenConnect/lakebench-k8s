@@ -904,6 +904,14 @@ TRACED_ENV_IF_SET = ("LB_CONTINUOUS_RESET", "LB_CONTINUOUS_WINDOW_S", "LB_REGIST
 STREAM_EXECUTORS = {"bronze-ingest": 2, "silver-stream": 4, "gold-refresh": 2}
 
 
+#: What the fake job manager says it applied (a real one hashes the maps).
+FAKE_SCRIPTS_PROVENANCE = {
+    "scripts_sha256": "a" * 64,
+    "scripts_maps": {"common": "b" * 64},
+    "files_sha256": {"common.py": "c" * 64},
+}
+
+
 class FakeJobManager:
     """``SparkJobManager`` stand-in: scripts deploy, submissions succeed."""
 
@@ -914,6 +922,10 @@ class FakeJobManager:
         self._rec = rec
         #: Read (and cleared) by the continuous submit loop.
         self.budget_warnings: list[str] = []
+        #: Run provenance (metrics/provenance.job_manager_fields): the maps
+        #: applied, set by deploy_scripts_configmap; no dependency set.
+        self.scripts_provenance: dict | None = None
+        self.deps: dict | None = None
 
     def engine_name(self) -> str:
         return "spark"
@@ -949,6 +961,7 @@ class FakeJobManager:
     def deploy_scripts_configmap(self, *args, **kwargs) -> bool:
         _checked(self._rec, self._real.deploy_scripts_configmap, *args, **kwargs)
         self._rec.add("JobManager", "deploy_scripts_configmap")
+        self.scripts_provenance = dict(FAKE_SCRIPTS_PROVENANCE)
         return True
 
     def submit_job(self, *args, **kwargs):

@@ -1418,9 +1418,9 @@ def _run_local_mode(
     # Share the run id with datagen pods and Spark drivers (live observability
     # grouping label) via the orchestrator process env.
     os.environ["LB_RUN_ID"] = run_id
-    snapshot = build_config_snapshot(cfg, run_mode="batch", system="local")
+    snapshot = build_config_snapshot(cfg, run_mode="batch", system="local", config_path=config_file)
     snapshot["local"] = True
-    collector.start_run(run_id, cfg.name, snapshot)
+    collector.start_run(run_id, cfg.name, snapshot, config_path=config_file)
     from lakebench.metrics.system_identity import sample_run_start
 
     sample_run_start(collector.current_run, cfg, local=True)
@@ -1973,7 +1973,7 @@ def run(
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
-    collector.start_run(run_id, cfg.name, config_snapshot)
+    collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
     # System identity and cluster load at run start; never raises.
     from lakebench.metrics.system_identity import sample_run_end, sample_run_start
 
@@ -2075,6 +2075,7 @@ def run(
             _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
             raise typer.Exit(ExitCode.FAILED)
         print_success("Spark scripts deployed")
+        collector.record_job_manager(job_manager)
 
         # -- Phase 3/7: Generate data -----------------------------------------------
         console.print()
@@ -2408,14 +2409,25 @@ def run(
                 _last_reported_executors = -1
 
                 _last_heartbeat_ts = job_start
+                # The stage's images are read while it runs (batch
+                # executors are deleted when it ends): metrics/provenance.py.
+                _images = collector.stage_image_watch(
+                    cfg.get_namespace(), f"lakebench-{stage_name}", at=stage_name
+                )
 
-                def on_progress(status, _start=job_start, _hb=[job_start]):  # noqa: B006
+                def on_progress(
+                    status,
+                    _start=job_start,
+                    _hb=[job_start],  # noqa: B006
+                    _watch=_images,
+                ):
                     nonlocal _max_executors, _last_reported_executors, _inflight_state
                     # The monitor reports each state change, the terminal one
                     # too, before it reads the driver log: an interrupt during
                     # that read knows how the application ended.
                     _inflight_state = status.state
                     if status.state == JobState.RUNNING:
+                        _watch.on_status(True, status.executor_count)
                         _max_executors = max(_max_executors, status.executor_count)
                         elapsed = (utc_now() - _start).total_seconds()
                         if status.executor_count != _last_reported_executors:
@@ -2442,6 +2454,8 @@ def run(
                     # Before the log parse and bucket listing below: an
                     # interrupt there must still find the run failed.
                     pipeline_success = False
+                _images.finish()
+                collector.record_scratch(stage_name, result.final_status)
                 # The poll that saw the end, less the driver-log fetch the
                 # monitor did after it.
                 job_observed_end = job_submitted + timedelta(seconds=result.elapsed_seconds)
