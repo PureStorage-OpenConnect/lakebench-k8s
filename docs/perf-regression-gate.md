@@ -226,8 +226,8 @@ compared with itself, or with an older run, proves nothing.
 ## Metrics and tolerances
 
 The metric set and each metric's direction come from the metric registry
-(`metrics/metric_registry.py`) through `lakebench.cli._reproduce`
-(`_classify_direction`), the same classification `lakebench reproduce` uses.
+(`metrics/metric_registry.reproduce_class`), the same classification
+`lakebench reproduce` uses.
 Only the performance band is compared.
 
 | Metric | Direction | Default tolerance |

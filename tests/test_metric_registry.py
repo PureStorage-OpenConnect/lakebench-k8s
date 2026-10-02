@@ -379,7 +379,13 @@ def test_each_bound_kind_caps_the_metrics_it_bounds():
         ),
         (
             {"skipped_rules": {"W3": "rule cap 500 alerts"}},
-            ["time_to_detect_seconds", "data_freshness_seconds"],
+            [
+                "time_to_detect_seconds",
+                "data_freshness_seconds",
+                "composite_qph",
+                "in_stream_composite_qph",
+                "query_qph_Q1",
+            ],
             "sustained",
         ),
         (
@@ -397,6 +403,8 @@ def test_each_bound_kind_caps_the_metrics_it_bounds():
     silver = _bound_kinds(executors=[{"job_type": "silver-build", "cap_hit": True}])
     assert reg.capped_by("gold_seconds", silver, "batch") == []
     assert reg.capped_by("scale_ratio", silver, "batch") == []
+    # Without a mode, against every mode's caps (a record with no mode).
+    assert reg.capped_by("total_core_hours", ["auto-sizing cuts"], None) == ["auto-sizing cuts"]
 
 
 def test_the_trickle_caps_intake_only():

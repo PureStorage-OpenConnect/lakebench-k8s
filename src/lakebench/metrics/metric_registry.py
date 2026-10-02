@@ -29,8 +29,9 @@ direction is ``higher`` or ``lower``.
 ``metrics/experiment._bound_kinds`` writes them; ``*`` matches any job
 type, and ``{job}`` the job type of the stage a key names) that, when they
 bound a run, bound this metric: it is then capped, not infrastructure
-performance. ``capped_by`` takes the trickle and the ML loop cap, which are
-not bound kinds, as ``extra``.
+performance. ``capped_by`` takes the trickle, which is not a bound kind, as
+``extra``. No reader calls ``capped_by`` yet: compare still labels a delta
+capped when any limit bound either run.
 
 Some keys mean different things by mode (a continuous stream stage's
 seconds are the window length; continuous core-hours scale with it): they
@@ -107,11 +108,11 @@ _ALL_WL = frozenset({"customer360", "financial"})
 _AML = frozenset({"financial"})
 
 # Bound kinds (``limits.bound_kinds``) as metrics/experiment._bound_kinds
-# writes them; ``*`` matches any job type. BOUND_TRICKLE and
-# BOUND_ML_LOOP_EXECUTOR_CAP are never bound kinds (the trickle is read from
-# the record, the loop cap sits in the ml_loop block): a reader passes them to
-# ``capped_by`` as ``extra``. The bounds module and the ML loop are to take
-# these names from here.
+# writes them; ``*`` matches any job type. BOUND_TRICKLE is never a bound
+# kind (the trickle is read from the record): a reader passes it to
+# ``capped_by`` as ``extra``. BOUND_ML_LOOP_EXECUTOR_CAP names the ML loop's
+# cap for the loop's rows when they are added. The bounds module and the ML
+# loop are to take these names from here.
 BOUND_EXECUTOR_CAP = "*: executor cap"
 BOUND_EXECUTOR_BUDGET = "*: concurrent executor budget"
 BOUND_AUTOSIZE = "auto-sizing cuts"
@@ -275,7 +276,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _CONT,
         _ALL_WL,
-        (),
+        _AML_CAPS,
         description="Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
     ),
     MetricMeta(
@@ -536,7 +537,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         "performance",
         _CONT,
         _ALL_WL,
-        (),
+        _AML_CAPS,
         description="Median QpH from in-stream benchmark rounds",
     ),
     MetricMeta(
@@ -902,6 +903,7 @@ PATTERNS: tuple[tuple[re.Pattern[str], tuple[MetricMeta, ...]], ...] = (
                 "performance",
                 _CONT,
                 _ALL_WL,
+                _AML_CAPS,
                 description="One query's QpH (3600 / its median seconds)",
             ),
         ),
@@ -1074,10 +1076,10 @@ def capped_by(
     key: str, bound_kinds: Iterable[str], mode: str | None, *, extra: Iterable[str] = ()
 ) -> list[str]:
     """The kinds in *bound_kinds* (``limits.bound_kinds``) and *extra* that
-    cap *key*'s value. *extra* carries the bounds a record states elsewhere:
-    ``BOUND_TRICKLE`` when the trickle held intake, and
-    ``BOUND_ML_LOOP_EXECUTOR_CAP`` from the ml_loop block."""
-    meta = lookup(key, mode)
+    cap *key*'s value; with *mode* None, against every mode's caps. *extra*
+    carries a bound the record states elsewhere: ``BOUND_TRICKLE`` when the
+    trickle held intake."""
+    meta = _mode_free(key) if mode is None else lookup(key, mode)
     if meta is None:
         return []
     return [
