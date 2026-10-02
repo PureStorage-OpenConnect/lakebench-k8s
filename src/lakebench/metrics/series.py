@@ -33,7 +33,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 MANIFEST_SCHEMA = "lb-series/1"
-#: The corpus problem ER-9's rule records when markers give another id v2.
+#: Why a repetition is not a member when its own bronze listing differed.
+CHANGED_REASON = "bronze changed during this repetition"
+#: Why a repetition is not a member when its record observed no listing.
+NOT_OBSERVED_REASON = "bronze was not observed before this repetition was saved"
+#: The corpus problem the identity rule (metrics/corpus_identity.py) records
+#: when this repetition's markers give another id v2 than repetition 1's.
 ID_MISMATCH_PROBLEM = "series corpus id differs from repetition 1"
 
 
@@ -61,6 +66,9 @@ class SeriesContext:
     #: The ``bronze_listing_sha256`` this repetition's own record observed.
     observed_digest: str | None = None
     sealed: bool = False
+    #: A signal arrived during the repetition (even one that only flagged,
+    #: after the record was sealed): the series stops.
+    signalled: bool = False
 
     def seal(self, run_metrics: Any) -> None:
         """Immediately before ``save_run``, after the corpus observation:
@@ -75,6 +83,10 @@ class SeriesContext:
             self.observed_digest = (
                 obs.get("bronze_listing_sha256") if isinstance(obs, Mapping) else None
             )
+            # Persisted whatever the digest: the record is built from it, and
+            # a digest that differs from D1 makes the build record the corpus
+            # problem "bronze changed during this repetition" and keep the
+            # record's own corpus block (ch03 section 6 step 3).
             if self.inherited is not None and isinstance(inputs, dict):
                 inputs["inherited_corpus"] = self.inherited
             self.sealed = True
@@ -106,8 +118,10 @@ def member_of_series(
     inherited verbatim (no markers) or carries the same id v2 computed from
     markers, with no series corpus problem. ``(False, reason)`` otherwise."""
     digest = _observed_digest(record)
+    if digest is None:
+        return False, NOT_OBSERVED_REASON
     if digest != d1:
-        return False, "bronze changed during this repetition"
+        return False, CHANGED_REASON
     corpus = _corpus(record)
     problems = list(corpus.get("problems") or [])
     if ID_MISMATCH_PROBLEM in problems:
@@ -165,6 +179,7 @@ class SeriesManifest:
         verdict: str | None,
         member: bool,
         reason: str | None = None,
+        corpus_changed: bool = False,
     ) -> None:
         entry: dict[str, Any] = {
             "run_id": run_id,
@@ -172,6 +187,7 @@ class SeriesManifest:
             "exit_code": int(exit_code),
             "verdict": verdict,
             "member": bool(member),
+            "corpus_changed": bool(corpus_changed),
         }
         if reason:
             entry["not_member_reason"] = reason

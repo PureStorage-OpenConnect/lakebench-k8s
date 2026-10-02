@@ -92,10 +92,22 @@ class Owned:
 
 @contextmanager
 def interrupt_scope() -> Iterator[None]:
-    """Around one ``run`` (or a whole ``--repeat`` series): on the way out,
-    a SIGINT or SIGTERM handler still owned by a ``RunInterrupt`` (a run
-    whose finally raised before it restored its handlers) is replaced by the
-    handler that instance saved, so nothing outlives the command."""
+    """Around one ``run`` (or a whole ``--repeat`` series). Inside it, a
+    SIGTERM left at its default raises ``KeyboardInterrupt`` like a Ctrl-C,
+    so one that lands outside a run's own handlers (between repetitions, or
+    before a run installs them) still ends the command through its cleanup.
+    On the way out, a handler still owned by a ``RunInterrupt`` (a run whose
+    finally raised before it restored its handlers) is replaced by the
+    handler that instance saved, and SIGTERM gets its default back, so
+    nothing outlives the command."""
+    sigterm_set = False
+    if threading.current_thread() is threading.main_thread():
+        try:
+            if signal.getsignal(signal.SIGTERM) == signal.SIG_DFL:
+                signal.signal(signal.SIGTERM, _sigterm_as_interrupt)
+                sigterm_set = True
+        except (ValueError, OSError) as e:
+            logger.debug("run: cannot handle SIGTERM: %s", e)
     try:
         yield
     finally:
@@ -108,6 +120,16 @@ def interrupt_scope() -> Iterator[None]:
                         owner.restore()
                 except (ValueError, OSError, TypeError) as e:
                     logger.debug("run: could not check the handler for %s: %s", sig, e)
+            if sigterm_set:
+                try:
+                    if signal.getsignal(signal.SIGTERM) is _sigterm_as_interrupt:
+                        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                except (ValueError, OSError) as e:
+                    logger.debug("run: could not restore SIGTERM: %s", e)
+
+
+def _sigterm_as_interrupt(signum: int, _frame: Any) -> None:
+    raise KeyboardInterrupt
 
 
 def signal_name(signum: int) -> str:

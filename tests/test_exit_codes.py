@@ -1459,7 +1459,7 @@ EXPECTED_OUTPUT = {
     "run.verdict_failed": "Local mode is sized",
     "run.interrupted": "Interrupted by SIGINT during silver-build",
     "repeat.no_verified_corpus": "no verified corpus to reuse",
-    "series.corpus_changed": "bronze changed between repetitions",
+    "series.corpus_changed": "bronze changed during or between repetitions",
     "run.args": "--force-reset only applies to a continuous run",
     "run.namespace_gone": "was deleted mid-run; stopping",
     "config.validation": "Config error",

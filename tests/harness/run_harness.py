@@ -305,6 +305,8 @@ class Recorder:
     fresh_bronze: bool = False
     #: The datagen Job this run deployed has not finished.
     datagen_running: bool = False
+    #: Batch applications still running (a stage a timeout left behind).
+    running_apps: set[str] = field(default_factory=set)
     #: The silver-state ConfigMap's data (rebuild epochs) and its version.
     silver_state: dict[str, str] = field(default_factory=dict)
     silver_state_rv: int = 1
@@ -740,6 +742,27 @@ class FakeCustomObjectsApi(_FakeApi):
             }
         # No SparkApplication is left over from an earlier run.
         raise _api_exception(404)
+
+    def list_namespaced_custom_object(self, group, version, namespace, plural, **kw):
+        """This deployment's SparkApplications: streams run until deleted,
+        every other submitted application has finished."""
+        self._rec.add("CustomObjectsApi", "list", plural, namespace)
+        if plural != "sparkapplications" or namespace != self._rec.namespace:
+            raise self._rec.refuse(f"unscripted list {namespace}/{plural}")
+        items = [
+            {
+                "metadata": {"name": name, "uid": uid},
+                "status": {
+                    "applicationState": {
+                        "state": "RUNNING"
+                        if name in self._rec.live_streams or name in self._rec.running_apps
+                        else "COMPLETED"
+                    }
+                },
+            }
+            for name, uid in sorted(self._rec.apps.items())
+        ]
+        return {"items": items}
 
     def delete_namespaced_custom_object(
         self, group, version, namespace, plural, name, body=None, **kw

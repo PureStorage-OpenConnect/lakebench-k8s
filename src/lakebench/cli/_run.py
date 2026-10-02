@@ -3609,6 +3609,9 @@ def _run_once(
                 else ""
             ),
         )
+        if series is not None:
+            # A signal after the save only flagged; the series still stops.
+            series.signalled = bool(_interrupt.received)
         _interrupt.restore()
         if not pipeline_success and not _exception_in_flight:
             # Metrics are saved above for diagnosis; the exit code must still
