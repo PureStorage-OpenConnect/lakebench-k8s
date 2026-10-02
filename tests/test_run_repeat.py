@@ -108,6 +108,7 @@ def test_repeat_three_records_one_series(tmp_path, monkeypatch):
     assert manifest["corpus"]["bronze_bytes"] == 2000
     assert manifest["corpus"]["digest_scope"] == f"runchar-bronze/{SCOPE}"
     assert manifest["corpus"]["from_run_id"] == records[0]["run_id"]
+    assert manifest["corpus"]["stale_bronze"] is None
     assert manifest["stopped_reason"] is None
 
 
@@ -171,6 +172,26 @@ def test_repeat_allow_stale_bronze_only_reaches_repetition_1(tmp_path, monkeypat
     assert result.exit_code == 0, result.output
     assert seen == [True, False, False]
     assert manifest["passed"] == 3
+
+
+def test_repeat_manifest_carries_the_stale_bronze_note(tmp_path, monkeypatch):
+    """Repetition 1 generated over objects already in bronze: D1 hashes them
+    too, so the manifest's corpus says so, not only the records."""
+    import lakebench.cli._series as series_mod
+
+    note = {"bucket": "runchar-bronze", "objects_before": 7, "owned": False}
+    real = series_mod._record
+
+    def record(storage, run_id):
+        rec = real(storage, run_id)
+        if rec is not None and (rec.get("series") or {}).get("index") == 1:
+            rec = {**rec, "datagen": {**(rec.get("datagen") or {}), "stale_bronze": note}}
+        return rec
+
+    monkeypatch.setattr(series_mod, "_record", record)
+    result, rec, records, manifest = _series(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    assert manifest["corpus"]["stale_bronze"] == note
 
 
 def test_repeat_stops_on_bronze_change(tmp_path, monkeypatch):

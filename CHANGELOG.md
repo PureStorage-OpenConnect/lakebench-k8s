@@ -930,8 +930,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   --allow-stale-bronze` still records the note. `run` refuses
   `--allow-stale-bronze` (exit 2, before any cluster call) where no generate
   reads it: without `--generate`, `--generate-only` or a multi-cycle batch
-  run, and with `--local`, `--deploy-only` or a continuous run. A
-  `run --repeat` series passes it to repetition 1 only.
+  run, and with `--local`, `--deploy-only` or a continuous run other than
+  `--generate-only`. A `run --repeat` series passes it to repetition 1
+  only, and its manifest carries repetition 1's note (`corpus.stale_bronze`).
 - **`destroy` clears the kept silver-state's data clock when it empties
   bronze.** With `create_namespace: false`, `lakebench-silver-state`
   survives destroy for its rebuild counters; its `bronze_data_clock` now

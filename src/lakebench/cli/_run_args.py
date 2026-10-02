@@ -177,10 +177,10 @@ RUN_RULES: tuple[RunRule, ...] = (
         lambda a, c: a.allow_stale_bronze and not _generates_bronze(a, c),
         "--allow-stale-bronze only applies when the run generates into bronze: --generate "
         "or a multi-cycle run (batch, not --local), or --generate-only",
-        "add --generate, or drop --allow-stale-bronze",
+        "drop --allow-stale-bronze, or add --generate to a batch run that is not --local",
         "`--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, "
         "`--generate-only` or a multi-cycle batch run take it; not `--local`, `--deploy-only` "
-        "or a continuous run)",
+        "or a continuous run other than `--generate-only`)",
     ),
     RunRule(
         lambda a, c: a.skip_generate and a.include_datagen,

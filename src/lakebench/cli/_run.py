@@ -1647,7 +1647,7 @@ def run(
         typer.Option(
             "--allow-stale-bronze",
             help=(
-                "With --generate (or a multi-cycle run): generate over objects "
+                "With --generate, --generate-only or a multi-cycle batch run: generate over objects "
                 "already in the datagen prefix of a bronze bucket this "
                 "deployment did not create. Rows may be over-counted; "
                 "metrics.json records it (datagen.stale_bronze)."
