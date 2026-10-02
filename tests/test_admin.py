@@ -595,6 +595,38 @@ class TestRepairOperator:
         h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a", "ns-b"])
         assert all(held for _, held in h.calls), h.calls
 
+    def test_a_landed_rollback_with_a_slow_rollout_still_sets(self):
+        """rollback_to returns False when the rollout wait times out even
+        though helm rolled back; the carried namespace must still be set."""
+        h = _Repair(
+            values=["ns-a", "ns-b"],
+            live=["ns-a", "ns-b"],
+            active=("ns-a", "ns-b"),
+            state=_state("pending-upgrade", 5),
+            after={
+                "values": ["ns-a"],
+                "spark-operator-controller": ["ns-a"],
+                "spark-operator-webhook": ["ns-a"],
+            },
+        )
+        h.mgr.good_revisions.return_value = [4]
+        h.revision_lists[4] = ["ns-a"]
+        h.mgr.rollback_to.side_effect = lambda *_a: setattr(h, "rolled_back", True) or False
+        r = h.invoke()
+        assert r.exit_code == 0, r.output
+        h.mgr._set_watch_list_impl.assert_called_once_with(["ns-a", "ns-b"])
+
+    def test_a_failed_helm_rollback_exits_without_a_set(self):
+        h = _Repair(
+            values=["ns-a"], live=["ns-a"], active=("ns-a",), state=_state("pending-upgrade", 5)
+        )
+        h.mgr.good_revisions.return_value = [4]
+        h.revision_lists[4] = ["ns-a"]
+        h.mgr.rollback_to.side_effect = lambda *_a: False
+        r = h.invoke()
+        assert r.exit_code == 1, r.output
+        h.mgr._set_watch_list_impl.assert_not_called()
+
     def test_rollback_to_a_watch_all_revision_is_set_back(self):
         """A watch-all revision cannot crash-loop the operator; after it the
         pre-rollback list is set back rather than left watching everything."""

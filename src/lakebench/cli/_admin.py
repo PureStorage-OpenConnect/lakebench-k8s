@@ -982,7 +982,8 @@ def repair_operator(
     - rolls a release left ``pending-upgrade`` or ``pending-rollback`` (an
       interrupted helm call) back, when the pending revision started at
       least 10 minutes ago by the API server's clock, to the newest deployed
-      revision that names no deleted namespace;
+      revision that names no deleted namespace (when the operator watches
+      every namespace, only to a revision that does too);
     - sets the watch list, with one upgrade, to the namespaces any of the
       three sources lists (before a rollback included) that still exist and
       are Active (``default`` only when nothing else is left: an empty list
@@ -1291,8 +1292,18 @@ def repair_operator(
                         ExitCode.REFUSED,
                     )
                 if not mgr.rollback_to(good):
-                    _fail(f"helm rollback to revision {good} failed; see the log above")
-                print_success(f"rolled {rel} back to revision {good}")
+                    after = mgr.release_state()
+                    if after is None or after.status != "deployed":
+                        _fail(f"helm rollback to revision {good} failed; see the log above")
+                    # The rollback landed but its rollout did not finish in
+                    # time: still set the carried list now, or a namespace
+                    # only the pending revision listed is lost for good.
+                    print_warning(
+                        f"rolled {rel} back to revision {good}, but its rollout did not "
+                        "finish; setting the watch list anyway"
+                    )
+                else:
+                    print_success(f"rolled {rel} back to revision {good}")
                 # The rolled-back revision may lack a namespace the pending
                 # one or a Deployment listed (a killed add): carry them into
                 # the set, filtered to what is still Active.
