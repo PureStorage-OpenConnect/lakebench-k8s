@@ -54,8 +54,10 @@ make check-fast
 That is ruff, the format check and mypy, then the unit tests in parallel
 (`pytest-xdist`, one test file per worker) without the Spark tier and
 without the AML statistics tests marked `slow`, which CI runs in their own
-job. The tests import `src/` of this checkout (`PYTHONPATH=src`), whatever
-is installed, with one worker per CPU; `make check-fast XDIST_WORKERS=8`
+job. The tests import `src/` of this checkout, whatever is installed:
+`pyproject.toml` sets pytest's `pythonpath = ["src"]`, so a bare `pytest`
+does too, and `make check-fast` and `make test` also set `PYTHONPATH=src` for the
+subprocesses some tests start. It runs one worker per CPU; `make check-fast XDIST_WORKERS=8`
 caps the workers on a shared machine, and `PYTHON=python3.11` picks the
 interpreter (default `python3`). `make test` is the same pytest command without the lint and
 type checks. To run the whole unit suite serially, slow tests included, and stop

@@ -201,6 +201,11 @@ ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest imports lakebench from this checkout's src/, ahead of any installed
+# copy: a bare `pytest` in a second worktree tests that worktree's code, not
+# the tree the editable install points at. Subprocesses do not inherit it;
+# `make check-fast` also sets PYTHONPATH=src for those.
+pythonpath = ["src"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short -m 'not e2e and not integration'"
 markers = [
