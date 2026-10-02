@@ -25,12 +25,16 @@ from lakebench.deploy.engine import DeploymentEngine
 from tests.conftest import make_config
 
 
-def _deployer(schema="customer360", create_buckets=True, dry_run=True, allow=False):
+def _deployer(
+    schema="customer360", create_buckets=True, dry_run=True, allow=False, continuous=False
+):
     cfg = make_config(
         architecture={"workload": {"schema": schema, "datagen": {"seed": 43}}},
     )
     cfg.platform.storage.s3.create_buckets = create_buckets
-    return DatagenDeployer(DeploymentEngine(cfg, dry_run=dry_run), allow_stale_bronze=allow)
+    return DatagenDeployer(
+        DeploymentEngine(cfg, dry_run=dry_run), allow_stale_bronze=allow, continuous=continuous
+    )
 
 
 class _FakeS3:
@@ -131,6 +135,68 @@ def test_unowned_bucket_is_not_cleared(monkeypatch):
     with pytest.raises(StaleBronzeRefused, match="--allow-stale-bronze"):
         d._clear_bronze_prefix_if_fresh(0, "customer/interactions")
     assert _FakeS3.instances[0].deleted == []
+
+
+@pytest.mark.parametrize(
+    "schema,prefix", [("customer360", "customer/interactions"), ("financial", "pacs008")]
+)
+def test_continuous_refusal_names_the_continuous_remedy(monkeypatch, schema, prefix):
+    """Continuous datagen never takes --allow-stale-bronze (run refuses the flag
+    there, exit 2), and its reset already cleared the prefix: the refusal says
+    to re-run once no datagen pod is left, not to pass the flag."""
+    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
+    _own(monkeypatch, False)
+    d = _deployer(schema=schema, continuous=True)
+    with pytest.raises(StaleBronzeRefused) as e:
+        d._clear_bronze_prefix_if_fresh(0, prefix)
+    msg = str(e.value)
+    assert f"/{prefix} holds objects" in msg
+    assert "continuous reset cleared the prefix" in msg
+    ns = d.config.get_namespace()
+    assert f"kubectl get pods -n {ns} -l job-name=lakebench-datagen` lists none" in msg
+    assert "cannot prove it may empty" in msg
+    assert "clean bronze" not in msg  # empties the whole bucket; the re-run suffices
+    assert "own datagen does not take --allow-stale-bronze" in msg
+    assert "--force-reset does not change this check" in msg
+    assert "Pass --allow-stale-bronze" not in msg
+    assert _FakeS3.instances[0].deleted == []
+
+
+def test_continuous_empty_prefix_refusal_does_not_suggest_the_flag(monkeypatch):
+    """Unreachable from a continuous run today (the datagen prefix is fixed
+    and non-empty); pinned so the branch cannot start suggesting the flag."""
+    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
+    _own(monkeypatch, True)
+    d = _deployer(continuous=True)
+    with pytest.raises(StaleBronzeRefused, match="prefix is empty") as e:
+        d._clear_bronze_prefix_if_fresh(0, "/")
+    assert "--allow-stale-bronze" not in str(e.value)
+
+
+def test_continuous_run_builds_its_deployer_as_continuous():
+    """The continuous path is the only caller that must pass continuous=True;
+    every batch caller passes the operator's --allow-stale-bronze instead."""
+    import ast
+    import inspect
+
+    from lakebench.cli import _generate, _run, _sustained
+
+    def calls(mod):
+        tree = ast.parse(inspect.getsource(mod))
+        return [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "DatagenDeployer"
+        ]
+
+    sustained = calls(_sustained)
+    assert len(sustained) == 1
+    kw = {k.arg: k.value for k in sustained[0].keywords}
+    assert isinstance(kw.get("continuous"), ast.Constant) and kw["continuous"].value is True
+    for mod in (_run, _generate):
+        for c in calls(mod):
+            names = {k.arg for k in c.keywords}
+            assert "continuous" not in names and "allow_stale_bronze" in names
 
 
 def test_unowned_bucket_with_the_flag_is_written_over(monkeypatch):
