@@ -167,7 +167,8 @@ def load_expected(path: Path) -> dict[str, Any]:
     """``uat/expected-results-<version>.json``: ``{"version", "entries":
     [{workload, workload_version, corpus_id_v2, scale, mode: "batch",
     query_set_id, fingerprints: {query: fp}, alert_set?}], "continuous":
-    [{workload, workload_version, query_set_ids: [...]}]}``."""
+    [{workload, workload_version, query_set_ids: [...], fingerprints:
+    {query: fp} (customer360, required)}]}``."""
     data = json.loads(path.read_text())
     if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
         raise ValueError(f"{path}: no entries list")
@@ -193,7 +194,14 @@ def _results_problems(
         )
         if entry is None:
             return ["no expected query sets for this continuous workload"]
-        rounds = list(record.get("benchmark_rounds") or [])
+        # The rounds as the pipeline benchmark holds them (where the round
+        # recorder writes the executed query set); the top-level copy for a
+        # record without them.
+        rounds = list(
+            (record.get("pipeline_benchmark") or {}).get("benchmark_rounds")
+            or record.get("benchmark_rounds")
+            or []
+        )
         if not rounds or any(not r.get("executed_query_set_id") for r in rounds):
             # The declared query_set_id says what a round was asked to run,
             # not what it ran.
@@ -208,8 +216,11 @@ def _results_problems(
                 if missing
                 else f"rounds ran unexpected query set(s) {', '.join(extra)}"
             ]
-        if entry.get("fingerprints"):
-            # C360 continuous: gold read once the corpus settled.
+        if w.get("name") == "customer360":
+            # C360 continuous: gold read once the corpus settled is compared
+            # like a batch result; the entry must list it.
+            if not entry.get("fingerprints"):
+                return ["no expected fingerprints for this C360 continuous workload"]
             return _fingerprint_problems(exp.get("results") or {}, entry)
         return []
     entry = next(
@@ -350,7 +361,13 @@ def _stage_problems(record: Mapping[str, Any], exp: Mapping[str, Any]) -> list[s
     # says not_checked by design and is held to its query sets instead.
     if mode == "continuous" and workload == "customer360":
         check = (record.get("continuous") or {}).get("result_check") or {}
-        if check.get("not_checked") or not check.get("fingerprints"):
+        fps = check.get("fingerprints") or {}
+        failed = [q for q, fp in fps.items() if fp is None] + list(check.get("failed") or [])
+        if failed:
+            problems.append(
+                f"continuous result check queries failed: {', '.join(sorted(set(map(str, failed))))}"
+            )
+        if check.get("not_checked") or not fps:
             problems.append(
                 f"continuous result check did not run: {check.get('not_checked') or 'no result'}"
             )

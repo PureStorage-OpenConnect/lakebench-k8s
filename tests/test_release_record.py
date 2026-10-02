@@ -58,8 +58,12 @@ def _release(kind: str) -> dict:
         "git_dirty": False,
         "end_sample": {"code_changed_during_run": False},
     }
-    for r in rec.get("benchmark_rounds") or []:
-        r["executed_query_set_id"] = r["query_set_id"]
+    for rounds in (
+        rec.get("benchmark_rounds") or [],
+        (rec.get("pipeline_benchmark") or {}).get("benchmark_rounds") or [],
+    ):
+        for r in rounds:
+            r["executed_query_set_id"] = r["query_set_id"]
     if kind == "aml_cont":
         exp["rules"]["executed"] = sorted(
             set(exp["rules"]["executed"]) | (_rule_targets() - set(_continuous_skipped()))
@@ -94,6 +98,11 @@ def _expected(*recs: dict) -> dict:
                     "workload_version": w["version"],
                     "query_set_ids": sorted(
                         {r["query_set_id"] for r in rec.get("benchmark_rounds") or []}
+                    ),
+                    **(
+                        {"fingerprints": copy.deepcopy(exp["results"]["fingerprints"])}
+                        if w["name"] == "customer360"
+                        else {}
                     ),
                 }
             )
@@ -238,8 +247,9 @@ def test_aml_continuous_only_the_8_query_set_fails(ready):
 
 def test_aml_continuous_only_the_12_query_set_fails(ready):
     rec = _release("aml_cont")
-    for r in rec["benchmark_rounds"]:
-        r["query_set_id"] = r["executed_query_set_id"] = "qs12-x"
+    for rounds in (rec["benchmark_rounds"], rec["pipeline_benchmark"]["benchmark_rounds"]):
+        for r in rounds:
+            r["query_set_id"] = r["executed_query_set_id"] = "qs12-x"
     expected = _expected(_release("aml_cont"))
     expected["continuous"][0]["query_set_ids"] = ["qs12-x", "qs8-32f521a57551"]
     _fails(rec, "never ran query set(s) qs8-32f521a57551", expected)
@@ -363,7 +373,7 @@ def test_extra_rule_ran(ready):
 
 def test_rounds_without_the_executed_query_set(ready):
     rec = _release("c360_cont")
-    for r in rec["benchmark_rounds"]:
+    for r in rec["pipeline_benchmark"]["benchmark_rounds"]:
         r.pop("executed_query_set_id")
     _fails(rec, "rounds do not record the query set they executed")
 
@@ -376,6 +386,16 @@ def test_c360_continuous_fingerprints_compared_when_listed(ready):
     fps[q]["rows"] = -1
     expected["continuous"][0]["fingerprints"] = fps
     _fails(rec, f"query {q} result differs", expected)
+    expected["continuous"][0].pop("fingerprints")
+    _fails(rec, "no expected fingerprints for this C360 continuous workload", expected)
+
+
+def test_c360_continuous_failed_result_queries_refused(ready):
+    rec = _release("c360_cont")
+    check = rec["continuous"]["result_check"]
+    q = sorted(check["fingerprints"])[0]
+    check["fingerprints"][q] = None
+    _fails(rec, f"continuous result check queries failed: {q}")
 
 
 def test_mixed_datagen_images_refused(ready):

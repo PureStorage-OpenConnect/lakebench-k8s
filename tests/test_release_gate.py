@@ -585,3 +585,33 @@ def test_support_record_needs_every_row_at_its_scale_on_the_freeze_tree(frozen, 
     detail = rg.make_support_record_check("v9.9.9")().detail
     assert "no validated run for financial hive-iceberg-spark-trino batch at scale 10" in detail
     assert f"not the freeze {sha[:12]}" in detail
+
+
+def test_post_freeze_version_bump_allowed_other_edits_not(frozen):
+    repo, _sha = frozen
+    init = repo / "src" / "lakebench" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9.dev0"\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "version file before the freeze")
+    sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "uat" / "freeze-9.9.9").write_text(sha + "\n")
+    _git(repo, "commit", "-qam", "move the freeze")
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9"\n')
+    _git(repo, "commit", "-qam", "bump")
+    assert rg.check_freeze().status == rg.PASS, rg.check_freeze().detail
+    init.write_text('"""Lakebench, edited."""\n\n__version__ = "9.9.9"\n')
+    _git(repo, "commit", "-qam", "edit")
+    assert "beyond __version__" in rg.check_freeze().detail
+
+
+def test_release_workflow_runs_the_evidence_checks_on_full_history():
+    import yaml
+
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "release.yml").read_text())
+    gate = wf["jobs"]["gate"]
+    assert gate["steps"][0]["with"]["fetch-depth"] == 0
+    run = next(s["run"] for s in gate["steps"] if "release_gate.py" in str(s.get("run")))
+    only = set(run.split("--only", 1)[1].split()[0].split(","))
+    assert {"records", "support-record", "freeze", "expected-results"} <= only
+    assert "--require-all" in run

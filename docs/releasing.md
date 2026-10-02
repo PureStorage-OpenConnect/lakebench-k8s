@@ -106,7 +106,8 @@ maintainer who tags is still responsible for the content.
 
 ### Release evidence
 
-Four checks read the cited run records themselves
+Four checks hold the release to its evidence; `records` and
+`support-record` read the cited run records themselves
 (`src/lakebench/metrics/release_record.py`). `records`, `freeze` and
 `expected-results` are skipped until the freeze is declared in
 `uat/freeze-<version>` (one line, the 40-hex sha of the freeze commit), and
@@ -129,8 +130,9 @@ all four with the repository's full history.
   pins, with that image's lineage entry); or was bound by an evaluation
   sizing profile or any Lakebench limit in `limits.bound_kinds` the row does
   not allow (none is allowed today). A continuous record must also say which
-  query set each round executed; a C360 continuous record must also match
-  the expected fingerprints when the file lists them; a corpus with
+  query set each round executed; a C360 continuous record must also have a
+  result check in which no query failed and that matches the expected file's
+  fingerprints, which its continuous entry must list; a corpus with
   recorded problems (such as datagen pods on different images) is refused.
 - `support-record` (with `--tag`): `validated_combinations.yaml` lists every
   release-matrix row and was validated on the freeze tree; every run it lists
@@ -139,8 +141,10 @@ all four with the repository's full history.
 - `freeze`: the freeze commit is an ancestor of `HEAD`, the tree is clean,
   and every change after it is in `uat/`, `validated_combinations.yaml`,
   `benchmarks/perf/baselines.yaml` or `docs/benchmarks/examples/`, the
-  `CHANGELOG.md` release heading, or a generated block of `README.md` or a
-  top-level `docs/*.md` file that equals what its generator writes.
+  `CHANGELOG.md` release heading, the `__version__` line of
+  `src/lakebench/__init__.py` (the release bump), or a generated block of
+  `README.md` or a top-level `docs/*.md` file that equals what its generator
+  writes.
 - `expected-results`: `uat/expected-results-<version>.json` exists and its
   last commit comes before the freeze commit; a fingerprint set newer than
   the freeze is refused.

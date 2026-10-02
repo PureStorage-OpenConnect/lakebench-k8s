@@ -461,6 +461,21 @@ def _changelog_heading_only(freeze: str) -> bool:
     return all(ln.startswith("## [") for ln in changed)
 
 
+VERSION_FILE = "src/lakebench/__init__.py"
+
+
+def _version_line_only(freeze: str) -> bool:
+    """Whether the version file changed after *freeze* only in its
+    ``__version__`` line (the release bump)."""
+    rc, out = _git_out("diff", "-U0", freeze, "HEAD", "--", VERSION_FILE)
+    if rc != 0:
+        return False
+    changed = [
+        ln[1:] for ln in out.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))
+    ]
+    return all(ln.startswith("__version__ = ") for ln in changed)
+
+
 def _generated_blocks_only(freeze: str, rel: str) -> str | None:
     """None when *rel* changed since *freeze* only inside its generated
     blocks and each block equals what its generator writes now; else why."""
@@ -498,6 +513,10 @@ def _post_freeze_problems(freeze: str) -> list[str]:
         if path == "CHANGELOG.md":
             if not _changelog_heading_only(freeze):
                 problems.append("CHANGELOG.md changed after the freeze beyond the release heading")
+            continue
+        if path == VERSION_FILE:
+            if not _version_line_only(freeze):
+                problems.append(f"{VERSION_FILE} changed after the freeze beyond __version__")
             continue
         if path == "README.md" or (path.startswith("docs/") and path.count("/") == 1):
             why = _generated_blocks_only(freeze, path)
@@ -606,7 +625,8 @@ def make_support_record_check(tag: str | None) -> Callable[[], Result]:
             if (workload, recipe, support.canonical_mode(mode)) not in record:
                 problems.append(f"no validated entry for {workload} {recipe} {mode}")
         for (workload, recipe, mode), v in sorted(record.items()):
-            if sha and not sha.startswith(str(v.tree)):
+            tree = str(v.tree)
+            if sha and not (re.fullmatch(r"[0-9a-f]{7,40}", tree) and sha.startswith(tree)):
                 problems.append(
                     f"{workload} {recipe} {mode}: validated on tree {v.tree}, not the freeze "
                     f"{sha[:12]}"
