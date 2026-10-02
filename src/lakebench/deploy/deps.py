@@ -224,6 +224,18 @@ class DependencyServerDeployer:
         from kubernetes import client as k8s_client
 
         try:
+            pvc = k8s_client.CoreV1Api().read_namespaced_persistent_volume_claim(
+                m.PVC_NAME, self.namespace
+            )
+        except _api_exception() as e:
+            if _status(e) not in (403, 404):
+                raise
+            pvc = None
+        if pvc is not None and not pvc.metadata.deletion_timestamp:
+            # The class is read only when the PVC is created; the PVC step
+            # warns when it differs from the configured one.
+            return
+        try:
             k8s_client.StorageV1Api().read_storage_class(name)
         except _api_exception() as e:
             if _status(e) == 404:

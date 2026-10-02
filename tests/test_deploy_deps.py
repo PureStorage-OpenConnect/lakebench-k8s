@@ -541,6 +541,24 @@ def test_a_named_storage_class_that_does_not_exist_fails_before_any_object(recor
     assert not rec.mutations()
 
 
+def test_a_deleted_class_does_not_fail_a_deploy_whose_pvc_exists(recording_k8s, monkeypatch):
+    """The class is read only when the PVC is created: a bound PVC on a class
+    deleted since keeps the set, and the redeploy succeeds."""
+    rec = recording_k8s
+    cfg = _cfg(platform={"deps": {"storage_class": "nope"}})
+    engine = _setup(rec, cfg)
+    rec.add(
+        "persistentvolumeclaims",
+        {"metadata": {"name": m.PVC_NAME}, "spec": {"storageClassName": "nope"}},
+        namespace=NS,
+    )
+    request = req.select_request(cfg)
+    Controller(rec, monkeypatch)
+    _show(rec, lambda sha: fake_shown(request))
+    result = DependencyServerDeployer(engine).deploy()
+    assert result.status == DeploymentStatus.SUCCESS, result.message
+
+
 def test_a_timeout_reports_events(recording_k8s, monkeypatch):
     rec = recording_k8s
     monkeypatch.setattr(deps_mod, "READY_TIMEOUT_S", 1)
@@ -1076,11 +1094,16 @@ def test_warnings_do_not_repeat_on_a_retry(recording_k8s, monkeypatch):
     rec = recording_k8s
     cfg = _cfg(platform={"deps": {"storage_class": "px-csi-db"}})
     engine = _setup(rec, cfg)
-    rec.fail("read", "storageclasses", "px-csi-db", status=403)
+    # A warning every deploy repeats: the PVC is on another class.
+    rec.add(
+        "persistentvolumeclaims",
+        {"metadata": {"name": m.PVC_NAME}, "spec": {"storageClassName": "thin-csi"}},
+        namespace=NS,
+    )
     request = req.select_request(cfg)
     Controller(rec, monkeypatch)
     _show(rec, lambda sha: fake_shown(request))
     d = DependencyServerDeployer(engine)
     d.deploy()
     result = d.deploy()
-    assert result.message.count("(403)") == 1
+    assert result.message.count("applies only to a new PVC") == 1
