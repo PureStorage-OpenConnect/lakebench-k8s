@@ -1133,8 +1133,9 @@ class SparkOperatorManager:
                 )
                 return False
             except ContextConflictError as e:
-                # The kubeconfig changed after the helm upgrade: the operator
-                # may be upgraded without its OpenShift patches or restart.
+                # The kubeconfig changed during the sequence: if it was after
+                # the helm upgrade, the operator may be upgraded without its
+                # OpenShift patches or restart.
                 logger.error(
                     "spark-operator watch-list: adding %r stopped -- %s. The operator's "
                     "watch list may be partly modified; once the kubeconfig names the "

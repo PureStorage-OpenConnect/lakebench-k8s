@@ -316,6 +316,24 @@ def test_fallback_fingerprint_refuses_an_entry_rewritten_to_another_server(
     assert api_server_fingerprint(None) is None
 
 
+def test_fallback_fingerprint_reads_an_unchanged_entry_with_a_trailing_slash(
+    tmp_path, monkeypatch
+) -> None:
+    """The fallback compares servers the way the loader strips them."""
+    from lakebench.deploy.ownership import api_server_fingerprint
+
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A + "/"}, current="A")
+    _with_ca(path, b"CA-ONE")
+    point_kubeconfig_at(monkeypatch, path)
+    with patch.object(target_mod, "_kubeconfig_cluster_block", return_value=None):
+        t = ClusterTarget.resolve(None).activate()
+    assert not t.ca_fp_known and t.api_server == SERVER_A
+    fp = api_server_fingerprint(None)
+    assert fp is not None
+    assert fp == target_mod._ca_fingerprint(target_mod._kubeconfig_cluster_block("A"))
+
+
 def test_activate_refuses_a_server_that_changed_during_the_load(kubeconfig) -> None:
     moved = {"server": "https://127.0.0.1:9"}
     with patch.object(target_mod, "_kubeconfig_cluster_block", return_value=moved):

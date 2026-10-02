@@ -181,7 +181,7 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
         # rewritten one would hash another cluster's CA.
         if pinned.in_cluster:
             return _try_incluster_fingerprint()
-        from lakebench.k8s.target import _kubeconfig_cluster_block
+        from lakebench.k8s.target import _ca_fingerprint, _kubeconfig_cluster_block
 
         block = _kubeconfig_cluster_block(str(pinned.context))
         server = str((block or {}).get("server") or "").rstrip("/")
@@ -192,7 +192,8 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
                 pinned.api_server,
             )
             return None
-        context = pinned.context
+        # Hash the entry just checked, not a second read of the file.
+        return _ca_fingerprint(block)
 
     try:
         contexts, active = _kube_config.list_kube_config_contexts()
