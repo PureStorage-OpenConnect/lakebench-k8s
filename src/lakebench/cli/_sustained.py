@@ -2423,6 +2423,27 @@ class NamespaceWatch:
             raise NamespaceGone(reason, elapsed)
 
 
+def _record_not_observed(run_metrics, reason: str) -> None:
+    """The record's corpus observation when the run did not observe it (the
+    namespace went, and its bucket may be a redeployment's): said so, not
+    left absent, which reads as a record from before observations. Never
+    raises."""
+    try:
+        from lakebench.metrics.corpus_identity import MarkerSet
+
+        inputs = (run_metrics.config_snapshot or {}).get("experiment_inputs")
+        if isinstance(inputs, dict):
+            inputs["corpus_observation"] = {
+                "format": 1,
+                "markers": MarkerSet(error=f"corpus not observed: {reason}").to_dict(),
+                "series": None,
+                "bronze_listing_sha256": None,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+    except Exception as e:  # noqa: BLE001 -- evidence, never a save failure
+        logger.warning("Could not record the missing corpus observation: %s", e)
+
+
 def _stop_streams(k8s, namespace: str, submitted: list) -> None:
     console.print("[bold]Stopping continuous jobs...[/bold]")
     for _job_type, job_name in submitted:
@@ -4044,7 +4065,11 @@ def _run_sustained(
         pipeline_success = False
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
-    except typer.Exit:
+    except typer.Exit as e:
+        # Several refusals above exit without clearing the flag; a run that
+        # exits non-zero is never recorded as a success.
+        if e.exit_code:
+            pipeline_success = False
         raise
     except KeyboardInterrupt as e:
         # SIGINT or SIGTERM anywhere (the settle phase can last 30 min). Sealed
@@ -4148,15 +4173,6 @@ def _run_sustained(
             except Exception as e:
                 console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
-            sample_run_end(run_metrics, cfg)
-            # The corpus this run read, once, before the save (corpus id v2).
-            # After an interrupt too: it never raises, and a corpus cut short
-            # records as incomplete, so nothing inherits from it. Not after
-            # the namespace went: its bucket may already be a redeployment's.
-            if _abort is None:
-                from lakebench.metrics.corpus_identity import record_corpus_observation
-
-                record_corpus_observation(run_metrics, cfg)
             if _interrupted is None and _interrupt.late_signal():
                 # A signal since the check above (Prometheus, the scores):
                 # the record still says so. After the save, it is too late.
@@ -4167,6 +4183,19 @@ def _run_sustained(
                 pipeline_success = False
                 run_metrics.success = False
                 run_metrics.interrupted = _interrupted
+            # The end load sample, then the corpus this run read (corpus id
+            # v2), both after an interrupt too: they never raise, the sample is
+            # bounded and reads the nodes and the other namespaces' pods, and
+            # a corpus cut short records as incomplete. After a lost namespace
+            # the sample is still taken, but the corpus is not read: its
+            # bucket may already be a redeployment's.
+            from lakebench.metrics.corpus_identity import record_corpus_observation
+
+            sample_run_end(run_metrics, cfg)
+            if _abort is None:
+                record_corpus_observation(run_metrics, cfg)
+            else:
+                _record_not_observed(run_metrics, _abort["reason"])
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")

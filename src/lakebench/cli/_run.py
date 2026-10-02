@@ -3364,13 +3364,6 @@ def run(
                         )
                     )
 
-            sample_run_end(run_metrics, cfg)
-            # The corpus this run read, once, before the save (corpus id v2).
-            # After an interrupt too: it never raises, and a corpus cut short
-            # records as incomplete, so nothing inherits from it.
-            from lakebench.metrics.corpus_identity import record_corpus_observation
-
-            record_corpus_observation(run_metrics, cfg)
             if _interrupted is None and _interrupt.late_signal():
                 # A signal since the check above (Prometheus, the scorecard):
                 # the record still says so. After the save, it is too late.
@@ -3382,6 +3375,16 @@ def run(
                 pipeline_success = False
                 run_metrics.success = False
                 run_metrics.interrupted = _interrupted
+            # The end load sample, after an interrupt and after a lost
+            # namespace too: bounded, never raises, and it reads the nodes and
+            # the other namespaces' pods, not this run's namespace.
+            sample_run_end(run_metrics, cfg)
+            # The corpus this run read, once, before the save (corpus id v2).
+            # After an interrupt too: it never raises, and a corpus cut short
+            # records as incomplete, so nothing inherits from it.
+            from lakebench.metrics.corpus_identity import record_corpus_observation
+
+            record_corpus_observation(run_metrics, cfg)
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")

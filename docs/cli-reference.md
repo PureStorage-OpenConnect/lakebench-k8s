@@ -328,7 +328,8 @@ invocation created since is left alone. The cleanup takes at most about
 something had already failed before the interrupt, never PASSED), and its
 `interrupted` block names the signal, the stage, and the objects stopped,
 left and skipped. After an interrupt the run does not measure bucket sizes
-or read Prometheus. A signal that arrives while the results are being
+or read Prometheus; it still lists the datagen prefix once to record which
+corpus it read (a corpus cut short is recorded as incomplete). A signal that arrives while the results are being
 gathered at the end of a run does not stop the record being written; the
 record is sealed the same way, at stage `results` (a run that had already
 failed keeps its own exit code). One that arrives after the record is

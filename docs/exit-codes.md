@@ -25,7 +25,7 @@ path yet says so.
 | 12 | `COMPARE_NOT_LIKE_FOR_LIKE` | compare: comparable, not like-for-like. | no command yet |
 | 13 | `COMPARE_CONFOUNDED` | compare: comparable, confounded. | no command yet |
 | 14 | `REQUIREMENT_UNMET` | Requirement unmet: a reproduction drifted outside its tolerance, was asked to verify at another commit, or could only be verified out of band. | `reproduce.drift`, `reproduce.commit_drift` |
-| 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C). | `sigint`, `run.interrupted` |
+| 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM). | `sigint`, `run.interrupted` |
 
 ## Named paths
 
@@ -37,7 +37,7 @@ the CLI down every path listed here and checks the code.
 | `run.pass` | 0 | `run` finished and its verdict passed |
 | `version.ok` | 0 | `lakebench version` prints the version |
 | `run.datagen_timeout` | 1 | datagen did not finish in time; the record says "datagen timed out" in verdict.reasons |
-| `run.namespace_gone` | 1 | the namespace was deleted, or deleted and deployed again, during a continuous `run`; the record names it in abort_reason |
+| `run.namespace_gone` | 1 | the namespace was deleted, or deleted and deployed again, during a continuous `run`, or could not be read three times over a minute; the record names it in abort_reason |
 | `run.verdict_failed` | 1 | `run` finished with a failing verdict |
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `cli.bad_argument` | 2 | a command refuses an argument it checks itself: an unknown recipe, component, stage or example, a missing file, conflicting options |

@@ -335,7 +335,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   signal while the results are gathered no longer loses the record. A
   second Ctrl-C cuts the cleanup short and still writes the record; a third
   stops at once. After an interrupt the run does not measure bucket sizes or
-  read Prometheus. `report --list` shows such a run as Interrupted. Inside
+  read Prometheus; it still lists the datagen prefix once for the corpus
+  observation. `report --list` shows such a run as Interrupted. Inside
   the cluster lease the signal still waits for the shared change to finish
   first. SIGHUP is not handled.
 - **A continuous run notices that its namespace is gone.** It used to keep

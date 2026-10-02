@@ -57,6 +57,13 @@ def test_namespace_gone_exits_within_one_interval(tmp_path, monkeypatch, event, 
     # The streams went with the namespace: nothing is deleted, by uid or by name.
     assert not [c for c in rec.calls if c[1] in ("delete", "delete_custom_resource")]
     assert "interrupted" not in record
+    # Not observed: the bucket may be a redeployment's. Said so, not absent.
+    assert not [c for c in rec.calls if c[:2] == ["S3", "paginate list_objects_v2"]]
+    obs = record["config_snapshot"]["experiment_inputs"]["corpus_observation"]
+    assert obs["markers"]["error"] == f"corpus not observed: {reason}"
+    # The end load sample reads the cluster, not this namespace: still taken.
+    observed = record["config_snapshot"]["experiment_inputs"]["observed"]
+    assert "end" in observed["allocatable"]
 
 
 def test_a_namespace_read_that_fails_twice_is_not_a_reason(tmp_path, monkeypatch):
