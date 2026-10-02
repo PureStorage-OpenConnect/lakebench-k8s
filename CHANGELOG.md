@@ -212,7 +212,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the corpus markers). An exp2 identity drops the generator image tag and
   the `cluster`/`local` string and adds corpus id v2, the query set id,
   the system fingerprint, `architecture.access_paths` and the dependency
-  pinset, so new runs of an unchanged config get new identity digests;
+  pinset, so exp2 runs of an unchanged config get new identity digests;
   stored records keep theirs. The system and the query access path are no
   longer execution conditions: `compare` no longer calls a pair "not
   like-for-like" because they differ. The compaction operation now is
@@ -222,13 +222,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   130953-f8a2cf) is now comparable, not like-for-like, where 1.6 called it
   like-for-like. A perf-gate baseline or reproduction package recorded
   under the other identity version is refused with one message naming
-  both versions.
+  both versions. A pair whose architecture and system both differ is
+  confounded and is no longer called like-for-like, nor is a pair that
+  differs only in its dependency set; a record with a required workload or
+  corpus key missing, or a withheld seed, is not comparable.
+- **System and load at run start and end.** `run` records
+  `experiment.system_identity` (the system fingerprint, sampled at run start)
+  and `experiment.observed`: allocatable CPU and memory of the schedulable
+  workers and the CPU and memory requested by other namespaces' scheduled
+  pods, at run start and end. The load is evidence only (n=1 per sample);
+  nothing compares on it in 1.7. Co-tenant requests include platform
+  pods (DaemonSets, shared operators), so an idle cluster reads above
+  zero; pods not yet scheduled are recorded apart. Sampling reads two node
+  lists, a paged cluster-wide pod list, the API server version and
+  ClusterVersion and sends one HEAD on the bronze bucket at run start, and
+  a node list and the pod list when the record is saved; each sample
+  returns within 120 s and 60 s, and a refused or unfinished read is
+  recorded as `not_observed`. A `--local` run records a local system
+  identity with no part observed, and no load.
 - **A stored experiment block is never rebuilt.** Loading and saving a
   record keeps its block as written; 1.6 rebuilt it with the current code,
   which moved the identity digest of seven stored records.
   `lakebench benchmark` updates only the benchmark half of the stored
-  block (results, iterations, mode) and notes it in
-  `experiment.benchmark_source`.
+  block (batch results, benchmark iterations and mode, samples per query,
+  the "benchmark (not run)" stage entry) and notes it in
+  `experiment.benchmark_source`; that moves the record's identity digest,
+  since it now describes another benchmark.
 ### Fixed
 
 - Trino compaction of the Customer 360 silver table no longer fails with

@@ -461,9 +461,9 @@ class PipelineMetrics:
         """The experiment block: the stored one whenever the record has one,
         whatever its schema, and otherwise built from the snapshot's
         ``experiment_inputs`` (a fresh run, or a v1.6 record saved before the
-        block existed). A stored block is never rebuilt (ch03 section 0.1,
-        S1): rebuilding with newer code re-stamped v1.6 records and moved
-        their identity digests. ``lakebench benchmark`` refreshes only the
+        block existed). A stored block is never rebuilt: rebuilding with
+        newer code re-stamped v1.6 records and moved their identity
+        digests. ``lakebench benchmark`` refreshes only the
         benchmark half of a stored block (``experiment.refresh_benchmark``)."""
         if self.experiment is not None:
             return self.experiment

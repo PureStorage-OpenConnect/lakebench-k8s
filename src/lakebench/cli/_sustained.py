@@ -2745,6 +2745,10 @@ def _run_sustained(
 
     config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    # System identity and cluster load at run start; never raises.
+    from lakebench.metrics.system_identity import sample_run_end, sample_run_start
+
+    sample_run_start(collector.current_run, cfg)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts
         # [] from the start: a run that ends before any maintenance round is
@@ -3906,6 +3910,7 @@ def _run_sustained(
             except Exception as e:
                 console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
 
+            sample_run_end(run_metrics, cfg)
             # The corpus this run read, once, before the save (corpus id v2).
             from lakebench.metrics.corpus_identity import record_corpus_observation
 

@@ -30,8 +30,9 @@ nothing measured under this one):
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
 present: corpus id v2 (from the generator's markers), the run-start
-``identity_version`` and an observed system identity. Otherwise it is
-``exp1`` and names what was missing in ``v2_unavailable``. ``identity()``
+``identity_version`` and a system identity with at least one observed
+part. Otherwise it is ``exp1`` and names what was missing in
+``v2_unavailable``. ``identity()``
 reads exp1 blocks with the frozen ``_identity_v1`` and exp2 blocks with
 ``_identity_v2``; a stored block is never rebuilt
 (``PipelineMetrics.experiment_block``), so no stored id or digest moves.
@@ -41,10 +42,13 @@ Which keys say what (workload, corpus, architecture, system, conditions) is
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
+
+from lakebench.metrics import comparability as _cmp
 
 EXPERIMENT_SCHEMA_V1 = "exp1"
 EXPERIMENT_SCHEMA_V2 = "exp2"
@@ -841,7 +845,15 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
             corpus["id_v2_unavailable"] = NOT_OBSERVED
         if corpus.get("id_v2") is None:
             missing.append("corpus id v2")
-        if sysid is None:
+        from lakebench.metrics.system_identity import CLUSTER_PARTS, observed_parts
+
+        if sysid is None or (
+            not local and not observed_parts(sysid.get("parts") or {}) & set(CLUSTER_PARTS)
+        ):
+            # A cluster run's identity counts only with a part read from the
+            # cluster itself; a stub from a failed sample, or one built from
+            # the config alone, is kept as evidence but is not one. A local
+            # run's identity observes no part by design and is complete.
             missing.append("system identity")
         from lakebench.metrics.comparability import access_paths
 
@@ -854,6 +866,13 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         **({"identity_version": IDENTITY_VERSION} if exp2 else {}),
         **({"v2_unavailable": missing} if v17 and missing else {}),
         **({"system_identity": sysid} if sysid is not None else {}),
+        # Allocatable and co-tenant load at run start and end:
+        # Observational, never compared.
+        **(
+            {"observed": copy.deepcopy(dict(inputs["observed"]))}
+            if isinstance(inputs.get("observed"), Mapping)
+            else {}
+        ),
     }
     return {
         **block,
@@ -881,9 +900,12 @@ def refresh_benchmark(metrics: Any) -> None:
 
     A stored block is never rebuilt, so without this its result
     fingerprints, benchmark iterations and mode would still describe the
-    benchmark that was replaced. Only those keys, the sample count and a
+    benchmark that was replaced. Only those keys, the sample count, the
+    "benchmark (not run)" entry of the skipped stages and a
     ``benchmark_source`` note change; schema, corpus, architecture and every
-    other key stay as stored. A record with no stored block is left alone
+    other key stay as stored. The identity digest moves with the benchmark
+    iterations and mode (and on exp2 the query set id), as the record now
+    describes a different benchmark. A record with no stored block is left alone
     (its block is built from the record when it is saved). For a continuous
     record the results stay its end-of-run result check, which a later
     benchmark does not change."""
@@ -895,7 +917,23 @@ def refresh_benchmark(metrics: Any) -> None:
         return
     mode = exp.get("mode") or "batch"
     if mode != "sustained":
-        exp["results"] = _results(metrics, mode)
+        old = exp.get("results") or {}
+        new = _results(metrics, mode)
+        # Keys another writer put in results stay; the benchmark's own
+        # three are replaced.
+        exp["results"] = {
+            **{
+                k: v
+                for k, v in old.items()
+                if k not in ("query_set_id", "fingerprints", "not_checked")
+            },
+            **new,
+        }
+        stages = exp.get("stages") or {}
+        if isinstance(stages.get("skipped"), list):
+            stages["skipped"] = [
+                x for x in stages["skipped"] if not str(x).startswith("benchmark (")
+            ]
     limits = exp.setdefault("limits", {})
     limits["benchmark_iterations"] = getattr(bench, "iterations", None) or limits.get(
         "benchmark_iterations"
@@ -1029,23 +1067,12 @@ def _identity_v2(exp: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-#: Identity keys that are execution conditions (the Conditions
-#: group): a difference makes a pair comparable but not like-for-like.
-#: ``system`` and ``query access path`` moved out in v1.7 (System and
-#: Architecture groups); ``compaction operation`` is a read-time key
-#: (comparability.compaction_operation), not an identity() key.
-CONDITION_KEYS = frozenset(
-    {
-        "effective maintenance",
-        "compaction operation",
-        "maintenance settings",
-        "benchmark iterations",
-        "benchmark mode",
-        "benchmark rounds",
-        "Lakebench limits that bound",
-    }
-)
-
+#: Identity keys that are execution conditions (the Conditions group of
+#: metrics/comparability.py, its one definition): a difference makes a pair
+#: comparable but not like-for-like. ``system`` and ``query access path``
+#: moved out in 1.7 (System and Architecture groups); ``compaction
+#: operation`` is a read-time key, not an identity() key.
+CONDITION_KEYS = frozenset(_cmp.CONDITION_KEYS)
 
 #: Conditions that are also outcomes of the run: the in-stream round count
 #: depends on how long each round took, so a slower build fits fewer rounds,
@@ -1053,7 +1080,7 @@ CONDITION_KEYS = frozenset(
 #: compare reports a difference (not like-for-like); the perf gate and
 #: reproduce do not refuse on it, or a regression that costs a round would
 #: read as "not comparable" instead of a regression.
-OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds", "investigator sessions"})
+OUTCOME_CONDITION_KEYS = _cmp.OUTCOME_CONDITION_KEYS
 
 
 def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
@@ -1095,8 +1122,13 @@ def identity_digest(record_or_block: Mapping[str, Any]) -> str | None:
 
 
 def experiment_of(record: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """The record's experiment block when it is one this Lakebench reads
+    (exp1, or exp2 with identity version 2), else None: a block of another
+    schema reads as no provenance, as the comparison ladder reads it."""
     exp = (record or {}).get("experiment")
-    return exp if isinstance(exp, Mapping) and exp.get("schema") else None
+    if not isinstance(exp, Mapping) or _cmp.generation(record) == _cmp.LEGACY:
+        return None
+    return exp
 
 
 def diff_identities(ia: Mapping[str, Any], ib: Mapping[str, Any], keys: Any = None) -> list[str]:
@@ -1208,7 +1240,14 @@ def refusals(
     if prov:
         return prov, [], []
     assert ea is not None and eb is not None
-    prov = identity_differences(ea, eb, record_a, record_b)
+    from lakebench.metrics import comparability as cmp
+
+    # Ladder step 0 (identity versions, required keys, a withheld seed).
+    step0 = cmp.pair_verdict([record_a or {}], [record_b or {}], label_a, label_b)
+    prov = list(step0.reasons) if step0.step == "0" else []
+    if _cmp.block_generation(ea) == _cmp.block_generation(eb):
+        # (A version mismatch is already the step 0 line.)
+        prov += identity_differences(ea, eb, record_a, record_b)
     for label, exp in ((label_a, ea), (label_b, eb)):
         prov.extend(f"{label}: {p}" for p in corpus_problems(exp))
     notes: list[str] = []
@@ -1228,15 +1267,25 @@ def refusals(
 def like_for_like(
     record_a: Mapping[str, Any] | None, record_b: Mapping[str, Any] | None
 ) -> list[str]:
-    """Execution conditions that differ between two metrics.json dicts
-    (effective maintenance, the compaction operation). A comparable pair
-    with any is comparable but not like-for-like (DESIGN 6.5). Empty when
-    either has no experiment block (that pair is refused before this
-    matters)."""
+    """Why two metrics.json dicts are not like-for-like: the execution
+    conditions that differ (effective maintenance, the compaction
+    operation and the rest of the Conditions group), preceded by the
+    ladder's confounded line (architecture and system both differ) or its
+    step 7a line (only the dependency set differs). Empty when either has
+    no experiment block (that pair is refused before this matters)."""
     ea, eb = experiment_of(record_a), experiment_of(record_b)
     if ea is None or eb is None:
         return []
-    return condition_differences(ea, eb, record_a, record_b)
+    from lakebench.metrics import comparability as cmp
+
+    out = condition_differences(ea, eb, record_a, record_b)
+    verdict = cmp.pair_verdict([record_a or {}], [record_b or {}])
+    if verdict.verdict == cmp.CONFOUNDED or verdict.step == "7a":
+        # Not conditions, but just as fatal to like-for-like (ladder steps
+        # 6 and 7a): shown with the conditions until compare reads the
+        # ladder itself.
+        out = list(verdict.reasons) + out
+    return out
 
 
 def support_of(record: Mapping[str, Any] | None) -> str:
@@ -1272,8 +1321,21 @@ def stored_identity_refusals(
     version_refusal = _identity_version_refusal(expected_identity, full_actual, actual, what)
     if version_refusal:
         return [version_refusal]
+    unobserved = (
+        _unobserved_system(expected_identity.get("system fingerprint"), actual)
+        if full_actual.get("identity version") == IDENTITY_VERSION
+        else None
+    )
+    if unobserved:
+        return [f"not comparable: {unobserved}; the {what} cannot be matched to a system"]
     actual_identity = {k: v for k, v in full_actual.items() if k not in OUTCOME_CONDITION_KEYS}
-    missing = [k for k in actual_identity if k not in expected_identity]
+    # An optional key (set only when non-default) absent from the reference
+    # is a difference in that key, not an older identity.
+    missing = [
+        k
+        for k in actual_identity
+        if k not in expected_identity and k not in _cmp.OPTIONAL_IDENTITY_KEYS
+    ]
     if missing:
         return [
             f"not comparable: the {what} was recorded with an older experiment identity "
@@ -1310,6 +1372,24 @@ def stored_identity_refusals(
     want = {n: f for n, f in (expected_fingerprints or {}).items() if n not in skip}
     reasons.extend(diff_fingerprints(want, got, what, "run"))
     return reasons
+
+
+def _unobserved_system(expected_fingerprint: Any, actual: Mapping[str, Any]) -> str | None:
+    """Why a v2 reference or run names no observed system, or None. The
+    fingerprint of an identity with no observed part is one constant per
+    system type, so two such runs on different clusters would match."""
+    from lakebench.metrics.system_identity import PARTS, fingerprint_of, observed_parts
+
+    sysid = actual.get("system_identity")
+    if isinstance(sysid, Mapping) and not observed_parts(sysid.get("parts") or {}):
+        return "the run observed no part of its system"
+    blank = {
+        fingerprint_of({p: {"not_observed": ""} for p in PARTS}, system_type=t)
+        for t in ("cluster", "local")
+    }
+    if expected_fingerprint in blank:
+        return "the reference observed no part of its system"
+    return None
 
 
 def _identity_version_refusal(

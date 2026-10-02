@@ -49,11 +49,11 @@ OBSERVATIONAL = "observational"
 
 GROUPS = (WORKLOAD, CORPUS, ARCHITECTURE, SYSTEM, CONDITIONS, OBSERVATIONAL)
 
-#: Generations (ch03 section 0.1). A legacy record has no experiment block.
+#: Record generations. A legacy record has no experiment block.
 LEGACY, EXP1, EXP2 = "legacy", "exp1", "exp2"
 
 #: The value a None corpus role reads as, so None never meets None as an
-#: accidental match (S1). Every exp1 record stores None; exp2 always writes
+#: accidental match. Every exp1 record stores None; exp2 always writes
 #: a role string.
 UNDECLARED_ROLE = "undeclared"
 
@@ -65,9 +65,23 @@ PINSET_NOT_RECORDED = "not_recorded"
 #: an unresolved digest on one side is not a difference).
 BOTH_SIDES_ONLY = frozenset({"generator digest"})
 
+#: The Conditions group, in display order. ``benchmark rounds`` is present
+#: on continuous records only; ``investigator sessions`` is an optional key
+#: (``OPTIONAL_IDENTITY_KEYS``) and not listed here, so default identities
+#: do not gain it.
+CONDITION_KEYS = (
+    "effective maintenance",
+    "compaction operation",
+    "maintenance settings",
+    "benchmark iterations",
+    "benchmark mode",
+    "Lakebench limits that bound",
+    "benchmark rounds",
+)
+
 #: Conditions that are also outcomes of the run: compare reports a
-#: difference (not like-for-like), the perf gate and reproduce do not refuse
-#: on it, and members of one side may differ in it.
+#: difference (not like-for-like); the perf gate and reproduce do not refuse
+#: on it.
 OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds", "investigator sessions"})
 
 
@@ -79,12 +93,13 @@ OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds", "investigator sessions"}
 @dataclass(frozen=True)
 class OptionalKey:
     """One ``OPTIONAL_IDENTITY_KEYS`` row. *extractor* reads the value from
-    an experiment block and, when given, its whole metrics.json record."""
+    an experiment block and, when given, its whole metrics.json record;
+    *owner* names the feature that writes the key."""
 
     group: str
     default: Any
     extractor: Callable[[Mapping[str, Any], Mapping[str, Any] | None], Any]
-    owner_wi: str
+    owner: str
 
 
 def _cycles(exp: Mapping[str, Any], record: Mapping[str, Any] | None) -> int:
@@ -149,13 +164,15 @@ OPTIONAL_IDENTITY_KEYS: dict[str, OptionalKey] = {
 
 def optional_keys(exp: Mapping[str, Any], record: Mapping[str, Any] | None = None) -> dict:
     """``{key: value}`` of the optional identity keys whose value is not the
-    default for *exp*. A reader bug is a missing key, never a crash."""
+    default for *exp*. A value that cannot be read is ``"unreadable: ..."``,
+    which equals nothing a run sets, never the default (reading it as the
+    default would hide a difference)."""
     out: dict[str, Any] = {}
     for name, row in OPTIONAL_IDENTITY_KEYS.items():
         try:
             value = row.extractor(exp, record)
-        except Exception:  # noqa: BLE001 -- unreadable reads as the default
-            continue
+        except Exception as exc:  # noqa: BLE001 -- recorded, never the default
+            value = f"unreadable: {type(exc).__name__}"
         if value != row.default:
             out[name] = value
     return out
@@ -181,21 +198,44 @@ def lakebench_minor(exp: Mapping[str, Any]) -> tuple[tuple[int, int] | None, str
     return (int(m.group(1)), int(m.group(2))), None
 
 
+def written_by_v17(
+    exp: Mapping[str, Any], record: Mapping[str, Any] | None = None
+) -> tuple[bool, list[str]]:
+    """Whether *exp* was written by Lakebench 1.7 or later, and notes.
+
+    Never decided by the schema string alone: an exp1 block can be written
+    by 1.6 or by 1.7. A block is 1.7 when its ``lakebench_version`` parses
+    as 1.7 or later, or when it carries what only 1.7 writes: identity v2,
+    ``v2_unavailable``, or a run-start ``identity_version`` 2 in the
+    record's snapshot. The second rule covers 1.7 development builds, whose
+    package version still reads 1.6."""
+    minor, note = lakebench_minor(exp)
+    notes = [note] if note else []
+    if minor is not None and minor >= (1, 7):
+        return True, notes
+    inputs = ((record or {}).get("config_snapshot") or {}).get("experiment_inputs") or {}
+    v17 = (
+        block_generation(exp) == EXP2
+        or "v2_unavailable" in exp
+        or (isinstance(inputs, Mapping) and inputs.get("identity_version") == 2)
+    )
+    return v17, notes
+
+
 def dependency_pinset(
     exp: Mapping[str, Any], record: Mapping[str, Any] | None = None
 ) -> tuple[bool, Any, list[str]]:
     """``(present, value, notes)`` of the ``dependency pinset`` key.
 
-    Keyed on the writer's ``lakebench_version``, never on the schema string:
-    a record written by 1.7 or later carries the key, valued
-    ``provenance.deps.pinset_sha256`` (the record's, else the block's
-    ``lakebench`` copy of provenance), or ``"not_recorded"`` when that is
-    absent. Below 1.7, or with no parseable version, the key is absent."""
-    minor, note = lakebench_minor(exp)
-    notes = [note] if note else []
-    if minor is None or minor < (1, 7):
+    A record written by 1.7 or later (``written_by_v17``) carries the key,
+    valued ``provenance.deps.pinset_sha256`` (the block's ``lakebench``
+    copy of provenance first, which is what the identity hashes, else the
+    record's), or ``"not_recorded"`` when that is absent. Older records do
+    not carry it."""
+    v17, notes = written_by_v17(exp, record)
+    if not v17:
         return False, None, notes
-    for prov in ((record or {}).get("provenance"), exp.get("lakebench")):
+    for prov in (exp.get("lakebench"), (record or {}).get("provenance")):
         deps = (prov or {}).get("deps") if isinstance(prov, Mapping) else None
         value = (deps or {}).get("pinset_sha256") if isinstance(deps, Mapping) else None
         if value and value != PINSET_NOT_RECORDED:
@@ -222,7 +262,10 @@ def compaction_operation(exp: Mapping[str, Any]) -> str | None:
     engine (``cli/_sustained.py`` and ``deploy/iceberg.py`` build the
     statements per engine): Trino runs ``optimize`` with a 128MB file size
     threshold, Spark Thrift runs Iceberg ``rewrite_data_files`` with its
-    defaults. Delta compaction never runs (``maintenance_policy``)."""
+    defaults. The maintenance policy marks Delta compaction not supported,
+    so the Delta labels apply only to a record that says it ran. The label
+    is an inference from the composition for records that do not name the
+    operation."""
     em = exp.get("effective_maintenance") or {}
     if not isinstance(em, Mapping):
         return None
@@ -265,7 +308,7 @@ def access_paths(exp: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def generation(record: Mapping[str, Any] | None) -> str:
-    """``legacy``, ``exp1`` or ``exp2`` (ch03 section 0.1) of a metrics.json
+    """``legacy``, ``exp1`` or ``exp2`` of a metrics.json
     dict. An unknown schema string reads as exp1 only when it is ``exp1``;
     anything else that is not ``exp2`` is legacy (never comparable)."""
     exp = (record or {}).get("experiment")
@@ -296,6 +339,10 @@ class Classified:
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: ``experiment.system_identity`` when one was observed.
     system_identity: Mapping[str, Any] | None = None
+    #: Written by 1.7 or later (``written_by_v17``): such a record without a
+    #: system identity failed to sample it, and is never assumed to share
+    #: a system.
+    v17: bool = False
     notes: list[str] = field(default_factory=list)
 
     def keys(self, group: str) -> dict[str, Any]:
@@ -357,6 +404,7 @@ def classify(exp: Mapping[str, Any], record: Mapping[str, Any] | None = None) ->
         architecture["query access path"] = arch.get("query_access_path")
     has_pinset, pinset, notes = dependency_pinset(exp, record)
     out.notes += notes
+    out.v17 = written_by_v17(exp, record)[0]
     if has_pinset:
         architecture["dependency pinset"] = pinset
 
@@ -367,16 +415,20 @@ def classify(exp: Mapping[str, Any], record: Mapping[str, Any] | None = None) ->
         "system fingerprint": (out.system_identity or {}).get("fingerprint"),
     }
 
-    conditions: dict[str, Any] = {
+    values = {
         "effective maintenance": (exp.get("effective_maintenance") or {}).get("id"),
         "compaction operation": compaction_operation(exp),
         "maintenance settings": exp.get("maintenance_settings"),
         "benchmark iterations": limits.get("benchmark_iterations"),
         "benchmark mode": limits.get("benchmark_mode"),
         "Lakebench limits that bound": list(limits.get("bound_kinds") or []),
+        "benchmark rounds": limits.get("benchmark_rounds"),
     }
-    if exp.get("mode") == "sustained":
-        conditions["benchmark rounds"] = limits.get("benchmark_rounds")
+    conditions = {
+        k: values[k]
+        for k in CONDITION_KEYS
+        if k != "benchmark rounds" or exp.get("mode") == "sustained"
+    }
 
     groups = {
         WORKLOAD: workload,
@@ -411,9 +463,14 @@ REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
-def missing_required(c: Classified) -> list[str]:
-    """The ``REQUIRED_KEYS`` that are None on *c* (ladder step 0)."""
+def missing_required(c: Classified, *, results: bool = True) -> list[str]:
+    """The ``REQUIRED_KEYS`` that are None on *c* (ladder step 0). The query
+    set id is required only of a run whose results were checked
+    (*results*): a run with no benchmark has none, and reads NOT
+    ESTABLISHED at step 4, not identity incomplete."""
     keys = list(REQUIRED_KEYS["all"]) + list(REQUIRED_KEYS.get(c.generation, ()))
+    if not results:
+        keys = [k for k in keys if k != "query set id"]
     if c.keys(WORKLOAD).get("workload") == "financial":
         keys += list(REQUIRED_KEYS["financial"])
     values = {**c.keys(WORKLOAD), **c.keys(CORPUS)}
@@ -478,16 +535,29 @@ def diff_group(a: Classified, b: Classified, group: str, *, skip: Any = ()) -> l
     return out
 
 
+UNOBSERVED = "unobserved"
+
+#: How strongly a relation says "not one system", for folding several.
+_RELATION_ORDER = {"same": 0, "unknown": 1, UNOBSERVED: 2, "different": 3}
+
+
 def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
-    """``("same" | "different" | "unknown", note)`` for the System group.
+    """``(relation, note)`` for the System group, the relation one of
+    ``same``, ``different``, ``unobserved`` or ``unknown``.
 
     Different system strings (cluster against local) are different. With
     no fingerprint on either side (every exp1 record from before 1.7) the
-    systems are assumed the same, with a note. A fingerprint on one side
-    only is different. With both, ``system_identity.same_system`` decides
-    (equal over the parts both observed, the API server CA among them);
-    two observations that agree on every common part but cannot show they
-    are one cluster are ``unknown``."""
+    systems are assumed the same, with a note. With both,
+    ``system_identity.same_system`` decides (equal over the parts both
+    observed, the API server CA among them), and observations that differ
+    on a common part are different. ``unobserved`` is a pair nothing could
+    be compared for: a fingerprint on one side only, a 1.7 record that did
+    not sample its system, or cluster observations with no part in common;
+    the ladder treats it as different, but never names a system
+    differential on it. ``unknown``, with the reason, is the case in
+    between: cluster observations that agree on every common part but not
+    on the CA, or two local runs (which record no part). The ladder reads
+    ``unknown`` as the same system with the note, and never as a repeat."""
     from lakebench.metrics.system_identity import common_fingerprints, same_system
 
     sa, sb = a.keys(SYSTEM).get("system"), b.keys(SYSTEM).get("system")
@@ -495,10 +565,15 @@ def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
         return "different", f"system {sa!r} vs {sb!r}"
     ia, ib = a.system_identity, b.system_identity
     if ia is None and ib is None:
+        unsampled = [c.run_id or "?" for c in (a, b) if c.v17]
+        if unsampled:
+            # A 1.7 run without one failed to sample it: nothing says where
+            # it ran.
+            return UNOBSERVED, "system identity not sampled on " + ", ".join(unsampled)
         return "same", "system identity not recorded; assumed the same"
     if ia is None or ib is None:
         missing = a.run_id if ia is None else b.run_id
-        return "different", f"system identity recorded on one side only (not on {missing})"
+        return UNOBSERVED, f"system identity recorded on one side only (not on {missing})"
     if same_system(ia, ib):
         return "same", None
     fa, fb, keys = common_fingerprints(ia, ib)
@@ -507,10 +582,385 @@ def system_relation(a: Classified, b: Classified) -> tuple[str, str | None]:
             "different",
             f"system fingerprint differs ({ia.get('fingerprint')} vs {ib.get('fingerprint')})",
         )
-    if sa == "local":
-        return "same", "local runs: system compared on " + (", ".join(keys) or "no part")
+    if not keys:
+        if sa == "local":
+            return "unknown", "system identity not established: local runs record no part"
+        return UNOBSERVED, "system identity not comparable: no part observed on both sides"
     return "unknown", (
         "system identity not established: the observations agree on "
         + (", ".join(keys) or "no part")
         + " but not on the API server CA"
     )
+
+
+# ---------------------------------------------------------------------------
+# The ladder: two sides of stored records, one verdict
+# ---------------------------------------------------------------------------
+
+NOT_COMPARABLE = "NOT COMPARABLE"
+NOT_ESTABLISHED = "NOT ESTABLISHED"
+CONFOUNDED = "CONFOUNDED"
+NOT_LIKE_FOR_LIKE = "NOT LIKE-FOR-LIKE"
+LIKE_FOR_LIKE = "LIKE-FOR-LIKE"
+
+#: The code each verdict exits with (TUD 7.6).
+VERDICT_CODES = {
+    NOT_COMPARABLE: 10,
+    NOT_ESTABLISHED: 11,
+    NOT_LIKE_FOR_LIKE: 12,
+    CONFOUNDED: 13,
+    LIKE_FOR_LIKE: 0,
+}
+
+#: Record verdict statuses a side may not contain (ladder step 1).
+_EXCLUDED_STATUSES = ("FAILED", "INTERRUPTED", "VOID")
+
+
+@dataclass
+class PairVerdict:
+    """What ``pair_verdict`` decided, and why."""
+
+    verdict: str
+    step: str
+    reasons: list[str] = field(default_factory=list)
+    #: Between-side differences by group (filled from step 6 on, and for
+    #: the Workload and Corpus groups at step 3).
+    differences: dict[str, list[Difference]] = field(default_factory=dict)
+    #: ``same``, ``different``, ``unobserved`` or ``unknown``
+    #: (``system_relation``); None
+    #: when the ladder stopped before the System group was read.
+    system: str | None = None
+    #: For LIKE-FOR-LIKE: architecture differential, system differential,
+    #: repeat, or "system not established".
+    attribution: str | None = None
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def code(self) -> int:
+        return VERDICT_CODES[self.verdict]
+
+    @property
+    def comparable(self) -> bool:
+        return self.verdict in (CONFOUNDED, NOT_LIKE_FOR_LIKE, LIKE_FOR_LIKE)
+
+    def keys(self, group: str) -> list[str]:
+        return [d.key for d in self.differences.get(group, [])]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "verdict": self.verdict,
+            "code": self.code,
+            "step": self.step,
+            "comparable": self.comparable,
+            "reasons": list(self.reasons),
+            "differences": {
+                g: [{"key": d.key, "a": d.a, "b": d.b} for d in ds]
+                for g, ds in self.differences.items()
+                if ds
+            },
+            "system": self.system,
+            "attribution": self.attribution,
+            "notes": list(self.notes),
+        }
+
+
+def _rid(record: Mapping[str, Any]) -> str:
+    return str(record.get("run_id") or "unknown run")
+
+
+def _seed_withheld(value: Any) -> bool:
+    return isinstance(value, Mapping) and value.get("seed_ref") is None
+
+
+def _first_reason(record: Mapping[str, Any]) -> str | None:
+    reasons = (record.get("verdict") or {}).get("reasons") or []
+    return str(reasons[0]) if reasons else None
+
+
+def _results_differences(
+    ea: Mapping[str, Any], eb: Mapping[str, Any], la: str, lb: str
+) -> list[str]:
+    """Step 5: a different query set or a per-query result mismatch (the
+    alert-set fingerprint joins here once it is recorded)."""
+    from lakebench.metrics.experiment import fingerprint_differences
+
+    qa = (ea.get("results") or {}).get("query_set_id")
+    qb = (eb.get("results") or {}).get("query_set_id")
+    out = [f"benchmark query sets differ ({qa} vs {qb})"] if qa != qb else []
+    return out + fingerprint_differences(ea, eb, la, lb)
+
+
+def _member_passed(record: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """Whether a record is a passed run, and the status it reads. The
+    strictest of the stored verdict (or ``success`` for a record without
+    one) and, once the tree has it, the verdict recomputed from the record
+    (``metrics.verdict.verdict_from_record``); a reader never promotes."""
+    from lakebench.metrics import verdict as verdict_mod
+
+    status = verdict_mod.verdict_status(record)
+    ok = status not in _EXCLUDED_STATUSES and verdict_mod.passed(record)
+    recompute = getattr(verdict_mod, "verdict_from_record", None)
+    if ok and recompute is not None:
+        again = recompute(record)
+        again_status = getattr(again, "status", None) or (
+            again.get("status") if isinstance(again, Mapping) else None
+        )
+        if again_status != "PASSED":
+            return False, f"recomputed {again_status}"
+    return ok, status
+
+
+def _digests(members: list[Classified]) -> set[Any]:
+    return {c.keys(CORPUS).get("generator digest") for c in members} - {None}
+
+
+def pair_verdict(
+    side_a: list[Mapping[str, Any]],
+    side_b: list[Mapping[str, Any]],
+    label_a: str = "A",
+    label_b: str = "B",
+) -> PairVerdict:
+    """The comparison verdict of two sides of metrics.json dicts, each side
+    one or more runs of one experiment (the comparison ladder, first match
+    wins):
+
+    0. members of different identity versions, or a required Workload or
+       Corpus key None (or a withheld seed) on any member: NOT COMPARABLE;
+    1. a side with a legacy, FAILED, INTERRUPTED or void member, or no
+       member: NOT COMPARABLE;
+    2. a side whose members differ in a Workload, Corpus, Architecture,
+       System or Conditions key, in their generator digests, or in
+       results: NOT COMPARABLE, the side is not one experiment;
+    3. Workload or Corpus differs between the sides (generator digests over
+       every member), or a member has corpus problems: NOT COMPARABLE;
+    4. results not established on a member: NOT ESTABLISHED;
+    5. different query sets or results: NOT COMPARABLE;
+    6. Architecture and System both differ: CONFOUNDED;
+    7. Conditions differ: NOT LIKE-FOR-LIKE;
+    7a. only the dependency pinset differs in Architecture: NOT
+       LIKE-FOR-LIKE, same composition on different dependency sets;
+    8. LIKE-FOR-LIKE, attributed to the architecture, the system, a
+       repeat, or "system not established".
+
+    A System that cannot be shown to be one or two systems (``unknown`` in
+    ``system_relation``) reads as the same system with its note; it is never
+    a repeat.
+    """
+    from lakebench.metrics.experiment import corpus_problems, results_established
+
+    sides = ((label_a, list(side_a)), (label_b, list(side_b)))
+    classified: dict[str, list[Classified]] = {label_a: [], label_b: []}
+
+    # Step 0: identity versions and required keys, over members with a block.
+    gens: dict[str, set[str]] = {label_a: set(), label_b: set()}
+    incomplete: list[str] = []
+    for label, members in sides:
+        for rec in members:
+            if generation(rec) == LEGACY:
+                continue
+            exp = rec["experiment"]
+            c = classify(exp, rec)
+            classified[label].append(c)
+            gens[label].add(c.generation)
+            checked = results_established(exp) is True
+            for key in missing_required(c, results=checked):
+                incomplete.append(f"identity incomplete: {key} not recorded on {_rid(rec)}")
+            if _seed_withheld(c.keys(CORPUS).get("seed")):
+                incomplete.append(f"identity incomplete: seed withheld on {_rid(rec)}")
+    for label, _members in sides:
+        if len(gens[label]) > 1:
+            return PairVerdict(
+                NOT_COMPARABLE, "0", [f"side {label} mixes identity v1 and v2 records"]
+            )
+    ga, gb = gens[label_a], gens[label_b]
+    if ga and gb and ga != gb:
+        va, vb = (1 if g == {EXP1} else 2 for g in (ga, gb))
+        return PairVerdict(
+            NOT_COMPARABLE,
+            "0",
+            [f"{label_a} was recorded with identity v{va} and {label_b} with v{vb}"],
+        )
+    if incomplete:
+        return PairVerdict(NOT_COMPARABLE, "0", incomplete)
+
+    # Step 1: every member a passed run with a block.
+    failed: list[str] = []
+    for label, members in sides:
+        if not members:
+            failed.append(f"side {label} has no run")
+        for rec in members:
+            if generation(rec) == LEGACY:
+                failed.append(f"{label} run {_rid(rec)} predates the experiment block; re-run it")
+                continue
+            ok, status = _member_passed(rec)
+            if not ok:
+                why = _first_reason(rec)
+                failed.append(
+                    f"{label} run {_rid(rec)} did not pass"
+                    + (f" ({why})" if why else f" ({status or 'success false'})")
+                    + "; fix it and re-run"
+                )
+    if failed:
+        return PairVerdict(NOT_COMPARABLE, "1", failed)
+
+    notes: list[str] = []
+    for label, _members in sides:
+        for c in classified[label]:
+            notes += [n for n in c.notes if n not in notes]
+
+    # Step 2: each side is one experiment. The System is checked over every
+    # pair of members (same_system is not transitive); the rest against the
+    # first member, whose keys equality makes transitive.
+    for label, members in sides:
+        cs = classified[label]
+        for i, ci in enumerate(cs):
+            for cj, rj in zip(cs[i + 1 :], members[i + 1 :], strict=True):
+                pair_rel, pair_why = system_relation(ci, cj)
+                if pair_rel in ("different", UNOBSERVED):
+                    return PairVerdict(
+                        NOT_COMPARABLE,
+                        "2",
+                        [
+                            f"side {label} is not one experiment "
+                            f"({_rid(members[i])} vs {_rid(rj)}):",
+                            f"system: {pair_why}",
+                        ],
+                        notes=notes,
+                    )
+                if pair_why and pair_why not in notes:
+                    notes.append(pair_why)
+    for label, members in sides:
+        first, first_rec = classified[label][0], members[0]
+        for c, rec in zip(classified[label][1:], members[1:], strict=True):
+            within: list[str] = []
+            for group in (WORKLOAD, CORPUS, ARCHITECTURE, CONDITIONS):
+                within += [str(d) for d in diff_group(first, c, group)]
+            within += _results_differences(
+                first_rec["experiment"], rec["experiment"], _rid(first_rec), _rid(rec)
+            )
+            if within:
+                return PairVerdict(
+                    NOT_COMPARABLE,
+                    "2",
+                    [f"side {label} is not one experiment ({_rid(first_rec)} vs {_rid(rec)}):"]
+                    + within,
+                    notes=notes,
+                )
+        digests = _digests(classified[label])
+        if len(digests) > 1:
+            return PairVerdict(
+                NOT_COMPARABLE,
+                "2",
+                [
+                    f"side {label} is not one experiment:",
+                    f"generator digest differs ({', '.join(sorted(map(str, digests)))})",
+                ],
+                notes=notes,
+            )
+
+    ca, cb = classified[label_a][0], classified[label_b][0]
+    ea = side_a[0]["experiment"]
+
+    # Step 3: one workload on one corpus.
+    identity_diffs = {g: diff_group(ca, cb, g) for g in (WORKLOAD, CORPUS)}
+    digests = _digests(classified[label_a] + classified[label_b])
+    if len(digests) > 1 and not any(d.key == "generator digest" for d in identity_diffs[CORPUS]):
+        da, db = _digests(classified[label_a]), _digests(classified[label_b])
+        identity_diffs[CORPUS].append(
+            Difference(CORPUS, "generator digest", sorted(map(str, da)), sorted(map(str, db)))
+        )
+    problems = [
+        f"{label}: {p}"
+        for label, members in sides
+        for rec in members
+        for p in corpus_problems(rec["experiment"])
+    ]
+    if any(identity_diffs.values()) or problems:
+        return PairVerdict(
+            NOT_COMPARABLE,
+            "3",
+            [str(d) for ds in identity_diffs.values() for d in ds] + problems,
+            differences=identity_diffs,
+            notes=notes,
+        )
+
+    # Step 4: results checked on every member.
+    unestablished = [
+        f"{label} run {_rid(rec)}: {established}"
+        for label, members in sides
+        for rec in members
+        if (established := results_established(rec["experiment"])) is not True
+    ]
+    if unestablished:
+        return PairVerdict(NOT_ESTABLISHED, "4", unestablished, notes=notes)
+
+    # Step 5: the same results, every member of B against A's first (step 2
+    # already holds each side's members to its own first).
+    different = []
+    for rec in side_b:
+        lb = label_b if len(side_b) == 1 else f"{label_b} run {_rid(rec)}"
+        different += _results_differences(ea, rec["experiment"], label_a, lb)
+    if different:
+        return PairVerdict(NOT_COMPARABLE, "5", different, notes=notes)
+
+    arch = diff_group(ca, cb, ARCHITECTURE)
+    cond = diff_group(ca, cb, CONDITIONS)
+    # The System relation of the pair is the weakest link over every member
+    # of A against every member of B (same_system is not transitive), and
+    # no stronger than "unknown" when a side's members were only unknown.
+    rel, rel_note = "same", None
+    for a_c in classified[label_a]:
+        for b_c in classified[label_b]:
+            r, n = system_relation(a_c, b_c)
+            if _RELATION_ORDER[r] > _RELATION_ORDER[rel]:
+                rel, rel_note = r, n
+            if n and n not in notes and r == "same":
+                notes.append(n)
+    if rel == "same" and any("not established" in n for n in notes):
+        rel = "unknown"
+    why = rel_note or ""
+    if rel_note and rel_note not in notes:
+        notes.append(rel_note)
+    pinsets = [c.keys(ARCHITECTURE).get("dependency pinset") for c in (ca, cb)]
+    if all(p in (None, PINSET_NOT_RECORDED) for p in pinsets):
+        notes.append("dependency set not recorded")
+    diffs = {ARCHITECTURE: arch, CONDITIONS: cond}
+
+    def verdict(name: str, step: str, reasons: list[str], attribution: str | None = None):
+        return PairVerdict(
+            name, step, reasons, diffs, system=rel, attribution=attribution, notes=notes
+        )
+
+    # Step 6: architecture and system both differ.
+    if arch and rel in ("different", UNOBSERVED):
+        return verdict(
+            CONFOUNDED,
+            "6",
+            [f"architecture and system both differ ({', '.join(d.key for d in arch)}; {why})"],
+        )
+    # Step 7: conditions differ.
+    if cond:
+        return verdict(NOT_LIKE_FOR_LIKE, "7", [str(d) for d in cond])
+    # Step 7a: same composition, different dependency sets.
+    if [d.key for d in arch] == ["dependency pinset"]:
+        unrecorded = [
+            c.run_id or "?"
+            for c in (ca, cb)
+            if c.keys(ARCHITECTURE).get("dependency pinset") in (None, PINSET_NOT_RECORDED)
+        ]
+        reason = (
+            "same composition, different dependency sets (dependency pinset differs)"
+            if not unrecorded
+            else "same composition; the dependency set is not recorded on " + ", ".join(unrecorded)
+        )
+        return verdict(NOT_LIKE_FOR_LIKE, "7a", [reason])
+    # Step 8.
+    if arch:
+        attribution = "architecture differential"
+    elif rel == "different":
+        attribution = "system differential"
+    elif rel in ("unknown", UNOBSERVED):
+        attribution = "system not established"
+    else:
+        attribution = "repeat"
+    return verdict(LIKE_FOR_LIKE, "8", [], attribution)
