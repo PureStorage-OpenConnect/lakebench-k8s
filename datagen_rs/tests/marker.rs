@@ -444,3 +444,15 @@ fn reference_only_pod_writes_no_marker() {
     assert!(generate(Some(&dir), &[], &a).status.success());
     assert!(markers(&dir).is_empty());
 }
+
+#[test]
+fn print_resolved_args_comes_after_every_check() {
+    // A C360 cycle whose row ids overflow is refused by the run; the print
+    // must refuse it too rather than hash arguments the run would not take.
+    let mut a = c360(&["--cycle", "8388000", "--cycles", "8388607"]);
+    a.push("--print-resolved-args".into());
+    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+    let out = generate(None, &[], &a);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}

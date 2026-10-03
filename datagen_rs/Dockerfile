@@ -13,7 +13,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 # Evidence names what produced it: an image without its commit is refused.
-RUN test "$LB_BUILD_COMMIT" != "unknown" || { echo "build with --build-arg LB_BUILD_COMMIT=\$(git rev-parse HEAD)" >&2; exit 1; }
+RUN test -n "$LB_BUILD_COMMIT" && test "$LB_BUILD_COMMIT" != "unknown" || { echo "build with --build-arg LB_BUILD_COMMIT=\$(git rev-parse HEAD)" >&2; exit 1; }
 RUN LB_BUILD_COMMIT="$LB_BUILD_COMMIT" cargo build --release --locked --bin generate
 
 # Python 3.14-slim, digest-pinned for freeze reproducibility. Bumped from
