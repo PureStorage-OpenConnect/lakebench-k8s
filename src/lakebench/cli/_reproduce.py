@@ -1235,7 +1235,7 @@ def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
     try:
         looks = datagen_seed.load_looks()
         spent_set = datagen_seed.spent_seeds()
-        held_set = datagen_seed.protected_seeds()
+        datagen_seed._heldout()  # the held-out hashes must be readable
     except Exception as e:  # noqa: BLE001 -- unreadable: fail closed
         return (
             "refuse",
@@ -1254,23 +1254,32 @@ def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
         return ("verify", mine[0])
     if seed in spent_set:
         return ("verify", None)
-    if protected or seed in held_set:
+    try:
+        held = datagen_seed.heldout_role(seed) is not None
+    except Exception:  # noqa: BLE001 -- unreadable: fail closed
+        held = True
+    if protected or held:
         return ("refuse", "a held-out corpus whose look has not run is never reproduced")
     return None
 
 
 def _redact_seed_text(text: str) -> str:
-    """A config error with any digit run that names a held-out or spent seed
-    replaced, so a refusal never prints one."""
+    """A config error with any digit run that names a held-out, spent or
+    looked-at seed replaced, so a refusal never prints one (every digit run
+    of four or more digits when the held-out record cannot be read)."""
     import re
 
-    try:
-        from lakebench.config import datagen_seed
+    from lakebench.config import datagen_seed
 
-        hidden = {str(x) for x in (*datagen_seed.protected_seeds(), *datagen_seed.spent_seeds())}
+    try:
+        datagen_seed._heldout()
     except Exception:  # noqa: BLE001 -- unreadable: hide every long number
         return re.sub(r"\b\d{4,}\b", "<seed>", text)
-    return re.sub(r"\b\d+\b", lambda m: "<seed>" if m.group(0) in hidden else m.group(0), text)
+    return re.sub(
+        r"\b\d+\b",
+        lambda m: "<seed>" if datagen_seed.seed_is_protected(int(m.group(0))) else m.group(0),
+        text,
+    )
 
 
 def _config_held_out(cfg: Any) -> bool:
@@ -1287,7 +1296,7 @@ def _config_held_out(cfg: Any) -> bool:
     if workload.schema_type.value != "financial" or not isinstance(seed, int):
         return False
     try:
-        return seed in datagen_seed.protected_seeds() or seed in datagen_seed.spent_seeds()
+        return datagen_seed.heldout_role(seed) is not None or seed in datagen_seed.spent_seeds()
     except Exception:  # noqa: BLE001 -- unreadable: fail closed
         return True
 
