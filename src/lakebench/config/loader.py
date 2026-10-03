@@ -208,8 +208,10 @@ class ConfigNameRequired(ConfigValidationError):
                 f"{other_path}, beside the file the link points to. The two directories "
                 "share this one file, so which deployment it names cannot be told. Fix: "
                 "pass --name to destroy, stop, status or logs, which then check the "
-                "namespace's stamps; to keep using the config, replace the link with a "
-                "copy of the file and add each deployment's name to its own copy."
+                "namespace's stamps (through this path only the name recorded beside "
+                "the link is accepted; reach the other deployment through the file's "
+                "own path); to keep using the config, replace the link with a copy of "
+                "the file and add each deployment's name to its own copy."
             )
         elif teardown and resolution.source == "legacy-state":
             also = f", and {others}" if shared else ""
@@ -399,7 +401,8 @@ def load_config(
     Raises:
         ConfigFileNotFoundError: If file doesn't exist
         ConfigParseError: If YAML parsing fails
-        ConfigNameRequired: A nameless config under MUTATE or RUN
+        ConfigNameRequired: A nameless config the purpose may not use (see
+            ``purpose``)
         ConfigValidationError: If validation fails
     """
     if purpose is None:
@@ -444,10 +447,14 @@ def _load_and_validate(
             if purpose != LoadPurpose.INSPECT:
                 raise ConfigNameRequired(resolution, linked=True)
             other_path, other = resolution.resolved_legacy
+            what = (
+                "the name v1.6 used through this path"
+                if resolution.source == "legacy-state"
+                else "a suggestion, as v1.6 recorded no name beside the link"
+            )
             emit_note(
-                f"no name: loaded as '{resolution.name}', the name v1.6 used through "
-                f"this path; {other_path} records '{other}' for the file the link "
-                "points to",
+                f"no name: loaded as '{resolution.name}', {what}; {other_path} "
+                f"records '{other}' for the file the link points to",
                 category=None,
             )
         siblings = other_nameless_configs(path) if resolution.source == "legacy-state" else []

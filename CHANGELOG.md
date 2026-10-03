@@ -1060,10 +1060,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `status` or `compare` through a link no longer use, or check `--name`
   against, another directory's v1.6 name. When the two directories record
   different names, every command that may look at a deployment refuses a
-  nameless load without `--name`; `info` and the `config` commands load it
-  under the link directory's name with a note. `init --overwrite` through a
-  link refuses when either directory records a v1.6 name, and `relocate`
-  refuses through a link.
+  nameless load without `--name`; `info`, `config show`, `config storage`
+  and `config recommend` load it under the link directory's name with a
+  note. `init --overwrite` through a
+  link refuses when either directory records a v1.6 name, and so does
+  `relocate`.
 - **A fresh generate waits for an earlier datagen Job's pods to stop.**
   The previous Job is deleted in the background, so its pods kept running
   for their grace period and could land a `part-*` file in the datagen
