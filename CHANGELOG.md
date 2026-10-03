@@ -539,6 +539,16 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   the gold-finalize job when the driver's status listener lags, and none
   when it keeps up; continuous gold ticks do not profile. See
   [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **Storage multiple.** Every run measures, at its end, physical bytes over
+  the current snapshot's data files per table, per layer and in total,
+  with physical split into current, retained-snapshot, metadata and other
+  bytes, under the maintenance policy that ran. Checkpoints, datagen
+  markers and manifest, scoring outputs and the ML loop prefix are
+  excluded and listed; raw datagen files are physical only. Recorded as
+  `storage_multiple` and shown on the HTML report; DuckDB and `none`
+  recipes record physical bytes only. The run end adds a second listing of
+  each bucket and a few metadata queries per table on the maintenance
+  engine, within a 10-minute budget.
 - **Customer 360 results on the HTML report.** The report shows the C360
   expected-results checks: passed out of total and the gate as the verdict
   applies it (a gating check that failed, did not run or is absent reads

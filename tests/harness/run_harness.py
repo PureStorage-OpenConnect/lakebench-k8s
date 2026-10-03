@@ -446,6 +446,28 @@ class FakeTrino:
             pair = self.snapshots[min(self._probes[layer], len(self.snapshots) - 1)]
             self._probes[layer] += 1
             return 0, f'"{pair[0] if layer == "silver snaps" else pair[1]}"\n', ""
+        # The storage multiple at run end (metrics/storage_multiple.py): each
+        # table's location in its layer's bucket, its current data files
+        # (1 GiB) and no data that only a retained snapshot references.
+        if low.startswith("show create table "):
+            fq = sql.split()[-1]
+            tbl = fq.rsplit(".", 1)[-1]
+            schema = fq.split(".")[-2] if fq.count(".") >= 2 else ""
+            layer = next(
+                (x for x in ("bronze", "silver", "gold") if tbl.startswith(x) or schema == x),
+                "gold",
+            )
+            return (
+                0,
+                f"CREATE TABLE {fq} ()\nWITH (\n   location = 's3a://{NAME}-{layer}/warehouse/{tbl}'\n)\n",
+                "",
+            )
+        if low.startswith("select sum(file_size_in_bytes) from") and '$files"' in low:
+            if "not like" in low:
+                return 0, '"NULL"\n', ""  # no data file outside the location
+            return 0, '"1073741824"\n', ""
+        if low.startswith("select sum(a.file_size_in_bytes) from") and "$all_entries" in low:
+            return 0, '"0"\n', ""
         raise self._rec.refuse(f"unscripted Trino SQL: {sql}")
 
 
