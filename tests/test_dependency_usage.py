@@ -43,7 +43,12 @@ MODULE_OF = {"pyyaml": "yaml", "scikit-learn": "sklearn"}
 NON_USER_EXTRAS = {"dev", "build"}
 
 #: Imported directly without being declared, and why.
-IMPORTED_UNDECLARED: dict[str, str] = {}
+IMPORTED_UNDECLARED: dict[str, str] = {
+    # Not a distribution: aml/fidelity_gate.py falls back to the flat copy of
+    # lakebench.config.datagen_seed that ships beside it on the Spark driver,
+    # only when the package import fails.
+    "datagen_seed": "flat copy of lakebench.config.datagen_seed on the Spark driver",
+}
 
 #: Declared without a direct import, and why.
 NOT_IMPORTED = {

@@ -8,7 +8,6 @@ registered evaluation or robustness seed.
 from __future__ import annotations
 
 import copy
-import importlib
 import json
 import logging
 import random
@@ -185,14 +184,10 @@ def test_missing_file_fails_closed(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def aml_features(monkeypatch):
+def aml_features(monkeypatch, load_script):
     for mod in ("pyspark", "pyspark.sql", "pyspark.sql.functions"):
         monkeypatch.setitem(sys.modules, mod, MagicMock())
-    monkeypatch.syspath_prepend(str(ROOT / "src/lakebench/spark/scripts"))
-    sys.modules.pop("aml_features", None)
-    af = importlib.import_module("aml_features")
-    yield af
-    sys.modules.pop("aml_features", None)
+    return load_script("aml_features")
 
 
 def test_recover_round_trip(aml_features):
@@ -365,14 +360,10 @@ class _Af:
 
 
 @pytest.fixture
-def scorer(monkeypatch, held):
+def scorer(monkeypatch, held, load_script):
     for mod in ("pyspark", "pyspark.sql", "pyspark.sql.functions"):
         monkeypatch.setitem(sys.modules, mod, MagicMock())
-    monkeypatch.syspath_prepend(str(ROOT / "src/lakebench/spark/scripts"))
-    monkeypatch.syspath_prepend(str(ROOT / "src/lakebench/aml"))
-    sys.modules.pop("score_financial_reference", None)
-    ref = importlib.import_module("score_financial_reference")
-    import fidelity_gate
+    ref, fidelity_gate = load_script("score_financial_reference", extra=("fidelity_gate",))
 
     opened = json.loads(PREREG.read_text())
     opened["corpora"]["registered_looks_open"] = True
@@ -383,8 +374,7 @@ def scorer(monkeypatch, held):
     monkeypatch.setattr(fidelity_gate, "load_preregistration", lambda *a, **k: (opened, "x"))
     monkeypatch.delenv("LB_DATAGEN_CORPUS_ROLE", raising=False)
     monkeypatch.delenv("LB_DATAGEN_ROBUSTNESS_PERTURBATION", raising=False)
-    yield ref
-    sys.modules.pop("score_financial_reference", None)
+    return ref
 
 
 def test_misclaimed_heldout_corpus_refused(scorer, monkeypatch):
@@ -545,13 +535,13 @@ def test_planted_token_fails(held):
 
 
 def _rendered_maps(cfg):
-    from lakebench.modules.pipeline_engines.spark.job import SparkJobManager
+    from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
 
-    k8s = MagicMock()
-    k8s.apply_manifest.return_value = True
-    SparkJobManager(cfg, k8s).deploy_scripts_configmap()
-    m = k8s.apply_manifest.call_args.args[0]
-    return {f"{m['metadata']['name']}/{k}": v for k, v in m["data"].items()}
+    return {
+        f"{m['metadata']['name']}/{k}": v
+        for m in sm.build_script_configmaps(cfg, "ns")
+        for k, v in m["data"].items()
+    }
 
 
 @pytest.fixture
@@ -566,7 +556,7 @@ def two_configs():
 
 @pytest.mark.xfail(
     json.loads(PROD.read_text())["absence_check"] == "report",
-    reason="the pre-registration keeps its plaintext seeds until the owner's OA5 commit",
+    reason="the pre-registration keeps its plaintext seeds until they are removed",
     raises=AssertionError,
     strict=True,
 )
@@ -579,7 +569,7 @@ def test_tip_maps_clean(two_configs):
 def test_only_the_prereg_holds_a_heldout_value(two_configs):
     for cfg in two_configs:
         for p in ds.absence_problems(_rendered_maps(cfg)):
-            assert p.startswith("lakebench-spark-scripts/aml_preregistration.json:"), p
+            assert p.startswith("lakebench-scripts-aml-data/aml_preregistration.json:"), p
 
 
 def _manager(cfg):
@@ -587,7 +577,11 @@ def _manager(cfg):
 
     k8s = MagicMock()
     k8s.apply_manifest.return_value = True
-    return SparkJobManager(cfg, k8s), k8s
+    # No live SparkApplication mounts the maps, and nothing else owns them.
+    k8s.get_configmap.return_value = None
+    mgr = SparkJobManager(cfg, k8s)
+    mgr._scripts_apply_refusal = lambda maps: None
+    return mgr, k8s
 
 
 def test_scripts_map_refused_when_enforcing(two_configs, monkeypatch, caplog):
@@ -599,11 +593,13 @@ def test_scripts_map_refused_when_enforcing(two_configs, monkeypatch, caplog):
         "absence_problems",
         lambda texts, h=None, exclude=None: real({**texts, "m/planted": str(EV)}, h, []),
     )
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsApplyError
+
     mgr, k8s = _manager(two_configs[1])
-    with caplog.at_level(logging.ERROR):
-        assert mgr.deploy_scripts_configmap() is False
+    with caplog.at_level(logging.ERROR), pytest.raises(ScriptsApplyError, match="held-out") as e:
+        mgr.deploy_scripts_configmap()
     k8s.apply_manifest.assert_not_called()
-    assert "m/planted" in caplog.text and _no_seed_in(caplog.text)
+    assert "m/planted" in caplog.text and _no_seed_in(caplog.text) and _no_seed_in(str(e.value))
 
 
 def test_scripts_map_applied_and_logged_in_report_mode(two_configs, monkeypatch, caplog):
@@ -615,10 +611,25 @@ def test_scripts_map_applied_and_logged_in_report_mode(two_configs, monkeypatch,
         "absence_problems",
         lambda texts, h=None, exclude=None: real({**texts, "m/planted": str(EV)}, h, []),
     )
+    from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
     mgr, k8s = _manager(two_configs[0])
+    # Read-back returns what was written, so the apply completes.
+    written = {}
+    k8s.apply_manifest.side_effect = lambda cm: (
+        written.setdefault(cm["metadata"]["name"], cm) or True
+    )
+    k8s.get_configmap.side_effect = lambda name, ns: (
+        {
+            "annotations": written[name]["metadata"]["annotations"],
+            "data": written[name]["data"],
+        }
+        if name in written
+        else None
+    )
     with caplog.at_level(logging.INFO):
         assert mgr.deploy_scripts_configmap() is True
-    k8s.apply_manifest.assert_called_once()
+    assert k8s.apply_manifest.call_count == len(sm.ROLES)
     assert "m/planted" in caplog.text and _no_seed_in(caplog.text)
 
 
@@ -626,15 +637,18 @@ def test_scripts_map_refused_without_the_hash_file(two_configs, monkeypatch):
     def gone(*a, **k):
         raise FileNotFoundError("heldout_hashes.json not found")
 
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsApplyError
+
     monkeypatch.setattr(ds, "load_heldout", gone)
     mgr, k8s = _manager(two_configs[0])
-    assert mgr.deploy_scripts_configmap() is False
+    with pytest.raises(ScriptsApplyError, match="held-out"):
+        mgr.deploy_scripts_configmap()
     k8s.apply_manifest.assert_not_called()
 
 
 def test_hash_file_ships_in_the_scripts_map(two_configs):
     maps = _rendered_maps(two_configs[1])
-    shipped = json.loads(maps["lakebench-spark-scripts/heldout_hashes.json"])
+    shipped = json.loads(maps["lakebench-scripts-aml-data/heldout_hashes.json"])
     assert shipped == json.loads(PROD.read_text())
 
 
@@ -712,12 +726,9 @@ def test_generator_schedules_every_cycle_from_the_raw_seed():
 
 
 def _gate_module():
-    import importlib.util
+    from tests.conftest import exec_repo_script
 
-    spec = importlib.util.spec_from_file_location("aml_gate_heldout", ROOT / "scripts/aml_gate.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return exec_repo_script(ROOT / "scripts/aml_gate.py", "aml_gate_heldout")
 
 
 def test_gate_report_records_an_unspent_heldout_seed_by_hash(held, monkeypatch):
