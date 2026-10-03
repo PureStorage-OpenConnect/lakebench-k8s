@@ -155,7 +155,9 @@ locally, point `LB_HELDOUT_HASHES` at the tracked copy, or the binary exits 2:
 LB_HELDOUT_HASHES=../src/lakebench/spark/data/aml/heldout_hashes.json \
 DG_LOCAL_DIR=/tmp/lb-datagen cargo run --release --bin generate -- \
   --bucket test-bronze --seed 43 --scale 0.01 --threads 1
-``` Inspect the output with PyArrow:
+```
+
+Inspect the Customer 360 output with PyArrow:
 
 ```python
 import pyarrow.parquet as pq

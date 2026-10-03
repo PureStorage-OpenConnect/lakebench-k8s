@@ -160,10 +160,13 @@ fn generate(env: Option<&str>) -> std::process::Output {
 
 #[test]
 fn missing_file_exits_2() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-heldout-gen");
     for env in [None, Some("/nonexistent/heldout.json")] {
+        let _ = std::fs::remove_dir_all(&dir);
         let out = generate(env);
         assert_eq!(out.status.code(), Some(2), "{env:?}");
         assert!(String::from_utf8_lossy(&out.stderr).contains("LB_HELDOUT_HASHES"));
+        assert!(!dir.exists(), "wrote output before refusing");
     }
     let bad = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-heldout-bad.json");
     std::fs::write(&bad, "{}").unwrap();
@@ -195,5 +198,40 @@ fn a_spent_seed_in_the_file_is_refused() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("spent"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("spent"));
+    assert!(
+        !err.contains(&TEST_SPENT_SEED.to_string()),
+        "the spent seed was echoed"
+    );
+}
+
+#[test]
+fn customer360_never_reads_the_file() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-heldout-c360");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", &dir)
+        .env_remove("LB_HELDOUT_HASHES")
+        .args([
+            "--schema",
+            "customer360",
+            "--bucket",
+            "b",
+            "--seed",
+            "42",
+            "--target-tb",
+            "0.00002",
+            "--file-size-mb",
+            "4",
+            "--threads",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
