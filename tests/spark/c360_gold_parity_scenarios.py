@@ -12,8 +12,10 @@ Silver is the product's transform of the generator model's rows
   loaded with its rate stream replaced by a stub that hands back the
   ``foreachBatch`` handler, which is then called for three ticks while
   silver grows by a third of its dates before each (as the silver stream
-  appends);
-- changed: one silver purchase amount changed, then ``gold_finalize`` again.
+  appends). After every tick, gold is compared with ``gold_finalize`` over
+  silver as it stands then, so each tick, not only the last, is checked;
+- changed: one silver purchase's amount changed by one cent, then
+  ``gold_finalize`` again.
 
 Gold tables are compared by ``table_fingerprint`` (shared with C36-2).
 
@@ -108,20 +110,28 @@ def batch_gold(spark, work: str, fmt: str, gold_table: str) -> dict:
     return table_fingerprint(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
 
 
-def stream_gold(spark, work: str, fmt: str, parts: list, gold_table: str) -> dict:
-    """Three refresh ticks, silver growing by one part before each."""
+def stream_ticks(spark, work: str, fmt: str, parts: list, gold_table: str) -> list:
+    """Three refresh ticks, silver growing by one part before each; after
+    each, ``(stream gold, batch gold over the same silver)`` fingerprints."""
     from pyspark.sql import SparkSession
 
-    _env(work, fmt, gold_table)
     name = "gold_refresh" if fmt == "iceberg" else "gold_refresh_delta"
     SparkSession.readStream = property(lambda self: _RateStream())  # type: ignore[assignment]
+    _RateStream.handler = None
+    _env(work, fmt, gold_table)
     sys.modules.pop(name, None)
-    importlib.import_module(name)
+    module = importlib.import_module(name)
     tick = _RateStream.handler
+    if tick is None or getattr(tick, "__module__", None) != module.__name__:
+        raise RuntimeError(f"{name} did not hand its foreachBatch handler to the stream")
+    out = []
     for i, part in enumerate(parts):
         _write_silver(spark, fmt, part, "overwrite" if i == 0 else "append")
+        _env(work, fmt, gold_table)
         tick(None, i)
-    return table_fingerprint(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
+        stream = table_fingerprint(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
+        out.append((stream, batch_gold(spark, work, fmt, f"gold.parity_batch_{i}")))
+    return out
 
 
 def scenario(spark, work: str, fmt: str) -> dict:
@@ -139,13 +149,27 @@ def scenario(spark, work: str, fmt: str) -> dict:
         spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")
     else:
         spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.silver")
-    out = {"stream": stream_gold(spark, work, fmt, parts, "gold.parity_stream")}
-    # The batch reads the silver the three ticks built.
-    out["batch"] = batch_gold(spark, work, fmt, "gold.parity_batch")
-    out["silver_rows"] = spark.table(f"{CATALOGS[fmt]}.{sc.SILVER}").count()
-    _write_silver(spark, fmt, sc.changed(silver), "overwrite")
+    ticks = stream_ticks(spark, work, fmt, parts, "gold.parity_stream")
+    out = {
+        "ticks": [{"stream": s, "batch": b} for s, b in ticks],
+        "silver_rows": spark.table(f"{CATALOGS[fmt]}.{sc.SILVER}").count(),
+    }
+    _write_silver(spark, fmt, one_cent_changed(silver), "overwrite")
     out["changed"] = batch_gold(spark, work, fmt, "gold.parity_changed")
     return out
+
+
+def one_cent_changed(df):
+    """Silver with one purchase's amount (the first by event id) one cent higher."""
+    from pyspark.sql.functions import col, lit, when
+
+    first = df.filter(col("interaction_type") == "purchase").orderBy("event_id").first()["event_id"]
+    return df.withColumn(
+        "transaction_amount",
+        when(col("event_id") == lit(first), col("transaction_amount") + lit(0.01)).otherwise(
+            col("transaction_amount")
+        ),
+    )
 
 
 def main():
