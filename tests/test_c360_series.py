@@ -229,12 +229,43 @@ def test_record_cycle_builds_a_complete_series():
     assert corpus.series_problem(cfg, corpus.read_series(cfg, s3)) is None
 
 
-def test_record_cycle_never_builds_on_another_runs_marker():
+def test_record_cycle_never_claims_another_runs_marker():
+    """Another generate wrote the marker since this run began (two runs in
+    one namespace): this run's cycle is not recorded, the marker is left as
+    the other run wrote it, and the caller is told (it fails the run)."""
+    cfg = _cfg(1)
+    s3 = S3()
+    _write_series(s3, cfg, 1, [], run_id="other-run")
+    before = dict(s3.store)
+    assert corpus.record_cycle(cfg, s3, 0, 1, "this-run", D1, None) == "conflict"
+    assert s3.store == before
+
+
+def test_record_cycle_after_a_missed_cycle_leaves_the_marker_incomplete():
     cfg = _cfg(3)
     s3 = S3()
-    _write_series(s3, cfg, 3, [0, 1], run_id="old-run")
-    corpus.record_cycle(cfg, s3, 2, 3, "new-run", D1, None)
-    assert _marker(s3)["cycles_complete"] == [2]
+    _write_series(s3, cfg, 3, [0], run_id="r")  # cycle 1's write failed
+    assert corpus.record_cycle(cfg, s3, 2, 3, "r", D1, None) == "unwritten"
+    assert _marker(s3)["cycles_complete"] == [0]
+
+
+def test_record_cycle_with_no_marker_records_the_cycle_alone():
+    """The bucket did not exist when the generate began (no begin marker)."""
+    cfg = _cfg(1)
+    s3 = S3()
+    assert corpus.record_cycle(cfg, s3, 0, 1, "r", D1, None) == "written"
+    assert _marker(s3)["cycles_complete"] == [0]
+
+
+def test_single_cycle_without_a_marker_refuses_a_multi_cycle_corpus():
+    s3 = S3(
+        {
+            (BUCKET, "customer/interactions/part-000000.parquet"): b"x",
+            (BUCKET, "customer/interactions/part-c001-000000.parquet"): b"x",
+        }
+    )
+    why = corpus.series_problem(_cfg(1), corpus.read_series(_cfg(1), s3))
+    assert why is not None and "of cycles after the first (part-cNNN-*)" in why
 
 
 def test_series_marker_records_image_digest():
@@ -314,8 +345,12 @@ class PrefixS3(S3):
     def has_user_objects(self, bucket, prefix=""):
         return any(k.startswith(prefix) for b, k in self.store if b == bucket)
 
-    def delete_prefix(self, bucket, prefix, abort_multipart=False):
-        gone = [k for k in self.store if k[0] == bucket and k[1].startswith(prefix + "/")]
+    def delete_prefix(self, bucket, prefix, abort_multipart=False, keep_keys=frozenset()):
+        gone = [
+            k
+            for k in self.store
+            if k[0] == bucket and k[1].startswith(prefix + "/") and k[1] not in keep_keys
+        ]
         for k in gone:
             del self.store[k]
         return len(gone)
@@ -352,3 +387,49 @@ def test_begin_marker_write_failure_fails_the_generate(monkeypatch):
     result = _deployer(monkeypatch, NoWrite()).deploy()
     assert result.status.value == "failed"
     assert "series marker" in result.message
+
+
+def test_generate_begins_and_finishes_its_series(tmp_path, monkeypatch):
+    """`lakebench generate` (single cycle): the real deployer writes the
+    unfinished marker after its clear, and the finished Job adds cycle 0 under
+    the same run id, so a later `run` reuses the corpus. Without the record
+    every generate-then-run would be refused as unfinished."""
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from lakebench.deploy import datagen as dg
+    from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+    from tests import test_datagen_timeout_and_regenerate as t
+
+    t._stub_run_deps(monkeypatch)
+    monkeypatch.setattr("lakebench.s3.S3Client", t._FakeS3)
+    monkeypatch.setattr(t._FakeS3, "store", {})
+    monkeypatch.setattr(dg, "deployment_may_empty", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "lakebench.deploy.DeploymentEngine",
+        lambda cfg, **kw: SimpleNamespace(
+            config=cfg,
+            k8s=SimpleNamespace(apply_manifest=lambda *a, **k: None),
+            renderer=SimpleNamespace(render=lambda *a, **k: "kind: Job\n"),
+            context={},
+            dry_run=False,
+        ),
+    )
+    done = {"running": False, "completions": 2, "succeeded": 2}
+    monkeypatch.setattr(dg.DatagenDeployer, "get_progress", lambda self: done)
+    monkeypatch.setattr(
+        dg.DatagenDeployer,
+        "wait_for_completion",
+        lambda self, **k: DeploymentResult(
+            component="datagen", status=DeploymentStatus.SUCCESS, message="", details=done
+        ),
+    )
+    monkeypatch.setattr(corpus, "pod_image_digest", lambda ns: (D1, None))
+    monkeypatch.delenv("LB_RUN_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["generate", str(t._write_cfg(tmp_path)), "--yes"])
+    assert res.exit_code == 0, res.output
+    (key,) = [k for k in t._FakeS3.store if k[1].endswith("_corpus/series.json")]
+    body = json.loads(t._FakeS3.store[key])
+    assert body["cycles_complete"] == [0] and body["generation"]["image_digest"] == D1
+    assert "clearing" not in body

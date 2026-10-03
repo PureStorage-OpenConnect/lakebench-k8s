@@ -755,7 +755,7 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `workload.datagen.memory` | string | auto (by workload, scale and cpu) | advanced | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) at the fixed 64mb file size, with a 4Gi floor. |
 | `workload.datagen.generators` | integer | `0` | advanced | Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU request. |
 | `workload.datagen.timestamp_start` | string or null | `null` | advanced | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
-| `workload.datagen.timestamp_end` | string or null | `null` | advanced | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`deploy/datagen.py` fallback, matched by `metrics/c360_correctness.py`). See [Timestamp Range Impact](#timestamp-range-impact). |
+| `workload.datagen.timestamp_end` | string or null | `null` | advanced | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`config/c360_run.py` `cycle_windows`, which the datagen deployer and `metrics/c360_correctness.py` both read). See [Timestamp Range Impact](#timestamp-range-impact). |
 
 ### Workload -- Customer 360 and AML
 
@@ -1015,6 +1015,10 @@ in the `cycle_progression` score when `cycles > 1`.
 
 - `cycles > 1` requires `mode: batch`. Continuous mode has its own iteration
   model via streaming micro-batches.
+- The run generates each cycle before its stages: `lakebench generate`,
+  `run --generate` and `run --generate-only` refuse a multi-cycle config.
+  `run --skip-generate` reuses a finished multi-cycle corpus of the same
+  config (checked against its corpus series marker), except for AML.
 - The run generates each cycle before its stages: `lakebench generate`,
   `run --generate` and `run --generate-only` refuse a multi-cycle config.
   `run --skip-generate` reuses a finished multi-cycle corpus of the same

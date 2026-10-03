@@ -4,7 +4,7 @@ A multi-cycle ``--skip-generate`` reuses a finished multi-cycle corpus: no
 datagen Job, every cycle's stages, each cycle recorded ``datagen_skipped``.
 Before CD-18 the cycle loop regenerated every cycle whatever
 ``--skip-generate`` said (LB-213). An unfinished or mismatched marker is
-refused (exit 2) before anything is submitted.
+refused (exit 3) before anything is submitted.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def test_multicycle_skip_generate_refuses_an_unfinished_series(tmp_path, monkeyp
     result, rec = _run(
         tmp_path, monkeypatch, config, ["--skip-generate", "--yes"], _series_body(config, [0, 1])
     )
-    assert result.exit_code == 2, result.output
+    assert result.exit_code == 3, result.output
     assert "series incomplete: cycle(s) [2] missing" in result.output
     assert f"lakebench run {tmp_path}" in result.output and "--regenerate" in result.output
     assert _submits(rec) == []
@@ -116,7 +116,7 @@ def test_single_cycle_run_refuses_a_corpus_of_another_scale(tmp_path, monkeypatc
     result, rec = _run(
         tmp_path, monkeypatch, _config(cycles=1, scale=2), ["--yes"], _series_body(made, [0])
     )
-    assert result.exit_code == 2, result.output
+    assert result.exit_code == 3, result.output
     assert "series made with" in result.output
     assert _submits(rec) == []
 

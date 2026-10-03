@@ -168,8 +168,8 @@ RUN_RULES: tuple[RunRule, ...] = (
         ),
         "--regenerate only applies when the run generates: --generate, --generate-only, "
         "or a multi-cycle batch run without --skip-generate",
-        "add --generate on a single-cycle run (a multi-cycle run takes --regenerate alone), "
-        "or drop --regenerate",
+        "drop --regenerate; or add --generate on a single-cycle run; or drop "
+        "--skip-generate on a multi-cycle run, which takes --regenerate alone",
         "`--regenerate` on a run that does not generate (only `--generate`, "
         "`--generate-only` or a multi-cycle batch run without `--skip-generate` take it)",
     ),
@@ -184,7 +184,8 @@ RUN_RULES: tuple[RunRule, ...] = (
         lambda a, c: a.allow_stale_bronze and not _generates_bronze(a, c),
         "--allow-stale-bronze only applies when the run generates into bronze: --generate, "
         "a multi-cycle run without --skip-generate (batch, not --local), or --generate-only",
-        "drop --allow-stale-bronze, or add --generate to a batch run that is not --local",
+        "drop --allow-stale-bronze; or add --generate to a single-cycle batch run that is "
+        "not --local; or drop --skip-generate on a multi-cycle run",
         "`--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, "
         "`--generate-only` or a multi-cycle batch run without `--skip-generate` take it; not "
         "`--local`, `--deploy-only` or a continuous run other than `--generate-only`)",
@@ -219,7 +220,11 @@ RUN_RULES: tuple[RunRule, ...] = (
     ),
     RunRule(
         lambda a, c: (
-            a.skip_generate and c.mode == "batch" and c.cycles > 1 and c.schema == "financial"
+            a.skip_generate
+            and c.mode == "batch"
+            and c.cycles > 1
+            and c.schema == "financial"
+            and not a.local
         ),
         "--skip-generate does not apply to a multi-cycle financial (AML) run: its stages read "
         "the whole bronze prefix every cycle, so a reused corpus would be processed whole "

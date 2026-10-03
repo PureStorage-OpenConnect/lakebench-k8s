@@ -1540,8 +1540,9 @@ def _config_windows(cfg) -> list[tuple[str, str]]:
 
 def _cycle_series_record(cfg, *, marker: str, reused: bool) -> dict[str, Any]:
     """``metrics.json`` ``cycle_series``: the corpus series marker as this run
-    left it (``written``, ``unwritten``) or found it (``read``, ``absent``),
-    whether the run reused the corpus, and the cycle windows."""
+    left it (``begun``, ``written``, ``unwritten``, ``conflict``) or found it
+    (``read``, ``absent``), whether the run reused the corpus, and the cycle
+    windows."""
     windows = _config_windows(cfg)
     return {
         "marker": marker,
@@ -1561,12 +1562,29 @@ def _record_series_cycle(cfg, cycle: int, total: int, run_id: str) -> str:
 
     digest, why = pod_image_digest(cfg.get_namespace())
     mark = record_cycle(cfg, _s3_client_for(cfg), cycle, total, run_id, digest, why)
-    if mark != "written":
+    if mark == "conflict":
+        print_error(
+            "Another generate replaced this run's corpus: the corpus series marker in bronze "
+            "was written by another run since this one began. Two runs in one namespace are "
+            "not supported; run again once the other has finished."
+        )
+    elif mark != "written":
         print_warning(
             f"could not record cycle {cycle + 1} in the corpus series marker: a later run "
             "that reuses this corpus refuses it as unfinished"
         )
     return mark
+
+
+def _cycle_series_after(run_metrics, cfg, mark: str) -> None:
+    """Set the run's ``cycle_series`` after a cycle's marker write; once a
+    write failed (``unwritten``) or conflicted, the record keeps saying so."""
+    if run_metrics is None:
+        return
+    prev = (run_metrics.cycle_series or {}).get("marker")
+    if prev in ("unwritten", "conflict"):
+        return
+    run_metrics.cycle_series = _cycle_series_record(cfg, marker=mark, reused=False)
 
 
 def _check_series_reuse(
@@ -1582,11 +1600,11 @@ def _check_series_reuse(
     """For a batch run that reuses the corpus in bronze (``--skip-generate``,
     or one cycle without ``--generate``): the corpus series marker must
     describe a finished generate of this config (``deploy.corpus.
-    series_problem``), or the run is refused (exit 2) after the read-only
+    series_problem``), or the run is refused (exit 3) after the read-only
     prerequisites and before anything is deployed or submitted. Returns the run's ``cycle_series`` record (with the marker's
     ``stale_bronze`` label, if any), or None for a run that generates."""
     from lakebench.config.c360_run import run_cycles
-    from lakebench.exit_codes import PrerequisiteError, UsageError
+    from lakebench.exit_codes import PrerequisiteError, SafetyRefusal, UsageError
 
     cycles = run_cycles(cfg)
     reuses = (
@@ -1605,13 +1623,14 @@ def _check_series_reuse(
         raise PrerequisiteError(
             f"Cannot check the corpus in bronze before reusing it: {read.error}",
             next="check the S3 endpoint and credentials, then run again",
+            path="s3.unreachable",
         )
     try:
         why = series_problem(cfg, read)
     except ValueError as e:
         raise UsageError(
             f"Cannot check the corpus in bronze against the config: {e}",
-            path="run.series_mismatch",
+            next="fix the config's datagen block",
         ) from None
     if why:
         fix = (
@@ -1619,7 +1638,7 @@ def _check_series_reuse(
             if cycles > 1
             else f"lakebench run {config_file} --generate --regenerate"
         )
-        raise UsageError(
+        raise SafetyRefusal(
             f"Cannot reuse the corpus in bronze: {why}",
             why="a run that reuses bronze must read the corpus its config describes",
             next=f"generate it again with `{fix}`, or run with the config it was generated with",
@@ -1745,9 +1764,10 @@ def run(
         typer.Option(
             "--skip-generate",
             help=(
-                "Reuse the corpus already in bronze. Refused when its series marker "
-                "says the generate did not finish or was made for another cycle "
-                "count, window or generation than the config's (exit 2)"
+                "Batch: reuse the corpus already in bronze. Refused (exit 3) when its "
+                "series marker says the generate did not finish or was made for another "
+                "cycle count, window or generation than the config's; a multi-cycle run "
+                "needs a marker"
             ),
         ),
     ] = False,
@@ -2507,10 +2527,9 @@ def _run_once(
                         )
                         raise typer.Exit(ExitCode.FAILED)
                     _series_mark = _record_series_cycle(cfg, 0, 1, run_id)
-                    if collector.current_run is not None:
-                        collector.current_run.cycle_series = _cycle_series_record(
-                            cfg, marker=_series_mark, reused=False
-                        )
+                    _cycle_series_after(collector.current_run, cfg, _series_mark)
+                    if _series_mark == "conflict":
+                        raise typer.Exit(ExitCode.REFUSED)
 
                 datagen_end = datetime.now()
                 _datagen_elapsed = (datagen_end - datagen_start).total_seconds()
@@ -2661,8 +2680,9 @@ def _run_once(
             _generated_here = True
             _run_fleet = None
             if collector.current_run is not None:
+                # The deployer writes the marker unfinished before cycle 0.
                 collector.current_run.cycle_series = _cycle_series_record(
-                    cfg, marker="unwritten", reused=False
+                    cfg, marker="begun", reused=False
                 )
         elif not (include_datagen and not skip_generate) and collector.current_run is not None:
             # No datagen in this run: a stale-bronze label of the generate
@@ -2757,10 +2777,11 @@ def _run_once(
                             break
                         _interrupt.finished("Job", "lakebench-datagen")
                         _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
-                        if collector.current_run is not None:
-                            collector.current_run.cycle_series = _cycle_series_record(
-                                cfg, marker=_series_mark, reused=False
-                            )
+                        _cycle_series_after(collector.current_run, cfg, _series_mark)
+                        if _series_mark == "conflict":
+                            pipeline_success = False
+                            _pipeline_exit_code = ExitCode.REFUSED
+                            break
                 except Exception as e:
                     print_error(f"Cycle datagen failed: {e}")
                     pipeline_success = False
