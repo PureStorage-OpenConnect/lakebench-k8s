@@ -256,7 +256,7 @@ def _results_problems(
     from lakebench.metrics.alert_set import alert_set_missing
 
     # An AML batch release row carries its alert set whatever the expected
-    # entry holds (EVD-10): a failed fingerprint is never release evidence.
+    # entry holds: a failed fingerprint is never release evidence.
     no_alert_set = alert_set_missing(exp)
     if no_alert_set:
         return [no_alert_set]

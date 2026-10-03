@@ -631,8 +631,8 @@ def _continuous_results(metrics: Any) -> dict[str, Any]:
 
 def _alert_set_results(metrics: Any) -> dict[str, Any]:
     """``alert_set`` (or ``alert_set_unavailable``, the reason) from the
-    run's last gold-finalize job, the one whose alerts gold.alerts holds
-    (EVD-10). Empty when no gold-finalize job printed the line (C360, or a
+    run's last gold-finalize job, the one whose alerts gold.alerts holds.
+    Empty when no gold-finalize job printed the line (C360, or a
     run that stopped before gold)."""
     gold = [j for j in metrics.jobs if getattr(j, "job_type", None) == "gold-finalize"]
     if not gold:
@@ -1244,7 +1244,7 @@ def results_established(exp: Mapping[str, Any] | None, *, alert_set: bool = True
     """True when the run recorded benchmark results that can be checked for
     equivalence, else the reason they cannot (DESIGN 6.5: comparable means
     the results are equivalent, which needs results). An AML batch record
-    written by 1.7 also needs its alert set (EVD-10); *alert_set* False
+    written by 1.7 also needs its alert set; *alert_set* False
     asks about the benchmark results alone (ladder step 0's query set id)."""
     res = (exp or {}).get("results") or {}
     if res.get("not_checked"):
@@ -1257,7 +1257,7 @@ def results_established(exp: Mapping[str, Any] | None, *, alert_set: bool = True
 
     missing = alert_set_missing(exp)
     if missing:
-        # An exp2 AML batch record must carry its alert set (EVD-10).
+        # An exp2 AML batch record must carry its alert set.
         return missing
     return True
 

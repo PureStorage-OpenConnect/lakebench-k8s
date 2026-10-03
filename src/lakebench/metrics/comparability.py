@@ -886,7 +886,7 @@ def _results_differences(
     ea: Mapping[str, Any], eb: Mapping[str, Any], la: str, lb: str
 ) -> list[str]:
     """Step 5 (and step 2 inside a side): a different query set, a
-    per-query result mismatch, or a different alert set (EVD-10)."""
+    per-query result mismatch, or a different alert set."""
     from lakebench.metrics.alert_set import alert_set_of, diff_alert_sets
     from lakebench.metrics.experiment import fingerprint_differences
 

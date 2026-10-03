@@ -103,7 +103,7 @@ class JobMetrics:
     # ``[tm-status]`` lines by cycle: {"status", "reason"}; says whether the
     # layer ran and why not.
     tm_status: dict[str, dict[str, str]] = field(default_factory=dict)
-    # EVD-10 (AML gold-finalize only): the alert-set fingerprint from the
+    # AML gold-finalize only: the alert-set fingerprint from the
     # driver's ``LB_ALERT_SET`` line (metrics/alert_set.py), copied to
     # ``experiment.results.alert_set``; the seconds it took, Lakebench work
     # in the stage's pod that the CLI takes off ``elapsed_seconds`` and
@@ -3211,7 +3211,7 @@ class MetricsCollector:
         metrics.tm_status = {str(c): st for c, st in parse_tm_status(logs).items()}
         metrics.tm_ops = parse_tm_ops(logs)
 
-        # EVD-10: the alert-set fingerprint (AML gold-finalize).
+        # The alert-set fingerprint (AML gold-finalize).
         from lakebench.metrics.alert_set import parse_alert_set
 
         (

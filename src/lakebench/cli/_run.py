@@ -753,7 +753,7 @@ def _exclude_alert_set_time(job_metrics) -> float:
     """Take the AML alert-set fingerprint off a gold-finalize stage's time.
 
     gold_finalize_financial prints the fingerprint last, after the stage's
-    work (EVD-10), and records the seconds it took (``alert_set_seconds``).
+    work, and records the seconds it took (``alert_set_seconds``).
     Left in, Lakebench's own scan would count as pipeline time in the
     stage's elapsed seconds, its CPU-seconds and time to value, as the
     c360 check would (``_exclude_c360_check_time``). Returns the seconds

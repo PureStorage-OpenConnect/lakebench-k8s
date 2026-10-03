@@ -1,4 +1,4 @@
-"""The alert-set fingerprint, CLI side (EVD-10, OD-3).
+"""The alert-set fingerprint, CLI side.
 
 AML gold-finalize prints one ``LB_ALERT_SET {json}`` line after its last
 write to gold.alerts (``spark/scripts/gold_finalize_financial.alert_set_line``,
@@ -99,7 +99,7 @@ def parse_alert_set(logs: str | None) -> tuple[dict[str, Any] | None, float | No
     without ``seconds``; ``unavailable`` is the reason when the line says
     the fingerprint could not be computed or the line is not well formed.
     All three are None when the log has no such line (a C360 run, or a
-    script from before EVD-10)."""
+    script from before 1.7)."""
     last = None
     for m in _LINE_RE.finditer(logs or ""):
         last = m.group("json")

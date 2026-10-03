@@ -20,8 +20,8 @@ this). Steps:
    scenario coverage, L1 dispositions, cases and SAR decisions, then the
    workflow invariants the CLI gates on.
 
-5. Prints the alert-set fingerprint of the run's alerts (``LB_ALERT_SET``,
-   EVD-10), last, so the CLI can take its seconds off the stage's time.
+5. Prints the alert-set fingerprint of the run's alerts (``LB_ALERT_SET``),
+   last, so the CLI can take its seconds off the stage's time.
 
 The detection step means `lakebench run` on a batch AML config produces
 alerts as part of the pipeline itself, so the baseline row is populated
@@ -341,7 +341,7 @@ def main() -> None:
 
     run_tm_operations(spark, txns, RUN_ID)
 
-    # EVD-10: the alert-set fingerprint, after the last write to gold.alerts
+    # The alert-set fingerprint, after the last write to gold.alerts
     # (run_tm_operations only reads it) and last in the stage. It is
     # Lakebench's work, not the pipeline's: the line carries its seconds and
     # the CLI takes them off the stage's time (cli/_run.py
@@ -372,8 +372,8 @@ ALERT_SET_TAG = "LB_ALERT_SET"
 
 
 def alert_set_line(spark, run_id: str, table: str | None = None) -> str:
-    """The ``LB_ALERT_SET {json}`` line for this run's rows of gold.alerts
-    (EVD-10): ``common.alert_set_fingerprint`` plus ``seconds``, the time
+    """The ``LB_ALERT_SET {json}`` line for this run's rows of gold.alerts:
+    ``common.alert_set_fingerprint`` plus ``seconds``, the time
     the fingerprint took. Never raises: when the fingerprint cannot be
     computed the line carries ``unavailable`` with the reason instead, and
     the record then has no alert set, which ``compare`` reads as results

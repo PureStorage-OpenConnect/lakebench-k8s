@@ -2627,7 +2627,7 @@ def frame_fingerprint_by(df, cols, key):
     return cols_sha, groups
 
 
-#: The alert-set fingerprint (EVD-10, OD-3): one alert is (rule, subject,
+#: The alert-set fingerprint: one alert is (rule, subject,
 #: window), where the window is the event time the rule derived from the data.
 #: Generated ids (alert_id, run_id) and wall-clock times (detected_ts) are not
 #: part of it. Batch gold-finalize and the continuous covered score both use
