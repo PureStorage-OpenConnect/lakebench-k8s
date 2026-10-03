@@ -35,6 +35,11 @@ nothing measured under this one):
   when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
   every gold day; incremental gold runs only for multi-cycle cycles 2+, and
   the strategy that ran is recorded per job (2026-10-02).
+- ``c360-2.dev1``: a multi-cycle run's silver jobs take one data clock, the
+  exclusive end of the range its cycles cover (``data_clock_source``
+  ``cycle_series_end``), instead of each cycle's bronze-verify clock, so
+  ``customer_recency_score`` is anchored to one day across cycles.
+  Single-cycle results do not change (2026-10-03).
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
@@ -70,7 +75,7 @@ IDENTITY_VERSION = 2
 V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
-    "customer360": "c360-2",
+    "customer360": "c360-2.dev1",
     "financial": "aml-1",
     "custom": "custom-1",
 }

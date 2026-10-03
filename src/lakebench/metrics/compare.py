@@ -716,9 +716,12 @@ def _sides(a: Side, b: Side, label: str | None) -> tuple[Side, Side]:
     return (b, a) if label == "B" else (a, b)
 
 
-def _workload_version_number(v: Any) -> int | None:
-    m = re.search(r"-(\d+)$", str(v or ""))
-    return int(m.group(1)) if m else None
+def _workload_version_number(v: Any) -> tuple[int, int] | None:
+    """``(n, dev)`` of ``<name>-<n>`` or ``<name>-<n>.dev<dev>``. A
+    ``.devN`` version is later work toward the next release than its
+    ``-<n>``: ``c360-2`` < ``c360-2.dev1`` < ``c360-2.dev2``."""
+    m = re.search(r"-(\d+)(?:\.dev(\d+))?$", str(v or ""))
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else None
 
 
 #: Corpus keys in the order a hint picks them (the corpus id follows from
