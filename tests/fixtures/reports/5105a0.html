@@ -201,9 +201,6 @@
 </head>
 <body>
     <div class="container">
-        <div class="provenance-label" style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem;">
-            internal benchmark, single-owner recorded
-        </div>
         <header>
             <h1>Lakebench Scorecard</h1>
             <div class="subtitle">
@@ -218,19 +215,14 @@
         </header>
 
         
-        <section class="read-first" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--success);">
+        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--success);">
             <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
                 Read this first
             </div>
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
-                <div><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style="color: var(--success);">PASSED</strong></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> batch pipeline completed, all gates passed</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> <code class="mono">none (id 194912d5ba8c, scale 10.0)</code></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Limits present:</span> 0</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Record digest:</span> <code class="mono">9be64a9a08289b8e</code></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+                <div class="fm-verdict"><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style='color: var(--success);'>PASSED</strong></div><div class="fm-headline"><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> Customer 360 batch, scale 10.0, n=1</div><div class="fm-evidence-class"><span class="read-first-key" style="color: var(--text-muted);">Evidence class:</span> development (no look record names this run)</div><div class="fm-corpus"><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> none (id 194912d5ba8c, scale 10.0)</div><div class="fm-support-state"><span class="read-first-key" style="color: var(--text-muted);">Support state:</span> unverified (a valid combination that no release-matrix run has validated; valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</div><div class="fm-binding-caps"><span class="read-first-key" style="color: var(--text-muted);">Binding caps:</span> none</div><div class="fm-n"><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1 run, 3 samples per query</div><div class="fm-provenance"><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div><div class="fm-digest"><span class="read-first-key" style="color: var(--text-muted);">Digest:</span> <code class="mono">9be64a9a08289b8e</code></div>
             </div>
+            
             <div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li></ul></div>
         </section>
         

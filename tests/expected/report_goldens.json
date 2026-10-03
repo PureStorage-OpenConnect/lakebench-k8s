@@ -74,7 +74,7 @@
       "from": "streaming[*].total_rows_processed summed"
     },
     {
-      "text": "Streaming Jobs: 3/3 passed",
+      "text": "Continuous jobs: 3/3 passed",
       "from": "streaming[*].success"
     },
     {
@@ -130,7 +130,7 @@
       "from": "pipeline_benchmark.benchmark_rounds[0].qph, [3].qph"
     },
     {
-      "text": "Streaming Jobs: 3/3 passed",
+      "text": "Continuous jobs: 3/3 passed",
       "from": "streaming[*].success"
     }
   ],

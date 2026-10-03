@@ -545,27 +545,11 @@ class FinancialScorecardBlock:
 
 
 def registered_look_role(run_id: str | None) -> str | None:
-    """The role of a completed registered look whose ``run_ids`` names this
-    run, read from the look record (never the config); None for every other
-    run, and when the record is missing or unreadable."""
-    if not run_id:
-        return None
-    try:
-        from lakebench.config.datagen_seed import load_looks
+    """The role of the completed registered look whose run_ids names this
+    run (reports/front_matter.py reads the look record)."""
+    from lakebench.reports.front_matter import registered_look_role as _role
 
-        looks = load_looks()
-    except Exception:  # noqa: BLE001 -- no readable look record means no look
-        return None
-    for entry in looks:
-        run_ids = entry.get("run_ids") if isinstance(entry, dict) else None
-        # Only a list names runs; anything else names none (fail closed).
-        if (
-            entry.get("state") == "complete"
-            and isinstance(run_ids, list)
-            and any(isinstance(r, str) and r == run_id for r in run_ids)
-        ):
-            return str(entry.get("role"))
-    return None
+    return _role(run_id)
 
 
 def _subject_check_html(scoring) -> str:

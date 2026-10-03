@@ -580,6 +580,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   open as a new alert. Records stamped `aml-1` do not compare with `aml-2`
   runs. See
   [aml-scoring.md](docs/aml-scoring.md#per-alert-evidence-caps).
+- **Reports open with the front matter.** The HTML report, `lakebench
+  report` and the end of `run` show, before any metric: the verdict (the
+  strictest of the stored and the recomputed one, with "stored X;
+  recomputed Y" when they differ) and its headline, the evidence class,
+  the corpus, the support state and what it means, the binding caps, n,
+  the provenance and the identity digest, then the verdict's qualifiers
+  and what limits interpretation. The evidence class is read from the
+  registered-look record, never the config: every run reads "development"
+  until a completed look names it. The fixed "internal benchmark,
+  single-owner recorded" stamp is gone. A batch scale ratio above 1.05 is
+  now a badge warning (amber badge and the headline of a passed run),
+  never a failure; the stored verdict does not change. Mode labels read
+  batch or continuous ("Continuous Throughput", "Continuous jobs"), never
+  "Sustained" or "streaming".
 - **Every derived number on the HTML report is checked against the record.**
   Each percentage, total and count the report computes is wrapped in a
   `data-lb-derived` span that names the `metrics.json` paths it came from,

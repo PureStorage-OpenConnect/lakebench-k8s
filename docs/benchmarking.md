@@ -690,7 +690,7 @@ read (`current_timestamp` minus the newest silver processing timestamp), so
 the figure tracks the silver trigger and the gold write time rather than
 `gold_refresh_interval`. Lower is better.
 
-**Sustained Throughput** (rows/sec) measures the steady-state ingestion rate
+**Continuous Throughput** (`sustained_throughput_rps`, rows/sec) measures the steady-state ingestion rate
 through bronze. This is unique rows only -- gold-stage re-reads of silver data
 are excluded.
 
@@ -1126,18 +1126,46 @@ The header shows the deployment name, run ID, and an overall status badge:
   the expected rules and non-empty answers (see
   [What a PASSED verdict asserts](#what-a-passed-verdict-asserts)).
 - **WARNING** (amber) -- pipeline completed but a ratio or job raised a
-  non-fatal flag.
+  non-fatal flag, for example a batch scale ratio above 1.05 (more data
+  than the scale asks for).
 - **FAILED** (red) -- a stage or query failed, or data completeness is below
   threshold. A run stopped by Ctrl-C or SIGTERM also shows as failed, with
   the interrupt as its reason; its verdict is INTERRUPTED (see
   [Interrupting a run](cli-reference.md#run)).
 
-The "Read this first" panel under the header also names the provenance (the
-Lakebench version, commit, and whether its tree was dirty) and lists what
-limits interpretation: a single run (n=1), detection rules skipped or
-errored (and, for continuous AML, the rules that mode does not run), AML recall that is uncalibrated and in-sample (every run that no
-completed registered look in `aml_registered_looks.json` names), and a dirty
-tree.
+The "Read this first" panel under the header is the report's front matter,
+and no metric comes before it. In this order it shows:
+
+- **Verdict** and **headline**: the strictest of the verdict the record
+  stored and the one recomputed from the record today (a record is never
+  promoted); when they differ it says so, for example "FAILED (stored
+  PASSED; recomputed FAILED)". The headline is the first reason a failed
+  run gives, the first warning, or for a clean pass the workload, mode,
+  scale, rules run and n.
+- **Evidence class**: read only from the registered-look record
+  (`src/lakebench/spark/data/aml/aml_registered_looks.json`), never from
+  the config. A completed look whose `run_ids` names this run is
+  "registered look: <role>" with the first 12 characters of its report
+  sha256; an AML calibration corpus is "development (calibration corpus:
+  in-sample ...)"; every other run, and any run when the look record is
+  missing or unreadable, is "development".
+- **Corpus**, **support state** with what it means, **binding caps** (every
+  Lakebench limit that bound the run, or "none"), **n** (runs, and samples
+  per query), **provenance** (the Lakebench version, commit, and whether its
+  tree was dirty) and the identity **digest**.
+
+Under them come the verdict's qualifiers (rules skipped on a Lakebench cap,
+layers whose rows were not measured, C360 checks that failed outside the
+gating set) and what limits interpretation: a single run (n=1), detection
+rules skipped or errored (and, for continuous AML, the rules that mode does
+not run), AML recall that is uncalibrated and in-sample, and a dirty tree.
+`lakebench report` prints the same front matter before its scores, and
+`run` prints it after the record is saved (not for `--local` runs).
+
+The evidence class is decided when a report is rendered. A run's delivered
+`report.html` is written at save, before any look record can name the run,
+so it reads "development"; a report rendered after the look is recorded
+(`lakebench report --render`) reads the registered look.
 
 A one-line context banner below the header shows pipeline mode (Batch /
 Continuous), Customer360 scale factor, the recipe string
@@ -1150,7 +1178,7 @@ Five primary KPI cards. The cards change with pipeline mode:
 **Batch:** Time-to-Value, Data Processed (GB), Pipeline Throughput (GB/s), QpH,
 Job Status (pass/fail count).
 
-**Continuous:** Data Freshness, Sustained Throughput (rows/s), Compute
+**Continuous:** Data Freshness, Continuous Throughput (rows/s), Compute
 Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
 CPU-hours.
 
