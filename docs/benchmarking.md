@@ -278,8 +278,9 @@ limits the effect when only a few rounds land in a settling window.
 Each in-stream round records `index`, `started_at`, `ended_at`, the queries
 it executed (`executed_queries`, the ones that succeeded),
 `executed_query_set_id` and `investigator_queries` (`included`,
-`absent_no_cases`, `probe_failed`; null until the AML investigator rounds
-set it, and for C360). A round whose query failed executed a smaller set
+`absent_no_cases`, `probe_failed`: whether an AML continuous round with the
+TM operations layer ran IQ1-IQ4, which it does once the run has a case; null
+for C360 and for AML without that layer). A round whose query failed executed a smaller set
 than the others, so its QpH is over different queries.
 `scores.composite_qph_basis` says whether the rounds behind the in-stream
 QpH (those with a QpH) executed more than one set (`blended`) and how many
