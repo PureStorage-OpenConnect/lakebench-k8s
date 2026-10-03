@@ -591,8 +591,7 @@ def test_golden_is_clean(run_id):
 
     html = golden_path(run_id).read_text()
     assert check_clean({"page": html}) == []
-    protected = datagen_seed.protected_seeds()
-    hits = [m for m in re.findall(r"\d+", html) if int(m) in protected]
+    hits = [m for m in re.findall(r"\d+", html) if datagen_seed.heldout_role(int(m)) is not None]
     assert not hits, "golden holds a protected seed"
 
 
