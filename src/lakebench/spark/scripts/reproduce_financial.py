@@ -49,6 +49,10 @@ GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 #: Outcomes the job determines (each exits 0).
 OUTCOMES = ("reproduced", "not_found", "snapshot_gone", "mismatch", "rule_skipped")
 
+#: What a rule reads that the run record does not pin: W5/W6 read the bronze
+#: watchlist as it is now, and W1 its vertex cap from the current config.
+NOT_PINNED = ("bronze watchlist (W5, W6)", "W1 vertex cap (current config)")
+
 # Whitelist of alert_id characters. UUIDs and short prefixes with digits,
 # dashes, and lowercase letters cover every alert we produce. Anything else
 # is either a bug or an injection attempt; refuse rather than interpolate.
@@ -109,7 +113,14 @@ def read_recorded(spark, table: str, entry: dict | None) -> tuple:
     want = (entry.get("rows"), entry.get("fp"), entry.get("cols_sha"))
     if None in want:
         return None, None, f"{table}: snapshot {snapshot} expired and no fingerprint was recorded"
-    current = spark.table(fq)
+    # The current snapshot, pinned: the frame fingerprinted is the frame read.
+    now = spark.sql(
+        f"SELECT snapshot_id FROM {fq}.history WHERE is_current_ancestor "
+        "ORDER BY made_current_at DESC LIMIT 1"
+    ).collect()
+    if not now:
+        return None, None, f"{table}: snapshot {snapshot} expired and the table has no snapshot"
+    current = spark.sql(f"SELECT * FROM {fq} VERSION AS OF {int(now[0][0])}")
     rows, fp, cols_sha = frame_fingerprint(current, current.columns)
     if (int(rows), str(fp), str(cols_sha)) == (int(want[0]), str(want[1]), str(want[2])):
         return current, "equivalent", None
@@ -140,6 +151,7 @@ def match_alert(original_txns, reproduced_rows) -> tuple[str, int, int]:
 def reproduce(spark, alert_id: str, inputs: dict) -> dict:
     """The result record for *alert_id* (``outcome`` one of OUTCOMES)."""
     run_id = str(inputs.get("run_id") or "")
+    nonce = inputs.get("nonce")
     by_table = {
         e.get("table"): e for e in inputs.get("read_snapshots") or [] if isinstance(e, dict)
     }
@@ -153,6 +165,12 @@ def reproduce(spark, alert_id: str, inputs: dict) -> dict:
         "diff_size": None,
         "snapshot_ids": {t: (by_table.get(t) or {}).get("snapshot") for t in _tables()},
         "reason": None,
+        # The CLI's token for this reproduction: a result without it is not
+        # this one's.
+        "nonce": nonce,
+        # Inputs the rule reads that the run did not record: the basis
+        # covers the three silver tables only.
+        "not_pinned": list(NOT_PINNED),
     }
 
     # alert_ts compared as epoch microseconds: a timestamp collected to
@@ -192,11 +210,24 @@ def reproduce(spark, alert_id: str, inputs: dict) -> dict:
         # The current versions table holds what gold saw (equal content).
         txns = sealed_txns_filter(spark, txns_raw, CATALOG, SILVER_BATCH_VERSIONS)
 
-    from detection_rules import RuleSkipped, get_rule, rule_params
+    from detection_rules import (
+        RULE_VERSION,
+        RuleSkipped,
+        cleanup_w1_checkpoints,
+        get_rule,
+        rule_params,
+    )
 
     fn = get_rule(alert["rule_id"])
     if fn is None:
         return {**result, "outcome": "mismatch", "reason": f"unknown rule {alert['rule_id']}"}
+    recorded_version = _field(alert, "rule_version")
+    if recorded_version is not None and str(recorded_version) != RULE_VERSION:
+        return {
+            **result,
+            "outcome": "mismatch",
+            "reason": f"rule version {recorded_version} raised it; this code is {RULE_VERSION}",
+        }
     try:
         reproduced = fn(txns, **rule_params(fn, run_id, frames[SILVER_ENTITIES]))
         same = reproduced.where(
@@ -207,8 +238,20 @@ def reproduce(spark, alert_id: str, inputs: dict) -> dict:
         matches = [r["txns"] for r in same.limit(10).collect()]
     except RuleSkipped as skip:
         return {**result, "outcome": "rule_skipped", "reason": f"{skip.reason}: {skip.detail}"}
+    finally:
+        # W1 checkpoints and W3/W17 path spill under the gold bucket would be
+        # counted in the next run's measured gold size.
+        cleanup_w1_checkpoints(spark)
     outcome, matched, diff = match_alert(alert["related_txn_ids"], matches)
     return {**result, "outcome": outcome, "matched": matched, "diff_size": diff}
+
+
+def _field(row, name):
+    """A Row field, or None when the table has no such column."""
+    try:
+        return row[name]
+    except (KeyError, ValueError):
+        return None
 
 
 def main() -> None:

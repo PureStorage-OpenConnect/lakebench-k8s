@@ -211,7 +211,7 @@ def _write(runs: Path, run_id: str, **fields) -> None:
         "deployment_name": "aml-x",
         "start_time": f"2026-10-0{run_id[7]}T12:00:00+00:00",
         "experiment": {"workload": {"name": "financial"}, "mode": "batch"},
-        "financial_scoring": {"read_snapshots": SNAPS},
+        "financial_scoring": {"run_id": f"{run_id}-c1", "read_snapshots": SNAPS},
     }
     for k, v in fields.items():
         rec[k] = v
@@ -240,6 +240,9 @@ def test_the_record_is_the_latest_aml_batch_run_of_the_deployment(tmp_path):
     assert rec["run_id"] == "20261002-120000-aaaaaa"
     rec, where = reproduce_record(cfg, "20261001-120000-aaaaaa", tmp_path)
     assert rec["run_id"] == "20261001-120000-aaaaaa" and where.endswith("metrics.json")
+    # --run names a record of another deployment, or not an AML batch run.
+    assert reproduce_record(cfg, "20261004-120000-dddddd", tmp_path)[0] is None
+    assert reproduce_record(cfg, "20261003-120000-cccccc", tmp_path)[0] is None
     assert reproduce_record(cfg, "20261009-000000-zzzzzz", tmp_path)[0] is None
     assert reproduce_record(SimpleNamespace(name="none"), None, tmp_path)[0] is None
 
@@ -275,7 +278,12 @@ class _Cluster:
         self.calls.append(f"get {Key}")
         if self.raw is None and self.result is None:
             raise FileNotFoundError(Key)
-        body = self.raw if self.raw is not None else json.dumps(self.result)
+        if self.raw is not None:
+            body = self.raw
+        else:
+            # The job echoes the nonce it was given, unless the case says not.
+            result = {"nonce": self.uploaded["nonce"], **self.result}
+            body = json.dumps(result)
         return {"Body": SimpleNamespace(read=lambda: body.encode())}
 
 
@@ -313,10 +321,12 @@ def _invoke(monkeypatch, tmp_path, cluster, *extra):
 )
 def test_outcome_codes(monkeypatch, tmp_path, outcome, code):
     _write(tmp_path / "lakebench-output" / "runs", RUN)
-    cluster = _Cluster(result={"run_id": RUN, "outcome": outcome, "rule_id": "W2_structuring"})
+    cluster = _Cluster(result={"outcome": outcome, "rule_id": "W2_structuring"})
     result = _invoke(monkeypatch, tmp_path, cluster)
     assert result.exit_code == code, result.output
-    assert cluster.uploaded == {"run_id": RUN, "read_snapshots": SNAPS}
+    # The run id gold stamped on its alerts (a cycle's), not the record's.
+    assert cluster.uploaded["run_id"] == f"{RUN}-c1"
+    assert cluster.uploaded["read_snapshots"] == SNAPS and len(cluster.uploaded["nonce"]) == 32
     submit = next(c for c in cluster.calls if c.startswith("submit"))
     assert "--input s3a://g/scoring/reproduce/abc-123/input.json" in submit
     assert "--output s3a://g/scoring/reproduce/abc-123/result.json" in submit
@@ -330,10 +340,10 @@ def test_outcome_codes(monkeypatch, tmp_path, outcome, code):
     "result, raw",
     [
         (None, None),
-        ({"run_id": "20261003-000000-other0", "outcome": "reproduced"}, None),
+        ({"nonce": "an-earlier-reproduction", "outcome": "reproduced"}, None),
         (None, "not json"),
     ],
-    ids=["no-result", "another-runs-result", "garbage"],
+    ids=["no-result", "an-earlier-result", "garbage"],
 )
 def test_no_usable_result_is_a_failure(monkeypatch, tmp_path, result, raw):
     _write(tmp_path / "lakebench-output" / "runs", RUN)
@@ -341,12 +351,40 @@ def test_no_usable_result_is_a_failure(monkeypatch, tmp_path, result, raw):
     assert out.exit_code == 1, out.output
 
 
-def test_a_record_without_read_snapshots_is_refused_before_any_cluster_call(monkeypatch, tmp_path):
-    _write(tmp_path / "lakebench-output" / "runs", RUN, financial_scoring={"recall": 0.5})
+@pytest.mark.parametrize(
+    ("scoring", "why"),
+    [
+        (None, "was not scored"),
+        ({"recall": 0.5}, "was not scored"),
+        ({"run_id": f"{RUN}-c1", "recall": 0.5}, "predates 1.7"),
+        ({"run_id": f"{RUN}-c1", "read_snapshots": []}, "recorded no read snapshots"),
+    ],
+)
+def test_a_record_without_read_snapshots_is_refused_before_any_cluster_call(
+    monkeypatch, tmp_path, scoring, why
+):
+    _write(tmp_path / "lakebench-output" / "runs", RUN, financial_scoring=scoring)
     cluster = _Cluster()
     out = _invoke(monkeypatch, tmp_path, cluster)
-    assert out.exit_code == 4 and "predates 1.7" in out.output, out.output
+    assert out.exit_code == 4 and why in out.output, out.output
     assert cluster.calls == []
+
+
+def test_a_protected_record_is_refused_before_any_cluster_call(monkeypatch, tmp_path):
+    from lakebench.aml import look_guard
+
+    _write(tmp_path / "lakebench-output" / "runs", RUN)
+    seen = {}
+
+    def reason(record, **kw):
+        seen.update(kw)
+        return "corpus_role evaluation"
+
+    monkeypatch.setattr(look_guard, "protected_record_reason", reason)
+    cluster = _Cluster()
+    out = _invoke(monkeypatch, tmp_path, cluster)
+    assert out.exit_code == 2 and "protected AML corpus" in out.output, out.output
+    assert cluster.calls == [] and seen.get("fail_closed") is True
 
 
 def test_no_record_is_refused_before_any_cluster_call(monkeypatch, tmp_path):
@@ -356,13 +394,21 @@ def test_no_record_is_refused_before_any_cluster_call(monkeypatch, tmp_path):
     assert cluster.calls == []
 
 
-@pytest.mark.parametrize("bad", ["x' OR 1=1", "a" * 129, "case/../x"])
-def test_a_bad_alert_id_is_refused_before_anything(monkeypatch, tmp_path, bad):
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--alert-id", "x' OR 1=1"],
+        ["--alert-id", "a" * 129],
+        ["--alert-id", "case/../x"],
+        ["--alert-id", "abc", "--run", "../../etc"],
+    ],
+)
+def test_a_bad_alert_or_run_id_is_refused_before_anything(monkeypatch, tmp_path, argv):
     import lakebench.cli._financial as fin
 
     called = []
     monkeypatch.setattr(fin, "_load_config", lambda *a, **k: called.append(1))
-    out = CliRunner().invoke(app, ["financial", "reproduce", "c.yaml", "--alert-id", bad])
+    out = CliRunner().invoke(app, ["financial", "reproduce", "c.yaml", *argv])
     assert out.exit_code == 2 and called == [], out.output
 
 
