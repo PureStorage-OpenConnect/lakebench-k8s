@@ -116,6 +116,7 @@ def test_gate_covers_the_required_checks():
         "version",
         "changelog",
         "prose",
+        "package-guard",
         "uat-results",
         "perf-baselines",
     } <= names

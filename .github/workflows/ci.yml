@@ -525,6 +525,13 @@ jobs:
       - name: Verify wheel installs
         run: pip install dist/*.whl && lakebench version
 
+      # What the built artifacts and the script maps rendered from the wheel
+      # carry: no local-only docs, no key patterns, no held-out seed (once
+      # the hash file exists). gitleaks is not installed here, so that part
+      # is SKIP; the secret-scan jobs cover the tree it is built from.
+      - name: Package guard
+        run: python scripts/package_guard.py --dist dist
+
       # Named ci-dist, not dist: release.yml calls this workflow in the same
       # run and uploads its own dist, and artifact names are per run.
       - name: Upload the wheel for the clean-venv job

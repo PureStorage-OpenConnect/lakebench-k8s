@@ -457,6 +457,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **The release gate and CI check what the package ships.**
+  `scripts/package_guard.py` reads the built wheel and sdist, and the
+  script ConfigMaps rendered from the wheel, and fails on a
+  `docs/internal/` or other maintainer-only member, an access key, a
+  private key or a gitleaks finding; once the held-out hash file exists it
+  also runs the held-out absence check (a hit is `PENDING-OA5` until the
+  file says `enforce`). CI's package build runs it, and the release gate
+  gains a `package-guard` check, which `release.yml` runs with gitleaks.
 - **The release gate's `em-dashes` check is now `prose`.** It runs
   `scripts/prose_guard.py` over every tracked file instead of the docs,
   workflows, examples and CLI sources, and fails on emoji and AI

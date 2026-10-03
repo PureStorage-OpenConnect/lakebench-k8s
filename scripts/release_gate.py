@@ -733,6 +733,33 @@ def check_gitleaks_history() -> Result:
     )
 
 
+def check_package_guard() -> Result:
+    """scripts/package_guard.py over a fresh wheel and sdist: names, key
+    patterns, gitleaks and the held-out absence check. A SKIP (no gitleaks,
+    no hash file) or a PENDING-OA5 hit makes this check SKIP, so
+    --require-all fails on it."""
+    import tempfile
+
+    guard = _load_script("package_guard")
+    with tempfile.TemporaryDirectory(prefix="release-gate-package-") as tmp:
+        work = Path(tmp)
+        try:
+            guard.build(work / "dist")
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or b"").decode("utf-8", "replace")
+            return Result("package-guard", FAIL, f"python -m build failed\n{_tail(err)}")
+        findings = guard.guard(work / "dist", work)
+    lines = [f.render() for f in findings]
+    statuses = {f.status for f in findings}
+    if guard.FAIL in statuses:
+        bad = [f.render() for f in findings if f.status == guard.FAIL]
+        return Result("package-guard", FAIL, f"{len(bad)} failing:\n" + "\n".join(bad + lines))
+    if statuses & {guard.SKIP, guard.PENDING}:
+        open_ = [f.render() for f in findings if f.status in (guard.SKIP, guard.PENDING)]
+        return Result("package-guard", SKIP, f"{len(open_)} not passed:\n" + "\n".join(open_))
+    return Result("package-guard", PASS, "; ".join(f"{f.check} {f.detail}" for f in findings))
+
+
 def check_pre_push_hook() -> Result:
     """The pre-push hook installed in this clone is the tracked one."""
     tracked = ROOT / "scripts" / "hooks" / "pre-push"
@@ -855,6 +882,11 @@ def build_checks(tag: str | None = None, perf_runs: dict[str, str] | None = None
             "gitleaks-history",
             check_gitleaks_history,
             "secret scan of the history beyond .gitleaksignore",
+        ),
+        Check(
+            "package-guard",
+            check_package_guard,
+            "the wheel, sdist and script maps ship no local docs, keys or held-out seeds",
         ),
         Check("pre-push-hook", check_pre_push_hook, "installed pre-push hook is the tracked one"),
         Check("examples", check_examples, "every examples/*.yaml validates"),

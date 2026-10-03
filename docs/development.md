@@ -535,7 +535,11 @@ diff against `main`. The scan also runs with
 the branch's own config, so a new rule applies at once.
 `tests/test_gitleaks_baseline.py` pins the list. The package build runs
 only after the lint, test, Spark, Rust and both secret-scan jobs pass; it
-does not wait for the slow AML job, which most branches skip.
+does not wait for the slow AML job, which most branches skip. After the
+build it runs `scripts/package_guard.py --dist dist`: no `docs/internal/`
+or other maintainer-only member, no key pattern, and no held-out seed once
+the hash file exists, in the wheel, the sdist and the script ConfigMaps
+rendered from the wheel.
 
 Every job runs on a fixed runner image (`ubuntu-24.04`, never
 `ubuntu-latest`), and every action is pinned by commit SHA with its tag as
