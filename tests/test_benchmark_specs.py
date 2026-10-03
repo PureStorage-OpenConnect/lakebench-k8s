@@ -3,8 +3,10 @@
 Code to doc: every metric the registry tags with a workload, every query id
 of the workload's query set and every correctness check id the workload
 evaluates appears, in backticks, in that workload's spec under
-``docs/benchmarks/``. A lane that adds a metric, query or check without a
-spec line fails here.
+``docs/benchmarks/``. For AML that is also every detection rule id, every
+reason code a rule can write, and every scoring query id in
+``benchmark/aml_queries.py``. A lane that adds a metric, query, check, rule
+or code without a spec line fails here.
 
 Seed scan: no spec carries an integer whose salted hash is a held-out AML
 seed's. The scan compares sha256 hashes against
@@ -22,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from lakebench.benchmark import aml_queries
 from lakebench.benchmark.queries import get_benchmark_queries
 from lakebench.config.schema import WorkloadSchema
 from lakebench.metrics import c360_correctness, metric_registry
@@ -30,6 +33,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SPECS = ROOT / "docs" / "benchmarks"
 C360_SPEC = SPECS / "C360.md"
 C360_CHECKS = ROOT / "src" / "lakebench" / "metrics" / "c360_correctness.py"
+AML_SPEC = SPECS / "AML.md"
+SCRIPTS = ROOT / "src" / "lakebench" / "spark" / "scripts"
+DETECTION_RULES = SCRIPTS / "detection_rules.py"
+REASON_CODES = SCRIPTS / "aml_reason_codes.py"
 HELDOUT_HASHES = ROOT / "src" / "lakebench" / "spark" / "data" / "aml" / "heldout_hashes.json"
 
 #: The functions in c360_correctness.py that build one check from a literal id.
@@ -117,6 +124,101 @@ def test_planted_check_and_query_without_a_spec_line_fail():
     assert missing_from("`Q1_full_aggregation_scan`", {"Q1_full_aggregation_scan", "Q8_x"}) == [
         "Q8_x"
     ]
+
+
+# -- AML ----------------------------------------------------------------------
+
+
+def literal_dict(source: str, name: str) -> dict:
+    """The literal value of the module-level ``name = {...}`` in *source*
+    (read by AST, so the Spark scripts are not imported)."""
+    for node in ast.parse(source).body:
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, ast.AnnAssign)
+            else []
+        )
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not found")
+
+
+def aml_rule_ids(source: str) -> set[str]:
+    """Rule ids gold-finalize dispatches (``_RULE_DISPATCH`` keys)."""
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == "_RULE_DISPATCH" for t in targets):
+                assert isinstance(node.value, ast.Dict)
+                return {k.value for k in node.value.keys if isinstance(k, ast.Constant)}
+    raise AssertionError("_RULE_DISPATCH not found")
+
+
+def aml_reason_codes(source: str) -> set[str]:
+    """Every base and conditional reason code a rule can write."""
+    codes = set(literal_dict(source, "BASE_CODE").values())
+    for pairs in literal_dict(source, "CONDITIONAL_CODES").values():
+        codes |= {code for code, _ in pairs}
+    return codes
+
+
+def test_every_registry_metric_in_aml_spec():
+    names = registry_metrics("financial")
+    assert "time_to_detect_seconds" in names
+    missing = missing_from(AML_SPEC.read_text(), names)
+    assert not missing, f"docs/benchmarks/AML.md names no registry metric: {missing}"
+
+
+def test_every_aml_query_id_in_spec():
+    names = {q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)}
+    assert len(names) == 12
+    scoring = {q.query_id for q in aml_queries.load_aml_queries("lakehouse")}
+    assert len(scoring) >= 40, sorted(scoring)
+    spec = AML_SPEC.read_text()
+    missing = missing_from(spec, names | scoring)
+    assert not missing, f"docs/benchmarks/AML.md names no query: {missing}"
+    assert missing_from(spec, names | {"FQ99_planted"}) == ["FQ99_planted"]
+
+
+def test_every_aml_rule_id_in_spec():
+    ids = aml_rule_ids(DETECTION_RULES.read_text())
+    assert ids == set(aml_queries.RULE_TARGETS), sorted(ids)
+    missing = missing_from(AML_SPEC.read_text(), ids)
+    assert not missing, f"docs/benchmarks/AML.md names no rule: {missing}"
+
+
+def test_every_aml_reason_code_in_spec():
+    codes = aml_reason_codes(REASON_CODES.read_text())
+    assert len(codes) >= 9, sorted(codes)
+    missing = missing_from(AML_SPEC.read_text(), codes)
+    assert not missing, f"docs/benchmarks/AML.md names no reason code: {missing}"
+
+
+def test_planted_aml_ids_without_a_spec_line_fail():
+    spec = AML_SPEC.read_text()
+    planted = dict(metric_registry.METRICS)
+    entry = next(iter(planted["time_to_detect_seconds"]))
+    planted["planted_unnamed_metric"] = (
+        metric_registry.MetricMeta(
+            "planted_unnamed_metric",
+            entry.unit,
+            entry.direction,
+            entry.band,
+            entry.modes,
+            entry.workloads,
+        ),
+    )
+    assert missing_from(spec, registry_metrics("financial", planted)) == ["planted_unnamed_metric"]
+    rules = DETECTION_RULES.read_text().replace(
+        "_RULE_DISPATCH = {", '_RULE_DISPATCH = {\n    "W99_planted_rule": None,', 1
+    )
+    assert missing_from(spec, aml_rule_ids(rules)) == ["W99_planted_rule"]
+    codes = REASON_CODES.read_text().replace(
+        "BASE_CODE = {", 'BASE_CODE = {\n    "W99_planted_rule": "W99_PLANTED_CODE",', 1
+    )
+    assert missing_from(spec, aml_reason_codes(codes)) == ["W99_PLANTED_CODE"]
 
 
 # -- held-out seed scan ---------------------------------------------------------

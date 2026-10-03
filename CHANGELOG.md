@@ -507,6 +507,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **AML benchmark specification.** `docs/benchmarks/AML.md` publishes the AML
+  (financial) workload's data model, seed policy, pipeline, detection rules
+  and reason codes, correctness contract, query set, metrics, scoring and
+  comparability rules, checked against the code. `tests/test_benchmark_specs.py`
+  fails when a financial metric, query, rule or reason code has no line in it.
 - **`scripts/gen_docs.py`** regenerates every generated docs block in one
   command (support states, configuration and CLI references, sizing tables,
   exit codes, prerequisites); `--check` exits 1 when any is stale. Every
