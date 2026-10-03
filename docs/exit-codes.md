@@ -117,5 +117,5 @@ one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`
 (the fix) and `Where` lines when they apply. An error Lakebench does
 not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`
 to get the traceback. Machine output (`--format json` and `--format csv`
-on `query`, `results` and `compare`) goes to plain stdout, unwrapped, so
+on `query`, `report` and `compare`) goes to plain stdout, unwrapped, so
 it can be piped to a parser.
