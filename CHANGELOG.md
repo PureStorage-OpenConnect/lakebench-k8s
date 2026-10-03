@@ -87,8 +87,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   such a config must be redeployed, since `run` refuses a dependency set
   that no longer matches the config. A config that writes a table format
   version Spark 4.1 cannot run (Delta 4.0.0) and no image keeps Spark 4.0.2,
-  so it still loads and tears down. The Hive examples now pin 4.1.1; the
-  perf-gate pinned configs keep 4.0.2 until their re-baseline. `--local`
+  so it still loads and tears down. The Hive examples now pin 4.1.1; of the
+  perf-gate pinned configs, `aml-batch-s10` runs 4.1.1 and the Customer 360
+  Hive/Polaris pair stays on 4.0.2 (Polaris is validated only there). `--local`
   runs keep their own 4.0.2 image, and their record now names it.
 - **The verdict is decided from the record.** A PASSED verdict now also
   needs rows in every layer (`layer_rows`), the expected AML rules with no
@@ -502,6 +503,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   silver tables between a batch and a drained continuous deployment of one
   corpus, with the business columns read from the silver DDL. See
   RELEASING.md.
+- **v1.7 performance re-baseline configs.** `benchmarks/perf/` pins
+  `aml-batch-s10` and `c360-batch-s10-polaris` (the Polaris twin of
+  `c360-batch-s10`); the release workflow now runs the `perf-baselines`
+  check, which fails a tag only for configs marked required (none until the
+  post-freeze data commit). See docs/perf-regression-gate.md.
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in

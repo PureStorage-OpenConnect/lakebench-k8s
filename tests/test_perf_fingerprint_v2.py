@@ -29,12 +29,13 @@ from lakebench.modules.pipeline_engines.spark import job as job_mod
 from tests import test_perf_gate as _tpg
 from tests.conftest import make_config
 from tests.test_perf_gate import (
-    PERF,
     PINSET,
     _batch_run,
     _record,
     _snapshot,
 )
+
+V16_STORE = Path(__file__).resolve().parent / "fixtures" / "perf_v16_store"
 
 # The perf-gate tests' store-and-runs fixture.
 env = _tpg.env
@@ -85,9 +86,10 @@ def test_v1_snapshot_projection_is_unchanged():
 
 
 def test_v16_baseline_refused_fingerprint_v1(env, tmp_path):
-    # The checked-in store is schema 1 with an accepted v1.6 baseline.
+    # The v1.6 store (schema 1 with an accepted v1.6 baseline), kept as a
+    # fixture since the checked-in store moved on to the v1.7 re-baseline.
     store_dir = tmp_path / "checked-in"
-    shutil.copytree(PERF, store_dir)
+    shutil.copytree(V16_STORE, store_dir)
     store = pg.load_store(store_dir / "baselines.yaml")
     base = store.baselines["c360-batch-s10"]
     assert base.accepted and base.fingerprint_version == 1
@@ -141,7 +143,7 @@ def test_v1_entry_survives_a_schema_2_save(tmp_path):
     # another config; the v1 entry stays version 1, the store still loads,
     # and compare refuses that entry by its version.
     store_dir = tmp_path / "checked-in"
-    shutil.copytree(PERF, store_dir)
+    shutil.copytree(V16_STORE, store_dir)
     store = pg.load_store(store_dir / "baselines.yaml")
     store.save()
     data = yaml.safe_load((store_dir / "baselines.yaml").read_text())
