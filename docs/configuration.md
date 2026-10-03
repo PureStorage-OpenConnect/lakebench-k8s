@@ -71,8 +71,9 @@ report, the other directory's deployment. `info`, `config show`, `config
 storage` and `config recommend` load it under the link directory's name (a
 suggested name when it records none) with a note. Because both directories
 share the one file, the fix is not to add `name:` to it: pass `--name`
-(through the link only the link directory's name is accepted; reach the
-other deployment through the file's own path), or replace the link with a
+(when the link's directory records a name, only that name is accepted
+through the link; reach the other deployment through the file's own path;
+otherwise the namespace's stamps decide), or replace the link with a
 copy and name each copy. `init --overwrite` without `--name` refuses such a
 file when either directory records a v1.6 name, and `relocate` refuses to
 run through a link when either directory records one. The v1.7 deploy

@@ -208,9 +208,9 @@ class ConfigNameRequired(ConfigValidationError):
                 f"{other_path}, beside the file the link points to. The two directories "
                 "share this one file, so which deployment it names cannot be told. Fix: "
                 "pass --name to destroy, stop, status or logs, which then check the "
-                "namespace's stamps (through this path only the name recorded beside "
-                "the link is accepted; reach the other deployment through the file's "
-                "own path); to keep using the config, replace the link with a copy of "
+                "namespace's stamps (when the link's directory records a name, only that "
+                "name is accepted through this path; reach the other deployment through "
+                "the file's own path); to keep using the config, replace the link with a copy of "
                 "the file and add each deployment's name to its own copy."
             )
         elif teardown and resolution.source == "legacy-state":

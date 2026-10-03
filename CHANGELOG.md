@@ -1388,12 +1388,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   path given, not beside the file the link points to, so `destroy`, `stop`,
   `status` or `compare` through a link no longer use, or check `--name`
   against, another directory's v1.6 name. When the two directories record
-  different names, every command that may look at a deployment refuses a
-  nameless load without `--name`; `info`, `config show`, `config storage`
-  and `config recommend` load it under the link directory's name with a
-  note. `init --overwrite` through a link refuses when either directory
-  records a v1.6 name, and so does `relocate`; `init --from` through a link
-  refuses a name recorded only beside the link's target.
+  different names, or only the target's records one, every command that
+  may look at a deployment refuses a nameless load without `--name`;
+  `info`, `config show`, `config storage` and `config recommend` load it
+  under the link directory's name (or a suggested one) with a note. `init
+  --overwrite` through a link refuses when either directory records a v1.6
+  name, and so does `relocate`; `init --from` through a link refuses a name
+  recorded only beside the link's target.
 - **A fresh generate waits for an earlier datagen Job's pods to stop.**
   The previous Job is deleted in the background, so its pods kept running
   for their grace period and could land a `part-*` file in the datagen
