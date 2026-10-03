@@ -146,15 +146,21 @@ judges records against HEAD, and is never evidence. Copy `results.md` and
 the scrubbed records into `uat/` in the post-freeze data commit.
 
 A matrix row may list `extra_steps`, run on the row's own deployment after
-its run passes and before its destroy. `continuous-after-batch` (on M01, a
-Customer 360 batch row only) runs `run --continuous --yes` on the same
-deployment: it must reset the batch's state, which it does only after
-proving it owns the namespace and buckets, and its record must pass on its
-verdict and rows per layer. A row with that step is admitted at the larger
-of its batch and continuous peaks. Extra-step records go to
-`<out>/extra/runs/` and their results to `results-extra.md`; they do not
-change the row's verdict, but a failed, skipped or missing step makes the
-harness exit non-zero.
+its run passes and before its destroy, and only while the deployment is
+still the row's incarnation. `continuous-after-batch` (on M01, a Customer
+360 batch row only) runs `run --continuous --force-reset --skip-deploy
+--yes` on the same deployment: the reset of the batch's tables still needs
+the ownership proof, and the reset job's own lines (read with `lakebench
+logs ... bronze-verify`) must show at least one table dropped with PURGE, no
+table kept as foreign, and every deleted location inside the row's own
+buckets. The continuous record must pass on its verdict, rows per layer and
+commit. A row with that step is admitted at the larger of its batch and
+continuous peaks. Extra-step records go to `<out>/extra/runs/` and their
+results to `results-extra.md`, which also lists a step that did not finish
+as MISSING; copy both to `uat/extra/` (never `uat/runs/`, which the support
+record reads) in the post-freeze data commit. They do not change the row's
+verdict, but a failed, skipped or missing step makes the harness exit
+non-zero.
 
 Safety rules. Destroy is never passed `--force` and never re-invoked. Exit
 6 is followed by read-only polls for up to 20 minutes. Any other non-zero

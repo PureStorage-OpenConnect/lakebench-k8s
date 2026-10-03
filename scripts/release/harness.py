@@ -125,6 +125,7 @@ TIMEOUTS_S = {
     "report": 1800,
     "destroy": 2 * 3600,
     "query": 600,
+    "logs": 600,
 }
 SCRIPT_TIMEOUT_S = 6 * 3600
 #: The ledger session cell of an alone row written by any harness process.
@@ -1220,6 +1221,10 @@ class ScenarioMixin:
     def write_extra_results(self: Any) -> Path:
         """``results-extra.md``: scenario (and upgrade) runs, which are not
         release-matrix evidence and stay out of results.md."""
+        with self._log_lock:
+            return self._write_extra_results()
+
+    def _write_extra_results(self: Any) -> Path:
         states = self.rowlog.latest()
         lines = [
             f"# Parallel-safety and upgrade runs {self.version}",
@@ -1230,7 +1235,15 @@ class ScenarioMixin:
             "|---|---|---|---|",
         ]
         for rid, s in states.items():
-            for step, res in (s.get("extra") or {}).items():
+            done = s.get("extra") or {}
+            row = self.rows.get(rid)
+            for step in row.extra_steps if row is not None else ():
+                if step not in done:
+                    lines.append(
+                        f"| {rid} {step} | {s.get('namespace', '?')} | MISSING | "
+                        "the step did not finish |"
+                    )
+            for step, res in done.items():
                 problems = "; ".join(res.get("problems") or []) or "-"
                 ids = ", ".join(r.removeprefix("run-") for r in res.get("run_ids") or []) or "-"
                 lines.append(
@@ -1766,15 +1779,19 @@ class UpgradeMixin:
 
 # -- extra steps -------------------------------------------------------------
 
-#: Lines of a continuous run's output: the reset of the previous run's state
-#: ran (it runs only after ownership of the namespace and buckets is proved),
-#: and the refusal it prints when ownership is not proved.
-RESET_DONE = "Continuous tables reset in"
+#: The continuous run's own line for a refused reset (three causes share it:
+#: ownership not proved, data present without --force-reset, a datagen Job
+#: still running), and the line it prints once the reset job succeeded.
 RESET_REFUSED = "Refusing to reset continuous state"
+RESET_DONE = "Continuous tables reset in"
+#: The reset job's per-table lines (spark/scripts/common.py reset_stream_tables).
+RESET_LINE = re.compile(r"Continuous reset: (.*)")
+RESET_LOCATION = re.compile(r"(?:deleted \d+ data entries under|deleted|kept) (\S+)")
 
 
-def _judge_extra(record: dict[str, Any]) -> list[str]:
-    """A non-matrix record passes on its verdict and rows per layer."""
+def _judge_extra(record: dict[str, Any], sha: str) -> list[str]:
+    """A non-matrix record passes on its verdict, rows per layer and the
+    commit it ran."""
     from lakebench.metrics.release_record import _layer_rows_problem
     from lakebench.metrics.verdict import passed
 
@@ -1784,6 +1801,32 @@ def _judge_extra(record: dict[str, Any]) -> list[str]:
     layer = _layer_rows_problem(record)
     if layer:
         problems.append(layer)
+    ran = (record.get("provenance") or {}).get("git_sha")
+    if ran != sha:
+        problems.append(f"the run is not from {sha[:12]} (ran {str(ran)[:12]})")
+    return problems
+
+
+def reset_problems(log_text: str, owned_buckets: Sequence[str]) -> list[str]:
+    """What the reset job's own lines say against "data removed only from
+    this deployment's buckets": at least one table dropped with PURGE, no
+    table kept as foreign, every location deleted inside an owned bucket."""
+    lines = [m.group(1) for m in RESET_LINE.finditer(log_text)]
+    if not lines:
+        return ["the reset job's log has no 'Continuous reset:' line"]
+    problems = []
+    if not any(line.startswith("DROP PURGE ") for line in lines):
+        problems.append("no table was dropped with PURGE")
+    for line in lines:
+        m = RESET_LOCATION.match(line)
+        if not m:
+            continue
+        location = m.group(1)
+        bucket = location.split("://", 1)[-1].split("/", 1)[0]
+        if line.startswith("kept "):
+            problems.append(f"the reset kept {location} as not this deployment's")
+        elif bucket not in owned_buckets:
+            problems.append(f"the reset deleted {location}, outside this deployment's buckets")
     return problems
 
 
@@ -1793,7 +1836,7 @@ class ExtraStepsMixin:
     ``<out>/extra/runs/`` and their results to ``results-extra.md``; they do
     not change the row's own verdict."""
 
-    def run_extra_steps(self: Any, plan: RowPlan, verdict: str) -> None:
+    def run_extra_steps(self: Any, plan: RowPlan, verdict: str, inc: str) -> None:
         row = plan.row
         for step in row.extra_steps:
             if self.interrupted:
@@ -1802,7 +1845,7 @@ class ExtraStepsMixin:
                 result = {"verdict": "SKIPPED", "problems": ["the row's own run did not pass"]}
             else:
                 try:
-                    result = EXTRA_STEPS[step](self, plan)
+                    result = EXTRA_STEPS[step](self, plan, inc)
                 except Exception as e:  # noqa: BLE001 -- recorded; the destroy still runs
                     result = {"verdict": "FAIL", "problems": [f"{type(e).__name__}: {e}"]}
             extras = dict(self.rowlog.latest()[row.id].get("extra") or {})
@@ -1810,15 +1853,23 @@ class ExtraStepsMixin:
             self.log(row.id, "recorded", extra=extras, extra_running=None)
             self.write_extra_results()
 
-    def step_continuous_after_batch(self: Any, plan: RowPlan) -> dict[str, Any]:
-        """A continuous run on the deployment the batch row just used: it
-        must reset the batch's state (only after proving ownership) and pass
-        on its own."""
+    def step_continuous_after_batch(self: Any, plan: RowPlan, inc: str) -> dict[str, Any]:
+        """A continuous run on the deployment the batch row just used. It
+        must reset the batch's tables (``--force-reset``, which still needs
+        the ownership proof), the reset job's own lines must show data
+        removed only inside this deployment's buckets, and the record must
+        pass. ``--skip-deploy``: the step never deploys."""
+        now, why = confirmed_incarnation(plan.config, self.cluster.core_v1)
+        if now != inc:
+            return {
+                "verdict": "SKIPPED",
+                "problems": [f"the deployment is no longer this row's incarnation ({why or now})"],
+            }
         before = sorted(self.run_dirs(plan))
         res = self._spawn(
             plan,
             "run",
-            [str(plan.config), "--continuous", "--yes"],
+            [str(plan.config), "--continuous", "--force-reset", "--skip-deploy", "--yes"],
             interruptible=True,
             log_name="extra-continuous-after-batch",
             status="recorded",
@@ -1828,11 +1879,25 @@ class ExtraStepsMixin:
         text = res.text()
         problems = []
         if res.code != 0:
-            problems.append(f"the continuous run exited {res.code}")
-        if RESET_REFUSED in text:
-            problems.append("the continuous run refused to reset: ownership was not proved")
-        if RESET_DONE not in text:
-            problems.append("the continuous run did not reset the batch's state")
+            problems.append(f"the continuous run exited {res.code} {res.paths or ''}".strip())
+        refused = [ln.strip() for ln in text.splitlines() if RESET_REFUSED in ln]
+        if refused:
+            problems.append(f"the continuous run refused to reset: {refused[0][:300]}")
+        elif RESET_DONE not in text:
+            problems.append("the continuous run did not reset the batch's tables")
+        else:
+            logs = self.out / "logs" / plan.row.id / "extra-reset-driver.log"
+            got = self.runner(
+                ["logs", str(plan.config), "bronze-verify", "--lines", "5000"],
+                cwd=plan.config.parent,
+                log=self.log_path(plan.row, "extra-logs"),
+                stdout=logs,
+            )
+            if got.code != 0 or not logs.is_file():
+                problems.append(f"the reset job's log could not be read (logs exited {got.code})")
+            else:
+                owned = config_buckets(plan.config)
+                problems += reset_problems(logs.read_text(errors="replace"), owned)
         if len(runs) != 1:
             problems.append(f"expected one continuous record, found {len(runs)}")
         for rid in runs:
@@ -1844,7 +1909,7 @@ class ExtraStepsMixin:
             except Exception as e:  # noqa: BLE001
                 problems.append(f"{rid}: record unreadable or scrub refused: {e}")
                 continue
-            problems += [f"{rid}: {p}" for p in _judge_extra(clean)]
+            problems += [f"{rid}: {p}" for p in _judge_extra(clean, self.judge_sha or self.freeze)]
             dest = self.out / "extra" / "runs" / rid
             dest.mkdir(parents=True, exist_ok=True)
             (dest / "metrics.json").write_text(scrub.dump(clean))
@@ -2236,7 +2301,7 @@ class Harness(ScenarioMixin, UpgradeMixin, ExtraStepsMixin):
         self.log(row.id, "recorded", run_ids=run_ids, verdict=verdict, problems=problems)
         if self.interrupted:
             return
-        self.run_extra_steps(plan, verdict)
+        self.run_extra_steps(plan, verdict, inc)
         if self.interrupted:
             return
         self.destroy(plan, inc)
@@ -2505,6 +2570,7 @@ class Harness(ScenarioMixin, UpgradeMixin, ExtraStepsMixin):
 
     def finish(self) -> int:
         path = self.write_results()
+        self.write_extra_results()
         states = self.rowlog.latest()
         open_rows = [r for r, s in states.items() if s["status"] not in TERMINAL]
         self.say(f"results: {path}")

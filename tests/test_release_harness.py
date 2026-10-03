@@ -216,6 +216,11 @@ class FakeRunner:
         self.destroy_override: tuple[int, list[str], str] | None = None
         self.destroy_keeps_buckets = False
         self.continuous_output = "Continuous tables reset in 42s\n"
+        self.reset_log = (
+            "Continuous reset: deleted 12 data entries under s3a://{name}-silver/warehouse/t\n"
+            "Continuous reset: DROP PURGE lakehouse.silver.t (iceberg)\n"
+            "Continuous reset: deleted s3a://{name}-silver/warehouse/t\n"
+        )
         self.on_deploy: Any = None
         self.counter = 0
 
@@ -257,6 +262,9 @@ class FakeRunner:
                 (d / "metrics.json").write_text(json.dumps({"run_id": d.name}))
             return H.ChildResult(self.run_code, [], log)
         if verb == "report":
+            return H.ChildResult(0, [], log)
+        if verb == "logs":
+            stdout.write_text(self.reset_log.format(name=name))
             return H.ChildResult(0, [], log)
         if verb == "destroy":
             assert "--force" not in args
@@ -2348,7 +2356,7 @@ M01X = H.Row(
 
 @pytest.fixture
 def xenv(env, monkeypatch):
-    monkeypatch.setattr(H, "_judge_extra", lambda record: [])
+    monkeypatch.setattr(H, "_judge_extra", lambda record, sha: [])
     env.h.rows = {"M01": M01X}
     return env
 
@@ -2378,8 +2386,8 @@ def test_continuous_after_batch_runs_before_the_destroy_and_passes(xenv):
     plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
     _go(xenv, plan)
     verbs = xenv.runner.verbs()
-    assert verbs == ["init", "deploy", "run", "report", "run", "destroy"]
-    assert "--continuous" in xenv.runner.calls[4]
+    assert verbs == ["init", "deploy", "run", "report", "run", "logs", "destroy"]
+    assert {"--continuous", "--force-reset", "--skip-deploy"} <= set(xenv.runner.calls[4])
     st = _status(xenv)
     assert st["status"] == "destroyed" and st["verdict"] == "PASS"
     step = st["extra"]["continuous-after-batch"]
@@ -2432,3 +2440,66 @@ def test_a_step_stopped_midway_is_destroyed_on_resume_and_counts_as_missing(xenv
     H.resume(xenv.h, {"M01": M01X})
     assert _status(xenv)["status"] == "destroyed"
     assert xenv.h.finish() == 1
+
+
+def test_reset_lines_inside_own_buckets_pass_and_foreign_or_kept_fail():
+    own = ["n-bronze", "n-silver", "n-gold"]
+    good = (
+        "Continuous reset: deleted 3 data entries under s3a://n-gold/w/t\n"
+        "Continuous reset: DROP PURGE lakehouse.gold.t (iceberg)\n"
+    )
+    assert H.reset_problems(good, own) == []
+    assert any("outside" in p for p in H.reset_problems(good.replace("n-gold", "other"), own))
+    kept = (
+        good + "Continuous reset: kept s3a://other/x (outside this deployment or not its own dir)\n"
+    )
+    assert any("kept" in p for p in H.reset_problems(kept, own))
+    no_purge = "Continuous reset: DROP lakehouse.gold.t (iceberg)\n"
+    assert any("PURGE" in p for p in H.reset_problems(no_purge, own))
+    assert H.reset_problems("nothing", own)
+
+
+def test_the_step_fails_on_a_foreign_reset_location(xenv):
+    xenv.runner.reset_log = (
+        "Continuous reset: deleted s3a://someone-else/x\nContinuous reset: DROP PURGE t (iceberg)\n"
+    )
+    plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
+    _go(xenv, plan)
+    step = _status(xenv)["extra"]["continuous-after-batch"]
+    assert step["verdict"] == "FAIL" and any("outside" in p for p in step["problems"])
+
+
+def test_the_step_quotes_the_refusal_it_saw(xenv):
+    xenv.runner.continuous_output = (
+        "Refusing to reset continuous state: this deployment already holds data\n"
+    )
+    plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
+    _go(xenv, plan)
+    step = _status(xenv)["extra"]["continuous-after-batch"]
+    assert any("already holds data" in p for p in step["problems"])
+
+
+def test_the_step_never_runs_on_another_incarnation(xenv, monkeypatch):
+    plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
+    real = xenv.runner.__call__
+
+    def runner(args, **kw):
+        res = real(args, **kw)
+        if args[0] == "report":  # someone redeploys the namespace meanwhile
+            name = yaml.safe_load(plan.config.read_text())["name"]
+            xenv.core.namespaces[name]["uid"] = "other"
+        return res
+
+    xenv.h.runner = runner
+    _go(xenv, plan)
+    step = _status(xenv)["extra"]["continuous-after-batch"]
+    assert step["verdict"] == "SKIPPED"
+    assert xenv.runner.verbs().count("run") == 1
+
+
+def test_results_extra_lists_a_missing_step(xenv):
+    xenv.h.log("M01", "planned", namespace="n", config="c", peak=[1, 1])
+    xenv.h.log("M01", "destroyed", verdict="PASS")
+    assert (
+        "| M01 continuous-after-batch | n | MISSING |" in xenv.h.write_extra_results().read_text()
+    )
