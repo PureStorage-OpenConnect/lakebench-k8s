@@ -436,7 +436,7 @@ def test_expected_approximate_sums_are_the_midpoint(ready, tmp_path):
     b["experiment"]["results"]["fingerprints"][q]["approx"][col] += 0.002
     expected = _write(tmp_path, {"run-1": a, "run-2": b})
     got = expected["entries"][0]["fingerprints"][q]["approx"][col]
-    assert got == pytest.approx(fps[q]["approx"][col] + 0.001)
+    assert got == pytest.approx(fps[q]["approx"][col] + 0.001, rel=0, abs=1e-6)
     for rec in (a, b):
         assert _gate(rec, expected) == []
 

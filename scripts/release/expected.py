@@ -339,10 +339,10 @@ def _merge_fingerprints(
             if not isinstance(sums, dict):
                 continue
             for col in sums:
-                values = [
-                    float(((fps.get(q) or {}).get(key) or {}).get(col, sums[col]))
-                    for _rid, fps in members
-                ]
+                values: list[float] = []
+                for _rid, fps in members:
+                    theirs: Any = (fps.get(q) or {}).get(key) or {}
+                    values.append(float(theirs.get(col, sums[col])))
                 sums[col] = (min(values) + max(values)) / 2
         merged[q] = fp
     return merged, problems
