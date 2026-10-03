@@ -36,7 +36,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 from c360_generator_model import generate
@@ -44,20 +44,22 @@ from c360_stream_scenarios import BRONZE_DDL
 from delta_silver_epoch_scenarios import ICEBERG_CATALOG, _submit_args
 from table_fingerprint import table_fingerprint
 
+from lakebench.config.c360_run import cycle_windows
+
 _SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 
-#: The series window and its three cycle windows (config.c360_run.cycle_windows
-#: over 2024-01-01..2024-04-01 with three cycles).
-SERIES_START = date(2024, 1, 1)
-CYCLE_DAYS = (30, 30, 31)
-DATA_CLOCK = "2024-04-01"
+#: The series window, split as a multi-cycle run splits it
+#: (``config.c360_run.cycle_windows``); the data clock is its exclusive end,
+#: as ``job.py`` gives every cycle's silver job.
+WINDOWS = cycle_windows(3, "2024-01-01", "2024-04-01")
+DATA_CLOCK = WINDOWS[-1][1]
 ROWS_PER_CYCLE = 3_000
 CUSTOMERS = 400
 
 
 def cycle_rows(cycle: int) -> list[dict]:
-    start = SERIES_START + timedelta(days=sum(CYCLE_DAYS[:cycle]))
-    rows = generate(ROWS_PER_CYCLE, CUSTOMERS, start, CYCLE_DAYS[cycle], seed=101 + cycle)
+    lo, hi = (date.fromisoformat(d) for d in WINDOWS[cycle])
+    rows = generate(ROWS_PER_CYCLE, CUSTOMERS, lo, (hi - lo).days, seed=101 + cycle)
     # Each cycle draws its own ids, as each datagen cycle does.
     for r in rows:
         r["id"] += 1_000_000 * cycle
@@ -112,12 +114,17 @@ def job(jars: str, work: str, fmt: str, script: str, cycle: int | None, log: lis
         text=True,
         timeout=900,
     )
+    text = proc.stdout + proc.stderr
     log.append(
         {
             "job": name,
             "cycle": cycle,
             "rc": proc.returncode,
-            "tail": (proc.stdout + proc.stderr)[-3000:],
+            # Whether the job took the incremental path (read from the whole
+            # driver output; the tail below is for failures).
+            "appended": f"Appending to existing table (incremental mode, cycle={cycle})" in text,
+            "replaced_from_watermark": "Replacing gold rows from" in text,
+            "tail": text[-3000:],
         }
     )
     return proc.returncode
@@ -153,7 +160,7 @@ def changed(rows: list[dict]) -> list[dict]:
 
 
 def scenario(spark, jars: str, root: str, fmt: str) -> dict:
-    cycles = [cycle_rows(c) for c in range(len(CYCLE_DAYS))]
+    cycles = [cycle_rows(c) for c in range(len(WINDOWS))]
     log: list = []
 
     inc = _fresh(root, f"{fmt}-incremental")
@@ -176,7 +183,20 @@ def scenario(spark, jars: str, root: str, fmt: str) -> dict:
 
     full, full_rcs = rebuild("rebuild", cycles)
     alt, alt_rcs = rebuild("changed", [cycles[0], changed(cycles[1]), cycles[2]])
-    out = {"rcs": rcs + full_rcs + alt_rcs, "log": log}
+    # The incremental run really appended: cycles 1 and 2 of silver and gold
+    # took the incremental path (a silent fallback to a full rebuild would
+    # make the comparison trivially equal).
+    by_job = {(e["job"], e["cycle"]): e for e in log}
+    silver_job = f"silver_build{'_delta' if fmt == 'delta' else ''}.py"
+    gold_job = f"gold_finalize{'_delta' if fmt == 'delta' else ''}.py"
+    markers = {
+        str(c): {
+            "silver_appended": by_job[(silver_job, c)]["appended"],
+            "gold_incremental": by_job[(gold_job, c)]["replaced_from_watermark"],
+        }
+        for c in (1, 2)
+    }
+    out = {"rcs": rcs + full_rcs + alt_rcs, "log": log, "incremental": markers}
     if any(out["rcs"]):
         return out
     for layer in ("silver", "gold"):
