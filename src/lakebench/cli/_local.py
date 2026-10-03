@@ -359,7 +359,7 @@ def generate_local(
     dims = get_dimensions(
         cfg.architecture.workload.schema_type, cfg.architecture.workload.datagen.scale
     )
-    target_tb = max(dims.approx_bronze_gb / 1024.0, 0.0001)
+    target_tb = max(dims.datagen_target_gb / 1024.0, 0.0001)
     datagen = cfg.architecture.workload.datagen
 
     cmd = [

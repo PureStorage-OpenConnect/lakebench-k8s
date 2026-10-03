@@ -262,3 +262,23 @@ class TestComputeGuidance:
         g = compute_guidance(1)
         with pytest.raises(AttributeError):
             g.tier_name = "other"  # type: ignore[misc]
+
+
+def test_the_aml_datagen_target_keeps_its_old_size():
+    """The Job's --target-tb for AML stays scale x 8.4 GB (the generator
+    ignores it; the argv is pinned), also when a config carries
+    customer360.unique_customers, which rebuilds the dimensions."""
+    from tests.conftest import make_config
+
+    cfg = make_config(
+        workload={
+            "schema": "financial",
+            "datagen": {"scale": 10},
+            "customer360": {"unique_customers": 50_000},
+        }
+    )
+    dims = cfg.get_scale_dimensions()
+    assert dims.datagen_target_gb == pytest.approx(84.0)
+    assert dims.approx_bronze_gb == pytest.approx(93.6)
+    c360 = make_config(workload={"datagen": {"scale": 2}}).get_scale_dimensions()
+    assert c360.datagen_target_gb == c360.approx_bronze_gb == 20.0

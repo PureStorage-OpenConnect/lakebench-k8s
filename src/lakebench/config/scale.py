@@ -31,8 +31,9 @@ class ScaleDimensions:
     """Concrete dimensions derived from a scale factor.
 
     Each schema produces these from its mapping function.
-    The ``approx_bronze_gb`` is guidance only -- actual disk
-    usage is measured from S3 after generation.
+    ``approx_bronze_gb`` is the expected bronze size ``scale_ratio`` divides
+    by (measured for AML); actual usage is measured from S3 after
+    generation.
     """
 
     scale: float

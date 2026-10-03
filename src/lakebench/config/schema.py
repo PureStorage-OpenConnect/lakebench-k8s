@@ -6,6 +6,7 @@ matching the specification in lakebench-spec.md Section 4.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from enum import Enum
@@ -3416,7 +3417,7 @@ class LakebenchConfig(ConfigModel):
         Returns:
             ScaleDimensions with customers, rows, approx size, etc.
         """
-        from lakebench.config.scale import ScaleDimensions, get_dimensions
+        from lakebench.config.scale import get_dimensions
 
         workload = self.architecture.workload
         scale = workload.datagen.get_effective_scale()
@@ -3426,13 +3427,9 @@ class LakebenchConfig(ConfigModel):
         c360 = workload.customer360
         if c360.unique_customers is not None:
             customers = c360.unique_customers
-            dims = ScaleDimensions(
-                scale=dims.scale,
-                customers=customers,
-                events_per_customer=dims.events_per_customer,
-                date_range_days=dims.date_range_days,
-                approx_rows=customers * dims.events_per_customer,
-                approx_bronze_gb=dims.approx_bronze_gb,
+            # replace keeps every other field (the datagen target included).
+            dims = dataclasses.replace(
+                dims, customers=customers, approx_rows=customers * dims.events_per_customer
             )
 
         return dims
