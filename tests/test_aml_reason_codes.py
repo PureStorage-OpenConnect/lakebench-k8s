@@ -38,10 +38,12 @@ def test_conditional_keys_are_rules_or_their_projections(load_script):
 
 def test_vocabulary_digest_is_stable_and_moves_with_the_vocabulary(load_script):
     rc = load_script("aml_reason_codes")
-    d = rc.vocabulary_digest()
-    assert d == rc.vocabulary_digest() and len(d) == 16
+    cuts = {"W2_structuring": 6}
+    d = rc.vocabulary_digest(cuts)
+    assert d == rc.vocabulary_digest(dict(cuts)) and len(d) == 16
+    assert rc.vocabulary_digest({"W2_structuring": 7}) != d  # a moved cut moves it
     rc.BASE_CODE["W8_dormant_reactivation"] = "W8_OTHER"
-    assert rc.vocabulary_digest() != d
+    assert rc.vocabulary_digest(cuts) != d
 
 
 def test_no_pyspark_at_module_top():

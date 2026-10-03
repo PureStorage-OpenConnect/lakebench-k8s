@@ -81,13 +81,18 @@ def _all_codes(rule_id: str) -> tuple[str, ...]:
 REASON_CODES = {rule: _all_codes(rule) for rule in BASE_CODE}
 
 
-def vocabulary_digest() -> str:
-    """sha256 (16 hex) of the code vocabulary, recorded beside per-code
-    scores so a reader knows which vocabulary they are in."""
+def vocabulary_digest(cutoffs: dict | None = None) -> str:
+    """sha256 (16 hex) of the code vocabulary and the cut points its codes
+    read (detection_rules.HIGH_PRIORITY_CUTOFFS, passed by the caller: this
+    module does not import pyspark at its top), recorded beside per-code
+    scores so a reader knows which codes, meaning what, they are in."""
     import hashlib
     import json
 
-    text = json.dumps({"base": BASE_CODE, "conditional": CONDITIONAL_CODES}, sort_keys=True)
+    text = json.dumps(
+        {"base": BASE_CODE, "conditional": CONDITIONAL_CODES, "cutoffs": cutoffs or {}},
+        sort_keys=True,
+    )
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 

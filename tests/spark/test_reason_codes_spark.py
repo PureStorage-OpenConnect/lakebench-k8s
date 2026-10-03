@@ -112,6 +112,8 @@ def _manifest(spark):
             ("s2", "stack", "x", ["b"]),
             ("s3", "stack", "x", ["c"]),
             ("s4", "stack", "x", ["d"]),
+            # An instance with no planted payment: typology recall counts it.
+            ("s5", "stack", "x", []),
             ("r1", "random", "x", ["z"]),
         ],
         "typology_id STRING, typology_type STRING, expected_workload STRING, "
@@ -131,18 +133,21 @@ def _alerts(spark, rows):
     )
 
 
-# Six alerts, three codes, one alert with two conditional codes. By hand:
-# - W4_FAST_PASS_THROUGH (every alert): instances s1, s2, s3 hit -> 3/4;
-#   alerts on target: a1, a2, a3, a5 of 6 -> FP 2/6.
-# - W4_MULTI_CHAIN (a2, a3, a6): s2, s3 -> 2/4; on target a2, a3 -> FP 1/3.
-# - X_EXTRA (a3 only, an unlisted code): s3 -> 1/4; FP 0.
+# Seven alerts, three codes, one alert with two conditional codes (one of
+# them twice), one alert with no related payment. Five stack instances,
+# one without payments. By hand:
+# - W4_FAST_PASS_THROUGH (every alert, 7): instances s1, s2, s3 hit -> 3/5;
+#   of the 6 alerts with a payment, a1, a2, a3, a5 on target -> FP 2/6.
+# - W4_MULTI_CHAIN (a2, a3, a6): s2, s3 -> 2/5; on target a2, a3 -> FP 1/3.
+# - X_EXTRA (a3 only, an unlisted code): s3 -> 1/5; FP 0.
 ROWS = [
     ("a1", W4, ["a", "q"], ["W4_FAST_PASS_THROUGH"]),
     ("a2", W4, ["b"], ["W4_FAST_PASS_THROUGH", "W4_MULTI_CHAIN"]),
-    ("a3", W4, ["c"], ["W4_FAST_PASS_THROUGH", "W4_MULTI_CHAIN", "X_EXTRA"]),
+    ("a3", W4, ["c"], ["W4_FAST_PASS_THROUGH", "W4_MULTI_CHAIN", "X_EXTRA", "W4_MULTI_CHAIN"]),
     ("a4", W4, ["q2"], ["W4_FAST_PASS_THROUGH"]),
     ("a5", W4, ["a"], ["W4_FAST_PASS_THROUGH"]),
     ("a6", W4, ["z"], ["W4_FAST_PASS_THROUGH", "W4_MULTI_CHAIN"]),
+    ("a8", W4, [], ["W4_FAST_PASS_THROUGH"]),
 ]
 
 
@@ -153,12 +158,12 @@ def test_per_code_scores_by_hand(spark):
     assert s["by_code_status"] == "scored"
     rec = s["recall_by_code"][W4]
     assert rec == pytest.approx(
-        {"W4_FAST_PASS_THROUGH": 0.75, "W4_MULTI_CHAIN": 0.5, "X_EXTRA": 0.25}
+        {"W4_FAST_PASS_THROUGH": 0.6, "W4_MULTI_CHAIN": 0.4, "X_EXTRA": 0.2}
     )
     assert s["fp_by_code"][W4] == pytest.approx(
         {"W4_FAST_PASS_THROUGH": 2 / 6, "W4_MULTI_CHAIN": 1 / 3, "X_EXTRA": 0.0}
     )
-    assert s["alerts_by_code"][W4] == {"W4_FAST_PASS_THROUGH": 6, "W4_MULTI_CHAIN": 3, "X_EXTRA": 1}
+    assert s["alerts_by_code"][W4] == {"W4_FAST_PASS_THROUGH": 7, "W4_MULTI_CHAIN": 3, "X_EXTRA": 1}
     # The base code's recall is the rule's recall (the union identity).
     stack = [r for r in per.collect() if r["typology_type"] == "stack"][0]
     assert rec["W4_FAST_PASS_THROUGH"] == pytest.approx(stack["recall"])
@@ -169,7 +174,7 @@ def test_per_code_scores_by_hand(spark):
 def test_an_alert_without_a_code_stops_per_code_scores(spark):
     from score_financial import compute_scores
 
-    rows = ROWS[:-1] + [("a6", W4, ["d"], [])]
+    rows = ROWS[:-1] + [("a8", W4, ["d"], [])]
     _, s = compute_scores(spark, _manifest(spark), _alerts(spark, rows), STATUS)
     assert s["by_code_status"].startswith("not_scored: 1 alerts carry no reason code")
     assert s["recall_by_code"] == {} and s["fp_by_code"] == {}
@@ -202,6 +207,15 @@ def test_ensure_alert_columns_appends_trailing_and_refuses_reordered(spark):
     assert common.ensure_alert_columns(spark, fq, ALERT_COLUMNS) == ["detected_ts", "reason_codes"]
     assert spark.table(fq).columns == [n for n, _, _ in ALERT_COLUMNS]
     assert common.ensure_alert_columns(spark, fq, ALERT_COLUMNS) == []
+
+    # A table missing a middle column is refused before anything is altered.
+    gap = "lakehouse.gold.alerts_gap"
+    spark.sql(f"DROP TABLE IF EXISTS {gap}")
+    cols = [c for c in ALERT_COLUMNS[:17] if c[0] != "alert_score"]
+    spark.sql(f"CREATE TABLE {gap} ({', '.join(f'{n} {t}' for n, t, _ in cols)}) USING iceberg")
+    with pytest.raises(common.AlertColumnsError):
+        common.ensure_alert_columns(spark, gap, ALERT_COLUMNS)
+    assert len(spark.table(gap).columns) == 16
 
     bad = "lakehouse.gold.alerts_reordered"
     spark.sql(f"DROP TABLE IF EXISTS {bad}")
