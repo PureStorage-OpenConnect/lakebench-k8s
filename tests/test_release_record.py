@@ -26,20 +26,14 @@ BASES = {
 
 @pytest.fixture
 def ready(monkeypatch):
-    """The two verdict inputs another work item owes (the layer_rows gate
-    and the allowed rule skips), stubbed as passing."""
+    """The layer_rows gate stubbed as passing (the edited records are not
+    whole runs); the allowed rule skips are the verdict's real table."""
     monkeypatch.setattr(
         verdict_mod,
         "verdict_from_record",
         lambda record: SimpleNamespace(
             gates={"layer_rows": "PASS"}, qualifiers={rr.LAYER_ROWS_UNMEASURED: []}
         ),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        verdict_mod,
-        "EXPECTED_SKIPS",
-        {("financial", "batch"): {"W1_connected_components": {"giant-component"}}},
         raising=False,
     )
 
@@ -322,6 +316,20 @@ def test_executor_cap_bound(ready):
     rec = _release("c360_batch")
     rec["experiment"]["limits"]["bound_kinds"] = ["silver-build: executor cap"]
     _fails(rec, "silver-build: executor cap bound this run")
+
+
+def test_path_cap_skip_is_allowed_but_its_bound_refuses_release(ready):
+    """A W3 path-cap skip passes the rule set (owner, 10-03) and is labelled
+    as a bound kind, which no release row allows: the record is refused on
+    the bound alone."""
+    rec = _release("aml_batch")
+    rules = rec["experiment"]["rules"]
+    rules["executed"].remove("W3_round_tripping")
+    rules["skipped"]["W3_round_tripping"] = "path-cap"
+    rec["experiment"]["limits"]["bound_kinds"] = ["rule W3_round_tripping cap"]
+    problems = _problems(rec)
+    assert not any("W3_round_tripping skipped" in p for p in problems), problems
+    assert "rule W3_round_tripping cap bound this run; its numbers measure the cap" in problems
 
 
 def test_display_list_alone_is_not_read(ready):

@@ -832,3 +832,15 @@ def test_path_cap_is_a_registered_bound_kind() -> None:
 def test_giant_component_is_allowed_but_not_a_cap() -> None:
     v = V.verdict_from_record(sr.load_record(AML_BATCH))
     assert v.status == "PASSED" and V.RULE_CAPS not in v.qualifiers
+
+
+def test_report_labels_the_gold_stage_bounded_by_a_rule_cap() -> None:
+    """Invariant 6: skipping W3 and W17 on path-cap shortens gold, so the
+    report's gold stage row carries the bound; bronze and silver do not."""
+    from lakebench.reports.generator import _stage_matches_cap
+
+    caps = ["rule W3_round_tripping skipped: path-cap"]
+    assert _stage_matches_cap("gold", caps)
+    assert not _stage_matches_cap("silver", caps)
+    assert not _stage_matches_cap("bronze", caps)
+    assert not _stage_matches_cap("gold", ["rule W1_connected_components skipped: giant-component"])
