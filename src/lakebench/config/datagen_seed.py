@@ -1536,7 +1536,7 @@ def registered_corpus_problem(
             return (
                 f"another attempt ({other}) had a datagen Job in the same bronze prefix that may "
                 f"have been writing while attempt {attempt} ran; generate the registered corpus "
-                "again into an empty bucket"
+                "again into a different bucket"
             )
     return None
 

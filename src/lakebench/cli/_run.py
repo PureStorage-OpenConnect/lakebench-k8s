@@ -1277,7 +1277,9 @@ def _behavioural_subset() -> set[str]:
     return set(data.get("behavioural_subset", []))
 
 
-def _held_out_check_only(job_manager, monitor, run_id, interrupt, timeout) -> None:
+def _held_out_check_only(
+    job_manager, monitor, run_id, interrupt, timeout, *, required: bool = True
+) -> None:
     """Run bronze-verify's held-out check alone (``LB_REGISTER_TABLE=check``):
     it reads every manifest row and stops on a corpus from a held-out or
     spent AML seed. A refusal exits 2 (``run.protected_corpus``); a check
@@ -1291,7 +1293,12 @@ def _held_out_check_only(job_manager, monitor, run_id, interrupt, timeout) -> No
     if interrupt is not None:
         interrupt.creating("SparkApplication", app)
     status = job_manager.submit_job(
-        JobType.BRONZE_VERIFY, cycle_env={"LB_REGISTER_TABLE": "check", "LB_RUN_ID": run_id}
+        JobType.BRONZE_VERIFY,
+        cycle_env={
+            "LB_REGISTER_TABLE": "check",
+            "LB_RUN_ID": run_id,
+            "LB_MANIFEST_REQUIRED": "1" if required else "0",
+        },
     )
     if interrupt is not None:
         interrupt.submitted(status)
@@ -2595,13 +2602,16 @@ def _run_once(
             from lakebench.cli._sustained import _stop_leftover_streams
 
             _stop_leftover_streams(job_manager, cfg.get_namespace())
-            # A multi-cycle run generates each cycle's corpus itself (its
-            # seed passed the load-time guard) after clearing the prefix.
-            if stages[0][0] != JobType.BRONZE_VERIFY and total_cycles == 1:
+            if stages[0][0] != JobType.BRONZE_VERIFY:
                 # A stage subset runs no bronze-verify, but its stages read the
                 # corpus: its held-out check runs alone first.
                 _stage = "held-out check"
-                _held_out_check_only(job_manager, monitor, run_id, _interrupt, timeout)
+                # A multi-cycle run generates each cycle's corpus itself, so
+                # its prefix may hold no manifest yet; one that is there is
+                # still checked (an unowned prefix is not cleared).
+                _held_out_check_only(
+                    job_manager, monitor, run_id, _interrupt, timeout, required=total_cycles == 1
+                )
 
         # B1 --force-rebuild: bump the deployment's rebuild-epoch counter
         # ONCE per `lakebench run` invocation, before the cycle loop, so
