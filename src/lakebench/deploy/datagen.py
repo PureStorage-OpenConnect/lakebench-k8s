@@ -291,6 +291,25 @@ def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None, *, strict: bool 
     return _rule(cfg, bucket, s3, strict=strict)
 
 
+def _reuse_hint(cfg: Any) -> str:
+    """How to keep the corpus instead of regenerating it, for *cfg*."""
+    from lakebench.config.c360_run import run_cycles
+
+    if run_cycles(cfg) == 1:
+        return "or --skip-generate to reuse the existing data"
+    if cfg.architecture.workload.schema_type.value == "financial":
+        return "or clear it yourself (a multi-cycle AML run cannot reuse its corpus)"
+    return "or --skip-generate to reuse a finished multi-cycle corpus of this config"
+
+
+def _mark_clearing(cfg: Any, s3: Any) -> frozenset[str]:
+    """``deploy.corpus.mark_clearing`` before a clear of the datagen prefix:
+    the key the clear must keep. Raises when it cannot be written."""
+    from lakebench.deploy.corpus import mark_clearing
+
+    return frozenset({mark_clearing(cfg, s3, os.environ.get("LB_RUN_ID", ""))})
+
+
 @dataclass
 class BronzeGateResult:
     """What ``bronze_prefix_gate`` decided before datagen."""
@@ -410,13 +429,21 @@ def bronze_prefix_gate(
         if not regenerate:
             return refuse(
                 f"Bronze prefix {held}. Refusing to generate over it: pass --regenerate "
-                "to clear the datagen prefix first, or --skip-generate to reuse the "
-                "existing data.",
+                f"to clear the datagen prefix first, {_reuse_hint(cfg)}.",
                 owned,
                 n,
             )
         try:
-            cleared = s3.delete_prefix(bucket, prefix, abort_multipart=True)
+            keep = _mark_clearing(cfg, s3)
+        except Exception as e:  # noqa: BLE001 -- nothing was deleted
+            return refuse(
+                f"--regenerate: {e}; nothing under {shown} was deleted",
+                owned,
+                n,
+                code=ExitCode.FAILED,
+            )
+        try:
+            cleared = s3.delete_prefix(bucket, prefix, abort_multipart=True, keep_keys=keep)
         except Exception as e:  # noqa: BLE001
             return refuse(
                 f"--regenerate: could not clear {shown}: {e}", owned, n, code=ExitCode.FAILED
@@ -713,7 +740,9 @@ class DatagenDeployer:
                 )
             return
         if deployment_may_empty(self.config, bucket, s3):
-            n = s3.delete_prefix(bucket, prefix, abort_multipart=True)
+            n = s3.delete_prefix(
+                bucket, prefix, abort_multipart=True, keep_keys=_mark_clearing(self.config, s3)
+            )
             if n:
                 logger.info(
                     "cleared %d stale object(s) under s3://%s/%s before a fresh generate",

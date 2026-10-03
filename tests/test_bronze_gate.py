@@ -50,6 +50,16 @@ def _seed(rec: K8sRecorder, *, owned: bool, objects=(), created_record: bool | N
     return cfg
 
 
+SERIES_KEY = f"{PREFIX}/_corpus/series.json"
+
+
+def _clearing(rec) -> bool:
+    import json
+
+    body = json.loads(rec.buckets_store[BRONZE][SERIES_KEY])
+    return body.get("clearing") is True and body["cycles_complete"] == []
+
+
 def _gate(cfg, **kw):
     from lakebench.deploy.datagen import bronze_prefix_gate
 
@@ -81,7 +91,12 @@ class TestGate:
             )
             got = _gate(cfg, regenerate=True)
             assert got.proceed and got.cleared == 2
-            assert sorted(rec.buckets_store[BRONZE]) == sorted(["checkpoints/x", OWNER_MARKER_KEY])
+            # The series marker the clear writes first and keeps (it says a
+            # clear is under way until the generate begins).
+            assert sorted(rec.buckets_store[BRONZE]) == sorted(
+                ["checkpoints/x", OWNER_MARKER_KEY, SERIES_KEY]
+            )
+            assert _clearing(rec)
             rec.assert_recorded(api="s3", method="list_multipart_uploads")
 
     def test_adopted_nonempty_refuses(self):
@@ -201,7 +216,8 @@ class TestDeployerCycleZero:
             d._clear_bronze_prefix_if_fresh(1, PREFIX)
             assert f"{PREFIX}/part-0" in rec.buckets_store[BRONZE]
             d._clear_bronze_prefix_if_fresh(0, PREFIX)
-            assert list(rec.buckets_store[BRONZE]) == [OWNER_MARKER_KEY]
+            assert sorted(rec.buckets_store[BRONZE]) == sorted([OWNER_MARKER_KEY, SERIES_KEY])
+            assert _clearing(rec)
 
     def test_a_16_adopted_empty_record_does_not_count_as_owned(self):
         """SAF-10: only the created record (or an owner marker) proves this
@@ -228,7 +244,7 @@ class TestDeployerCycleZero:
                 OWNER_MARKER_KEY: json.dumps({"deployment": NS, "cluster": FP}).encode(),
             }
             self._deployer(cfg)._clear_bronze_prefix_if_fresh(0, PREFIX)
-            assert list(rec.buckets_store[BRONZE]) == [OWNER_MARKER_KEY]
+            assert sorted(rec.buckets_store[BRONZE]) == sorted([OWNER_MARKER_KEY, SERIES_KEY])
 
     def test_unproven_legacy_bucket_is_not_owned(self):
         """Row 4: our name tag, no cluster stamp, not in the record."""
@@ -369,8 +385,13 @@ class TestMultiCycleGate:
                 ],
             )
             got = _gate(cfg, regenerate=True)
-            assert got.proceed and got.cleared == 2
-            assert sorted(rec.buckets_store[BRONZE]) == sorted([OWNER_MARKER_KEY, "checkpoints/x"])
+            # The old series marker is not deleted: it is overwritten by the
+            # marker that says a clear is under way, and kept.
+            assert got.proceed and got.cleared == 1
+            assert sorted(rec.buckets_store[BRONZE]) == sorted(
+                [OWNER_MARKER_KEY, "checkpoints/x", SERIES_KEY]
+            )
+            assert _clearing(rec)
 
     def test_unowned_with_allow_stale_proceeds(self):
         with recording() as rec:

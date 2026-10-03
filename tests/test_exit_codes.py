@@ -735,6 +735,19 @@ def _scenario_run_series_mismatch(monkeypatch, tmp_path):
     return _runner().invoke(app, ["run", str(cfg), "--skip-generate", "--skip-preflight", "--yes"])
 
 
+def test_run_reuse_with_s3_unreadable_exits_4(monkeypatch, tmp_path):
+    """A run that reuses bronze cannot read its series marker: exit 4 before
+    anything is deployed or submitted (path s3.unreachable)."""
+    dg = _fake_s3(monkeypatch, init_error="endpoint unreachable")
+    stubs = dg._stub_full_run(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+    res = _runner().invoke(app, ["run", str(dg._write_cfg(tmp_path)), "--skip-preflight", "--yes"])
+    assert res.exit_code == ExitCode.PREREQUISITE, res.output
+    assert "Cannot check the corpus in bronze before reusing it" in res.output
+    stubs["job_manager"].submit_job.assert_not_called()
+
+
 def _scenario_datagen_pods_live(monkeypatch, tmp_path):
     dg = _fake_s3(monkeypatch)  # an empty bronze prefix: the gate proceeds
     dg._stub_run_deps(monkeypatch)

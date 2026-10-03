@@ -15,8 +15,8 @@ path yet says so.
 |---|---|---|---|
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass`, `compare.like_for_like`, `status.ok`, `plan.ok` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone`, `repeat.no_verified_corpus`, `status.drift`, `status.namespace_missing`, `stop.api_error`, `logs.no_pod` |
-| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `generate.multi_cycle`, `run.series_mismatch`, `alias.refused`, `compare.equal_names`, `compare.bad_ref`, `compare.same_runs`, `compare.unreadable_record`, `compare.removed_flag`, `reproduce.report_required` |
-| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `reproduce.existing_namespace`, `reproduce.nonce_changed`, `reproduce.held_out`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `datagen.pods_live`, `series.corpus_changed`, `lease.held`, `context.changed`, `destroy.unverified_cluster` |
+| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `generate.multi_cycle`, `alias.refused`, `compare.equal_names`, `compare.bad_ref`, `compare.same_runs`, `compare.unreadable_record`, `compare.removed_flag`, `reproduce.report_required` |
+| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `run.series_mismatch`, `reproduce.existing_namespace`, `reproduce.nonce_changed`, `reproduce.held_out`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `datagen.pods_live`, `series.corpus_changed`, `lease.held`, `context.changed`, `destroy.unverified_cluster` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `capacity.shortfall`, `capacity.unknown`, `plan.missing_storage_class`, `k8s.unreachable`, `k8s.api_error`, `s3.unreachable`, `financial.k8s_unreachable`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
@@ -63,7 +63,6 @@ the CLI down every path listed here and checks the code.
 | `generate.multi_cycle` | 2 | `generate` with a multi-cycle config (`cycles` above 1): `run` generates each cycle |
 | `reproduce.report_required` | 2 | `reproduce` of a registered look's package without --report (a look is never rerun) |
 | `run.args` | 2 | a `run` argument or combination is refused before any cluster call |
-| `run.series_mismatch` | 2 | a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds its series marker unfinished, unreadable, or written for another cycle count, window or generation than the config's |
 | `context.changed` | 3 | the kubeconfig changed under the command: a second context, or the pinned context's server or CA moved |
 | `datagen.pods_live` | 3 | `generate`, `run --generate`, a multi-cycle or a continuous run: an earlier datagen Job's pods were still running five minutes after the Job was deleted, and would write into the new corpus |
 | `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`) |
@@ -85,6 +84,7 @@ the CLI down every path listed here and checks the code.
 | `reproduce.nonce_changed` | 3 | the deployment `reproduce` created was replaced before its run or its destroy |
 | `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset) |
 | `run.deps_mismatch` | 3 | the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded |
+| `run.series_mismatch` | 3 | a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds its series marker unfinished, unreadable, or written for another cycle count, window or generation than the config's |
 | `series.corpus_changed` | 3 | the bronze corpus changed during or between repetitions of `run --repeat` |
 | `capacity.shortfall` | 4 | free cluster capacity is below the run's floor, or its largest pod fits no node |
 | `capacity.unknown` | 4 | the run's capacity check could not read the nodes or pods (the check fails closed) |
@@ -97,7 +97,7 @@ the CLI down every path listed here and checks the code.
 | `run.deps_missing` | 4 | the deployment has no dependency server (deployed by 1.6, or never deployed) |
 | `run.deps_stale` | 4 | the dependency set is not verified for this config: the deploy did not finish, the request changed since deploy, or the server has no Ready pod |
 | `run.prereq_failed` | 4 | a `run` preflight check failed |
-| `s3.unreachable` | 4 | `generate` or `run --generate` cannot read the bronze bucket to check it is empty |
+| `s3.unreachable` | 4 | `generate` or `run --generate` cannot read the bronze bucket to check it is empty, or a `run` that reuses bronze cannot read its corpus series marker |
 | `confirm.declined` | 5 | a confirmation prompt was answered no |
 | `confirm.non_tty` | 5 | a confirmation prompt got no answer (no terminal, end of input) or was declined |
 | `run.namespace_missing_no_yes` | 5 | `run` would create a missing namespace and was not given --yes |

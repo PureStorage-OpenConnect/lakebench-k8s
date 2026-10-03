@@ -121,13 +121,17 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   window, the generation parameters and the image digest the datagen pods
   ran. A batch run that reuses bronze (`--skip-generate`, or a single-cycle
   run without `--generate`) reads it before anything is deployed or
-  submitted and exits 2 (new path `run.series_mismatch`) when the generate
-  did not finish (an interrupted generate, or a continuous run's corpus) or
-  the marker names another cycle count, window or generation (seed, scale,
-  customer id space, file size, dirty ratio, image) than the config's. A
+  submitted and exits 3 (new path `run.series_mismatch`) when the generate
+  did not finish (an interrupted generate or clear, or a continuous run's
+  corpus) or the marker names another cycle count, window or generation
+  (seed, scale, customer id space, file size, target size per cycle, dirty
+  ratio, image, window bounds, AML robustness perturbation) than the
+  config's; it exits 4 (`s3.unreachable`) when bronze cannot be read. A
   single-cycle run over a corpus with no marker (1.6, or an older
   `generate`) proceeds as before and records `cycle_series.marker:
-  "absent"`. A multi-cycle `--skip-generate` now reuses a finished
+  "absent"`, unless the corpus holds files of later cycles. A clear of the
+  datagen prefix first writes a marker that says a clear is under way and
+  keeps it. A multi-cycle `--skip-generate` now reuses a finished
   multi-cycle corpus with no datagen; 1.6 regenerated every cycle whatever
   it said. An AML multi-cycle `--skip-generate` is refused (exit
   2): its stages read the whole bronze prefix every cycle. A multi-cycle run

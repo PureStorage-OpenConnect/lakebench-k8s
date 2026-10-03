@@ -72,6 +72,7 @@ class KeyS3:
 
     def __init__(self, keys: set[str]):
         self.keys = keys
+        self.markers: dict = {}
 
     def bucket_exists(self, bucket):
         return True
@@ -83,7 +84,14 @@ class KeyS3:
         n = sum(1 for k in self.keys if k.startswith(prefix))
         return SimpleNamespace(object_count=n, size_bytes=n * 1000)
 
-    def delete_prefix(self, bucket, prefix, abort_multipart=False):
+    @property
+    def raw_client(self):
+        """The corpus series marker, kept apart from the part-file keys."""
+        from tests.fixtures.memory_s3 import MemoryBoto
+
+        return MemoryBoto(self.markers)
+
+    def delete_prefix(self, bucket, prefix, abort_multipart=False, keep_keys=frozenset()):
         gone = {k for k in self.keys if k.startswith(prefix.rstrip("/") + "/")}
         self.keys -= gone
         return len(gone)

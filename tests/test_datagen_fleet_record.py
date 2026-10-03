@@ -275,7 +275,7 @@ def test_multi_cycle_run_never_borrows_an_older_sidecar(tmp_path, monkeypatch):
 
 def test_multi_cycle_skip_generate_without_a_series_keeps_the_sidecar(tmp_path, monkeypatch):
     """A multi-cycle --skip-generate reuses only a finished multi-cycle corpus:
-    with no series marker it is refused (exit 2) before anything runs, and
+    with no series marker it is refused (exit 3) before anything runs, and
     the namespace's sidecar is left as it was."""
     import tests.harness.run_harness as harness
 
@@ -285,7 +285,7 @@ def test_multi_cycle_skip_generate_without_a_series_keeps_the_sidecar(tmp_path, 
         SCENARIOS["batch_c360"], argv=["--skip-generate", "--yes"], config=config
     )
     trace, _rec = run_scenario_full(scenario, tmp_path, monkeypatch)
-    assert trace["exit_code"] == 2, trace
+    assert trace["exit_code"] == 3, trace
     assert ["Datagen", "deploy_cycle"] not in trace["calls"]
     assert _sidecar(tmp_path).exists()
 
