@@ -2044,11 +2044,14 @@ def _bind(h: Harness, rid: str, fn: Callable[[], None]) -> Callable[[], None]:
 
 
 def _core_v1(context: str) -> Any:
+    """A CoreV1Api pinned to *context* through the release tree's
+    ClusterTarget (one context per process, as every lakebench command)."""
     from kubernetes import client as kclient
-    from kubernetes import config as kconfig
 
-    api = kconfig.new_client_from_config(context=context)
-    return kclient.CoreV1Api(api)
+    from lakebench.k8s.target import ClusterTarget
+
+    ClusterTarget.resolve(context=context).activate()
+    return kclient.CoreV1Api()
 
 
 def _select(rows: list[Row], spec: str | None) -> list[Row]:
