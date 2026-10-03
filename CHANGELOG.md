@@ -682,6 +682,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gold-finalize job records `gold_strategy` and `gold_strategy_source` in
   `jobs[].extra_metrics`. Customer 360 records now carry workload version
   `c360-2`, so they do not compare with `c360-1` records.
+- **A multi-cycle Customer 360 run takes one data clock (workload version
+  `c360-2.dev1`).** Each cycle's silver job anchored `customer_recency_score`
+  to that cycle's bronze-verify clock, so one run's rows were scored against
+  different days. Every cycle now takes the exclusive end of the event-time
+  range the run's cycles cover (`data_clock_source` `cycle_series_end` in the
+  silver driver log). Single-cycle Customer 360 and AML at any cycle count
+  are unchanged. Customer 360 records carry `c360-2.dev1`, which does not
+  compare with `c360-2` records; `compare` names the older side.
 - **`admin repair-operator` reads and repairs under the lease.** It now
   takes the cluster lease first (waiting up to 37.5 min, three watch-list
   holds) and reads the release state, the Helm values, the `--namespaces`
