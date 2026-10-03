@@ -251,30 +251,43 @@ refuses an interpreter whose lakebench is not 1.6 or is imported from
 outside its own environment. It uses one Customer 360 batch scale 1
 deployment on hive-iceberg-spark-trino:
 
-1. 1.6 `init` (credentials as `${VAR}` references, the context pinned),
-   the ledger row (admitted as one deployment), 1.6 `deploy`, and 1.6 `run
-   --generate`. The namespace's `<uid>#<nonce>` is read right after the
-   1.6 deploy, and the 1.6 run must be `PASSED` by its own stored verdict
-   (a 1.6 record cannot pass this release's record checks).
-2. This tree's `init --from OLD -o NEW`, which must keep the name and
-   buckets. Baseline: the bronze datagen objects (key, size, ETag) and the
-   silver and gold table lists from 1.6 `query`.
+1. 1.6 `init` (credentials as `${VAR}` references, the context pinned) and
+   at once this tree's `init --from OLD -o NEW`, which must keep the name
+   and the `<name>-bronze/-silver/-gold` buckets. The namespace must not
+   exist yet. The ledger row names NEW and is admitted at the largest
+   default peak for scale 1.
+2. 1.6 `deploy` and `run --generate`. The namespace's `<uid>#<nonce>` is
+   read right after the deploy. The 1.6 run must be `PASSED` by its own
+   stored verdict with output rows in bronze verify, silver build and gold
+   finalize (a 1.6 record cannot pass this release's record checks).
+   Baseline: the bronze datagen objects (key, size, ETag) and the row
+   counts of the silver and gold tables from 1.6 `query`, which must be
+   above zero.
 3. This tree's `deploy NEW --yes`, which adopts the 1.6 namespace and
    records a nonce (`run` refuses a namespace with no dependency server
    until it is deployed by this tree), only while the namespace is still
-   the incarnation 1.6 deployed; then `run NEW --yes` without `--generate`,
-   over the 1.6 bronze. Its record is judged like a matrix row's and
-   scrubbed into `<out>/extra/runs/`, never `uat/runs/`.
-4. Before destroy, the bronze objects must be unchanged and every table 1.6
-   wrote must still be listed.
-5. `destroy NEW --yes --expect-incarnation <uid>#<nonce>`, with the
-   bystander's namespace incarnation and generated objects checked before
-   and after.
+   the incarnation 1.6 deployed. The silver and gold row counts must be
+   unchanged through this deploy.
+4. `run NEW --yes` without `--generate`, over the 1.6 bronze, which must be
+   unchanged afterwards. Its record is scrubbed into `<out>/extra/runs/`,
+   never `uat/runs/`, and passes on its verdict, rows per layer, stages and
+   the freeze commit; the release-image and corpus-lineage checks do not
+   apply to it, because 1.6 generated the corpus and writes no corpus
+   markers.
+5. `destroy NEW --yes --expect-incarnation <uid>#<nonce>`. A bystander's
+   namespace incarnation, its buckets and its generated objects are read
+   before the 1.7 deploy and checked after the destroy (its silver and gold
+   change while it runs; its own harness judges its record).
 
-A failed step is never retried: the deployment is destroyed by an
-incarnation this row made (this tree's confirmed nonce, else the nonce 1.6
-stamped) or left for a person. The result goes to `results-extra.md`.
-`resume` cleans up a stopped upgrade the same way and never re-runs it.
+A failed step is never retried. The deployment is destroyed by an
+incarnation this row made: this tree's confirmed nonce, else the nonce 1.6
+stamped, or a nonce of this tree's deploy that did not finish on the
+namespace 1.6 created. Otherwise it is left for a person. Ctrl-C stops the
+routine before its next deploy or run. The result goes to
+`results-extra.md`. `resume` cleans up a stopped upgrade with this tree's
+CLI only and never re-runs it. This routine does not exercise destroying a
+1.6 deployment that this tree never deployed (a 1.6 directory with no
+recorded nonce); that path has its own tests.
 
 ### UAT results
 

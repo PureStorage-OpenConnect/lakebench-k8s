@@ -124,6 +124,7 @@ TIMEOUTS_S = {
     "run": 12 * 3600,
     "report": 1800,
     "destroy": 2 * 3600,
+    "query": 600,
 }
 SCRIPT_TIMEOUT_S = 6 * 3600
 #: The ledger session cell of an alone row written by any harness process.
@@ -462,9 +463,10 @@ def _group_alive(pgid: int) -> bool:
 
 
 #: How a child that must stop is stopped. A lakebench command holding the
-#: cluster lease defers SIGTERM until its shared change is done (up to the
-#: lease's 750 s hold) and releases the lease on a third catchable signal, so
-#: three SIGTERMs, 25 minutes apart in total, come before any SIGKILL.
+#: cluster lease defers the first catchable signals until its shared change
+#: is done (up to the lease's 750 s hold) and releases the lease on the third
+#: (the SIGINT counts as the first), so SIGINT and three SIGTERMs, over 35
+#: minutes, come before any SIGKILL.
 STOP_SEQUENCE: tuple[tuple[int, float], ...] = (
     (signal.SIGINT, 600),
     (signal.SIGTERM, 900),
@@ -1249,7 +1251,8 @@ class ScenarioMixin:
 #: Hive recipe, deployed and run by 1.6, then run and destroyed by this tree.
 UPGRADE_ROW = Row("UPGRADE", "customer360", "batch", "hive-iceberg-spark-trino", 1.0, 42)
 V16_SPEC = "lakebench-k8s==1.6.0"
-TABLE_LAYERS = ("silver", "gold")
+#: The 1.6 batch jobs whose output rows must all be above zero.
+V16_STAGES = ("lakebench-bronze-verify", "lakebench-silver-build", "lakebench-gold-finalize")
 
 
 def v16_python_problem(python: str) -> str | None:
@@ -1285,24 +1288,33 @@ def make_v16_venv(out: Path, spec: str = V16_SPEC) -> str:
     return str(python)
 
 
-def parse_query_names(path: Path) -> list[str]:
-    """The first cell of each row of ``query --format json`` output."""
-    data = json.loads(path.read_text() or "{}")
-    names = []
-    for row in data.get("rows") or []:
-        if isinstance(row, (list, tuple)):
-            cell: Any = row[0] if row else ""
-        elif isinstance(row, dict):
-            cell = next(iter(row.values()), "")
-        else:
-            cell = str(row).split(",")[0]
-        names.append(str(cell).strip().strip('"'))
-    return names
+def parse_count(text: str) -> int:
+    """The single count a ``query --sql 'SELECT count(*) ...'`` printed.
+
+    1.6 ``--format json`` prints ``{"rows": [{"0": "<n>"}], "count": 1}``
+    and then a ``N rows in Xs`` line on stdout; this tree's ``--json`` prints
+    the ``lb-cli/1`` envelope with ``data.rows`` as lists of strings.
+    """
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("no JSON in the query output")
+    doc, _end = json.JSONDecoder().raw_decode(text[start:])
+    rows = (doc.get("data") or {}).get("rows") if "data" in doc else doc.get("rows")
+    if not rows:
+        raise ValueError("the count query returned no row")
+    first = rows[0]
+    if isinstance(first, dict):
+        cell: Any = next(iter(first.values()))
+    elif isinstance(first, (list, tuple)):
+        cell = first[0]
+    else:
+        cell = first
+    return int(str(cell).strip().strip('"'))
 
 
 class UpgradeMixin:
     """The upgrade routine (``Harness.upgrade``): deploy and run with 1.6,
-    then ``init --from``, deploy, run and destroy with this tree."""
+    then deploy, run and destroy the ``init --from`` config with this tree."""
 
     def datagen_listing(self: Any, config: Path) -> dict[str, list[Any]]:
         """{key: [size, etag]} under the config's bronze datagen prefix."""
@@ -1321,28 +1333,32 @@ class UpgradeMixin:
                 listing[o["Key"]] = [o.get("Size"), o.get("ETag")]
         return listing
 
-    def table_names(
-        self: Any, runner: Runner, config: Path, row: Row, tag: str
-    ) -> dict[str, list[str]] | None:
-        """{layer: sorted table names} from ``query --format json``; None
-        when a query fails."""
-        found: dict[str, list[str]] = {}
-        for layer in TABLE_LAYERS:
-            out = self.out / "logs" / row.id / f"{tag}-tables-{layer}.json"
+    def table_counts(
+        self: Any, runner: Runner, query_config: Path, tables_from: Path, tag: str, v16: bool
+    ) -> dict[str, int] | None:
+        """{table: rows} of the config's silver and gold tables; None when a
+        count cannot be read."""
+        cfg = load_row_config(tables_from)
+        catalog = cfg.architecture.query_engine.trino.catalog_name
+        counts: dict[str, int] = {}
+        for table in (cfg.architecture.tables.silver, cfg.architecture.tables.gold):
+            out = self.out / "logs" / UPGRADE_ROW.id / f"{tag}-count-{table}.out"
+            fmt = ["--format", "json"] if v16 else ["--json"]
             res = runner(
-                ["query", str(config), "--sql", f"SHOW TABLES FROM lakehouse.{layer}"]
-                + ["--format", "json"],
-                cwd=config.parent,
-                log=self.log_path(row, f"{tag}-query"),
+                ["query", str(query_config), "--sql", f"SELECT count(*) FROM {catalog}.{table}"]
+                + fmt,
+                cwd=query_config.parent,
+                log=self.log_path(UPGRADE_ROW, f"{tag}-query"),
                 stdout=out,
             )
             if res.code != 0:
                 return None
             try:
-                found[layer] = sorted(parse_query_names(out))
-            except (OSError, ValueError):
+                counts[table] = parse_count(out.read_text())
+            except (OSError, ValueError, AttributeError) as e:
+                self.say(f"upgrade: could not read the {tag} count of {table}: {e}")
                 return None
-        return found
+        return counts
 
     def upgrade(self: Any, bystander: Path | None = None) -> int:
         row = UPGRADE_ROW
@@ -1358,6 +1374,59 @@ class UpgradeMixin:
         v17dir.mkdir(parents=True, exist_ok=True)
         old = v16dir / f"{name}.yaml"
         new = v17dir / f"{name}.yaml"
+        self._v16_init(old, name)
+        # NEW is written before anything is deployed, so the ledger row names
+        # a config that exists and destroys this deployment from the start.
+        res = self.runner(
+            ["init", "--from", str(old), "-o", str(new)],
+            cwd=new.parent,
+            log=self.log_path(row, "v17-init-from"),
+        )
+        if res.code != 0 or not new.is_file():
+            raise Refused(f"init --from exited {res.code} (see {res.log})")
+        new_cfg = load_row_config(new)
+        expected = [f"{name}-{layer}" for layer in ("bronze", "silver", "gold")]
+        if new_cfg.name != name or new_cfg.get_namespace() != name:
+            raise Refused(f"init --from changed the name to {new_cfg.name}")
+        if config_buckets(new) != expected:
+            raise Refused(f"init --from changed the buckets to {config_buckets(new)}")
+        if self.cluster.namespace_exists(name):
+            raise Refused(f"namespace {name} exists before the 1.6 deploy; not this row's")
+        # 1.6 sizing is not readable from this tree: admit at the largest
+        # default peak at this scale.
+        peak = worst_case_peak(row.scale)
+        plan = RowPlan(row, name, new, peak)
+        self.log(
+            rid,
+            "planned",
+            namespace=name,
+            config=str(new),
+            v16_config=str(old),
+            peak=[peak.cores, peak.gib],
+            upgrade=True,
+            owned_buckets=expected,
+        )
+        self.admit_together(rid, [plan])
+        problems: list[str] = []
+        try:
+            problems += self._upgrade_steps(plan, old, new, expected, bystander)
+        except Exception as e:  # noqa: BLE001 -- recorded; resume cleans up
+            problems.append(f"harness error: {type(e).__name__}: {e}")
+            self.log(rid, self.status_of(rid), harness_error=f"{type(e).__name__}: {e}")
+            self.stop_admission(f"{rid}: harness error {e}")
+        st = self.rowlog.latest()[rid]
+        if st["status"] != "destroyed":
+            problems.append(f"the deployment ended {st['status']}, not destroyed")
+        verdict = "PASS" if not problems else "FAIL"
+        self.log(rid, st["status"], upgrade_verdict=verdict, upgrade_problems=problems)
+        self.write_extra_results()
+        for p in problems:
+            self.say(f"upgrade: {p}")
+        self.say(f"upgrade: {verdict}")
+        return 0 if verdict == "PASS" else 1
+
+    def _v16_init(self: Any, old: Path, name: str) -> None:
+        row = UPGRADE_ROW
         res = self.v16_runner(
             [
                 "init",
@@ -1380,7 +1449,7 @@ class UpgradeMixin:
                 "-o",
                 str(old),
             ],
-            cwd=v16dir,
+            cwd=old.parent,
             log=self.log_path(row, "v16-init"),
         )
         if res.code != 0 or not old.is_file():
@@ -1388,56 +1457,34 @@ class UpgradeMixin:
         data = yaml.safe_load(old.read_text()) or {}
         data.setdefault("platform", {}).setdefault("kubernetes", {})["context"] = self.context
         old.write_text(yaml.safe_dump(data, sort_keys=False))
-        from lakebench.config.sizing import default_sizing_config
-
-        peak = config_peak(default_sizing_config(row.workload, row.mode, row.scale))
-        plan = RowPlan(row, name, new, peak)
-        self.log(
-            rid,
-            "planned",
-            namespace=name,
-            config=str(new),
-            v16_config=str(old),
-            peak=[peak.cores, peak.gib],
-            upgrade=True,
-        )
-        self.admit_together(rid, [plan])
-        problems: list[str] = []
-        try:
-            problems += self._upgrade_steps(plan, old, new, bystander)
-        except Exception as e:  # noqa: BLE001 -- recorded; resume cleans up
-            problems.append(f"harness error: {type(e).__name__}: {e}")
-            self.log(rid, self.status_of(rid), harness_error=f"{type(e).__name__}: {e}")
-            self.stop_admission(f"{rid}: harness error {e}")
-        st = self.rowlog.latest()[rid]
-        if st["status"] != "destroyed":
-            problems.append(f"the deployment ended {st['status']}, not destroyed")
-        verdict = "PASS" if not problems else "FAIL"
-        self.log(rid, st["status"], upgrade_verdict=verdict, upgrade_problems=problems)
-        self.write_extra_results()
-        for p in problems:
-            self.say(f"upgrade: {p}")
-        self.say(f"upgrade: {verdict}")
-        return 0 if verdict == "PASS" else 1
 
     def _upgrade_steps(
-        self: Any, plan: RowPlan, old: Path, new: Path, bystander: Path | None
+        self: Any,
+        plan: RowPlan,
+        old: Path,
+        new: Path,
+        owned: list[str],
+        bystander: Path | None,
     ) -> list[str]:
-        row, rid, name = plan.row, plan.row.id, plan.namespace
+        rid, name = plan.row.id, plan.namespace
         problems: list[str] = []
         v16 = self.v16_runner
-        res = self._spawn(plan, "deploy", [str(old), "--yes"], runner=v16, cwd=old.parent)
-        if res.code != 0:
-            problems.append(f"1.6 deploy exited {res.code}")
-            return problems + self._upgrade_cleanup(plan, old, new, None)
+        res = self._spawn(
+            plan, "deploy", [str(old), "--yes"], runner=v16, cwd=old.parent, log_name="v16-deploy"
+        )
         ident = self.cluster.namespace_identity(name)
-        if ident is None or ident.deployment_name != name or not ident.nonce:
-            problems.append("after the 1.6 deploy the namespace carries no identity of this row")
-            self.log(rid, "left", detail="1.6 deploy left no identity; not destroyed")
-            self.stop_admission(f"{rid}: left for a human")
-            return problems
+        ours = ident is not None and ident.deployment_name == name and bool(ident.nonce)
+        if ours:
+            # The namespace did not exist before this deploy: it is this row's.
+            self.log(
+                rid, "deployed", incarnation=ident.incarnation, v16_incarnation=ident.incarnation
+            )
+        if res.code != 0 or not ours:
+            problems.append(f"1.6 deploy exited {res.code}" + ("" if ours else " with no identity"))
+            return problems + self._upgrade_cleanup(plan, new, owned)
         v16_inc = ident.incarnation
-        self.log(rid, "deployed", incarnation=v16_inc, v16_incarnation=v16_inc)
+        if self.interrupted:
+            return problems
         before = sorted(self.run_dirs_in(old.parent))
         res = self._spawn(
             plan,
@@ -1446,6 +1493,7 @@ class UpgradeMixin:
             runner=v16,
             cwd=old.parent,
             interruptible=True,
+            log_name="v16-run",
             runs_before=before,
             phase="1.6",
         )
@@ -1454,40 +1502,37 @@ class UpgradeMixin:
         self.log(rid, "running", v16_run_ids=v16_runs)
         if self.interrupted:
             return problems
-        res = self.runner(
-            ["init", "--from", str(old), "-o", str(new)],
-            cwd=new.parent,
-            log=self.log_path(row, "v17-init-from"),
-        )
-        if res.code != 0 or not new.is_file():
-            problems.append(f"init --from exited {res.code}")
-            self.log(rid, "left", detail="init --from failed; destroy needs a person")
-            self.stop_admission(f"{rid}: left for a human")
-            return problems
-        new_cfg = load_row_config(new)
-        if new_cfg.name != name or new_cfg.get_namespace() != name:
-            problems.append(f"init --from changed the name to {new_cfg.name}")
-            self.log(rid, "left", detail="init --from changed the name")
-            self.stop_admission(f"{rid}: left for a human")
-            return problems
         listing_before = self.datagen_listing(new)
         if not listing_before:
             problems.append("the 1.6 run left no generated bronze objects to compare")
-        tables_before = self.table_names(v16, old, row, "v16")
-        if tables_before is None:
-            problems.append("the 1.6 table list could not be read")
+        counts_v16 = self.table_counts(v16, old, new, "v16", v16=True)
+        if counts_v16 is None or not all(counts_v16.values()):
+            problems.append(f"the 1.6 silver and gold tables are unreadable or empty: {counts_v16}")
+        watch = self._bystander_before(bystander) if bystander else None
         ident = self.cluster.namespace_identity(name)
         if ident is None or ident.incarnation != v16_inc:
             problems.append("the namespace is no longer the incarnation 1.6 deployed")
             self.log(rid, "left", detail="namespace changed before the 1.7 deploy")
             self.stop_admission(f"{rid}: left for a human")
             return problems
+        if self.interrupted:
+            return problems
         res = self._spawn(plan, "deploy", [str(new), "--yes"], log_name="v17-deploy", phase="1.7")
         inc, why = confirmed_incarnation(new, self.cluster.core_v1)
         if res.code != 0 or inc is None:
             problems.append(f"1.7 deploy over the 1.6 deployment exited {res.code} ({why})")
-            return problems + self._upgrade_cleanup(plan, old, new, v16_inc)
+            return problems + self._upgrade_cleanup(plan, new, owned)
         self.log(rid, "deployed", incarnation=inc)
+        # Intact through the 1.7 deploy: the 1.7 run rewrites silver and
+        # gold, so the 1.6 tables are compared before it.
+        counts_after_deploy = self.table_counts(self.runner, new, new, "v17-deploy", v16=False)
+        if counts_after_deploy != counts_v16:
+            problems.append(
+                f"the 1.6 tables changed through the 1.7 deploy: {counts_v16} -> "
+                f"{counts_after_deploy}"
+            )
+        if self.interrupted:
+            return problems
         before = sorted(self.run_dirs(plan))
         res = self._spawn(
             plan,
@@ -1504,7 +1549,7 @@ class UpgradeMixin:
         if len(v17_runs) != 1:
             problems.append(f"expected one 1.7 run record, found {len(v17_runs)}")
         for r in v17_runs:
-            problems += self.collect(plan, r, kind="extra")
+            problems += self.collect_upgrade(plan, r)
         listing_after = self.datagen_listing(new)
         if listing_after != listing_before:
             gone = sorted(set(listing_before) - set(listing_after))
@@ -1518,41 +1563,66 @@ class UpgradeMixin:
                 f"the 1.6 bronze changed under 1.7: {len(gone)} gone, {len(changed)} changed, "
                 f"{len(added)} added"
             )
-        tables_after = self.table_names(self.runner, new, row, "v17")
-        if tables_after is None:
-            problems.append("the 1.7 table list could not be read")
-        elif tables_before is not None:
-            for layer in TABLE_LAYERS:
-                lost = sorted(set(tables_before[layer]) - set(tables_after[layer]))
-                if lost:
-                    problems.append(f"{layer} tables 1.6 wrote are gone: {', '.join(lost)}")
         self.log(
             rid,
             "recorded",
             v17_run_ids=v17_runs,
             run_ids=v17_runs,
-            tables_before=tables_before,
-            tables_after=tables_after,
+            counts_v16=counts_v16,
+            counts_after_v17_deploy=counts_after_deploy,
             bronze_objects=len(listing_before),
             verdict="PASS" if not problems else "FAIL",
             problems=list(problems),
         )
         if self.interrupted:
             return problems
-        watch = self._bystander_before(bystander) if bystander else None
-        self.destroy(plan, inc)
+        self.destroy(plan, inc, owned)
         if bystander is not None:
             problems += self._bystander_after(bystander, watch)
         return problems
+
+    def collect_upgrade(self: Any, plan: RowPlan, run_id: str) -> list[str]:
+        """Scrub the 1.7 record into ``<out>/extra/runs/`` and judge it by
+        its verdict, rows per layer and stages, and the freeze commit. The
+        release-image and corpus-lineage checks cannot apply: the corpus was
+        generated by 1.6, which writes no corpus markers."""
+        from lakebench.metrics.experiment import experiment_of
+        from lakebench.metrics.release_record import _layer_rows_problem, _stage_problems
+        from lakebench.metrics.verdict import passed
+
+        src = plan.config.parent / "lakebench-output" / "runs" / run_id / "metrics.json"
+        try:
+            record = json.loads(src.read_text())
+            scrub = _scrub_module()
+            clean, _rewritten = scrub.scrub_record(record)
+        except Exception as e:  # noqa: BLE001 -- a refused scrub keeps the record out
+            return [f"{run_id}: record unreadable or scrub refused: {e}"]
+        problems: list[str] = []
+        try:
+            if not passed(dict(clean)):
+                problems.append("the 1.7 run did not pass")
+            layer = _layer_rows_problem(clean)
+            if layer:
+                problems.append(layer)
+            problems += _stage_problems(clean, experiment_of(dict(clean)) or {})
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"the 1.7 record could not be judged: {type(e).__name__}: {e}")
+        sha = (clean.get("provenance") or {}).get("git_sha")
+        if sha != (self.judge_sha or self.freeze):
+            problems.append(f"the 1.7 run is not from {(self.judge_sha or self.freeze)[:12]}")
+        dest = self.out / "extra" / "runs" / run_id
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "metrics.json").write_text(scrub.dump(clean))
+        return [f"{run_id}: {p}" for p in problems]
 
     def run_dirs_in(self: Any, directory: Path) -> set[str]:
         runs = directory / "lakebench-output" / "runs"
         return {p.name for p in runs.iterdir() if p.is_dir()} if runs.is_dir() else set()
 
     def _v16_record_problems(self: Any, directory: Path, runs: list[str], code: int) -> list[str]:
-        """1.6 records cannot pass this tree's release checks (another
+        """A 1.6 record cannot pass this tree's release checks (another
         commit, no current experiment block); a 1.6 run passes on its own
-        stored verdict with rows in every layer."""
+        stored verdict with output rows above zero in every batch stage."""
         problems = []
         if code != 0:
             problems.append(f"1.6 run exited {code}")
@@ -1566,69 +1636,98 @@ class UpgradeMixin:
         status = (record.get("verdict") or {}).get("status")
         if status != "PASSED":
             problems.append(f"the 1.6 run's verdict is {status}, not PASSED")
+        rows = {j.get("job_name"): j.get("output_rows") for j in record.get("jobs") or []}
+        empty = [s for s in V16_STAGES if not isinstance(rows.get(s), int) or rows[s] <= 0]
+        if empty:
+            problems.append(f"1.6 stages with no output rows: {', '.join(empty)}")
         return problems
 
-    def _upgrade_cleanup(
-        self: Any, plan: RowPlan, old: Path, new: Path, v16_inc: str | None
-    ) -> list[str]:
-        """After a failed step: destroy with this tree's CLI by incarnation
-        (the 1.7 state's confirmed nonce, else the nonce 1.6 stamped);
-        anything else is left for a person."""
+    def _upgrade_incarnation(self: Any, plan: RowPlan, new: Path) -> str | None:
+        """An incarnation this row made: this tree's confirmed nonce; else
+        the namespace's own token when its UID is the one 1.6 created for
+        this row and its nonce is 1.6's or one NEW's state recorded (a
+        pending nonce of a 1.7 deploy that did not finish)."""
+        inc = confirmed_incarnation(new, self.cluster.core_v1)[0]
+        if inc is not None:
+            return inc
+        st = self.rowlog.latest().get(plan.row.id, {})
+        v16_inc = st.get("v16_incarnation")
+        ident = self.cluster.namespace_identity(plan.namespace)
+        if ident is None or not v16_inc or ident.uid != v16_inc.split("#", 1)[0]:
+            return None
+        if ident.incarnation == v16_inc:
+            return v16_inc
+        from lakebench.config.deploy_state import StateError, read_state
+
+        try:
+            state = read_state(new)
+        except StateError:
+            return None
+        if state is not None and ident.nonce in state.kept_nonces():
+            return ident.incarnation
+        return None
+
+    def _upgrade_cleanup(self: Any, plan: RowPlan, new: Path, owned: list[str]) -> list[str]:
+        """After a failed step: destroy by an incarnation this row made, or
+        close the ledger row when nothing was created; otherwise leave it."""
         rid = plan.row.id
-        if not new.is_file() and old.is_file():
-            res = self.runner(
-                ["init", "--from", str(old), "-o", str(new)],
-                cwd=new.parent,
-                log=self.log_path(plan.row, "v17-init-from"),
-            )
-            if res.code != 0:
-                self.log(rid, "left", detail="cleanup: init --from failed; not destroyed")
-                self.stop_admission(f"{rid}: left for a human")
-                return ["cleanup: init --from failed; left for a person"]
-        inc = confirmed_incarnation(new, self.cluster.core_v1)[0] if new.is_file() else None
-        if inc is None and v16_inc is not None:
-            ident = self.cluster.namespace_identity(plan.namespace)
-            if ident is not None and ident.incarnation == v16_inc:
-                inc = v16_inc
+        try:
+            inc = self._upgrade_incarnation(plan, new)
+            gone = self.cluster.namespace_identity(plan.namespace) is None
+        except Exception as e:  # noqa: BLE001
+            self.log(rid, self.status_of(rid), detail=f"cleanup: namespace unreadable ({e})")
+            self.stop_admission(f"{rid}: namespace unreadable")
+            return [f"cleanup: namespace unreadable ({e})"]
         if inc is None:
-            ident = self.cluster.namespace_identity(plan.namespace)
-            if ident is None and self.buckets_left(plan, None) == []:
+            if gone and self.buckets_left(plan, owned) == []:
                 if self.ledger_close(plan, required=False):
                     self.log(rid, "not-deployed", detail="nothing was created")
                 return []
-            self.log(rid, "left", detail="no incarnation this row deployed; not destroyed")
+            self.log(rid, "left", detail="no incarnation this row made; not destroyed")
             self.stop_admission(f"{rid}: left for a human")
             return ["cleanup: no incarnation to destroy by; left for a person"]
         self.log(rid, "recorded", incarnation=inc, verdict="FAIL")
         if self.interrupted:
             return []
-        self.destroy(plan, inc)
+        self.destroy(plan, inc, owned)
         return []
 
     def _bystander_before(self: Any, config: Path) -> dict[str, Any]:
-        cfg = load_row_config(config)
-        ident = self.cluster.namespace_identity(cfg.get_namespace())
-        return {
-            "namespace": cfg.get_namespace(),
-            "incarnation": ident.incarnation if ident is not None else None,
-            "listing": self.datagen_listing(config),
-        }
+        try:
+            cfg = load_row_config(config)
+            ident = self.cluster.namespace_identity(cfg.get_namespace())
+            return {
+                "namespace": cfg.get_namespace(),
+                "incarnation": ident.incarnation if ident is not None else None,
+                "listing": self.datagen_listing(config),
+                "buckets": config_buckets(config),
+            }
+        except Exception as e:  # noqa: BLE001 -- recorded; the destroy still runs
+            return {"error": f"{type(e).__name__}: {e}"}
 
     def _bystander_after(self: Any, config: Path, before: dict[str, Any] | None) -> list[str]:
-        """The bystander's namespace is the same incarnation and none of
-        its generated objects went or changed."""
-        if before is None:
-            return ["bystander: nothing recorded before the destroy"]
+        """The bystander is the same incarnation, its buckets exist, and
+        none of its generated objects went or changed. (Its silver and gold
+        change while it runs; its own harness judges its record.)"""
+        if before is None or "error" in before:
+            return [f"bystander: not read before the 1.7 deploy ({(before or {}).get('error')})"]
         problems = []
-        if before["incarnation"] is None:
-            problems.append(f"bystander {before['namespace']} was not deployed")
-        ident = self.cluster.namespace_identity(before["namespace"])
-        if ident is None or ident.incarnation != before["incarnation"]:
-            problems.append(f"bystander {before['namespace']} changed incarnation or is gone")
-        after = self.datagen_listing(config)
-        gone = [k for k, v in before["listing"].items() if after.get(k) != v]
-        if gone:
-            problems.append(f"bystander lost or changed {len(gone)} generated objects")
+        try:
+            if before["incarnation"] is None:
+                problems.append(f"bystander {before['namespace']} was not deployed")
+            ident = self.cluster.namespace_identity(before["namespace"])
+            if ident is None or ident.incarnation != before["incarnation"]:
+                problems.append(f"bystander {before['namespace']} changed incarnation or is gone")
+            s3 = self.s3_factory(config)
+            missing = [b for b in before["buckets"] if not s3.bucket_exists(b)]
+            if missing:
+                problems.append(f"bystander buckets gone: {', '.join(missing)}")
+            after = self.datagen_listing(config)
+            lost = [k for k, v in before["listing"].items() if after.get(k) != v]
+            if lost:
+                problems.append(f"bystander lost or changed {len(lost)} generated objects")
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"bystander could not be read after the destroy: {e}")
         self.log(UPGRADE_ROW.id, self.status_of(UPGRADE_ROW.id), bystander_checked=not problems)
         return problems
 
@@ -2035,8 +2134,9 @@ class Harness(ScenarioMixin, UpgradeMixin):
             plan, "destroy", [str(plan.config), "--yes", "--expect-incarnation", inc]
         )
 
-    def destroy(self, plan: RowPlan, inc: str) -> None:
-        """Destroy by incarnation; never ``--force``, never re-invoked."""
+    def destroy(self, plan: RowPlan, inc: str, owned: list[str] | None = None) -> None:
+        """Destroy by incarnation; never ``--force``, never re-invoked.
+        *owned*: the buckets the row owns (default: the config's three)."""
         row = plan.row
         try:
             exists = self.cluster.namespace_exists(plan.namespace)
@@ -2053,7 +2153,7 @@ class Harness(ScenarioMixin, UpgradeMixin):
             )
             self.stop_admission(f"{row.id}: left for a human")
             return
-        self.classify_destroy(plan, self.spawn_destroy(plan, inc))
+        self.classify_destroy(plan, self.spawn_destroy(plan, inc), owned)
 
     def buckets_left(self, plan: RowPlan, owned: list[str] | None) -> list[str] | None:
         """The row's buckets that still exist; None when they cannot be read."""
@@ -2425,12 +2525,12 @@ def _resume_upgrade(h: Harness, st: dict[str, Any]) -> None:
     (a destroy that was running is polled); never re-deploy or re-run."""
     row = UPGRADE_ROW
     plan = _rebuild_plan(row, st)
-    old, new = Path(st["v16_config"]), plan.config
+    owned = list(st.get("owned_buckets") or []) or None
     if st["status"] == "destroying":
-        h.poll_gone(plan, "harness stopped during the upgrade's destroy")
-        problems = []
+        h.poll_gone(plan, "harness stopped during the upgrade's destroy", owned)
+        problems: list[str] = []
     else:
-        problems = h._upgrade_cleanup(plan, old, new, st.get("v16_incarnation"))
+        problems = h._upgrade_cleanup(plan, plan.config, owned or [])
     h.log(
         row.id,
         h.status_of(row.id),
@@ -2661,11 +2761,10 @@ def _main(args: argparse.Namespace) -> int:
     )
     h.rows = {r.id: r for r in rows}
     runners = [runner]
-    if args.cmd in ("upgrade", "resume"):
-        v16_python = _v16_python(args, out)
-        if v16_python is not None:
-            h.v16_runner = ProcessRunner(TREE, python=v16_python)
-            runners.append(h.v16_runner)
+    if args.cmd == "upgrade":
+        # resume cleans an upgrade up with this tree's CLI only
+        h.v16_runner = ProcessRunner(TREE, python=_v16_python(args, out))
+        runners.append(h.v16_runner)
     sigints = {"n": 0}
     pending = threading.Event()
 
@@ -2705,18 +2804,14 @@ def _main(args: argparse.Namespace) -> int:
         rowlog.release()
 
 
-def _v16_python(args: argparse.Namespace, out: Path) -> str | None:
+def _v16_python(args: argparse.Namespace, out: Path) -> str:
     """The lakebench 1.6 interpreter for ``upgrade``: --v16-venv, or
-    ``<out>/v16-venv`` (created for ``upgrade``, reused by ``resume``)."""
+    ``<out>/v16-venv`` created with --v16-spec."""
     venv = getattr(args, "v16_venv", None)
     if venv is not None:
         python = str(Path(venv).absolute() / "bin" / "python")
-    elif args.cmd == "upgrade":
-        python = make_v16_venv(out, args.v16_spec)
-    elif (out / "v16-venv" / "bin" / "python").exists():
-        python = str(out / "v16-venv" / "bin" / "python")
     else:
-        return None
+        python = make_v16_venv(out, args.v16_spec)
     problem = v16_python_problem(python)
     if problem:
         raise Refused(problem)

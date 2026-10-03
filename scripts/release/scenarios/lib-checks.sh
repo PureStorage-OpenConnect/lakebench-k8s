@@ -21,25 +21,19 @@
 # lease on a third signal, so: SIGTERM, up to 900 s; SIGTERM, 300 s; SIGTERM,
 # 300 s; only then SIGKILL. The harness also waits for the script's whole
 # process group before it cleans up.
-_lb_alive() {
-  local p
-  for p in "$@"; do kill -0 "$p" 2>/dev/null && return 0; done
-  return 1
-}
 _lb_reap() {
-  local rc=$? pids grace i p
-  pids=$(jobs -p)
-  if [ -n "$pids" ]; then
-    for grace in 900 300 300; do
-      _lb_alive $pids || break
-      for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
-      for i in $(seq 1 "$grace"); do
-        _lb_alive $pids || break
-        sleep 1
-      done
+  local rc=$? grace i p
+  # jobs -pr is re-read each round: only this shell's own background jobs
+  # that are still running are signalled, never a pid that was reused.
+  for grace in 900 300 300; do
+    [ -n "$(jobs -pr)" ] || return $rc
+    for p in $(jobs -pr); do kill -TERM "$p" 2>/dev/null || true; done
+    for i in $(seq 1 "$grace"); do
+      [ -n "$(jobs -pr)" ] || return $rc
+      sleep 1
     done
-    for p in $pids; do kill -KILL "$p" 2>/dev/null || true; done
-  fi
+  done
+  for p in $(jobs -pr); do kill -KILL "$p" 2>/dev/null || true; done
   return $rc
 }
 trap _lb_reap EXIT
