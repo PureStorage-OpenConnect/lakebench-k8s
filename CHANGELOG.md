@@ -841,8 +841,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **Datagen pods also get `SSL_CERT_FILE` when `platform.storage.s3.ca_cert`
   is set**, pointing at the same mounted CA as `S3_CA_CERT`, so an image
   that predates `S3_CA_CERT` (1.6.0) trusts the configured CA through
-  rustls-native-certs. It replaces the pod's system CA store, so it is set
-  only with a CA.
+  rustls-native-certs. It replaces the pod's system CA store on every image,
+  the default one included: with `ca_cert` set, datagen trusts that CA alone
+  (before, the 1.7 image trusted it on top of the system CAs), so a `ca_cert`
+  for a proxy in front of a public-CA endpoint must also carry the public
+  CA.
 - **The two manual datagen Job manifests (`job-scale1.yaml` and
   `job-scale1-8core.yaml` under `datagen_rs`) are removed**: they named the deleted
   `lb-datagen-rs:latest` image. A unit test now fails on any tracked

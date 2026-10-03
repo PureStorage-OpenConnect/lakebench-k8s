@@ -126,9 +126,8 @@ The default for `datagen.mode: auto` moved from `batch` (at scale <= 10)
 to `continuous` (at every scale). Same-seed corpora remain byte-identical;
 only the S3 upload pattern changed. If a run depended on batch-style
 bursty uploads (bandwidth ceilings, RSS profile), set `mode: batch`
-explicitly. `continuous` overlaps generation with upload, while `batch`
-uploads whole files and pays less per-file multipart overhead, so which is
-faster depends on file count and the network. No measurement of the
+explicitly. `continuous` overlaps generation with upload and `batch`
+uploads whole files once each is written. No measurement of the speed
 difference is published yet; choose the mode from file count and network
 profile rather than accepting the default.
 
