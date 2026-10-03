@@ -142,6 +142,10 @@ app.command(name="benchmark")(_benchmark_fn)
 app.command(name="reproduce")(_reproduce_fn)
 app.command(name="plan")(_plan_fn)
 
+from lakebench.cli import _aliases  # noqa: E402
+
+_aliases.register(app)
+
 
 # Re-exports for backward compatibility (tests import these from lakebench.cli)
 from lakebench.cli._deploy import _preflight_check as _preflight_check  # noqa: E402
@@ -1827,69 +1831,6 @@ def report(
             f"[dim]No delivered report at {esc(delivered)}. "
             "Run 'lakebench report --render' to generate one.[/dim]"
         )
-
-
-@app.command()
-def results(
-    target: Annotated[
-        str | None,
-        typer.Argument(
-            metavar="[RUN|CONFIG]",
-            help="A run id or a configuration YAML file, as for `report`",
-            show_default=False,
-        ),
-    ] = None,
-    metrics_dir: Annotated[
-        Path,
-        typer.Option(
-            "--metrics",
-            "-m",
-            help="Directory containing run subdirectories",
-        ),
-    ] = Path(DEFAULT_OUTPUT_DIR) / "runs",
-    run_id: Annotated[
-        str | None,
-        typer.Option(
-            "--run",
-            "-r",
-            help="Specific run ID (default: latest)",
-        ),
-    ] = None,
-    output_format: Annotated[
-        str | None,
-        typer.Option(
-            "--format",
-            "-o",
-            help="Output format: table, json, csv (default: table)",
-        ),
-    ] = None,
-    format_short_f: Annotated[
-        str | None,
-        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
-    ] = None,
-) -> None:
-    """Display a run's stage matrix: `lakebench report --format table`.
-
-    The same as ``report`` with ``--format`` (default ``table``): a run id
-    or a config as the argument, ./lakebench.yaml by default.
-    """
-    if format_short_f is not None:
-        warn_deprecated_short_f("--format / -o")
-        if output_format is not None and output_format != format_short_f:
-            print_error(f"both --format {output_format} and -f {format_short_f} given")
-            raise typer.Exit(ExitCode.USAGE)
-        output_format = format_short_f
-    report(
-        target=target,
-        metrics_dir=metrics_dir,
-        run_id=run_id,
-        list_runs=False,
-        render=False,
-        output_path=None,
-        force=False,
-        summary=False,
-        output_format=output_format or "table",
-    )
 
 
 _LOGS_HELP_COMPONENTS = (

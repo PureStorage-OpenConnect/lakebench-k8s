@@ -117,7 +117,7 @@ class TestLoader:
         ("module", "argv"),
         [
             ("lakebench.cli._destroy", ["destroy"]),
-            ("lakebench.cli._clean", ["clean", "data"]),
+            ("lakebench.cli._clean", ["clean", "silver"]),
             ("lakebench.cli", ["status"]),
             ("lakebench.cli", ["stop"]),
             ("lakebench.cli", ["logs", "hive"]),

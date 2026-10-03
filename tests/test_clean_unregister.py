@@ -9,7 +9,6 @@ destroy's statements on the deployment's Trino or Spark Thrift pod.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -143,7 +142,7 @@ CFG = (
 )
 
 
-def _clean(tmp_path, unregister, target="data"):
+def _clean(tmp_path, unregister, target="silver"):
     import typer
 
     from lakebench.cli._clean import clean
@@ -182,7 +181,6 @@ def _clean(tmp_path, unregister, target="data"):
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path(tmp_path / "metrics"),
             )
         except typer.Exit as e:
             code = e.exit_code
@@ -192,16 +190,12 @@ def _clean(tmp_path, unregister, target="data"):
 def test_clean_unregisters_each_layer_before_emptying_it(tmp_path):
     from lakebench.deploy.unregister import LayerUnregister
 
-    order, code = _clean(tmp_path, lambda layer: LayerUnregister(unregistered=[f"t.{layer}"]))
-    assert code in (None, 0)
-    assert order == [
-        ("unregister", "my-clean-bronze"),
-        ("empty", "my-clean-bronze"),
-        ("unregister", "my-clean-silver"),
-        ("empty", "my-clean-silver"),
-        ("unregister", "my-clean-gold"),
-        ("empty", "my-clean-gold"),
-    ]
+    for target in ("silver", "gold"):
+        order, code = _clean(
+            tmp_path, lambda layer: LayerUnregister(unregistered=[f"t.{layer}"]), target=target
+        )
+        assert code in (None, 0)
+        assert order == [("unregister", f"my-clean-{target}"), ("empty", f"my-clean-{target}")]
 
 
 def test_a_table_left_registered_keeps_the_bucket_and_fails_the_clean(tmp_path):

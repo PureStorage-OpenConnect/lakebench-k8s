@@ -597,8 +597,12 @@ def test_old_verbs_alias(tmp_path):
         ro = _invoke("install-spark-operator", str(cfg))
         assert rec.mutations() == []
     assert rs.exit_code == 0 and ro.exit_code == 0, rs.output + ro.output
-    assert "is now 'lakebench admin install --component scratch-storage-class'" in rs.stderr
-    assert "is now 'lakebench admin install --component spark-operator'" in ro.stderr
+    for res, old in ((rs, "scratch-storage-class"), (ro, "spark-operator")):
+        line = (
+            f"`lakebench admin install-{old}` is now `lakebench admin install --component "
+            f"{old}`; the old name is removed in v1.8"
+        )
+        assert res.stderr.count(line) == 1, res.stderr
 
 
 def test_dry_run_plans_without_a_lease_or_mutation():

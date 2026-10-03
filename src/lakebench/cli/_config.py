@@ -568,13 +568,9 @@ def config_upgrade(
     old invocations get this refusal rather than a usage error; neither is
     read or printed.
     """
-    from lakebench.cli._exit import UsageError
+    from lakebench.cli._aliases import refusal
 
-    raise UsageError(
-        "`config upgrade` is removed: it rewrote configs lossily and wrote secrets in plaintext.",
-        next="lakebench init --from OLD.yaml -o NEW.yaml",
-        path="config.upgrade_refused",
-    )
+    raise refusal("config upgrade", path="config.upgrade_refused")
 
 
 # -- Helpers -----------------------------------------------------------------

@@ -725,7 +725,6 @@ lakebench clean TARGET [CONFIG_FILE] [OPTIONS]
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--force` / `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--metrics-dir` | `-m` | `./lakebench-output/runs` | Metrics directory (for `metrics` target) |
 | `--force-legacy` | | `false` | Clean a bucket that has no lakebench ownership tag. Foreign-tagged buckets are always refused |
 | `--allow-unverified-cluster` | | `false` | Proceed when the kubeconfig cannot prove which cluster it points at |
 | `--file` | | | Config file (alternative to the positional argument; no short form) |
@@ -747,12 +746,14 @@ Valid targets:
 
 | Target | Action |
 |---|---|
-| `bronze` | Empty the bronze S3 bucket |
 | `silver` | Empty the silver S3 bucket |
 | `gold` | Empty the gold S3 bucket |
-| `data` | Empty all three buckets |
-| `metrics` | Delete local metrics/runs directory |
-| `journal` | Delete all journal session files |
+
+`bronze` and `data` are refused (exit 2) and name `lakebench run CONFIG
+--generate --regenerate`, which clears the run's datagen prefix and
+generates afresh. `metrics` and `journal` are refused: run records and
+journals are evidence, and the CLI does not delete them. A refusal echoes
+no argument.
 
 ### destroy
 
@@ -862,8 +863,9 @@ Display pipeline benchmark results in the terminal.
 lakebench results [RUN|CONFIG] [OPTIONS]
 ```
 
-The same as `lakebench report --format table`: the argument, `--run`,
-`--metrics` and `./lakebench.yaml` default work as for `report`, and
+An alias of `lakebench report --format table`, removed in v1.8: it prints
+one line on stderr naming `report`, then runs it. The argument, `--run`,
+`--metrics` and the `./lakebench.yaml` default work as for `report`, and
 `--format` passes through.
 
 | Flag | Short | Default | Description |
@@ -986,8 +988,8 @@ the cluster-wide `lakebench-cluster-lock` lease.
 | `admin status` | `--operator-namespace` (default `spark-operator`) | Installed operators, lease state, lakebench namespaces, controller `/tmp` size and storage evictions |
 | `admin doctor [CONFIG]` | `-f/--file` | Read-only report on the shared components (the prerequisite checks of [Prerequisites](prerequisites.md): scratch StorageClass, Spark Operator, Stackable, observability stack, OpenShift SCC role), the controller `/tmp` and the lease. Without a config, every component at its default name, with Stackable and the observability stack reported but not failing. Exits 1 when a check fails or cannot run |
 | `admin install [CONFIG]` | `--component/-c C` (repeatable: `scratch-storage-class`, `spark-operator`, `stackable`, `observability`, or `all` for what the config uses; `all` needs a config), `--version C=V` (repeatable, exact chart version), `--allow-version-change`, `--dry-run`, `-y/--yes`, `--controller-tmp-size` (spark-operator fresh install, default 8Gi, floor 4Gi), `-f/--file` | Install the shared components that are missing, under the cluster lease, at `--version`, else the config's pin, else the Lakebench default. An installed component is never changed: with everything installed and ready it exits 0 and changes nothing. A config pin that differs from the installed version is kept with a warning; a stale shared Grafana dashboard is re-applied. Chart repos are refreshed before the lease is taken. Exit 1: a status that cannot be read, a release not `deployed`, an install that failed, or a component not ready. Exit 2: a malformed request, a version change without `--allow-version-change`, or `--controller-tmp-size` for an installed operator. Exit 3: refused (a version change, which Lakebench does not automate because helm leaves a chart's `crds/` at the installed version; a second Spark Operator or kube-prometheus-stack; leftover CRDs; a partial Stackable install that is ambiguous or at another version; a StorageClass whose parameters differ from the config's) |
-| `admin install-scratch-storage-class [CONFIG]` | `-f/--file` | Alias of `admin install --component scratch-storage-class` (prints a notice on stderr). An existing class whose parameters differ from the config's now exits 3 |
-| `admin install-spark-operator [CONFIG]` | `--version`, `--operator-namespace`, `--controller-tmp-size`, `-f/--file` | Alias of `admin install --component spark-operator` (prints a notice on stderr). It no longer upgrades an installed operator: `--version` differing from the installed chart exits 2 |
+| `admin install-scratch-storage-class [CONFIG]` | `-f/--file` | Alias of `admin install --component scratch-storage-class`, removed in v1.8 (prints one line on stderr naming it). An existing class whose parameters differ from the config's now exits 3 |
+| `admin install-spark-operator [CONFIG]` | `--version`, `--operator-namespace`, `--controller-tmp-size`, `-f/--file` | Alias of `admin install --component spark-operator`, removed in v1.8 (prints one line on stderr naming it). It no longer upgrades an installed operator: `--version` differing from the installed chart exits 2 |
 | `admin repair-operator [CONFIG]` | `--dry-run`, `--controller-tmp-size` (default 8Gi), `-f/--file` | Under the cluster lease: roll a `pending-upgrade` or `pending-rollback` release whose pending revision started at least 10 minutes ago (API server clock) back to the newest deployed revision that watches no deleted or Terminating namespace, and only to a watch-all revision when the operator watches every namespace (exit 3 otherwise, and for `pending-install`); set the watch list with one upgrade to the namespaces the Helm values, the controller or the webhook list that are still Active (exit 3 when some of them watch every namespace and others do not); raise a controller `/tmp` smaller than the given size. No release exits 4. `--dry-run` reads without the lease |
 | `admin migrate-deployment NAMESPACE [CONFIG]` | `--api-server-fingerprint`, `-f/--file` | Stamp identity annotations on a legacy pre-ownership namespace |
 | `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment and this cluster, or on a backend without tagging its owner marker (`.lakebench/owner.json`); refused (exit 3) when the bucket holds objects unless `--force-nonempty`, exit 4 when the cluster fingerprint cannot be computed |
@@ -1025,9 +1027,7 @@ lakebench destroy --force             # tear down everything
 ### Re-running the Pipeline
 
 ```bash
-lakebench clean data --force          # empty S3 buckets
-lakebench generate --timeout 14400    # regenerate data
-lakebench run                         # re-run pipeline
+lakebench run --generate --regenerate # clear the datagen prefix, regenerate, re-run
 ```
 
 ### Running a Single Stage

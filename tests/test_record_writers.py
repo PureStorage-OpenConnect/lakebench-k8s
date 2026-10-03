@@ -236,17 +236,25 @@ def _invoke(tmp_path, monkeypatch, *argv):
     return CliRunner().invoke(app, list(argv))
 
 
+_RESULTS_LINE = (
+    "`lakebench results` is now `lakebench report --format table`; the old name is removed in v1.8"
+)
+
+
 def test_results_aliases_report(tmp_path, monkeypatch):
     _runs(tmp_path, PARENT)
     for fmt in ("table", "json", "csv"):
         a = _invoke(tmp_path, monkeypatch, "results", PARENT, "--format", fmt)
         b = _invoke(tmp_path, monkeypatch, "report", PARENT, "--format", fmt)
         assert a.exit_code == b.exit_code == 0, (a.output, b.output)
-        assert a.output == b.output
+        # stdout is the same; stderr has the alias line, exactly once.
+        assert a.stdout == b.stdout
+        assert a.stderr.count(_RESULTS_LINE) == 1, a.stderr
+        assert a.stderr.replace(_RESULTS_LINE + "\n", "", 1) == b.stderr
     # results' default is the table, as before.
     a = _invoke(tmp_path, monkeypatch, "results", PARENT)
     b = _invoke(tmp_path, monkeypatch, "report", PARENT, "--format", "table")
-    assert a.output == b.output and "Pipeline Benchmark:" in a.output
+    assert a.stdout == b.stdout and "Pipeline Benchmark:" in a.stdout
     j = _invoke(tmp_path, monkeypatch, "report", "--run", PARENT, "--format", "json")
     assert json.loads(j.stdout)["run_id"] == PARENT
 

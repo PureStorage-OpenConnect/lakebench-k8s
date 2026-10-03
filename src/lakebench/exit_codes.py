@@ -277,8 +277,9 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "alias.refused",
         _C.USAGE,
-        "a removed command or flag; the message names the replacement",
-        planned=True,
+        "a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean "
+        "journal`); the message names the replacement, and no argument is echoed",
+        v16_code=0,
     ),
     ExitPath(
         "compare.equal_names",

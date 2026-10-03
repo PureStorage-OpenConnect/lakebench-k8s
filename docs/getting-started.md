@@ -661,8 +661,8 @@ lakebench destroy lakebench.yaml --local
 
 `--generate` populates bronze on the first local run. Subsequent runs
 against the same `--workdir` reuse the existing bronze corpus, so
-`--generate` is only needed again after `destroy --remove-data`, after
-`clean bronze`, or when the scale factor changes. Without `--generate`
+`--generate` is only needed again after `destroy --remove-data`, or when
+the scale factor changes. Without `--generate`
 the pipeline runs against whatever bronze the workdir already holds; an
 empty workdir gives an empty pipeline.
 

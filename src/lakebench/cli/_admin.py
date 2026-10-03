@@ -27,6 +27,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from lakebench.cli._aliases import alias_notice
 from lakebench.cli._helpers import (
     console,
     esc,
@@ -615,11 +616,7 @@ def install(
     )
 
 
-def _alias_notice(old: str, new: str) -> None:
-    typer.echo(f"'lakebench admin {old}' is now 'lakebench admin {new}'.", err=True)
-
-
-@admin_app.command("install-scratch-storage-class")
+@admin_app.command("install-scratch-storage-class", hidden=True)
 def install_scratch_storage_class(
     config_file: Annotated[
         Path | None,
@@ -631,7 +628,7 @@ def install_scratch_storage_class(
     ] = None,
 ) -> None:
     """Alias of 'admin install --component scratch-storage-class'."""
-    _alias_notice("install-scratch-storage-class", "install --component scratch-storage-class")
+    alias_notice("admin install-scratch-storage-class")
     cfg = _load_cfg(config_file, file_option)
     _run_admin_install(
         cfg=cfg,
@@ -644,7 +641,7 @@ def install_scratch_storage_class(
     )
 
 
-@admin_app.command("install-spark-operator")
+@admin_app.command("install-spark-operator", hidden=True)
 def install_spark_operator(
     config_file: Annotated[
         Path | None,
@@ -672,7 +669,7 @@ def install_spark_operator(
     ] = None,
 ) -> None:
     """Alias of 'admin install --component spark-operator'."""
-    _alias_notice("install-spark-operator", "install --component spark-operator")
+    alias_notice("admin install-spark-operator")
     cfg = None
     if config_file is not None or file_option is not None:
         cfg = _load_cfg(config_file, file_option)
