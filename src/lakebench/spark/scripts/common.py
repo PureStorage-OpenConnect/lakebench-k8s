@@ -2781,27 +2781,47 @@ def _status_events_dropped(jsc):
     return int(registry.counter("queue.appStatus.numDroppedEvents").getCount())
 
 
-def _jobs_evicted_since(store, first_job):
-    """Whether the status store may have dropped jobs with id >= first_job:
-    its oldest retained job id is above first_job. An empty store says
-    nothing was retained, so yes."""
+def _store_jobs(store):
+    """(job id, status, completion epoch ms or None, job group) of every job
+    the status store holds."""
     jobs = store.jobsList(None)
-    n = int(jobs.size())
-    if n == 0:
-        return True
-    oldest = min(int(jobs.apply(i).jobId()) for i in range(n))
-    return oldest > int(first_job)
+    out = []
+    for i in range(int(jobs.size())):
+        j = jobs.apply(i)
+        comp = j.completionTime()
+        group = j.jobGroup()
+        out.append(
+            (
+                int(j.jobId()),
+                j.status().toString(),
+                int(comp.get().getTime()) if comp.isDefined() else None,
+                group.get() if group.isDefined() else None,
+            )
+        )
+    return out
+
+
+def _jobs_evicted_since(jobs, mark_ms):
+    """Whether the status store may have dropped jobs that completed after
+    epoch ms *mark_ms*. It evicts completed jobs oldest completion first, so
+    while it still holds a job that completed before the mark, no job that
+    completed after it is gone. Without such a job, say yes."""
+    return not any(
+        comp is not None and comp < mark_ms and status not in ("RUNNING", "UNKNOWN")
+        for _id, status, comp, _group in jobs
+    )
 
 
 def rule_profile_mark(spark):
     """Where the application stands when a rule's job group is set: jobs
-    submitted so far (DAGScheduler.numTotalJobs) and status events dropped
-    so far. Pass it to ``rule_stage_profile``. None when it cannot be read."""
+    submitted so far (DAGScheduler.numTotalJobs), status events dropped so
+    far and the JVM clock (epoch ms). Pass it to ``rule_stage_profile``. None when it cannot be read."""
     try:
         jsc = spark.sparkContext._jsc.sc()
         return {
             "jobs": int(jsc.dagScheduler().numTotalJobs()),
             "dropped": _status_events_dropped(jsc),
+            "ms": int(spark.sparkContext._jvm.System.currentTimeMillis()),
         }
     except Exception:  # noqa: BLE001 -- diagnostic only
         return None
@@ -2834,11 +2854,10 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
       group's jobs or stages (it keeps ``spark.ui.retainedJobs`` jobs and
       ``spark.ui.retainedStages`` stages). Dropped jobs are not listed under
       the group at all; they are found against ``mark``: the store drops its
-      oldest jobs first, so when its oldest retained job id is above the
-      job count at ``mark``, jobs of the rule may be gone. (A count of
-      jobs submitted since ``mark`` against those listed under the group
-      flagged rules that lost nothing: job ids are also taken by jobs that
-      never reach the store.);
+      completed jobs oldest completion first, so the profile is complete
+      only while the store still holds a job that completed before the
+      rule's mark. Jobs since the mark that ran outside the group are
+      logged as ``[stage-profile-foreign]`` for diagnosis;
     - ``lossy=true``: the listener queue dropped events during the rule
       (against ``mark``), so the stored task totals are low.
 
@@ -2866,7 +2885,15 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
         job_ids = list(tracker.getJobIdsForGroup(group))
         truncated = lossy = mark is None
         if mark is not None:
-            truncated = _jobs_evicted_since(store, mark["jobs"])
+            jobs = _store_jobs(store)
+            truncated = _jobs_evicted_since(jobs, mark["ms"])
+            # Diagnostic: jobs since the mark that ran outside the rule's group.
+            foreign = [(i, g) for i, _s, _c, g in jobs if i >= mark["jobs"] and g != group]
+            if foreign:
+                log(
+                    f"[stage-profile-foreign] rule={rule_id} group={group} jobs={len(foreign)} "
+                    f"groups={sorted({str(g) for _, g in foreign})[:5]}"
+                )
             lossy = _status_events_dropped(jsc) > mark["dropped"]
         stage_ids = set()
         for job_id in job_ids:

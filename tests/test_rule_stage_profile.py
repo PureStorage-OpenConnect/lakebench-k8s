@@ -13,7 +13,9 @@ class _NoStore:
 def test_unreadable_store_logs_unavailable(load_script, capsys):
     common = load_script("common")
     assert (
-        common.rule_stage_profile(_NoStore(), "g", "W2_structuring", mark={"jobs": 3, "dropped": 0})
+        common.rule_stage_profile(
+            _NoStore(), "g", "W2_structuring", mark={"jobs": 3, "dropped": 0, "ms": 10}
+        )
         is None
     )
     out = capsys.readouterr().out.strip().splitlines()
@@ -38,7 +40,17 @@ def _fake_spark(*, wait=None, last_stage=None, jobs_now=1, dropped=0):
         waitUntilEmpty=wait or (lambda ms: None),
         metrics=lambda: _Obj(metricRegistry=lambda: registry),
     )
-    retained = _Obj(size=lambda: 1, apply=lambda i: _Obj(jobId=lambda: 0))
+    none = _Obj(isDefined=lambda: False)
+    done = _Obj(isDefined=lambda: True, get=lambda: _Obj(getTime=lambda: 0))
+    retained = _Obj(
+        size=lambda: 1,
+        apply=lambda i: _Obj(
+            jobId=lambda: 0,
+            status=lambda: _Obj(toString=lambda: "SUCCEEDED"),
+            completionTime=lambda: done,
+            jobGroup=lambda: none,
+        ),
+    )
     jsc = _Obj(
         listenerBus=lambda: bus,
         statusStore=lambda: _Obj(lastStageAttempt=last_stage, jobsList=lambda statuses: retained),
@@ -59,7 +71,7 @@ def _evicted(sid):
 def test_evicted_stage_is_truncation_not_failure(load_script, capsys):
     common = load_script("common")
     rows = common.rule_stage_profile(
-        _fake_spark(last_stage=_evicted), "g", "W2", mark={"jobs": 0, "dropped": 0}
+        _fake_spark(last_stage=_evicted), "g", "W2", mark={"jobs": 0, "dropped": 0, "ms": 10}
     )
     assert rows == []
     out = capsys.readouterr().out
@@ -77,7 +89,7 @@ def test_other_store_error_is_unavailable_not_truncation(load_script, capsys):
         )
 
     rows = common.rule_stage_profile(
-        _fake_spark(last_stage=broken), "g", "W2", mark={"jobs": 0, "dropped": 0}
+        _fake_spark(last_stage=broken), "g", "W2", mark={"jobs": 0, "dropped": 0, "ms": 10}
     )
     assert rows is None
     out = capsys.readouterr().out
@@ -94,7 +106,7 @@ def test_listener_that_does_not_drain_is_incomplete(load_script, capsys):
         _fake_spark(wait=timeout, last_stage=_evicted, dropped=2),
         "g",
         "W2",
-        mark={"jobs": 0, "dropped": 1},
+        mark={"jobs": 0, "dropped": 1, "ms": 10},
     )
     out = capsys.readouterr().out
     assert "truncated=true complete=false lossy=true" in out
@@ -107,17 +119,18 @@ def test_without_a_mark_the_flags_are_not_claimed_clean(load_script, capsys):
     assert "truncated=true complete=true lossy=true" in out
 
 
-def test_jobs_outside_the_store_do_not_mark_truncation(load_script):
-    """Truncation means the store dropped the rule's jobs (its oldest
-    retained job is newer than the rule's first), not that job ids were
-    taken by jobs the store never saw."""
+def test_truncation_is_read_from_completion_order(load_script):
+    """The store evicts completed jobs oldest completion first: a held job
+    that completed before the rule's mark proves nothing of the rule was
+    evicted; otherwise the profile is flagged."""
     common = load_script("common")
-
-    def store(ids):
-        seq = _Obj(size=lambda: len(ids), apply=lambda i: _Obj(jobId=lambda: ids[i]))
-        return _Obj(jobsList=lambda statuses: seq)
-
-    assert common._jobs_evicted_since(store([5, 6, 7]), 5) is False
-    assert common._jobs_evicted_since(store([3, 9]), 5) is False
-    assert common._jobs_evicted_since(store([8, 9]), 5) is True
-    assert common._jobs_evicted_since(store([]), 5) is True
+    mark = 1000
+    held_before = [(1, "SUCCEEDED", 900, None), (7, "SUCCEEDED", 1500, "g")]
+    assert common._jobs_evicted_since(held_before, mark) is False
+    # A low-id job that completed late does not vouch for anything.
+    late_low = [(1, "SUCCEEDED", 1600, None), (9, "SUCCEEDED", 1500, "g")]
+    assert common._jobs_evicted_since(late_low, mark) is True
+    # A running job is never evicted, so it does not vouch either.
+    running = [(1, "RUNNING", None, None), (9, "SUCCEEDED", 1500, "g")]
+    assert common._jobs_evicted_since(running, mark) is True
+    assert common._jobs_evicted_since([], mark) is True
