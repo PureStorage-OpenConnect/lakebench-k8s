@@ -67,6 +67,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - The Hive recipes now default to Spark 4.1.1. A config that does not set `images.spark` runs Spark 4.1.1 (and Delta 4.1.0) where v1.6 ran 4.0.2. Its jars, dependency set and perf fingerprint change, and a deployment made from it must be redeployed before run.
 - A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer; `run` exits 1 when its record does not read PASSED.
 - `compare`, `report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
+- The datagen image exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
+- Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
+- Datagen pods honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
 
 - **The Hive recipes default to Spark 4.1.1.** Each recipe's default
   Spark image is now the Spark minor of its release-matrix row:
@@ -708,6 +711,20 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **`docs/prerequisites.md` is generated** from the prerequisite checks in
   `deploy/prereqs.py` by `scripts/gen_prereq_docs.py`, so the page and the
   checks cannot drift.
+- **Each datagen pod writes a corpus marker when it finishes.**
+  `<prefix>/_corpus/c<cycle>-node-<node>.json` records the files, rows and
+  bytes the pod wrote, the build commit, the seed (as its salted hash for
+  the financial schema) and `corpus_args`: the corpus arguments as the
+  generator resolved them (defaults applied; the parquet writer settings
+  from `DG_*` included; destination, transport, credentials and thread
+  count left out) with their sha256, so an omitted flag and the same flag at
+  its default hash the same. `generate --print-resolved-args` prints that
+  object and writes nothing; `--version` prints the model version and build
+  commit. The image carries OCI labels for both, refuses to build without
+  `--build-arg LB_BUILD_COMMIT=<commit>`, and no longer installs boto3. A
+  Customer 360 `--cycle n` now needs the matching `--cycles` (Lakebench
+  always passes both), and a non-finite `--scale`, `--dirty-ratio` or
+  `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 
 ### Changed
 - **`compare`: outcome keys inside a side, and maintenance skipped on both
@@ -853,23 +870,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   older seed Secret; otherwise it stays until `destroy` removes it.
   `scripts/aml_gate.py` takes a held-out seed only from `--seed-file`
   (owner-only file) and refuses one on `--seed` in every mode. Development
-  configs, seed 43 included, render exactly as before. Needs the next
+  configs, seed 43 included, pass their seed as before (every financial
+  datagen Job also mounts the held-out hash file, see below). Needs the next
   datagen image (the generator and its entrypoint read `LB_DATAGEN_SEED`); an
   older image refuses a registered corpus with exit 2.
-- **Each datagen pod writes a corpus marker when it finishes.**
-  `<prefix>/_corpus/c<cycle>-node-<node>.json` records the files, rows and
-  bytes the pod wrote, the build commit, the seed (as its salted hash for
-  the financial schema) and `corpus_args`: the corpus arguments as the
-  generator resolved them (defaults applied; the parquet writer settings
-  from `DG_*` included; destination, transport, credentials and thread
-  count left out) with their sha256, so an omitted flag and the same flag at
-  its default hash the same. `generate --print-resolved-args` prints that
-  object and writes nothing; `--version` prints the model version and build
-  commit. The image carries OCI labels for both, refuses to build without
-  `--build-arg LB_BUILD_COMMIT=<commit>`, and no longer installs boto3. A
-  Customer 360 `--cycle n` now needs the matching `--cycles` (Lakebench
-  always passes both), and a non-finite `--scale`, `--dirty-ratio` or
-  `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 - **The datagen generator parses its arguments strictly.** An unknown flag,
   a flag given twice, a flag without its value, a stray argument, or a value
   that does not parse now exits 2 in the entrypoint and the Rust binary
@@ -877,23 +881,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   to run as node 0). `--payload-kb` is still accepted by the entrypoint. The
   Rust `--scale` default is 1.0, as the entrypoint's (Lakebench always passes
   it for the financial schema).
-- **A failed datagen upload completion is retried.** A continuous-delivery
-  file whose multipart upload or completion fails is rebuilt from the same
-  rows and uploaded again on the same key after 2, 4 and 8 s before the pod
-  fails (it used to fail at once and restart from scratch); the S3 client's
-  own per-request retries go from 1 to 3 (every request, parts and single
-  PUTs included). Output bytes are unchanged. Each pod logs
-  `delivery_mode=<batch|continuous>` and reports it in its metrics line,
-  and the run record's `datagen_fleet.delivery_mode` carries it.
-- **The datagen pods honour `platform.storage.s3.path_style`, `verify_ssl`
-  and `ca_cert`.** The Rust S3 client used path-style addressing, plain HTTP
-  and the system CAs whatever the config said; it now reads `S3_PATH_STYLE`,
-  `S3_VERIFY_SSL` and `S3_CA_CERT` (already rendered into the Job), allows
-  plain HTTP only for an `http://` endpoint, and exits 2 on a value it cannot
-  read or a CA file it cannot load. With `path_style: false` the bucket goes
-  into the endpoint's host (virtual-hosted requests); a FlashBlade or MinIO
-  config must keep `path_style: true`, which the datagen pods now honour
-  like Spark does.
 - **The datagen generator checks held-out seeds by hash.** It no longer
   compiles the evaluation and robustness seeds in: it reads
   `heldout_hashes.json` from `LB_HELDOUT_HASHES` (a financial generate
@@ -912,8 +899,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   in plaintext.** The pre-registration drops `corpora.evaluation_seed` and
   `corpora.robustness_seed` and names those seeds by role in its notes, and
   `heldout_hashes.json` moves its absence check from `report` to `enforce`.
-  The datagen image source keeps its compiled copy until the Rust check
-  reads the hash file (next datagen change, before the look image).
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with
@@ -1888,6 +1873,23 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `iceberg-spark-runtime-4.1`. Thrift now makes the same choice as the jobs.
   Thrift deployments on Spark 4.1 with Iceberg 1.11 change runtime jar on
   their next deploy; other combinations are unchanged.
+- **A failed datagen upload completion is retried.** A continuous-delivery
+  file whose multipart upload or completion fails is rebuilt from the same
+  rows and uploaded again on the same key after 2, 4 and 8 s before the pod
+  fails (it used to fail at once and restart from scratch); the S3 client's
+  own per-request retries go from 1 to 3 (every request, parts and single
+  PUTs included). Output bytes are unchanged. Each pod logs
+  `delivery_mode=<batch|continuous>` and reports it in its metrics line,
+  and the run record's `datagen_fleet.delivery_mode` carries it.
+- **The datagen pods honour `platform.storage.s3.path_style`, `verify_ssl`
+  and `ca_cert`.** The Rust S3 client used path-style addressing, plain HTTP
+  and the system CAs whatever the config said; it now reads `S3_PATH_STYLE`,
+  `S3_VERIFY_SSL` and `S3_CA_CERT` (already rendered into the Job), allows
+  plain HTTP only for an `http://` endpoint, and exits 2 on a value it cannot
+  read or a CA file it cannot load. With `path_style: false` the bucket goes
+  into the endpoint's host (virtual-hosted requests); a FlashBlade or MinIO
+  config must keep `path_style: true`, which the datagen pods now honour
+  like Spark does.
 
 ### Known limitations
 - **The capacity preflight sums free capacity across nodes.** Ten nodes

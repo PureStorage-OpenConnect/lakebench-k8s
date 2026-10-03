@@ -210,35 +210,41 @@ def seed_ever_recorded(seed: int) -> str | None:
                 label = f"the registered {role} seed" if role else f"seed {seed}"
                 return f"{label} is in the look ledger {led}"
     rec = looks_path()
-    hits = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(ROOT),
-            "log",
-            "--all",
-            "--format=%H",
-            "-S",
-            f'"seed": {int(seed)}',
-            "--",
-            str(rec.relative_to(ROOT)),
-        ],
+    rel = str(rec.relative_to(ROOT))
+    # Every revision of the record on any ref, read through git show: the
+    # seed never goes on a git command line, where /proc would show it.
+    revs = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "--all", "--format=%H", "--", rel],
         capture_output=True,
         text=True,
         check=False,
     )
-    if hits.returncode != 0:
-        # Not CalledProcessError: its text carries the argv, which holds the seed.
-        raise OSError(f"git log over {rec.name} failed (exit {hits.returncode})")
-    hits = hits.stdout.strip()
-    if hits:
-        # git log --all also sees stashes and unpushed branches, where a
-        # held-out seed can sit before its look: name it by role then.
-        from lakebench.config.datagen_seed import heldout_role
+    if revs.returncode != 0:
+        raise OSError(f"git log over {rec.name} failed (exit {revs.returncode})")
+    for rev in revs.stdout.split():
+        shown = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{rev}:{rel}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if shown.returncode != 0:
+            continue  # the record does not exist at this revision
+        try:
+            looks = json.loads(shown.stdout).get("looks") or []
+        except (ValueError, AttributeError):
+            continue
+        if any(
+            isinstance(e, dict) and type(e.get("seed")) is int and e["seed"] == int(seed)
+            for e in looks
+        ):
+            # git log --all also sees stashes and unpushed branches, where a
+            # held-out seed can sit before its look: name it by role then.
+            from lakebench.config.datagen_seed import heldout_role
 
-        role = heldout_role(seed)
-        label = f"the registered {role} seed" if role else f"seed {seed}"
-        return f"{label} was recorded in {rec.name} by commit {hits.splitlines()[0]}"
+            role = heldout_role(seed)
+            label = f"the registered {role} seed" if role else f"seed {seed}"
+            return f"{label} is recorded in {rec.name} at commit {rev}"
     return None
 
 

@@ -407,3 +407,21 @@ A new shared observability install gets a generated Grafana password; an existin
 A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer; `run` exits 1 when its record does not read PASSED.
 
 **What to do:** Read `verdict.reasons` and `verdict.gates` in `metrics.json`; a run that exited 0 under 1.6 with an empty layer or a skipped rule now exits 1 and says which.
+
+### The datagen generator refuses arguments it cannot read
+
+The datagen image exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
+
+**What to do:** Lakebench's own Jobs pass valid arguments; correct scripts and manual Jobs that call the image directly (`--node-id abc` used to run as node 0).
+
+### The datagen image builds only with its commit
+
+Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
+
+**What to do:** Build with `--build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD)`, as docs/datagen-custom-images.md shows.
+
+### Datagen pods honour path style, TLS and CA settings
+
+Datagen pods honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
+
+**What to do:** Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.

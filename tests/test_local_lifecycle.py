@@ -137,6 +137,15 @@ class TestGenerateLocal:
         assert "AWS_ACCESS_KEY_ID=GK1" in joined
         assert "AWS_SECRET_ACCESS_KEY=sec" in joined
 
+    def test_names_the_schema(self, cfg, tmp_path):
+        """The entrypoint defaults to financial; local mode generates Customer 360."""
+        with mock.patch("lakebench.cli._local._empty_bronze", return_value=True):
+            with mock.patch("subprocess.run", return_value=_completed()) as run:
+                generate_local(cfg, _deployment(tmp_path))
+        argv = run.call_args.args[0]
+        i = argv.index("--schema")
+        assert argv[i + 1] == "customer360" and argv[i - 1] == cfg.images.datagen
+
     def test_failure_is_reported(self, cfg, tmp_path):
         with mock.patch("lakebench.cli._local._empty_bronze", return_value=True):
             with mock.patch("subprocess.run", return_value=_completed(returncode=1, stderr="boom")):

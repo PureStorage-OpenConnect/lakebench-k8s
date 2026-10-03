@@ -576,3 +576,24 @@
   source: src/lakebench/cli/_aml_post.py:STOP_DRAIN_BUDGET_S
   text: '`stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.'
   fix: 'Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.'
+- id: the-datagen-generator-refuses-arguments-it-cannot-read
+  title: The datagen generator refuses arguments it cannot read
+  kind: refused-command
+  subject: datagen generator arguments
+  source: datagen_rs/src/bin/generate.rs:check_known_flags
+  text: 'The datagen image exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.'
+  fix: 'Lakebench''s own Jobs pass valid arguments; correct scripts and manual Jobs that call the image directly (`--node-id abc` used to run as node 0).'
+- id: the-datagen-image-builds-only-with-its-commit
+  title: The datagen image builds only with its commit
+  kind: default-change
+  subject: datagen image build
+  source: datagen_rs/Dockerfile:LB_BUILD_COMMIT
+  text: 'Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.'
+  fix: 'Build with `--build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD)`, as docs/datagen-custom-images.md shows.'
+- id: datagen-pods-honour-path-style-tls-and-ca-settings
+  title: Datagen pods honour path style, TLS and CA settings
+  kind: default-change
+  subject: datagen S3 transport settings
+  source: datagen_rs/src/s3sink.rs:S3_PATH_STYLE
+  text: 'Datagen pods honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.'
+  fix: 'Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.'

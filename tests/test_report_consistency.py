@@ -591,8 +591,8 @@ def test_golden_is_clean(run_id):
 
     html = golden_path(run_id).read_text()
     assert check_clean({"page": html}) == []
-    hits = [m for m in re.findall(r"\d+", html) if datagen_seed.heldout_role(int(m)) is not None]
-    assert not hits, "golden holds a protected seed"
+    # Every integer shape (grouped, embedded, hex), hashed: no held-out seed.
+    assert datagen_seed.absence_problems({"page": html}) == [], "golden holds a protected seed"
 
 
 # ---------------------------------------------------------------------------

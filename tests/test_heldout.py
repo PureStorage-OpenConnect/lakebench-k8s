@@ -796,6 +796,30 @@ def test_look_ledger_git_failure_names_no_seed(monkeypatch, tmp_path):
     assert _no_seed_in(str(e.value))
 
 
+def test_look_history_search_keeps_the_seed_off_the_command_line(held, monkeypatch, tmp_path):
+    g = _gate_module()
+    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "none.jsonl"))
+    argvs = []
+
+    class Done:
+        def __init__(self, out, rc=0):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    def fake_run(argv, *a, **k):
+        argvs.append(argv)
+        if "log" in argv:
+            return Done("c0ffee\nbadc0de\n")
+        if argv[-1].startswith("c0ffee:"):
+            return Done(json.dumps({"looks": [{"role": "evaluation", "seed": EV}]}))
+        return Done("", 128)
+
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    msg = g.seed_ever_recorded(EV)
+    assert "evaluation" in msg and "c0ffee" in msg and _no_seed_in(msg)
+    assert all(_no_seed_in(" ".join(a)) for a in argvs)
+    assert g.seed_ever_recorded(RB) is None
+
+
 def test_cross_role_hash_refused(tmp_path):
     # The robustness seed's hash appended to the evaluation list would make
     # heldout_role answer "evaluation" for it.
