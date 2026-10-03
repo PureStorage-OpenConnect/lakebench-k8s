@@ -757,9 +757,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   local corpus's (data files by path and size, manifests by sha256), the
   generation was pinned to the `--generator-image` digest and every datagen pod
   of it ran one image, and no other attempt on this host had a datagen Job in
-  that bronze prefix meanwhile (the ledger is per host). `generate
-  --registered-corpus` now needs `images.datagen` pinned by digest, and exits 1
-  when it generated the corpus but could not fingerprint it.
+  that bronze prefix meanwhile (the ledger is per host; an earlier attempt
+  that failed after submitting may have left pods writing, so the corpus is
+  then generated again into an empty bucket). `generate --registered-corpus`
+  now needs `images.datagen` pinned by digest, and exits 1 when it generated
+  the corpus but could not fingerprint it or read its pods' image digests.
 - **`scripts/aml_heldout_audit.py`** (maintainers) lists every protected-role
   scored run it can find on this host: stored run records, the configs the
   journals name and the held-out tokens in them, the bronze manifests and

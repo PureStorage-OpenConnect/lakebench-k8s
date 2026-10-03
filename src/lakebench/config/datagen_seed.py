@@ -1522,19 +1522,21 @@ def registered_corpus_problem(
             or e.get("bronze_uri") != gen.get("bronze_uri")
         ):
             continue
+        # Finished means generated. A failure after submit leaves its Job and
+        # pods behind (OOM, crash loop, timeout), so it may still be writing.
         closed = next(
             (
                 k
                 for k in range(j + 1, len(entries))
-                if entries[k].get("attempt") == other
-                and entries[k].get("state") in ("generated", "failed")
+                if entries[k].get("attempt") == other and entries[k].get("state") == "generated"
             ),
             None,
         )
         if closed is None or closed > start:
             return (
-                f"another attempt ({other}) had a datagen Job in the same bronze prefix while "
-                f"attempt {attempt} ran"
+                f"another attempt ({other}) had a datagen Job in the same bronze prefix that may "
+                f"have been writing while attempt {attempt} ran; generate the registered corpus "
+                "again into an empty bucket"
             )
     return None
 
