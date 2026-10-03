@@ -85,7 +85,7 @@ differ, so compare, the perf gate and reproduce refuse them).
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage rows taken in inside the window)` (gold: its re-reads of silver) | Total volume processed during the measurement window. |
 | `total_s3_objects` | `sum(bucket_object_count)` | Total S3 objects across bronze/silver/gold at end of run. If this grows faster than retention can clean, metadata ops degrade. |
-| `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. |
+| `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. Withheld when the rounds ran different query sets (`scores.qph_degradation_withheld` says so), as an AML continuous run's do once its investigator queries start. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
 
 **BOUNDED BY trickle.** A continuous run feeds bronze at most

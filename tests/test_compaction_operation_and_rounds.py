@@ -549,3 +549,41 @@ def test_a_legacy_subset_never_hashes_todays_sql():
     _fail_every_round(a["pipeline_benchmark"]["benchmark_rounds"])
     names = [q["name"] for q in a["pipeline_benchmark"]["benchmark_rounds"][0]["queries"][1:]]
     assert recorded_executed_query_set(a) not in (None, query_set_id(names))
+
+
+# --- QpH degradation over rounds of different query sets (owner, 10-03) -------
+
+
+def _sustained_with(rounds):
+    from lakebench.metrics.collector import PipelineBenchmark
+
+    pb = PipelineBenchmark(
+        run_id="20261002-000000-aaaaaa",
+        deployment_name="d",
+        pipeline_mode="sustained",
+        start_time=datetime(2026, 10, 2, 1, 0, tzinfo=timezone.utc),
+        benchmark_rounds=rounds,
+    )
+    pb.compute_aggregates()
+    return pb
+
+
+def test_degradation_is_withheld_when_rounds_ran_different_sets():
+    """An AML continuous run: 8-query rounds before its first case, 12 after.
+    The halves time different work, so no degradation figure is recorded."""
+    from lakebench.metrics.collector import QPH_DEGRADATION_BLENDED
+
+    rounds = [_round(EIGHT, qph=400.0), _round(EIGHT, qph=400.0)]
+    rounds += [_round(TWELVE, qph=100.0), _round(TWELVE, qph=100.0)]
+    run = _sustained_with(rounds)
+    assert run.qph_degradation_pct is None
+    assert run.qph_degradation_withheld == QPH_DEGRADATION_BLENDED
+    scores = run.to_dict()["scores"]
+    assert "qph_degradation_pct" not in scores
+    assert scores["qph_degradation_withheld"] == QPH_DEGRADATION_BLENDED
+
+
+def test_degradation_is_computed_over_one_set():
+    rounds = [_round(TWELVE, qph=q) for q in (100.0, 100.0, 80.0, 80.0)]
+    run = _sustained_with(rounds)
+    assert run.qph_degradation_pct == 20.0 and run.qph_degradation_withheld is None

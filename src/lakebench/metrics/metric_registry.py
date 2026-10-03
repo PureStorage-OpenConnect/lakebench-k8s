@@ -590,6 +590,16 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         description="QpH degradation from first-half to second-half of sustained run (positive = slower, negative = faster)",
     ),
     MetricMeta(
+        "qph_degradation_withheld",
+        "text",
+        "none",
+        "label",
+        _CONT,
+        _ALL_WL,
+        (),
+        description="Continuous. Why qph_degradation_pct is not recorded though the run has four or more rounds: the rounds ran different query sets, so the two halves time different work",
+    ),
+    MetricMeta(
         "time_to_value_seconds",
         "s",
         "lower",
