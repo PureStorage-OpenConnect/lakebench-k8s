@@ -429,3 +429,33 @@ def test_a_nameless_config_uses_the_session_name_for_its_bucket(audit_mod, tmp_p
     c.write_text("workload:\n  schema: financial\n")
     j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", c, {"config_name": "lb-reg"}))
     assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 1
+
+
+def test_a_variable_corpus_field_is_never_read_as_clean(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    c = tmp_path / "c.yaml"
+    c.write_text(
+        "name: x\nworkload:\n  schema: financial\n  datagen:\n"
+        "    corpus_role: ${LB_T_ROLE:-calibration}\n"
+    )
+    with pytest.raises(audit_mod.Unresolved):
+        audit_mod.raw_config_reason(audit_mod._raw_config(c))
+    # A hex seed in a variable is typed as YAML types it.
+    monkeypatch.setenv("LB_T_SEED", hex(pc.RB))
+    c.write_text("name: x\nworkload:\n  schema: financial\n  datagen:\n    seed: ${LB_T_SEED}\n")
+    assert "robustness" in audit_mod.raw_config_reason(audit_mod._raw_config(c))
+
+
+def test_malformed_session_entries_do_not_crash(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    j = tmp_path / "j"
+    j.mkdir()
+    (j / "session-x.jsonl").write_text(
+        json.dumps({"event_type": "session.start", "session_id": "s1", "details": "x"})
+        + "\n"
+        + json.dumps(
+            {"event_type": "session.start", "session_id": "s2", "details": {"config_file": 5}}
+        )
+        + "\n"
+    )
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 2
