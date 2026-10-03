@@ -271,15 +271,17 @@ start the generator refuses the robustness seed without it, and the
 evaluation seed or a calibration replicate with it. The reference scorer
 reads the perturbation from the manifest's stamp, not from the config.
 
-The held-out check runs at three points, each hashing the seed it sees and
-comparing it with the per-role hashes: config load; generator start
-(`datagen_rs/src/heldout.rs`, in images built from this release's source),
-which refuses to generate a financial corpus without the hash file Lakebench
-mounts on the datagen pod; and
-the cluster reference scorer (`spark/scripts/score_financial_reference.py`),
-which recovers the corpus seed from every manifest row and refuses a corpus
-from a spent seed, or from a held-out seed outside its registered run,
-whatever the config claims. No refusal message prints a held-out seed.
+The held-out check runs at five points, each hashing the seed it sees and
+comparing it with the per-role hashes: config load and the look guard
+after it (below); generator start (`datagen_rs/src/heldout.rs`, in images
+built from this release's source), which refuses to generate a financial
+corpus without the hash file Lakebench mounts on the datagen pod;
+bronze-verify (`spark/scripts/bronze_verify_financial.py`) and the recall
+scorer (`spark/scripts/score_financial.py`), which recover the corpus seed
+from every manifest row and refuse a held-out or spent corpus; and the
+cluster reference scorer (`spark/scripts/score_financial_reference.py`),
+which does the same and refuses a corpus from a spent seed, or from a
+held-out seed outside its registered run, whatever the config claims. No refusal message prints a held-out seed.
 
 **Registered corpora.** When a financial config declares `corpus_role:
 evaluation` or `robustness`, or names a seed whose hash matches a held-out
@@ -295,15 +297,30 @@ the held-out seed only from `--seed-file`, refuses it on `--seed`, records
 the seed as spent before any model is fitted and the report's sha256 before
 it prints a verdict. No `lakebench` command records a look.
 
-Never set `datagen.corpus_role` on a config used with `lakebench run`: such
-a run passes config load and, with an image built from this release's
-source, generates the registered corpus and scores rule recall and
-false-positive rate against its manifest, and no look is recorded (section
-12). With the default image the generator exits 2, because it never reads
-the seed from the Secret.
-<!-- PENDING look-guard: when the registered-look guard lands, `run` and the
-financial verbs refuse a protected corpus; rewrite this paragraph and the
-section 12 limitation from aml/look_guard.py. -->
+**The look guard** (`aml/look_guard.py`). `run`, `benchmark`, `query`,
+`reproduce` and the `financial` commands refuse a protected corpus right
+after the config loads, before any cluster call, with exit 2
+(`run.protected_corpus`): a config that declares `corpus_role: evaluation`
+or `robustness`, names a seed whose hash matches a held-out role, or (AML)
+points its bronze datagen prefix at one where this host generated a
+registered corpus; `compare`, which loads no config, refuses a stored run
+record from such a corpus. `generate` writes
+a protected corpus only with `--registered-corpus --yes` and a digest-pinned
+`images.datagen`; it records the attempt in the host's corpus ledger
+(`~/.lakebench/aml_corpora.jsonl`, `LB_AML_CORPORA_LEDGER`) before its first
+cluster call, then `generated` (with the corpus fingerprint and the pod
+image ids) or `failed`, and refuses a seed whose look was already taken.
+For the financial workload bronze-verify also reads every row of the corpus
+manifest before anything else and stops (exit 2) on a corpus from a
+held-out or spent seed, on a manifest no corpus seed can be recovered from,
+and on a batch corpus with no manifest; a `run --stage` subset runs that
+check alone first, and a check that could not run (a storage error) exits 1.
+`scripts/aml_gate.py --registered` scores a look only when the ledger holds
+a matching `generated` entry for the corpus it reads.
+`scripts/aml_heldout_audit.py` lists this host's run records, journals,
+ledgers and ledger buckets that touch a protected corpus. `destroy` and the
+read-only commands skip the load-time seed check, so a deployment that
+generated a registered corpus can still be torn down.
 
 The AML protocol grants each held-out seed exactly one registered look after
 the generator freeze. The freeze covers bronze rows, the manifest,
@@ -1247,17 +1264,11 @@ only.
   covered scorer use (`spark/scripts/aml_features.py`), so silver rows from
   a batch whose seal marker never landed (a crash between the transaction
   commit and the marker) are counted there and nowhere else.
-- **`lakebench run` can spend a held-out look without recording it.** A run
-  config that declares `datagen.corpus_role: evaluation` or `robustness`
-  with the matching seed loads while registered looks are open, and, with
-  an image built from this release's source, `lakebench run` then generates
-  and scores that held-out corpus without verifying the manifest against
-  the seed and without recording a look. The
-  load-time refusal text for a protected seed also points at the config
-  route. Never set `datagen.corpus_role` in a run config; registered looks
-  are recorded only by `scripts/aml_gate.py --registered`.
-  <!-- PENDING look-guard: rewrite or remove once the registered-look guard
-  refuses protected corpora in run and the financial verbs. -->
+- **The look guard is per host.** The corpus ledger that records a
+  registered corpus and the bronze prefix it was written to is a local file
+  (section 3.3), so a development config on another host pointed at that
+  prefix is refused only by bronze-verify's manifest check, after the
+  deploy. Take every look from one host.
 - **The default generator image is a tag.** A registered look or
   calibration shard run through `scripts/aml_gate.py` needs
   `--generator-image` as a digest-pinned reference (`repo@sha256:<digest>`)

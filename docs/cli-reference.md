@@ -796,6 +796,14 @@ does not support, are refused just after these, also before any cluster
 call. Benchmark settings `run` does not honour are refused when the config
 loads.
 
+A config naming a protected AML corpus (the evaluation or robustness role or
+seed) is refused before any cluster call (exit 2, `run.protected_corpus`).
+For the financial workload, bronze-verify reads every row of the corpus
+manifest first and stops (exit 2) on a corpus from a held-out or spent seed,
+on a manifest no corpus seed can be recovered from, and on a batch corpus
+with no manifest; `--stage silver-build` or `gold-finalize` runs that check
+alone first. A check that could not run (a storage error) exits 1.
+
 The run command executes 7 phases:
 
 1. **Prerequisites** -- check kubectl, helm, K8s cluster, S3, Spark Operator
