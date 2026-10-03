@@ -39,6 +39,28 @@ RELEASE_MATRIX: tuple[tuple[str, str, str, float], ...] = (
     ("financial", "batch", "hive-iceberg-spark-trino", 10),
 )
 
+#: SPEC section 11's Spark minor and table format version per row, by
+#: (workload, mode, recipe). The support record is keyed by them
+#: (config/support.py), so a row's runs must use these versions.
+_ICEBERG, _SPARK41, _SPARK40 = "1.11.0", "4.1", "4.0"
+RELEASE_MATRIX_VERSIONS: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("customer360", "batch", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
+    ("customer360", "batch", "polaris-iceberg-spark-trino"): (_SPARK40, _ICEBERG),
+    ("customer360", "batch", "hive-delta-spark-trino"): (_SPARK41, "4.1.0"),
+    ("customer360", "batch", "hive-delta-spark-thrift"): (_SPARK40, "4.0.0"),
+    ("customer360", "batch", "hive-iceberg-spark-thrift"): (_SPARK41, _ICEBERG),
+    ("customer360", "batch", "polaris-iceberg-spark-thrift"): (_SPARK40, _ICEBERG),
+    ("customer360", "batch", "hive-iceberg-spark-duckdb"): (_SPARK41, _ICEBERG),
+    ("customer360", "batch", "polaris-iceberg-spark-duckdb"): (_SPARK40, _ICEBERG),
+    ("customer360", "batch", "hive-iceberg-spark-none"): (_SPARK41, _ICEBERG),
+    ("customer360", "continuous", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
+    ("customer360", "continuous", "hive-delta-spark-trino"): (_SPARK41, "4.1.0"),
+    ("financial", "batch", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
+    ("financial", "batch", "polaris-iceberg-spark-trino"): (_SPARK40, _ICEBERG),
+    ("financial", "continuous", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
+    ("financial", "continuous", "polaris-iceberg-spark-trino"): (_SPARK40, _ICEBERG),
+}
+
 #: Bound kinds a release row may carry, by (workload, mode, scale). Empty for
 #: every row: the matrix runs at scale 1 and 10 with default sizing, and the
 #: stored s1 and s10 PASSED records bound nothing. A row that needs a cap

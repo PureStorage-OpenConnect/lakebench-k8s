@@ -574,17 +574,65 @@ def test_support_record_needs_every_row_at_its_scale_on_the_freeze_tree(frozen, 
     rid = "20260928-130953-f8a2cf"  # AML batch hive Trino at scale 1
     d = repo / "uat" / "runs" / f"run-{rid}"
     d.mkdir(parents=True)
-    d.joinpath("metrics.json").write_text(json.dumps(sr.load_record("130953-f8a2cf")))
-    record = {
-        (w, r, support.canonical_mode(m)): support.Validation(
-            w, r, support.canonical_mode(m), "0" * 12, (rid,)
-        )
-        for w, m, r, _s in rr.RELEASE_MATRIX
-    }
+    data = sr.load_record("130953-f8a2cf")
+    data["experiment"]["architecture"]["pipeline_engine"]["image"] = "apache/spark:4.1.1-python3"
+    d.joinpath("metrics.json").write_text(json.dumps(data))
+    record = _matrix_record(support, rr, rid)
     monkeypatch.setattr(support, "load_validation_record", lambda path=None: record)
     detail = rg.make_support_record_check("v9.9.9")().detail
     assert "no validated run for financial hive-iceberg-spark-trino batch at scale 10" in detail
+    assert "no validated run for financial hive-iceberg-spark-trino batch at scale 1;" not in (
+        detail + ";"
+    )
     assert f"not the freeze {sha[:12]}" in detail
+
+
+def _matrix_record(support, rr, rid: str, versions=None) -> dict:
+    """A validation record with one entry per release-matrix row, at the
+    row's versions unless *versions* overrides them, each citing *rid*."""
+    out = {}
+    for w, m, r, _s in rr.RELEASE_MATRIX:
+        spark, version = versions or rr.RELEASE_MATRIX_VERSIONS[(w, m, r)]
+        v = support.Validation(w, r, support.canonical_mode(m), spark, version, "0" * 40, (rid,))
+        out[v.key] = v
+    return out
+
+
+def test_support_record_rows_are_keyed_by_the_matrix_versions(frozen, monkeypatch):
+    # A record whose entries name other versions than SPEC section 11 does
+    # not cover the matrix, and a run at other versions than its entry is
+    # not that entry's evidence.
+    import json
+
+    import lakebench.config.support as support
+    from lakebench.metrics import release_record as rr
+    from tests.fixtures import stored_records as sr
+
+    repo, _sha = frozen
+    rid = "20260928-130953-f8a2cf"
+    d = repo / "uat" / "runs" / f"run-{rid}"
+    d.mkdir(parents=True)
+    d.joinpath("metrics.json").write_text(json.dumps(sr.load_record("130953-f8a2cf")))
+    record = _matrix_record(support, rr, rid, versions=("4.0", "1.11.0"))
+    monkeypatch.setattr(support, "load_validation_record", lambda path=None: record)
+    detail = rg.make_support_record_check("v9.9.9")().detail
+    assert (
+        "no validated entry for customer360 hive-iceberg-spark-trino batch on Spark 4.1 "
+        "with table format 1.11.0"
+    ) in detail
+    assert (
+        "customer360 hive-iceberg-spark-trino batch on Spark 4.0 with table format 1.11.0 "
+        "is not a release-matrix row"
+    ) in detail
+    # The stored run is Spark 4.0: it is the 4.0 entry's run, so its key agrees.
+    assert f"{rid}: record is not financial hive-iceberg-spark-trino batch" not in detail
+    record = _matrix_record(support, rr, rid)
+    monkeypatch.setattr(support, "load_validation_record", lambda path=None: record)
+    detail = rg.make_support_record_check("v9.9.9")().detail
+    assert (
+        f"{rid}: record is not financial hive-iceberg-spark-trino batch on Spark 4.1 "
+        "with table format 1.11.0"
+    ) in detail
 
 
 def test_post_freeze_version_bump_allowed_other_edits_not(frozen):

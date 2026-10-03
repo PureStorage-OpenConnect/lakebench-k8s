@@ -46,6 +46,15 @@ def _fp(value: int = 1) -> dict:
     return fingerprint_rows([(value, "x")], engine="trino", adapted_sql="SELECT 1")
 
 
+def _cfg_spark41():
+    """The default C360 batch config on the Spark 4.1 image, the release
+    matrix's version for hive-iceberg-spark-trino."""
+    return make_config(
+        images={"spark": "apache/spark:4.1.1-python3"},
+        architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
+    )
+
+
 def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
     run = MetricsCollector().start_run(
         "20260926-120000-aaaaaa", cfg.name, build_config_snapshot(cfg)
@@ -192,28 +201,29 @@ class TestStamping:
         rec.write_text(
             "validated:\n"
             "  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: batch,\n"
-            "     tree: abc1234, runs: [run-1]}\n"
+            "     spark: '4.1', table_format_version: 1.11.0,\n"
+            f"     tree: {'abc1234' + '0' * 33}, runs: [run-1]}}\n"
         )
         with (
             mock.patch.object(support, "VALIDATION_RECORD", rec),
             mock.patch.object(provenance, "run_provenance", lambda: clean),
         ):
-            run = _metrics(_cfg())
+            run = _metrics(_cfg_spark41())
             s = run.to_dict()["experiment"]["support"]
             assert s["state"] == "supported"
             assert s["validation_runs"] == ["run-1"] and "abc1234" in s["basis"]
             # A modified tree is not the validated code.
             dirty = dict(clean, git_dirty=True)
             with mock.patch.object(provenance, "run_provenance", lambda: dirty):
-                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+                s = _metrics(_cfg_spark41()).to_dict()["experiment"]["support"]
             assert s["state"] == "unverified" and "modified tree" in s["basis"]
             unknown = dict(clean, git_dirty=None)
             with mock.patch.object(provenance, "run_provenance", lambda: unknown):
-                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+                s = _metrics(_cfg_spark41()).to_dict()["experiment"]["support"]
             assert s["state"] == "unverified"
             wheel = dict(clean, git_sha=None, git_dirty=None)
             with mock.patch.object(provenance, "run_provenance", lambda: wheel):
-                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+                s = _metrics(_cfg_spark41()).to_dict()["experiment"]["support"]
             assert s["state"] == "supported"
         # Frozen at run start: re-rendering after the record changes keeps it.
         assert run.to_dict()["experiment"]["support"]["state"] == "supported"
@@ -223,12 +233,12 @@ class TestStamping:
             mock.patch.object(support, "VALIDATION_RECORD", rec),
             mock.patch.object(provenance, "run_provenance", lambda: clean),
         ):
-            s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+            s = _metrics(_cfg_spark41()).to_dict()["experiment"]["support"]
             assert s["state"] == "unverified"
             # A record from before the state was frozen is never re-stamped
             # supported, whatever the installed record now says.
             rec.write_text(rec.read_text().replace("mode: continuous", "mode: batch"))
-            old = _metrics(_cfg())
+            old = _metrics(_cfg_spark41())
             old.config_snapshot["experiment_inputs"].pop("support")
             s = old.to_dict()["experiment"]["support"]
             assert s["state"] == "unverified" and "not recorded at run start" in s["basis"]

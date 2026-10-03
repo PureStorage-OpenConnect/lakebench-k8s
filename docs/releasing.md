@@ -106,6 +106,41 @@ maintainer who tags is still responsible for the content.
 
 ### Release evidence
 
+The support record (`src/lakebench/config/validated_combinations.yaml`) is
+generated from the release-matrix run records once they are checked in
+under `uat/runs/`, and never edited by hand:
+
+```bash
+PYTHONPATH=$PWD/src python -m lakebench.config.support . --from-records uat/runs \
+    --tree "$(cat uat/freeze-<version>)" \
+    --expected uat/expected-results-<version>.json --write
+PYTHONPATH=$PWD/src python -m lakebench.config.support .   # regenerate the README and docs tables
+```
+
+`.` is the repository root: the record is written to its
+`src/lakebench/config/validated_combinations.yaml`, and the release
+datagen image's lineage evidence is read from it. Both commands refuse
+(exit 2) unless the lakebench they import is that root's `src`, because the
+tables, the record rules and the release image come from the imported
+code; hence `PYTHONPATH`. `--expected` is the expected-results file the
+`expected-results` check reads.
+
+It keeps each record that is release evidence (the `records` check's
+rules, below) on a release-matrix row run at that row's Spark minor and
+table format version (SPEC section 11, `RELEASE_MATRIX_VERSIONS` in
+`src/lakebench/metrics/release_record.py`), groups them by workload,
+recipe, mode, Spark minor and table format version, and writes one entry
+per group with the freeze commit as its `tree`. A record whose directory is
+not `run-<its run_id>` is refused, and so is every copy of a run id found
+with two different records; byte-equal copies count once. Every refused
+record is listed on stderr with its reasons, and so is every matrix row,
+scale included, that no kept run covers (the `support-record` check
+refuses the tag until each is covered). Without `--write` it prints the
+record instead. It exits 0 when it built at least one entry, 1 when no
+record is release evidence (nothing is written) and 2 on a usage error, and
+touches no other file. Commit the record and the regenerated tables
+together; both are on the post-freeze allowlist.
+
 Four checks hold the release to its evidence; `records` and
 `support-record` read the cited run records themselves
 (`src/lakebench/metrics/release_record.py`). `records`, `freeze` and
@@ -136,9 +171,12 @@ all four with the repository's full history.
   failed and that matches the expected file's fingerprints, which its continuous entry must list; a corpus with
   recorded problems (such as datagen pods on different images) is refused.
 - `support-record` (with `--tag`): `validated_combinations.yaml` lists every
-  release-matrix row and was validated on the freeze tree; every run it lists
-  is in `uat/runs/`, is release evidence and is the workload, recipe and mode
-  of its entry; and every matrix row, scale included, has such a run.
+  release-matrix row at the row's Spark minor and table format version
+  (`RELEASE_MATRIX_VERSIONS`), lists nothing outside the matrix, and was
+  validated on the freeze tree; every run it lists is in `uat/runs/`, is
+  release evidence and is the workload, recipe, mode, Spark minor and table
+  format version of its entry; and every matrix row, scale included, has
+  such a run.
 - `freeze`: the freeze commit is an ancestor of `HEAD`, the tree is clean,
   and every change after it is in `uat/`, `validated_combinations.yaml`,
   `benchmarks/perf/baselines.yaml` or `docs/benchmarks/examples/`, the

@@ -332,19 +332,11 @@ def experiment_inputs(
     if seed_error:
         corpus["seed_error"] = seed_error
 
-    table_format = arch.table_format.type.value
-    format_version: str | None
-    try:
-        from lakebench.modules.pipeline_engines.spark.job import resolve_format_version
+    from lakebench.config.support import resolved_format_version
 
-        requested = (
-            arch.table_format.iceberg.version
-            if table_format == "iceberg"
-            else arch.table_format.delta.version
-        )
-        format_version = resolve_format_version(images.spark, table_format, requested)
-    except Exception:  # noqa: BLE001
-        format_version = None
+    table_format = arch.table_format.type.value
+    # One reading with the support stamp (config.support.config_versions).
+    format_version = resolved_format_version(cfg)
 
     catalog = arch.catalog.type.value
     catalog_version = {
@@ -693,13 +685,17 @@ def support_state(
 ) -> dict[str, Any]:
     """The DESIGN 6.5 support state of a run's workload x architecture x mode,
     computed by lakebench.config.support from layers 1-3 and the release
-    validation record (config/validated_combinations.yaml)."""
+    validation record (config/validated_combinations.yaml), at the Spark
+    minor and table format version the architecture block names."""
+    from lakebench.config.support import spark_minor
     from lakebench.config.support import support_state as _state
 
     def t(key: str) -> str | None:
         v = arch.get(key)
         return (v or {}).get("type") if isinstance(v, Mapping) else v
 
+    engine, fmt = arch.get("pipeline_engine"), arch.get("table_format")
+    version = fmt.get("version") if isinstance(fmt, Mapping) else None
     return _state(
         workload,
         t("catalog"),
@@ -708,6 +704,8 @@ def support_state(
         t("query_engine"),
         mode,
         system=system,
+        spark=spark_minor(engine.get("image") if isinstance(engine, Mapping) else None),
+        table_format_version=version if isinstance(version, str) else None,
     )
 
 

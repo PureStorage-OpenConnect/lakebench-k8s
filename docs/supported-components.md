@@ -133,7 +133,7 @@ Every recipe deploys PostgreSQL, its catalog (Hive Metastore or Polaris), its
 query engine (none for the `-none` recipes) and runs Spark for the pipeline.
 
 <!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
 |---|---|---|---|---|
