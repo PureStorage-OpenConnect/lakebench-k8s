@@ -61,6 +61,24 @@ commands use a suggested name, `lb-<user>-<6 hex>`, which the error for the
 other commands also offers. No command writes `.lakebench/state.json` any
 more, and the read-only commands create no files.
 
+The v1.6 name is read from `.lakebench/state.json` beside the path given,
+as v1.6 read it, with symbolic links not followed; `--name` is checked
+against that name. When a nameless config is reached through a link and the
+directory of the file it points to records a different v1.6 name (or the
+link's directory records none), every command that may look at a
+deployment refuses it without `--name`, so one config cannot act on, or
+report, the other directory's deployment. `info`, `config show`, `config
+storage` and `config recommend` load it under the link directory's name (a
+suggested name when it records none) with a note. Because both directories
+share the one file, the fix is not to add `name:` to it: pass `--name`
+(through the link only the link directory's name is accepted; reach the
+other deployment through the file's own path), or replace the link with a
+copy and name each copy. `init --overwrite` without `--name` refuses such a
+file when either directory records a v1.6 name, and `relocate` refuses to
+run through a link when either directory records one. The v1.7 deploy
+state (`.lakebench/<name>.json`, below) stays with the file the link points
+to.
+
 ### Deploy state and nameless teardown
 
 Every `deploy` (named configs included) records the per-deploy nonce it is
@@ -1248,9 +1266,10 @@ written (quoted or not) and never expanded, and it never writes over OLD
 (`-o` naming OLD, or a link to it, exits 2). It:
 
 - keeps the deployment's name: OLD's `name:`, or for a nameless config the
-  name 1.6 recorded in `.lakebench/state.json` beside it (beside the path
-  given and, for a link, beside the file it points to; two different names
-  exit 3). When other nameless configs share that directory, 1.6 gave all
+  name 1.6 recorded in `.lakebench/state.json` beside the path given, where
+  1.6 read it. For a link, the file beside its target is read too: two
+  different names, or a name only beside the target, exit 3, as `destroy`
+  and `status` refuse that config without `--name`. When other nameless configs share that directory, 1.6 gave all
   of them that name, so it exits 3 until `--name` says which deployment
   this file made. A `--name` that differs from the recorded name is
   printed with it. With neither, the new file gets a new name, and the

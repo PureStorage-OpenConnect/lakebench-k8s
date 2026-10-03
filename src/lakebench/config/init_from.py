@@ -590,12 +590,14 @@ def _set_name(
     """The name NEW carries and where it came from; written into *data*.
 
     OLD's own name wins. A nameless OLD takes the name 1.6 recorded in
-    ``.lakebench/state.json`` beside it, read where 1.6 read it (beside the
-    path as given, a link or not) and beside the file a link resolves to:
-    two different names, or another nameless config in the directory (1.6
-    gave all of them the one name), need ``--name``.
+    ``.lakebench/state.json`` beside the path as given, a link or not, where
+    1.6 read it; the file a link resolves to is read too. Two different
+    names, a name only beside the link's target (1.6 never read it through
+    this path), or another nameless config in the directory (1.6 gave all
+    of them the one name) need ``--name``, as the nameless checks of
+    ``destroy`` and ``status`` do (``loader.ConfigNameRequired``).
     """
-    from .deploy_state import legacy_names, other_nameless_configs
+    from .deploy_state import given_legacy_state_path, legacy_names, other_nameless_configs
 
     own = data.get("name")
     if own not in (None, ""):
@@ -621,6 +623,16 @@ def _set_name(
         raise InitFromError(
             f"{old_path} has no name, and 1.6 recorded two names for it ({where}): pass "
             "--name with the deployment this file made",
+            refused=True,
+        )
+    elif recorded and given_legacy_state_path(old_path) not in found:
+        (target_state,) = found
+        raise InitFromError(
+            f"{old_path} has no name and is a symbolic link: 1.6 recorded "
+            f"'{recorded[0]}' in {target_state}, beside the file the link points to, "
+            "and no name beside the link, so it is not the name 1.6 gave this path. "
+            f"Pass --name {recorded[0]} if this file deployed it, or convert the file "
+            "from its own path",
             refused=True,
         )
     elif recorded:

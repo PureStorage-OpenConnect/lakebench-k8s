@@ -9,8 +9,10 @@ decides three things:
 - the derived-name length check is skipped (TEARDOWN, READ, INSPECT);
 - a config with no ``name`` is refused (MUTATE, RUN), refused when its name
   would be only a suggestion (TEARDOWN) or would come from the v1.6
-  ``.lakebench/state.json`` (TEARDOWN, READ), and otherwise loads under the
-  name ``deploy_state.resolve_name`` resolves.
+  ``.lakebench/state.json`` (TEARDOWN, READ), refused through a symbolic
+  link whose target's directory records another v1.6 name (every purpose
+  but INSPECT), and otherwise loads under the name
+  ``deploy_state.resolve_name`` resolves.
 
 Deprecations, dropped keys and dead fields are collected into
 :class:`LoadNotes` while a load runs, instead of each validator logging on its

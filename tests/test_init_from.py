@@ -617,6 +617,25 @@ def test_init_from_reads_the_legacy_name_where_v16_did(tmp_path, monkeypatch):
     assert not (tmp_path / "new2.yaml").exists()
 
 
+def test_init_from_through_a_link_refuses_a_name_only_beside_the_target(tmp_path, monkeypatch):
+    """1.6 never read the target directory's name through the link, and
+    destroy and status refuse that config without --name; so does init
+    --from. From the file's own path the name is the one 1.6 used."""
+    lab, shared = tmp_path / "lab", tmp_path / "shared"
+    lab.mkdir()
+    shared.mkdir()
+    _legacy_dir(shared, "lb-target")
+    (shared / "real.yaml").write_text(NAMELESS)
+    (lab / "lakebench.yaml").symlink_to(shared / "real.yaml")
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(app, ["init", "--from", "lab/lakebench.yaml", "-o", "new.yaml"])
+    assert r.exit_code == 3, r.output
+    assert "lb-target" in r.output and not (tmp_path / "new.yaml").exists()
+    r = runner.invoke(app, ["init", "--from", "shared/real.yaml", "-o", "new.yaml"])
+    assert r.exit_code == 0, r.output
+    assert yaml.safe_load((tmp_path / "new.yaml").read_text())["name"] == "lb-target"
+
+
 def test_init_from_name_flag_says_what_was_recorded(tmp_path, monkeypatch):
     _legacy_dir(tmp_path)
     old, new, r = _convert(tmp_path, monkeypatch, NAMELESS, "--name", "fresh")
