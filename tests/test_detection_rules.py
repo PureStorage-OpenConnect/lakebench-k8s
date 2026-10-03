@@ -837,9 +837,12 @@ def test_gold_finalize_threads_max_vertices():
     """The configured W1 vertex cap (LB_FINANCIAL_W1_MAX_VERTICES) must be
     read and passed into any rule that accepts max_vertices."""
     body = GOLD_FINALIZE_PATH.read_text()
-    assert "LB_FINANCIAL_W1_MAX_VERTICES" in body
-    assert '"max_vertices" in sig.parameters' in body
-    assert 'params["max_vertices"]' in body
+    # One builder for gold, replay and reproduce (detection_rules.rule_params).
+    assert "rule_params(fn, run_id, silver_entities)" in body
+    rules = (GOLD_FINALIZE_PATH.parent / "detection_rules.py").read_text()
+    builder = rules[rules.index("def rule_params(") :]
+    assert '"max_vertices" in sig' in builder and 'params["max_vertices"]' in builder
+    assert "LB_FINANCIAL_W1_MAX_VERTICES" in rules[rules.index("def w1_max_vertices(") :]
 
 
 def test_gold_finalize_projects_derived_tables():
@@ -936,8 +939,8 @@ def test_replay_threads_w1_vertex_cap():
     configured cap, not the rule's 5M hard-coded default."""
     p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/replay_financial.py"
     body = p.read_text()
-    assert "LB_FINANCIAL_W1_MAX_VERTICES" in body
-    assert 'kwargs["max_vertices"]' in body
+    # The cap comes from the builder gold-finalize uses.
+    assert "kwargs = rule_params(rule_fn, replay_run_id, silver_entities)" in body
 
 
 def test_score_financial_scopes_alerts_by_run_id():
