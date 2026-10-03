@@ -51,7 +51,7 @@ from lakebench.cli._helpers import (
     print_success,
     print_warning,
 )
-from lakebench.exit_codes import ExitCode, UsageError
+from lakebench.exit_codes import ExitCode
 
 logger = logging.getLogger(__name__)
 
@@ -1110,10 +1110,12 @@ def _run_pipeline(
     except ConfigError as e:
         raise ReproduceError(str(e)) from None
 
-    # The run below would refuse a bad timeout, but only after the deploy
-    # and generate: check it first.
-    if timeout is not None and timeout < 1:
-        raise UsageError("--timeout must be at least 1 s", path="run.args")
+    # The run below would refuse a bad argument or combination (a bad
+    # timeout, investigator sessions on a batch config), but only after the
+    # deploy and generate: check run's rules first.
+    from lakebench.cli._run_args import RunArgs, validate_run_args
+
+    validate_run_args(RunArgs(timeout=timeout), cfg)
 
     _refuse_existing(cfg, config_file)
     namespace = cfg.get_namespace()

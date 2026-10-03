@@ -774,6 +774,8 @@ class TestNoPreRunDestroy:
             mock.patch("lakebench.cli._generate.generate", track("generate")),
             mock.patch("lakebench.cli._run.run", track("run")),
             mock.patch("lakebench.cli._reproduce._refuse_existing"),
+            # run's argument rules read a real config (tests/test_run_args.py).
+            mock.patch("lakebench.cli._run_args.validate_run_args"),
             mock.patch(
                 "lakebench.cli._reproduce._own_incarnation",
                 side_effect=lambda cfg, path, own, **k: f"uid#{own}",

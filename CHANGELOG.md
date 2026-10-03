@@ -492,8 +492,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   sessions that ran, not the configured number, so a run whose round was
   lowered or skipped compares as not like-for-like with one that ran at N
   (an outcome condition: the perf gate and `reproduce` do not refuse on the
-  number; the perf gate refuses a run with sessions against a baseline
-  without them). A config without the key records and identifies exactly
+  number; the perf gate refuses sessions that ran against a baseline with
+  none configured or none run, and the other way round). A config without the key records and identifies exactly
   as before. With the key, the run adds one round after its first
   in-stream round with a case: N concurrent sessions, one case each in
   IQ1's queue order, run IQ1 to IQ3 bound to their case and IQ4, once each,

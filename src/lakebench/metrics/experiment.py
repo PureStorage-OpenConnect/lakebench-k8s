@@ -1513,16 +1513,22 @@ def stored_identity_refusals(
             f"round(s), the run's of {r_run} (0 means the post-stream benchmark)"
         )
     # The number of investigator sessions that ran may differ (an outcome),
-    # but not whether the run put investigator load on the pipeline at all:
-    # a run with the sessions configured is never matched to one without.
+    # but not whether the run put investigator load on the pipeline at all
+    # (none configured, or none ran): load is never matched to no load, as
+    # an in-stream QpH median is never matched to the post-stream estimator.
     s_ref = expected_identity.get("investigator sessions")
     s_run = full_actual.get("investigator sessions")
-    if (s_ref is None) != (s_run is None):
+
+    def _loaded(v: Any) -> bool:
+        # 0: configured, but no session ran (skipped round): no load either.
+        return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+    if _loaded(s_ref) != _loaded(s_run):
         reasons.append(
             f"investigator load differs: the {what} "
-            + ("ran no investigator sessions" if s_ref is None else f"ran {s_ref} session(s)")
+            + ("ran no investigator sessions" if not s_ref else f"ran {s_ref} session(s)")
             + ", the run "
-            + ("none" if s_run is None else f"{s_run}")
+            + ("none" if not s_run else f"{s_run}")
             + " (architecture.benchmark.investigator_sessions)"
         )
     reasons.extend(f"run: {p}" for p in corpus_problems(actual))
