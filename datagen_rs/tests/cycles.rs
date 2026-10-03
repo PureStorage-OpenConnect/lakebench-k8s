@@ -1209,3 +1209,86 @@ fn c360_two_cycle_output_is_pinned() {
         "c360 two-cycle output changed"
     );
 }
+
+fn reference_run(extra: &[&str]) -> std::process::Output {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-strict");
+    let _ = std::fs::remove_dir_all(&dir);
+    generate_cmd()
+        .env("DG_LOCAL_DIR", &dir)
+        .args(["--bucket", "b", "--mode", "reference", "--total-nodes", "1"])
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn rust_bad_node_id_exits_2() {
+    // Present but unparseable, missing, repeated, unknown, positional, and a
+    // bare flag given a value: each exits 2 instead of a silent default.
+    let seed = ["--seed", "7777"];
+    let scale = ["--scale", SCALE];
+    for bad in [
+        vec!["--node-id", "abc"],
+        vec!["--total-nodes", "x"],
+        vec!["--corpus-months", "60x"],
+        vec!["--file-size-mb", "1.5"],
+        vec!["--threads", "-2"],
+        vec!["--total-nodes"],
+        vec!["--node-id", "0", "--node-id", "0"],
+        vec!["--nope", "1"],
+        vec!["--payload-kb", "2"],
+        vec!["--target-tb", "0.1"],
+        vec!["4321"],
+        vec!["--robustness-perturbation=yes"],
+    ] {
+        let out = reference_run(&[&seed[..], &scale[..], &bad[..]].concat());
+        assert_eq!(out.status.code(), Some(2), "{bad:?} was accepted");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("4321"), "a stray value was echoed");
+    }
+    // The same run with valid flags works.
+    assert!(reference_run(&[&seed[..], &scale[..]].concat())
+        .status
+        .success());
+}
+
+#[test]
+fn c360_refuses_financial_flags() {
+    let out = generate_cmd()
+        .env(
+            "DG_LOCAL_DIR",
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-strict-c360"),
+        )
+        .args([
+            "--schema",
+            "customer360",
+            "--bucket",
+            "b",
+            "--seed",
+            "42",
+            "--target-tb",
+            "0.00002",
+            "--corpus-months",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--corpus-months"));
+}
+
+#[test]
+fn financial_scale_defaults_to_one() {
+    let out = reference_run(&["--seed", "7777"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("\"scale\":1.000000"),
+        "default scale is not 1.0"
+    );
+}

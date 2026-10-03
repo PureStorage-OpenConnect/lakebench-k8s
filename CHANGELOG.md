@@ -497,6 +497,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   configs, seed 43 included, render exactly as before. Needs the next
   datagen image (the generator and its entrypoint read `LB_DATAGEN_SEED`); an
   older image refuses a registered corpus with exit 2.
+- **The datagen generator parses its arguments strictly.** An unknown flag,
+  a flag given twice, a flag without its value, a stray argument, or a value
+  that does not parse now exits 2 in the entrypoint and the Rust binary
+  instead of being dropped or falling back to a default (`--node-id abc` used
+  to run as node 0). `--payload-kb` is still accepted by the entrypoint. The
+  Rust `--scale` default is 1.0, as the entrypoint's (Lakebench always passes
+  it for the financial schema).
+- **A failed datagen upload completion is retried.** A continuous-delivery
+  file whose multipart upload or completion fails is rebuilt from the same
+  rows and uploaded again on the same key after 2, 4 and 8 s before the pod
+  fails (it used to fail at once and restart from scratch); part uploads
+  get 3 retries instead of 1. Output bytes are unchanged.
+- **The datagen pods honour `platform.storage.s3.path_style`, `verify_ssl`
+  and `ca_cert`.** The Rust S3 client used path-style addressing, plain HTTP
+  and the system CAs whatever the config said; it now reads `S3_PATH_STYLE`,
+  `S3_VERIFY_SSL` and `S3_CA_CERT` (already rendered into the Job), allows
+  plain HTTP only for an `http://` endpoint, and exits 2 on a value it cannot
+  read or a CA file it cannot load.
 - **The datagen generator checks held-out seeds by hash.** It no longer
   compiles the evaluation and robustness seeds in: it reads
   `heldout_hashes.json` from `LB_HELDOUT_HASHES` (a financial generate

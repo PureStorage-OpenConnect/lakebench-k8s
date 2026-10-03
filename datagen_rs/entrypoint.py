@@ -182,11 +182,10 @@ def main() -> int:
     # it as an alias for `--threads` so the Rust rayon pool sizes correctly
     # even if the template hasn't been updated to pass --threads explicitly.
     ap.add_argument("--workers", type=int, default=None)
-    # Ignore any other args silently (e.g. --payload-kb=0 which some templates
-    # pass): argparse handles unknown args by erroring, so we let it.
-    args, unknown = ap.parse_known_args()
-    if unknown:
-        print(f"[entrypoint] ignoring unknown args: {unknown}", file=sys.stderr)
+    # Strict: an unknown flag exits 2 (argparse), so a typo or a flag from a
+    # newer Lakebench never runs as a silent default. --payload-kb stays
+    # declared above because a v1.6 template may still pass it.
+    args = ap.parse_args()
 
     if args.schema not in SUPPORTED_SCHEMAS:
         print(
