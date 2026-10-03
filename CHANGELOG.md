@@ -1080,6 +1080,15 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   gold-finalize job records `gold_strategy` and `gold_strategy_source` in
   `jobs[].extra_metrics`. Customer 360 records now carry workload version
   `c360-2`, so they do not compare with `c360-1` records.
+- **Multi-cycle time to value leaves the cycles' datagen out.** A
+  multi-cycle run generates cycles 2 and later between one cycle's gold and
+  the next bronze, inside the span `time_to_value_seconds` measures, so the
+  score counted datagen as pipeline time. Each cycle now records
+  `datagen_start` and `datagen_end`, and the overlap of those intervals with
+  the span is subtracted and reported as
+  `pipeline_benchmark.scores.time_to_value_datagen_excluded_seconds`.
+  Single-cycle time to value is unchanged; a multi-cycle record from before
+  this does not compare with one after it (workload version `c360-2.dev1`).
 - **A multi-cycle Customer 360 run takes one data clock (workload version
   `c360-2.dev1`).** Each cycle's silver job anchored `customer_recency_score`
   to that cycle's bronze-verify clock, so one run's rows were scored against
