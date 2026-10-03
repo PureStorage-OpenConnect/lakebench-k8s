@@ -407,3 +407,9 @@ A new shared observability install gets a generated Grafana password; an existin
 A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer; `run` exits 1 when its record does not read PASSED.
 
 **What to do:** Read `verdict.reasons` and `verdict.gates` in `metrics.json`; a run that exited 0 under 1.6 with an empty layer or a skipped rule now exits 1 and says which.
+
+### Multi-cycle runs and reused corpora check a corpus series marker
+
+A run that reuses bronze exits 3 when its corpus series marker is unfinished or names another generation, a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`, and `generate` or `run --generate-only` on a multi-cycle config exits 2.
+
+**What to do:** Generate a multi-cycle corpus with `lakebench run` (add `--regenerate` over an old corpus); regenerate a single-cycle corpus the marker refuses with `run --generate --regenerate`.

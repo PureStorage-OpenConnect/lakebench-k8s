@@ -39,27 +39,6 @@ from lakebench.k8s.target import ContextConflictError
 CLEAN_TARGETS = ["silver", "gold"]
 
 
-def _empty_layer(cfg, s3, layer: str, bucket: str, progress) -> int:
-    """``empty_bucket`` for one layer. For bronze the corpus series marker
-    first says a clear is under way and is kept until the bucket is empty,
-    then removed (deploy/corpus.py): a clean that stops part way leaves a
-    marker that refuses any run that would reuse the rest. When the marker
-    cannot be written nothing is deleted (raises)."""
-    from lakebench.s3.client import LAKEBENCH_KEY_PREFIX
-
-    if layer != "bronze":
-        return s3.empty_bucket(bucket, progress_callback=progress)
-    from lakebench.deploy.datagen import _mark_clearing
-
-    keep = _mark_clearing(cfg, s3) if s3.bucket_exists(bucket) else frozenset()
-    deleted = s3.empty_bucket(
-        bucket, progress_callback=progress, keep_prefixes=(LAKEBENCH_KEY_PREFIX, *sorted(keep))
-    )
-    for key in keep:
-        s3.raw_client.delete_object(Bucket=bucket, Key=key)
-    return deleted
-
-
 def clean(
     target: Annotated[
         str,
@@ -512,7 +491,7 @@ def clean(
                             "(see above); re-run clean once they can"
                         )
                         continue
-                    deleted = _empty_layer(cfg, s3, layer, bucket, _clean_progress)
+                    deleted = s3.empty_bucket(bucket, progress_callback=_clean_progress)
                     total_deleted += deleted
                     if deleted > 0:
                         print_success(

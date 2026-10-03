@@ -576,3 +576,16 @@
   source: src/lakebench/cli/_aml_post.py:STOP_DRAIN_BUDGET_S
   text: '`stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.'
   fix: 'Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.'
+- id: multi-cycle-runs-and-reused-corpora-check-a-corpus-series-marker
+  title: Multi-cycle runs and reused corpora check a corpus series marker
+  kind: default-change
+  subject:
+  - corpus series marker
+  - run.series_mismatch
+  - generate.multi_cycle
+  source: src/lakebench/deploy/corpus.py:read_series
+  text: A run that reuses bronze exits 3 when its corpus series marker is unfinished or names another
+    generation, a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`, and
+    `generate` or `run --generate-only` on a multi-cycle config exits 2.
+  fix: Generate a multi-cycle corpus with `lakebench run` (add `--regenerate` over an old corpus); regenerate
+    a single-cycle corpus the marker refuses with `run --generate --regenerate`.

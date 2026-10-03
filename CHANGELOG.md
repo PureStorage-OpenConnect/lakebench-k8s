@@ -67,6 +67,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - The Hive recipes now default to Spark 4.1.1. A config that does not set `images.spark` runs Spark 4.1.1 (and Delta 4.1.0) where v1.6 ran 4.0.2. Its jars, dependency set and perf fingerprint change, and a deployment made from it must be redeployed before run.
 - A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer; `run` exits 1 when its record does not read PASSED.
 - `compare`, `report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
+- A run that reuses bronze exits 3 when its corpus series marker is unfinished or names another generation, a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`, and `generate` or `run --generate-only` on a multi-cycle config exits 2.
 
 - **The Hive recipes default to Spark 4.1.1.** Each recipe's default
   Spark image is now the Spark minor of its release-matrix row:
@@ -130,8 +131,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   single-cycle run over a corpus with no marker (1.6, or an older
   `generate`) proceeds as before and records `cycle_series.marker:
   "absent"`, unless the corpus holds files of later cycles. The clears of
-  the datagen prefix (`--regenerate`, a fresh generate, a continuous reset,
-  `clean bronze`) first write a marker that says a clear is under way and
+  the datagen prefix (`--regenerate`, a fresh generate, a continuous reset)
+  first write a marker that says a clear is under way and
   keep it until the clear is done; a generate whose marker another run
   replaced exits 3. A multi-cycle `--skip-generate` now reuses a finished
   multi-cycle corpus with no datagen; 1.6 regenerated every cycle whatever
