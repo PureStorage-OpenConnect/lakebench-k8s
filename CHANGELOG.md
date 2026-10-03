@@ -459,6 +459,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **Held-out AML seeds are checked as salted hashes.** The evaluation and
+  robustness seeds are matched against `spark/data/aml/heldout_hashes.json`
+  (which may only be appended to) and a compiled copy of the current
+  hashes; the Python guards no longer read the plaintext seeds. A registered
+  `evaluation` or `robustness` look must set `workload.datagen.seed`;
+  `corpus_role` alone no longer fills it in. The guard's refusal messages
+  name the role, never the seed, and `scripts/aml_gate.py` records an unspent held-out
+  seed in its report by its salted hash. A missing or malformed hash file
+  refuses every Spark scripts deploy, Customer 360 included.
+- **The AML reference job checks every manifest row.** The corpus seed is
+  recovered from each row's instance seed (it used to compare a 200-row
+  sample), so a held-out seed behind any one manifest file is found, and a
+  manifest the seed cannot be recovered from is refused rather than
+  scored. The report's `corpus_seed_verified` pass uses the same all-rows
+  check, and a report without it reads as not verified. `scripts/aml_gate.py`
+  does the same.
+- **The Spark scripts ConfigMap is scanned for held-out seeds before it is
+  applied.** Every integer token, every 6 to 19 digit window of a longer
+  digit run and every comma- or space-grouped number is hashed and compared
+  with the held-out hashes. Until the pre-registration drops its plaintext
+  seeds the scan logs a warning (`absence_check: report`); after that it
+  refuses the deploy.
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with
@@ -1396,29 +1418,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Per-job executor overrides and the driver overrides are not counted**
   in the sizing figures yet; `config show` and `info` say so when a config
   sets one.
-### Changed
-- **Held-out AML seeds are checked as salted hashes.** The evaluation and
-  robustness seeds are matched against `spark/data/aml/heldout_hashes.json`
-  (which may only be appended to) and a compiled copy of the current
-  hashes; the Python guards no longer read the plaintext seeds. A registered
-  `evaluation` or `robustness` look must set `workload.datagen.seed`;
-  `corpus_role` alone no longer fills it in. The guard's refusal messages
-  name the role, never the seed, and `scripts/aml_gate.py` records an unspent held-out
-  seed in its report by its salted hash. A missing or malformed hash file
-  refuses every Spark scripts deploy, Customer 360 included.
-- **The AML reference job checks every manifest row.** The corpus seed is
-  recovered from each row's instance seed (it used to compare a 200-row
-  sample), so a held-out seed behind any one manifest file is found, and a
-  manifest the seed cannot be recovered from is refused rather than
-  scored. The report's `corpus_seed_verified` pass uses the same all-rows
-  check, and a report without it reads as not verified. `scripts/aml_gate.py`
-  does the same.
-- **The Spark scripts ConfigMap is scanned for held-out seeds before it is
-  applied.** Every integer token, every 6 to 19 digit window of a longer
-  digit run and every comma- or space-grouped number is hashed and compared
-  with the held-out hashes. Until the pre-registration drops its plaintext
-  seeds the scan logs a warning (`absence_check: report`); after that it
-  refuses the deploy.
 
 ## [1.6.0] - 2026-09-30
 
