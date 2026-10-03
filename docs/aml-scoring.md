@@ -393,7 +393,9 @@ applies to each of its codes. Continuous runs are not split by code in v1.7.
 Two diagnostic counts sit beside the scores and are not results:
 `financial_scoring.nonplanted_alerts_by_rule` (per rule with a target
 typology, the alerts that touch none of its planted payments, counted on
-`gold.alerts` before the TM layer, so no Lakebench cap truncates it) and
+`gold.alerts` before the TM layer, so no Lakebench cap truncates the count;
+an evidence cap can still make an alert whose planted payments were cut read
+non-planted, which `evidence_capped_alerts_by_rule` shows) and
 `financial_scoring.customer_count` (customers in `silver.entities`). They
 feed the published limitation on how W5 and W6 non-planted alerts per
 customer grow with scale.
