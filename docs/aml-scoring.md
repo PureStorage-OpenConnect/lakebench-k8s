@@ -402,6 +402,9 @@ the shipped AML example is batch mode.
 - **`qph_degradation_pct`** (continuous mode only) wants at least four
   rounds to read as a trend. Typical continuous runs produce five.
   Interpret values from a five-round run as a signal, not a conclusion.
+  With the TM operations layer the early rounds run 8 queries and the later
+  ones 12, so the halves time different work: the figure is withheld and
+  `scores.qph_degradation_withheld` says why.
 - **`pattern_span_s`** (per rule, was labelled "time-to-detect") is NOT
   detection latency. It is the span from a planted typology's injection
   start to the event time of the last transaction a rule cites for it,
@@ -744,8 +747,13 @@ two-hop view, and open cases older than 60 days. They read only this run's
 rows, and are left out unless this run's TM verdict is pass or fail (the
 standalone `benchmark` command includes them only when the deployment's
 newest run had a pass or fail verdict, since each run overwrites the tables) (so a
-disabled or not-run layer never times empty or stale tables), and from the
-in-window rounds of a continuous run. QpH is recorded with its query-set id; `compare` and
+disabled or not-run layer never times empty or stale tables). A continuous
+run's in-window rounds include them once the run has a case: each round first
+probes `gold.cases` for the run's `base_run_id` (untimed) and runs the 12-query
+set when a row comes back, or the 8-query set before the first TM pass, labelled
+`investigator_queries: absent_no_cases` (`probe_failed` when the probe errors).
+Such a run's rounds usually span both sets, so its in-stream composite QpH reads
+`blended`, with the median per set in `scores.composite_qph_by_set`. QpH is recorded with its query-set id; `compare` and
 `reproduce` refuse to compare QpH across different query sets, so an 8-query
 AML run is never set against a 12-query one. A run recorded before the id
 existed gets a pinned historical id when its query names are the c360 set or

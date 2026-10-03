@@ -636,6 +636,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   printed, and listed in `metrics.json` under
   `verdict.qualifiers.c360_failed_not_gating`. `--local` and `--stage` runs
   make no Customer 360 check, as before.
+- **AML continuous rounds run the investigator queries (workload version
+  `aml-2`).** With the TM operations layer on, each in-stream round first
+  probes `gold.cases` for the run's cases (untimed) and runs IQ1-IQ4 with the
+  eight analytical queries once a case exists; a round before the first TM
+  pass runs the eight and records `investigator_queries: absent_no_cases`
+  (`probe_failed` when the probe errors), and its console line says so. The
+  continuous query set therefore changes, AML records carry `aml-2` and do
+  not compare with `aml-1` records, and an AML continuous run's in-stream
+  composite QpH usually reads `blended` (median per set in
+  `scores.composite_qph_by_set`). `qph_degradation_pct`, which compares the
+  first and second halves of the rounds, is withheld for any continuous
+  run whose rounds ran different query sets, and
+  `scores.qph_degradation_withheld` says why.
 - **Customer 360 gold is never silently incremental (workload version
   `c360-2`).** gold-finalize used to switch to its incremental strategy
   whenever gold already had rows and silver was over 1,000 GB, so a repeat

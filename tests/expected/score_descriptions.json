@@ -37,6 +37,7 @@
   "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
   "benchmark_rounds_count": "Number of in-stream benchmark rounds executed",
   "qph_degradation_pct": "QpH degradation from first-half to second-half of sustained run (positive = slower, negative = faster)",
+  "qph_degradation_withheld": "Continuous. Why qph_degradation_pct is not recorded though the run has four or more rounds: the rounds ran different query sets, so the two halves time different work",
   "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
   "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
   "cycle_progression": "Per-cycle elapsed time, QpH, and table health for multi-cycle batch runs",

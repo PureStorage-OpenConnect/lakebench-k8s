@@ -215,6 +215,7 @@ DIRECTIONAL = [
     ("post_compaction_qph", "batch", "higher"),
 ]
 NOT_DIRECTIONAL = [
+    ("qph_degradation_withheld", "sustained"),
     ("total_core_hours", "sustained"),
     ("total_elapsed_seconds", "sustained"),
     ("total_data_processed_gb", "batch"),

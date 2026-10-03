@@ -382,7 +382,7 @@ def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path,
     monkeypatch.setattr("lakebench.metrics.MetricsStorage", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(_sustained, "write_run_report", lambda *a, **kw: None)
 
-    def broken(cfg):
+    def broken(cfg, **kw):
         raise RuntimeError("no query engine executor")
 
     monkeypatch.setattr("lakebench.benchmark.BenchmarkRunner", broken)
@@ -538,7 +538,7 @@ def _drive(
     monkeypatch.setattr(_sustained, "write_run_report", lambda *a, **kw: None)
     monkeypatch.setattr(_sustained, "cluster_clock_offset_seconds", lambda: clock_offset)
     if runner is not None:
-        monkeypatch.setattr("lakebench.benchmark.BenchmarkRunner", lambda c: runner)
+        monkeypatch.setattr("lakebench.benchmark.BenchmarkRunner", lambda c, **kw: runner)
     monkeypatch.setattr(
         "lakebench.metrics.datagen_aggregator.collect_from_k8s",
         lambda **kw: MagicMock(data_quality="complete", total_rows_written=dg_rows),

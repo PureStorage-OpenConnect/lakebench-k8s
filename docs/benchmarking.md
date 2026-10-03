@@ -85,7 +85,7 @@ differ, so compare, the perf gate and reproduce refuse them).
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage rows taken in inside the window)` (gold: its re-reads of silver) | Total volume processed during the measurement window. |
 | `total_s3_objects` | `sum(bucket_object_count)` | Total S3 objects across bronze/silver/gold at end of run. If this grows faster than retention can clean, metadata ops degrade. |
-| `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. |
+| `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. Withheld when the rounds ran different query sets (`scores.qph_degradation_withheld` says so), as an AML continuous run's do once its investigator queries start. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
 
 **BOUNDED BY trickle.** A continuous run feeds bronze at most
@@ -278,8 +278,9 @@ limits the effect when only a few rounds land in a settling window.
 Each in-stream round records `index`, `started_at`, `ended_at`, the queries
 it executed (`executed_queries`, the ones that succeeded),
 `executed_query_set_id` and `investigator_queries` (`included`,
-`absent_no_cases`, `probe_failed`; null until the AML investigator rounds
-set it, and for C360). A round whose query failed executed a smaller set
+`absent_no_cases`, `probe_failed`: whether an AML continuous round with the
+TM operations layer ran IQ1-IQ4, which it does once the run has a case; null
+for C360 and for AML without that layer). A round whose query failed executed a smaller set
 than the others, so its QpH is over different queries.
 `scores.composite_qph_basis` says whether the rounds behind the in-stream
 QpH (those with a QpH) executed more than one set (`blended`) and how many
@@ -290,9 +291,11 @@ rounds, so an older run in which a query failed in some rounds and not
 others reads blended too. When the rounds are blended, the aggregate
 benchmark's `query_set_id` reads `blended` (otherwise it is, as before, the
 set of every query name the rounds ran, even when one query failed in every
-round). `compare` marks a continuous run's `composite_qph`,
-`in_stream_composite_qph` and `qph_degradation_pct` `not_assessed` with the
-hint "rounds ran different query sets (A)", and the perf gate and
+round). `compare` marks a continuous run's `composite_qph` and
+`in_stream_composite_qph` `not_assessed` with the hint "rounds ran
+different query sets (A)"; such a run records no `qph_degradation_pct`
+(`scores.qph_degradation_withheld` says why; a record from before 1.7 that
+carries one reads `not_assessed` the same way). The perf gate and
 `reproduce` leave the in-stream QpH out. When every round missed the same
 query, the medians are over a smaller set than the run declared: `compare`
 marks the same rows `not_assessed` ("every round missed a query"), and
