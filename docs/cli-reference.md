@@ -579,6 +579,20 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 - `--allow-stale-bronze`: `run` records the over-count in `metrics.json`
   (`datagen.stale_bronze`) and the report shows "bronze held N objects
   before generate".
+- `--registered-corpus` needs `corpora.registered_looks_open` true in the
+  pre-registration and `images.datagen` pinned by digest
+  (`repo@sha256:...`). It is refused (exit 2) for a config that names no
+  protected corpus, with `--allow-stale-bronze`, and for a seed that already
+  has a look (the look ledger, or any commit of the look record; a shallow
+  clone, a tree that is not a git checkout or a pip install cannot show that
+  history, so it is refused there too). The attempt is appended to `~/.lakebench/aml_corpora.jsonl`
+  (`LB_AML_CORPORA_LEDGER`, one ledger per host) before the first cluster
+  call, `submitting` before the datagen Job is created, then `generated` or
+  `failed`; the seed is recorded only by its salted hash. The `generated`
+  entry records the corpus fingerprint (every data file's path and size,
+  each manifest file's sha256), which `scripts/aml_gate.py --registered`
+  requires the scored corpus to match. A development config whose bronze
+  prefix is in that ledger is refused by every data command.
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
@@ -591,7 +605,9 @@ exceeds its wait budget (`--timeout`), `3` (refused) when the bronze datagen
 prefix is non-empty and neither `--regenerate` (on a bucket this deployment
 owns) nor `--allow-stale-bronze` (on one it does not) applies, or
 `--regenerate` was passed for a bucket it does not own or with an empty
-datagen prefix, and `4` when bronze or its ownership cannot be checked;
+datagen prefix, `2` for a protected AML corpus without `--registered-corpus`
+(or the flag on a config that names none, without `--yes`, or on a seed with a
+look), and `4` when bronze or its ownership cannot be checked;
 when datagen exceeds its wait budget the datagen Job and any leftover
 streaming SparkApplication consuming the trickle are stopped before exit.
 Only the initial-pass datagen is guarded by this exit code; per-cycle
@@ -1250,7 +1266,8 @@ namespace or buckets cannot be read; `1` when the pipeline could not run.
 A package from a registered evaluation or robustness look is never rerun:
 `--report` matching the look record exits `0`, a mismatch `14`, no
 `--report` `2`; a held-out package whose look has not run is refused with
-`3`. 1.6 used `1` for performance drift and
+`3`, and a config naming a protected AML corpus with `2` (`run.protected_corpus`).
+1.6 used `1` for performance drift and
 `2` for correctness drift.
 
 ### financial

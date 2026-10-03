@@ -2818,12 +2818,12 @@ def _run_once(
                 else:
                     from lakebench.aml.look_guard import refusal_in_log
 
-                    _refused = refusal_in_log(getattr(result, "driver_logs", None))
-                    if _refused:
+                    _protected = refusal_in_log(getattr(result, "driver_logs", None))
+                    if _protected:
                         # bronze-verify found a corpus from a held-out or spent
                         # AML seed and read nothing: the protected-corpus refusal.
                         print_error(
-                            f"Refused: {stage_name} found a protected AML corpus ({esc(_refused)})"
+                            f"Refused: {stage_name} found a protected AML corpus ({esc(_protected)})"
                         )
                         results.append((stage_name, False, job_metrics.elapsed_seconds))
                         _journal_safe(
