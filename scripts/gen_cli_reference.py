@@ -47,6 +47,10 @@ EXTRA_PATH_PREFIXES: dict[str, tuple[str, ...]] = {
     "run": ("repeat.", "series.", "capacity."),
 }
 
+#: Path prefixes that name a shared condition, not the command of that name:
+#: ``config.*`` is a config that does not load, on any command.
+SHARED_PREFIXES = ("config.",)
+
 
 def _app() -> Any:
     import typer
@@ -112,6 +116,15 @@ def _type_text(p: Any) -> str:
         return " \\| ".join(f"`{c.value if isinstance(c, enum.Enum) else c}`" for c in choices)
     name = getattr(t, "name", "text") or "text"
     text = {"str": "text", "int": "integer"}.get(str(name).lower(), str(name).lower())
+    lo, hi = getattr(t, "min", None), getattr(t, "max", None)
+    if lo is not None or hi is not None:
+        base = "number" if "float" in text else "integer"
+        if lo is not None and hi is not None:
+            text = f"{base}, {lo} to {hi}"
+        elif lo is not None:
+            text = f"{base}, at least {lo}"
+        else:
+            text = f"{base}, at most {hi}"
     if getattr(p, "multiple", False):
         text += ", repeatable"
     return text
@@ -125,7 +138,7 @@ def _default_text(p: Any) -> str:
         if getattr(p, "secondary_opts", None):
             return f"`{p.opts[0] if d else p.secondary_opts[0]}`" if d is not None else ""
         return "`true`" if d else ""
-    if d is None or d == () or d == []:
+    if d is None or d == () or d == [] or d == "":
         return ""
     if isinstance(d, enum.Enum):
         d = d.value
@@ -154,7 +167,11 @@ def exit_paths(path: str) -> list[Any]:
 
     words = path.split()
     prefixes = (f"{'.'.join(words)}.", *EXTRA_PATH_PREFIXES.get(path, ()))
-    return [p for p in PATHS if p.live and p.name.startswith(prefixes)]
+    return [
+        p
+        for p in PATHS
+        if p.live and p.name.startswith(prefixes) and not p.name.startswith(SHARED_PREFIXES)
+    ]
 
 
 def render_command(path: str, cmd: Any, *, heading: bool = False) -> list[str]:
@@ -184,7 +201,11 @@ def render_command(path: str, cmd: Any, *, heading: bool = False) -> list[str]:
         lines.append("")
     paths = exit_paths(path)
     if paths:
-        lines.append("Exit paths named after this command:")
+        lines.append(
+            "Exit paths of this command (the shared ones, such as usage errors, "
+            "prerequisites, nameless-config and lease refusals and declined "
+            "confirmations, are in [Exit codes](exit-codes.md)):"
+        )
         lines.append("")
         lines += [f"- `{int(p.code)}` `{p.name}`: {_cell(p.when)}" for p in paths]
         lines.append("")
@@ -218,10 +239,13 @@ def render_aliases() -> str:
             f"removed in {al.REMOVED_IN} | `{a.target}` |"
         )
     for old, new in al.DEPRECATED_COMMANDS.items():
-        rows.append(f"| `{old}` | hidden and deprecated since 1.3; still runs | `{new}` |")
+        rows.append(
+            f"| `{old}` | hidden and deprecated since {al.DEPRECATED_SINCE}; still runs | `{new}` |"
+        )
     for command, flags in al.ALIASED_FLAGS.items():
-        for flag, note in flags.items():
-            rows.append(f"| `{command} {flag}` | accepted; {_cell(note)} | |")
+        for flag, fa in flags.items():
+            use = f"`{fa.replacement}`" if fa.replacement else "nothing (drop it)"
+            rows.append(f"| `{command} {flag}` | accepted: {_cell(fa.note)} | {use} |")
     for old, r in al.REFUSED.items():
         rows.append(
             f"| `{old}` | refused (exit 2): {_cell(r.reason)} | {_cell(r.replacement or 'nothing')} |"
@@ -248,8 +272,16 @@ def render(path: str, cmd: Any) -> str:
         return SPECIAL_BLOCKS[path]()
     if hasattr(cmd, "commands"):
         lines: list[str] = []
-        for sub_path, sub in _subcommands(cmd, path):
+        subs = _subcommands(cmd, path)
+        for sub_path, sub in subs:
             lines += render_command(sub_path, sub, heading=True)
+        own = tuple(f"{p.replace(' ', '.')}." for p, _ in subs)
+        group_paths = [p for p in exit_paths(path) if not p.name.startswith(own)]
+        if group_paths:
+            lines.append(f"Exit paths of every `{path}` subcommand:")
+            lines.append("")
+            lines += [f"- `{int(p.code)}` `{p.name}`: {_cell(p.when)}" for p in group_paths]
+            lines.append("")
     else:
         lines = render_command(path, cmd)
     return "\n".join(lines).rstrip("\n")

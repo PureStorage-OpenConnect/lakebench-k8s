@@ -60,7 +60,7 @@ _SCALE_COMMENT = {
     "financial": "1 is about 8.4 GB of bronze",
 }
 
-_WIZARD_REMOVED = ALIASED_FLAGS["init"]["--interactive"]
+_WIZARD_REMOVED = ALIASED_FLAGS["init"]["--interactive"].note
 
 
 def default_name(user: str | None = None, token: str | None = None) -> str:

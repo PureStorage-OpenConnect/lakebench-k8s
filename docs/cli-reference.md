@@ -42,11 +42,11 @@ lakebench init [OPTIONS]
 | `--output` | `-o` | path | `lakebench.yaml` | Output file path for configuration |
 | `--name` | `-n` | text |  | Deployment name (default: lb-<user>-<4 hex>, unique per init) |
 | `--scale` | `-s` | float |  | Scale factor: 1 is about 10 GB of bronze for customer360, 8.4 GB for financial (default 1; 0.1 with --local) |
-| `--endpoint` |  | text | `` | S3 endpoint URL (e.g. http://your-s3:80 or https://your-s3:443) |
+| `--endpoint` |  | text |  | S3 endpoint URL (e.g. http://your-s3:80 or https://your-s3:443) |
 | `--credentials-env` |  | text | `LAKEBENCH_S3` | Environment variable prefix for the S3 credentials: the config references ${PREFIX_ACCESS_KEY} and ${PREFIX_SECRET_KEY} |
-| `--namespace` |  | text | `` | Kubernetes namespace (default: same as deployment name) |
-| `--recipe` | `-r` | text | `` | Architecture recipe (default polaris-iceberg-spark-trino; see 'config recipes') |
-| `--workload` | `-w` | text | `` | Workload schema (customer360 \| financial). Default is customer360. |
+| `--namespace` |  | text |  | Kubernetes namespace (default: same as deployment name) |
+| `--recipe` | `-r` | text |  | Architecture recipe (default polaris-iceberg-spark-trino; see 'config recipes') |
+| `--workload` | `-w` | text |  | Workload schema (customer360 \| financial). Default is customer360. |
 | `--overwrite` |  | flag |  | Overwrite an existing file |
 | `--force` |  | flag |  | Old spelling of --overwrite |
 | `--local` |  | flag |  | Generate a config for local mode (podman/docker, no Kubernetes) |
@@ -102,7 +102,7 @@ lakebench compare SIDE_A SIDE_B [OPTIONS]
 | `--format` |  | text | `table` | Output format: table, json, csv |
 | `--output` | `-o` | path |  | Write the comparison (json, or csv) to this file |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `0` `compare.like_for_like`: `compare` finds the sides like-for-like
 - `2` `compare.equal_names`: `compare` was given two configs with the same deployment name and different contents
@@ -404,12 +404,12 @@ lakebench plan CONFIG_FILES [OPTIONS]
 | Flag | Short | Type | Default | Description |
 |---|---|---|---|---|
 | `--offline` |  | flag |  | Make no cluster call: size without a cluster |
-| `--cores` |  | int range |  | Cluster CPU cores to size against (implies offline) |
-| `--memory` |  | int range |  | Cluster memory in GB to size against (with --cores) |
+| `--cores` |  | integer, at least 1 |  | Cluster CPU cores to size against (implies offline) |
+| `--memory` |  | integer, at least 1 |  | Cluster memory in GB to size against (with --cores) |
 | `--name` |  | text |  | The deployment name for a config that sets none |
 | `--json` |  | flag |  | Print the plan as JSON (always offline) |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `0` `plan.ok`: `plan` finds every prerequisite and enough capacity
 - `4` `plan.missing_storage_class`: `plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, Stackable or another check), cannot check one of those three, finds too little free capacity, or cannot read a config value the sizing needs
@@ -471,7 +471,7 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 | `--workdir` |  | path |  | Host directory for local mode state (default: ~/.lakebench/local/<name>) |
 | `--force-legacy` |  | flag |  | Claim ownership without tag proof. Covers two cases: (1) a pre-1.5 annotation-less namespace or untagged bucket being migrated; (2) a bucket on a backend that does not implement bucket tagging AND does not match the deployment-name prefix. Use only when you have confirmed the resources are yours -- a mistake can silently take over another team's storage. |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `3` `deploy.state_copied`: `deploy` found a state written for another directory or host (a copied directory)
 - `3` `deploy.identity_foreign`: the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`)
@@ -593,9 +593,9 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | flag |  | Skip all confirmation prompts |
 | `--local` |  | flag |  | Run locally with podman/docker instead of Kubernetes |
 | `--workdir` |  | path |  | Host directory for local mode state (default: ~/.lakebench/local/<name>) |
-| `--repeat` |  | int range |  | Run the batch pipeline N times as one series over one corpus: repetition 1 as asked, then N-1 rebuilds from the same bronze |
+| `--repeat` |  | integer, 1 to 20 |  | Run the batch pipeline N times as one series over one corpus: repetition 1 as asked, then N-1 rebuilds from the same bronze |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `0` `run.pass`: `run` finished and its verdict passed
 - `1` `run.verdict_failed`: `run` finished with a failing verdict
@@ -768,7 +768,7 @@ lakebench stop [CONFIG_FILE] [OPTIONS]
 | `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
 | `--dry-run` |  | flag |  | List what would be stopped without deleting anything |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `1` `stop.api_error`: `stop` could not list or delete a job; it still tried every other deletion
 <!-- END GENERATED: cli stop -->
@@ -805,7 +805,7 @@ lakebench benchmark [CONFIG_FILE] [OPTIONS]
 | `--mode` | `-m` | text |  | Benchmark mode: power, throughput, or composite (overrides config) |
 | `--streams` | `-s` | integer |  | Number of concurrent query streams for throughput/composite (overrides config) |
 | `--cold` |  | flag |  | Flush Iceberg metadata cache before each query (cold run) |
-| `--iterations` | `-n` | int range |  | Timed runs per query, scored by the median (overrides architecture.benchmark.iterations, default 3) |
+| `--iterations` | `-n` | integer, at least 1 |  | Timed runs per query, scored by the median (overrides architecture.benchmark.iterations, default 3) |
 | `--class` | `-c` | text |  | Run only queries of a specific class (scan, filter_prune, aggregation, analytics, operational; AML also investigator) |
 <!-- END GENERATED: cli benchmark -->
 
@@ -886,7 +886,7 @@ lakebench status [CONFIG_FILE] [OPTIONS]
 | `--workdir` |  | path |  | Host directory for local mode state (default: ~/.lakebench/local/<name>) |
 | `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `0` `status.ok`: `status` finds every listed component ready
 - `1` `status.drift`: `status` finds a component of the config not ready or not found (with only `--namespace`: one not ready, or none found)
@@ -977,11 +977,11 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--remove-data` |  | flag |  | Local mode: also delete generated data and the Ivy cache |
 | `--allow-unverified-cluster` |  | flag |  | Bypass the api-server fingerprint match when it cannot be computed on one or both sides. Only use when you know the current kubectl context is correct (dev environment with a broken kubeconfig, etc). |
 | `--force-legacy` |  | flag |  | Destroy without tag / annotation proof of ownership. Covers two cases: (1) legacy pre-ownership namespace or bucket that carries no lakebench identity annotation / ownership tag; (2) a bucket on an S3 backend that does not implement tagging AND does not match the deployment-name prefix. Caution: another workload's data may live there. Prefer `lakebench admin migrate-deployment <namespace>` first (case 1) or rename the bucket to start with the deployment name (case 2). Refuses always on foreign-tagged buckets or namespaces regardless of this flag. |
-| `--namespace-timeout` |  | int range | `600` | Seconds to wait for the namespace to finish terminating after the delete is issued (PVC and pod finalizers can hold it for minutes). A namespace still terminating at the deadline is not reported as deleted and destroy exits 6. 0 skips the wait, so destroy exits 6 unless the namespace is already gone. |
+| `--namespace-timeout` |  | integer, at least 0 | `600` | Seconds to wait for the namespace to finish terminating after the delete is issued (PVC and pod finalizers can hold it for minutes). A namespace still terminating at the deadline is not reported as deleted and destroy exits 6. 0 skips the wait, so destroy exits 6 unless the namespace is already gone. |
 | `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
 | `--keep-buckets` |  | flag |  | Empty the S3 buckets but do not delete them. By default destroy deletes the emptied buckets this deployment created (listed in the namespace's created-buckets record) and provably owns (ownership tag, or name prefix on backends without tagging) when create_buckets is true. Without tagging, a bucket is emptied only if the namespace records creating it or adopting it empty. |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `3` `destroy.incarnation_mismatch`: `destroy` found the namespace is not the deployment incarnation it checked or was told to expect
 - `3` `destroy.redeployed`: "Destroy NOT completed": the namespace now belongs to a newer deployment
@@ -1094,11 +1094,11 @@ lakebench logs [CONFIG] [COMPONENT] [OPTIONS]
 |---|---|---|---|---|
 | `--file` |  | path |  | Path to configuration YAML file (alternative to positional argument) |
 | `--follow` | `-F` | flag |  | Follow log output (the newest matching pod) |
-| `--lines` | `-n` | int range | `100` | Number of lines to show per pod |
+| `--lines` | `-n` | integer, at least 1 | `100` | Number of lines to show per pod |
 | `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
 | `--previous` |  | flag |  | Read the previous (crashed or restarted) container instead |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `1` `logs.no_pod`: `logs` found no pod for the component, or none with a log to read yet (a container still starting, no previous container for `--previous`)
 <!-- END GENERATED: cli logs -->
@@ -1169,7 +1169,7 @@ lakebench reproduce [PACKAGE] [OPTIONS]
 | `--dry-run` |  | flag |  | Verify mode: parse the package and exit without running the pipeline |
 | `--report` |  | path |  | Verify mode, registered looks only: the look's report; its sha256 is checked against the look record and nothing is run |
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `2` `reproduce.report_required`: `reproduce` of a registered look's package without --report (a look is never rerun)
 - `3` `reproduce.existing_namespace`: `reproduce` would reuse a namespace or bucket that already exists
@@ -1227,7 +1227,7 @@ lakebench financial replay CONFIG [OPTIONS]
 | `--rule` |  | text |  | Rule id, e.g. W2_structuring |
 | `--depth-months` |  | integer | `60` | Snapshot depth in months |
 | `--threshold` |  | float |  | Rule-specific threshold override |
-| `--output-alerts` |  | text | `` | Fully-qualified output alerts table (catalog.namespace.table). Defaults to the config's gold alerts table with an _replay suffix, so a replay never overwrites the batch run's alerts. Multiple rules can share the table: replay does DELETE WHERE rule_id=X before appending, so each rule owns its rows. |
+| `--output-alerts` |  | text |  | Fully-qualified output alerts table (catalog.namespace.table). Defaults to the config's gold alerts table with an _replay suffix, so a replay never overwrites the batch run's alerts. Multiple rules can share the table: replay does DELETE WHERE rule_id=X before appending, so each rule owns its rows. |
 | `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
 
 #### `financial reproduce`
@@ -1283,6 +1283,10 @@ lakebench financial reference-score CONFIG [OPTIONS]
 | `--output-prefix` |  | text |  | S3 URI prefix for leakage_report.parquet + reference_metrics.parquet |
 | `--leakage-threshold` |  | float | `0.1` | Min baseline/typology ratio in a structuring band to pass the gate |
 | `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
+
+Exit paths of every `financial` subcommand:
+
+- `4` `financial.k8s_unreachable`: a `financial` command cannot reach the Kubernetes API
 <!-- END GENERATED: cli financial -->
 
 ### admin
@@ -1431,7 +1435,7 @@ Show version information.
 lakebench version
 ```
 
-Exit paths named after this command:
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
 - `0` `version.ok`: `lakebench version` prints the version
 <!-- END GENERATED: cli version -->
@@ -1454,12 +1458,12 @@ list is `lakebench.cli._aliases`.
 | `admin install-scratch-storage-class` | alias: one line on stderr, then runs the new command; removed in v1.8 | `admin install --component scratch-storage-class` |
 | `info` | hidden and deprecated since 1.3; still runs | `config show` |
 | `recommend` | hidden and deprecated since 1.3; still runs | `config recommend` |
-| `init --interactive` | accepted; the init wizard is removed; init writes a default config (see init --help) | |
-| `init -i` | accepted; the init wizard is removed; init writes a default config (see init --help) | |
-| `init --advanced` | accepted; the init wizard is removed; init writes a default config (see init --help) | |
-| `run --sustained` | accepted; --continuous | |
-| `recommend --extended` | accepted; --slow-datagen | |
-| `recommend -e` | accepted; --slow-datagen | |
+| `init --interactive` | accepted: the init wizard is removed; init writes a default config (see init --help) | nothing (drop it) |
+| `init -i` | accepted: the init wizard is removed; init writes a default config (see init --help) | nothing (drop it) |
+| `init --advanced` | accepted: the init wizard is removed; init writes a default config (see init --help) | nothing (drop it) |
+| `run --sustained` | accepted: a deprecated alias; prints a warning | `--continuous` |
+| `recommend --extended` | accepted: a deprecated alias; prints a warning | `--slow-datagen` |
+| `recommend -e` | accepted: a deprecated alias; prints a warning | `--slow-datagen` |
 | `config upgrade` | refused (exit 2): it rewrote configs lossily and wrote secrets in plaintext | lakebench init --from OLD.yaml -o NEW.yaml |
 | `clean bronze` | refused (exit 2): a run regenerates its own corpus, so the corpus a record names is the one it read | lakebench run CONFIG --generate --regenerate; on a bucket this deployment did not create, `lakebench admin reclaim-bucket` first (an owner action) |
 | `clean data` | refused (exit 2): a run regenerates its own corpus, so the corpus a record names is the one it read | lakebench clean silver CONFIG and lakebench clean gold CONFIG, then lakebench run CONFIG --generate --regenerate; on a bucket this deployment did not create, `lakebench admin reclaim-bucket` first (an owner action) |

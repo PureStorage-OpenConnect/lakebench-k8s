@@ -6,7 +6,9 @@ Two directions:
   ``scripts/gen_cli_reference.py`` writes from the Typer app, byte for byte;
 * doc to code: every ``lakebench ...`` command line in ``README.md``,
   ``docs/**/*.md`` (not ``docs/internal/``, not the generated blocks) and
-  ``examples/`` parses with Click, names no unknown command or flag, and
+  ``examples/`` parses with Click (indented and ``~~~`` fences, inline
+  spans, table cells and the generated blocks included), names no unknown
+  command or flag and no bad value, and
   uses an alias, a refused command or a refused or aliased flag of
   ``lakebench.cli._aliases``. The deprecated ``info`` and ``recommend``
   stay verbs (design C5b) and may be named.
@@ -57,10 +59,15 @@ def test_cli_reference_generated():
 # Doc to code
 # ---------------------------------------------------------------------------
 
-_GENERATED = re.compile(r"<!-- BEGIN GENERATED: .*?<!-- END GENERATED: [^>]*-->", re.S)
-_FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.S | re.M)
+# A fence may be indented (a code block inside a list item) and use ``` or ~~~.
+_FENCE = re.compile(r"^[ \t]*(```|~~~)[^\n]*\n(.*?)^[ \t]*\1", re.S | re.M)
 _INLINE = re.compile(r"`(lakebench [^`]+)`")
 _ENV = re.compile(r"^[A-Z_][A-Z0-9_]*=\S*$")
+#: Shell words that end the command's own arguments (redirections, background).
+#: (``<id>`` is a placeholder, not an input redirection.)
+_SHELL_END = re.compile(r"^(?:\d?>>?\S*|&|<<?)$")
+#: Wrappers that run the next word as the command.
+_WRAPPERS = {"sudo", "env", "time", "watch", "uvx", "nohup"}
 
 
 def doc_files() -> list[Path]:
@@ -77,32 +84,35 @@ def _commands_in_line(line: str) -> list[list[str]]:
     line = line.strip()
     if line.startswith("$ "):
         line = line[2:]
+    line = line.replace("\\|", "|")  # a pipe escaped in a Markdown table cell
     out = []
     for part in re.split(r"\s*(?:&&|\|\||;|\|)\s*", line):
         try:
             words = shlex.split(part, comments=True)
         except ValueError:
             continue
-        while words and _ENV.match(words[0]):
+        while words and (_ENV.match(words[0]) or words[0] in _WRAPPERS):
             words = words[1:]
-        if words[:3] in (["python3.11", "-m", "lakebench"], ["python3", "-m", "lakebench"]):
+        if len(words) >= 3 and words[1:3] == ["-m", "lakebench"] and "python" in words[0]:
             words = ["lakebench", *words[3:]]
         if words and words[0] == "lakebench":
-            out.append(words[1:])
+            args = words[1:]
+            end = next((i for i, w in enumerate(args) if _SHELL_END.match(w)), len(args))
+            out.append(args[:end])
     return out
 
 
 def doc_commands(text: str) -> list[tuple[int, list[str]]]:
     """``(line number, args)`` for each ``lakebench`` command in a document:
-    every line of a fenced block, and each inline code span."""
-    text = _GENERATED.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    every line of a fenced block, and each inline code span (its args start
+    with ``INLINE``: prose may name a flag without its value)."""
     found: list[tuple[int, list[str]]] = []
     for m in _FENCE.finditer(text):
-        start = text.count("\n", 0, m.start(1)) + 1
+        start = text.count("\n", 0, m.start(2)) + 1
         # A continued line (trailing backslash) is one command; it is
         # reported at the line it starts on.
         k = 0
-        for logical in re.split(r"(?<!\\)\n", m.group(1)):
+        for logical in re.split(r"(?<!\\)\n", m.group(2)):
             for args in _commands_in_line(logical.replace("\\\n", " ")):
                 found.append((start + k, args))
             k += logical.count("\n") + 1
@@ -110,8 +120,12 @@ def doc_commands(text: str) -> list[tuple[int, list[str]]]:
     for m in _INLINE.finditer(outside):
         line_no = outside.count("\n", 0, m.start()) + 1
         for args in _commands_in_line(m.group(1)):
-            found.append((line_no, args))
+            found.append((line_no, [INLINE, *args]))
     return found
+
+
+#: Marks an inline span's args in ``doc_commands``.
+INLINE = "\x00inline"
 
 
 #: Placeholder words that stand for "the rest of the line".
@@ -134,7 +148,8 @@ def _tree():
 
 def problem(args: list[str]) -> str | None:
     """Why *args* (after ``lakebench``) is not a live command line, or None."""
-    args = [a for a in args if a not in _PLACEHOLDERS]
+    inline = bool(args) and args[0] == INLINE
+    args = [a for a in args if a not in _PLACEHOLDERS and a != INLINE]
     cmd = _tree()
     path: list[str] = []
     ctx = None
@@ -168,16 +183,26 @@ def problem(args: list[str]) -> str | None:
                 return f"`{full} {name}` is {kind}"
     if "--help" in rest or "-h" in rest:
         return None
-    rest = [a for a in rest if (full, a.split("=", 1)[0]) not in PLANNED_FLAGS]
+    kept: list[str] = []
+    it = iter(rest)
+    for a in it:
+        if (full, a.split("=", 1)[0]) in PLANNED_FLAGS:
+            if "=" not in a:
+                next(it, None)  # and its value
+            continue
+        kept.append(a)
+    rest = kept
     try:
         cmd.make_context(full, rest, parent=ctx, resilient_parsing=False)
-    except click_exc.NoSuchOption as e:
-        return f"`{full}`: {e.format_message()}"
-    except click_exc.UsageError as e:
+    except click_exc.MissingParameter:
+        return None  # a doc line may show part of a command
+    except click_exc.UsageError as e:  # unknown flag, bad value, extra argument
         msg = e.format_message()
-        if "unexpected extra argument" in msg or "No such command" in msg:
-            return f"`{full}`: {msg}"
-        return None  # a missing argument: a doc line may show part of a command
+        if "does not exist" in msg:
+            return None  # a path checked on disk: the doc's file is an example
+        if inline and "requires an argument" in msg:
+            return None  # prose names a flag without its value
+        return f"`{full}`: {msg}"
     except (click_exc.Exit, click_exc.Abort):
         return None
     return None
@@ -197,8 +222,11 @@ def test_docs_use_live_commands():
 
 def test_docs_are_found():
     """Not vacuous: the scan sees the commands the README shows."""
-    cmds = [args for _, args in doc_commands((ROOT / "README.md").read_text())]
-    assert ["init"] in cmds or any(a[:1] == ["init"] for a in cmds)
+    cmds = [
+        [a for a in args if a != INLINE]
+        for _, args in doc_commands((ROOT / "README.md").read_text())
+    ]
+    assert any(a[:1] == ["init"] for a in cmds)
     assert sum(1 for p in doc_files() for _ in doc_commands(p.read_text())) > 200
 
 
@@ -242,3 +270,48 @@ def test_live_lines_pass():
     ):
         (args,) = _commands_in_line(line)
         assert problem(args) is None, line
+
+
+def test_planned_flags_are_not_live_yet():
+    """An entry leaves PLANNED_FLAGS when its work item adds the flag."""
+    tree = _tree()
+    for (command, flag), wi in PLANNED_FLAGS.items():
+        cmd = tree
+        for word in command.split():
+            cmd = cmd.commands[word]
+        opts = {o for p in cmd.params for o in getattr(p, "opts", [])}
+        assert flag not in opts, f"{command} {flag} is live ({wi}); delete it from PLANNED_FLAGS"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "lakebench run c.yaml --repeat 50",
+        "lakebench logs c.yaml trino --lines 0",
+        "lakebench run c.yaml --timeout",
+    ],
+)
+def test_bad_values_fail(line):
+    (args,) = _commands_in_line(line)
+    assert problem(args), line
+
+
+def test_indented_fences_redirections_and_wrappers():
+    doc = "1. Step:\n\n   ```bash\n   lakebench results c.yaml\n   ```\n"
+    assert any("alias" in (problem(a) or "") for _, a in doc_commands(doc))
+    for line in (
+        "lakebench report c.yaml --format json > out.json",
+        "lakebench run c.yaml --generate --yes 2>&1 &",
+        "nohup lakebench run c.yaml --yes",
+        "lakebench init --from old.yaml -o new.yaml",
+        "lakebench report --run <id> --format csv",
+    ):
+        (args,) = _commands_in_line(line)
+        assert problem(args) is None, line
+
+
+def test_a_flag_without_value_fails_in_a_block_not_in_prose():
+    block = "```bash\nlakebench report --run\n```\n"
+    prose = "Pass `lakebench report --run` a run id.\n"
+    assert problem(doc_commands(block)[0][1])
+    assert problem(doc_commands(prose)[0][1]) is None
