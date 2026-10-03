@@ -484,8 +484,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `harness.py scenario S-Pn`, which cleans up by incarnation afterwards.
   `harness.py upgrade` deploys and runs one deployment with Lakebench 1.6,
   then converts it with `init --from`, deploys, runs and destroys it with
-  the release, checking that the 1.6 bronze and tables survive. See
-  docs/releasing.md.
+  the release, checking that the 1.6 bronze and tables survive. Matrix rows
+  may run extra steps before their destroy (M01: a continuous run after the
+  batch run on the same deployment). See docs/releasing.md.
 - **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...`
   to that file as it exits, so scripts can tell refusals that share exit 3
   apart without reading message text (docs/exit-codes.md).

@@ -219,6 +219,10 @@ def load_matrix(path: Path, known_steps: Sequence[str] = ()) -> tuple[str, list[
         bad = [s for s in row.extra_steps if s not in known_steps]
         if bad:
             raise Refused(f"{where}: unknown extra steps {bad}")
+        if "continuous-after-batch" in row.extra_steps and (
+            row.workload != "customer360" or row.mode != "batch"
+        ):
+            raise Refused(f"{where}: continuous-after-batch runs on a Customer 360 batch row only")
         rows.append(row)
     return version, rows
 
@@ -692,12 +696,13 @@ def load_row_config(path: Path) -> Any:
         return load_config(path, purpose=LoadPurpose.INSPECT, print_notes=False)
 
 
-def config_peak(cfg: Any) -> Peak:
+def config_peak(cfg: Any, run_mode: str | None = None) -> Peak:
     """The deployment's plan peak (``config.sizing.plan_requirements``):
-    Spark, the co-resident engines and catalog, and datagen."""
+    Spark, the co-resident engines and catalog, and datagen; *run_mode*
+    sizes another mode on the same config (an extra step)."""
     from lakebench.config.sizing import plan_requirements
 
-    plan = plan_requirements(cfg)
+    plan = plan_requirements(cfg, run_mode=run_mode)
     return Peak(float(plan.full.cpu_cores), float(plan.full.memory_gb))
 
 
@@ -1225,6 +1230,13 @@ class ScenarioMixin:
             "|---|---|---|---|",
         ]
         for rid, s in states.items():
+            for step, res in (s.get("extra") or {}).items():
+                problems = "; ".join(res.get("problems") or []) or "-"
+                ids = ", ".join(r.removeprefix("run-") for r in res.get("run_ids") or []) or "-"
+                lines.append(
+                    f"| {rid} {step} (runs {ids}) | {s.get('namespace', '?')} | "
+                    f"{res.get('verdict')} | {problems} |"
+                )
             if "upgrade_verdict" in s:
                 problems = "; ".join(s.get("upgrade_problems") or []) or "-"
                 lines.append(
@@ -1752,6 +1764,103 @@ class UpgradeMixin:
         return problems
 
 
+# -- extra steps -------------------------------------------------------------
+
+#: Lines of a continuous run's output: the reset of the previous run's state
+#: ran (it runs only after ownership of the namespace and buckets is proved),
+#: and the refusal it prints when ownership is not proved.
+RESET_DONE = "Continuous tables reset in"
+RESET_REFUSED = "Refusing to reset continuous state"
+
+
+def _judge_extra(record: dict[str, Any]) -> list[str]:
+    """A non-matrix record passes on its verdict and rows per layer."""
+    from lakebench.metrics.release_record import _layer_rows_problem
+    from lakebench.metrics.verdict import passed
+
+    problems = []
+    if not passed(dict(record)):
+        problems.append("the run did not pass")
+    layer = _layer_rows_problem(record)
+    if layer:
+        problems.append(layer)
+    return problems
+
+
+class ExtraStepsMixin:
+    """Steps a matrix row runs on its own deployment after its run and
+    before its destroy (``extra_steps`` in the matrix). Their records go to
+    ``<out>/extra/runs/`` and their results to ``results-extra.md``; they do
+    not change the row's own verdict."""
+
+    def run_extra_steps(self: Any, plan: RowPlan, verdict: str) -> None:
+        row = plan.row
+        for step in row.extra_steps:
+            if self.interrupted:
+                return
+            if verdict != "PASS":
+                result = {"verdict": "SKIPPED", "problems": ["the row's own run did not pass"]}
+            else:
+                try:
+                    result = EXTRA_STEPS[step](self, plan)
+                except Exception as e:  # noqa: BLE001 -- recorded; the destroy still runs
+                    result = {"verdict": "FAIL", "problems": [f"{type(e).__name__}: {e}"]}
+            extras = dict(self.rowlog.latest()[row.id].get("extra") or {})
+            extras[step] = result
+            self.log(row.id, "recorded", extra=extras, extra_running=None)
+            self.write_extra_results()
+
+    def step_continuous_after_batch(self: Any, plan: RowPlan) -> dict[str, Any]:
+        """A continuous run on the deployment the batch row just used: it
+        must reset the batch's state (only after proving ownership) and pass
+        on its own."""
+        before = sorted(self.run_dirs(plan))
+        res = self._spawn(
+            plan,
+            "run",
+            [str(plan.config), "--continuous", "--yes"],
+            interruptible=True,
+            log_name="extra-continuous-after-batch",
+            status="recorded",
+            extra_running="continuous-after-batch",
+        )
+        runs = sorted(self.run_dirs(plan) - set(before))
+        text = res.text()
+        problems = []
+        if res.code != 0:
+            problems.append(f"the continuous run exited {res.code}")
+        if RESET_REFUSED in text:
+            problems.append("the continuous run refused to reset: ownership was not proved")
+        if RESET_DONE not in text:
+            problems.append("the continuous run did not reset the batch's state")
+        if len(runs) != 1:
+            problems.append(f"expected one continuous record, found {len(runs)}")
+        for rid in runs:
+            src = plan.config.parent / "lakebench-output" / "runs" / rid / "metrics.json"
+            try:
+                record = json.loads(src.read_text())
+                scrub = _scrub_module()
+                clean, _rewritten = scrub.scrub_record(record)
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{rid}: record unreadable or scrub refused: {e}")
+                continue
+            problems += [f"{rid}: {p}" for p in _judge_extra(clean)]
+            dest = self.out / "extra" / "runs" / rid
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "metrics.json").write_text(scrub.dump(clean))
+        return {
+            "verdict": "PASS" if not problems else "FAIL",
+            "problems": problems,
+            "run_ids": runs,
+        }
+
+
+#: Step name -> method. A step is listed in a matrix row's extra_steps.
+EXTRA_STEPS: dict[str, Callable[..., dict[str, Any]]] = {
+    "continuous-after-batch": ExtraStepsMixin.step_continuous_after_batch,
+}
+
+
 # -- the harness -------------------------------------------------------------
 
 
@@ -1763,7 +1872,7 @@ class Observation:
 
 
 @dataclass
-class Harness(ScenarioMixin, UpgradeMixin):
+class Harness(ScenarioMixin, UpgradeMixin, ExtraStepsMixin):
     tree: Path
     out: Path
     freeze: str
@@ -1890,7 +1999,10 @@ class Harness(ScenarioMixin, UpgradeMixin):
         problem = versions_problem(row, cfg)
         if problem:
             raise Refused(f"{row.id}: {problem}")
-        return RowPlan(row, cfg.get_namespace(), cfg_path, config_peak(cfg))
+        peak = config_peak(cfg)
+        if "continuous-after-batch" in row.extra_steps:
+            peak = peak.max(config_peak(cfg, run_mode="continuous"))
+        return RowPlan(row, cfg.get_namespace(), cfg_path, peak)
 
     # -- admission --
 
@@ -2022,7 +2134,7 @@ class Harness(ScenarioMixin, UpgradeMixin):
     ) -> ChildResult:
         """Log the step's status before the child exists (resume treats it
         as started), then its pid once it does."""
-        status = STEP_STATUS[verb]
+        status = fields.pop("status", None) or STEP_STATUS[verb]
         self.log(plan.row.id, status, child_pid=None, child_start=None, **fields)
 
         def on_spawn(pid: int, start: str) -> None:
@@ -2122,6 +2234,9 @@ class Harness(ScenarioMixin, UpgradeMixin):
             problems.append(f"report exited {rep.code}")
         verdict = "PASS" if not problems else "FAIL"
         self.log(row.id, "recorded", run_ids=run_ids, verdict=verdict, problems=problems)
+        if self.interrupted:
+            return
+        self.run_extra_steps(plan, verdict)
         if self.interrupted:
             return
         self.destroy(plan, inc)
@@ -2402,7 +2517,13 @@ class Harness(ScenarioMixin, UpgradeMixin):
         bad = [
             r
             for r, s in states.items()
-            if r in self.rows and (s.get("verdict") != "PASS" or s["status"] != "destroyed")
+            if r in self.rows
+            and (
+                s.get("verdict") != "PASS"
+                or s["status"] != "destroyed"
+                or any(x.get("verdict") != "PASS" for x in (s.get("extra") or {}).values())
+                or set(self.rows[r].extra_steps) - set(s.get("extra") or {})
+            )
         ]
         return 0 if not bad and not open_rows else 1
 
@@ -2646,7 +2767,8 @@ def _ensure_tree_imports() -> None:
         del sys.modules[name]
 
 
-KNOWN_STEPS: tuple[str, ...] = ()
+#: Steps a matrix row may run after its own run and before its destroy.
+KNOWN_STEPS: tuple[str, ...] = tuple(EXTRA_STEPS)
 
 
 def build_parser() -> argparse.ArgumentParser:

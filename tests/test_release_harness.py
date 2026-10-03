@@ -215,6 +215,7 @@ class FakeRunner:
         self.run_records = 1
         self.destroy_override: tuple[int, list[str], str] | None = None
         self.destroy_keeps_buckets = False
+        self.continuous_output = "Continuous tables reset in 42s\n"
         self.on_deploy: Any = None
         self.counter = 0
 
@@ -246,6 +247,8 @@ class FakeRunner:
                 write_state(cfg, name, name, [(nonce, "pending")])
             return H.ChildResult(self.deploy_code, [], log)
         if verb == "run":
+            if "--continuous" in args:
+                log.write_text(self.continuous_output)
             runs = cfg.parent / "lakebench-output" / "runs"
             for _ in range(self.run_records):
                 self.counter += 1
@@ -2328,3 +2331,104 @@ def test_a_namespace_appearing_while_waiting_for_admission_is_not_deployed(uenv,
     assert uenv.h.upgrade() == 1
     assert "deploy" not in [c[0] for c in uenv.v16.calls]
     assert _up(uenv)["status"] == "not-deployed"
+
+
+# -- extra steps -----------------------------------------------------------------
+
+M01X = H.Row(
+    "M01",
+    "customer360",
+    "batch",
+    "hive-iceberg-spark-trino",
+    1.0,
+    42,
+    extra_steps=("continuous-after-batch",),
+)
+
+
+@pytest.fixture
+def xenv(env, monkeypatch):
+    monkeypatch.setattr(H, "_judge_extra", lambda record: [])
+    env.h.rows = {"M01": M01X}
+    return env
+
+
+def test_m01_runs_continuous_after_batch_and_only_c360_batch_rows_may(tmp_path):
+    _, rows = H.load_matrix(RELEASE / "matrix-1.7.yaml", H.KNOWN_STEPS)
+    assert {r.id: r.extra_steps for r in rows if r.extra_steps} == {
+        "M01": ("continuous-after-batch",)
+    }
+    p = tmp_path / "m.yaml"
+    p.write_text(
+        "version: x\nrows:\n  - {id: A, workload: financial, mode: batch, "
+        "recipe: hive-iceberg-spark-trino, scale: 1, seed: 43, "
+        "extra_steps: [continuous-after-batch]}\n"
+    )
+    with pytest.raises(H.Refused, match="Customer 360 batch row only"):
+        H.load_matrix(p, H.KNOWN_STEPS)
+
+
+def test_a_row_with_continuous_after_batch_is_admitted_at_the_larger_peak(xenv):
+    plain = _plan(xenv)
+    with_step = xenv.h.plan_row(M01X, xenv.out / "x")
+    assert with_step.peak.cores > plain.peak.cores  # continuous s1 needs more cores
+
+
+def test_continuous_after_batch_runs_before_the_destroy_and_passes(xenv):
+    plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
+    _go(xenv, plan)
+    verbs = xenv.runner.verbs()
+    assert verbs == ["init", "deploy", "run", "report", "run", "destroy"]
+    assert "--continuous" in xenv.runner.calls[4]
+    st = _status(xenv)
+    assert st["status"] == "destroyed" and st["verdict"] == "PASS"
+    step = st["extra"]["continuous-after-batch"]
+    assert step["verdict"] == "PASS" and len(step["run_ids"]) == 1
+    assert (xenv.out / "extra" / "runs" / step["run_ids"][0]).is_dir()
+    assert step["run_ids"][0] not in [p.name for p in (xenv.out / "uat" / "runs").iterdir()]
+    assert "continuous-after-batch" in (xenv.out / "results-extra.md").read_text()
+    assert xenv.h.finish() == 0
+
+
+def test_continuous_after_batch_fails_when_the_reset_was_refused(xenv):
+    xenv.runner.continuous_output = "Refusing to reset continuous state: not owned\n"
+    plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
+    _go(xenv, plan)
+    step = _status(xenv)["extra"]["continuous-after-batch"]
+    assert step["verdict"] == "FAIL"
+    assert any("refused to reset" in p for p in step["problems"])
+    assert _status(xenv)["status"] == "destroyed"
+    assert xenv.h.finish() == 1
+
+
+def test_extra_steps_are_skipped_when_the_row_failed(xenv, monkeypatch):
+    monkeypatch.setattr(H, "record_verdict", lambda r, f, v: ["bad"])
+    plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
+    _go(xenv, plan)
+    assert _status(xenv)["extra"]["continuous-after-batch"]["verdict"] == "SKIPPED"
+    assert xenv.runner.verbs().count("run") == 1
+
+
+def test_a_step_stopped_midway_is_destroyed_on_resume_and_counts_as_missing(xenv):
+    plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
+    xenv.h.log(
+        "M01",
+        "planned",
+        namespace=plan.namespace,
+        config=str(plan.config),
+        peak=[plan.peak.cores, plan.peak.gib],
+    )
+    xenv.core.add_ns(plan.namespace, "u1", "n1")
+    xenv.h.log(
+        "M01",
+        "recorded",
+        incarnation="u1#n1",
+        verdict="PASS",
+        run_ids=["run-x"],
+        extra_running="continuous-after-batch",
+        child_pid=1,
+        child_start="x",
+    )
+    H.resume(xenv.h, {"M01": M01X})
+    assert _status(xenv)["status"] == "destroyed"
+    assert xenv.h.finish() == 1

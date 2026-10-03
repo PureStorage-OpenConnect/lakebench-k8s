@@ -145,6 +145,17 @@ check. A rehearsal writes `results-rehearsal.md` with its own heading,
 judges records against HEAD, and is never evidence. Copy `results.md` and
 the scrubbed records into `uat/` in the post-freeze data commit.
 
+A matrix row may list `extra_steps`, run on the row's own deployment after
+its run passes and before its destroy. `continuous-after-batch` (on M01, a
+Customer 360 batch row only) runs `run --continuous --yes` on the same
+deployment: it must reset the batch's state, which it does only after
+proving it owns the namespace and buckets, and its record must pass on its
+verdict and rows per layer. A row with that step is admitted at the larger
+of its batch and continuous peaks. Extra-step records go to
+`<out>/extra/runs/` and their results to `results-extra.md`; they do not
+change the row's verdict, but a failed, skipped or missing step makes the
+harness exit non-zero.
+
 Safety rules. Destroy is never passed `--force` and never re-invoked. Exit
 6 is followed by read-only polls for up to 20 minutes. Any other non-zero
 exit, or "Destroy NOT completed", marks the row `failed` or
