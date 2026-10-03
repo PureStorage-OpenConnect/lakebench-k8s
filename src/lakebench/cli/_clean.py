@@ -44,18 +44,14 @@ def _empty_layer(cfg, s3, layer: str, bucket: str, progress) -> int:
     first says a clear is under way and is kept until the bucket is empty,
     then removed (deploy/corpus.py): a clean that stops part way leaves a
     marker that refuses any run that would reuse the rest. When the marker
-    cannot be written the clean goes on, as before, with a warning."""
+    cannot be written nothing is deleted (raises)."""
     from lakebench.s3.client import LAKEBENCH_KEY_PREFIX
 
     if layer != "bronze":
         return s3.empty_bucket(bucket, progress_callback=progress)
-    keep: frozenset[str] = frozenset()
-    try:
-        from lakebench.deploy.datagen import _mark_clearing
+    from lakebench.deploy.datagen import _mark_clearing
 
-        keep = _mark_clearing(cfg, s3)
-    except Exception as e:  # noqa: BLE001 -- the clean itself is what was asked
-        print_warning(f"could not mark the corpus as being cleared: {e}")
+    keep = _mark_clearing(cfg, s3) if s3.bucket_exists(bucket) else frozenset()
     deleted = s3.empty_bucket(
         bucket, progress_callback=progress, keep_prefixes=(LAKEBENCH_KEY_PREFIX, *sorted(keep))
     )

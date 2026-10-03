@@ -744,12 +744,13 @@ interrupted generate or clear, or a continuous run's corpus), or names
 another cycle count, window or generation than the config's (the seed,
 scale, customer id space, file size, target size per cycle, dirty ratio,
 image, window bounds and, for AML, the robustness perturbation; the image
-digest is not compared), and exits 4 when bronze cannot be read. Every clear
+digest is not compared), and exits 4 when bronze cannot be read. The clears
 of the datagen prefix (`--regenerate`, the deployer's clear before a fresh
-generate, a continuous run's reset, `clean bronze`) first writes a marker
-that says a clear is under way and keeps it until the clear is done, so a
-clear that stops part way never leaves part of a corpus unmarked. A prefix
-holding only the marker counts as empty. A
+generate, a continuous run's reset, `clean bronze`) first write a marker
+that says a clear is under way and keep it until the clear is done, so such
+a clear that stops part way never leaves part of a corpus unmarked (a
+destroy that keeps the bronze bucket and stops while emptying it is not
+covered). A prefix holding only the marker counts as empty. A
 single-cycle run over a corpus with no marker (one from 1.6 or an older
 `generate`) proceeds and records `cycle_series.marker: "absent"`, unless it
 holds files of cycles after the first (`part-cNNN-*`, a multi-cycle corpus);
