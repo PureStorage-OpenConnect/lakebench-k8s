@@ -393,8 +393,45 @@ def stamp_namespace(
                 ),
             )
 
-        # Already stamped with our identity -- idempotent no-op.
+        # Already stamped with our identity. The committed-sha stamp says
+        # which code deployed last, so a redeploy from other code refreshes
+        # it (or drops it when this deploy cannot name its commit); the
+        # identity annotations and stamped-at are left as they are.
         if existing_name == deployment_name and existing_server == api_server:
+            if (existing.get(ANNOTATION_COMMITTED_SHA) or None) == (committed_sha or None):
+                return IdentityReport(
+                    verdict=IdentityVerdict.MATCH,
+                    resource_name=namespace,
+                    expected_deployment=deployment_name,
+                    found_deployment=existing_name,
+                    found_api_server=existing_server,
+                    current_api_server=api_server,
+                )
+            # Only that annotation, under the read's resourceVersion: a
+            # strategic merge patch leaves the other keys alone and deletes a
+            # key set to None.
+            body = {
+                "metadata": {
+                    "annotations": {ANNOTATION_COMMITTED_SHA: committed_sha or None},
+                    "resourceVersion": ns.metadata.resource_version,
+                }
+            }
+            try:
+                core_v1.patch_namespace(namespace, body, **request_timeout_kw())
+            except Exception as e:  # noqa: BLE001 -- see below
+                if isinstance(e, ApiException) and e.status == 409 and attempt + 1 < max_retries:
+                    # Re-read: the identity checks above run again on it.
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                # The identity is verified; the sha stamp is informational,
+                # so failing to refresh it (API or transport error) never
+                # refuses the deploy.
+                logger.warning(
+                    "stamp_namespace: could not refresh %s on %s: %s",
+                    ANNOTATION_COMMITTED_SHA,
+                    namespace,
+                    e,
+                )
             return IdentityReport(
                 verdict=IdentityVerdict.MATCH,
                 resource_name=namespace,
@@ -977,9 +1014,7 @@ def owner_marker_identity(
     from datetime import datetime, timezone
 
     try:
-        from importlib.metadata import version
-
-        lb_version = version("lakebench")
+        from lakebench import __version__ as lb_version
     except Exception:  # noqa: BLE001 -- informational only
         lb_version = "unknown"
     return {
