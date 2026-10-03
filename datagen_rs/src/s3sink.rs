@@ -121,18 +121,40 @@ impl Transport {
     }
 }
 
-/// `scheme://host...` with the bucket as the first host label
-/// (`https://s3.example` and bucket `b` give `https://b.s3.example`); an
-/// endpoint that already starts with the bucket is kept.
+/// `scheme://bucket.host[:port]` for virtual-hosted requests
+/// (`https://s3.example` and bucket `b` give `https://b.s3.example`). The
+/// endpoint must be a host name with no path (a trailing slash is dropped);
+/// an IP address or a path cannot carry the bucket and is refused.
 pub fn virtual_hosted_endpoint(endpoint: &str, bucket: &str) -> Result<String, String> {
     let (scheme, rest) = endpoint
         .split_once("://")
         .ok_or("S3_ENDPOINT needs a scheme (http:// or https://) for virtual-hosted requests")?;
+    let rest = rest.trim_end_matches('/');
     if rest.is_empty() || bucket.is_empty() {
         return Err("S3_ENDPOINT and the bucket must be set for virtual-hosted requests".into());
     }
-    if rest.starts_with(&format!("{bucket}.")) {
-        return Ok(endpoint.to_string());
+    if rest.contains('/') {
+        return Err(
+            "S3_ENDPOINT has a path; virtual-hosted requests need a bare host (set path_style: true)"
+                .into(),
+        );
+    }
+    let host = match rest.rsplit_once(':') {
+        Some((h, port)) if !h.contains(']') || h.ends_with(']') => {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                h
+            } else {
+                rest
+            }
+        }
+        _ => rest,
+    };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        return Err(
+            "S3_ENDPOINT is an IP address; virtual-hosted requests need a host name (set path_style: true)"
+                .into(),
+        );
     }
     Ok(format!("{scheme}://{bucket}.{rest}"))
 }
