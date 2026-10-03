@@ -490,8 +490,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `lakebench-datagen-seed-<salted-hash prefix>`, and the datagen Job and the
   reference scorer read it as `LB_DATAGEN_SEED` from that Secret instead of
   from `--seed` or a plaintext env value; no Spark job of that deployment
-  gets `LB_SEED`. A development generate in the same namespace deletes the
-  deployment's seed Secrets, and `destroy` removes them.
+  gets `LB_SEED`. A later registered generate for another seed deletes the
+  older seed Secret; otherwise it stays until `destroy` removes it.
   `scripts/aml_gate.py` takes a held-out seed only from `--seed-file`
   (owner-only file) and refuses one on `--seed` in every mode. Development
   configs, seed 43 included, render exactly as before. Needs the next
