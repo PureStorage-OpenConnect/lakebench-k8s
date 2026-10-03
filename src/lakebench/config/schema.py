@@ -318,6 +318,41 @@ def is_continuous_mode(mode: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in ("continuous", "sustained")
 
 
+#: Query engines that run the investigator sessions (AML continuous).
+INVESTIGATOR_QUERY_ENGINES = ("trino", "spark-thrift")
+
+
+def investigator_sessions_problem(arch: Any, run_mode: str | None = None) -> str | None:
+    """Why ``architecture.benchmark.investigator_sessions`` cannot run, or None
+    (unset, or every condition holds). The one predicate for the load-time
+    refusal and ``run``'s (``cli._run_args.RUN_RULES``, with the run's
+    resolved mode). *run_mode* is ``batch`` or ``continuous``; None reads the
+    config's pipeline mode. The text names every condition that fails."""
+    n = arch.benchmark.investigator_sessions
+    if n is None:
+        return None
+    workload = arch.workload
+    continuous = (
+        run_mode == "continuous" if run_mode is not None else is_continuous_mode(arch.pipeline.mode)
+    )
+    missing: list[str] = []
+    if workload.schema_type.value != "financial":
+        missing.append(f"the workload is {workload.schema_type.value}, not financial")
+    if not continuous:
+        missing.append("the run is batch, not continuous")
+    if workload.schema_type.value == "financial" and not workload.tm_operations.enabled:
+        missing.append("workload.tm_operations.enabled is false")
+    engine = arch.query_engine.type.value
+    if engine not in INVESTIGATOR_QUERY_ENGINES:
+        missing.append(f"the query engine is {engine}, not trino or spark-thrift")
+    if not missing:
+        return None
+    return (
+        f"architecture.benchmark.investigator_sessions ({n}) runs only on an AML continuous run "
+        "with TM operations on a trino or spark-thrift query engine: " + "; ".join(missing)
+    )
+
+
 class ReportFormat(str, Enum):
     """Supported report output formats."""
 
@@ -2511,6 +2546,14 @@ class BenchmarkConfig(ConfigModel):
     )
     maintenance_settle: MaintenanceSettleConfig = Field(default_factory=MaintenanceSettleConfig)
     """Batch: the storage settle wait between maintenance and the scored round."""
+    investigator_sessions: int | None = Field(default=None, ge=1, le=32)
+    """AML continuous only: concurrent investigator sessions run once, as an extra round
+    after the first in-stream round, each working one open case (IQ1 to IQ4). Range: 1--32.
+    Unset runs no such round. Refused unless the workload is `financial`, the run is
+    continuous, `tm_operations.enabled` is true and the query engine is `trino` or
+    `spark-thrift`. The sessions that ran (fewer when fewer cases are open) are an outcome
+    condition: two runs that differ in it compare as not like-for-like.
+    """
 
     @model_validator(mode="after")
     def _refuse_what_run_does_not_do(self, info: ValidationInfo) -> BenchmarkConfig:
@@ -2651,6 +2694,16 @@ class ArchitectureConfig(ConfigModel):
             if getattr(t, field) == getattr(c360, field):
                 setattr(t, field, value)
                 t.__pydantic_fields_set__.discard(field)
+        return self
+
+    @model_validator(mode="after")
+    def validate_investigator_sessions(self) -> ArchitectureConfig:
+        """Refuse ``benchmark.investigator_sessions`` outside AML continuous
+        with TM operations on trino or spark-thrift (``run`` checks it again
+        with the mode it resolves)."""
+        problem = investigator_sessions_problem(self)
+        if problem:
+            raise ValueError(problem + ". Delete the key, or fix the config")
         return self
 
     @model_validator(mode="after")

@@ -576,6 +576,18 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   when the record is read (`experiment.requested_effective_mismatches`
   keeps the run's own list); it never fails the run or enters identity. The config snapshot records the requested gold
   strategy (`requested.gold_strategy`).
+- **`architecture.benchmark.investigator_sessions` (AML continuous).** A
+  new optional key, 1 to 32, for concurrent investigator sessions on an AML
+  continuous run. It is refused when the config loads unless the workload
+  is `financial`, the run is continuous, `tm_operations.enabled` is true and
+  the query engine is `trino` or `spark-thrift` (the message names each
+  condition that fails), and `run` refuses it again with the mode it
+  resolves. The record gains `experiment.investigators = {requested, run}`,
+  and the identity key `investigator sessions` takes the sessions that ran,
+  not the configured number, so a run whose round was lowered or skipped
+  compares as not like-for-like with one that ran at N (an outcome
+  condition: the perf gate and `reproduce` do not refuse on it). A config
+  without the key records and identifies exactly as before.
 - **AML continuous runs drain the last detection tick and score
   `recall_covered`.** At window end the CLI asks gold-refresh to finish its
   tick (a marker under its checkpoint) instead of deleting it mid-tick, then

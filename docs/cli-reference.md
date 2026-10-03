@@ -685,7 +685,8 @@ cluster call, and exits 2 (usage) naming the first refused one:
 - `--repeat` below 1 or above 20;
 - `--repeat` with a continuous run;
 - `--repeat` with `cycles` above 1;
-- `--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`.
+- `--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`;
+- `benchmark.investigator_sessions` outside an AML continuous run with TM operations on trino or spark-thrift.
 <!-- END GENERATED: cli run -->
 
 - `--timeout`, when omitted, is `max(3600, scale * 120)` seconds per job;

@@ -466,6 +466,12 @@ def experiment_inputs(
                 workload.tm_operations.max_alerts_per_customer if schema == "financial" else None
             ),
         },
+        # Only when set, so a default config's inputs (and identity) do not move.
+        **(
+            {"investigator_sessions": arch.benchmark.investigator_sessions}
+            if arch.benchmark.investigator_sessions is not None
+            else {}
+        ),
     }
 
 
@@ -1026,11 +1032,31 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         "results": _results(metrics, mode),
         "lakebench": experiment_lakebench(metrics.provenance),
     }
+    investigators = _investigators(metrics, inputs)
+    if investigators is not None:
+        exp["investigators"] = investigators
     # Diagnostic, AML batch only: where gold-finalize's time went.
     gold_attribution = attribution(metrics) if mode == "batch" else None
     if gold_attribution is not None:
         exp["attribution"] = gold_attribution
     return exp
+
+
+def _investigators(metrics: Any, inputs: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``experiment.investigators = {requested, run}`` when the config set
+    ``benchmark.investigator_sessions``, else None. ``run`` is the number of
+    sessions that executed (``continuous.investigators.sessions_run``), 0 when
+    the round was skipped or never recorded: the identity key ``investigator
+    sessions`` reads it (an outcome condition, so a lowered or skipped round
+    compares as not like-for-like with one that ran at N)."""
+    requested = inputs.get("investigator_sessions")
+    if requested is None:
+        return None
+    inv = (getattr(metrics, "continuous", None) or {}).get("investigators")
+    ran = inv.get("sessions_run") if isinstance(inv, Mapping) else None
+    if isinstance(ran, bool) or not isinstance(ran, int):
+        ran = 0
+    return {"requested": requested, "run": ran}
 
 
 def _requested_effective(metrics: Any, limits: Mapping[str, Any]) -> dict[str, Any]:

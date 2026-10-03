@@ -72,6 +72,9 @@ CASES = [
     (["--continuous", "--repeat", "2"], "--repeat does not apply to a continuous run"),
     (["--repeat", "2", "--cycles"], "--repeat does not apply to a multi-cycle run"),
     (["--stage", "silver-build", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
+    # Not a flag: the config sets benchmark.investigator_sessions on a batch
+    # Customer 360 run (the load check refuses it first, with the same rule).
+    (["--investigators"], "runs only on an AML continuous run with TM operations"),
 ]
 
 
@@ -88,6 +91,7 @@ def test_every_rule_has_a_case():
             mode="continuous" if args.continuous else "batch",
             cycles=2 if "--cycles" in argv else 1,
             schema="financial" if "--financial" in argv else "customer360",
+            investigators="the run is batch" if "--investigators" in argv else None,
         )
         assert rule.broken(args, ctx), argv
         assert message in rule.text(args), (argv, rule.next)
@@ -173,6 +177,11 @@ def test_run_validation_zero_cluster_calls(tmp_path, monkeypatch, no_cluster, ar
     if "--financial" in argv:  # not a flag: the config's schema
         argv = [a for a in argv if a != "--financial"]
         text = text.replace("  schema: customer360\n", "  schema: financial\n")
+    if "--investigators" in argv:  # not a flag: the config's sessions key
+        argv = [a for a in argv if a != "--investigators"]
+        text = text.replace(
+            "  pipeline:\n", "  benchmark:\n    investigator_sessions: 8\n  pipeline:\n"
+        )
     cfg.write_text(text)
     result = CliRunner().invoke(app, ["run", str(cfg), *argv, "--yes"])
     assert result.exit_code == ExitCode.USAGE, result.output
