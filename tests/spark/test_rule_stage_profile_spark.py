@@ -40,7 +40,7 @@ def test_profile_of_one_job(spark_session, load_script, capsys):
     assert rows and rows[0]["tasks"] >= 1 and rows[0]["max_task_s"] is not None, rows
     out = capsys.readouterr().out
     assert "[stage-profile] rule=WX group=g-one stage=" in out
-    assert "truncated=false complete=true lossy=false" in out
+    assert "truncated=false complete=true lossy=false profile_s=" in out
     assert "status=COMPLETE" in out
 
 

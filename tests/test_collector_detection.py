@@ -21,14 +21,14 @@ DRIVER_LOG = "\n".join(
         P + "[stage-profile] rule=W2_structuring group=lb-rule-W2_structuring-aaaa1111 "
         "stage=7 attempt=0 status=COMPLETE tasks=88 wall_s=30.2 exec_s=2400.0 "
         "shuffle_read_mb=512.5 max_task_s=40.1 stages=4 truncated=false complete=true "
-        "lossy=false name=count at NativeMethodAccessorImpl.java:0",
+        "lossy=false profile_s=0.12 name=count at NativeMethodAccessorImpl.java:0",
         P + "[stage-profile] rule=W2_structuring group=lb-rule-W2_structuring-aaaa1111 "
         "stage=5 attempt=1 status=ACTIVE tasks=2 wall_s=None exec_s=3.0 shuffle_read_mb=0.0 "
         "max_task_s=None stages=4 truncated=false complete=true lossy=false "
-        "name=collect at x.py:1",
+        "profile_s=0.12 name=collect at x.py:1",
         P + "[detection] W1_layering: skipped=vertex-cap detail=8000001 > 8000000 elapsed=3.2s",
         P + "[stage-profile] rule=W1_layering group=lb-rule-W1_layering-bbbb2222 stages=0 "
-        "truncated=false complete=true lossy=false",
+        "truncated=false complete=true lossy=false profile_s=0.05",
         P + "[detection] W7_cross_border_high_risk: alerts=0 error=RuntimeError: boom elapsed=0.7s",
         P + "[stage-profile] rule=W7_cross_border_high_risk group=lb-rule-W7-cccc3333 "
         "unavailable reason=Py4JError: statusStore does not exist",
@@ -36,7 +36,7 @@ DRIVER_LOG = "\n".join(
         P + "[detection] W9_typo: alerts=0 error=unknown-rule elapsed=0.0s",
         P + "[detection] W3_round_tripping: alerts=4 prior=0 elapsed=9.0s",
         P + "[stage-profile] rule=W3_round_tripping group=lb-rule-W3-dddd4444 stages=0 "
-        "truncated=true complete=false lossy=false",
+        "truncated=true complete=false lossy=false profile_s=5.01",
     ]
 )
 
@@ -86,6 +86,11 @@ def test_stage_profile_per_rule():
             "no stage in the status store: truncated=true complete=false lossy=false"
         ),
     }
+    assert job.stage_profile_cost_s == {
+        "W2_structuring": 0.12,
+        "W1_layering": 0.05,
+        "W3_round_tripping": 5.01,
+    }
 
 
 def test_last_group_of_a_rule_wins():
@@ -96,16 +101,16 @@ def test_last_group_of_a_rule_wins():
             "[stage-profile] rule=W2 group=g1 unavailable reason=x",
             "[stage-profile] rule=W2 group=g2 stage=1 attempt=0 status=COMPLETE tasks=1 "
             "wall_s=1.0 exec_s=1.0 shuffle_read_mb=0.0 max_task_s=1.0 stages=1 "
-            "truncated=true complete=true lossy=true name=a",
+            "truncated=true complete=true lossy=true profile_s=0.1 name=a",
         ]
     )
-    profile, unavailable = parse_stage_profile(logs)
-    assert unavailable == {}
+    profile, unavailable, cost = parse_stage_profile(logs)
+    assert unavailable == {} and cost == {"W2": 0.1}
     assert [(s["stage"], s["truncated"], s["lossy"]) for s in profile["W2"]] == [(1, True, True)]
-    profile, unavailable = parse_stage_profile(
+    profile, unavailable, cost = parse_stage_profile(
         logs + "\n[stage-profile] rule=W2 group=g3 unavailable reason=y"
     )
-    assert profile == {} and unavailable == {"W2": "y"}
+    assert profile == {} and unavailable == {"W2": "y"} and cost == {}
 
 
 def test_fields_survive_the_metrics_json_round_trip(tmp_path):
@@ -117,3 +122,4 @@ def test_fields_survive_the_metrics_json_round_trip(tmp_path):
     assert back.rule_elapsed_s == job.rule_elapsed_s
     assert back.stage_profile == job.stage_profile
     assert back.stage_profile_unavailable == job.stage_profile_unavailable
+    assert back.stage_profile_cost_s == job.stage_profile_cost_s

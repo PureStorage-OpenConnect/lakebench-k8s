@@ -6,14 +6,18 @@ stages by executor run time::
 
     [stage-profile] rule=<id> group=<g> stage=<n> attempt=<a> status=<s>
         tasks=<t> wall_s=<s> exec_s=<s> shuffle_read_mb=<m> max_task_s=<s>
-        stages=<k> truncated=<b> complete=<b> lossy=<b> name=<stage name>
-    [stage-profile] rule=<id> group=<g> stages=0 truncated=<b> complete=<b> lossy=<b>
+        stages=<k> truncated=<b> complete=<b> lossy=<b> profile_s=<s>
+        name=<stage name>
+    [stage-profile] rule=<id> group=<g> stages=0 truncated=<b> complete=<b>
+        lossy=<b> profile_s=<s>
     [stage-profile] rule=<id> group=<g> unavailable reason=<text>
 
 The flags are common.rule_stage_profile's: ``complete=false`` the driver's
 status listener had not caught up, ``truncated=true`` the store had dropped
 some of the group's jobs or stages, ``lossy=true`` the listener queue
-dropped events during the rule.
+dropped events during the rule (both true when they could not be
+checked). ``profile_s`` is the time the profile read took, Lakebench
+overhead inside the gold-finalize job's time.
 
 The group is unique per rule invocation. When one log holds several
 invocations of a rule (a rerun driver), the last group's lines win.
@@ -27,7 +31,7 @@ from typing import Any
 _PREFIX = r"\[stage-profile\]\s+rule=(?P<rule>[A-Za-z0-9_]+)\s+group=(?P<group>\S+)\s+"
 _FLAGS = (
     r"truncated=(?P<truncated>true|false)\s+complete=(?P<complete>true|false)"
-    r"\s+lossy=(?P<lossy>true|false)"
+    r"\s+lossy=(?P<lossy>true|false)\s+profile_s=(?P<profile_s>[\d.]+)"
 )
 _STAGE_RE = re.compile(
     _PREFIX + r"stage=(?P<stage>\d+)\s+attempt=(?P<attempt>\d+)\s+status=(?P<status>[A-Z]+)"
@@ -52,8 +56,8 @@ def _flags(m: re.Match[str]) -> dict[str, bool]:
 
 def parse_stage_profile(
     logs: str | None,
-) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
-    """``(stage_profile, unavailable)``.
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str], dict[str, float]]:
+    """``(stage_profile, unavailable, cost_s)``.
 
     ``stage_profile``: per rule, the stages of its last group, heaviest
     first as logged, each with the group's ``truncated``, ``complete`` and
@@ -63,10 +67,13 @@ def parse_stage_profile(
     ``unavailable``: per rule whose last group gave no usable list, why:
     the status store could not be read, or it held no stage of the group
     while a flag says stages may be missing.
+
+    ``cost_s``: per rule, the seconds its last profile read took.
     """
     last_group: dict[str, str] = {}
     profile: dict[str, list[dict[str, Any]]] = {}
     unavailable: dict[str, str] = {}
+    cost: dict[str, float] = {}
     for line in (logs or "").splitlines():
         if "[stage-profile]" not in line:
             continue
@@ -81,10 +88,12 @@ def parse_stage_profile(
             last_group[rule] = group
             profile[rule] = []
             unavailable.pop(rule, None)
+            cost.pop(rule, None)
         if gone:
             profile.pop(rule, None)
             unavailable[rule] = gone.group("reason")
         elif empty:
+            cost[rule] = float(empty.group("profile_s"))
             flags = _flags(empty)
             if flags["truncated"] or not flags["complete"] or flags["lossy"]:
                 profile.pop(rule, None)
@@ -92,6 +101,7 @@ def parse_stage_profile(
                     f"{k}={'true' if v else 'false'}" for k, v in flags.items()
                 )
         elif stage:
+            cost[rule] = float(stage.group("profile_s"))
             profile[rule].append(
                 {
                     "stage": int(stage.group("stage")),
@@ -107,4 +117,4 @@ def parse_stage_profile(
                     "name": stage.group("name"),
                 }
             )
-    return profile, unavailable
+    return profile, unavailable, cost

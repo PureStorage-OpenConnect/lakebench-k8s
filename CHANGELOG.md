@@ -47,8 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   job in `metrics.json` gains `rule_elapsed_s` (seconds per detection
   rule), `stage_profile` (each rule's three heaviest Spark stages, read
   from the driver's status store with every rule in its own job group,
-  flagged when the store may be missing stages) and
-  `stage_profile_unavailable`, and the TM operations summary gains
+  flagged when the store may be missing stages), `stage_profile_unavailable`
+  and `stage_profile_cost_s`, and the TM operations summary gains
   `tm_ops.phases` (seconds per stage of the pass). No alert, gold table or
   score changes. Reading the profile can add up to 5 seconds per rule to
   the gold-finalize job when the driver's status listener lags, and none

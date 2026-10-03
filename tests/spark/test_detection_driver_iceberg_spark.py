@@ -209,7 +209,7 @@ def _check_stage_profile(spark):
     lines = [m for m in logged if m.startswith("[stage-profile]")]
     for rule in rules:
         assert any(f"rule={rule} group={groups[rule]} " in m for m in lines), (rule, lines)
-    profile, unavailable = parse_stage_profile("\n".join(lines))
+    profile, unavailable, _cost = parse_stage_profile("\n".join(lines))
     assert unavailable == {}, unavailable
     assert profile["WX_ran"], lines
     top = profile["WX_ran"][0]

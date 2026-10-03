@@ -90,6 +90,9 @@ class JobMetrics:
     # list for a rule (store unreadable, or empty while a flag is set).
     stage_profile: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     stage_profile_unavailable: dict[str, str] = field(default_factory=dict)
+    # Seconds each rule's profile read took (Lakebench overhead inside the
+    # job's elapsed time, never part of a rule's time).
+    stage_profile_cost_s: dict[str, float] = field(default_factory=dict)
     # TM operations layer (GOALS P10, AML gold only), from the driver's
     # ``[tm-invariant]`` and ``[tm-ops]`` lines. ``tm_invariants`` is keyed
     # by cycle (as a string, the JSON key) then invariant name, each value
@@ -3091,7 +3094,11 @@ class MetricsCollector:
         # AML-1: per-rule Spark stage profile (common.rule_stage_profile).
         from lakebench.metrics.stage_profile import parse_stage_profile
 
-        metrics.stage_profile, metrics.stage_profile_unavailable = parse_stage_profile(logs)
+        (
+            metrics.stage_profile,
+            metrics.stage_profile_unavailable,
+            metrics.stage_profile_cost_s,
+        ) = parse_stage_profile(logs)
 
         # P10 TM operations lines (tm_operations.py).
         from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_ops, parse_tm_status

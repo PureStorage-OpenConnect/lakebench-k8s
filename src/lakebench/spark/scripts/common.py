@@ -2805,7 +2805,8 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
 
         [stage-profile] rule=<id> group=<g> stage=<n> attempt=<a> status=<s>
             tasks=<t> wall_s=<s> exec_s=<s> shuffle_read_mb=<m> max_task_s=<s>
-            stages=<k> truncated=<b> complete=<b> lossy=<b> name=<stage name>
+            stages=<k> truncated=<b> complete=<b> lossy=<b> profile_s=<s>
+            name=<stage name>
 
     ``wall_s`` is submission to completion, ``exec_s`` the summed executor
     run time of the stage's tasks, ``max_task_s`` its longest task,
@@ -2813,8 +2814,10 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
     stages, whose output was reused, are not counted). The three flags say
     how far the numbers can be trusted:
 
-    - ``complete=false``: the listener had not caught up within ``wait_s``,
-      so the rule's last jobs or task ends may be missing;
+    - ``complete=false``: the listener bus had not drained within
+      ``wait_s``, so the rule's last jobs or task ends may be missing. The
+      wait covers every listener queue (an enabled event log too), so the
+      flag can be false while the status store itself had caught up;
     - ``truncated=true``: the store had already dropped some of the
       group's jobs or stages (it keeps ``spark.ui.retainedJobs`` jobs and
       ``spark.ui.retainedStages`` stages). Dropped jobs are not listed under
@@ -2822,12 +2825,17 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
     - ``lossy=true``: the listener queue dropped events during the rule
       (against ``mark``), so the stored task totals are low.
 
-    A group with no stage in the store logs ``stages=0`` with the same flags
-    and no stage line. Any other failure logs ``[stage-profile] rule=<id>
+    Without a ``mark`` neither can be checked, and both are logged true.
+    ``profile_s`` is the time this call took, wait included: Lakebench
+    overhead inside the gold-finalize job's time. A group with no stage in
+    the store logs ``stages=0`` with the same flags and no stage line. Any other failure logs ``[stage-profile] rule=<id>
     group=<g> unavailable reason=<one line>`` and returns None. Never
     raises, so detection cannot fail because of it. Returns the logged
     stage rows.
     """
+    import time
+
+    started = time.time()
     try:
         sc = spark.sparkContext
         jsc = sc._jsc.sc()
@@ -2839,8 +2847,7 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
         tracker = sc.statusTracker()
         store = jsc.statusStore()
         job_ids = list(tracker.getJobIdsForGroup(group))
-        truncated = False
-        lossy = False
+        truncated = lossy = mark is None
         if mark is not None:
             truncated = len(job_ids) < int(jsc.dagScheduler().numTotalJobs()) - mark["jobs"]
             lossy = _status_events_dropped(jsc) > mark["dropped"]
@@ -2883,8 +2890,8 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
             )
         stages.sort(key=lambda r: (-r["exec_s"], r["stage"]))
         rows = stages[:top]
-        gw = sc._gateway
         for r in rows:
+            gw = sc._gateway
             quantile = gw.new_array(gw.jvm.double, 1)
             quantile[0] = 1.0
             summary = store.taskSummary(r["stage"], r["attempt"], quantile)
@@ -2903,6 +2910,7 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
         f"{k}={'true' if v else 'false'}"
         for k, v in (("truncated", truncated), ("complete", complete), ("lossy", lossy))
     )
+    flags += f" profile_s={time.time() - started:.2f}"
     if not rows:
         log(f"[stage-profile] rule={rule_id} group={group} stages=0 {flags}")
     for r in rows:

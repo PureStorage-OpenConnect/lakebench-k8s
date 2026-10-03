@@ -2384,17 +2384,10 @@ def run_tm_operations(
         alerts = spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == lit(run_id))
         inputs = build_alert_inputs(spark, alerts, entities, manifest, params, carry).persist()
         held.append(inputs)
-        # Materialise the persisted frame here, so the alert-input build is
-        # timed as its own phase. Later reads use the cache, as they did
-        # when the first write materialised it: results are unchanged.
-        inputs.count()
-        _phase("inputs")
         disp_sim, cases_sim, tagged = simulate(
             spark, inputs, carry, params, as_of, prev_as_of, cycle_no
         )
         held.append(tagged)
-        tagged.count()  # the per-customer replay, persisted by simulate()
-        _phase("simulate")
         run_cols = [
             lit(as_of).cast("date").alias("as_of_date"),
             lit(cycle_no).cast("int").alias("cycle"),
@@ -2446,6 +2439,7 @@ def run_tm_operations(
             lit(None).cast("boolean").alias("qa_disagrees"),
         )
         disp = sim_rows.select(*disp_cols).unionByName(other.select(*disp_cols))
+        _phase("plan")
         # From here on tables are overwritten. The cycle number is taken in
         # the ledger first, so a crash leaves an incomplete cycle the next
         # pass skips (never reused, never carried from), and any error after
@@ -2461,6 +2455,15 @@ def run_tm_operations(
         wrote = True
         _status("started", cycle_no, "writing the TM tables")
         _phase("write_ledger")
+        # Materialise the two persisted frames here, after the cycle is taken
+        # (a failure in either fails the pass, as it did when the first write
+        # triggered them), so the alert-input build and the per-customer
+        # replay are timed as their own phases. Later reads use the cache, as
+        # they did when the write materialised it: results are unchanged.
+        inputs.count()
+        _phase("inputs")
+        tagged.count()
+        _phase("simulate")
         disp.select(*disp_cols, *run_cols).writeTo(f"{CATALOG}.{GOLD_DISPOSITIONS}").overwrite(
             lit(True)
         )

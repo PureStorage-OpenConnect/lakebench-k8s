@@ -497,22 +497,31 @@ The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
   caught up within 5 seconds, `truncated: true` when the store had already
   dropped some of the rule's jobs or stages (it keeps the last 100 of
   each), and `lossy: true` when the listener dropped events during the
-  rule, so task totals are low. An empty list means the rule ran no stage.
+  rule, so task totals are low. When the starting point could not be read,
+  `truncated` and `lossy` are both true. The 5 second wait covers every
+  listener queue, so with Spark's event log turned on `complete` can read
+  false while the status store had caught up. An empty list means the rule
+  ran no stage.
   When there is no usable list (the store could not be read, or it held no
   stage of the rule while a flag is set), the rule is listed in
   `stage_profile_unavailable` with the reason instead. Detection is never
   affected. The wait for the listener adds at most 5 seconds per rule to
-  the gold-finalize job, and nothing when the listener keeps up. The
-  continuous gold tick does not profile, so its timings are unchanged.
+  the gold-finalize job, and nothing when the listener keeps up;
+  `stage_profile_cost_s` records the seconds each rule's read took, which
+  is Lakebench overhead inside the job's time and never part of
+  `rule_elapsed_s`. The continuous gold tick does not profile, so its
+  timings are unchanged.
 - `tm_ops.phases`: wall seconds per stage of the TM operations pass, in
-  pass order `pin`, `reconcile`, `prior_state`, `inputs` (the alert-input
-  build), `simulate` (the per-customer replay), `write_ledger`,
+  pass order `pin`, `reconcile`, `prior_state`, `plan` (building the
+  alert-input, replay and disposition plans), `write_ledger`, `inputs`
+  (the alert-input build), `simulate` (the per-customer replay),
   `write_dispositions`, `write_cases`, `coverage`, `read_back`,
   `recon_write`, `invariants`; together they make up
   `tm_ops.elapsed_seconds`. The JSON keys are sorted, not in pass order.
   Spark evaluates lazily, so a phase holds the work its own reads and
-  writes trigger; the alert inputs and the replay are materialised at the
-  end of their own phases.
+  writes trigger; the alert inputs and the replay are materialised in
+  their own phases, after the cycle is recorded as started, so a failure
+  there fails the pass as before.
 
 ## Known limitations in v1.6
 
