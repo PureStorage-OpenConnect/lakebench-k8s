@@ -112,6 +112,15 @@ def _mode(value: Any) -> str:
     return mode(value)
 
 
+def _round_set(rnd: Mapping[str, Any]) -> str:
+    """The query set a round counts for, by the release record's own rule
+    (``release_record.round_query_set``): a round whose only failures are the
+    tolerated Q9 counts for the set it listed, so writer and reader agree."""
+    from lakebench.metrics.release_record import round_query_set
+
+    return str(round_query_set(rnd) or rnd.get("executed_query_set_id") or "")
+
+
 def _rounds(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The in-stream rounds the gate reads (``release_record._results_problems``):
     those that measured a QpH."""
@@ -277,7 +286,7 @@ def record_refusals(
         elif any(not r.get("executed_query_set_id") for r in rounds):
             problems.append(f"{rid}: rounds do not record the query set they executed")
         else:
-            sets = sorted({r["executed_query_set_id"] for r in rounds})
+            sets = sorted({_round_set(r) for r in rounds})
             want = _expected_sets(str(name))
             if want is not None and sets != want:
                 problems.append(
@@ -457,9 +466,7 @@ def build_expected(
             "scale",
             {rid: float((exps[rid].get("corpus") or {}).get("scale") or 0) for rid in ids},
         )
-        sets = {
-            rid: sorted({r["executed_query_set_id"] for r in _rounds(rec)}) for rid, rec in members
-        }
+        sets = {rid: sorted({_round_set(r) for r in _rounds(rec)}) for rid, rec in members}
         problems += _one(label, "executed query sets", sets)
         centry: dict[str, Any] = {
             "workload": name,

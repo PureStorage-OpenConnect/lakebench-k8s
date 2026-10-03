@@ -463,3 +463,18 @@ def test_references_are_compared_pairwise(ready):
     down["experiment"]["results"]["fingerprints"][q]["approx"][col] -= 0.9 * t
     problems = _refusals({"run-1": a, "run-2": up, "run-3": down})
     assert any(f"query {q} differs between run-3 and run-2" in p for p in problems)
+
+
+def test_c360_continuous_reference_with_a_tolerated_q9_round_is_accepted(ready, tmp_path):
+    """A reference round whose Q9 failed (tolerated by the verdict) counts for
+    the set it listed, as the release record reads it, so the writer accepts
+    the run, writes the full set and the gate accepts the run against it."""
+    a = _ref("c360_cont")
+    b = copy.deepcopy(a)
+    for holder in (b["pipeline_benchmark"]["benchmark_rounds"], b["benchmark_rounds"]):
+        trr._round_failing(holder[1], trr.Q9)
+    assert b["benchmark_rounds"][1]["executed_query_set_id"].startswith("qs7-")
+    expected = _write(tmp_path, {"run-1": a, "run-2": b})
+    sets = [s for e in expected["continuous"] for s in e["query_set_ids"]]
+    assert sets and not any(s.startswith("qs7-") for s in sets)
+    assert _gate(b, expected) == []
