@@ -636,20 +636,26 @@ def _hidden_seeds() -> Hidden:
     return ProtectedSeeds()
 
 
-_SEED_TEXT = re.compile(r"[+-]?[0-9][0-9_]*(?:\.0+)?")
-
-
 def _seed_int(v: Any) -> int | None:
     """*v* read as an integer seed: an int, an integer-valued float, or text
-    such as ``123``, ``+123``, ``1_234`` or ``123.0``; None otherwise."""
+    such as ``123``, ``+123``, ``1_234``, ``123.0``, ``123.`` or ``1.23e5``
+    (the forms ``look_guard.recorded_seed_role`` reads); None otherwise."""
+    from decimal import Decimal, InvalidOperation
+
     if isinstance(v, bool):
         return None
     if isinstance(v, int):
         return v
     if isinstance(v, float):
         return int(v) if v.is_integer() else None
-    if isinstance(v, str) and _SEED_TEXT.fullmatch(v.strip()):
-        return int(v.strip().replace("_", "").split(".")[0])
+    if not isinstance(v, str):
+        return None
+    try:
+        d = Decimal(v.strip().replace("_", ""))
+    except InvalidOperation:
+        return None
+    if d.is_finite() and d.adjusted() < 20 and d == d.to_integral_value():
+        return int(d)
     return None
 
 
@@ -661,7 +667,7 @@ def _seed_out(v: Any, hidden: Hidden) -> Any:
     if isinstance(v, list | tuple):
         return [_seed_out(x, hidden) for x in v]
     if isinstance(v, Mapping):
-        return {k: (_seed_out(x, hidden) if k == "seed_ref" else x) for k, x in v.items()}
+        return {k: _seed_out(x, hidden) for k, x in v.items()}
     n = _seed_int(v)
     if n is None:
         return v
@@ -671,7 +677,7 @@ def _seed_out(v: Any, hidden: Hidden) -> Any:
 
 
 _RUN_ID_TOKEN = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
-_INT_TOKEN = re.compile(r"(?<![\w.-])\d+(?:\.0+)?(?!\w|\.\d)")
+_INT_TOKEN = re.compile(r"(?<![\w.-])\d(?:[\d_]*\d)?(?:\.0+)?(?!\w|\.\d)")
 _DIGIT_TO_LETTER = str.maketrans("0123456789", "abcdefghij")
 
 
@@ -691,7 +697,7 @@ def _scrub_text(text: str, hidden: Hidden) -> str:
     out = _INT_TOKEN.sub(
         lambda m: (
             "<protected seed>"
-            if hidden is None or int(m.group(0).split(".")[0]) in hidden
+            if hidden is None or int(m.group(0).split(".")[0].replace("_", "")) in hidden
             else m.group(0)
         ),
         out,

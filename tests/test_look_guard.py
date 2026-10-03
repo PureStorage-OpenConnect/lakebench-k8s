@@ -507,10 +507,13 @@ def test_compare_redaction_hides_every_integer_form_when_unreadable(monkeypatch)
     monkeypatch.setattr(ds, "_heldout", gone)
     hidden = cm._hidden_seeds()
     assert hidden is None
-    for v in (pc.EV, f"+{pc.EV}", f"{pc.EV}.0", float(43), f" {pc.EV} ", "1_234"):
+    for v in (pc.EV, f"+{pc.EV}", f"{pc.EV}.0", f"{pc.EV}.", "1.23456e5", float(43), " 7 "):
         assert cm._seed_out(v, hidden) == "<protected seed>", v
+    assert cm._seed_out("1_234", hidden) == "<protected seed>"
     assert cm._seed_out({"seed_ref": str(pc.EV)}, hidden) == {"seed_ref": "<protected seed>"}
-    doc = cm.redact({"note": f"corpus seed differs ({pc.EV}.0 vs +{pc.RB})"}, hidden)
+    assert cm._seed_out({"seed": pc.EV}, hidden) == {"seed": "<protected seed>"}
+    doc = cm.redact({"note": f"corpus seed differs ({pc.EV}.0 vs +{pc.RB}, 1_234_567)"}, hidden)
+    assert "1_234_567" not in doc["note"]
     assert pc.seed_tokens(json.dumps(doc)) == []
 
 
