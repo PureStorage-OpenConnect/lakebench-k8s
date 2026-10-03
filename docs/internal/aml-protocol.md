@@ -84,15 +84,23 @@ log, and R-numbers to its rules.
 ## The look image
 
 The registered looks, the calibration corpora and the Level-2 predictions
-use one datagen image (DAT-2), named by digest:
+use one datagen image, named by digest:
 
 - **Digest:** `sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`,
   tag `lb-datagen:a592385`, built from integrate
   `a592385053b038d66dc491ee3c8dfb55dfab3d84` with `LB_BUILD_COMMIT` set
   (the image's `org.opencontainers.image.revision` label and `datagen_rs
   --version` report it), MODEL_VERSION `datagen-v2-rs-0.3`. It is
-  `ImagesConfig.datagen`'s default, and a look config pins
-  `images.datagen` to the same tag-and-digest string explicitly.
+  `ImagesConfig.datagen`'s default
+  (`docker.io/sillidata/lb-datagen:a592385@sha256:<digest above>`). A look
+  config must pin `images.datagen` to that string explicitly, and the
+  calibration scoring, the predictions and every look pass the same string to
+  `aml_gate.py --generator-image`, which compares it with the predictions'
+  `generator_image` as a string. What is not enforced yet: no look config is
+  in the tree, and nothing checks that a scored corpus was written by this
+  image (its markers' build commit against the lineage row's), so the
+  operator checks the corpus markers' `build_commit` by hand until the look
+  preflight does.
 - **Output neutrality:** the five-case byte-compare against the v1.6 release
   image (`sha256:5fda9025...`; F0, F1, C0, F2, C2 on development seeds 43 and
   42, `_corpus/` excluded) is equal:
@@ -102,8 +110,9 @@ use one datagen image (DAT-2), named by digest:
   (Docker Hub), the only location today. The second location the plan
   named, the cluster's internal registry, is not available: the OpenShift
   image registry on the lab cluster is `Removed`. The second location is an
-  owner decision (OA3), pending; until it is made, DAT-2's "pulls succeed
-  from both locations" is not met, and a Docker Hub outage blocks a look.
+  owner decision, pending; until it is made, the release requirement that
+  the image pulls from two locations is not met, and a Docker Hub outage
+  blocks a look.
 - **Library pins.** Generator: the build stage
   `rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e`,
   the runtime base
@@ -111,9 +120,12 @@ use one datagen image (DAT-2), named by digest:
   (its glibc and libm are part of generator identity), and
   `datagen_rs/Cargo.lock` with sha256
   `481940aff76e8325b816e0d0fb4b95ead232c1795bdf6c63c191d3ebdba297a0`
-  (parquet and arrow 53.4.1, rand 0.8.8, rand_chacha 0.3.1, mimalloc
-  0.1.52, ring 0.17.14, serde_json 1.0.151), built with `cargo build
-  --release --locked`. Reference scorer: `REFERENCE_PY_DEPS` in
+  (direct dependencies: arrow and parquet 53.4.1, object_store 0.11.2,
+  rayon 1.12.0, tokio 1.53.1, bytes 1.12.1, serde_json 1.0.151, ring
+  0.17.14, mimalloc 0.1.52), built with `cargo build --release --locked`.
+  The image inputs (`datagen_rs/src`, `Cargo.toml`, `Cargo.lock`,
+  `Dockerfile`, `entrypoint.py`) are fixed at the build commit; a change to
+  any of them needs a new image and a new byte-compare. Reference scorer: `REFERENCE_PY_DEPS` in
   `modules/pipeline_engines/spark/job.py` (numpy 2.2.6, scipy 1.15.3,
   pandas 2.3.3, scikit-learn 1.7.2, joblib 1.5.2, threadpoolctl 3.6.0,
   python-dateutil 2.9.0.post0, pytz 2025.2, tzdata 2025.2, six 1.17.0).

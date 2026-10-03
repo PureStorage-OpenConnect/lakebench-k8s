@@ -73,3 +73,35 @@ def test_perf_configs_pin_the_default_image():
             continue
         doc = yaml.safe_load(path.read_text())
         assert doc["images"]["datagen"] == ImagesConfig().datagen, path.name
+
+
+# sha256 over the datagen image inputs (length-prefixed relative path and bytes,
+# sorted by path) at the commit the default image was built from (a5923850).
+IMAGE_INPUTS_SHA256 = "3c22971237072732412f06754d64545594e334ebb6bf8b0614a1bc744a90c122"
+
+
+def _image_inputs_sha256() -> str:
+    root = ROOT / "datagen_rs"
+    names = ("Cargo.toml", "Cargo.lock", "Dockerfile", "entrypoint.py")
+    files = sorted(
+        [p for p in (root / "src").rglob("*") if p.is_file()] + [root / n for n in names]
+    )
+    h = hashlib.sha256()
+    for p in files:
+        rel = str(p.relative_to(root)).encode()
+        data = p.read_bytes()
+        h.update(len(rel).to_bytes(8, "big") + rel + len(data).to_bytes(8, "big") + data)
+    return h.hexdigest()
+
+
+def test_image_inputs_are_those_the_default_image_was_built_from():
+    """A change to datagen_rs/src, Cargo.*, the Dockerfile or entrypoint.py
+    means the default image no longer holds the tree's generator: build a new
+    image, byte-compare it and re-pin (then update the hash here)."""
+    assert _image_inputs_sha256() == IMAGE_INPUTS_SHA256
+
+
+def test_job_template_default_is_the_schema_default():
+    text = (ROOT / "src/lakebench/templates/datagen/job.yaml.j2").read_text()
+    m = re.search(r"datagen_image \| default\('([^']+)'\)", text)
+    assert m and m.group(1) == ImagesConfig().datagen

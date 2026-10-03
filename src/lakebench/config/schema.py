@@ -437,7 +437,7 @@ class ImagesConfig(ConfigModel):
     # cargo --locked) after the docker.io repository was wiped (LB-209). Release
     # tags are the exception to the commit-tag rule above.
     # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
-    # a592385: the v1.7 look image (DAT-2), built from integrate a5923850 with
+    # a592385: the v1.7 registered-look image, built from integrate a5923850 with
     # LB_BUILD_COMMIT set: held-out seeds as salted hashes read at run time,
     # strict argument parsing, per-node corpus markers, S3 transport settings
     # honoured, a registered seed read from its Secret. Output-neutral: the
