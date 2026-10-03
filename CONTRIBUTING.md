@@ -29,8 +29,8 @@ the pre-commit hooks. `make check-fast` is what CI's first job runs, under
 an 8-minute budget: ruff, the format check, mypy and the unit tests in
 parallel. `make test-spark` runs the PySpark tests on a local Spark with
 the Iceberg and Delta jars they need, which it downloads and checks by
-sha256; it needs Java 17 and takes longer (30 to 50 minutes on a CI
-runner). Then make a branch, push it to your fork and open a pull request
+sha256; it needs Java 17 and takes longer (about 70 minutes on a CI
+runner, where CI splits it across jobs). Then make a branch, push it to your fork and open a pull request
 against `main` (see [Pull requests](#pull-requests)).
 
 New here? [README.md](README.md), [the recipes](docs/recipes.md) and
@@ -126,8 +126,9 @@ Tests that import pyspark go under `tests/spark/`.
 
 CI runs on every push and pull request. The first signal is the Lint job
 (`make check-fast` under an 8-minute budget); the unit tests on Python 3.10
-and 3.13 have a 15-minute budget, the Spark tier runs four parallel jobs
-(two pyspark lines, each forward and reversed) of up to 70 minutes each,
+and 3.13 have a 15-minute budget, the Spark tier runs eight parallel jobs
+(two pyspark lines, each forward and reversed, each split in two by test
+file) of up to 52 minutes each,
 and the Rust and secret-scan jobs run alongside; the package is built once
 they all pass. A job that runs over its budget fails. The full list is in
 [What CI runs](docs/development.md#what-ci-runs).

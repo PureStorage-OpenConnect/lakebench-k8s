@@ -313,45 +313,50 @@ jobs:
       - name: cargo test
         run: cargo test --release --locked
 
-  # Each pyspark leg runs the Spark tier twice, forward and in reverse
-  # order, as two parallel jobs. Run serially, a leg was the critical path of
-  # the whole run: with 381 tests the two passes add up to 67 min (4.0) and
-  # 85 min (4.1) in the first run below, and the Spark lane saw about 95 min.
-  # Split, one pass of the 381 took 30 to 52 min in two runs on 2026-10-02
-  # (37011145001: 4.0 forward 1777 s with coverage, 4.0 reverse 2254 s, 4.1
-  # forward 2813 s, 4.1 reverse 2267 s; 37020573180: 3095, 2284, 2796 and
-  # 2970 s); the same tests vary that much between runners. The budget is
-  # 70 minutes (scripts/ci_budget.py), 36% above the slowest pass, with
-  # timeout-minutes 105 as the backstop. Coverage is collected on the 4.0
-  # forward pass only.
+  # Each pyspark leg runs the Spark tier forward and in reverse order, and
+  # each (leg, order) pass is split into two shards by test file
+  # (--lb-shard K/2, tests/spark/conftest.py): eight parallel jobs. Every file
+  # is in exactly one shard of each pass, balanced on the recorded times in
+  # tests/spark/shard_weights.json, and the reverse jobs run their shard's
+  # tests backwards. The order check still runs every test after and before
+  # the other files of its shard, but no longer next to a file in the other
+  # shard; a job that turns red right after the weights change and move files
+  # between shards points at an order dependency. One unsharded pass of 381
+  # tests took 30 to 52 min on 2026-10-02 (37011145001, 37020573180); by
+  # 2026-10-03 the tier had 455 tests (collected at a5923850) and Spark jobs in train runs failed
+  # only on the 70-minute budget (4239 to 4265 s; 37139482365, 37145033026).
+  # Sharded, the test step took (shard 1, shard 2, in seconds): 4.0 forward
+  # 1307, 2096 and 2283, 2005; 4.0 reverse 1064, 1943 and (runner shut down
+  # at 1583), 1935; 4.1 forward 2000, 2073 and 2037, 2128; 4.1 reverse 2047,
+  # 2034 and 1498, 2034 (37153895161, 37156481202). The same shard took 1307
+  # and 2283 s on two runners. On the 4.1 line the split is within 3% of an
+  # even one; on the 4.0 line it is not (one weight per file serves both
+  # lines). The budget is 52 minutes (scripts/ci_budget.py), 37% above the
+  # slowest shard seen, with timeout-minutes 78 as the backstop.
+  # Coverage is collected on the two 4.0 forward shards and combined in the
+  # "Spark coverage floors" job below. Each job keeps its JUnit report, the
+  # input of scripts/spark_shard_weights.py.
   spark-tests:
-    name: Spark (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }})
+    name: Spark (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }}, ${{ matrix.shard }}/2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 105
+    timeout-minutes: 78
     strategy:
       fail-fast: false
       matrix:
+        pyspark: ["4.0.1", "4.1.1"]
+        order: [forward, reverse]
+        shard: [1, 2]
         include:
-          - leg: "4.0"
-            pyspark: "4.0.1"
-            order: forward
-            args: --cov=src/lakebench/spark/scripts --cov-report=json:coverage-spark.json
-          - leg: "4.0"
-            pyspark: "4.0.1"
-            order: reverse
-            args: --lb-reverse
-          - leg: "4.1"
-            pyspark: "4.1.1"
-            order: forward
-            args: ""
-          - leg: "4.1"
-            pyspark: "4.1.1"
-            order: reverse
-            args: --lb-reverse
+          - pyspark: "4.0.1"
+            leg: "4.0"
+          - pyspark: "4.1.1"
+            leg: "4.1"
     env:
       # Any test that needs a jar fails without it, and any jar-reason skip
       # fails the run (tests/spark/conftest.py).
       LB_REQUIRE_JARS: "1"
+      # The 4.0 forward shards' coverage data, one file per shard.
+      COVERAGE_FILE: coverage-spark-${{ matrix.shard }}.data
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -401,24 +406,98 @@ jobs:
       # or only before, another one.
       - name: Run Spark tests
         run: >-
-          python scripts/ci_budget.py --seconds 4200
-          --label "Spark tests (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }})" --
-          pytest tests/spark -q -rsxX -p no:cacheprovider
-          --basetemp="${{ runner.temp }}/spark-${{ matrix.order }}" ${{ matrix.args }}
+          python scripts/ci_budget.py --seconds 3120
+          --label "Spark tests (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }}, ${{ matrix.shard }}/2)" --
+          pytest tests/spark -q -rsxX -p no:cacheprovider --lb-shard ${{ matrix.shard }}/2
+          --basetemp="${{ runner.temp }}/spark-${{ matrix.order }}"
+          --junitxml="${{ runner.temp }}/spark-junit.xml"
+          ${{ matrix.order == 'reverse' && '--lb-reverse' || '' }}
+          ${{ matrix.leg == '4.0' && matrix.order == 'forward' && '--cov=src/lakebench/spark/scripts --cov-report=' || '' }}
 
       # detection_rules.py is imported by path as a top-level module, so it
-      # is measured here and not in the unit job.
-      - name: Coverage floors
+      # is measured here and not in the unit job. The floors are checked on
+      # both shards' data together, in the spark-coverage job.
+      - name: Upload coverage data
         if: matrix.leg == '4.0' && matrix.order == 'forward'
-        run: python scripts/check_coverage.py --suite spark coverage-spark.json
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: coverage-spark-data-${{ matrix.shard }}
+          overwrite: true
+          path: coverage-spark-${{ matrix.shard }}.data
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: spark-junit-${{ matrix.leg }}-${{ matrix.order }}-${{ matrix.shard }}
+          overwrite: true
+          path: ${{ runner.temp }}/spark-junit.xml
+          retention-days: 30
+          if-no-files-found: ignore
 
       # A failing Spark child writes its whole output to spark-subprocess.log.
       - name: Upload Spark child logs
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: spark-subprocess-logs-${{ matrix.leg }}-${{ matrix.order }}
+          name: spark-subprocess-logs-${{ matrix.leg }}-${{ matrix.order }}-${{ matrix.shard }}
+          overwrite: true
           path: ${{ runner.temp }}/spark-*/**/spark-subprocess.log
+          if-no-files-found: ignore
+
+  # The Spark coverage floors (scripts/check_coverage.py --suite spark) on the
+  # two 4.0 forward shards' coverage data combined, which is the same set of
+  # tests one unsharded 4.0 forward pass measured. The coverage version is
+  # the one pinned in pyproject.toml (tests/test_workflows.py checks this).
+  # It runs when a Spark job failed too, so a coverage drop is still reported
+  # while another leg is red; a 4.0 forward shard that failed uploads no data
+  # and the combine step then fails.
+  spark-coverage:
+    name: Spark coverage floors
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [spark-tests]
+    if: ${{ !cancelled() }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # No pip cache: it installs only coverage, and would share the lint key.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install coverage
+        run: pip install "coverage==7.13.2"
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: coverage-spark-data-*
+          merge-multiple: true
+          path: coverage-data
+
+      # Both shards' data must be there: a missing one would lower, not
+      # fail, the numbers of the files only it reached.
+      - name: Combine the shards' coverage
+        run: |
+          test -f coverage-data/coverage-spark-1.data
+          test -f coverage-data/coverage-spark-2.data
+          coverage combine --data-file=coverage-spark.data coverage-data/coverage-spark-1.data coverage-data/coverage-spark-2.data
+          coverage json --data-file=coverage-spark.data -o coverage-spark.json
+
+      - name: Coverage floors
+        run: python scripts/check_coverage.py --suite spark coverage-spark.json
+
+      # The per-file report, kept so a floor can be raised from a measured run.
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: coverage-spark
+          overwrite: true
+          path: coverage-spark.json
+          retention-days: 30
           if-no-files-found: ignore
 
   # The AML statistics tests marked `slow` (the heavy fidelity-gate fits, the
@@ -500,7 +579,7 @@ jobs:
   build:
     name: Build Package
     runs-on: ubuntu-24.04
-    needs: [lint, test, secrets, secrets-history, rust, spark-tests]
+    needs: [lint, test, secrets, secrets-history, rust, spark-tests, spark-coverage]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 

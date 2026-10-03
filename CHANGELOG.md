@@ -873,6 +873,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   version pairs and gives each unverified cell's reason as a note. The
   release gate's `support-record` check requires every matrix row at its
   versions and refuses entries outside the matrix.
+- **CI's Spark tier runs as eight jobs.** Each pyspark line's forward and
+  reverse passes are split in two by test file (`--lb-shard K/N` in
+  `tests/spark/conftest.py`, balanced on the recorded seconds per file in
+  `tests/spark/shard_weights.json`), each job under a 52-minute budget (one
+  unsharded pass had outgrown its 70 minutes). Every file is in exactly one
+  shard. The Spark coverage floors are checked on the two 4.0 forward
+  shards' coverage combined, in a "Spark coverage floors" job.
 - **The release gate and CI check what the package ships.**
   `scripts/package_guard.py` reads the built wheel and sdist, and the
   script ConfigMaps rendered from the wheel, and fails on a

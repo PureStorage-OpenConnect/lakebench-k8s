@@ -62,10 +62,11 @@ check-fast:
 test:
 	$(UNIT_PYTEST)
 
-# The Spark tier as one CI job runs it: the jars pinned in
+# The Spark tier as CI runs it: the jars pinned in
 # tests/spark/jars.lock.json for the installed pyspark, every jar-reason skip
 # an error, serially (the Spark sessions share the JVM's working directory).
-# CI also runs it once with --lb-reverse.
+# CI splits it into two jobs (--lb-shard 1/2 and 2/2) and also runs both
+# shards with --lb-reverse.
 test-spark:
 	jars="$$(python scripts/fetch_test_jars.py --leg auto --print-env)" && export "$$jars" && \
 	LB_REQUIRE_JARS=1 PYSPARK_PYTHON="$$(command -v python)" pytest tests/spark -q -rsxX -p no:cacheprovider
