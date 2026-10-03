@@ -93,13 +93,44 @@ def test_planted_key_pattern_fails_without_printing_it(body, rule):
         assert secret not in " ".join(f.render() for f in found)
 
 
-def test_allowlisted_low_entropy_and_binary_members_pass():
+def test_allowlisted_and_low_entropy_values_pass():
     members = {
-        # .gitleaks.toml allowlists this variable name.
-        "a.yaml": b"secret_key: LAKEBENCH_S3_SECRET_KEY_PLACEHOLDER_VALUE\n",
+        # .gitleaks.toml allowlists this fixed local-only value.
+        "a.yaml": b"secret_key: 0123456789abcdef0123456789abcdef\n",
         "b.yaml": b"secret_key: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
-        "c.bin": b"\0" + FAKE_PSFB.encode(),
     }
+    assert pg.check_content(members) == []
+
+
+def test_a_value_on_the_line_after_its_key_is_found():
+    found = pg.check_content({"m.yaml": f"x: 1\nsecret_key:\n  {FAKE_SECRET}\n".encode()})
+    assert [f.detail for f in found] == ["m.yaml:2: gitleaks rule s3-secret-key-assignment"]
+
+
+def test_binary_member_fails_unscanned():
+    found = pg.check_content({"c.bin": b"\0" + FAKE_PSFB.encode()})
+    assert [f.detail for f in found] == ["c.bin: binary member, not scanned"]
+
+
+def test_a_rule_python_cannot_compile_fails(tmp_path):
+    cfg = tmp_path / "gitleaks.toml"
+    cfg.write_text("[[rules]]\nid = 'bad'\nregex = 'a\\z'\n")
+    found = pg.check_content({"a.txt": b"ok"}, cfg)
+    assert [f.status for f in found] == [pg.FAIL] and "rule bad" in found[0].detail
+
+
+def test_link_member_in_an_sdist_fails(tmp_path):
+    path = tmp_path / "x.tar.gz"
+    with tarfile.open(path, "w:gz") as t:
+        info = tarfile.TarInfo("lakebench_k8s-9.9.9/evil")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        t.addfile(info)
+    members = pg.sdist_members(path)
+    links = [n for n, d in members.items() if d == pg.LINK_MARK]
+    assert [f.detail for f in pg.check_names(members, links)] == [
+        "evil: a link member must not ship"
+    ]
     assert pg.check_content(members) == []
 
 
@@ -108,15 +139,20 @@ def test_gitleaks_runs_on_the_extracted_members_or_skips(tmp_path, monkeypatch):
     assert [f.status for f in pg.check_gitleaks(tmp_path)] == [pg.SKIP]
 
 
-def test_gitleaks_ignores_a_shipped_baseline(tmp_path):
+def test_gitleaks_ignores_inline_allow_comments_and_names_the_member(tmp_path):
     if pg.shutil.which("gitleaks") is None:
         pytest.skip("gitleaks is not on PATH")
     (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "x.yaml").write_text(f"access_key: {FAKE_PSFB}\n")
-    (tmp_path / "pkg" / ".gitleaksignore").write_text("*\n")
+    (tmp_path / "pkg" / "x.yaml").write_text(f"ok: 1\naccess_key: {FAKE_PSFB}  # gitleaks:allow\n")
     (found,) = pg.check_gitleaks(tmp_path)
     assert found.status == pg.FAIL
-    assert FAKE_PSFB not in found.detail
+    assert found.detail == "pkg/x.yaml:2: pure-flashblade-s3-access-key"
+
+
+def test_gitleaks_on_an_empty_tree_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(pg.shutil, "which", lambda name: "/bin/true")
+    (found,) = pg.check_gitleaks(tmp_path)
+    assert found.status == pg.FAIL and "no files" in found.detail
 
 
 def _absence(mode, problems):
@@ -149,7 +185,9 @@ def test_planted_heldout_token_follows_the_files_mode(tmp_path, mode, status):
     }
     found = pg.check_heldout(members, _absence(mode, problems), hashes)
     assert [(f.status, f.detail.split(":")[0]) for f in found] == [(status, "w.whl/lakebench/a.py")]
-    assert set(seen) == {"w.whl/lakebench/a.py", "s/c.md"}  # text members only
+    # Text members, and the member names as one more text.
+    assert set(seen) == {"w.whl/lakebench/a.py", "s/c.md", "<member names>"}
+    assert "w.whl/lakebench/b.bin" in seen["<member names>"]
     assert pg.exit_code(found) == (1 if status == pg.FAIL else 0)
     assert pg.exit_code(found, require_all=True) == 1
 
@@ -162,6 +200,34 @@ def test_heldout_check_that_cannot_run_fails(tmp_path):
         raise RuntimeError("no absence check")
 
     (found,) = pg.check_heldout({"a": b"1"}, broken, hashes)
+    assert found.status == pg.FAIL and "no absence check" in found.detail
+
+
+def test_hash_file_that_cannot_load_yet_is_pending(tmp_path, monkeypatch):
+    # The datagen lane ships the hash file before the maintainers' commit
+    # writes its compiled floor; until then loading it raises.
+    from lakebench.config import datagen_seed as ds
+
+    hashes = tmp_path / "heldout_hashes.json"
+    hashes.write_text("{}")
+    monkeypatch.setattr(pg, "HELDOUT_HASHES", hashes)
+
+    def not_yet(path=None):
+        raise RuntimeError("compiled held-out floor is not initialised")
+
+    monkeypatch.setattr(ds, "load_heldout", not_yet, raising=False)
+    monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
+    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
+    assert found.status == pg.PENDING and "cannot be loaded yet" in found.detail
+
+
+def test_hash_file_without_an_absence_check_fails(tmp_path, monkeypatch):
+    from lakebench.config import datagen_seed as ds
+
+    hashes = tmp_path / "heldout_hashes.json"
+    hashes.write_text("{}")
+    monkeypatch.delattr(ds, "absence_problems", raising=False)
+    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
     assert found.status == pg.FAIL and "no absence check" in found.detail
 
 
@@ -214,6 +280,16 @@ def test_ci_build_job_guards_the_built_package_after_installing_it():
     guard = next(i for i, r in enumerate(steps) if "scripts/package_guard.py --dist dist" in r)
     install = next(i for i, r in enumerate(steps) if "pip install dist/*.whl" in r)
     assert install < guard
+    assert any("gitleaks.tgz" in r and "sha256sum -c" in r for r in steps[:guard])
+
+
+def test_release_guards_the_files_it_uploads():
+    steps = _workflow("release.yml")["jobs"]["build-dist"]["steps"]
+    runs = [str(s.get("run", "")) for s in steps]
+    guard = next(i for i, r in enumerate(runs) if "package_guard.py --dist dist --require-all" in r)
+    upload = next(i for i, s in enumerate(steps) if "upload-artifact" in str(s.get("uses", "")))
+    assert guard < upload
+    assert any("gitleaks.tgz" in r for r in runs[:guard])
 
 
 def test_release_gate_job_has_gitleaks_for_the_package_guard():

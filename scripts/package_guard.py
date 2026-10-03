@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 import shutil
@@ -65,9 +66,9 @@ NAME_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("agent settings", re.compile(r"(^|/)\.claude(/|$)")),
 )
 KEY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("flashblade-access-key", re.compile(r"\bPSFB[A-Z]{38}\b")),
-    ("aws-access-key", re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("flashblade-access-key", re.compile(r"\bPSFB[A-Z]{38}\b", re.ASCII)),
+    ("aws-access-key", re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b", re.ASCII)),
+    ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.ASCII)),
 )
 
 
@@ -95,15 +96,23 @@ def wheel_members(path: Path) -> dict[str, bytes]:
         return {n: z.read(n) for n in z.namelist() if not n.endswith("/")}
 
 
+#: Marks a member that is a link, not a file; check_names fails on it.
+LINK_MARK = b"\0lakebench-package-guard: link member\0"
+
+
 def sdist_members(path: Path) -> dict[str, bytes]:
-    """Members with the ``<name>-<version>/`` prefix stripped."""
+    """Members with the ``<name>-<version>/`` prefix stripped. A symlink or
+    hard link is kept with ``LINK_MARK`` as its content; directories go."""
     out: dict[str, bytes] = {}
     with tarfile.open(path, "r:gz") as t:
         for m in t.getmembers():
-            if not m.isfile():
+            if m.isdir():
                 continue
             parts = m.name.split("/", 1)
             rel = parts[1] if len(parts) == 2 else parts[0]
+            if not m.isfile():
+                out[rel] = LINK_MARK
+                continue
             f = t.extractfile(m)
             out[rel] = f.read() if f is not None else b""
     return out
@@ -153,8 +162,8 @@ def _is_text(data: bytes) -> bool:
 # -- checks --------------------------------------------------------------------
 
 
-def check_names(members: Iterable[str]) -> list[Finding]:
-    out = []
+def check_names(members: Iterable[str], links: Iterable[str] = ()) -> list[Finding]:
+    out = [Finding(FAIL, "names", f"{n}: a link member must not ship") for n in sorted(links)]
     for name in sorted(members):
         if _safe(name) is None:
             out.append(Finding(FAIL, "names", f"{name}: unsafe member path"))
@@ -174,43 +183,54 @@ def _entropy(s: str) -> float:
 
 def gitleaks_rules(
     config: Path = GITLEAKS_CONFIG,
-) -> tuple[list[dict[str, Any]], list[re.Pattern[str]]]:
-    """The custom ``[[rules]]`` of the repository's gitleaks config, and its
-    global allowlist regexes."""
+) -> tuple[list[dict[str, Any]], list[re.Pattern[str]], list[str]]:
+    """The custom ``[[rules]]`` of the repository's gitleaks config, its
+    global allowlist regexes, and the rules Python cannot compile (each one
+    is a FAIL: a rule silently dropped would check nothing)."""
     doc = tomllib.loads(config.read_text(encoding="utf-8"))
-    rules = []
+    rules, broken = [], []
     for r in doc.get("rules", []):
         try:
-            rules.append({**r, "_re": re.compile(r["regex"])})
-        except (KeyError, re.error):
-            continue
-    allow = [re.compile(x) for block in doc.get("allowlists", []) for x in block.get("regexes", [])]
-    return rules, allow
+            rules.append({**r, "_re": re.compile(r["regex"], re.ASCII)})
+        except (KeyError, re.error) as exc:
+            broken.append(f"{r.get('id', '?')}: {exc}")
+    allow = [
+        re.compile(x, re.ASCII)
+        for block in doc.get("allowlists", [])
+        for x in block.get("regexes", [])
+    ]
+    return rules, allow, broken
 
 
 def check_content(members: Mapping[str, bytes], config: Path = GITLEAKS_CONFIG) -> list[Finding]:
-    rules, allow = gitleaks_rules(config)
-    out = []
+    """Key patterns over each text member, matched over the whole text (a
+    value on the line after its key counts), one finding per line, never
+    the value. A binary member is a FAIL: nothing could check it."""
+    rules, allow, broken = gitleaks_rules(config)
+    out = [Finding(FAIL, "content", f".gitleaks.toml rule {b} does not compile") for b in broken]
     for name in sorted(members):
         data = members[name]
-        if not _is_text(data):
+        if data == LINK_MARK:
             continue
-        for n, line in enumerate(data.decode("utf-8", errors="replace").split("\n"), 1):
-            hit = next((rid for rid, rule in KEY_RULES if rule.search(line)), None)
-            for r in rules if hit is None else ():
-                for m in r["_re"].finditer(line):
-                    group = int(r.get("secretGroup", 0) or 0)
-                    secret = m.group(group) if group <= (m.re.groups or 0) else m.group(0)
-                    if r.get("entropy") and _entropy(secret) < float(r["entropy"]):
-                        continue
-                    if any(a.search(secret) for a in allow):
-                        continue
-                    hit = f"gitleaks rule {r.get('id', '?')}"
-                    break
-                if hit:
-                    break
-            if hit:  # one finding per line, never the value
-                out.append(Finding(FAIL, "content", f"{name}:{n}: {hit}"))
+        if not _is_text(data):
+            out.append(Finding(FAIL, "content", f"{name}: binary member, not scanned"))
+            continue
+        text = data.decode("utf-8", errors="replace")
+        hits: dict[int, str] = {}
+        for rule_id, rule in KEY_RULES:
+            for m in rule.finditer(text):
+                hits.setdefault(text.count("\n", 0, m.start()) + 1, rule_id)
+        for r in rules:
+            group = int(r.get("secretGroup", 0) or 0)
+            for m in r["_re"].finditer(text):
+                secret = m.group(group) if group <= (m.re.groups or 0) else m.group(0)
+                if r.get("entropy") and _entropy(secret) < float(r["entropy"]):
+                    continue
+                if any(a.search(secret) for a in allow):
+                    continue
+                line = text.count("\n", 0, m.start()) + 1
+                hits.setdefault(line, f"gitleaks rule {r.get('id', '?')}")
+        out += [Finding(FAIL, "content", f"{name}:{n}: {hits[n]}") for n in sorted(hits)]
     return out
 
 
@@ -224,32 +244,48 @@ def extract(members: Mapping[str, bytes], dest: Path) -> None:
         p.write_bytes(data)
 
 
+def _rel(path: str, tree: Path) -> str:
+    try:
+        return Path(path).relative_to(tree).as_posix()
+    except ValueError:
+        return path
+
+
 def check_gitleaks(tree: Path, config: Path = GITLEAKS_CONFIG) -> list[Finding]:
+    """``gitleaks dir`` over the extracted members, inline allow comments
+    ignored and no baseline: it runs from an empty directory with an empty
+    ignore file, so no ``.gitleaksignore`` applies."""
     exe = shutil.which("gitleaks")
     if exe is None:
         return [Finding(SKIP, "gitleaks", "gitleaks is not on PATH")]
-    # A file named .gitleaksignore inside the scanned tree would be honoured;
-    # the members are scanned with none.
-    for ignore in tree.rglob(".gitleaksignore"):
-        ignore.unlink()
-    r = subprocess.run(
-        [
-            exe,
-            "dir",
-            str(tree),
-            "--config",
-            str(config),
-            "--redact",
-            "--no-banner",
-            "--exit-code",
-            "1",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode == 0:
-        return [Finding(PASS, "gitleaks", f"no leaks in {sum(1 for _ in tree.rglob('*'))} paths")]
-    tail = [ln for ln in (r.stdout + r.stderr).splitlines() if ln.strip()][-8:]
+    files = sum(1 for p in tree.rglob("*") if p.is_file())
+    if files == 0:
+        return [Finding(FAIL, "gitleaks", f"{tree}: no files to scan")]
+    with tempfile.TemporaryDirectory(prefix="package-guard-gitleaks-") as run:
+        empty = Path(run) / "gitleaksignore"
+        empty.write_text("")
+        report = Path(run) / "report.json"
+        argv = [exe, "dir", str(tree), "--config", str(config), "--redact", "--no-banner"]
+        argv += ["--ignore-gitleaks-allow", "--gitleaks-ignore-path", str(empty)]
+        argv += ["--report-format", "json", "--report-path", str(report), "--exit-code", "1"]
+        r = subprocess.run(argv, cwd=run, capture_output=True, text=True)
+        if r.returncode == 0:
+            return [Finding(PASS, "gitleaks", f"no leaks in {files} files")]
+        try:
+            leaks = json.loads(report.read_text())
+        except (OSError, ValueError):
+            leaks = []
+    if r.returncode == 1 and leaks:
+        return [
+            Finding(
+                FAIL,
+                "gitleaks",
+                f"{_rel(str(x.get('File', '?')), tree)}:{x.get('StartLine', '?')}: "
+                f"{x.get('RuleID', '?')}",
+            )
+            for x in leaks
+        ]
+    tail = [ln for ln in (r.stdout + r.stderr).splitlines() if ln.strip()][-5:]
     return [Finding(FAIL, "gitleaks", f"gitleaks dir exit {r.returncode}: " + " | ".join(tail))]
 
 
@@ -268,7 +304,12 @@ def _datagen_seed_absence(texts: Mapping[str, str]) -> tuple[str, list[str]]:
         raise RuntimeError(
             "heldout_hashes.json exists but lakebench.config.datagen_seed has no absence check"
         )
-    held = load(HELDOUT_HASHES)
+    try:
+        held = load(HELDOUT_HASHES)
+    except Exception as exc:  # noqa: BLE001 -- e.g. the floor not yet written
+        # The hash file is there but not usable yet (its compiled floor comes
+        # with the maintainers' commit): not a pass, and not CI-red either.
+        return "report", [f"the held-out hashes cannot be loaded yet: {exc}"]
     return held.absence_check, absence(texts, held)
 
 
@@ -280,6 +321,8 @@ def check_heldout(
     if not hashes.is_file():
         return [Finding(SKIP, "heldout", f"no {hashes.name}: the held-out check is off")]
     texts = {n: d.decode("utf-8", errors="replace") for n, d in members.items() if _is_text(d)}
+    # A seed in a file or directory name counts too.
+    texts["<member names>"] = "\n".join(sorted(members))
     try:
         mode, problems = (absence or _datagen_seed_absence)(texts)
     except Exception as exc:  # noqa: BLE001 -- a check that cannot run fails
@@ -325,8 +368,13 @@ def guard(dist: Path, workdir: Path, absence: AbsenceFn | None = None) -> list[F
             return [Finding(FAIL, "configmap", f"{w.name}: cannot render the script maps: {exc}")]
     for s in sdists:
         members.update({f"{s.name}/{k}": v for k, v in sdist_members(s).items()})
-    names = [n.split("/", 1)[1] if not n.startswith("configmap/") else n for n in members]
-    findings = check_names(names) or [Finding(PASS, "names", f"{len(members)} members")]
+
+    def strip(n: str) -> str:
+        return n if n.startswith("configmap/") else n.split("/", 1)[1]
+
+    names = [strip(n) for n in members]
+    links = [strip(n) for n, d in members.items() if d == LINK_MARK]
+    findings = check_names(names, links) or [Finding(PASS, "names", f"{len(members)} members")]
     findings += check_content(members) or [Finding(PASS, "content", "no key pattern")]
     tree = workdir / "members"
     extract(members, tree)

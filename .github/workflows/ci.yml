@@ -525,10 +525,25 @@ jobs:
       - name: Verify wheel installs
         run: pip install dist/*.whl && lakebench version
 
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       # What the built artifacts and the script maps rendered from the wheel
-      # carry: no local-only docs, no key patterns, no held-out seed (once
-      # the hash file exists). gitleaks is not installed here, so that part
-      # is SKIP; the secret-scan jobs cover the tree it is built from.
+      # carry: no local-only docs, no key patterns or gitleaks finding (the
+      # generated members, PKG-INFO, METADATA, RECORD and _build_info.py,
+      # are not in the tree the secret-scan jobs read), and no held-out seed
+      # once the hash file exists (PENDING-OA5 passes here; the release
+      # gate's --require-all refuses it).
       - name: Package guard
         run: python scripts/package_guard.py --dist dist
 

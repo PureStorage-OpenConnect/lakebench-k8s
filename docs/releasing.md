@@ -155,7 +155,8 @@ Lakebench limit bound is never recorded as a baseline or compared with one.
 
 ### Package guard
 
-The `package-guard` check builds the wheel and sdist as CI does and runs
+The `package-guard` check builds the wheel and sdist (`python -m build
+--no-isolation`: the sdist, then the wheel from it) and runs
 `scripts/package_guard.py` over them and over the script ConfigMaps
 rendered from the wheel: no `docs/internal/` or other maintainer-only
 member, no access key, private key or gitleaks finding, and, once the
@@ -165,7 +166,8 @@ held-out hit prints as `PENDING-OA5` and the check is SKIP, so the release
 gate (`--require-all`) stays red until the maintainers' commit removes the
 plaintext and sets it to `enforce`. Without the file the held-out part is
 SKIP too. CI's package build runs the same guard on every push, without
-gitleaks and without `--require-all`.
+`--require-all`, and the release's `build-dist` job runs it with
+`--require-all` on the very files it uploads.
 
 ### Performance baselines
 
