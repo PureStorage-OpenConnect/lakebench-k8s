@@ -134,7 +134,7 @@ def read_seed_file(path: Path) -> int:
     st = os.stat(path)
     if not stat.S_ISREG(st.st_mode):
         raise ValueError(f"--seed-file {path} is not a regular file")
-    if st.st_mode & 0o077:
+    if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         raise ValueError(
             f"--seed-file {path} is readable by group or others "
             f"(mode {stat.S_IMODE(st.st_mode):o}); chmod 600 it"
@@ -146,8 +146,10 @@ def read_seed_file(path: Path) -> int:
         raise ValueError(
             f"--seed-file {path} does not hold one integer (content not shown)"
         ) from None
-    if not 0 <= seed < 1 << 63:
-        raise ValueError(f"--seed-file {path} holds a seed outside 0..2^63-1 (not shown)")
+    if not 0 <= seed <= sys.maxsize:  # the generator's i64 range on a 64-bit host
+        raise ValueError(
+            f"--seed-file {path} holds a seed outside the 64-bit seed range (not shown)"
+        )
     return seed
 
 
