@@ -275,6 +275,8 @@ def _stub_run_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("lakebench.cli._generate.get_k8s_client", lambda **kw: k8s_stub)
     # No earlier datagen Job to stop (tests/test_datagen_old_pods.py covers it).
     monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
+    # A bronze bucket of this test's own: no series marker another test wrote.
+    monkeypatch.setattr(_FakeS3, "store", {})
     return {"k8s": k8s_stub}
 
 
@@ -389,6 +391,7 @@ def _stub_full_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
 
     if _s3.S3Client.__module__ == "lakebench.s3.client":
         monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
+    monkeypatch.setattr(_FakeS3, "store", {})
     return {"k8s": k8s_stub, "op": op, "job_manager": job_manager}
 
 
