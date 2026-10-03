@@ -232,7 +232,9 @@ def tick_list(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def time_travel_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """``continuous.time_travel.ticks[]`` (DESIGN interfaces): one entry per
-    tick that logged a time-travel record, with its driver start and cycle.
+    tick that logged a time-travel record, with its driver start, cycle and
+    whether it completed (``(start, cycle)`` is the key into
+    ``continuous.ticks``).
     A tick without one (no transactions snapshot, or a driver that predates
     the record) is not listed."""
     out = []
@@ -240,5 +242,10 @@ def time_travel_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         tt = t.get("tt")
         if tt is None:
             continue
-        out.append({"start": t["start"], "cycle": t["cycle"], **tt})
+        # completed: the tick also logged its completed line (one that failed
+        # after pinning, or was still running when the log was read, still
+        # recorded the snapshot it read).
+        out.append(
+            {"start": t["start"], "cycle": t["cycle"], **tt, "completed": bool(t.get("completed"))}
+        )
     return out

@@ -388,8 +388,32 @@ def test_tick_record_never_takes_the_live_table_count(gr, monkeypatch, spark):
     _txns, _sid, _used, rows, _newest, tt = gr._pin_silver(spark)
     assert rows == 5
     assert tt["total_records"] is None and tt["count_source"] == "unavailable"
+    # Whatever the summary does carry is kept (the commit time dates expiry).
+    want_at = "2026-10-03T12:00:00.000123Z" if spark.row is not None else None
+    assert tt["committed_at"] == want_at and tt["snapshot"] == 11
     line = gr.tt_record_line(4, "silver.transactions", tt)
     assert "total_records=null" in line and "count_source=unavailable" in line
+
+
+def test_tick_record_commit_time_is_utc_on_any_host_zone(gr, monkeypatch):
+    import os
+    import time
+
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Denver"
+    time.tzset()
+    try:
+        _Pin(gr, monkeypatch, 11, 22)
+        spark = _SummarySpark({"committed_us": _US, "n": "1", "pos": "0", "eq": "0"})
+        assert gr._pin_silver(spark)[5]["committed_at"] == "2026-10-03T12:00:00.000123Z"
+    finally:
+        # The process's zone is restored with the variable, not only the
+        # variable (monkeypatch would leave time.tzset() unrun).
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
 
 
 @pytest.mark.parametrize("sid", [None, "unknown"])
@@ -418,7 +442,7 @@ def test_tick_record_round_trips_into_time_travel_ticks(gr):
     ]
     parsed = parse_tick_records("\n".join(lines), "run-1")
     assert time_travel_ticks(parsed["ticks"]) == [
-        {"start": 0, "cycle": 1, "table": "silver.transactions", **rec}
+        {"start": 0, "cycle": 1, "table": "silver.transactions", **rec, "completed": False}
     ]
 
 

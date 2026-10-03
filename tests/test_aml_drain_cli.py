@@ -655,6 +655,7 @@ def test_window_drain_records_the_time_travel_ticks(monkeypatch):
         (2, 12, None),
     ]
     assert tt[1]["count_source"] == "unavailable" and tt[0]["start"] == 0
+    assert all(t["completed"] for t in tt)
     assert tt[0]["committed_at"] == "2026-10-03T12:01:00.000000Z"
     # continuous.ticks keeps its own keys.
     assert "tt" not in cont["ticks"][0]

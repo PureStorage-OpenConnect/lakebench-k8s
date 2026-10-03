@@ -590,11 +590,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   [aml-scoring.md](docs/aml-scoring.md#continuous-recall-over-covered-instances).
 - **Each AML continuous tick records its transactions snapshot for
   time travel.** The record gains `continuous.time_travel.ticks[]`: per
-  tick, the `silver.transactions` snapshot detection read, its commit time
-  and its row and delete-file counts from the Iceberg snapshot summary
-  (`count_source: "summary"`, or `"unavailable"` with a null count when the
-  summary has none). It is metadata only, so tick timings, time to detect
-  and freshness are unchanged.
+  tick, the `silver.transactions` snapshot detection read, its commit time,
+  and its record count and deleted-row counts from the Iceberg snapshot
+  summary (`count_source: "summary"`, or `"unavailable"` with a null count
+  when the summary has none). It is metadata only, so tick timings, time to
+  detect and freshness are unchanged.
 - **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
   deployment's name (OLD's, or the one 1.6 recorded in
   `.lakebench/state.json` for a nameless config) and writes the bucket names
