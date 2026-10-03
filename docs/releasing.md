@@ -229,7 +229,9 @@ freeze tree as `lakebench run --generate --repeat 3`; repetition 1 is
 recorded as its baseline (n=1) through `scripts/perf_gate.py`, all three
 records go to `uat/perf/`, and the post-freeze data commit marks exactly
 these three `required: true`; until then none is required, and once the
-CHANGELOG dates 1.7.0 a test requires exactly these three. See
+CHANGELOG dates 1.7.0 a test requires exactly these three. The release
+check then compares repetition 3 with repetition 1 of one series, which
+shows repeatability rather than the absence of a regression. See
 [perf-regression-gate.md](perf-regression-gate.md).
 
 ## After tagging

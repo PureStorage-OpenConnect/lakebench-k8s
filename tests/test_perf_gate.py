@@ -771,7 +771,7 @@ def test_pinned_executor_counts_match_todays_auto_counts(path):
 
 
 #: The v1.7 re-baseline: AML batch scale 10 and Customer 360 batch scale 10
-#: on Hive and on Polaris, each n=3.
+#: on Hive and on Polaris; each baseline is one run (n=1) of a three-run series.
 REBASELINE_V17 = {"aml-batch-s10", "c360-batch-s10", "c360-batch-s10-polaris"}
 
 

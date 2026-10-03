@@ -84,8 +84,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   such a config must be redeployed, since `run` refuses a dependency set
   that no longer matches the config. A config that writes a table format
   version Spark 4.1 cannot run (Delta 4.0.0) and no image keeps Spark 4.0.2,
-  so it still loads and tears down. The Hive examples now pin 4.1.1; the
-  perf-gate pinned configs keep 4.0.2 until their re-baseline. `--local`
+  so it still loads and tears down. The Hive examples now pin 4.1.1; of the
+  perf-gate pinned configs, `aml-batch-s10` runs 4.1.1 and the Customer 360
+  Hive/Polaris pair stays on 4.0.2 (Polaris is validated only there). `--local`
   runs keep their own 4.0.2 image, and their record now names it.
 - **The verdict is decided from the record.** A PASSED verdict now also
   needs rows in every layer (`layer_rows`), the expected AML rules with no

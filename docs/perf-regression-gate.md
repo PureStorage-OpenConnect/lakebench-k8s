@@ -27,7 +27,7 @@ Pinned configs today:
 | `c360-batch-s10-polaris` | Customer 360 (Polaris) | batch | 10 | from the v1.7 data commit | pending first run (v1.7 re-baseline) |
 
 v1.6 has no performance baselines. The v1.7 re-baseline records
-`aml-batch-s10`, `c360-batch-s10` and `c360-batch-s10-polaris` (n=3 each) on
+`aml-batch-s10`, `c360-batch-s10` and `c360-batch-s10-polaris` (three runs each) on
 the freeze tree; the post-freeze data commit accepts their baselines and
 marks exactly these three required. Until then no config is required and the
 `perf-baselines` release check reports each config as `warn` without failing
@@ -43,7 +43,11 @@ each config runs once as `lakebench run --generate --repeat 3`; repetition
 1 (the one that generates, so it carries the datagen figures) is recorded
 as the baseline, labelled n=1, and all three records are checked in under
 `uat/perf/`, where the release check compares the newest against the
-baseline.
+baseline. That comparison is within one series (same deployment and
+corpus, minutes apart), so a v1.7 pass is evidence of repeatability, not of
+the absence of a regression against an earlier release. Moving the tree's
+default datagen image moves the pins with it and invalidates every
+accepted baseline, which must then be recorded again.
 
 ## How "like for like" is enforced
 
@@ -279,6 +283,10 @@ Per-config overrides go in the store entry:
 ```
 
 ## Record a baseline
+
+For the v1.7 re-baseline series, see the paragraph on it under "Pinned
+configs today": one `lakebench run --generate --repeat 3`, repetition 1
+recorded. The single-run procedure below records any other config.
 
 1. Run the pinned config as-is on the reference cluster. Identity and
    credentials come from the environment, so the file does not change:

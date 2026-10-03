@@ -32,7 +32,7 @@ baselines:
   aml-batch-s10:
     config: aml-batch-s10.yaml
     # The AML point of the v1.7 re-baseline. Required from the post-freeze
-    # data commit that accepts its first baseline (n=3, one run --repeat 3).
+    # data commit that accepts its first baseline (n=1: repetition 1 of a run --repeat 3).
     required: false
     status: pending first run
     notes: First recorded on the v1.7 freeze tree.

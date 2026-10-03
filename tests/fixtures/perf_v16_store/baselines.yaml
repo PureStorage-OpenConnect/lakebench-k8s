@@ -1,3 +1,8 @@
+# Fixture: the v1.6 perf store and its pinned configs, copied verbatim from
+# commit 9e51676d (benchmarks/perf/) for the fingerprint-v1 tests. Not passed
+# through tests/fixtures/scrub.py: the files hold no endpoint, bucket or
+# credential, only ${VAR} placeholders and templated names, and the accepted
+# entry's config_hash must match the copied configs byte for byte.
 # Accepted performance baselines per pinned config. Written by
 # scripts/perf_gate.py record; see docs/perf-regression-gate.md.
 schema_version: 1
