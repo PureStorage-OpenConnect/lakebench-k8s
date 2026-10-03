@@ -1346,7 +1346,7 @@ covered instances too), or why it was not scored; it never shows plain
 "recall". Total alerts and the off-target rate say they cover only the
 rules that ran, and carry a BOUNDED BY label when a rule was skipped on a
 Lakebench cap (a skip reason naming a cap); the funnel's alert totals carry
-the same label, with a note that every count below them comes from the
+the same label, with a note saying every count below them comes from the
 rules that ran, and the counts worked after the per-customer cap
 (escalated, alert cases, SARs filed) carry that cap when it held alerts
 back. A per-reason-code table follows when the run recorded reason

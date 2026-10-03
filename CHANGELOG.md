@@ -1119,8 +1119,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   the wrong section), and an unknown recipe names the nearest recipe.
 - A setting of the other workload (`customer360.*` or `dirty_data_ratio`
   under `schema: financial`; `tm_operations` or
-  `w1_max_vertices` under `schema: customer360`) loads with a note that the
-  workload does not read it.
+  `w1_max_vertices` under `schema: customer360`) loads with a note saying
+  the workload does not read it.
 - Read-only commands create no files: `validate` no longer opens a journal,
   and `report` and `results` no longer create `lakebench-output/runs/`.
 - `platform.storage.s3.secret_ref` is refused by the commands that change
