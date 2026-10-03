@@ -79,18 +79,124 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-fn arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
+/// Every value given for `flag`: `--flag value` and `--flag=value`. A
+/// `--flag` with nothing after it gives None. The token after `--flag` is its
+/// value whatever it looks like, as `robustness::flag_in_argv` reads argv.
+fn flag_values(args: &[String], flag: &str) -> Vec<Option<String>> {
+    let eq = format!("{flag}=");
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        if a == flag {
+            out.push(args.get(i + 1).cloned());
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix(eq.as_str()) {
+            out.push(Some(v.to_string()));
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `flag` parsed strictly: absent gives `default`; present but not parseable,
+/// given without a value, or given twice exits 2 naming the flag. (The old
+/// lenient `arg()` fell back to the default on a typo.)
+fn strict_arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
     let args: Vec<String> = std::env::args().collect();
-    for i in 0..args.len() {
-        if args[i] == flag {
-            if let Some(v) = args.get(i + 1) {
-                if let Ok(p) = v.parse() {
-                    return p;
-                }
-            }
+    match flag_values(&args, flag).as_slice() {
+        [] => default,
+        [Some(v)] => v.parse().unwrap_or_else(|_| {
+            eprintln!("{flag} cannot be parsed; got {v:?}");
+            std::process::exit(2);
+        }),
+        [None] => {
+            eprintln!("{flag} needs a value");
+            std::process::exit(2);
+        }
+        _ => {
+            eprintln!("{flag} is given more than once");
+            std::process::exit(2);
         }
     }
-    default
+}
+
+/// Flags that take a value, per schema; every other `--flag` exits 2. The
+/// entrypoint renders only these (`datagen_rs/entrypoint.py`).
+const FINANCIAL_FLAGS: &[&str] = &[
+    "--schema",
+    "--bucket",
+    "--prefix",
+    "--seed",
+    "--scale",
+    "--corpus-months",
+    "--file-size-mb",
+    "--bytes-per-row",
+    "--node-id",
+    "--total-nodes",
+    "--mode",
+    "--threads",
+    "--delivery-mode",
+    "--cycle",
+    "--cycles",
+];
+const C360_FLAGS: &[&str] = &[
+    "--schema",
+    "--bucket",
+    "--prefix",
+    "--seed",
+    "--cycle",
+    "--cycles",
+    "--target-tb",
+    "--file-size-mb",
+    "--node-id",
+    "--total-nodes",
+    "--scale",
+    "--customer-id-max",
+    "--dirty-ratio",
+    "--duplicate-email-pct",
+    "--timestamp-start",
+    "--timestamp-end",
+    "--threads",
+    "--workers",
+    "--delivery-mode",
+];
+/// Flags that take no value, per schema.
+const FINANCIAL_BARE: &[&str] = &["--robustness-perturbation"];
+const C360_BARE: &[&str] = &[];
+
+/// Refuse (exit 2) any `--flag` the schema does not know, a bare flag given a
+/// value, and any stray positional argument. The value of a stray token is
+/// never printed (it could be a seed).
+fn check_known_flags(schema: &str) {
+    let (values, bare) = match schema {
+        "financial" => (FINANCIAL_FLAGS, FINANCIAL_BARE),
+        _ => (C360_FLAGS, C360_BARE),
+    };
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let Some(rest) = a.strip_prefix("--") else {
+            eprintln!("unexpected argument at position {i} (value not shown); flags start with --");
+            std::process::exit(2);
+        };
+        let name = format!("--{}", rest.split('=').next().unwrap_or(""));
+        if bare.contains(&name.as_str()) {
+            if a.contains('=') {
+                eprintln!("{name} takes no value");
+                std::process::exit(2);
+            }
+            i += 1;
+        } else if values.contains(&name.as_str()) {
+            i += if a.contains('=') { 1 } else { 2 };
+        } else {
+            eprintln!("unknown flag {name} for the {schema} schema");
+            std::process::exit(2);
+        }
+    }
 }
 
 /// --cycle, strictly: absent means 0, but a present value that does not parse
@@ -117,16 +223,13 @@ fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
     let args: Vec<String> = std::env::args().collect();
     // Accept `--cycle N` and `--cycle=N`; anything else that names the flag
     // but does not parse is an error, never a silent cycle 0.
-    let eq = format!("{flag}=");
-    let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
-        if a == flag {
-            Some(args.get(i + 1).cloned().unwrap_or_default())
-        } else {
-            a.strip_prefix(eq.as_str()).map(str::to_string)
+    let raw: String = match flag_values(&args, flag).as_slice() {
+        [] => return default,
+        [one] => one.clone().unwrap_or_default(),
+        _ => {
+            eprintln!("{flag} is given more than once");
+            std::process::exit(2);
         }
-    });
-    let Some(raw) = raw else {
-        return default;
     };
     match raw.parse::<u64>() {
         Ok(c) if c <= max => c,
@@ -155,13 +258,14 @@ const SEED_ENV: &str = "LB_DATAGEN_SEED";
 /// would turn a typo into the old default 42.
 fn financial_seed(held: &HeldOut) -> i64 {
     let args: Vec<String> = std::env::args().collect();
-    let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
-        if a == "--seed" {
-            Some(args.get(i + 1).cloned().unwrap_or_default())
-        } else {
-            a.strip_prefix("--seed=").map(str::to_string)
+    let raw: Option<String> = match flag_values(&args, "--seed").as_slice() {
+        [] => None,
+        [one] => Some(one.clone().unwrap_or_default()),
+        _ => {
+            eprintln!("--seed is given more than once");
+            std::process::exit(2);
         }
-    });
+    };
     // Literal name, so every environment read is visible to a source scan.
     let env = std::env::var("LB_DATAGEN_SEED").ok();
     let seed = match (raw, env) {
@@ -313,7 +417,7 @@ fn parse_delivery_mode() -> DeliveryMode {
     // binary default matches the K8s template and Python entrypoint defaults
     // and matches owner D18. Legacy raw-CLI callers who need the pre-flip
     // behaviour can pass --delivery-mode batch explicitly.
-    let s: String = arg("--delivery-mode", "continuous".to_string());
+    let s: String = strict_arg("--delivery-mode", "continuous".to_string());
     match s.as_str() {
         "batch" => DeliveryMode::Batch,
         "continuous" => DeliveryMode::Continuous,
@@ -347,17 +451,30 @@ fn write_bronze_file(
             sz
         }
         DeliveryMode::Continuous => {
-            let props = writer_properties();
-            let mut mpu = sink.put_multipart(key);
-            {
-                let mut w = ArrowWriter::try_new(&mut mpu, batch.schema(), Some(props)).unwrap();
-                w.write(batch).unwrap();
-                w.close().unwrap();
-            }
-            let sz = mpu.bytes_written();
-            mpu.finish()
-                .unwrap_or_else(|e| panic!("continuous mpu finish key={} err={}", key, e));
-            sz
+            // A failed upload or completion rebuilds the file from the same
+            // batch (deterministic bytes) and uploads it again on the same
+            // key, after 2, 4 and 8 s; only then does the pod fail. Dropping
+            // a failed writer aborts its upload.
+            datagen_rs::s3sink::with_finish_retries(
+                &format!("continuous mpu key={key}"),
+                || {
+                    let mut mpu = sink.put_multipart(key);
+                    {
+                        let mut w = ArrowWriter::try_new(
+                            &mut mpu,
+                            batch.schema(),
+                            Some(writer_properties()),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        w.write(batch).map_err(|e| e.to_string())?;
+                        w.close().map_err(|e| e.to_string())?;
+                    }
+                    let sz = mpu.bytes_written();
+                    mpu.finish().map(|_| sz)
+                },
+                |s| std::thread::sleep(std::time::Duration::from_secs(s)),
+            )
+            .unwrap_or_else(|e| panic!("continuous mpu finish key={} err={}", key, e))
         }
     }
 }
@@ -367,7 +484,10 @@ fn main() {
     // manifest that predates the c360 branch. `entrypoint.py` gates schema
     // choice before invoking us, but keep a defensive check here too so a
     // typo doesn't fall through to the pacs.008 path silently.
-    let schema: String = arg("--schema", "financial".to_string());
+    let schema: String = strict_arg("--schema", "financial".to_string());
+    if matches!(schema.as_str(), "financial" | "customer360") {
+        check_known_flags(&schema);
+    }
     match schema.as_str() {
         "financial" => pacs008_main(),
         "customer360" => customer360_main(),
@@ -387,8 +507,8 @@ fn pacs008_main() {
     // Direct-to-S3: pod holds no state. --bucket / --prefix name where the files
     // go, S3 creds and endpoint come from env (AWS_ACCESS_KEY_ID,
     // AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, AWS_REGION).
-    let bucket: String = arg("--bucket", String::new());
-    let prefix: String = arg("--prefix", String::new());
+    let bucket: String = strict_arg("--bucket", String::new());
+    let prefix: String = strict_arg("--prefix", String::new());
     if bucket.is_empty() {
         eprintln!("--bucket is required (destination S3 bucket)");
         std::process::exit(2);
@@ -403,20 +523,20 @@ fn pacs008_main() {
     let (cycle_n, cycles) = cycle_args();
     let (slice_lo, slice_hi) = cycle::mass_slice(cycle_n, cycles);
     let in_slice = move |m: f64| m >= slice_lo && m < slice_hi;
-    let scale: f64 = arg("--scale", 0.01);
-    let corpus_months: i64 = arg("--corpus-months", 60);
+    let scale: f64 = strict_arg("--scale", 1.0);
+    let corpus_months: i64 = strict_arg("--corpus-months", 60);
     // Default 64 matches DatagenConfig.file_size ("64mb"), the template's
     // default(64) fallback, and entrypoint.py's default, so raw-CLI
     // reproducers and pod runs pick the same file size when
     // --file-size-mb is omitted. The historical pre-M6 default was 32
     // for the financial K8s YAMLs; aligned to 64 on 2026-09-28.
-    let file_size_mb: i64 = arg("--file-size-mb", 64);
+    let file_size_mb: i64 = strict_arg("--file-size-mb", 64);
     // Bytes/row is used only to size total_files from total_txns. If the flag
     // is not passed we pick a codec-aware default from writer::pacs008_bytes_per_row_default
     // (a single scalar was wrong under any codec other than the one it was
     // measured against -- see writer.rs for the measured table).
     //
-    // The generic `arg()` helper silently falls back to the default on parse
+    // A lenient parse would silently fall back to the default on parse
     // failure, which would let `--bytes-per-row abc` or `1e-999` (subnormal
     // underflow -> 0.0) or `-0.0` (== 0.0) silently take the codec default.
     // Distinguish "flag absent" from "flag present but unparseable"
@@ -424,14 +544,19 @@ fn pacs008_main() {
     // the override, absent uses the codec default.
     let bytes_per_row: f64 = {
         let args: Vec<String> = std::env::args().collect();
-        let mut present: Option<&str> = None;
-        for i in 0..args.len() {
-            if args[i] == "--bytes-per-row" {
-                if let Some(v) = args.get(i + 1) {
-                    present = Some(v.as_str());
-                }
+        let given = flag_values(&args, "--bytes-per-row");
+        let present: Option<&str> = match given.as_slice() {
+            [] => None,
+            [Some(v)] => Some(v.as_str()),
+            [None] => {
+                eprintln!("--bytes-per-row needs a value");
+                std::process::exit(2);
             }
-        }
+            _ => {
+                eprintln!("--bytes-per-row is given more than once");
+                std::process::exit(2);
+            }
+        };
         match present {
             None => {
                 let d = pacs008_bytes_per_row_default();
@@ -454,13 +579,13 @@ fn pacs008_main() {
             },
         }
     };
-    let node_id: i64 = arg("--node-id", 0);
-    let total_nodes: i64 = arg("--total-nodes", 1);
+    let node_id: i64 = strict_arg("--node-id", 0);
+    let total_nodes: i64 = strict_arg("--total-nodes", 1);
     // Work split: "all" (node 0 also writes the reference zones), "bronze"
     // (transactions only -- every pod balanced), "reference" (party/account/
     // manifest only, on a dedicated pod). Offloading reference removes the
     // node-0 straggler so bronze pods finish together.
-    let mode: String = arg("--mode", "all".to_string());
+    let mode: String = strict_arg("--mode", "all".to_string());
     // Delivery mode is orthogonal to work split (Wave 2 D3, 2026-09-28):
     // batch (default) writes each bronze file as one S3 PUT; continuous
     // streams parquet row-groups through S3 multipart. Corpus content is
@@ -513,7 +638,7 @@ fn pacs008_main() {
     // rather than the host-visible core count (rayon's default reflects CPU
     // affinity, not the Kubernetes CFS quota, so it oversubscribes and gets
     // throttled). 0 leaves rayon's default / RAYON_NUM_THREADS.
-    let threads: usize = arg("--threads", 0usize);
+    let threads: usize = strict_arg("--threads", 0usize);
     if threads > 0 {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -1370,20 +1495,20 @@ fn customer360_main() {
         eprintln!("{ROBUSTNESS_FLAG} applies to the financial schema only");
         std::process::exit(2);
     }
-    let bucket: String = arg("--bucket", String::new());
-    let prefix: String = arg("--prefix", "customer/interactions/".to_string());
+    let bucket: String = strict_arg("--bucket", String::new());
+    let prefix: String = strict_arg("--prefix", "customer/interactions/".to_string());
     if bucket.is_empty() {
         eprintln!("--bucket is required (destination S3 bucket)");
         std::process::exit(2);
     }
-    let seed: i64 = arg("--seed", 42);
+    let seed: i64 = strict_arg("--seed", 42);
     // See datagen_rs::cycle: n > 0 offsets the per-file stream and row ids and
     // suffixes the keys; 0 reproduces a run without --cycle.
     let cycle_n: u64 = cycle_arg();
     // Two sizing controls: --target-tb picks total file count, --file-size-mb
     // picks per-file size. --scale sizes only the customer id space (when
     // --customer-id-max is absent); target_tb drives file count.
-    let target_tb: f64 = arg("--target-tb", 0.1);
+    let target_tb: f64 = strict_arg("--target-tb", 0.1);
     if !target_tb.is_finite() || target_tb <= 0.0 {
         eprintln!(
             "--target-tb must be a positive finite number; got {}",
@@ -1391,7 +1516,7 @@ fn customer360_main() {
         );
         std::process::exit(2);
     }
-    let file_size_mb: i64 = arg("--file-size-mb", 64);
+    let file_size_mb: i64 = strict_arg("--file-size-mb", 64);
     if file_size_mb < 1 {
         eprintln!("--file-size-mb must be >= 1; got {}", file_size_mb);
         std::process::exit(2);
@@ -1404,9 +1529,9 @@ fn customer360_main() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        arg("--node-id", env_default)
+        strict_arg("--node-id", env_default)
     };
-    let total_nodes: i64 = arg("--total-nodes", 1);
+    let total_nodes: i64 = strict_arg("--total-nodes", 1);
     if total_nodes < 1 || node_id < 0 || node_id >= total_nodes {
         eprintln!(
             "--total-nodes must be >= 1 and --node-id in [0, total_nodes); got node_id={} total_nodes={}",
@@ -1419,9 +1544,9 @@ fn customer360_main() {
     // customers per scale unit, matching scale.py (E4). It was a fixed 500K
     // at every scale. Either way it must fit the pod's memory.
     let mem_limit = customer360::pod_memory_limit_bytes();
-    let customer_id_max: u64 = match arg::<u64>("--customer-id-max", 0) {
+    let customer_id_max: u64 = match strict_arg::<u64>("--customer-id-max", 0) {
         0 => {
-            let scale: f64 = arg("--scale", 1.0);
+            let scale: f64 = strict_arg("--scale", 1.0);
             customer360::customer_id_max_for_scale_within(scale, mem_limit)
         }
         n => customer360::check_id_space_fits_memory(n, mem_limit).map(|_| n),
@@ -1439,12 +1564,12 @@ fn customer360_main() {
     // stays as a Rust-visible field so unit tests can build small_cfg with
     // payload_kb=1. The old --payload-kb CLI value (if any) is ignored.
     let payload_kb: usize = 2;
-    let dirty_ratio: f64 = arg("--dirty-ratio", 0.08);
-    let duplicate_email_pct: f64 = arg("--duplicate-email-pct", 0.10);
+    let dirty_ratio: f64 = strict_arg("--dirty-ratio", 0.08);
+    let duplicate_email_pct: f64 = strict_arg("--duplicate-email-pct", 0.10);
     // Timestamp range as YYYY-MM-DD; default 2024-01-01..2025-01-01 matching
     // the Python c360 defaults.
-    let ts_start_str: String = arg("--timestamp-start", "2024-01-01".to_string());
-    let ts_end_str: String = arg("--timestamp-end", "2025-01-01".to_string());
+    let ts_start_str: String = strict_arg("--timestamp-start", "2024-01-01".to_string());
+    let ts_end_str: String = strict_arg("--timestamp-end", "2025-01-01".to_string());
     let ts_start_us = parse_date_to_us(&ts_start_str).unwrap_or_else(|| {
         eprintln!(
             "--timestamp-start must be YYYY-MM-DD; got {:?}",
@@ -1466,9 +1591,9 @@ fn customer360_main() {
     // Rayon pool: honor --threads if set, fall back to --workers for K8s Job
     // templates that don't yet know about --threads. 0 leaves rayon's default.
     let threads: usize = {
-        let t = arg::<usize>("--threads", 0);
+        let t = strict_arg::<usize>("--threads", 0);
         if t == 0 {
-            arg::<usize>("--workers", 0)
+            strict_arg::<usize>("--workers", 0)
         } else {
             t
         }

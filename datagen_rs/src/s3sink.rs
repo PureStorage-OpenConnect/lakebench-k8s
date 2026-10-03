@@ -19,8 +19,8 @@ use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path;
 use object_store::{
-    ClientOptions, Error as OsError, MultipartUpload, ObjectStore, PutPayload, RetryConfig,
-    WriteMultipart,
+    Certificate, ClientOptions, Error as OsError, MultipartUpload, ObjectStore, PutPayload,
+    RetryConfig, WriteMultipart,
 };
 use tokio::runtime::{Handle, Runtime};
 
@@ -33,6 +33,121 @@ pub struct S3Cfg {
     pub region: String,
     pub access_key: String,
     pub secret_key: String,
+    pub transport: Transport,
+}
+
+/// How the client reaches the store: addressing style and TLS. These change
+/// where bytes go and how, never the bytes, so they are not corpus inputs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Transport {
+    /// `S3_PATH_STYLE=false`: virtual-hosted-style requests (default path
+    /// style, which FlashBlade needs).
+    pub virtual_hosted: bool,
+    /// `S3_VERIFY_SSL=false`: accept any server certificate.
+    pub allow_invalid_certificates: bool,
+    /// Plain HTTP is allowed only for an `http://` endpoint.
+    pub allow_http: bool,
+    /// `S3_CA_CERT`: the PEM bundle read from that path.
+    pub ca_pem: Option<Vec<u8>>,
+}
+
+fn env_bool(name: &str, value: Option<&str>, default: bool) -> Result<bool, String> {
+    match value.map(|v| v.trim().to_ascii_lowercase()) {
+        None => Ok(default),
+        Some(v) if v.is_empty() => Ok(default),
+        Some(v) if v == "true" || v == "1" || v == "yes" => Ok(true),
+        Some(v) if v == "false" || v == "0" || v == "no" => Ok(false),
+        Some(v) => Err(format!("{name} must be true or false; got {v:?}")),
+    }
+}
+
+impl Transport {
+    /// Resolve from the raw environment values; a value that is not a
+    /// boolean, or a CA path that cannot be read, is an error (exit 2).
+    pub fn from_values(
+        endpoint: &str,
+        path_style: Option<&str>,
+        verify_ssl: Option<&str>,
+        ca_cert: Option<&str>,
+    ) -> Result<Transport, String> {
+        let path_style = env_bool("S3_PATH_STYLE", path_style, true)?;
+        let verify = env_bool("S3_VERIFY_SSL", verify_ssl, true)?;
+        let ca_pem = match ca_cert.map(str::trim).filter(|p| !p.is_empty()) {
+            None => None,
+            Some(path) => Some(
+                std::fs::read(path)
+                    .map_err(|e| format!("S3_CA_CERT={path} cannot be read ({})", e.kind()))?,
+            ),
+        };
+        let t = Transport {
+            virtual_hosted: !path_style,
+            allow_invalid_certificates: !verify,
+            allow_http: endpoint.trim().to_ascii_lowercase().starts_with("http://"),
+            ca_pem,
+        };
+        t.certificates()?;
+        Ok(t)
+    }
+
+    /// The CA bundle's certificates (none without S3_CA_CERT).
+    pub fn certificates(&self) -> Result<Vec<Certificate>, String> {
+        match &self.ca_pem {
+            None => Ok(Vec::new()),
+            Some(pem) => {
+                let certs = Certificate::from_pem_bundle(pem)
+                    .map_err(|e| format!("S3_CA_CERT is not a PEM bundle ({e})"))?;
+                if certs.is_empty() {
+                    return Err("S3_CA_CERT holds no certificate".into());
+                }
+                Ok(certs)
+            }
+        }
+    }
+
+    /// Client options for this transport, with the sink's timeouts.
+    pub fn client_options(&self) -> Result<ClientOptions, String> {
+        // Bound both connect and total request time so a stalled TCP
+        // connection cannot silently wedge a worker for the whole Job timeout
+        // window; a stall becomes a normal retryable error instead.
+        let mut opts = ClientOptions::new()
+            .with_connect_timeout(Duration::from_secs(10))
+            .with_timeout(Duration::from_secs(120))
+            .with_allow_http(self.allow_http)
+            .with_allow_invalid_certificates(self.allow_invalid_certificates);
+        for cert in self.certificates()? {
+            opts = opts.with_root_certificate(cert);
+        }
+        Ok(opts)
+    }
+}
+
+/// Waits before each retry of a failed multipart completion: the file is
+/// rebuilt from the same batch (the bytes are deterministic) and uploaded
+/// again on the same key, so the object is unchanged.
+pub const FINISH_RETRY_WAITS_S: [u64; 3] = [2, 4, 8];
+
+/// Run `attempt` until it succeeds, waiting `FINISH_RETRY_WAITS_S` between
+/// tries (through `wait`, so tests do not sleep). The last error, with every
+/// earlier one, is returned after the final try.
+pub fn with_finish_retries<T>(
+    what: &str,
+    mut attempt: impl FnMut() -> Result<T, String>,
+    mut wait: impl FnMut(u64),
+) -> Result<T, String> {
+    let mut errors = Vec::new();
+    for i in 0..=FINISH_RETRY_WAITS_S.len() {
+        match attempt() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                eprintln!("{what}: attempt {} failed: {e}", i + 1);
+                errors.push(e);
+                if let Some(w) = FINISH_RETRY_WAITS_S.get(i) {
+                    wait(*w);
+                }
+            }
+        }
+    }
+    Err(errors.join("; "))
 }
 
 impl S3Cfg {
@@ -48,6 +163,12 @@ impl S3Cfg {
             .map_err(|_| "AWS_ACCESS_KEY_ID env var required".to_string())?;
         let secret_key = env::var("AWS_SECRET_ACCESS_KEY")
             .map_err(|_| "AWS_SECRET_ACCESS_KEY env var required".to_string())?;
+        let transport = Transport::from_values(
+            &endpoint,
+            env::var("S3_PATH_STYLE").ok().as_deref(),
+            env::var("S3_VERIFY_SSL").ok().as_deref(),
+            env::var("S3_CA_CERT").ok().as_deref(),
+        )?;
         Ok(Self {
             bucket,
             prefix,
@@ -55,6 +176,7 @@ impl S3Cfg {
             region,
             access_key,
             secret_key,
+            transport,
         })
     }
 }
@@ -132,44 +254,41 @@ impl S3Sink {
             .build()
             .expect("build tokio runtime");
         let handle = rt.handle().clone();
-        // Bound both connect and total request time so a stalled TCP connection
-        // to FlashBlade cannot silently wedge a worker for the whole Job
-        // timeout window; a stall becomes a normal retryable error instead.
-        let client_opts = ClientOptions::new()
-            .with_connect_timeout(Duration::from_secs(10))
-            .with_timeout(Duration::from_secs(120))
-            // FlashBlade is in-cluster HTTP; opt in explicitly so the builder
-            // does not refuse a non-https endpoint.
-            .with_allow_http(true);
-        // Cap object_store's internal retry budget to a single retry so a real
-        // outage doesn't stack our 3-attempt loop on top of its default of 10.
-        // Keeping a small nonzero value here means the client still handles the
-        // one-shot 5xx / connection-reset case, and our loop handles longer
-        // outages with backoff -- matches what the previous disk-write path did.
-        let retry_cfg = RetryConfig {
-            max_retries: 1,
-            retry_timeout: Duration::from_secs(30),
-            ..Default::default()
-        };
-        let store = AmazonS3Builder::new()
-            .with_bucket_name(&cfg.bucket)
-            .with_region(&cfg.region)
-            .with_endpoint(&cfg.endpoint)
-            .with_access_key_id(&cfg.access_key)
-            .with_secret_access_key(&cfg.secret_key)
-            // FlashBlade needs path-style; virtual-hosted would resolve into a
-            // DNS name that does not exist.
-            .with_virtual_hosted_style_request(false)
-            .with_client_options(client_opts)
-            .with_retry(retry_cfg)
-            .build()
-            .expect("build object_store client");
+        let store = Self::builder(cfg)
+            .and_then(|b| b.build().map_err(|e| e.to_string()))
+            .unwrap_or_else(|e| {
+                eprintln!("s3 config error: {e}");
+                std::process::exit(2);
+            });
         S3Sink {
             store: Arc::new(store),
             prefix: cfg.prefix.trim_end_matches('/').to_string(),
             _rt: rt,
             handle,
         }
+    }
+
+    /// The S3 client builder for `cfg`: endpoint, credentials, the transport
+    /// settings and the retry budget. Public so tests can read its settings
+    /// back (`get_config_value`) without a network.
+    pub fn builder(cfg: &S3Cfg) -> Result<AmazonS3Builder, String> {
+        // object_store's own retry budget per request (parts included): 3,
+        // with the 30 s ceiling; a failed completion is retried above that by
+        // rebuilding the file (`with_finish_retries`).
+        let retry_cfg = RetryConfig {
+            max_retries: 3,
+            retry_timeout: Duration::from_secs(30),
+            ..Default::default()
+        };
+        Ok(AmazonS3Builder::new()
+            .with_bucket_name(&cfg.bucket)
+            .with_region(&cfg.region)
+            .with_endpoint(&cfg.endpoint)
+            .with_access_key_id(&cfg.access_key)
+            .with_secret_access_key(&cfg.secret_key)
+            .with_virtual_hosted_style_request(cfg.transport.virtual_hosted)
+            .with_client_options(cfg.transport.client_options()?)
+            .with_retry(retry_cfg))
     }
 
     /// Absolute key (bucket-relative) formed from the sink prefix and the

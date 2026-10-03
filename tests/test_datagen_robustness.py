@@ -394,8 +394,10 @@ def test_local_gate_checks_the_stamp_before_scoring():
 
 
 def test_entrypoint_does_not_accept_abbreviations(monkeypatch):
+    # An abbreviation is an unknown flag: refused (exit 2), never read as
+    # --robustness-perturbation.
     for abbrev in ("--rob", "--robust", "--robustness"):
         _, cmd = _entry_cmd(
             ["--schema", "financial", "--bucket", "b", "--seed", "7777", abbrev], monkeypatch
         )
-        assert "--robustness-perturbation" not in cmd, abbrev
+        assert cmd is None, abbrev
