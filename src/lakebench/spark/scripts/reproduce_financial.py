@@ -14,8 +14,8 @@ micro-batches are sealed.
    (``basis: equivalent``: compaction and expiry keep content, and the
    batch stamping columns are hashed too); otherwise ``snapshot_gone``.
 3. Filter the transactions to the batches sealed in the versions table as
-   gold saw it (``sealed_txns_filter_at`` at the recorded versions snapshot,
-   or the current table when that is equivalent).
+   gold saw it (``sealed_txns_filter_at`` at the versions snapshot read in
+   step 2: the recorded one, or the pinned current one when equivalent).
 4. Run the alert's rule with the parameters gold used
    (``detection_rules.rule_params``). A rule that declines to run:
    ``rule_skipped``.
@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
-from common import env, frame_fingerprint, log, sealed_txns_filter, sealed_txns_filter_at
+from common import env, frame_fingerprint, log, sealed_txns_filter_at
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import array_distinct, array_sort, col, lit, unix_micros
 
@@ -98,38 +99,42 @@ def _snapshot_present(spark, fq: str, snapshot: int) -> bool:
 
 
 def read_recorded(spark, table: str, entry: dict | None) -> tuple:
-    """``(frame, basis, reason)`` for *table* as gold read it: the recorded
-    snapshot when it is still there, else the current table when its
-    fingerprint over every column equals the recorded one. ``frame`` is None
-    with the reason when neither holds."""
+    """``(frame, basis, reason, snapshot)`` for *table* as gold read it: the
+    recorded snapshot when it is still there, else the current snapshot when
+    its fingerprint over every column equals the recorded one. ``snapshot``
+    is the id read (pinned either way). ``frame`` is None with the reason
+    when neither holds."""
     fq = f"{CATALOG}.{table}"
     if not entry:
-        return None, None, f"{table}: no recorded snapshot"
+        return None, None, f"{table}: no recorded snapshot", None
     snapshot = entry.get("snapshot")
     if isinstance(snapshot, bool) or not isinstance(snapshot, int):
-        return None, None, f"{table}: gold read no known snapshot ({snapshot})"
+        return None, None, f"{table}: gold read no known snapshot ({snapshot})", None
     if _snapshot_present(spark, fq, snapshot):
-        return spark.sql(f"SELECT * FROM {fq} VERSION AS OF {snapshot}"), "recorded", None
+        frame = spark.sql(f"SELECT * FROM {fq} VERSION AS OF {snapshot}")
+        return frame, "recorded", None, snapshot
     want = (entry.get("rows"), entry.get("fp"), entry.get("cols_sha"))
     if None in want:
-        return None, None, f"{table}: snapshot {snapshot} expired and no fingerprint was recorded"
+        why = f"{table}: snapshot {snapshot} expired and no fingerprint was recorded"
+        return None, None, why, None
     # The current snapshot, pinned: the frame fingerprinted is the frame read.
     now = spark.sql(
         f"SELECT snapshot_id FROM {fq}.history WHERE is_current_ancestor "
         "ORDER BY made_current_at DESC LIMIT 1"
     ).collect()
     if not now:
-        return None, None, f"{table}: snapshot {snapshot} expired and the table has no snapshot"
-    current = spark.sql(f"SELECT * FROM {fq} VERSION AS OF {int(now[0][0])}")
+        why = f"{table}: snapshot {snapshot} expired and the table has no snapshot"
+        return None, None, why, None
+    pinned = int(now[0][0])
+    current = spark.sql(f"SELECT * FROM {fq} VERSION AS OF {pinned}")
     rows, fp, cols_sha = frame_fingerprint(current, current.columns)
     if (int(rows), str(fp), str(cols_sha)) == (int(want[0]), str(want[1]), str(want[2])):
-        return current, "equivalent", None
-    return (
-        None,
-        None,
+        return current, "equivalent", None, pinned
+    why = (
         f"{table}: snapshot {snapshot} expired and the current table's content differs "
-        f"(rows {rows} against {want[0]})",
+        f"(rows {rows} against {want[0]})"
     )
+    return None, None, why, None
 
 
 def match_alert(original_txns, reproduced_rows) -> tuple[str, int, int]:
@@ -184,31 +189,33 @@ def reproduce(spark, alert_id: str, inputs: dict) -> dict:
     alert = rows[0]
     result["rule_id"] = alert["rule_id"]
     if str(alert["run_id"]) != run_id:
+        # --run takes the record's id; the alert carries the cycle's.
+        record_run = re.sub(r"-c\d+$", "", str(alert["run_id"]))
         return {
             **result,
             "outcome": "not_found",
-            "reason": f"alert belongs to run {alert['run_id']}; pass --run {alert['run_id']}",
+            "reason": f"alert belongs to run {alert['run_id']}; pass --run {record_run}",
         }
 
     frames: dict = {}
     bases: dict = {}
+    read: dict = {}
     for table in _tables():
-        frame, basis, why = read_recorded(spark, table, by_table.get(table))
+        frame, basis, why, snapshot = read_recorded(spark, table, by_table.get(table))
         if frame is None:
             return {**result, "outcome": "snapshot_gone", "reason": why}
         frames[table] = frame
         bases[table] = basis
+        read[table] = snapshot
     result["basis"] = "recorded" if all(b == "recorded" for b in bases.values()) else "equivalent"
 
-    txns_raw = frames[SILVER_TXNS]
-    if bases[SILVER_BATCH_VERSIONS] == "recorded":
-        versions_snapshot = int(by_table[SILVER_BATCH_VERSIONS]["snapshot"])
-        txns = sealed_txns_filter_at(
-            spark, txns_raw, CATALOG, SILVER_BATCH_VERSIONS, versions_snapshot
-        )
-    else:
-        # The current versions table holds what gold saw (equal content).
-        txns = sealed_txns_filter(spark, txns_raw, CATALOG, SILVER_BATCH_VERSIONS)
+    # The sealed batches as gold saw them: the versions table at the snapshot
+    # read above (the recorded one, or the pinned current one whose content
+    # equals it), never the live table.
+    txns = sealed_txns_filter_at(
+        spark, frames[SILVER_TXNS], CATALOG, SILVER_BATCH_VERSIONS, read[SILVER_BATCH_VERSIONS]
+    )
+    result["snapshots_read"] = dict(read)
 
     from detection_rules import (
         RULE_VERSION,

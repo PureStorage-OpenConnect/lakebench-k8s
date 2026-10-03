@@ -22,6 +22,8 @@ pytest.importorskip("pyspark")
 pytestmark = pytest.mark.requires_jars("iceberg")
 
 RUN = "20261003-120000-aaaaaa"
+#: The id gold stamps on its alerts: the run's first cycle.
+GOLD_RUN = f"{RUN}-c1"
 RULE = "W2_structuring"
 _ids = itertools.count()
 
@@ -117,14 +119,14 @@ def case(spark, load_script, monkeypatch):
             for k in ("SILVER_TXNS", "SILVER_ENTITIES", "SILVER_BATCH_VERSIONS")
         ]
         return {
-            "run_id": RUN,
+            "run_id": GOLD_RUN,
             "nonce": "n-1",
             "read_snapshots": score.read_snapshot_fingerprints(spark, args),
         }
 
     def raise_alert(alert_id, txns_ids):
         spark.createDataFrame(
-            [(alert_id, RULE, 7, t0 + timedelta(minutes=1), txns_ids, RUN)],
+            [(alert_id, RULE, 7, t0 + timedelta(minutes=1), txns_ids, GOLD_RUN)],
             "alert_id string, rule_id string, entity_id bigint, alert_ts timestamp, "
             "related_txn_ids array<string>, run_id string",
         ).writeTo(fq("GOLD_ALERTS")).createOrReplace()
@@ -219,6 +221,30 @@ def test_equivalent_after_a_rewrite_and_expiry(spark, case):
     assert (out["outcome"], out["basis"]) == ("reproduced", "equivalent"), out
 
 
+def test_equivalent_versions_are_read_at_a_pinned_snapshot(spark, case, monkeypatch):
+    """The versions snapshot expired but its content is unchanged: the
+    sealed filter reads the pinned current snapshot, so a batch sealed after
+    the fingerprint compare (a new run's silver) stays hidden."""
+    case.setup()
+    case.write_txns([case.txn(4, 7, 1, 1)])  # committed, not sealed when gold read
+    inputs = case.record()
+    case.raise_alert("a-8", ["t1", "t2"])
+    versions = case.fq("SILVER_BATCH_VERSIONS")
+    spark.sql(f"INSERT OVERWRITE {versions} SELECT * FROM {versions}")
+    case.expire("SILVER_BATCH_VERSIONS")
+    real = case.repro.read_recorded
+
+    def then_seal(sp, table, entry):
+        out = real(sp, table, entry)
+        if table == case.names["SILVER_BATCH_VERSIONS"]:
+            case.seal([1])  # lands after the compare, before the filter
+        return out
+
+    monkeypatch.setattr(case.repro, "read_recorded", then_seal)
+    out = case.repro.reproduce(spark, "a-8", inputs)
+    assert (out["outcome"], out["basis"]) == ("reproduced", "equivalent"), out
+
+
 def test_snapshot_gone_when_content_changed_and_expired(spark, case):
     case.setup()
     inputs = case.record()
@@ -258,8 +284,10 @@ def test_not_found_and_another_runs_alert(spark, case):
     inputs = case.record()
     case.raise_alert("a-7", ["t1", "t2"])
     assert case.repro.reproduce(spark, "nope-1", inputs)["outcome"] == "not_found"
-    other = case.repro.reproduce(spark, "a-7", {**inputs, "run_id": "20261003-000000-bbbbbb"})
-    assert other["outcome"] == "not_found" and f"pass --run {RUN}" in other["reason"], other
+    other = case.repro.reproduce(spark, "a-7", {**inputs, "run_id": "20261003-000000-bbbbbb-c1"})
+    # The hint names the record's id, the one --run takes (not the cycle's).
+    assert other["outcome"] == "not_found", other
+    assert other["reason"].endswith(f"pass --run {RUN}"), other
 
 
 def test_the_scorer_fingerprints_what_gold_read(spark, case):
@@ -345,7 +373,7 @@ def test_reproduces_an_alert_gold_wrote(spark, case, monkeypatch):
 
     monkeypatch.setattr(rules, "get_rule", lambda rid: toy if rid == "WX_toy" else None)
     txns = gf._sealed_txns(spark, case.names["SILVER_TXNS"])
-    gf.run_detection_rules(spark, txns, RUN, rules=("WX_toy",))
+    gf.run_detection_rules(spark, txns, GOLD_RUN, rules=("WX_toy",))
     written = spark.table("lakehouse.gold.alerts").where("rule_id = 'WX_toy'").collect()
     assert len(written) == 1, written
     monkeypatch.setattr(case.repro, "GOLD_ALERTS", "gold.alerts")
