@@ -110,9 +110,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   conditions that before only turned the report badge red: a continuous
   ingest ratio below 0.95 that the trickle does not explain, gold stale for
   more than half the run, and a batch scale ratio between 0 and 0.95.
-  `compare`, the perf gate, the release gate and `report --list` take the
-  strictest of a record's stored verdict and the one recomputed from it,
-  so stored records can read failed: three stored AML batch runs on a
+  `compare`, the perf gate, the release gate and `report` take the
+  strictest of a record's stored verdict and the one recomputed from it
+  (`report --json` and its `--list` rows show `verdict_stored`,
+  `verdict_recomputed` and that strictest one as `verdict`), so stored
+  records can read failed: three stored AML batch runs on a
   corpus without a watchlist (W5 and W6 did not run) do, and the stored
   Hive-versus-Polaris AML pair they form is now NOT COMPARABLE. The
   dependency-set gate is named `dependency_set` (was `deps`). `run --stage`

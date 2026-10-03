@@ -9,6 +9,8 @@
     "deployment_name": "pipe-c360-b10",
     "start_time": "2026-09-30T03:29:00.802293+00:00",
     "verdict": "PASSED",
+    "verdict_stored": "PASSED",
+    "verdict_recomputed": "PASSED",
     "pipeline_mode": "batch",
     "scores": {
       "time_to_value_seconds": 365.38,

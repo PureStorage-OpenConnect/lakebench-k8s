@@ -902,6 +902,11 @@ def _member_passed(record: Mapping[str, Any]) -> tuple[bool, str | None]:
     (``metrics.verdict.verdict_from_record``); a reader never promotes."""
     from lakebench.metrics import verdict as verdict_mod
 
+    kind = record.get("record_kind") or "run"
+    if kind != "run":
+        # A `lakebench benchmark` record re-measures another run's query
+        # stage; it is not a run, whatever its verdict.
+        return False, f"a {kind} record of run {record.get('parent_run_id') or 'unknown'}"
     status = verdict_mod.verdict_status(record)
     ok = status not in _EXCLUDED_STATUSES and verdict_mod.stored_passed(record)
     recompute = getattr(verdict_mod, "verdict_from_record", None)

@@ -1577,16 +1577,21 @@ def _print_stage_matrix(metrics, output_format: str) -> None:
 
 
 def _report_list_row(r: dict) -> dict:
-    """A ``report --list`` row for ``--json`` (cli/_json.ReportListRow)."""
-    from lakebench.metrics.verdict import verdict_status
+    """A ``report --list`` row for ``--json`` (cli/_json.ReportListRow):
+    the headline verdict (the strictest of the stored and the recomputed
+    one, as every reader takes it) and both halves."""
+    from lakebench.metrics.verdict import verdict_of, verdict_status
 
+    stored = verdict_status(r) or r.get("verdict_status")
     return {
         "run_id": r.get("run_id"),
         "record_kind": r.get("record_kind") or "run",
         "parent_run_id": r.get("parent_run_id"),
         "deployment_name": r.get("deployment_name"),
         "start_time": r.get("start_time"),
-        "verdict": verdict_status(r) or r.get("verdict_status"),
+        "verdict": r.get("verdict_headline") or verdict_of(r)["status"],
+        "verdict_stored": stored,
+        "verdict_recomputed": r.get("verdict_recomputed"),
         "total_elapsed_seconds": r.get("total_elapsed_seconds"),
     }
 
@@ -1596,9 +1601,15 @@ def _report_run_data(
 ) -> dict:
     """The run ``report`` shows, for ``--json`` (cli/_json.ReportRun), from
     the record as stored (the per-run file, else the legacy flat one, as
-    ``load_run`` reads them): its verdict and scores are never recomputed;
-    a record that cannot be read as stored gives null for both."""
+    ``load_run`` reads them). Scores are as stored. The verdict carries both
+    halves: ``verdict_stored`` as the record holds it, ``verdict_recomputed``
+    from the record (``verdict.verdict_from_record``), and ``verdict``, the
+    strictest of them, as compare, the perf gate and the release gate read
+    it. A record that cannot be read as stored gives null for all three and
+    for the scores."""
     import json as _json_mod
+
+    from lakebench.metrics.verdict import verdict_of
 
     record: dict = {}
     rid = requested or metrics.run_id  # the id load_run was given, when one was
@@ -1609,13 +1620,16 @@ def _report_run_data(
         except (OSError, ValueError):
             continue
     pbd = record.get("pipeline_benchmark") or {}
+    judged = verdict_of(record) if record else {"stored": None, "recomputed": None, "status": None}
     return {
         "run_id": metrics.run_id,
         "record_kind": record.get("record_kind") or metrics.record_kind,
         "parent_run_id": record.get("parent_run_id", metrics.parent_run_id),
         "deployment_name": record.get("deployment_name", metrics.deployment_name),
         "start_time": record.get("start_time"),
-        "verdict": (record.get("verdict") or {}).get("status"),
+        "verdict": judged["status"],
+        "verdict_stored": judged["stored"],
+        "verdict_recomputed": judged["recomputed"],
         "pipeline_mode": pbd.get("pipeline_mode"),
         "scores": pbd.get("scores") if record else None,
         "stages": [
@@ -1793,7 +1807,7 @@ def report(
         for r in runs:
             # Prefer the persisted verdict (OD-6: v1.6 records) and fall
             # back to raw ``success`` for legacy v1.5 records.
-            if _record_passed(r):
+            if r.get("passed", _record_passed(r)):
                 status = "[green]Passed[/green]"
             elif (_verdict_status(r) or r.get("verdict_status")) == "INTERRUPTED":
                 status = "[yellow]Interrupted[/yellow]"

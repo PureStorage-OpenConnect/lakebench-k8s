@@ -844,3 +844,43 @@ def test_report_labels_the_gold_stage_bounded_by_a_rule_cap() -> None:
     assert not _stage_matches_cap("silver", caps)
     assert not _stage_matches_cap("bronze", caps)
     assert not _stage_matches_cap("gold", ["rule W1_connected_components skipped: giant-component"])
+
+
+# ---------------------------------------------------------------------------
+# lakebench benchmark records (record_kind benchmark) are never a run
+# ---------------------------------------------------------------------------
+
+
+def _benchmark_record() -> dict:
+    rec = sr.load_record(C360_BATCH)
+    rec["record_kind"], rec["parent_run_id"] = "benchmark", rec["run_id"]
+    rec["run_id"] = "20261003-000000-be0000"
+    return rec
+
+
+def test_benchmark_record_is_not_a_compare_member() -> None:
+    """Even named directly to the ladder, a benchmark record is no member."""
+    from lakebench.metrics import comparability as cmp
+
+    bench = _benchmark_record()
+    v = cmp.pair_verdict([bench], [sr.load_record(C360_BATCH)])
+    assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "1")
+    assert "a benchmark record of run 20260929-212900-5105a0" in v.reasons[0]
+
+
+def test_benchmark_record_is_refused_by_release_and_perf_readers() -> None:
+    from lakebench.metrics import release_record as rr
+
+    bench = _benchmark_record()
+    assert any("a benchmark record" in p for p in rr.record_problems(bench, "f" * 40, {}))
+
+
+def test_benchmark_record_is_never_the_latest_run(tmp_path: Path) -> None:
+    from lakebench.metrics.storage import MetricsStorage
+
+    for rec in (sr.load_record(C360_BATCH), _benchmark_record()):
+        d = tmp_path / f"run-{rec['run_id']}"
+        d.mkdir()
+        (d / "metrics.json").write_text(json.dumps(rec))
+    latest = MetricsStorage(tmp_path).get_latest_run_for_deployment(None)
+    assert latest is not None and latest.record_kind == "run"

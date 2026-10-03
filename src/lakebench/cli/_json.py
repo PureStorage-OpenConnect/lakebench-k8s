@@ -71,15 +71,19 @@ class ReportStage(TypedDict):
 
 
 class ReportRun(TypedDict):
-    """As stored in the record: nothing is recomputed. A record that is
-    not readable as stored gives null verdict and scores."""
+    """The record as stored, with its verdict both as stored and as
+    recomputed from the record; ``verdict`` is the strictest of the two (a
+    reader never promotes). A record that is not readable as stored gives
+    null verdicts and scores."""
 
     run_id: str
     record_kind: str  # run | benchmark
     parent_run_id: str | None
     deployment_name: str | None
     start_time: str | None
-    verdict: str | None
+    verdict: str | None  # strictest of verdict_stored and verdict_recomputed
+    verdict_stored: str | None  # verdict.status as stored; null: no verdict block
+    verdict_recomputed: str | None  # verdict_from_record's status; null: not recomputable
     pipeline_mode: str | None
     scores: dict[str, Any] | None
     stages: list[ReportStage]
@@ -92,7 +96,9 @@ class ReportListRow(TypedDict):
     parent_run_id: str | None
     deployment_name: str | None
     start_time: str | None
-    verdict: str | None
+    verdict: str | None  # strictest of verdict_stored and verdict_recomputed
+    verdict_stored: str | None
+    verdict_recomputed: str | None
     total_elapsed_seconds: float | None
 
 

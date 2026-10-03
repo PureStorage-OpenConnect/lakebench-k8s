@@ -188,30 +188,59 @@ def stored_passed(record: Mapping[str, Any] | None) -> bool:
     return status == "PASSED" if status is not None else bool(record.get("success", False))
 
 
+#: Verdict statuses from strictest to least strict (``Verdict.PRIORITY``).
+_STRICTNESS = {"FAILED": 0, "INTERRUPTED": 1, "REFUSED": 2, "PASSED": 3}
+
+
+def verdict_of(record: Mapping[str, Any] | None) -> dict[str, str | None]:
+    """The verdict a reader reports for *record*: ``{"stored", "recomputed",
+    "status"}``.
+
+    ``stored`` is ``verdict.status`` as the record holds it (None when it
+    has no verdict block). ``recomputed`` is ``verdict_from_record``'s
+    status for a whole run record (None for a summary row, which cannot be
+    recomputed, or a record the loader cannot read). ``status``, the
+    headline, is the strictest of the two, where a record with no verdict
+    block stands for PASSED or FAILED by its ``success`` flag (a v1.5
+    record) and a whole record that cannot be recomputed reads FAILED: a
+    reader never promotes. None only for no record at all."""
+    if record is None:
+        return {"stored": None, "recomputed": None, "status": None}
+    stored = verdict_status(record)
+    base = stored if stored is not None else ("PASSED" if record.get("success") else "FAILED")
+    recomputed: str | None = None
+    unreadable = False
+    if _is_run_record(record):
+        try:
+            recomputed = _recompute(record).status
+        except Exception as e:  # noqa: BLE001 -- an unreadable record never reads passed
+            import logging
+
+            unreadable = True
+            logging.getLogger(__name__).warning(
+                "run %s: verdict not recomputable (%s); read as not passed",
+                record.get("run_id"),
+                e,
+            )
+    candidates = [base] + ([recomputed] if recomputed else []) + (["FAILED"] if unreadable else [])
+    status = min(candidates, key=lambda x: _STRICTNESS.get(x, 0))
+    return {"stored": stored, "recomputed": recomputed, "status": status}
+
+
 def passed(record: Mapping[str, Any] | None) -> bool:
-    """Whether *record* is a PASSED run: the strictest of what it stored and
-    what the record shows today. A reader never promotes.
+    """Whether *record* is a PASSED run: ``verdict_of(record)["status"]``,
+    the strictest of what it stored and what the record shows today. A
+    reader never promotes.
 
     The stored half prefers ``verdict.status == "PASSED"`` when the v1.6
     verdict block is present and falls back to ``record.get("success")`` for
-    a legacy v1.5 record. For a whole run record that stored a pass, the
-    verdict is then recomputed with ``verdict_from_record``, so a v1.6
-    record that the record gates fail (rows per layer, rules, scale ratio,
-    query answers) reads failed. A record the loader cannot read reads
-    failed. A summary row (no ``jobs`` list) is judged on what it stored.
+    a legacy v1.5 record. A whole run record is recomputed with
+    ``verdict_from_record``, so a v1.6 record that the record gates fail
+    (rows per layer, rules, scale ratio, query answers) reads failed. A
+    record the loader cannot read reads failed. A summary row (no ``jobs``
+    list) is judged on what it stored.
     """
-    stored_ok = stored_passed(record)
-    if record is None or not stored_ok or not _is_run_record(record):
-        return stored_ok
-    try:
-        return _recompute(record).status == "PASSED"
-    except Exception as e:  # noqa: BLE001 -- an unreadable record never reads passed
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "run %s: verdict not recomputable (%s); read as not passed", record.get("run_id"), e
-        )
-        return False
+    return verdict_of(record)["status"] == "PASSED"
 
 
 # ---------------------------------------------------------------------------
