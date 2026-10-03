@@ -56,8 +56,13 @@ def _run(cfg=None, fps=None, fleet=None):
     # A2b wiring: compare and perf_gate now refuse a run whose verdict is
     # FAILED. Mark the synthetic collector as successful so its computed
     # verdict is PASSED; these tests exercise the comparability ladder,
-    # not the failed-run refusal path.
+    # not the failed-run refusal path. Every layer has rows, so the
+    # verdict's layer_rows gate passes too.
     run.success = True
+    run.jobs = [
+        JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
+        for s in ("bronze-verify", "silver-build", "gold-finalize")
+    ]
     return run
 
 
@@ -274,7 +279,12 @@ class TestNotEstablished:
         b = dict(b)
         b["run_id"] = "20260926-120000-bbbbbb"
         for m in (a, b):
-            m.setdefault("pipeline_benchmark", {})["scores"] = {"time_to_value_seconds": 100.0}
+            # scale_ratio: a batch pipeline benchmark always records it, and
+            # the verdict fails a ratio of 0.
+            m.setdefault("pipeline_benchmark", {})["scores"] = {
+                "time_to_value_seconds": 100.0,
+                "scale_ratio": 1.0,
+            }
         b["pipeline_benchmark"]["scores"]["time_to_value_seconds"] = 50.0
         return a, b
 
