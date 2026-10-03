@@ -537,13 +537,28 @@ def w2_structuring(
         alert_type=col("_type"),
         run_id=lit(run_id),
         narrative=col("_narrative"),
+        # txn_total is the alert's full count of in-band payments;
+        # txns_truncated says the beneficiary kind's cap cut related_txn_ids
+        # (the originator kind is never cut).
         evidence=map_from_arrays(
-            array(lit("rule"), lit("threshold"), lit("window_hours"), lit("aggregation")),
+            array(
+                lit("rule"),
+                lit("threshold"),
+                lit("window_hours"),
+                lit("aggregation"),
+                lit("txn_total"),
+                lit("txns_truncated"),
+            ),
             array(
                 lit("W2_structuring"),
                 lit(str(threshold_count)),
                 lit(str(window_hours)),
                 col("_aggregation"),
+                col("suspicious_count").cast("string"),
+                (
+                    (col("_aggregation") == lit("beneficiary"))
+                    & (col("suspicious_count") > lit(int(max_txns_per_alert)))
+                ).cast("string"),
             ),
         ),
     )
@@ -1512,6 +1527,7 @@ def w4_risk_propagation(
     velocity_hours: int = 6,
     forward_ratio: float = 0.8,
     run_id: str = "unknown",
+    max_txns_per_alert: int = 1000,
 ) -> DataFrame:
     """Detect rapid pass-through: entity B receives funds from A and
     forwards >= forward_ratio of them to some entity C, all within
@@ -1522,8 +1538,16 @@ def w4_risk_propagation(
     C != A (which would require another join step); a self-loop that
     just cycles back also fires, treated as a subset of round-tripping.
 
-    Emits one alert per B (the intermediate entity) with related_txn_ids
-    = [incoming_uetr, outgoing_uetr] pair.
+    Emits one alert per B (the intermediate entity). related_txn_ids holds
+    the uetrs of every matched incoming and outgoing payment, and
+    related_entity_ids every A and C, each sorted and cut to the first
+    max_txns_per_alert (an evidence bound, the same value as W2's: without it
+    a hub's arrays grow with the corpus). The evidence map carries the full
+    counts, txn_total and entity_total, and txns_truncated and
+    entities_truncated ('true' when the cap cut the list). Scoring matches
+    planted transactions against related_txn_ids, so a truncated hub alert
+    can miss planted payments past the cut: recall is reported as bounded by
+    this cap when any W4 alert was truncated (score_financial).
     """
     from pyspark.sql.functions import unix_timestamp
 
@@ -1582,13 +1606,20 @@ def w4_risk_propagation(
         min_("ts_in").alias("first_ts"),
         max_(col("amt_out") / col("amt_in")).alias("max_forward_ratio"),
     )
+    # Sorted, so the kept prefix is the same on every run whatever order the
+    # collect_* produced.
+    cap = int(max_txns_per_alert)
+    per_entity = per_entity.withColumn(
+        "_txns", array_sort(array_distinct(expr("concat(uetrs_in, uetrs_out)")))
+    ).withColumn(
+        "_entities", array_sort(expr("cast(array_union(as_set, cs_set) as array<bigint>)"))
+    )
     return _alert_frame(
         per_entity,
         rule_id=lit("W4_risk_propagation"),
         entity_id=col("b"),
-        related_txn_ids=array_distinct(expr("concat(uetrs_in, uetrs_out)")),
-        # cast(set as array<bigint>) via expr for compat with older Spark
-        related_entity_ids=expr("cast(array_union(as_set, cs_set) as array<bigint>)"),
+        related_txn_ids=expr(f"slice(_txns, 1, {cap})"),
+        related_entity_ids=expr(f"slice(_entities, 1, {cap})"),
         alert_ts=col("last_ts"),
         # Score clamped to [0, 0.95] so downstream percentile aggregations
         # don't skew from >1 values (see W3 fix). max_forward_ratio -
@@ -1607,8 +1638,24 @@ def w4_risk_propagation(
             "cast(first_ts as string), ' last ', cast(last_ts as string))"
         ),
         evidence=map_from_arrays(
-            array(lit("rule"), lit("velocity_hours"), lit("forward_ratio")),
-            array(lit("W4_risk_propagation"), lit(str(velocity_hours)), lit(str(forward_ratio))),
+            array(
+                lit("rule"),
+                lit("velocity_hours"),
+                lit("forward_ratio"),
+                lit("txn_total"),
+                lit("txns_truncated"),
+                lit("entity_total"),
+                lit("entities_truncated"),
+            ),
+            array(
+                lit("W4_risk_propagation"),
+                lit(str(velocity_hours)),
+                lit(str(forward_ratio)),
+                size(col("_txns")).cast("string"),
+                (size(col("_txns")) > lit(cap)).cast("string"),
+                size(col("_entities")).cast("string"),
+                (size(col("_entities")) > lit(cap)).cast("string"),
+            ),
         ),
     )
 
@@ -2394,12 +2441,21 @@ def w5_sanctions_match(
             "list_id, ' (', cast(size(_txns) as string), ' prior payments)')"
         ),
         evidence=map_from_arrays(
-            array(lit("rule"), lit("list_id"), lit("list_version"), lit("match_mode")),
+            array(
+                lit("rule"),
+                lit("list_id"),
+                lit("list_version"),
+                lit("match_mode"),
+                lit("txn_total"),
+                lit("txns_truncated"),
+            ),
             array(
                 lit("W5_sanctions_match"),
                 col("list_id"),
                 col("list_version").cast("string"),
                 lit("rescreen"),
+                size(col("_txns")).cast("string"),
+                (size(col("_txns")) > lit(RESCREEN_MAX_RELATED)).cast("string"),
             ),
         ),
     )

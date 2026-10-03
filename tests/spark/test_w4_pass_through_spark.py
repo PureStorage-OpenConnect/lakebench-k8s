@@ -57,3 +57,49 @@ def test_pass_through_found_across_bucket_boundary(spark):
     ]
     out = w4_risk_propagation(_df(spark, rows), run_id="r").collect()
     assert [(a["entity_id"], sorted(a["related_txn_ids"])) for a in out] == [(2, ["i1", "o1"])]
+
+
+def test_hub_alert_is_capped_sorted_and_says_so(spark):
+    """AML-2 W4 evidence cap: a hub's related arrays are sorted and cut to
+    max_txns_per_alert (1000), and the evidence map carries the full counts
+    and the truncation flags. 1500 credits from 1500 senders, each forwarded
+    to one of 1500 receivers within the hour: 3000 related txns and 3000
+    related entities."""
+    from detection_rules import w4_risk_propagation
+
+    rows = []
+    for i in range(1500):
+        rows.append((f"in{i:05d}", 10_000 + i, 2, 1, 1000))
+        rows.append((f"out{i:05d}", 2, 20_000 + i, 1.5, 950))
+    rows.append(("si", 7, 8, 1, 1000))  # a small pass-through at entity 8
+    rows.append(("so", 8, 9, 2, 990))
+    out = {a["entity_id"]: a for a in w4_risk_propagation(_df(spark, rows), run_id="r").collect()}
+
+    hub = out[2]
+    every_txn = sorted([f"in{i:05d}" for i in range(1500)] + [f"out{i:05d}" for i in range(1500)])
+    assert hub["related_txn_ids"] == every_txn[:1000]
+    every_entity = sorted([10_000 + i for i in range(1500)] + [20_000 + i for i in range(1500)])
+    assert hub["related_entity_ids"] == every_entity[:1000]
+    assert hub["evidence"]["txn_total"] == "3000"
+    assert hub["evidence"]["txns_truncated"] == "true"
+    assert hub["evidence"]["entity_total"] == "3000"
+    assert hub["evidence"]["entities_truncated"] == "true"
+
+    small = out[8]
+    assert small["related_txn_ids"] == ["si", "so"]
+    assert small["related_entity_ids"] == [7, 9]
+    assert small["evidence"]["txn_total"] == "2"
+    assert small["evidence"]["txns_truncated"] == "false"
+    assert small["evidence"]["entities_truncated"] == "false"
+
+
+def test_cap_is_a_rule_parameter(spark):
+    """The cap is a keyword of the rule, so callers that pass a rule's own
+    parameters (replay, reproduction) see it."""
+    from detection_rules import w4_risk_propagation
+
+    rows = [("a1", 1, 2, 1, 1000), ("a2", 3, 2, 1, 1000), ("b1", 2, 4, 2, 990)]
+    (alert,) = w4_risk_propagation(_df(spark, rows), run_id="r", max_txns_per_alert=2).collect()
+    assert alert["related_txn_ids"] == ["a1", "a2"]
+    assert alert["evidence"]["txn_total"] == "3"
+    assert alert["evidence"]["txns_truncated"] == "true"

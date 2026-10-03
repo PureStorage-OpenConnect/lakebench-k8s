@@ -470,6 +470,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **AML results move to workload version `aml-2`.** W4's
+  `related_txn_ids` and `related_entity_ids` are sorted and cut to 1,000
+  per alert (an evidence cap, as W2 already had), and the evidence maps of
+  W2, W4 and the W5 rescreen gain the full count and a truncation flag
+  (`txn_total`, `txns_truncated`; W4 also `entity_total`,
+  `entities_truncated`). Scoring records the cut alerts per rule and labels
+  the recall of the typologies those rules detect as bounded by the cap.
+  Every rule now builds its alert columns through one helper, which is
+  results-neutral. A saturated W4 hub alert in continuous mode keeps the
+  same capped list and so is not raised again, which can move W4's time to
+  detect. Records stamped `aml-1` do not compare with `aml-2` runs. See
+  [aml-scoring.md](docs/aml-scoring.md#per-alert-evidence-caps).
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with

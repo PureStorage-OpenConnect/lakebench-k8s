@@ -390,7 +390,31 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         }
         for r in sorted(status_rows, key=lambda x: x["rule_id"])
     ]
+    # Alerts whose related_txn_ids a per-alert evidence cap cut (W1, the W2
+    # beneficiary kind, W4 and the W5 rescreen write txns_truncated into
+    # their evidence). Scoring matches planted
+    # payments against related_txn_ids, so a cut alert can miss planted
+    # payments past the cut: recall for a typology such a rule detects is
+    # bounded by a Lakebench-imposed cap, and says so (invariant 6).
+    capped_by_rule: dict[str, int] = {}
+    if "evidence" in alerts.columns:
+        for row in (
+            alerts.where(col("evidence").getItem("txns_truncated") == lit("true"))
+            .groupBy("rule_id")
+            .count()
+            .collect()
+        ):
+            capped_by_rule[row["rule_id"]] = int(row["count"])
+    capped_typologies = {
+        typ: sorted(r for r in rids if capped_by_rule.get(r))
+        for typ, rids in sorted(designated.items())
+        if any(capped_by_rule.get(r) for r in rids)
+    }
     summary = {
+        "evidence_capped_alerts_by_rule": dict(sorted(capped_by_rule.items())),
+        # typology -> its designated rules with a cut alert: that typology's
+        # recall is bounded by an evidence cap.
+        "recall_bounded_by_evidence_cap": capped_typologies,
         "typology_counts": counts,
         "rules": rules,
         "total_alerts": int(total_alerts),
@@ -535,6 +559,11 @@ def main() -> None:
             "subjects_not_customer": (
                 (check.get("by_typology") or {}).get(r.get("typology_type"), {})
             ).get("not_customer"),
+            # Designated rules with an alert cut by an evidence cap: this
+            # recall is bounded by that Lakebench-imposed cap.
+            "bounded_by_evidence_cap": summary["recall_bounded_by_evidence_cap"].get(
+                r.get("typology_type"), []
+            ),
         }
         for r in rows
     ]

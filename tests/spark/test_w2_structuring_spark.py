@@ -131,6 +131,14 @@ def test_steady_stream_is_one_alert(spark):
     assert 4 <= len(bene) <= 6
     assert all(len(a["related_txn_ids"]) <= 10 for a in bene)
     assert any(" received 2" in a["narrative"] for a in bene)  # full count, over the cap
+    # AML-2: the evidence says which lists the cap cut, with the full count.
+    for a in bene:
+        total = int(a["evidence"]["txn_total"])
+        assert a["evidence"]["txns_truncated"] == ("true" if total > 10 else "false"), a
+    assert any(a["evidence"]["txns_truncated"] == "true" for a in bene)
+    orig = [a for a in out if a["alert_type"] == "structuring"]
+    assert orig and all(a["evidence"]["txns_truncated"] == "false" for a in orig)
+    assert all(int(a["evidence"]["txn_total"]) == len(a["related_txn_ids"]) for a in orig)
 
 
 def test_one_structurer_plus_one_other_is_not_multiple_depositors(spark):

@@ -35,6 +35,11 @@ nothing measured under this one):
   when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
   every gold day; incremental gold runs only for multi-cycle cycles 2+, and
   the strategy that ran is recorded per job (2026-10-02).
+- ``aml-2``: W4's related_txn_ids and related_entity_ids are sorted and cut
+  to 1,000 per alert, and its evidence map gains txn_total, txns_truncated,
+  entity_total and entities_truncated, so W4 alerts and possibly W4 recall
+  change (2026-10-02). The first AML result change of v1.7; later
+  ones before the release take a dev suffix.
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
@@ -71,7 +76,7 @@ V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
     "customer360": "c360-2",
-    "financial": "aml-1",
+    "financial": "aml-2",
     "custom": "custom-1",
 }
 

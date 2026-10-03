@@ -293,3 +293,34 @@ def test_subject_check_unchecked_without_participants(spark):
 
     out = subject_customer_check(spark, _manifest(spark), None, None, SCOPED)
     assert out["status"] == "unchecked" and "participant_entity_ids" in out["reason"]
+
+
+def test_recall_of_a_rule_with_a_cut_alert_is_labelled_bounded(spark):
+    """Invariant 6: an evidence cap (W1, W4) cut an alert's related_txn_ids,
+    so recall for the typology that rule detects can miss planted payments
+    past the cut. The summary counts cut alerts per rule and names the
+    typologies whose recall is bounded by the cap."""
+    from score_financial import compute_scores
+
+    status = [
+        {"rule_id": "W2_structuring", "status": "ran", "target_typology": "fan_out"},
+        {"rule_id": "W4_risk_propagation", "status": "ran", "target_typology": "rapid_layering"},
+    ]
+    alerts = spark.createDataFrame(
+        [
+            ("a1", "W2_structuring", ["u1"], {"txns_truncated": "false"}),
+            ("h1", "W4_risk_propagation", ["u6"], {"txns_truncated": "true", "txn_total": "3000"}),
+            ("h2", "W4_risk_propagation", ["u6"], {"txns_truncated": "false"}),
+            ("n1", "W4_risk_propagation", ["u6"], None),
+        ],
+        "alert_id STRING, rule_id STRING, related_txn_ids ARRAY<STRING>, "
+        "evidence MAP<STRING, STRING>",
+    )
+    _, s = compute_scores(spark, _manifest(spark), alerts, status)
+    assert s["evidence_capped_alerts_by_rule"] == {"W4_risk_propagation": 1}
+    assert s["recall_bounded_by_evidence_cap"] == {"rapid_layering": ["W4_risk_propagation"]}
+
+    uncut = alerts.where("alert_id <> 'h1'")
+    _, s = compute_scores(spark, _manifest(spark), uncut, status)
+    assert s["evidence_capped_alerts_by_rule"] == {}
+    assert s["recall_bounded_by_evidence_cap"] == {}

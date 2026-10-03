@@ -347,6 +347,30 @@ matching role, so accidentally scoring against them is not possible.
 Numbers you publish for comparison with other stacks should cite the
 seed the run used and, when it is 43, say so.
 
+## Per-alert evidence caps
+
+Some rules cut an alert's related-transaction list so one alert row cannot
+grow with the corpus. These are Lakebench-imposed caps, set by Lakebench and
+not tuned to any result:
+
+| Rule | List | Cap | Kept |
+|---|---|---|---|
+| W1_connected_components | `related_txn_ids` | 250,000 | earliest by time |
+| W2_structuring, beneficiary kind | `related_txn_ids`, `related_entity_ids` | 1,000 | first by uetr order |
+| W4_risk_propagation | `related_txn_ids`, `related_entity_ids` | 1,000 | first in sorted order |
+| W5_sanctions_match, rescreen | `related_txn_ids` | 200 | first by payment time |
+
+The W2 originator kind and the other rules are not cut. Each capped alert's
+`evidence` map carries the full count (`txn_total`, and `entity_total` for
+W4) and whether the cap cut the list (`txns_truncated`, and
+`entities_truncated` for W4). Scoring matches planted payments against
+`related_txn_ids`, so a cut alert can miss planted payments past the cut.
+When any alert of a rule was cut, the scoring summary counts them in
+`evidence_capped_alerts_by_rule`, lists the typologies the rule detects in
+`recall_bounded_by_evidence_cap`, and each such typology's entry in
+`typologies` names the rule in `bounded_by_evidence_cap`: that recall is
+bounded by a Lakebench-imposed cap, not a property of the detector alone.
+
 ## Metric-trust caveats
 
 Three places on the scorecard where the metric name suggests more

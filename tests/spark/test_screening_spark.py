@@ -196,6 +196,7 @@ def test_w5_transaction_screen_and_rescreen(spark, tmp_path, monkeypatch):
     # the UTC instant into a local wall-clock time).
     assert abs(re["alert_ts"] - dt.datetime(2024, 10, 1)) <= dt.timedelta(days=1)
     assert re["evidence"]["list_id"] == "LBS-3"
+    assert re["evidence"]["txn_total"] == "2" and re["evidence"]["txns_truncated"] == "false"
     assert re["alert_ts"] < re["detected_ts"]
     assert list(rows[0].asDict()) == [f.name for f in dr._empty_alerts_df(spark, "r").schema.fields]
 
