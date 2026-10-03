@@ -109,7 +109,7 @@ def _install(monkeypatch, world: _World, *, owned: bool = True):
         def has_user_objects(self, bucket, prefix=""):
             return any(k.startswith(prefix) for k in world.keys)
 
-        def delete_prefix(self, bucket, prefix, *, abort_multipart=False):
+        def delete_prefix(self, bucket, prefix, *, abort_multipart=False, keep_keys=frozenset()):
             gone = {k for k in world.keys if k.startswith(prefix.rstrip("/") + "/")}
             world.keys -= gone
             return len(gone)

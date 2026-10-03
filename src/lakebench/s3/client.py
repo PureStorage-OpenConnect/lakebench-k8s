@@ -499,7 +499,14 @@ class S3Client:
                 f"Failed to get bucket size for {bucket_name}: {e}"
             )
 
-    def delete_prefix(self, bucket_name: str, prefix: str, *, abort_multipart: bool = False) -> int:
+    def delete_prefix(
+        self,
+        bucket_name: str,
+        prefix: str,
+        *,
+        abort_multipart: bool = False,
+        keep_keys: frozenset[str] = frozenset(),
+    ) -> int:
         """Delete every object under ``prefix``. Returns the count deleted.
 
         Refuses an empty or root prefix: this is for scoped state such as
@@ -507,7 +514,8 @@ class S3Client:
         Also refuses a prefix under ``.lakebench/`` (Lakebench's own keys).
         ``abort_multipart`` also aborts incomplete multipart uploads under the
         prefix (FlashBlade keeps them as ghosts otherwise, GOTCHAS 2); they
-        are not counted in the return value.
+        are not counted in the return value. Keys in ``keep_keys`` are left
+        in place (the corpus series marker that says a clear is under way).
         """
         if not prefix.strip("/"):
             raise ValueError("delete_prefix needs a non-empty prefix")
@@ -518,7 +526,9 @@ class S3Client:
         try:
             paginator = self._client.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
-                keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                keys = [
+                    {"Key": o["Key"]} for o in page.get("Contents", []) if o["Key"] not in keep_keys
+                ]
                 for i in range(0, len(keys), 1000):
                     chunk = keys[i : i + 1000]
                     resp = self._client.delete_objects(

@@ -246,15 +246,17 @@ lakebench generate my-config.yaml --regenerate
 `--regenerate` clears only the datagen prefix; other data in the bucket
 (stream checkpoints, another workload's prefix) stays. To keep the existing
 corpus instead, run the pipeline with `run --skip-generate`, or without
-`--generate`.
+`--generate` (single-cycle; a multi-cycle run keeps it only with
+`--skip-generate`, and a multi-cycle AML run cannot reuse it).
 
 Every generate writes a corpus series marker,
 `<datagen prefix>/_corpus/series.json`: the cycle count, the cycles whose
 datagen Job finished, each cycle's window, the generation parameters and the
 image digest the datagen pods ran. It is written when the generate starts,
 with no cycle finished, and updated after each cycle's Job succeeds, so an
-interrupted generate leaves a marker that says so. A run that reuses the
-corpus is refused (exit 2) when the marker is unfinished or describes
+interrupted generate leaves a marker that says so; a clear of the prefix
+first writes a marker that says a clear is under way and keeps it. A run that reuses the
+corpus is refused (exit 3) when the marker is unfinished or describes
 another cycle count, window or generation than the config's; see "Reusing a
 corpus" under `run` in the [CLI reference](cli-reference.md#run). No Spark
 stage reads `_corpus/`. `lakebench generate` refuses a multi-cycle config
