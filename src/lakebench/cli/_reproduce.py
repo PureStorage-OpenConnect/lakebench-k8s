@@ -1270,6 +1270,16 @@ def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
                 "refuse",
                 f"the {role} package's seed cannot be checked against the look record",
             )
+        # A recorded form (digit text, a salted hash, {seed_ref, role}) that
+        # names a held-out seed cannot be matched to its look: refused.
+        from lakebench.aml.look_guard import recorded_seed_role
+
+        try:
+            held_form = recorded_seed_role(seed)
+        except Exception:  # noqa: BLE001 -- unreadable: fail closed
+            held_form = "unreadable"
+        if held_form is not None:
+            return ("refuse", "a held-out corpus whose look has not run is never reproduced")
         return None
     mine = [e for e in looks if int(e["seed"]) == seed]
     done = [e for e in mine if e.get("state") == "complete"]

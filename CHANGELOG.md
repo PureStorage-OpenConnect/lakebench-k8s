@@ -576,22 +576,31 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   seed, and `compare` refuses a run record from one. Each refusal exits 2
   on the `run.protected_corpus` path before any cluster call and names a
   role, never a seed. A spent seed, a held-out seed under another role and a
-  role that does not match its seed are refused when the config loads (the
-  same path); `destroy`, `stop`, `status`, `logs` and `config show` still
-  load such a config, so a registered look's deployment can be torn down
-  once its seed is spent. The in-run scorer (`score-financial`) also reads
-  every manifest row and refuses a corpus any of whose rows come from a
-  held-out or spent seed, so a development config over a bucket holding a
-  registered corpus is not scored.
+  role that does not match its seed are refused when the config loads
+  (exit 2, as a config error). The commands that tear down, read about or
+  show a deployment (`destroy`, `stop`, `admin`, `status`, `logs`,
+  `report`, `results`, `plan`, `info`, the `config` read commands, and
+  `compare`'s name resolution) skip that load-time check, so a registered
+  look's deployment can be torn down once its seed is spent; `clean` still
+  refuses it (use `destroy`). A financial config whose bronze prefix is one
+  this host generated a registered corpus into (the corpus ledger below) is
+  refused the same way, so a development config pointed at that bucket does
+  not read the registered corpus. The in-run scorer (`score-financial`) also
+  reads every manifest row and refuses a corpus any of whose rows come from
+  a held-out or spent seed. `compare` refuses a record only when it is shown
+  to be protected; when the held-out record cannot be read it hides every
+  integer seed instead.
 - **`lakebench generate --registered-corpus`** generates the registered
-  evaluation or robustness corpus, and is the only way to: without it a
-  protected config is refused (2). It needs `--yes`, refuses a seed that
-  already has a look, and appends the attempt to
+  evaluation or robustness corpus; it is the only Lakebench command that
+  does (without it a protected config is refused, 2). It needs `--yes`,
+  refuses `--allow-stale-bronze` and a seed that already has a look (the
+  look ledger, or any commit of the look record), and appends the attempt to
   `~/.lakebench/aml_corpora.jsonl` (`LB_AML_CORPORA_LEDGER`) before the first
-  cluster call, then `generated` (with the observed image digest) or
-  `failed`; a crash leaves `attempted`. The ledger, the datagen sidecar and
-  the journal name the seed by its salted hash only. Generating the corpus
-  is not a look and spends nothing.
+  cluster call, `submitting` before the datagen Job is created, then
+  `generated` (with the observed image digest) or `failed`; a crash leaves
+  `attempted` (and `submitting` once the Job may exist). The ledger, the
+  datagen sidecar and the journal name the seed by its salted hash only.
+  Generating the corpus is not a look and spends nothing.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock

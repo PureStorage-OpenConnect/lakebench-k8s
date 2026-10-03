@@ -1231,6 +1231,11 @@ def manifest_protected_reason(
         verdict = corpus_verdict(rows, heldout=heldout, spent=known)
     except CorpusSeedError as e:
         return f"the corpus seed cannot be recovered from the manifest ({e})"
+    except (OSError, ValueError) as e:  # their messages name files and roles, never a seed
+        return (
+            f"the held-out record cannot be read ({type(e).__name__}: {e}), so the corpus "
+            "is unchecked"
+        )
     except Exception as e:  # noqa: BLE001 -- unreadable held-out record: refuse
         return (
             f"the held-out record cannot be read ({type(e).__name__}), so the corpus is unchecked"
@@ -1300,33 +1305,41 @@ def seed_ever_recorded(seed: int) -> str | None:
                 label = f"the registered {role} seed" if role else "the seed"
                 return f"{label} is in the look ledger {led}"
     rec = looks_path()
-    import subprocess
-
-    hits = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(rec.parent),
-            "log",
-            "--all",
-            "--format=%H",
-            "-S",
-            f'"seed": {int(seed)}',
-            "--",
-            rec.name,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if hits.returncode != 0:
-        # Not CalledProcessError: its text carries the argv, which holds the seed.
-        raise OSError(f"git log over {rec.name} failed (exit {hits.returncode})")
-    out = hits.stdout.strip()
-    if out:
+    commit = _look_commit(rec, int(seed))
+    if commit:
         role = heldout_role(seed)
         label = f"the registered {role} seed" if role else "the seed"
-        return f"{label} was recorded in {rec.name} by commit {out.splitlines()[0]}"
+        return f"{label} was recorded in {rec.name} by commit {commit}"
+    return None
+
+
+def _look_commit(rec: Path, seed: int) -> str | None:
+    """The first commit (any branch, stashes included) whose copy of the look
+    record ``rec`` lists ``seed``, or None. Each commit's copy is parsed; the
+    seed never appears in a command line (git log -S would put it in argv,
+    readable by every process on the host). Raises OSError when git cannot
+    list or read the history."""
+    import subprocess
+
+    def git(*args: str) -> str:
+        out = subprocess.run(
+            ["git", "-C", str(rec.parent), *args], capture_output=True, text=True, check=False
+        )
+        if out.returncode != 0:
+            raise OSError(f"git {args[0]} over {rec.name} failed (exit {out.returncode})")
+        return out.stdout
+
+    # Commits that added or changed the file (a deleting commit has no copy).
+    for sha in git("log", "--all", "--format=%H", "--diff-filter=ACMR", "--", rec.name).split():
+        try:
+            doc = json.loads(git("show", f"{sha}:./{rec.name}"))
+        except ValueError:
+            raise OSError(f"{rec.name} at commit {sha} is not JSON") from None
+        looks = doc.get("looks") if isinstance(doc, dict) else None
+        for e in looks if isinstance(looks, list) else []:
+            s = e.get("seed") if isinstance(e, dict) else None
+            if isinstance(s, int) and not isinstance(s, bool) and s == seed:
+                return sha
     return None
 
 

@@ -57,6 +57,8 @@ def use_heldout(monkeypatch, *, looks_open: bool = True, looks: list | None = No
     corpora = {**CORPORA, "registered_looks_open": looks_open}
     recorded = list(looks or [])
     monkeypatch.setattr(ds, "_heldout", lambda: held)
+    # No host ledger leaks in: a test that needs one sets its own path.
+    monkeypatch.setenv("LB_AML_CORPORA_LEDGER", "/nonexistent/lakebench/aml_corpora.jsonl")
     monkeypatch.setattr(ds, "load_looks", lambda path=None: list(recorded))
     monkeypatch.setattr(
         ds,

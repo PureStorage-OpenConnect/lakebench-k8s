@@ -33,6 +33,10 @@ MATCHED = [
     (42,),
     (7777,),
     ("bogus-role",),
+    (pc.EV, 42),
+    (42, pc.EV),
+    (pc.CALIBRATION, pc.EV),
+    (pc.EV, pc.RB),
 ]
 COUNTS_ONLY = [False, True]
 CLAIM = [None, True, False]

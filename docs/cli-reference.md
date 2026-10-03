@@ -569,7 +569,7 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | flag |  | Skip confirmation prompt |
 | `--regenerate` |  | flag |  | Clear the datagen prefix in the bronze bucket before generating, when this deployment owns the bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment cannot prove it owns. |
 | `--allow-stale-bronze` |  | flag |  | Generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; the run records it. |
-| `--registered-corpus` |  | flag |  | Generate the registered evaluation or robustness AML corpus (the config declares the role and its seed). Needs --yes. The attempt is recorded in ~/.lakebench/aml_corpora.jsonl (LB_AML_CORPORA_LEDGER) before the first cluster call. Without this flag a config that names a protected corpus is refused (exit 2). |
+| `--registered-corpus` |  | flag |  | Generate the registered evaluation or robustness AML corpus (the config declares the role and its seed). Needs --yes; refuses --allow-stale-bronze. The attempt is recorded in ~/.lakebench/aml_corpora.jsonl (LB_AML_CORPORA_LEDGER) before the first cluster call. Without this flag a config that names a protected corpus is refused (exit 2). |
 <!-- END GENERATED: cli generate -->
 
 - `--regenerate` clears the datagen prefix, not the whole bucket, and only
