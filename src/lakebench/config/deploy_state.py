@@ -60,6 +60,13 @@ class NameResolution:
     source: NameSource
     legacy_state_path: Path
     legacy_name: str | None = None
+    #: A config reached through a symbolic link: the v1.6 state file beside
+    #: the file the link resolves to, and the name it records, when that
+    #: differs from the name beside the path given (``legacy_name``, the one
+    #: 1.6 read). The loader refuses a nameless config with this set, except
+    #: under ``--name`` (checked against ``legacy_name`` and the namespace's
+    #: stamps) and for commands that look at no deployment.
+    resolved_legacy: tuple[Path, str] | None = None
 
     @property
     def nameless(self) -> bool:
@@ -68,20 +75,31 @@ class NameResolution:
 
 
 def legacy_state_path(config_path: str | Path) -> Path:
-    """Where v1.6 kept the auto-generated name for configs in this directory."""
+    """The v1.6 state file beside the file *config_path* resolves to
+    (symbolic links followed). Used to copy it with a config; the name 1.6
+    read is the one beside the path given (:func:`given_legacy_state_path`)."""
     return _config_file(config_path).parent / LEGACY_STATE
 
 
+def given_legacy_state_path(config_path: str | Path) -> Path:
+    """Where v1.6 read the name of a nameless config: ``.lakebench/state.json``
+    in the directory of the path it was given, symbolic links not followed,
+    so a config reached through a link used the link's directory."""
+    return Path(config_path).absolute().parent / LEGACY_STATE
+
+
 def read_legacy_name(config_path: str | Path) -> str | None:
-    """The name a v1.6 load recorded for nameless configs in this directory.
+    """The name a v1.6 load recorded for nameless configs in the directory of
+    the path given, as 1.6 read it (:func:`given_legacy_state_path`).
 
     Returned verbatim. A missing, unreadable or malformed file gives None;
     the file is never repaired or rewritten.
     """
-    return _read_legacy_file(legacy_state_path(config_path))
+    return _read_legacy_file(given_legacy_state_path(config_path))
 
 
 def _read_legacy_file(path: Path) -> str | None:
+    """The ``name`` of the v1.6 state file at *path*, or None."""
     try:
         with open(path) as f:
             state = json.load(f)
@@ -96,17 +114,15 @@ def _read_legacy_file(path: Path) -> str | None:
 
 
 def legacy_names(config_path: str | Path) -> dict[Path, str]:
-    """Every v1.6 name recorded for this config, by state file.
-
-    1.6 read ``.lakebench/state.json`` in the directory of the path it was
-    given, so a config reached through a symbolic link used the link's
-    directory; :func:`read_legacy_name` reads the directory of the file the
-    link resolves to. Both are read here (one file when they are the same),
-    so a caller can refuse when they disagree.
-    """
+    """Every v1.6 name recorded for this config, by state file: the one
+    beside the path given (the one 1.6 read) and, through a symbolic link,
+    the one beside the file the link resolves to (one file when they are
+    the same), so a caller can refuse when either names a deployment."""
     found: dict[Path, str] = {}
-    given = Path(config_path).absolute().parent / LEGACY_STATE
-    for path in dict.fromkeys([given, legacy_state_path(config_path)]):
+    given = given_legacy_state_path(config_path)
+    resolved = legacy_state_path(config_path)
+    paths = [given] if _same_file(given, resolved) else [given, resolved]
+    for path in paths:
         name = _read_legacy_file(path)
         if name:
             found[path] = name
@@ -213,8 +229,14 @@ def resolve_name(
     the file's own ``name:`` is an error, because it would point the command
     at a deployment the file does not describe.
     """
-    legacy_path = legacy_state_path(config_path)
-    legacy = read_legacy_name(config_path)
+    legacy_path = given_legacy_state_path(config_path)
+    legacy = _read_legacy_file(legacy_path)
+    resolved_path = legacy_state_path(config_path)
+    resolved_legacy: tuple[Path, str] | None = None
+    if not _same_file(legacy_path, resolved_path):
+        other = _read_legacy_file(resolved_path)
+        if other is not None and other != legacy:
+            resolved_legacy = (resolved_path, other)
     configured = raw.get("name")
     if configured:
         name = str(configured)
@@ -223,12 +245,22 @@ def resolve_name(
                 f"--name {name_override!r} does not match the config's name {name!r}; "
                 "--name is only for configs that set no name"
             )
-        return NameResolution(name, "config", legacy_path, legacy)
+        return NameResolution(name, "config", legacy_path, legacy, resolved_legacy)
     if name_override:
-        return NameResolution(name_override, "override", legacy_path, legacy)
+        return NameResolution(name_override, "override", legacy_path, legacy, resolved_legacy)
     if legacy:
-        return NameResolution(legacy, "legacy-state", legacy_path, legacy)
-    return NameResolution(suggested_name(config_path), "suggested", legacy_path, None)
+        return NameResolution(legacy, "legacy-state", legacy_path, legacy, resolved_legacy)
+    return NameResolution(
+        suggested_name(config_path), "suggested", legacy_path, None, resolved_legacy
+    )
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Whether *a* and *b* are one file (or one missing path)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return a.resolve() == b.resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +727,16 @@ def relocate_state(
         raise RelocateRefused(f"{src} is not a file")
     if dst_dir == src.parent:
         raise RelocateRefused(f"{dst_dir} is the config's own directory")
+    if not _same_file(given_legacy_state_path(config_path), legacy_state_path(config_path)):
+        recorded = legacy_names(config_path)
+        if recorded:
+            # The v1.6 state copied is the target directory's; through a link
+            # 1.6 read the link's, so the copy could carry another name.
+            raise RelocateRefused(
+                f"{config_path} is a symbolic link and v1.6 recorded "
+                + " and ".join(f"'{n}' in {p}" for p, n in recorded.items())
+                + f"; relocate {src} from its own path"
+            )
     if name:
         import yaml
 
