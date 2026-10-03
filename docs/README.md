@@ -26,6 +26,7 @@ Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures o
 - [Scoring and Benchmarking](benchmarking.md) -- pipeline scorecard, query engine benchmark, QpH scoring
 - [Query Reference](query-reference.md) -- Per-query reference with categories and expected output
 - [Customer 360 benchmark specification](benchmarks/C360.md) -- Data model, pipeline, correctness checks, queries, metrics and comparability rules
+- [AML benchmark specification](benchmarks/AML.md) -- Data model, seed policy, pipeline, detection rules, correctness checks, queries, metrics, scoring and comparability rules
 
 ## Component Reference
 
