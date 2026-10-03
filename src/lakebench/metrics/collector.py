@@ -984,7 +984,9 @@ class PipelineBenchmark:
     # Why qph_degradation_pct is withheld though there are enough rounds:
     # the rounds ran different query sets (an AML continuous run's 8-query
     # rounds before its first case, 12 after), so the halves time different
-    # work. The same rule compare applies (composite_qph_basis.blended).
+    # work. This matches compare's rule for the blended case only
+    # (composite_qph_basis.blended); compare also marks a run whose every
+    # round missed the same query, which still records a figure here.
     qph_degradation_withheld: str | None = None
 
     # Maintenance cost metrics (v1.3)
