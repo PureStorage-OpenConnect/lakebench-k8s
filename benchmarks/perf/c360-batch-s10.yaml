@@ -16,7 +16,7 @@ name: ${LAKEBENCH_PERF_NAME:-perf-c360-batch-s10}
 recipe: hive-iceberg-spark-trino
 
 images:
-  datagen: docker.io/sillidata/lb-datagen:14c4eee
+  datagen: docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   trino: trinodb/trino:483

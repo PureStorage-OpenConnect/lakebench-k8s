@@ -4,11 +4,10 @@ pure parts and the checked-in reference manifests."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
-
-import pytest
 
 from tests.conftest import exec_repo_script
 
@@ -173,8 +172,59 @@ def test_reference_manifests_carry_no_endpoint_or_key():
         json.loads(text)
 
 
-@pytest.mark.skip(
-    reason="ch03's lineage loader (ER-9L) is not in the tree yet; CD-8 adds this test"
-)
-def test_compare_output_matches_loader():
-    pass
+def _lineage_tree(root: Path, doc: dict, a: str, b: str) -> Path:
+    rel = f"tests/fixtures/datagen_reference/compare-{b.split(':')[1][:12]}.json"
+    f = root / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    raw = (json.dumps(doc, indent=1) + "\n").encode()
+    f.write_bytes(raw)
+    table = root / "lineage.yaml"
+    table.write_text(
+        "lineage:\n"
+        f"  - digest: {a}\n    canonical: {a}\n"
+        f"  - digest: {b}\n    canonical: {a}\n    evidence: {rel}\n"
+        f'    evidence_sha256: "{hashlib.sha256(raw).hexdigest()}"\n'
+    )
+    return table
+
+
+def test_compare_output_matches_loader(tmp_path):
+    """What ``compare`` writes is what ch03's lineage loader accepts, and the
+    same file with case F2 removed is refused, so the writer and the reader
+    cannot drift apart on layout (design ch05 4.1, d3)."""
+    from lakebench.metrics import corpus_identity as ci
+
+    a, b = "sha256:" + "1" * 64, "sha256:" + "2" * 64
+    cases = {}
+    for case in bc.CASES:
+        objects = [_obj(f"{case}/part-0.parquet"), _obj(f"{case}/manifest.parquet", 7)]
+        ref = {
+            "seed_ref": "43" if case.startswith("F") else "42",
+            "runs": [["--seed", "43" if case.startswith("F") else "42"]],
+            "env": {"CPU_LIMIT": "8"},
+            "threads": [[8, 8, 8, 8]],
+            "objects": objects,
+        }
+        cases[case] = (ref, _run(list(reversed(objects)), runs=ref["runs"]))
+    doc = bc.compare_result(a, b, cases)
+    table = ci.load_lineage(_lineage_tree(tmp_path, doc, a, b))
+    assert ci.check_lineage_evidence(table, tmp_path) == []
+    assert table[b].canonical == a
+
+    doc["cases"] = [c for c in doc["cases"] if c["case"] != "F2"]
+    table = ci.load_lineage(_lineage_tree(tmp_path, doc, a, b))
+    errors = ci.check_lineage_evidence(table, tmp_path)
+    assert any("expected exactly" in e for e in errors), errors
+
+
+def test_checked_in_compare_files_load():
+    """Every compare-<digest12>.json in the reference directory is named by a
+    lineage row whose evidence check passes."""
+    from lakebench.metrics import corpus_identity as ci
+
+    table = ci.load_lineage()
+    named = {row.evidence for row in table.values() if row.evidence}
+    for f in sorted(bc.REF_DIR.glob("compare-*.json")):
+        rel = str(f.relative_to(ROOT))
+        assert rel in named, f"{rel} has no lineage row"
+    assert ci.check_lineage_evidence(table, ROOT) == []
