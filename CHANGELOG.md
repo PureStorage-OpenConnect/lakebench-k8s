@@ -710,6 +710,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   The unit tests run the same guard (`tests/test_prose_style.py`). A hit
   that has to stay is listed in `scripts/prose_allowlist.txt` with a
   reason. `--only em-dashes` is now an unknown check; use `--only prose`.
+- **AML gold-finalize keeps 1,000 jobs and 1,000 stages in the Spark
+  driver's status store** (`spark.ui.retainedJobs`, `spark.ui.retainedStages`;
+  100 before, and still 100 for every other job and workload), so the
+  per-rule stage profile holds whole rules; the path-search rules (W3,
+  W17) can run more jobs than the store kept before. These keys are Lakebench's, so they
+  enter the perf-gate fingerprint of AML runs, and AML perf baselines taken
+  before this change do not compare like for like with runs after it.
 - **AML results move to workload version `aml-2`.** W4's
   `related_txn_ids` and `related_entity_ids` are sorted and cut to 1,000
   per alert (an evidence cap, as W2 already had), and the evidence maps of

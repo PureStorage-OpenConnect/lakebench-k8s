@@ -576,8 +576,9 @@ The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
   outside `rule_elapsed_s`. Three flags say how far the numbers can be
   trusted: `complete: false` when the driver's status listener had not
   caught up within 5 seconds, `truncated: true` when the store had already
-  dropped some of the rule's jobs or stages (it keeps the last 100 of
-  each), and `lossy: true` when the listener dropped events during the
+  dropped some of the rule's jobs or stages (for AML gold-finalize it keeps
+  the last 1,000 of each, enough for a whole rule; 100 for every other
+  job), and `lossy: true` when the listener dropped events during the
   rule, so task totals are low. When the starting point could not be read,
   `truncated` and `lossy` are both true. The 5 second wait covers every
   listener queue, so with Spark's event log turned on `complete` can read

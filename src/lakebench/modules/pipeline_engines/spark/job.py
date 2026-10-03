@@ -2459,6 +2459,13 @@ class SparkJobManager:
                 "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
             }
         )
+        if job_type == JobType.GOLD_FINALIZE and _schema == "financial":
+            # AML gold-finalize profiles each detection rule's stages from the
+            # driver's status store after the rule (common.rule_stage_profile);
+            # path-search rules (W3, W17) run more than 100 jobs and stages, so
+            # the store must hold a whole rule's. Completed entities only: the
+            # live-task flush above is unchanged.
+            spark_conf.update({"spark.ui.retainedJobs": "1000", "spark.ui.retainedStages": "1000"})
 
         # Prometheus metrics (for observability layer)
         if cfg.observability.enabled:
