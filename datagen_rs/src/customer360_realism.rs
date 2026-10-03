@@ -523,8 +523,8 @@ pub fn append_phone(rng: &mut Rng, out: &mut String) {
 }
 
 /// Corrupted phone: mode-selected replacement. Matches
-/// datagen/generate.py:452-469. Note that the Python regenerates area/prefix/
-/// line inside the corruption; we do the same so ids don't accidentally align.
+/// datagen/generate.py:452-469. The Python regenerates area, prefix and line
+/// inside the corruption, and so does this, so ids do not align by accident.
 pub fn append_phone_corrupt(rng: &mut Rng, out: &mut String, mode: u8) {
     let area = 200 + rng.below(799);
     let prefix = 200 + rng.below(799);

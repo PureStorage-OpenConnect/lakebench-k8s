@@ -1,5 +1,4 @@
-//! The reporting FI, its monitored population, and minimal KYC (GOALS P10
-//! stages 0 and 2).
+//! The reporting FI, its monitored population, and minimal KYC.
 //!
 //! A bank's transaction monitoring runs on its own customers; everyone else in
 //! its payment data is a counterparty at another bank. Before this module the
@@ -10,9 +9,9 @@
 //!
 //! Every attribute here is a pure function of (id, seed) plus, for the declared
 //! volume, the world's activity total. None depends on file layout, codec,
-//! thread or node count (GOALS P4.1).
+//! thread or node count.
 //!
-//! Leakage (AML-GOALS R1, D5). Customer status is drawn independently of every
+//! Leakage. Customer status is drawn independently of every
 //! other attribute. Typology instances only force their subject role to be a
 //! customer (typology::enforce_subject); nothing selects on PEP, tenure,
 //! declared volume or tier. The CRR is one deterministic method applied to
@@ -205,7 +204,7 @@ pub fn expected_monthly_volume_usd(
 /// Score is the sum (0..6); tier low for 0-1, medium for 2-3, high for 4+.
 /// PEP status is not a CRR input: it is the answer W6 (the PEP screen)
 /// is scored against, so the party zone carries no PEP flag and the CRR is
-/// computed without one (AML-GOALS #50). Returns (score, tier, factors).
+/// computed without one. Returns (score, tier, factors).
 pub fn crr(ty: i8, country: &str, expected_volume_usd: f64) -> (i32, &'static str, String) {
     let c = if country == DOMESTIC {
         0

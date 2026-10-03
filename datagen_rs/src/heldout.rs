@@ -224,6 +224,13 @@ impl HeldOut {
         }
     }
 
+    /// How a marker names a financial corpus seed: its salted hash under the
+    /// file's salt (`datagen_seed.seed_ref` on the Python side), so a marker
+    /// never carries the seed.
+    pub fn seed_ref(&self, seed: i64) -> String {
+        seed_hash(&self.salt, seed)
+    }
+
     /// Whether the file lists `seed` as spent.
     pub fn is_spent(&self, seed: i64) -> bool {
         self.spent.contains(&seed)

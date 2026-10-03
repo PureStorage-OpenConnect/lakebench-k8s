@@ -856,6 +856,17 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   configs, seed 43 included, render exactly as before. Needs the next
   datagen image (the generator and its entrypoint read `LB_DATAGEN_SEED`); an
   older image refuses a registered corpus with exit 2.
+- **Each datagen pod writes a corpus marker when it finishes.**
+  `<prefix>/_corpus/c<cycle>-node-<node>.json` records the files, rows and
+  bytes the pod wrote, the build commit, the seed (as its salted hash for
+  the financial schema) and `corpus_args`: the corpus arguments as the
+  generator resolved them (defaults applied; the parquet writer settings
+  from `DG_*` included; destination, transport, credentials and thread
+  count left out) with their sha256, so an omitted flag and the same flag at
+  its default hash the same. `generate --print-resolved-args` prints that
+  object and writes nothing; `--version` prints the model version and build
+  commit. The image carries OCI labels for both and no longer installs
+  boto3.
 - **The datagen generator parses its arguments strictly.** An unknown flag,
   a flag given twice, a flag without its value, a stray argument, or a value
   that does not parse now exits 2 in the entrypoint and the Rust binary

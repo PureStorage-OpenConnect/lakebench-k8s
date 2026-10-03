@@ -70,10 +70,10 @@ pub fn party_schema() -> SchemaRef {
         Field::new("bic", DataType::Utf8, true),
         // No sanctions_status, pep_status or initial_risk_score: whether a
         // party is listed is the answer the screening rules (W5, W6) are
-        // scored against, so it lives only in the manifest (AML-GOALS #50).
+        // scored against, so it lives only in the manifest, never in bronze.
         // Listed parties are external counterparties, never in this zone.
         Field::new("model_version", DataType::Utf8, true),
-        // Monitored population and KYC (GOALS P10 stages 0 and 2; see
+        // Monitored population and KYC (see
         // crate::kyc). The KYC fields are NULL for non-customers: the
         // reporting FI holds no CDD file on another bank's customer.
         Field::new("is_customer", DataType::Boolean, false),
@@ -100,7 +100,7 @@ fn syn_overrides(w: &World, instances: &[Instance]) -> HashMap<usize, Override> 
             continue;
         }
         let base = cluster[0] as usize;
-        // Base PII is recomputed on demand (LB-204). It is ty-branch-dependent
+        // Base PII is recomputed on demand to bound pod memory. It is ty-branch-dependent
         // via w.name/w.email (person/company/fi), reproduced exactly here.
         let base_phone = R::phone(base as u64, w.country(base), w.seed);
         let base_name = w.name(base);
@@ -159,7 +159,7 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
     for i in lo..=hi {
         let o = ov.get(&i);
         let id = i as u64;
-        // Attributes recomputed on demand (LB-204); bind the ones read more
+        // Attributes recomputed on demand to bound pod memory; bind the ones read more
         // than once per row so the recompute happens at most once each.
         let ty_i = w.ty(i);
         let country_i = w.country(i);
@@ -324,7 +324,7 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
     let mut home: Vec<String> = Vec::new();
     for id in lo as u64..=hi as u64 {
         let i = id as usize;
-        // Attributes recomputed on demand (LB-204); bind the per-entity ones so
+        // Attributes recomputed on demand to bound pod memory; bind the per-entity ones so
         // the recompute happens once for the whole account-sequence loop.
         let country_i = w.country(i);
         let bic_i = w.bic(i);

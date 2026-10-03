@@ -383,7 +383,7 @@ impl S3Sink {
     /// `MpuWriter::finish()` to complete the upload; dropping without
     /// finish aborts the upload so no orphan parts accumulate on S3.
     ///
-    /// LB-107: party.parquet and account.parquet at scale >= 1000 exceed
+    /// party.parquet and account.parquet at scale >= 1000 exceed
     /// the 5 GiB S3 single-PUT ceiling; this path removes that limit
     /// (S3 multipart supports up to 5 TiB per object across 10k parts).
     ///

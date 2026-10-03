@@ -477,6 +477,11 @@ fn c360_driver_digest(threads: &str) -> (u64, usize) {
         for e in std::fs::read_dir(&d).unwrap() {
             let p = e.unwrap().path();
             if p.is_dir() {
+                // The per-node marker records build and time, so it is
+                // excluded by path, as in the image byte-compare.
+                if p.file_name().is_some_and(|n| n == "_corpus") {
+                    continue;
+                }
                 stack.push(p);
             } else {
                 paths.push(p);
@@ -1006,6 +1011,11 @@ fn tree_digest(dir: &Path) -> (u64, usize) {
         for e in std::fs::read_dir(&d).unwrap() {
             let p = e.unwrap().path();
             if p.is_dir() {
+                // The per-node marker records build and time, so it is
+                // excluded by path, as in the image byte-compare.
+                if p.file_name().is_some_and(|n| n == "_corpus") {
+                    continue;
+                }
                 stack.push(p);
             } else {
                 paths.push(p.strip_prefix(dir).unwrap().to_string_lossy().to_string());

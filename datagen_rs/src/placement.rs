@@ -65,7 +65,7 @@ pub fn place_instances(instances: &mut [Instance], cal: &DayCal, start_us: i64, 
 }
 
 /// Shape one instance's rows in place. `country(orig)` gives each originator's
-/// country (recomputed on demand, LB-204). Returns the [min, max] of the
+/// country (recomputed on demand). Returns the [min, max] of the
 /// shaped in-window rows, which is what the manifest should report as the
 /// injection window.
 pub fn shape_instance_rows<F: Fn(usize) -> &'static str>(
