@@ -152,8 +152,10 @@ when the namespace and the row's buckets are gone; otherwise the row is
 retried: its namespace is destroyed by incarnation only when it carries the
 row's own confirmed nonce. A failed row stops new admissions, but rows
 already running finish and destroy. Each lakebench step has a time limit
-(deploy 2 h, run 12 h, destroy 2 h), after which the child gets SIGINT,
-then SIGTERM.
+(deploy 2 h, run 12 h, destroy 2 h). A child past its limit gets SIGINT,
+then three SIGTERMs over 25 minutes, and SIGKILL only after that, because
+a command holding the cluster lease finishes its shared change and
+releases the lease before it stops.
 
 Admission counts lakebench namespaces, ledger rows and the harness's own
 rows against the four-deployment limit. It counts every ledger deployment
@@ -163,16 +165,19 @@ allocatable, runs at most two AML continuous rows at once, and runs an
 `alone` row with nothing else, including another harness's `alone` row in
 the ledger. Unreadable nodes admit nothing.
 
-The ledger table is edited under `--ledger-lock` (pass the lock file the
-ledger's other writers take; the default `<ledger>.lock` excludes only
-other harness processes), with a backup under `<out>/ledger-backups/`,
-only when the file did not change while it was read, and the edit is read
-back. The first Ctrl-C stops admission and sends one SIGINT to running
-`lakebench run` children and scenario scripts; deploys and destroys finish,
-and rows stop before their next step. A second Ctrl-C sends one SIGINT to
-every child. `resume` continues every unfinished row and never re-deploys,
-re-runs or re-destroys; it refuses while a row's child process or a
-scenario script is still alive.
+The ledger table is edited under `--ledger-lock`, with a backup under
+`<out>/ledger-backups/`, only when the file did not change while it was
+read, and the edit is read back. The lock excludes only writers that take
+it: while the harness runs, everyone who edits the ledger (the main lane
+included) must edit it under the same lock file, or a hand admission can
+race the harness past the four-deployment limit. A row is marked
+`destroyed` only after its ledger row is closed. The first Ctrl-C stops
+admission and sends one SIGINT to running `lakebench run` children; deploys,
+destroys and scenario scripts finish, and rows stop before their next step.
+A second Ctrl-C sends one SIGINT to every child running at that moment.
+`resume` continues every unfinished row and never re-deploys, re-runs or
+re-destroys; it refuses while a row's child process, a scenario script, or
+any process naming a row's config is still running.
 
 ### Parallel-safety scenarios
 
@@ -209,8 +214,9 @@ deletes it afterwards only if it is unchanged; a bucket it did not create
 is never touched. For S-P6, B names A's bronze bucket. Bucket owners are
 read from the bucket tag, or on a backend without tagging (FlashBlade) from
 the bucket's `.lakebench/owner.json` marker. A script that exits early
-stops its background jobs, and the harness waits for the script's whole
-process group before it cleans up.
+stops its background jobs (three SIGTERMs over 25 minutes before SIGKILL),
+and the harness waits for the script's whole process group before it
+cleans up.
 
 After the script, whatever its exit code, the harness checks that each
 deployment the scenario keeps is present with its incarnation, destroys

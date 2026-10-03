@@ -1215,7 +1215,7 @@ def test_ledger_refuses_a_shrunken_file(tmp_path):
     led.add(L.LedgerRow("rel17-x", "/c", "s", "1", "t"))
     p.write_text(LEDGER_TEXT)
     again = L.MarkdownLedger(p, tmp_path / "b")  # a new process: the backups remember
-    with pytest.raises(L.LedgerError, match="smaller than its newest backup"):
+    with pytest.raises(L.LedgerError, match="less than 75% of its newest backup"):
         again.close("rel17-x")
 
 
@@ -1342,7 +1342,8 @@ def test_process_runner_keeps_waiting_when_recording_the_child_fails(tmp_path):
 def test_a_child_past_its_time_limit_is_stopped():
     proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
     start = time.monotonic()
-    assert H._wait_or_stop(proc, 0.2, graces=(2, 2, 2)) == H.TIMED_OUT
+    seq = ((H.signal.SIGINT, 2), (H.signal.SIGTERM, 2), (H.signal.SIGKILL, 2))
+    assert H._wait_or_stop(proc, 0.2, seq) == H.TIMED_OUT
     assert time.monotonic() - start < 10 and proc.poll() is not None
 
 
@@ -1357,7 +1358,8 @@ def test_script_runner_reaps_what_the_script_left_running(tmp_path, monkeypatch)
     pidfile = tmp_path / "bg.pid"
     script.write_text(f"sleep 120 & echo $! > {pidfile}\nexit 0\n")
     real = H.reap_group
-    monkeypatch.setattr(H, "reap_group", lambda pgid, out: real(pgid, out, poll=0.1))
+    seq = ((H.signal.SIGTERM, 2), (H.signal.SIGKILL, 2))
+    monkeypatch.setattr(H, "reap_group", lambda pgid, out: real(pgid, out, poll=0.1, sequence=seq))
     r = H.ProcessRunner(ROOT)
     rc = r.script(["bash", str(script)], env=dict(os.environ), cwd=tmp_path, log=tmp_path / "s.log")
     assert rc == 0
@@ -1736,3 +1738,126 @@ def test_lib_checks_reaps_background_jobs_on_an_early_exit(tmp_path):
     while not _gone(bg) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert _gone(bg)
+
+
+# -- brief-pass fixes ------------------------------------------------------------
+
+
+def test_stop_sequence_gives_a_lease_holder_three_terms_before_kill():
+    sigs = [sig for sig, _ in H.STOP_SEQUENCE]
+    assert sigs[-1] == H.signal.SIGKILL
+    assert sigs.count(H.signal.SIGTERM) >= 3
+    first_term = sigs.index(H.signal.SIGTERM)
+    assert sum(g for _, g in H.STOP_SEQUENCE[first_term:-1]) >= 800
+    text = (SCEN / "lib-checks.sh").read_text()
+    assert "for grace in 900 300 300" in text and 'kill -0 "$p"' in text
+
+
+def test_a_failed_ledger_close_keeps_the_row_open_for_resume(env, monkeypatch):
+    plan = _plan(env)
+    env.h.ledger_add_logged(plan)
+
+    real_close = env.h.ledger.close
+    broken = {"on": True}
+
+    def flaky_close(ns, when=None):
+        if broken["on"]:
+            raise L.LedgerError("kept changing")
+        return real_close(ns, when)
+
+    monkeypatch.setattr(env.h.ledger, "close", flaky_close)
+    env.h._guarded(plan)
+    st = _status(env)
+    assert st["status"] == "destroying" and "ledger close pending" in st["detail"]
+    broken["on"] = False
+    env.h._admission.clear()
+    H.resume(env.h, {"M01": ROW})
+    assert _status(env)["status"] == "destroyed"
+    assert f"closed {plan.namespace} " in env.ledger.read_text()
+
+
+def test_resume_refuses_while_a_process_names_the_rows_config(env):
+    plan = _seed_row(env, "deploying", child_pid=None, child_start=None)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", str(plan.config)])
+    try:
+        time.sleep(0.2)
+        with pytest.raises(H.Refused, match="live child"):
+            H.resume(env.h, {"M01": ROW})
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_after_a_second_ctrl_c_a_new_destroy_is_not_signalled(monkeypatch):
+    sent: list[int] = []
+    monkeypatch.setattr(H.os, "killpg", lambda pid, sig: sent.append(pid))
+    r = H.ProcessRunner(ROOT)
+    r.interrupt(1)
+    r.interrupt(2)
+    r._register(21, False)  # a cleanup destroy started afterwards
+    r._register(22, True)  # a run started afterwards
+    assert sent == [22]
+
+
+def test_a_failed_deploy_after_ctrl_c_is_not_destroyed(env):
+    env.runner.deploy_code = 1
+    plan = _plan(env)
+    env.h.ledger_add_logged(plan)
+    env.h.interrupt()
+    env.h.deploy(plan)
+    assert _status(env)["status"] == "recorded"
+    assert "destroy" not in env.runner.verbs()
+
+
+def test_unreadable_ledger_scale_fails_admission_closed(env, tmp_path):
+    plan = _plan(env)
+    row = SimpleNamespace(namespace="n", config=str(tmp_path / "x"), session="s", scale="s10")
+    obs = H.Observation([row], set(), C.Snapshot(C.Peak(400, 4000), {}))
+    assert isinstance(env.h.decide(plan, obs, C.Peak(0, 0)), C.Unknown)
+
+
+def test_alone_marker_is_the_harness_session_suffix_only():
+    assert H.ALONE_SESSION.fullmatch("release-harness abcdef12 row M16 alone")
+    assert not H.ALONE_SESSION.fullmatch("v17-run working alone today")
+
+
+def test_scenario_stopped_destroy_is_polled_against_the_buckets_it_owns(env):
+    plan = env.h.scenario_rows(H.SCENARIOS["S-P5"])["A"]
+    owned = env.h._set_buckets(plan, "rel17-s-p5-legacy-abcdef")
+    env.s3.buckets["rel17-s-p5-legacy-abcdef"] = {"harness-legacy/object.txt": b"x"}
+    env.h.ledger_add_logged(plan)
+    env.h.log(
+        "S-P5-A",
+        "destroying",
+        namespace=plan.namespace,
+        config=str(plan.config),
+        peak=[1, 1],
+        scenario="S-P5",
+        owned_buckets=owned,
+        legacy_bucket="rel17-s-p5-legacy-abcdef",
+        legacy_keys=["harness-legacy/object.txt"],
+        child_pid=1,
+        child_start="x",
+    )
+    H.resume(env.h, {})
+    st = _scen_states(env, "S-P5")["S-P5-A"]
+    assert st["status"] == "destroyed", st
+    assert "rel17-s-p5-legacy-abcdef" not in env.s3.buckets
+
+
+def test_a_legacy_bucket_left_after_terminal_rows_is_still_removed(env):
+    plan = env.h.scenario_rows(H.SCENARIOS["S-P5"])["A"]
+    env.s3.buckets["rel17-s-p5-legacy-abcdef"] = {"harness-legacy/object.txt": b"x"}
+    env.h.log(
+        "S-P5-A",
+        "destroyed",
+        namespace=plan.namespace,
+        config=str(plan.config),
+        peak=[1, 1],
+        scenario="S-P5",
+        owned_buckets=[],
+        legacy_bucket="rel17-s-p5-legacy-abcdef",
+        legacy_keys=["harness-legacy/object.txt"],
+    )
+    H.resume(env.h, {})
+    assert "rel17-s-p5-legacy-abcdef" not in env.s3.buckets

@@ -50,6 +50,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -120,6 +121,8 @@ TIMEOUTS_S = {
     "destroy": 2 * 3600,
 }
 SCRIPT_TIMEOUT_S = 6 * 3600
+#: The ledger session cell of an alone row written by any harness process.
+ALONE_SESSION = re.compile(r"release-harness \S+ row \S+ alone")
 #: After a scenario script exits, how long its background children may run on.
 SCRIPT_REAP_S = 30 * 60
 TIMED_OUT = 124
@@ -414,6 +417,22 @@ def _start_time(pid: int) -> str:
     return stat.rsplit(")", 1)[1].split()[19]
 
 
+def processes_naming(config: str) -> list[int]:
+    """Pids of running processes whose command line names *config* (a
+    lakebench child whose pid was never recorded)."""
+    found = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit() or int(proc.name) == os.getpid():
+            continue
+        try:
+            argv = (proc / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if config.encode() in argv:
+            found.append(int(proc.name))
+    return found
+
+
 def child_alive(pid: Any, start: Any) -> bool:
     """Whether the recorded child is still running (same pid and start time)."""
     if not isinstance(pid, int) or not start:
@@ -436,17 +455,31 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
+#: How a child that must stop is stopped. A lakebench command holding the
+#: cluster lease defers SIGTERM until its shared change is done (up to the
+#: lease's 750 s hold) and releases the lease on a third catchable signal, so
+#: three SIGTERMs, 25 minutes apart in total, come before any SIGKILL.
+STOP_SEQUENCE: tuple[tuple[int, float], ...] = (
+    (signal.SIGINT, 600),
+    (signal.SIGTERM, 900),
+    (signal.SIGTERM, 300),
+    (signal.SIGTERM, 300),
+    (signal.SIGKILL, 60),
+)
+
+
 def _wait_or_stop(
-    proc: subprocess.Popen[bytes], limit: float, graces: tuple[float, ...] = (600, 60, 60)
+    proc: subprocess.Popen[bytes],
+    limit: float,
+    sequence: tuple[tuple[int, float], ...] | None = None,
 ) -> int:
-    """Wait up to *limit* seconds; then SIGINT the group, SIGTERM after 10
-    minutes and SIGKILL after one more; a stopped child gives TIMED_OUT."""
+    """Wait up to *limit* seconds, then stop the group by STOP_SEQUENCE; a
+    stopped child gives TIMED_OUT."""
     try:
         return proc.wait(timeout=limit)
     except subprocess.TimeoutExpired:
         pass
-    sigs = (signal.SIGINT, signal.SIGTERM, signal.SIGKILL)
-    for sig, grace in zip(sigs, graces, strict=True):
+    for sig, grace in sequence or STOP_SEQUENCE:
         _signal_group(proc.pid, sig)
         try:
             proc.wait(timeout=grace)
@@ -470,7 +503,9 @@ class ProcessRunner:
     def _register(self, pid: int, interruptible: bool) -> None:
         with self._lock:
             self._children[pid] = interruptible
-            if self._level >= 2 or (interruptible and self._level >= 1):
+            # A child started after a Ctrl-C is signalled only if it is a run:
+            # a cleanup destroy started after the second Ctrl-C must finish.
+            if interruptible and self._level >= 1:
                 _signal_group(pid)
 
     def _forget(self, pid: int) -> None:
@@ -540,7 +575,10 @@ class ProcessRunner:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-            self._register(proc.pid, True)
+            # A scenario script runs to its end (SCRIPT_TIMEOUT_S bounds it):
+            # its deploys and destroys must finish, so only a second Ctrl-C
+            # reaches it.
+            self._register(proc.pid, False)
             try:
                 if on_spawn is not None:
                     with contextlib.suppress(Exception):
@@ -552,8 +590,9 @@ class ProcessRunner:
         return code
 
     def interrupt(self, level: int = 1) -> None:
-        """Level 1: one SIGINT to each run and scenario script (deploys and
-        destroys finish). Level 2: one SIGINT to every child."""
+        """Level 1: one SIGINT to each running ``lakebench run`` (deploys,
+        destroys and scenario scripts finish). Level 2: one SIGINT to every
+        child running at that moment."""
         with self._lock:
             if level <= self._level:
                 return
@@ -565,18 +604,24 @@ class ProcessRunner:
             self._level = level
 
 
-def reap_group(pgid: int, out: Any, limit: float | None = None, poll: float = 5) -> None:
-    """Wait for every process of *pgid* to exit; SIGINT, then SIGTERM, those
-    still running after *limit* seconds (default ``SCRIPT_REAP_S``)."""
+def reap_group(
+    pgid: int,
+    out: Any,
+    limit: float | None = None,
+    poll: float = 5,
+    sequence: tuple[tuple[int, float], ...] | None = None,
+) -> None:
+    """Wait for every process of *pgid* to exit; those still running after
+    *limit* seconds (default ``SCRIPT_REAP_S``) are stopped by STOP_SEQUENCE."""
     deadline = time.monotonic() + (SCRIPT_REAP_S if limit is None else limit)
     while _group_alive(pgid) and time.monotonic() < deadline:
         time.sleep(poll)
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+    for sig, grace in sequence or STOP_SEQUENCE:
         if not _group_alive(pgid):
             return
         out.write(f"[harness] stopping leftover processes of the script ({sig.name})\n".encode())
         _signal_group(pgid, sig)
-        end = time.monotonic() + 60 * poll
+        end = time.monotonic() + grace
         while _group_alive(pgid) and time.monotonic() < end:
             time.sleep(poll)
 
@@ -1062,7 +1107,7 @@ class ScenarioMixin:
         for c in [c for c in reversed(spec.configs) if c in run.plans]:
             plan = run.plans[c]
             if c in polls:
-                self.poll_gone(plan, "harness stopped during a scenario destroy")
+                self.poll_gone(plan, "harness stopped during a scenario destroy", run.buckets[c])
                 if self.rowlog.latest()[plan.row.id]["status"] != "destroyed":
                     problems.append(f"{c}: not destroyed after the stopped destroy")
                 continue
@@ -1322,11 +1367,8 @@ class Harness(ScenarioMixin):
         found = self._ledger_peaks[row.namespace]
         if found is not None:
             return found
-        try:
-            scale = float(row.scale)
-        except ValueError:
-            scale = 1.0
-        return self._worst_case(scale)
+        # An unreadable scale raises: admission fails closed.
+        return self._worst_case(float(row.scale))
 
     def observe(self) -> Observation | Any:
         """One read of the ledger, the lakebench namespaces and the cluster's
@@ -1377,7 +1419,7 @@ class Harness(ScenarioMixin):
                 ledger_live={r.namespace for r in live},
                 own_active=own,
                 ledger_peaks={r.namespace: self._ledger_peak(r) for r in live},
-                ledger_alone={r.namespace for r in live if " alone" in r.session},
+                ledger_alone={r.namespace for r in live if ALONE_SESSION.fullmatch(r.session)},
                 fallback_peak=fallback,
                 slots=self.slots,
             )
@@ -1401,14 +1443,23 @@ class Harness(ScenarioMixin):
         )
         self.log(plan.row.id, "ledgered", namespace=plan.namespace, config=str(plan.config))
 
-    def ledger_close(self, plan: RowPlan, required: bool = True) -> None:
-        if not required and not self.ledger.has_row(plan.namespace):
-            return  # the harness stopped before the row was written
+    def ledger_close(self, plan: RowPlan, required: bool = True) -> bool:
+        """Close the row's ledger row; False (and admission stops) when it
+        cannot be closed."""
         try:
+            if not self.ledger.has_row(plan.namespace):
+                if required:
+                    self.say(
+                        f"{plan.row.id}: the ledger has no row for {plan.namespace} to close "
+                        "(written by hand or lost); nothing to close"
+                    )
+                return True
             self.ledger.close(plan.namespace)
         except (OSError, LedgerError) as e:
             self.say(f"{plan.row.id}: could not close the ledger row for {plan.namespace}: {e}")
             self.stop_admission(f"{plan.row.id}: ledger close failed")
+            return False
+        return True
 
     def _spawn(
         self,
@@ -1467,8 +1518,10 @@ class Harness(ScenarioMixin):
             # namespace and none of the row's buckets, nothing was created.
             left = self.buckets_left(plan, None)
             if left == []:
-                self.log(row.id, "not-deployed", detail=f"{why}; nothing was created")
-                self.ledger_close(plan, required=False)
+                if self.ledger_close(plan, required=False):
+                    self.log(row.id, "not-deployed", detail=f"{why}; nothing was created")
+                else:
+                    self.log(row.id, self.status_of(row.id), detail=f"{why}; ledger close pending")
                 return
             self.log(row.id, "left", detail=f"{why}; no namespace, buckets: {left}")
             self.stop_admission(f"{row.id}: left for a human")
@@ -1481,6 +1534,8 @@ class Harness(ScenarioMixin):
             return
         # 'recorded' sends a resumed row straight to destroy, never to a run.
         self.log(row.id, "recorded", incarnation=inc, detail=why, verdict="FAIL", run_ids=[])
+        if self.interrupted:
+            return
         self.destroy(plan, inc)
 
     def run_dirs(self, plan: RowPlan) -> set[str]:
@@ -1591,8 +1646,12 @@ class Harness(ScenarioMixin):
             self.log(plan.row.id, "left", detail=f"{why}; buckets remain: {', '.join(left)}")
             self.stop_admission(f"{plan.row.id}: buckets remain after destroy")
             return [f"{plan.row.id}: buckets remain after the namespace went: {', '.join(left)}"]
+        if not self.ledger_close(plan):
+            # Not terminal until the ledger row is closed: resume polls the
+            # (gone) namespace and closes it then.
+            self.log(plan.row.id, "destroying", detail=f"{why}; ledger close pending")
+            return [f"{plan.row.id}: destroyed, but its ledger row could not be closed"]
         self.log(plan.row.id, "destroyed", detail=why)
-        self.ledger_close(plan)
         return []
 
     def classify_destroy(
@@ -1867,6 +1926,7 @@ def resume(h: Harness, rows: dict[str, Row]) -> int:
         and (
             child_alive(s.get("child_pid"), s.get("child_start"))
             or child_alive(s.get("script_pid"), s.get("script_start"))
+            or (s.get("config") and processes_naming(str(s["config"])))
         )
     ]
     if alive:
@@ -1911,7 +1971,11 @@ def resume(h: Harness, rows: dict[str, Row]) -> int:
     for spec_id in dict.fromkeys(
         st["scenario"]
         for st in states.values()
-        if st.get("scenario") in SCENARIOS and st["status"] not in TERMINAL
+        if st.get("scenario") in SCENARIOS
+        and (
+            st["status"] not in TERMINAL
+            or (st.get("legacy_bucket") and st.get("legacy_bucket_removed") is None)
+        )
     ):
         continuing.append(_bind(h, spec_id, lambda sid=spec_id: _resume_scenario(h, sid, states)))
     h.schedule(pending, continuing)

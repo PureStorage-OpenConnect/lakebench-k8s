@@ -16,18 +16,29 @@
 
 # A script that exits early must not leave a background deploy, generate or
 # run behind. Background jobs of a non-interactive shell ignore SIGINT, so
-# they get SIGTERM, then SIGKILL after 60 s (the harness also waits for the
-# script's whole process group before it cleans up).
+# they get SIGTERM. A lakebench command holding the cluster lease defers
+# SIGTERM until its shared change is done (up to 750 s) and releases the
+# lease on a third signal, so: SIGTERM, up to 900 s; SIGTERM, 300 s; SIGTERM,
+# 300 s; only then SIGKILL. The harness also waits for the script's whole
+# process group before it cleans up.
+_lb_alive() {
+  local p
+  for p in "$@"; do kill -0 "$p" 2>/dev/null && return 0; done
+  return 1
+}
 _lb_reap() {
-  local rc=$? pids i
+  local rc=$? pids grace i p
   pids=$(jobs -p)
   if [ -n "$pids" ]; then
-    kill -TERM $pids 2>/dev/null || true
-    for i in $(seq 1 60); do
-      kill -0 $pids 2>/dev/null || break
-      sleep 1
+    for grace in 900 300 300; do
+      _lb_alive $pids || break
+      for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+      for i in $(seq 1 "$grace"); do
+        _lb_alive $pids || break
+        sleep 1
+      done
     done
-    kill -KILL $pids 2>/dev/null || true
+    for p in $pids; do kill -KILL "$p" 2>/dev/null || true; done
   fi
   return $rc
 }

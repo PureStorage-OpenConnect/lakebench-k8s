@@ -20,8 +20,8 @@ Two stores, both written only by ``harness.py``:
     file and replaces the ledger only if its size and mtime are still those
     it read (otherwise it re-reads and retries), then reads the file again
     and refuses if its own change is not there. It refuses when the table
-    header is missing or the file is more than 4 KiB smaller than the newest
-    backup. A removed row is replaced by a ``closed <namespace> <utc>
+    header is missing or the file is less than 75% of the newest backup's
+    size (a truncated read). A removed row is replaced by a ``closed <namespace> <utc>
     destroy DONE`` line, the convention the table already uses. The lock is
     reentrant within this process (``transaction``), so admission can read
     the ledger and add its row under one lock.
@@ -187,7 +187,9 @@ class MarkdownLedger:
     """The deployments table of the evidence file."""
 
     RETRIES = 5
-    SHRINK_SLACK = 4096
+    #: A ledger smaller than this share of its newest backup is refused as
+    #: truncated (a half-written file); ordinary edits never shrink it so far.
+    SHRINK_FLOOR = 0.75
 
     def __init__(self, path: Path, backups: Path, lock_path: Path | None = None) -> None:
         # A symlinked ledger is edited at its target, never replaced by a copy.
@@ -279,10 +281,10 @@ class MarkdownLedger:
                 st = self.path.stat()
                 raw = self.path.read_bytes()
                 floor = self._newest_backup_size()
-                if floor is not None and st.st_size < floor - self.SHRINK_SLACK:
+                if floor is not None and st.st_size < floor * self.SHRINK_FLOOR:
                     raise LedgerError(
-                        f"{self.path} is {st.st_size} bytes, more than "
-                        f"{self.SHRINK_SLACK} smaller than its newest backup ({floor}); "
+                        f"{self.path} is {st.st_size} bytes, less than "
+                        f"{self.SHRINK_FLOOR:.0%} of its newest backup ({floor}); "
                         "refusing to write over a truncated ledger"
                     )
                 lines = raw.decode("utf-8").split("\n")
