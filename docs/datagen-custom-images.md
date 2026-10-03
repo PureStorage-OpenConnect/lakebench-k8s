@@ -127,6 +127,11 @@ and update the schema tests in `datagen_rs/src/schema.rs`.
 The binary always writes the whole corpus up front; there is no separate
 continuous-mode path and no checkpoint-resume.
 
+A custom image that keeps `entrypoint.py` inherits its strict argument
+parsing: any flag the entrypoint does not declare exits 2, so a new flag
+needs a declaration there and an entry in the generator's per-schema flag
+table (`datagen_rs/src/bin/generate.rs`).
+
 ## Testing Locally
 
 Run the tests, then generate a small corpus into a local directory.

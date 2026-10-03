@@ -532,7 +532,8 @@ class S3Config(ConfigModel):
     region: str = "us-east-1"
     """AWS region. Used by boto3 for signing."""
     path_style: bool = True  # Required for FlashBlade, MinIO
-    """Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3)."""
+    """Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3). Spark and the datagen
+    pods both follow it; with `false` requests go to `<bucket>.<endpoint host>`."""
 
     # Credentials. Only the inline keys are used: deploy writes them into the
     # lakebench-s3-credentials Secret and the CLI's S3 client reads them.

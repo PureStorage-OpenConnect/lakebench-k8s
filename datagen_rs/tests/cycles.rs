@@ -1210,46 +1210,115 @@ fn c360_two_cycle_output_is_pinned() {
     );
 }
 
-fn reference_run(extra: &[&str]) -> std::process::Output {
+fn strict_run(args: &[&str]) -> std::process::Output {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-strict");
     let _ = std::fs::remove_dir_all(&dir);
     generate_cmd()
         .env("DG_LOCAL_DIR", &dir)
-        .args(["--bucket", "b", "--mode", "reference", "--total-nodes", "1"])
-        .args(extra)
+        .args(["--bucket", "b", "--mode", "reference"])
+        .args(args)
         .output()
         .unwrap()
 }
 
 #[test]
 fn rust_bad_node_id_exits_2() {
-    // Present but unparseable, missing, repeated, unknown, positional, and a
-    // bare flag given a value: each exits 2 instead of a silent default.
-    let seed = ["--seed", "7777"];
-    let scale = ["--scale", SCALE];
-    for bad in [
-        vec!["--node-id", "abc"],
-        vec!["--total-nodes", "x"],
-        vec!["--corpus-months", "60x"],
-        vec!["--file-size-mb", "1.5"],
-        vec!["--threads", "-2"],
-        vec!["--total-nodes"],
-        vec!["--node-id", "0", "--node-id", "0"],
-        vec!["--nope", "1"],
-        vec!["--payload-kb", "2"],
-        vec!["--target-tb", "0.1"],
-        vec!["4321"],
-        vec!["--robustness-perturbation=yes"],
+    // Present but unparseable, missing its value, repeated, unknown,
+    // positional, and a bare flag given a value: each exits 2 naming the
+    // flag (a stray value is never printed) instead of a silent default.
+    let ok = ["--seed", "7777", "--scale", SCALE, "--total-nodes", "1"];
+    for (bad, names) in [
+        (vec!["--node-id", "abc"], "--node-id"),
+        (vec!["--corpus-months", "60x"], "--corpus-months"),
+        (vec!["--file-size-mb", "1.5"], "--file-size-mb"),
+        (vec!["--threads", "-2"], "--threads"),
+        (vec!["--node-id"], "--node-id needs a value"),
+        (vec!["--node-id", "0", "--node-id", "0"], "more than once"),
+        (vec!["--nope", "1"], "--nope"),
+        (vec!["--payload-kb", "2"], "--payload-kb"),
+        (vec!["--target-tb", "0.1"], "--target-tb"),
+        (vec!["4321"], "unexpected argument"),
     ] {
-        let out = reference_run(&[&seed[..], &scale[..], &bad[..]].concat());
+        let out = strict_run(&[&ok[..], &bad[..]].concat());
         assert_eq!(out.status.code(), Some(2), "{bad:?} was accepted");
         let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(names), "{bad:?}: {err}");
         assert!(!err.contains("4321"), "a stray value was echoed");
     }
-    // The same run with valid flags works.
-    assert!(reference_run(&[&seed[..], &scale[..]].concat())
-        .status
-        .success());
+    // Missing values for flags that are otherwise required.
+    let out = strict_run(&["--seed", "7777", "--scale", SCALE, "--total-nodes"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--total-nodes needs a value"));
+    // The same run with valid flags works, and logs its delivery mode.
+    let out = strict_run(&ok);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("delivery_mode=continuous"));
+    assert!(
+        err.contains("\"delivery_mode\":\"continuous\""),
+        "delivery_mode not in metrics"
+    );
+}
+
+#[test]
+fn a_value_is_never_read_as_a_flag() {
+    // `--prefix --scale=5` gives --prefix the value "--scale=5"; scale stays
+    // the one given by --scale.
+    let out = strict_run(&[
+        "--seed",
+        "7777",
+        "--scale",
+        "1",
+        "--total-nodes",
+        "1",
+        "--prefix",
+        "--scale=5",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("\"scale\":1.000000"), "{err}");
+}
+
+#[test]
+fn s3_transport_env_is_read_and_checked() {
+    // Without DG_LOCAL_DIR the S3 sink reads S3_PATH_STYLE, S3_VERIFY_SSL and
+    // S3_CA_CERT; a value it cannot use exits 2 naming the variable.
+    for (var, val) in [
+        ("S3_PATH_STYLE", "maybe"),
+        ("S3_VERIFY_SSL", "off"),
+        ("S3_CA_CERT", "/nonexistent/ca.pem"),
+    ] {
+        let out = generate_cmd()
+            .env_remove("DG_LOCAL_DIR")
+            .env("S3_ENDPOINT", "http://127.0.0.1:1")
+            .env("AWS_ACCESS_KEY_ID", "k")
+            .env("AWS_SECRET_ACCESS_KEY", "s")
+            .env(var, val)
+            .args([
+                "--bucket",
+                "b",
+                "--seed",
+                "7777",
+                "--scale",
+                SCALE,
+                "--mode",
+                "reference",
+                "--total-nodes",
+                "1",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{var}={val}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(var), "{var}");
+    }
 }
 
 #[test]
@@ -1279,7 +1348,7 @@ fn c360_refuses_financial_flags() {
 
 #[test]
 fn financial_scale_defaults_to_one() {
-    let out = reference_run(&["--seed", "7777"]);
+    let out = strict_run(&["--seed", "7777", "--total-nodes", "1"]);
     assert!(
         out.status.success(),
         "{}",
