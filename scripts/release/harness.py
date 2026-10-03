@@ -2631,7 +2631,7 @@ class Harness(ScenarioMixin, UpgradeMixin, ExtraStepsMixin):
         try:
             if problems:
                 raise _expected.ExpectedRefused(problems)
-            data, notes = _expected.build_expected(records, self.version)
+            data, notes = _expected.build_expected(records, self.version, root=self.tree)
             _expected.write(path, data, replace=True)
         except _expected.ExpectedRefused as e:
             path.unlink(missing_ok=True)
@@ -2910,6 +2910,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="a directory of scrubbed run records (run-*/metrics.json); repeatable",
     )
     exp.add_argument("--version", required=True, help="the release version, X.Y.Z")
+    exp.add_argument(
+        "--exclude",
+        action="append",
+        metavar="RUN_ID",
+        help="leave this run's record out (a failed row's run); repeatable",
+    )
     exp.add_argument("--out", type=Path, required=True, help="uat/expected-results-<version>.json")
     for name in ("run", "resume", "scenario", "upgrade"):
         sp = sub.add_parser(name)
@@ -2963,9 +2969,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
 
-def expected_command(from_dirs: Sequence[Path], version: str, out: Path) -> int:
+def expected_command(
+    from_dirs: Sequence[Path], version: str, out: Path, exclude: Sequence[str] = ()
+) -> int:
     """``harness.py expected``: 0 written, 1 a record or entry refused
-    (nothing written), 2 a usage refusal."""
+    (nothing written), 2 a usage refusal. *exclude*: run ids left out (a
+    failed row's run, say)."""
     if not _expected.VERSION_RE.match(version):
         raise Refused(f"--version {version!r} is not X.Y.Z")
     if out.name != _expected.file_name(version):
@@ -2973,9 +2982,16 @@ def expected_command(from_dirs: Sequence[Path], version: str, out: Path) -> int:
             f"--out {out} must be named {_expected.file_name(version)} "
             "(the file the release gate reads)"
         )
+    if out.exists():
+        raise Refused(f"--out {out} exists; a reviewed expected-results file is not rewritten")
     try:
         records = _expected.load_records(from_dirs)
-        data, notes = _expected.build_expected(records, version)
+        wanted = {f"run-{x.removeprefix('run-')}" for x in exclude}
+        unknown = sorted(wanted - {rid for rid, _ in records})
+        if unknown:
+            raise _expected.ExpectedRefused([f"--exclude {rid}: no such record" for rid in unknown])
+        records = [(rid, rec) for rid, rec in records if rid not in wanted]
+        data, notes = _expected.build_expected(records, version, root=TREE)
         _expected.write(out, data)
     except _expected.ExpectedRefused as e:
         print("expected results not written:", file=sys.stderr)
@@ -2992,7 +3008,7 @@ def expected_command(from_dirs: Sequence[Path], version: str, out: Path) -> int:
 
 def _main(args: argparse.Namespace) -> int:
     if args.cmd == "expected":
-        return expected_command(args.from_dirs, args.version, args.out)
+        return expected_command(args.from_dirs, args.version, args.out, args.exclude or ())
     version, rows = load_matrix(args.matrix, KNOWN_STEPS)
     problems = matrix_problems(rows)
     if problems:

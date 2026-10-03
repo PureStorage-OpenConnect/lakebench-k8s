@@ -2529,7 +2529,7 @@ def test_rehearsal_writes_a_draft_outside_the_tree(env, monkeypatch):
     built = {"version": "1.7.0", "entries": [], "continuous": []}
     seen: list = []
 
-    def build(records, version):
+    def build(records, version, **_kw):
         seen.append(([rid for rid, _ in records], version))
         return built, []
 

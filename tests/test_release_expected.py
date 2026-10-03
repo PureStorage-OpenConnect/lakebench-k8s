@@ -42,6 +42,9 @@ def ready(monkeypatch):
         ),
         raising=False,
     )
+    # The fixtures' corpora come from the v1.6 image; stand it in as the
+    # release image (CD-8 pins the real one).
+    monkeypatch.setattr(rr, "release_datagen_digest", lambda image=None: trr.DIGEST)
 
 
 def _ref(kind: str) -> dict:
@@ -56,7 +59,7 @@ def _ref(kind: str) -> dict:
             "benchmark_rounds"
         )
         post = copy.deepcopy(next(r for r in rounds if (r.get("qph") or 0) > 0))
-        post["executed_query_set_id"] = post["query_set_id"] = "qs12-post"
+        post["executed_query_set_id"] = post["query_set_id"] = X.registry("financial")["full"]
         rounds.append(post)
     return rec
 
@@ -209,7 +212,7 @@ def test_references_that_answered_other_queries_are_refused(ready):
     a = _ref("c360_batch")
     b = _with(a, "hive-iceberg-spark-trino")
     b["experiment"]["results"]["fingerprints"].popitem()
-    assert any("answered other queries" in p for p in _refusals({"run-1": a, "run-2": b}))
+    assert any("queries are not the registry's" in p for p in _refusals({"run-1": a, "run-2": b}))
 
 
 def test_exp1_record_refused(ready):
@@ -270,7 +273,7 @@ def test_held_out_corpus_refused_without_its_seed(ready):
 
 def test_aml_continuous_with_only_one_query_set_refused(ready):
     rec = trr._release("aml_cont")
-    assert any("pre-case and post-case" in p for p in _refusals({"run-1": rec}))
+    assert any("the pre-case and the post-case set" in p for p in _refusals({"run-1": rec}))
 
 
 def test_continuous_references_with_different_query_sets_refused(ready):
@@ -282,14 +285,16 @@ def test_continuous_references_with_different_query_sets_refused(ready):
     ):
         for r in rounds:
             r["executed_query_set_id"] = "qs8-other"
-    assert any("executed query sets" in p for p in _refusals({"run-1": a, "run-2": b}))
+    assert any(
+        "run-2: rounds ran query set(s) qs8-other" in p for p in _refusals({"run-1": a, "run-2": b})
+    )
 
 
 def test_query_set_differs_refused(ready):
     a = _ref("c360_batch")
     b = _with(a, "hive-iceberg-spark-trino")
     b["experiment"]["results"]["query_set_id"] = "qs8-other"
-    assert any("runs differ in query set" in p for p in _refusals({"run-1": a, "run-2": b}))
+    assert any("run-2: query set qs8-other" in p for p in _refusals({"run-1": a, "run-2": b}))
 
 
 def test_writer_checks_its_file_through_the_reader(ready, monkeypatch):
@@ -312,13 +317,27 @@ def test_command_refuses_a_name_the_gate_does_not_read(tmp_path):
         H.expected_command([tmp_path], "1.7", tmp_path / "expected-results-1.7.json")
 
 
-def test_command_never_rewrites_a_file(ready, tmp_path, capsys):
+def test_command_never_rewrites_a_file(ready, tmp_path):
     out = tmp_path / "uat" / X.file_name("9.9.9")
     out.parent.mkdir()
     out.write_text("{}")
-    rc = H.expected_command([_dir(tmp_path, {"run-1": _ref("c360_batch")})], "9.9.9", out)
-    assert rc == 1 and out.read_text() == "{}"
-    assert "is not rewritten" in capsys.readouterr().err
+    with pytest.raises(H.Refused, match="is not rewritten"):
+        H.expected_command([_dir(tmp_path, {"run-1": _ref("c360_batch")})], "9.9.9", out)
+    assert out.read_text() == "{}"
+    with pytest.raises(X.ExpectedRefused, match="is not rewritten"):
+        X.write(out, {"version": "9.9.9", "entries": [], "continuous": []})
+
+
+def test_command_exclude_leaves_a_run_out(ready, tmp_path):
+    bad = _ref("c360_batch")
+    bad["experiment"]["schema"] = "exp1"
+    recs = {"run-1": _ref("c360_batch"), "run-2": bad}
+    out = tmp_path / "uat" / X.file_name("9.9.9")
+    d = _dir(tmp_path, recs)
+    assert H.expected_command([d], "9.9.9", out, exclude=["run-3"]) == 1
+    assert H.expected_command([d], "9.9.9", out) == 1
+    assert H.expected_command([d], "9.9.9", out, exclude=["2"]) == 0
+    assert rr.load_expected(out)["entries"][0]["from_runs"] == ["run-1"]
 
 
 def test_command_exit_1_writes_nothing(ready, tmp_path, capsys):
@@ -335,3 +354,95 @@ def test_parser_has_the_command():
         ["expected", "--from", "a", "--from", "b", "--version", "1.7.0", "--out", "o.json"]
     )
     assert args.from_dirs == [Path("a"), Path("b")] and args.version == "1.7.0"
+
+
+# -- review round: what a degenerate or stale reference would bless ----------------
+
+
+def test_a_query_set_other_than_the_registry_is_refused(ready):
+    """A C360 continuous reference whose rounds lost a query (a set of 7)
+    would let a release run that also lost it pass."""
+    rec = _ref("c360_cont")
+    rounds = rec.get("pipeline_benchmark", {}).get("benchmark_rounds") or rec["benchmark_rounds"]
+    good = [r for r in rounds if (r.get("qph") or 0) > 0]
+    for r in good:
+        r["executed_query_set_id"] = "qs7-lost-one"
+    assert any("reference runs qs8-" in p for p in _refusals({"run-1": rec}))
+
+
+def test_aml_continuous_needs_the_registry_post_case_set(ready):
+    rec = _ref("aml_cont")
+    rounds = rec.get("pipeline_benchmark", {}).get("benchmark_rounds") or rec["benchmark_rounds"]
+    rounds[-1]["executed_query_set_id"] = "qs12-not-the-registry"
+    assert any("pre-case and the post-case set" in p for p in _refusals({"run-1": rec}))
+
+
+def test_batch_query_set_must_be_the_registry_full_set(ready):
+    rec = _ref("c360_batch")
+    rec["experiment"]["results"]["query_set_id"] = "qs8-stale-sql"
+    assert any("not the registry's full set" in p for p in _refusals({"run-1": rec}))
+
+
+def test_batch_queries_must_be_the_registry_queries(ready):
+    rec = _ref("c360_batch")
+    fps = rec["experiment"]["results"]["fingerprints"]
+    fps.pop(sorted(fps)[0])
+    assert any("queries are not the registry's" in p for p in _refusals({"run-1": rec}))
+
+
+def test_an_empty_result_is_refused_unless_the_query_allows_it(ready):
+    rec = _ref("c360_batch")
+    q = sorted(rec["experiment"]["results"]["fingerprints"])[0]
+    rec["experiment"]["results"]["fingerprints"][q]["rows"] = 0
+    assert any(f"query {q} returned no rows" in p for p in _refusals({"run-1": rec}))
+    aml = _ref("aml_batch")
+    allowed = sorted(X.registry("financial")["allow_empty"])[0]
+    aml["experiment"]["results"]["fingerprints"][allowed]["rows"] = 0
+    assert not any("returned no rows" in p for p in X.record_refusals("run-1", aml))
+
+
+def test_an_alert_set_with_no_alerts_is_refused(ready):
+    rec = _ref("aml_batch")
+    rec["experiment"]["results"]["alert_set"] = {**ALERTS, "rows": 0, "h": "0", "by_rule": {}}
+    assert any("holds no alerts" in p for p in _refusals({"run-1": rec}))
+
+
+def test_a_corpus_from_another_image_is_refused(ready):
+    rec = _ref("c360_batch")
+    rec["experiment"]["corpus"]["datagen"]["digest"] = "sha256:" + "a" * 64
+    assert any("not generated by the release datagen image" in p for p in _refusals({"run-1": rec}))
+
+
+def test_corpus_problems_are_counted_not_quoted(ready):
+    rec = _ref("c360_batch")
+    rec["experiment"]["corpus"]["problems"] = ["config seed 31337 but the datagen pods ran 4242"]
+    problems = _refusals({"run-1": rec})
+    assert any("1 corpus problem" in p for p in problems)
+    assert "31337" not in " ".join(problems) and "4242" not in " ".join(problems)
+
+
+def test_a_continuous_reference_off_the_matrix_scale_is_refused(ready):
+    rec = _ref("c360_cont")
+    rec["experiment"]["corpus"]["scale"] = 5.0
+    assert any("continuous reference at scale 5" in p for p in _refusals({"run-1": rec}))
+
+
+def test_expected_approximate_sums_are_the_midpoint(ready, tmp_path):
+    a = _ref("c360_batch")
+    fps = a["experiment"]["results"]["fingerprints"]
+    q = next(q for q in sorted(fps) if fps[q].get("approx"))
+    col = sorted(fps[q]["approx"])[0]
+    b = _with(a, "hive-iceberg-spark-trino")
+    b["experiment"]["results"]["fingerprints"][q]["approx"][col] += 0.002
+    expected = _write(tmp_path, {"run-1": a, "run-2": b})
+    got = expected["entries"][0]["fingerprints"][q]["approx"][col]
+    assert got == pytest.approx(fps[q]["approx"][col] + 0.001)
+    for rec in (a, b):
+        assert _gate(rec, expected) == []
+
+
+def test_summary_shows_rows_and_alerts_for_the_reviewer(ready, tmp_path):
+    expected = _write(tmp_path, {"run-1": _ref("aml_batch")})
+    lines = X.summary(expected)
+    assert any(line.startswith("  rows per query: ") for line in lines)
+    assert any("alerts: 3; per rule: R1 1, R2 2" in line for line in lines)

@@ -23,18 +23,26 @@ version, corpus id v2, scale. A continuous entry by workload and workload
 version. ``from_runs`` is for the reviewer; the reader ignores it.
 
 Every input record must be exp2 (corpus id v2), a PASSED run on a corpus that
-is not held out, with usable fingerprints for every query (batch with a query
-engine, and the Customer 360 continuous result check) and, for an AML batch
-run, its alert set. Records of one entry must share their corpus id v2, their
-query set and their query names, their fingerprints must match each other as
-the gate matches them (``fingerprint.mismatch``) and their alert sets must be
-equal. A continuous entry's records must have executed the same query sets:
-one for Customer 360, the pre-case and post-case sets for AML. Any refusal
-writes nothing. Before returning, the file is checked against every input
-record through the gate's own reader, so a file this module writes accepts
-the runs it was written from.
+is not held out, has no corpus problems and came from the release datagen
+image (``release_record._image_problems``, the check the gate later applies).
+Its results must hold a usable fingerprint for every query of today's
+benchmark registry and no other (batch with a query engine, and the Customer
+360 continuous result check), none of them empty unless the query allows an
+empty result, under the registry's full query set id; an AML batch run must
+carry a non-empty alert set. A continuous run's rounds must have executed the
+registry's sets: the full set for Customer 360, the pre-case and the full set
+for AML, at the release matrix's continuous scale (the gate matches
+continuous entries by workload alone). Runs of one entry must share corpus
+id v2 and scale, their fingerprints must match the first run's as the gate
+matches them (``fingerprint.mismatch``) and their alert sets must be equal;
+each approximate column's expected sums are the midpoint of the runs'
+range. Any refusal writes nothing. Before returning, the file is checked
+against every input record through the gate's own reader
+(``release_record._results_problems``), so the file accepts the runs it was
+written from.
 
-Nothing here prints or writes a seed: the corpus is named only by its id v2.
+Nothing here prints or writes a seed: the corpus is named only by its id v2,
+and corpus problems (which can name seeds) are counted, not quoted.
 """
 
 from __future__ import annotations
@@ -51,10 +59,6 @@ from typing import Any
 #: the match (``benchmark/fingerprint.py``): left out of the expected value,
 #: which stands for every engine.
 _EVIDENCE_KEYS = ("engine", "adapted_sql_sha")
-
-#: Executed query sets a continuous reference record must show, by workload:
-#: Customer 360 runs one set; AML runs the pre-case and the post-case set.
-_CONTINUOUS_SETS = {"customer360": 1, "financial": 2}
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -134,21 +138,76 @@ def _alert_shape(alert: Any) -> str | None:
     return problem
 
 
-def _fingerprint_problems(rid: str, fps: Any) -> list[str]:
+def registry(workload: str) -> dict[str, Any] | None:
+    """The workload's benchmark queries as the registry holds them today:
+    ``names``, ``allow_empty`` (queries whose result may be empty), ``full``
+    (the query set id of every query) and ``pre_case`` (the id of the set an
+    AML continuous round runs before a case exists: every query but the
+    investigator class). None for a workload with no query set of its own."""
+    from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN, query_set_id
+    from lakebench.config.schema import WorkloadSchema
+
+    try:
+        queries = BENCHMARK_QUERIES_BY_DOMAIN[WorkloadSchema(workload)]
+    except (KeyError, ValueError):
+        return None
+    names = sorted(q.name for q in queries)
+    return {
+        "names": names,
+        "allow_empty": {q.name for q in queries if q.allow_empty},
+        "full": query_set_id(names),
+        "pre_case": query_set_id([q.name for q in queries if q.query_class != "investigator"]),
+    }
+
+
+def _expected_sets(workload: str) -> list[str] | None:
+    """The query sets a continuous reference's rounds must have executed:
+    Customer 360 the full set; AML the pre-case set and, once a case
+    exists, the full set."""
+    reg = registry(workload)
+    if reg is None:
+        return None
+    if workload == "financial":
+        return sorted({reg["pre_case"], reg["full"]})
+    return [reg["full"]]
+
+
+def _fingerprint_problems(rid: str, fps: Any, reg: Mapping[str, Any] | None) -> list[str]:
+    """Missing, unusable or empty fingerprints, and a query list that is not
+    the registry's (a reference that skipped or added a query)."""
     from lakebench.benchmark.fingerprint import describe, usable
 
     if not isinstance(fps, Mapping) or not fps:
         return [f"{rid}: no result fingerprints"]
-    return [
-        f"{rid}: query {q} has no usable fingerprint ({describe(fp)})"
-        for q, fp in sorted(fps.items())
-        if not usable(fp)
-    ]
+    problems = []
+    allow_empty = set((reg or {}).get("allow_empty") or ())
+    for q, fp in sorted(fps.items()):
+        if not usable(fp):
+            problems.append(f"{rid}: query {q} has no usable fingerprint ({describe(fp)})")
+        elif int(fp.get("rows") or 0) == 0 and q not in allow_empty:
+            problems.append(
+                f"{rid}: query {q} returned no rows (it does not allow an empty result)"
+            )
+    if reg is not None and sorted(fps) != reg["names"]:
+        problems.append(
+            f"{rid}: queries are not the registry's (missing "
+            f"{sorted(set(reg['names']) - set(fps))}, extra {sorted(set(fps) - set(reg['names']))})"
+        )
+    return problems
 
 
-def record_refusals(rid: str, record: Mapping[str, Any]) -> list[str]:
-    """Why one record cannot be a reference run (empty when it can)."""
+def record_refusals(
+    rid: str,
+    record: Mapping[str, Any],
+    release_digest: str | None = None,
+    root: Path | None = None,
+) -> list[str]:
+    """Why one record cannot be a reference run (empty when it can).
+    *release_digest* and *root* are ``release_record._image_problems``'s: the
+    corpus must come from the release datagen image, as the gate later
+    requires of every matrix record."""
     from lakebench.config.datagen_seed import PROTECTED_ROLES
+    from lakebench.metrics import release_record as rr
     from lakebench.metrics.experiment import experiment_of
     from lakebench.metrics.verdict import passed
 
@@ -168,13 +227,24 @@ def record_refusals(rid: str, record: Mapping[str, Any]) -> list[str]:
     if role in PROTECTED_ROLES:
         problems.append(f"{rid}: the corpus is the held-out {role} corpus")
     if corpus.get("problems"):
-        problems.append(f"{rid}: corpus problems: {'; '.join(map(str, corpus['problems']))}")
-    if exp.get("schema") == "exp2" and not corpus.get("id_v2"):
-        problems.append(f"{rid}: no corpus id v2")
+        # Not quoted: a corpus problem can name the configured and observed
+        # seeds.
+        problems.append(
+            f"{rid}: the record lists {len(corpus['problems'])} corpus problem(s) "
+            "(experiment.corpus.problems)"
+        )
+    elif exp.get("schema") == "exp2":
+        if not corpus.get("id_v2"):
+            problems.append(f"{rid}: no corpus id v2")
+        digest = release_digest if release_digest is not None else rr.release_datagen_digest()
+        problems += [f"{rid}: {p}" for p in rr._image_problems(record, exp, digest, root)]
     workload = exp.get("workload") or {}
     name, version = workload.get("name"), workload.get("version")
     if not name or not version:
         problems.append(f"{rid}: no workload name and version")
+    reg = registry(str(name)) if name else None
+    if name and reg is None:
+        problems.append(f"{rid}: workload {name} has no benchmark query set of its own")
     results = exp.get("results") or {}
     recipe = str((exp.get("architecture") or {}).get("recipe") or "")
     mode = _mode(exp.get("mode"))
@@ -182,9 +252,12 @@ def record_refusals(rid: str, record: Mapping[str, Any]) -> list[str]:
         if not recipe.endswith("-none"):
             if results.get("not_checked"):
                 problems.append(f"{rid}: results not checked: {results['not_checked']}")
-            problems += _fingerprint_problems(rid, results.get("fingerprints"))
-            if not results.get("query_set_id"):
-                problems.append(f"{rid}: no query set id")
+            problems += _fingerprint_problems(rid, results.get("fingerprints"), reg)
+            qs = results.get("query_set_id")
+            if reg is not None and qs != reg["full"]:
+                problems.append(
+                    f"{rid}: query set {qs} is not the registry's full set {reg['full']}"
+                )
         if name == "financial":
             alert = results.get("alert_set")
             if alert is None:
@@ -194,6 +267,8 @@ def record_refusals(rid: str, record: Mapping[str, Any]) -> list[str]:
                 )
             elif shape := _alert_shape(alert):
                 problems.append(f"{rid}: alert set is not well formed: {shape}")
+            elif not alert.get("rows"):
+                problems.append(f"{rid}: the alert set holds no alerts")
     elif mode == "continuous":
         rounds = _rounds(record)
         if not rounds:
@@ -201,18 +276,28 @@ def record_refusals(rid: str, record: Mapping[str, Any]) -> list[str]:
         elif any(not r.get("executed_query_set_id") for r in rounds):
             problems.append(f"{rid}: rounds do not record the query set they executed")
         else:
-            sets = {r["executed_query_set_id"] for r in rounds}
-            want = _CONTINUOUS_SETS.get(str(name))
-            if want is not None and len(sets) != want:
+            sets = sorted({r["executed_query_set_id"] for r in rounds})
+            want = _expected_sets(str(name))
+            if want is not None and sets != want:
                 problems.append(
-                    f"{rid}: rounds ran {len(sets)} query set(s) ({', '.join(sorted(sets))}); "
-                    f"a {name} continuous reference runs {want}"
-                    + (" (pre-case and post-case)" if want == 2 else "")
+                    f"{rid}: rounds ran query set(s) {', '.join(sets)}; a {name} continuous "
+                    f"reference runs {', '.join(want)}"
+                    + (" (the pre-case and the post-case set)" if len(want) == 2 else "")
+                )
+            scales = {
+                float(s) for w, m, _r, s in rr.RELEASE_MATRIX if w == name and m == "continuous"
+            }
+            scale = float(corpus.get("scale") or 0)
+            if scales and scale not in scales:
+                # The gate matches continuous entries by workload alone.
+                problems.append(
+                    f"{rid}: a continuous reference at scale {scale:g}; the release rows run at "
+                    f"scale {', '.join(f'{x:g}' for x in sorted(scales))}"
                 )
         if name == "customer360":
             if results.get("not_checked"):
                 problems.append(f"{rid}: results not checked: {results['not_checked']}")
-            problems += _fingerprint_problems(rid, results.get("fingerprints"))
+            problems += _fingerprint_problems(rid, results.get("fingerprints"), reg)
     else:
         problems.append(f"{rid}: unknown mode {mode}")
     return problems
@@ -226,9 +311,11 @@ def _merge_fingerprints(
     label: str, members: Sequence[tuple[str, Mapping[str, Any]]]
 ) -> tuple[dict[str, Any], list[str]]:
     """One expected fingerprint per query from *members* (``(run id,
-    fingerprints)``, sorted): the first run's, provided every other run's
-    matches it as the gate matches (``fingerprint.mismatch``) and every run
-    answered the same queries."""
+    fingerprints)``, sorted), provided every run's matches the first run's
+    as the gate matches (``fingerprint.mismatch``) and every run answered
+    the same queries. The value is the first run's, with each approximate
+    column's sums at the midpoint of the runs' range, so a release run is
+    held to the centre of the references rather than to one end."""
     from lakebench.benchmark.fingerprint import mismatch
 
     ref_id, ref = members[0]
@@ -244,7 +331,21 @@ def _merge_fingerprints(
             why = mismatch(fps[q], ref[q])
             if why:
                 problems.append(f"{label}: query {q} differs between {rid} and {ref_id}: {why}")
-    return {q: _strip(ref[q]) for q in sorted(ref)}, problems
+    merged = {}
+    for q in sorted(ref):
+        fp = _strip(ref[q])
+        for key in ("approx", "approx_w"):
+            sums = fp.get(key)
+            if not isinstance(sums, dict):
+                continue
+            for col in sums:
+                values = [
+                    float(((fps.get(q) or {}).get(key) or {}).get(col, sums[col]))
+                    for _rid, fps in members
+                ]
+                sums[col] = (min(values) + max(values)) / 2
+        merged[q] = fp
+    return merged, problems
 
 
 def _one(label: str, what: str, values: Mapping[str, Any]) -> list[str]:
@@ -257,10 +358,16 @@ def _one(label: str, what: str, values: Mapping[str, Any]) -> list[str]:
 
 
 def build_expected(
-    records: Sequence[tuple[str, Mapping[str, Any]]], version: str
+    records: Sequence[tuple[str, Mapping[str, Any]]],
+    version: str,
+    *,
+    release_digest: str | None = None,
+    root: Path | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """``(expected-results dict, notes)`` from ``(run id, record)`` pairs;
-    raises ``ExpectedRefused`` with every problem found."""
+    raises ``ExpectedRefused`` with every problem found. *release_digest*
+    (default ``release_record.release_datagen_digest()``) and *root* (the
+    repository, for the lineage evidence file) go to the image check."""
     from lakebench.metrics.experiment import experiment_of
     from lakebench.metrics.release_record import RELEASE_MATRIX, _results_problems
 
@@ -270,7 +377,7 @@ def build_expected(
         raise ExpectedRefused(["no reference records"])
     problems: list[str] = []
     for rid, rec in records:
-        problems += record_refusals(rid, rec)
+        problems += record_refusals(rid, rec, release_digest, root)
     if problems:
         raise ExpectedRefused(problems)
 
@@ -335,6 +442,11 @@ def build_expected(
             "corpus id v2",
             {rid: (exps[rid].get("corpus") or {}).get("id_v2") for rid in ids},
         )
+        problems += _one(
+            label,
+            "scale",
+            {rid: float((exps[rid].get("corpus") or {}).get("scale") or 0) for rid in ids},
+        )
         sets = {
             rid: sorted({r["executed_query_set_id"] for r in _rounds(rec)}) for rid, rec in members
         }
@@ -342,6 +454,7 @@ def build_expected(
         centry: dict[str, Any] = {
             "workload": name,
             "workload_version": wver,
+            "scale": float((exps[ids[0]].get("corpus") or {}).get("scale") or 0),
             "query_set_ids": sets[ids[0]],
         }
         if name == "customer360":
@@ -386,23 +499,35 @@ def dump(expected: Mapping[str, Any]) -> str:
     return json.dumps(expected, indent=2, sort_keys=True) + "\n"
 
 
+def _rows(fps: Mapping[str, Any]) -> str:
+    return ", ".join(f"{q} {fp.get('rows')}" for q, fp in sorted(fps.items()))
+
+
 def summary(expected: Mapping[str, Any]) -> list[str]:
-    """One line per entry, for the operator and the reviewer (no seed)."""
+    """What the reviewer reads: per entry, its runs, rows per query and
+    alerts per rule (no seed)."""
     lines = []
     for e in expected.get("entries") or []:
         lines.append(
             f"batch {e['workload']} {e['workload_version']} scale {float(e['scale']):g} "
-            f"corpus {str(e['corpus_id_v2'])[:16]}: {len(e['fingerprints'])} queries"
-            + (", alert set" if e.get("alert_set") is not None else "")
-            + f", from {len(e['from_runs'])} run(s)"
+            f"corpus {e['corpus_id_v2']} query set {e['query_set_id']}, "
+            f"from {', '.join(e['from_runs'])}"
         )
+        lines.append(f"  rows per query: {_rows(e['fingerprints'])}")
+        alert = e.get("alert_set")
+        if isinstance(alert, Mapping):
+            by_rule = alert.get("by_rule") or {}
+            lines.append(
+                f"  alerts: {alert.get('rows')}; per rule: "
+                + ", ".join(f"{r} {(p or {}).get('rows')}" for r, p in sorted(by_rule.items()))
+            )
     for c in expected.get("continuous") or []:
         lines.append(
-            f"continuous {c['workload']} {c['workload_version']}: query sets "
-            f"{', '.join(c['query_set_ids'])}"
-            + (f", {len(c['fingerprints'])} queries" if c.get("fingerprints") else "")
-            + f", from {len(c['from_runs'])} run(s)"
+            f"continuous {c['workload']} {c['workload_version']} scale {float(c['scale']):g}: "
+            f"query sets {', '.join(c['query_set_ids'])}, from {', '.join(c['from_runs'])}"
         )
+        if c.get("fingerprints"):
+            lines.append(f"  rows per query (result check): {_rows(c['fingerprints'])}")
     return lines
 
 
