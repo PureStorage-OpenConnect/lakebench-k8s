@@ -11,6 +11,14 @@ import).
 Commands reach the same codes on other paths too; a code with no named
 path yet says so.
 
+Several paths share a code (3 covers every safety refusal). With
+`LB_EXIT_PATH_FILE` set to a file name, `lakebench` appends one line
+`<code> <path>...` to that file as it exits (`<code> -` when no path is
+named), so a script can tell `destroy.incarnation_mismatch` from
+`lease.held` without reading message text. `deploy`, `destroy`, `generate`,
+the bronze and datagen gates of `run` and `reproduce` name every refusal and
+`destroy.namespace_terminating`; other commands may write `<code> -`.
+
 | Code | Name | Meaning | Produced by |
 |---|---|---|---|
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass`, `compare.like_for_like`, `status.ok`, `plan.ok` |

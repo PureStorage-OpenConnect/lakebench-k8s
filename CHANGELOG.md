@@ -477,6 +477,26 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   command (support states, configuration and CLI references, sizing tables,
   exit codes, prerequisites); `--check` exits 1 when any is stale. Every
   config schema field, section blocks included, now has a description.
+- **Release harness.** `scripts/release/harness.py` (not in the wheel) runs
+  the release matrix (`scripts/release/matrix-1.7.yaml`) from a worktree
+  detached at the freeze commit: it refuses a dirty tree, a foreign sha or a
+  lakebench imported from outside the tree, writes the deployments-ledger
+  row before each deploy, admits rows against the cluster's load, judges
+  each row by its record and destroys only the incarnation it deployed
+  (`destroy --expect-incarnation`), closing a ledger row only when the
+  namespace and its buckets are gone. The six parallel-safety scenarios
+  moved into `scripts/release/scenarios/`, updated to the current CLI
+  (refusals checked by exit code and exit path, a context-pinned `kubectl`,
+  owners read from the bucket tag or the owner marker), and run through
+  `harness.py scenario S-Pn`, which cleans up by incarnation afterwards.
+  `harness.py upgrade` deploys and runs one deployment with Lakebench 1.6,
+  then converts it with `init --from`, deploys, runs and destroys it with
+  the release, checking that the 1.6 bronze and tables survive. Matrix rows
+  may run extra steps before their destroy (M01: a continuous run after the
+  batch run on the same deployment). See docs/releasing.md.
+- **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...`
+  to that file as it exits, so scripts can tell refusals that share exit 3
+  apart without reading message text (docs/exit-codes.md).
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in

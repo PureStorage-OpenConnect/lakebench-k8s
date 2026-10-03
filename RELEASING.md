@@ -139,6 +139,230 @@ pass uses the branch's own config, so a new rule applies at once. Main's
 required checks should include "Secret scan (history)" and "AML statistics
 (slow)".
 
+### Release harness
+
+The release matrix runs through `scripts/release/harness.py` from a
+worktree detached at the freeze commit (with `scripts/release/ledger.py`,
+the row log and the deployments-ledger edits, and
+`scripts/release/cluster.py`, the read-only cluster queries and the
+admission decision). It is not part of the wheel. It
+runs lakebench only as `env PYTHONPATH=<worktree>/src python3.11 -m
+lakebench`, so the editable install never shadows the release tree.
+
+```bash
+git worktree add --detach /home/repos/lb-release-<version> <freeze sha>
+cd /home/repos/lb-release-<version>
+python3.11 scripts/release/harness.py plan --matrix scripts/release/matrix-1.7.yaml --freeze <sha>
+export LB_S3_ENDPOINT=... LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
+python3.11 scripts/release/harness.py run --matrix scripts/release/matrix-1.7.yaml \
+    --freeze <sha> --context <kube context> --out /root/lakebench-release/<version> \
+    --deployments-ledger <deployments ledger file> --ledger-lock <its writers' lock file> \
+    [--rows M01,M02] [--slots 3] [--rehearsal]
+python3.11 scripts/release/harness.py resume --out /root/lakebench-release/<version> \
+    --context <kube context> --deployments-ledger <deployments ledger file> \
+    --ledger-lock <its writers' lock file>
+```
+
+`plan` needs no cluster: it writes each row's config with `lakebench
+init`, checks that it resolves to the row's Spark minor and table format
+version (`RELEASE_MATRIX_VERSIONS`), and prints the row's peak from the
+same sizing code as `lakebench plan`. The matrix file must list only
+release-matrix rows (`RELEASE_MATRIX`); Customer 360 rows use seed 42 and
+AML rows the pre-registered calibration seed (43); a protected seed is
+refused without being printed.
+
+`run` refuses to start (exit 2) when HEAD is on a branch, `--freeze` is
+not a commit or HEAD is not that commit (`--rehearsal` waives only the
+second), the tree has a tracked change or an untracked or ignored file
+under `src/` or `scripts/`, lakebench is imported from outside the tree,
+`--context` is not in the kubeconfig, the ledger file or a credential
+variable is missing, or `--out` is inside the worktree or under `/tmp`.
+`--freeze` is resolved to its full sha before anything is recorded. Row
+configs, their `.lakebench/` state, logs and `rows.jsonl` (one line per row
+transition) live under `--out`, one directory per row, never in the
+worktree.
+
+For each row it waits for admission and writes the row into the
+deployments ledger table under the same lock as the admission decision,
+deploys with `--require-new`, reads the deployment's incarnation
+(`<namespace uid>#<nonce>`) from the config's state file, runs `run
+--generate --yes` with the default per-job timeout, writes the report,
+scrubs the record into `<out>/uat/runs/` and destroys with `destroy --yes
+--expect-incarnation <uid>#<nonce>`. A row passes only when its scrubbed
+record has no `release_record.record_problems` finding; the exit code
+alone never passes a row. `<out>/results.md` is the UAT results table: a
+row that did not pass cites no run id in the table (the release gate reads
+every id there), and its runs are listed below it. The "group check"
+column reads "not checked": cross-row fingerprint equality is a separate
+check. A rehearsal writes `results-rehearsal.md` with its own heading,
+judges records against HEAD, and is never evidence. Copy `results.md` and
+the scrubbed records into `uat/` in the post-freeze data commit.
+
+A matrix row may list `extra_steps`, run on the row's own deployment after
+its run passes and before its destroy, and only while the deployment is
+still the row's incarnation. `continuous-after-batch` (on M01, a Customer
+360 batch row only) runs `run --continuous --force-reset --skip-deploy
+--yes` on the same deployment: the reset of the batch's tables still needs
+the ownership proof, and the reset job's own lines (read with `lakebench
+logs ... bronze-verify`, the job's last attempt) must show at least one
+table dropped with PURGE, no table kept as foreign, and every deleted
+location inside the row's own buckets, and the objects the run itself
+cleared (checkpoints, raw data) must be in the row's buckets. The continuous record must pass on its verdict, rows per layer and
+commit. A row with that step is admitted at the larger of its batch and
+continuous peaks. Extra-step records go to `<out>/extra/runs/` and their
+results to `results-extra.md`, which also lists a step that did not finish
+as MISSING; copy both to `uat/extra/` (never `uat/runs/`, which the support
+record reads) in the post-freeze data commit. They do not change the row's
+verdict, but a failed, skipped or missing step makes the harness exit
+non-zero.
+
+Safety rules. Destroy is never passed `--force` and never re-invoked. Exit
+6 is followed by read-only polls for up to 20 minutes. Any other non-zero
+exit, or "Destroy NOT completed", marks the row `failed` or
+`destroy-refused` and stops admitting rows; `lease.held` is not retried,
+because destroy already waits for the lease. A ledger row is closed only
+when the namespace and the row's buckets are gone; otherwise the row is
+`left` for a person and admission stops. A deploy that fails is never
+retried: its namespace is destroyed by incarnation only when it carries the
+row's own confirmed nonce. A failed row stops new admissions, but rows
+already running finish and destroy. Each lakebench step has a time limit
+(deploy 2 h, run 12 h, destroy 2 h). A child past its limit gets SIGINT,
+then three SIGTERMs over 25 minutes, and SIGKILL only after that, because
+a command holding the cluster lease finishes its shared change and
+releases the lease before it stops.
+
+Admission counts lakebench namespaces, ledger rows and the harness's own
+rows against the four-deployment limit. It counts every ledger deployment
+at its plan peak, and one whose config cannot be read at the largest
+default peak for its scale. It keeps load within 80% of schedulable
+allocatable, runs at most two AML continuous rows at once, and runs an
+`alone` row with nothing else, including another harness's `alone` row in
+the ledger. Unreadable nodes admit nothing.
+
+The ledger table is edited under `--ledger-lock`, with a backup under
+`<out>/ledger-backups/`, only when the file did not change while it was
+read, and the edit is read back. The lock excludes only writers that take
+it: while the harness runs, everyone who edits the ledger (the main lane
+included) must edit it under the same lock file, or a hand admission can
+race the harness past the four-deployment limit. A row is marked
+`destroyed` only after its ledger row is closed. The first Ctrl-C stops
+admission and sends one SIGINT to running `lakebench run` children; deploys,
+destroys and scenario scripts finish, and rows stop before their next step.
+A second Ctrl-C sends one SIGINT to every child running at that moment.
+`resume` continues every unfinished row and never re-deploys, re-runs or
+re-destroys; it refuses while a row's child process, a scenario script, or
+any process naming a row's config is still running.
+
+### Parallel-safety scenarios
+
+The six S-P scenarios live in `scripts/release/scenarios/` and run one at a
+time through the harness, from the same detached worktree:
+
+```bash
+python3.11 scripts/release/harness.py scenario S-P1 --freeze <sha> --context <kube context> \
+    --out /root/lakebench-release/<version> --deployments-ledger <deployments ledger file> \
+    --ledger-lock <its writers' lock file>
+```
+
+| Scenario | Script | What it proves |
+|---|---|---|
+| S-P1 | `s-p1-destroy-running.sh` | Destroying A while B's pipeline runs leaves B's record passing (success, scale ratio 0.95 to 1.10) and B's generated objects in place |
+| S-P2 | `s-p2-concurrent-deploy.sh` | Two deploys two seconds apart both finish, with distinct identities, nonces and SecretClasses |
+| S-P3 | `s-p3-destroy-during-deploy.sh` | Destroying B while A generates leaves A's datagen Job, buckets and generated objects alone |
+| S-P4 | `s-p4-double-destroy.sh` | Two destroys of A a second apart: exactly one deletes, the other converges with a named outcome |
+| S-P5 | `s-p5-legacy-bucket-destroy.sh` | A pre-existing bucket with no owner is refused at deploy and at destroy and left as it was |
+| S-P6 | `s-p6-same-bucket-two-configs.sh` | A second deployment naming A's bucket is refused at deploy and the bucket stays A's |
+
+The harness writes the scenario's configs (Customer 360 batch, scale 1,
+hive-iceberg-spark-trino, explicit bucket names) and their ledger rows,
+admits all of the scenario's deployments together, and runs the script with
+`LB_CONFIG_A`, `LB_CONFIG_B`, `LB_UAT_LOG_DIR`, `LB_KUBE_CONTEXT` and
+`LB_EXIT_<NAME>` (each exit code of the release tree) exported, and a
+`lakebench` shim for the release tree first on `PATH`. Refusals and
+failures are checked by exit code and by the paths `LB_EXIT_PATH_FILE`
+names; three success-path lines are still matched as text ("Namespace X
+deleted", "deletion started by another run", "concurrent destroy").
+`kubectl` and `helm` run only with the pinned context. For S-P5 the harness
+creates the bucket, named outside A's name prefix, with one object, and
+deletes it afterwards only if it is unchanged; a bucket it did not create
+is never touched. For S-P6, B names A's bronze bucket. Bucket owners are
+read from the bucket tag, or on a backend without tagging (FlashBlade) from
+the bucket's `.lakebench/owner.json` marker. A script that exits early
+stops its background jobs (three SIGTERMs over 25 minutes before SIGKILL),
+and the harness waits for the script's whole process group before it
+cleans up.
+
+After the script, whatever its exit code, the harness checks that each
+deployment the scenario keeps is present with its incarnation, destroys
+every leftover namespace with `--expect-incarnation` (B before A), allowing
+only the refusal the scenario expects (a bucket with no owner, or another
+deployment's, refused and left), and closes a ledger row only when the
+namespace and the buckets that deployment owns are gone. A scenario passes
+when the script exits 0 with its `PASS:` line and every harness check
+holds. Scenario results go to `<out>/results-extra.md`, never to
+`results.md`, so the release gate's records check does not read them.
+`resume` cleans up a scenario the harness stopped in, polls a destroy that
+was running, and marks the scenario failed; it never re-runs the script.
+
+### Upgrade from 1.6
+
+`harness.py upgrade` checks that a deployment made by Lakebench 1.6 can be
+run and destroyed by the release:
+
+```bash
+python3.11 scripts/release/harness.py upgrade --freeze <sha> --context <kube context> \
+    --out /root/lakebench-release/<version>-upgrade --deployments-ledger <ledger file> \
+    --ledger-lock <its writers' lock file> [--v16-venv <venv with lakebench 1.6>] \
+    [--bystander-config <config of a deployment running meanwhile>]
+```
+
+Without `--v16-venv` it creates `<out>/v16-venv` and installs
+`lakebench-k8s==1.6.0` there (`--v16-spec` changes it); either way it
+refuses an interpreter whose lakebench is not 1.6 or is imported from
+outside its own environment. It uses one Customer 360 batch scale 1
+deployment on hive-iceberg-spark-trino:
+
+1. 1.6 `init` (credentials as `${VAR}` references, the context pinned) and
+   at once this tree's `init --from OLD -o NEW`, which must keep the name
+   and the `<name>-bronze/-silver/-gold` buckets. The namespace must not
+   exist yet. The ledger row names NEW and is admitted at the largest
+   default peak for scale 1.
+2. 1.6 `deploy` and `run --generate`. The namespace's `<uid>#<nonce>` is
+   read right after the deploy. The 1.6 run must be `PASSED` by its own
+   stored verdict with output rows in bronze verify, silver build and gold
+   finalize (a 1.6 record cannot pass this release's record checks).
+   Baseline: the bronze datagen objects (key, size, ETag) and the row
+   counts of the silver and gold tables from 1.6 `query`, which must be
+   above zero.
+3. This tree's `deploy NEW --yes`, which adopts the 1.6 namespace and
+   records a nonce (`run` refuses a namespace with no dependency server
+   until it is deployed by this tree), only while the namespace is still
+   the incarnation 1.6 deployed. The silver and gold row counts must be
+   unchanged through this deploy.
+4. `run NEW --yes` without `--generate`, over the 1.6 bronze, which must be
+   unchanged afterwards. Its record is scrubbed into `<out>/extra/runs/`,
+   never `uat/runs/`, and passes on its verdict, rows per layer, stages and
+   the freeze commit; the release-image and corpus-lineage checks do not
+   apply to it, because 1.6 generated the corpus and writes no corpus
+   markers.
+5. `destroy NEW --yes --expect-incarnation <uid>#<nonce>`. A bystander's
+   namespace incarnation and buckets are read before the 1.7 deploy and its
+   generated objects just before the destroy, and all are checked after the
+   destroy (its silver and gold change while it runs; its own harness judges
+   its record). The bystander must outlive the upgrade.
+
+A failed step is never retried. The deployment is destroyed by an
+incarnation this row made: this tree's confirmed nonce, else the nonce 1.6
+stamped, or a nonce of this tree's deploy that did not finish on the
+namespace 1.6 created. Otherwise it is left for a person. Ctrl-C stops the
+routine before its next deploy or run. The result goes to
+`results-extra.md`. `resume` cleans up a stopped upgrade with this tree's
+CLI only and never re-runs it. Its normal path does not destroy a 1.6
+deployment through a nameless 1.6 directory with no recorded nonce; that
+path has its own tests. The 1.6 run's record is copied to
+`<out>/extra/v16-runs/` before the 1.6 count queries append their metrics
+to it.
+
 ### UAT results
 
 The gate requires `uat/results-<version>.md`, for example

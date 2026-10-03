@@ -1372,6 +1372,9 @@ def _verify(
         kind, detail = look
         if kind == "refuse":
             print_error(f"Refused: {detail}.")
+            from lakebench.cli._exit import note_exit_paths
+
+            note_exit_paths(["reproduce.held_out"])
             raise typer.Exit(ExitCode.REFUSED)
         _verify_spent_look(detail, _package_corpus(meta)[1], report)
         return
@@ -1438,6 +1441,9 @@ def _verify(
             "Refused: the config would generate a held-out corpus; reproduce never "
             "regenerates one (a registered look is verified with --report instead)."
         )
+        from lakebench.cli._exit import note_exit_paths
+
+        note_exit_paths(["reproduce.held_out"])
         raise typer.Exit(ExitCode.REFUSED)
     _iterations = _cfg.architecture.benchmark.iterations
     _mismatch = _sample_mismatch(meta, _iterations)

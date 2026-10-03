@@ -21,6 +21,14 @@ Mapping (``exit_code_for``):
 - ``KeyboardInterrupt``: 130;
 - anything else: 1, printed as one line; ``LAKEBENCH_DEBUG=1`` adds the
   traceback.
+
+Machine-readable exit path: with ``LB_EXIT_PATH_FILE`` set, the root group
+appends one line ``<code> <path> [<path>...]`` (or ``<code> -`` when no path
+is known) to that file on every way out, so a harness can tell apart
+refusals that share exit 3 without reading message text. A typed error gives
+its own path; a deploy or destroy that refuses inside its step results gives
+the ``details[REFUSAL_DETAIL]`` path of each refused step
+(``note_exit_paths``).
 """
 
 from __future__ import annotations
@@ -67,11 +75,50 @@ __all__ = [
     "error_for",
     "exit_code_for",
     "path_code",
+    "note_exit_paths",
     "quiet_urllib3",
+    "refusal_paths",
     "refused_result_code",
 ]
 
 DEBUG_ENV = "LAKEBENCH_DEBUG"
+
+#: When set, the root group appends ``<code> <path>...`` to this file on exit.
+EXIT_PATH_FILE_ENV = "LB_EXIT_PATH_FILE"
+
+# Paths noted by a command that exits through ``typer.Exit`` (the deploy and
+# destroy step refusals), reset at the start of every root invocation.
+_noted_paths: list[str] = []
+
+
+def note_exit_paths(paths: list[str]) -> None:
+    """Record exit paths for ``LB_EXIT_PATH_FILE`` before a ``typer.Exit``."""
+    _noted_paths.extend(p for p in paths if p and p not in _noted_paths)
+
+
+def refusal_paths(results: Any) -> list[str]:
+    """The ``details[REFUSAL_DETAIL]`` path of every failed step, in order."""
+    paths: list[str] = []
+    for r in results:
+        if getattr(getattr(r, "status", None), "value", None) != "failed":
+            continue
+        path = (getattr(r, "details", None) or {}).get(REFUSAL_DETAIL)
+        if isinstance(path, str) and path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _write_exit_path(code: int, paths: list[str]) -> None:
+    """Append ``<code> <paths>`` to ``LB_EXIT_PATH_FILE``; never raises."""
+    target = os.environ.get(EXIT_PATH_FILE_ENV, "")
+    if not target:
+        return
+    line = f"{int(code)} {' '.join(paths) if paths else '-'}\n"
+    try:
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except (OSError, ValueError):
+        pass
 
 
 _CLICK_ROOTS = frozenset({"typer", "click"})
@@ -282,10 +329,16 @@ class LakebenchGroup(TyperGroup):
         # them in ``_protected_args``), its options in ``args``.
         protected = getattr(ctx, "_protected_args", None) or getattr(ctx, "protected_args", None)
         _json.start_from_args(self, [*(protected or []), *ctx.args])
+        _noted_paths.clear()
         try:
             rv = super().invoke(ctx)
         except BaseException as exc:
             err = error_for(exc)
+            if err is not None:
+                _write_exit_path(int(err.code), [p for p in (err.path,) if p] + _noted_paths)
+            else:
+                passed_code = _exit_code_of(exc)
+                _write_exit_path(1 if passed_code is None else passed_code, list(_noted_paths))
             if _json.active():
                 # --json: one document on every way out, its exit_code the
                 # process's own.
@@ -315,6 +368,7 @@ class LakebenchGroup(TyperGroup):
             raise typer.Exit(int(err.code)) from exc
         finally:
             _json.root_done()
+        _write_exit_path(0, list(_noted_paths))
         if _json.active():
             _json.finish(0)
         return rv
