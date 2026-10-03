@@ -292,3 +292,21 @@ def test_malformed_shapes_are_refused_not_crashed(mod, path, value):
     node[path[-1]] = value
     _doc, problems = mod.build([rec])
     assert len(_about(problems, "shape")) == 1
+
+
+def test_a_calibration_seed_of_43_needs_only_seed_43s_two_runs(mod, monkeypatch):
+    monkeypatch.setattr(datagen_seed, "calibration_seed", lambda: 43)
+    two = [r for r in _four() if r["experiment"]["corpus"]["seed"] == 43]
+    doc, problems = mod.build(two)
+    assert problems == []
+    assert {r["seed_role"] for r in doc["ratios"]} == {"seed-43"}
+    assert mod.build(two[:1])[1] == ["seed-43: no usable record at scale 10"]
+
+
+def test_an_unreadable_calibration_seed_stops_the_file(mod, monkeypatch):
+    def broken():
+        raise KeyError("calibration_seed")
+
+    monkeypatch.setattr(datagen_seed, "calibration_seed", broken)
+    _doc, problems = mod.build(_four()[:2])
+    assert problems == ["the calibration seed cannot be read (KeyError)"]

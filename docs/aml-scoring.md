@@ -435,9 +435,11 @@ non-planted, which `evidence_capped_alerts_by_rule` shows) and
 feed the published limitation on how W5 and W6 non-planted alerts per
 customer grow with scale: `scripts/aml_screen_rates.py` reads stored AML
 batch records (never a bucket or a cluster) and writes
-`docs/benchmarks/data/aml_screening_rates.json` from four runs, seed 43 and
-the calibration seed at scale 1 and 10, each with an observed generator
-digest, scale and seed (generate in the same namespace before the run).
+`docs/benchmarks/data/aml_screening_rates.json` from seed 43's runs at
+scale 1 and 10, plus the calibration seed's at both when the
+pre-registration's calibration seed is not 43, each with an observed
+generator digest, scale and seed (generate in the same namespace before the
+run).
 It gives one n=1 row per seed role (`seed-43` or `calibration`), scale and
 rule, with the run id and generator digest, and the ratio scale 10 over
 scale 1 from the raw counts. It refuses a protected-corpus record, a verdict

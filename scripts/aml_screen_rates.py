@@ -29,8 +29,10 @@ Refused, by run id and reason, never read as zero:
   that is missing or differs from the declared one;
 - a record at a scale other than 1 or 10;
 - a record whose seed is neither 43 nor the calibration seed;
-- two records for one (seed role, scale), a missing one of the four
-  (seed 43 and calibration, scale 1 and 10), and a scale-1 and scale-10
+- two records for one (seed role, scale), a missing one of the runs
+  (seed 43 at scale 1 and 10, and the calibration seed at both when it is
+  not 43: the pre-registration's calibration seed may be 43 itself, and
+  then seed 43's two runs are the whole set), and a scale-1 and scale-10
   pair that differ in generator or workload version.
 
 The output holds no seed: rows name a seed role (``seed-43`` or
@@ -197,8 +199,19 @@ def record_row(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-#: The runs the figure needs: both seed roles at both scales.
-REQUIRED = tuple((role, scale) for role in ("seed-43", "calibration") for scale in SCALES)
+def required_runs() -> tuple[tuple[str, float], ...]:
+    """The runs the figure needs: seed 43 at both scales, and the calibration
+    seed at both scales when it is another seed (when the pre-registration's
+    calibration seed is 43, the two are one corpus and seed 43's runs stand
+    for both). Raises Refused when the calibration seed cannot be read."""
+    from lakebench.config import datagen_seed
+
+    try:
+        same = datagen_seed.calibration_seed() == DEV_SEED
+    except Exception as e:  # noqa: BLE001 -- unreadable pre-registration
+        raise Refused(f"the calibration seed cannot be read ({type(e).__name__})") from None
+    roles = ("seed-43",) if same else ("seed-43", "calibration")
+    return tuple((role, scale) for role in roles for scale in SCALES)
 
 
 def build(records: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str]]:
@@ -219,7 +232,12 @@ def build(records: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str]]:
             )
             continue
         rows[key] = row
-    for role, scale in REQUIRED:
+    try:
+        required = required_runs()
+    except Refused as e:
+        problems.append(str(e))
+        required = ()
+    for role, scale in required:
         if (role, scale) not in rows:
             problems.append(f"{role}: no usable record at scale {scale:g}")
     figures = []
