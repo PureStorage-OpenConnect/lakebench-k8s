@@ -43,6 +43,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for every key Lakebench owns.
 
 ### Added
+- **AML continuous runs drain the last detection tick and score
+  `recall_covered`.** At window end the CLI asks gold-refresh to finish its
+  tick (a marker under its checkpoint) instead of deleting it mid-tick, then
+  scores recall over the instances that tick could have detected, at the
+  snapshots it logged. The record gains `continuous.ticks[]`,
+  `continuous.drain`, `continuous.ticks_unpinned`,
+  `financial_scoring` with `mode: "covered"` and
+  `experiment.results.alert_set_continuous`. A drain that times out fails
+  the run. `lakebench stop` drains for up to 300 s before deleting. Each
+  tick now filters silver through the versions table at one recorded
+  snapshot. See
+  [aml-scoring.md](docs/aml-scoring.md#continuous-recall-over-covered-instances).
 - **AML batch records attribute gold-finalize time and show stage headroom.**
   `experiment.attribution` names gold-finalize's slowest rule, its heaviest
   Spark stage and the TM share; `limits.headroom_pct` gives each stage's

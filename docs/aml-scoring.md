@@ -587,7 +587,9 @@ enters identity, a verdict or a comparison):
 - **AML continuous per-rule recall is not scored.** Stopping the
   streams can interrupt a gold-refresh tick and leave rule statuses
   `pending`; post-run scoring refuses them, and the report says "Recall is
-  not scored in continuous mode". Batch recall is unaffected. Target v1.7.
+  not scored in continuous mode". Batch recall is unaffected. From v1.7 a
+  continuous run drains the last tick and records `recall_covered`
+  instead; see [Continuous recall over covered instances](#continuous-recall-over-covered-instances).
 - **Stream restarts longer than 1 h are not safe.** Continuous
   Iceberg snapshot expiry is floored at 1 h while streams are live. A
   bronze-ingest driver down for longer can replay a batch and append
@@ -611,6 +613,68 @@ enters identity, a verdict or a comparison):
 - **Recall is uncalibrated.** v1.6 publishes no held-out Level-2 result;
   recall and precision are in-sample on the calibration corpus. The
   registered held-out looks are deferred to v1.7.
+
+## Continuous recall over covered instances
+
+A continuous run ends its window by draining gold-refresh instead of
+deleting it mid-tick. The CLI writes a marker object,
+`<checkpoint_base>/gold-refresh/_lb_stop` in the gold bucket, whose body is
+the run id. The driver finishes the tick it is in, logs
+`Drain complete: last completed cycle N`, frees its executors and waits
+until the streams are stopped. The CLI waits up to 1800 s for that line.
+The run fails when the drain times out (`gold drain timed out; last tick
+interrupted`), when gold-refresh is deleted before it drains, or when the
+driver had restarted and found the marker before its first tick, because in
+each case `gold.alerts` may be half rewritten. A marker that cannot be
+written does not fail the run; its recall reads `not_scored`.
+`lakebench stop` drains the same way, with a 300 s budget, and stops the
+jobs whether or not the drain is confirmed, Ctrl-C included.
+
+Every tick logs the snapshots it read and wrote: `silver.transactions`,
+`silver.entities`, `silver.accounts` and `silver_batch_versions` when it
+pinned silver, and `gold.alerts` and `gold.detection_status` once
+detection committed. Detection filters the pinned transactions through the
+versions table at the logged snapshot, so the scorer can see exactly the
+sealed batches detection saw. The record keeps them as
+`continuous.ticks[]`, with `continuous.drain` and
+`continuous.ticks_unpinned` (ticks whose transactions or versions snapshot
+was not pinned, which detection then read through the current versions
+table). They come from the current gold-refresh driver pod's log, so a
+driver that restarted leaves its earlier pod's ticks out
+(`continuous.drain.ticks_scope`), and
+`continuous.drain.log_from_driver_start` is false when log rotation trimmed
+the log's first ticks.
+
+After the streams stop and every gate has decided, the score job reads
+those six snapshots of the drained tick and scores **`recall_covered`** per
+typology: the designated
+rule hit rate over the instances the tick could have detected. An instance
+is covered when every one of its participant transactions is in the sealed
+transactions at the tick's snapshot and every participant maps, through
+`silver.accounts` at that snapshot, to an entity in `silver.entities` at
+that snapshot. Each typology also reports `covered_instances`,
+`corpus_instances`, `coverage` and `no_participant_txns`; a typology whose
+designated rules are all excluded from continuous mode is listed under
+`excluded_typologies`. False positives and transaction precision count the
+whole manifest, so an alert on a planted payment the tick had not yet
+covered is not a false positive. The per-rule chance floor uses the covered
+random-control instances, as recall does.
+
+`recall_covered` is not the batch `recall` and is never written under that
+name: it lands in `financial_scoring.covered` with `mode: "covered"`.
+The run is `not_scored`, with the reason, when the drain did not complete,
+the run failed a gate, the last tick's record is missing or names a
+snapshot as `unknown` or `none`, a recorded snapshot was expired before
+scoring, or the run was interrupted before scoring finished. An earlier
+tick is never scored instead, and the current tables are never read in
+place of a recorded snapshot. The scored tick can begin after the window
+closed (the drain waits for the tick in progress, and the window's bucket
+listing runs first); `financial_scoring.tick.pinned_after_window_end_s`
+says by how much. The same job fingerprints `gold.alerts` at the scored
+tick's commit (`experiment.results.alert_set_continuous`), which is
+diagnostic only: continuous alerts depend on when ticks ran. The scorecard
+says whether recall was scored and why not, but does not render
+`recall_covered` yet.
 
 ## The transaction-monitoring operations layer
 
