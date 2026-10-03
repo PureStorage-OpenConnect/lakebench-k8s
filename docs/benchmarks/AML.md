@@ -232,7 +232,7 @@ the generator (`datagen_rs/src/world.rs`):
 | Parties (population) | round(111,111 x scale), at least 100 in the generator (Lakebench's own estimate floors at 1) | 111,111 | 1,111,110 |
 | Base payments | population x 4 per month x 60 months | 26,666,640 | 266,666,400 |
 | Screening rows | added on top of base payments; the count depends on the seed | 5,227 (recorded, by difference) | 52,194 (recorded, by difference) |
-| Estimated pacs.008 size | 8.4 GB x scale | 8.4 GB | 84 GB |
+| Expected pacs.008 size (the `scale_ratio` denominator) | scale x GB per scale unit, measured: 8.47 at scale 1 and 9.36 at scale 10, interpolated in log10(scale) between them and held outside (`config/scale.py`) | 8.47 GB | 93.6 GB |
 | Files at 64 MiB, snappy | clamp(rows x 345 B / file size, 64, rows / 1000) | 137 | 1,371 |
 
 The entity mix is 55% person, 40% company and 5% financial institution;
