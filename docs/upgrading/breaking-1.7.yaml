@@ -544,3 +544,28 @@
     and a deployment made from it must be redeployed before run.
   fix: 'Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version:
     4.0.0` keeps Spark 4.0.2.'
+- id: a-run-passes-only-when-its-record-shows-it
+  title: A run passes only when its record shows it
+  kind: default-change
+  subject:
+  - verdict.gates.layer_rows
+  - verdict.gates.aml_rules
+  - verdict.gates.scale_ratio
+  - verdict.gates.query_answers
+  source: src/lakebench/metrics/verdict.py:record_gates
+  text: A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or
+    vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer;
+    `run` exits 1 when its record does not read PASSED.
+  fix: Read `verdict.reasons` and `verdict.gates` in `metrics.json`; a run that exited 0 under 1.6 with
+    an empty layer or a skipped rule now exits 1 and says which.
+- id: readers-take-the-strictest-verdict
+  title: Readers take the strictest verdict
+  kind: identity
+  subject:
+  - verdict.passed
+  source: src/lakebench/metrics/verdict.py:verdict_of
+  text: '`compare`, `report`, the perf gate and the release gate read the stricter of a record''s stored
+    verdict and the one recomputed from it: three stored AML batch records without a watchlist now read
+    FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.'
+  fix: Re-run a record that now reads FAILED; `report --json` shows `verdict_stored` and `verdict_recomputed`
+    beside the `verdict` it heads with.
