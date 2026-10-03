@@ -12,13 +12,18 @@ Every file is listed explicitly; there are no globs. The builder measures the
 bytes it is about to apply (UTF-8 key plus value bytes over ``data``; the API
 server counts only the values, so this is slightly conservative) and refuses
 a map over :data:`MAP_BUDGET_BYTES`. A listed file that is not in the package
-raises instead of being skipped.
+raises instead of being skipped. Before returning, the builder hashes every
+integer token in the maps against the held-out AML seeds
+(:func:`heldout_absence_refusal`); a hit under ``absence_check: enforce``, or a
+hash record that cannot be read, raises, so every caller (the apply and the
+continuous runner's pre-check) refuses before it changes anything.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -30,6 +35,8 @@ from lakebench.modules.pipeline_engines.spark.job import JobType
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
+
+logger = logging.getLogger(__name__)
 
 # Kubernetes rejects a ConfigMap whose data keys plus values exceed 1 MiB.
 CONFIGMAP_LIMIT_BYTES = 1_048_576
@@ -279,7 +286,38 @@ def build_script_configmaps(
                 "data": data,
             }
         )
+    refusal = heldout_absence_refusal(maps)
+    if refusal:
+        raise ScriptsManifestError(refusal)
     return maps
+
+
+def heldout_absence_refusal(maps: Iterable[Mapping[str, Any]]) -> str | None:
+    """Scan the maps' data for an integer token that hashes to a held-out AML
+    seed (``datagen_seed.absence_problems``; no value is printed). Returns a
+    refusal naming each map and key when the hash file says
+    ``absence_check: enforce`` (the shipped setting), or when the check cannot
+    run at all; with ``report`` a hit is logged and None returned."""
+    from lakebench.config import datagen_seed as ds
+
+    texts = {
+        f"{m['metadata']['name']}/{k}": v for m in maps for k, v in (m.get("data") or {}).items()
+    }
+    try:
+        held = ds.load_heldout()
+        problems = ds.absence_problems(texts, held)
+    except Exception as e:  # noqa: BLE001 -- any failure refuses the apply
+        return f"the held-out absence check could not run ({type(e).__name__}: {e}); not applying"
+    if not problems:
+        return None
+    if held.absence_check == "enforce":
+        return "held-out seed in a scripts map, not applying: " + "; ".join(problems)
+    logger.warning(
+        "Held-out absence check (report mode) found %d key(s): %s",
+        len(problems),
+        "; ".join(problems),
+    )
+    return None
 
 
 def scripts_volume(job_type: JobType) -> dict[str, Any]:

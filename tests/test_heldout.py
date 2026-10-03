@@ -592,13 +592,13 @@ def test_scripts_map_refused_when_enforcing(two_configs, monkeypatch, caplog):
         "absence_problems",
         lambda texts, h=None, exclude=None: real({**texts, "m/planted": str(EV)}, h, []),
     )
-    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsApplyError
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
 
     mgr, k8s = _manager(two_configs[1])
-    with caplog.at_level(logging.ERROR), pytest.raises(ScriptsApplyError, match="held-out") as e:
+    with pytest.raises(ScriptsMapError, match="held-out") as e:
         mgr.deploy_scripts_configmap()
     k8s.apply_manifest.assert_not_called()
-    assert "m/planted" in caplog.text and _no_seed_in(caplog.text) and _no_seed_in(str(e.value))
+    assert "m/planted" in str(e.value) and _no_seed_in(str(e.value))
 
 
 def test_scripts_map_applied_and_logged_in_report_mode(two_configs, monkeypatch, caplog):
@@ -636,13 +636,58 @@ def test_scripts_map_refused_without_the_hash_file(two_configs, monkeypatch):
     def gone(*a, **k):
         raise FileNotFoundError("heldout_hashes.json not found")
 
-    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsApplyError
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
 
     monkeypatch.setattr(ds, "load_heldout", gone)
     mgr, k8s = _manager(two_configs[0])
-    with pytest.raises(ScriptsApplyError, match="held-out"):
+    with pytest.raises(ScriptsMapError, match="held-out"):
         mgr.deploy_scripts_configmap()
     k8s.apply_manifest.assert_not_called()
+
+
+def _plant(monkeypatch, role, key, text):
+    """Add ``key: text`` to one role's rendered map, as if a shipped file
+    carried it."""
+    from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
+    real = sm._read_role
+
+    def read(r, package_dir):
+        data = real(r, package_dir)
+        return {**data, key: text} if r == role else data
+
+    monkeypatch.setattr(sm, "_read_role", read)
+
+
+def test_builder_refuses_a_planted_seed_for_every_caller(two_configs, monkeypatch):
+    # The planted token sits in a real rendered map. The builder itself
+    # refuses, so the continuous runner's pre-check (which only builds the
+    # maps, before its reset drops any state) refuses too, not just the apply.
+    from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
+    held = ds.HeldOut(**{**ts.load().__dict__, "absence_check": "enforce"})
+    monkeypatch.setattr(ds, "load_heldout", lambda *a, **k: held)
+    _plant(monkeypatch, "common", "planted.py", f"SEED = {EV:_}\n")
+    with pytest.raises(sm.ScriptsMapError, match="lakebench-scripts-common/planted.py") as e:
+        sm.build_script_configmaps(two_configs[0], "ns")
+    assert _no_seed_in(str(e.value))
+    mgr, k8s = _manager(two_configs[1])
+    with pytest.raises(sm.ScriptsMapError):
+        mgr.deploy_scripts_configmap()
+    k8s.apply_manifest.assert_not_called()
+
+
+def test_absence_check_failure_of_any_kind_refuses(two_configs, monkeypatch):
+    # A malformed looks record or pre-registration raises KeyError/TypeError
+    # inside the scan; that is a refusal too, not a traceback or a pass.
+    from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
+    def broken(*a, **k):
+        raise KeyError("corpora")
+
+    monkeypatch.setattr(ds, "absence_problems", broken)
+    with pytest.raises(sm.ScriptsMapError, match="could not run"):
+        sm.build_script_configmaps(two_configs[0], "ns")
 
 
 def test_hash_file_ships_in_the_scripts_map(two_configs):
@@ -905,3 +950,117 @@ def test_rust_compiled_seed_hashes_to_its_role(role):
     if ok is None:
         pytest.skip("robustness.rs no longer compiles the seed in (CD-5)")
     assert ok is True, f"robustness.rs {role.upper()}_SEED is not the registered {role} seed"
+
+
+# ---------------------------------------------------------------------------
+# Callers of the removed protected_seeds(): production paths, fail closed
+# ---------------------------------------------------------------------------
+
+
+def _gone():
+    raise FileNotFoundError("heldout_hashes.json not found")
+
+
+def test_seed_is_protected_by_hash_and_fails_closed(held, monkeypatch):
+    assert ds.seed_is_protected(EV) and ds.seed_is_protected(RB)
+    assert ds.seed_is_protected(42)  # spent, public
+    assert not ds.seed_is_protected(43)
+    assert not ds.seed_is_protected(True) and not ds.seed_is_protected("x")
+    monkeypatch.setattr(ds, "_heldout", _gone)
+    assert ds.seed_is_protected(43), "an unreadable record must hide every seed"
+
+
+def test_compare_redaction_uses_the_hash_record(held, monkeypatch):
+    # The real _hidden_seeds, not a stubbed frozenset: a held-out seed is
+    # hidden in a seed field and in text, a development seed is shown, and an
+    # unreadable record hides every integer seed.
+    from lakebench.metrics import compare
+
+    hidden = compare._hidden_seeds()
+    assert isinstance(hidden, compare.ProtectedSeeds)
+    doc = {"seed": EV, "dev": {"seed": 43}, "note": f"corpus seed {EV} differs"}
+    out = compare.redact(doc, hidden)
+    assert out["seed"] == "<protected seed>" and out["dev"]["seed"] == 43
+    assert _no_seed_in(json.dumps(out))
+    assert (hidden - {EV}).__contains__(EV) is False  # public seeds subtract
+    monkeypatch.setattr(ds, "_heldout", _gone)
+    assert compare._hidden_seeds() is None
+    assert compare.redact({"seed": 43}, None)["seed"] == "<protected seed>"
+
+
+def test_reproduce_redacts_and_refuses_through_the_hash_record(held, monkeypatch):
+    from types import SimpleNamespace
+
+    from lakebench.cli import _reproduce as rep
+
+    text = f"seed {EV} is refused; seed 43 is fine; 12 rows"
+    out = rep._redact_seed_text(text)
+    assert _no_seed_in(out) and "43" in out and "12 rows" in out
+
+    def cfg(seed):
+        dg = SimpleNamespace(corpus_role=None, seed=seed)
+        wl = SimpleNamespace(datagen=dg, schema_type=SimpleNamespace(value="financial"))
+        return SimpleNamespace(architecture=SimpleNamespace(workload=wl))
+
+    assert rep._config_held_out(cfg(EV)) and not rep._config_held_out(cfg(43))
+    monkeypatch.setattr(ds, "load_looks", lambda path=None: [])
+    meta = {"experiment_identity": {"workload": "financial", "seed": EV}}
+    kind, why = rep._spent_look(meta)
+    assert kind == "refuse" and _no_seed_in(why)
+
+
+def test_reproduce_fails_closed_without_the_hash_record(monkeypatch):
+    from types import SimpleNamespace
+
+    from lakebench.cli import _reproduce as rep
+
+    monkeypatch.setattr(ds, "_heldout", _gone)
+    assert rep._redact_seed_text("seed 1234 of 12") == "seed <seed> of 12"
+    meta = {"experiment_identity": {"workload": "financial", "seed": 43}}
+    assert rep._spent_look(meta)[0] == "refuse"
+
+    def role_broken(seed, h=None):
+        raise ValueError("record conflict")
+
+    monkeypatch.setattr(ds, "heldout_role", role_broken)
+    dg = SimpleNamespace(corpus_role=None, seed=43)
+    wl = SimpleNamespace(datagen=dg, schema_type=SimpleNamespace(value="financial"))
+    assert rep._config_held_out(SimpleNamespace(architecture=SimpleNamespace(workload=wl)))
+
+
+def test_shipped_hash_file_history_is_clean():
+    # Until QR-10's frozen guard runs heldout_history_problems on every
+    # commit, check the shipped file against the creation rules and the
+    # recorded looks (a spent append of an unlooked held-out seed fails).
+    looks = json.loads((PROD.parent / ds.LOOKS_FILENAME).read_text())
+    assert ds.heldout_history_problems(None, json.loads(PROD.read_text()), looks) == []
+
+
+# Tracked files that may still hold a held-out value, each with the work
+# item that removes it. CD-5 moves the Rust check onto the hash file and
+# deletes this entry.
+_PLAINTEXT_ALLOWED = {"datagen_rs/src/robustness.rs": "CD-5"}
+
+
+def test_no_tracked_file_holds_a_heldout_seed():
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("not a git checkout")
+    texts = {}
+    for rel in filter(None, out.decode().split("\0")):
+        path = ROOT / rel
+        if rel in _PLAINTEXT_ALLOWED or not path.is_file():
+            continue
+        try:
+            texts[rel] = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+    problems = ds.absence_problems(texts, exclude=())
+    assert not problems, problems
+    for rel in _PLAINTEXT_ALLOWED:
+        assert (ROOT / rel).is_file(), f"{rel} is gone: drop it from _PLAINTEXT_ALLOWED"

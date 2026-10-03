@@ -475,15 +475,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   scored. The report's `corpus_seed_verified` pass uses the same all-rows
   check, and a report without it reads as not verified. `scripts/aml_gate.py`
   does the same.
-- **The Spark scripts ConfigMap is scanned for held-out seeds before it is
-  applied.** Every integer token, every 6 to 19 digit window of a longer
-  digit run and every comma- or space-grouped number is hashed and compared
-  with the held-out hashes. A hit refuses the deploy (`absence_check:
+- **The Spark scripts ConfigMaps are scanned for held-out seeds when they
+  are built**, before any apply and in the continuous runner's pre-check, so
+  a refusal comes before the continuous reset drops any state. Every integer
+  token, every 6 to 19 digit window of a longer digit run and every comma-
+  or space-grouped number is hashed and compared with the held-out hashes. A hit refuses the deploy (`absence_check:
   enforce`), naming the map and key, never the value.
-- **No tracked file holds a held-out seed in plaintext.** The
-  pre-registration drops `corpora.evaluation_seed` and
+- **The pre-registration and the protocol no longer hold the held-out seeds
+  in plaintext.** The pre-registration drops `corpora.evaluation_seed` and
   `corpora.robustness_seed` and names those seeds by role in its notes, and
   `heldout_hashes.json` moves its absence check from `report` to `enforce`.
+  The datagen image source keeps its compiled copy until the Rust check
+  reads the hash file (next datagen change, before the look image).
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with
