@@ -7,33 +7,40 @@ Usage::
     python3.11 scripts/release/silver_parity.py BATCH_CFG CONTINUOUS_CFG \\
         --batch-record PATH --continuous-record PATH [--json OUT]
 
-Both configs are AML (financial) deployments that generated the same corpus
-(same seed and scale, read from their run records). The continuous record
-must show a drained corpus: ``pipeline_benchmark.corpus_drained`` true (all
-generated rows reached bronze and silver committed all of them) and
-``continuous.drain.state`` ``drained``; otherwise the tool refuses (exit 2).
+Refusals (exit 2), from the two run records and configs:
 
-For each of the six silver tables the tool runs, on both deployments,
-``lakebench query CFG --json --sql "SELECT count(*), to_hex(checksum(ROW(...)))
-..."`` through Trino (``checksum`` is order-insensitive). The columns are the
-table's business columns, read from the silver DDL constants of
-``src/lakebench/deploy/financial_ddl.py`` by parsing the file (no list is kept
-here), minus:
+* each record must belong to its config (``deployment_name``) and the two
+  deployments must differ;
+* both must be successful AML (financial) runs of the same corpus: seed,
+  scale, generator image, time range, dirty-data ratio, role and
+  perturbation all equal;
+* the batch record must be a batch run; the continuous record must show a
+  drained corpus (``pipeline_benchmark.corpus_drained`` and
+  ``continuous.drain.state`` ``drained``) and no ``continuous.gate_problems``;
+* the continuous run must have generated with one datagen pod: the
+  continuous statement path numbers entries and running balances in arrival
+  order, which equals the batch order only when bronze arrives in order.
 
-* the per-run sentinels of the batch-version protocol (``SENTINELS``);
-* ``PER_MODE``: columns whose value depends on the mode by design;
-* the DOUBLE columns of ``silver_entity_profiles``, which the continuous
-  path accumulates by merging (Welford) and so differ in the last bits: each
-  is compared as ``sum(col)`` within a relative tolerance of 1e-9, the
-  tolerance the Spark-tier parity tests use. Other DOUBLE columns are hashed.
+For each silver table the tool runs, on both deployments, ``lakebench query
+CFG --json --sql ...`` through Trino: the row count, and an order-insensitive
+``checksum`` of one hash per row, ``xxhash64`` over the row's business
+columns joined as text (so a value moved between rows changes the result).
+Business columns come from the silver DDL constants of
+``src/lakebench/deploy/financial_ddl.py``, parsed from the file, minus the
+batch-version sentinels (``SENTINELS``) and the columns that differ by mode
+by design (``PER_MODE``). ``silver_counterparty_edges`` is compared through
+its consumer view, one row per (source, target) with first/last times and
+summed amounts and counts, because continuous mode appends one edge row per
+micro-batch. The entity-profile accumulators that continuous mode merges
+incrementally (``MERGED``) are compared per entity within a relative and
+absolute tolerance of 1e-9, as the Spark-tier parity test does; every other
+profile column is hashed exactly. ``silver_batch_versions`` is checked for
+rows on both sides, and its counts are reported, not compared: batch writes
+one version, continuous one per micro-batch. Every compared table must hold
+rows on both sides.
 
-``silver_batch_versions`` is reported by row count only: batch writes one
-version, continuous one per committed micro-batch, so the counts differ by
-design and are not compared. When a table differs, a second query
-checksums each column alone and the differing columns are named.
-
-Exit 0 when every compared table is equal, 1 when any differs, 2 on a
-refusal or usage error, 4 when a query fails. ``query`` writes no record.
+Exit 0 when every table is equal, 1 when any differs, 2 on a refusal or
+usage error, 4 when a query fails. ``query`` writes no record.
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import math
 import os
 import re
 import subprocess
@@ -64,6 +72,8 @@ SILVER_KEYS = (
     "silver_entity_profiles",
 )
 VERSIONS_KEY = "silver_batch_versions"
+EDGES_KEY = "silver_counterparty_edges"
+PROFILES_KEY = "silver_entity_profiles"
 #: Per-run sentinels of the batch-version protocol: which write produced a
 #: row, never what the row says.
 SENTINELS = frozenset({"_batch_id", "_stream_id", "ingest_ts", "committed_at"})
@@ -73,15 +83,30 @@ PER_MODE = {
         "batch stamps the data-clock date; continuous the latest transaction time it merged"
     ),
 }
-REL_TOL = 1e-9
-#: Tables whose DOUBLE columns are merged incrementally in continuous mode.
-MERGED_TABLES = frozenset({"silver_entity_profiles"})
+#: Entity-profile columns continuous mode accumulates by merging (Welford and
+#: derived means); compared per entity within TOL.
+MERGED = ("passthrough_ratio", "avg_gap_days", "stddev_amount_usd", "avg_amount_usd", "_m2")
+TOL = 1e-9
+#: The edges consumer view: grouping keys, then each other column's aggregate.
+EDGE_KEYS = ("source_entity_id", "target_entity_id")
+EDGE_AGG = {
+    "first_seen_ts": "min",
+    "last_seen_ts": "max",
+    "cumulative_amount_usd": "sum",
+    "txn_count": "sum",
+}
+QUERY_TIMEOUT_S = 1500
+NULL = "\\N"
 
 EXIT_OK, EXIT_DIFFERENT, EXIT_REFUSED, EXIT_QUERY = 0, 1, 2, 4
 
 
 class Refused(Exception):
     """Printed, exit 2."""
+
+
+class QueryFailed(Exception):
+    """Printed, exit 4."""
 
 
 # -- business columns from the DDL --------------------------------------------
@@ -174,8 +199,10 @@ def ddl_columns(ddl: str) -> list[tuple[str, str]]:
 @dataclass(frozen=True)
 class TableSpec:
     key: str
-    hashed: tuple[str, ...]
-    summed: tuple[str, ...]
+    #: (column, type) hashed per row, after the view (if any).
+    hashed: tuple[tuple[str, str], ...]
+    #: Columns compared per entity within TOL (entity profiles only).
+    merged: tuple[str, ...]
     excluded: tuple[str, ...]
 
 
@@ -183,59 +210,116 @@ def table_specs(path: Path = DDL_FILE) -> list[TableSpec]:
     ddls = ddl_strings(path)
     specs = []
     for key in SILVER_KEYS:
-        hashed, summed, excluded = [], [], []
-        for name, ctype in ddl_columns(ddls[key]):
+        hashed, merged, excluded = [], [], []
+        cols = ddl_columns(ddls[key])
+        names = {n for n, _ in cols}
+        if key == EDGES_KEY:
+            business = names - SENTINELS
+            unknown = business - set(EDGE_KEYS) - set(EDGE_AGG)
+            if unknown or not set(EDGE_KEYS) <= business:
+                raise Refused(
+                    f"the edges view does not know columns {sorted(unknown)}: update EDGE_AGG"
+                )
+        if key == PROFILES_KEY and not set(MERGED) <= names:
+            raise Refused(f"entity profiles lost merged columns {sorted(set(MERGED) - names)}")
+        for name, ctype in cols:
             if name in SENTINELS or name in PER_MODE:
                 excluded.append(name)
-            elif ctype == "DOUBLE" and key in MERGED_TABLES:
-                summed.append(name)
+            elif key == PROFILES_KEY and name in MERGED:
+                merged.append(name)
             else:
-                hashed.append(name)
-        specs.append(TableSpec(key, tuple(hashed), tuple(summed), tuple(excluded)))
+                hashed.append((name, ctype))
+        specs.append(TableSpec(key, tuple(hashed), tuple(merged), tuple(excluded)))
     return specs
+
+
+# -- SQL -----------------------------------------------------------------------
+
+
+def text_of(col: str, ctype: str) -> str:
+    """A Trino expression giving *col* as text, NULL as a marker."""
+    if ctype.startswith("ARRAY"):
+        inner = f"array_join({col}, chr(31), '{NULL}')"
+    elif ctype.startswith("STRUCT") or ctype.startswith("MAP"):
+        inner = f"json_format(CAST({col} AS JSON))"
+    else:
+        inner = f"CAST({col} AS VARCHAR)"
+    return f"coalesce({inner}, '{NULL}')"
+
+
+def source_of(table: str, spec: TableSpec) -> str:
+    """The table, or for edges the consumer view over it."""
+    if spec.key != EDGES_KEY:
+        return table
+    keys = ", ".join(EDGE_KEYS)
+    aggs = ", ".join(f"{fn}({c}) AS {c}" for c, fn in EDGE_AGG.items())
+    return f"(SELECT {keys}, {aggs} FROM {table} GROUP BY {keys}) v"
+
+
+def row_hash(spec: TableSpec) -> str:
+    parts = ", ".join(text_of(c, t) for c, t in spec.hashed)
+    return f"xxhash64(to_utf8(concat_ws(chr(30), {parts})))"
+
+
+def table_sql(table: str, spec: TableSpec) -> str:
+    return f"SELECT count(*), to_hex(checksum({row_hash(spec)})) FROM {source_of(table, spec)}"
+
+
+def column_sql(table: str, spec: TableSpec) -> str:
+    """One order-insensitive checksum per column, to name what differs."""
+    cols = ", ".join(
+        f"to_hex(checksum(xxhash64(to_utf8({text_of(c, t)}))))" for c, t in spec.hashed
+    )
+    return f"SELECT {cols} FROM {source_of(table, spec)}"
+
+
+def merged_sql(table: str, spec: TableSpec) -> str:
+    return f"SELECT entity_id, {', '.join(spec.merged)} FROM {table}"
 
 
 # -- queries -------------------------------------------------------------------
 
-
-def table_sql(table: str, spec: TableSpec) -> str:
-    sums = "".join(f", sum({c})" for c in spec.summed)
-    row = ", ".join(spec.hashed)
-    return f"SELECT count(*), to_hex(checksum(ROW({row}))){sums} FROM {table}"
+#: (config, sql) -> every result row, as strings (None for SQL NULL).
+Querier = Callable[[Path, str], list[list[str | None]]]
 
 
-def column_sql(table: str, spec: TableSpec) -> str:
-    cols = ", ".join(f"to_hex(checksum({c}))" for c in spec.hashed)
-    return f"SELECT {cols} FROM {table}"
-
-
-Querier = Callable[[Path, str], list[str]]
-
-
-def lakebench_query(config: Path, sql: str) -> list[str]:
-    """The first row of ``lakebench query CONFIG --json --sql SQL`` (this
-    tree's lakebench), as strings; RuntimeError when it fails."""
+def lakebench_query(config: Path, sql: str) -> list[list[str | None]]:
+    """The rows of ``lakebench query CONFIG --json --sql SQL`` (this tree's
+    lakebench); QueryFailed when it fails."""
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
     env["PYTHONPATH"] = str(TREE / "src")
-    out = subprocess.run(
-        [sys.executable, "-m", "lakebench", "query", str(config), "--json", "--sql", sql],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=str(config.parent),
-        check=False,
-        timeout=1800,
-    )
-    if out.returncode != 0:
-        raise RuntimeError(
-            f"query on {config} exited {out.returncode}: {out.stderr.strip()[-400:]}"
+    argv = [sys.executable, "-m", "lakebench", "query", str(config), "--json"]
+    argv += ["--timeout", str(QUERY_TIMEOUT_S), "--sql", sql]
+    try:
+        out = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(config.parent),
+            check=False,
+            timeout=QUERY_TIMEOUT_S + 300,
         )
+    except subprocess.TimeoutExpired as e:
+        raise QueryFailed(f"query on {config} did not return in time") from e
+    if out.returncode != 0:
+        raise QueryFailed(f"query on {config} exited {out.returncode}: {out.stderr.strip()[-400:]}")
     start = out.stdout.find("{")
-    doc, _ = json.JSONDecoder().raw_decode(out.stdout[start:])
-    rows = (doc.get("data") or {}).get("rows") or []
-    if not rows:
-        raise RuntimeError(f"query on {config} returned no row")
-    return [str(c) for c in rows[0]]
+    try:
+        doc, _ = json.JSONDecoder().raw_decode(out.stdout[start:] if start >= 0 else "")
+    except ValueError as e:
+        raise QueryFailed(f"query on {config} printed no JSON document") from e
+    rows = (doc.get("data") or {}).get("rows")
+    if not isinstance(rows, list):
+        raise QueryFailed(f"query on {config} returned no rows list")
+    return [[None if c in (None, "", "NULL") else str(c) for c in row] for row in rows]
+
+
+def _one(query: Querier, config: Path, sql: str, width: int) -> list[str | None]:
+    rows = query(config, sql)
+    if len(rows) != 1 or len(rows[0]) < width:
+        raise QueryFailed(f"query on {config} returned {len(rows)} rows, not one of {width} cells")
+    return rows[0]
 
 
 # -- records -------------------------------------------------------------------
@@ -252,22 +336,47 @@ def _load(path: Path) -> dict[str, Any]:
     return data
 
 
-def _corpus(record: dict[str, Any]) -> tuple[Any, Any, Any]:
+#: The corpus fields two runs must share to have generated the same corpus
+#: (the corpus id itself differs between batch and continuous generation).
+CORPUS_FIELDS = (
+    "seed",
+    "scale",
+    "generator_image",
+    "timestamp_start",
+    "timestamp_end",
+    "dirty_data_ratio",
+    "corpus_role",
+    "robustness_perturbation",
+)
+
+
+def _corpus(record: dict[str, Any]) -> dict[str, Any]:
     corpus = ((record.get("experiment") or {}).get("corpus")) or {}
-    workload = ((record.get("experiment") or {}).get("workload") or {}).get("name")
-    return workload, corpus.get("seed"), corpus.get("scale")
+    return {k: corpus.get(k) for k in CORPUS_FIELDS}
 
 
-def record_problems(batch: dict[str, Any], cont: dict[str, Any]) -> list[str]:
+def record_problems(
+    batch: dict[str, Any], cont: dict[str, Any], names: tuple[str, str] | None = None
+) -> list[str]:
     """Why the two records cannot be compared (empty when they can)."""
     problems = []
-    if _corpus(batch)[0] != "financial" or _corpus(cont)[0] != "financial":
-        problems.append("both records must be AML (financial) runs")
-    if _corpus(batch)[1:] != _corpus(cont)[1:] or None in _corpus(batch)[1:]:
-        problems.append(
-            f"different or unknown corpora: batch seed/scale {_corpus(batch)[1:]}, "
-            f"continuous {_corpus(cont)[1:]}"
-        )
+    for side, rec in (("batch", batch), ("continuous", cont)):
+        if ((rec.get("experiment") or {}).get("workload") or {}).get("name") != "financial":
+            problems.append(f"the {side} record is not an AML (financial) run")
+        if rec.get("success") is not True:
+            problems.append(f"the {side} run did not succeed")
+    if names is not None:
+        for side, rec, name in (("batch", batch, names[0]), ("continuous", cont, names[1])):
+            if rec.get("deployment_name") != name:
+                problems.append(
+                    f"the {side} record is of {rec.get('deployment_name')!r}, not {name!r}"
+                )
+        if names[0] == names[1]:
+            problems.append("both configs name the same deployment")
+    cb, cc = _corpus(batch), _corpus(cont)
+    if cb != cc or cb["seed"] is None or cb["scale"] is None:
+        diff = sorted(k for k in CORPUS_FIELDS if cb[k] != cc[k])
+        problems.append(f"the records are not of one corpus (differ in {diff or 'seed/scale'})")
     bmode = (batch.get("pipeline_benchmark") or {}).get("pipeline_mode")
     cmode = (cont.get("pipeline_benchmark") or {}).get("pipeline_mode")
     if bmode != "batch":
@@ -276,9 +385,18 @@ def record_problems(batch: dict[str, Any], cont: dict[str, Any]) -> list[str]:
         problems.append(f"the continuous record's mode is {cmode}")
     if (cont.get("pipeline_benchmark") or {}).get("corpus_drained") is not True:
         problems.append("the continuous record does not show a drained corpus (corpus_drained)")
-    drain = ((cont.get("continuous") or {}).get("drain")) or {}
+    cblock = cont.get("continuous") or {}
+    drain = cblock.get("drain") or {}
     if drain.get("state") != "drained":
         problems.append(f"the continuous drain state is {drain.get('state')!r}, not 'drained'")
+    if cblock.get("gate_problems"):
+        problems.append(f"the continuous run has gate problems: {cblock['gate_problems']}")
+    pods = ((cont.get("config_snapshot") or {}).get("datagen") or {}).get("parallelism")
+    if pods != 1:
+        problems.append(
+            f"the continuous run generated with {pods} datagen pods; statement entry numbers "
+            "and running balances match batch only with one (workload.datagen.parallelism: 1)"
+        )
     return problems
 
 
@@ -288,20 +406,37 @@ def record_problems(batch: dict[str, Any], cont: dict[str, Any]) -> list[str]:
 @dataclass
 class TableResult:
     table: str
-    batch: list[str]
-    continuous: list[str]
+    batch: list[str | None]
+    continuous: list[str | None]
     equal: bool
     notes: list[str] = field(default_factory=list)
 
 
-def _close(a: str, b: str) -> bool:
-    if a == b:
-        return True
-    try:
-        x, y = float(a), float(b)
-    except ValueError:
-        return False
-    return abs(x - y) <= REL_TOL * max(abs(x), abs(y))
+def _close(a: str | None, b: str | None, zero_null: bool = False) -> bool:
+    if zero_null:
+        a, b = a or "0", b or "0"
+    if a is None or b is None:
+        return a is None and b is None
+    return math.isclose(float(a), float(b), rel_tol=TOL, abs_tol=TOL)
+
+
+def _merged_notes(query: Querier, bcfg: Path, ccfg: Path, table: str, spec: TableSpec) -> list[str]:
+    sql = merged_sql(table, spec)
+    brows = {r[0]: r[1:] for r in query(bcfg, sql)}
+    crows = {r[0]: r[1:] for r in query(ccfg, sql)}
+    notes = []
+    if set(brows) != set(crows):
+        notes.append(f"entities differ: {len(set(brows) ^ set(crows))} only on one side")
+    bad = 0
+    for eid in set(brows) & set(crows):
+        for i, col in enumerate(spec.merged):
+            if not _close(brows[eid][i], crows[eid][i], zero_null=(col == "_m2")):
+                bad += 1
+                if bad <= 5:
+                    notes.append(f"entity {eid} {col}: {brows[eid][i]} vs {crows[eid][i]}")
+    if bad:
+        notes.append(f"{bad} merged values outside {TOL}")
+    return notes
 
 
 def compare(
@@ -310,47 +445,56 @@ def compare(
     tables: dict[str, str],
     specs: Sequence[TableSpec],
     query: Querier,
-) -> tuple[list[TableResult], dict[str, tuple[str, str]]]:
+) -> tuple[list[TableResult], dict[str, tuple[str | None, str | None]]]:
     """Per-table results, and the batch-versions row counts (not compared)."""
     results = []
     for spec in specs:
         table = tables[spec.key]
         sql = table_sql(table, spec)
-        b, c = query(batch_cfg, sql), query(cont_cfg, sql)
+        b, c = _one(query, batch_cfg, sql, 2), _one(query, cont_cfg, sql, 2)
         notes = []
-        equal = b[:2] == c[:2]
-        for i, col in enumerate(spec.summed, start=2):
-            if not _close(b[i], c[i]):
-                equal = False
-                notes.append(f"sum({col}) {b[i]} vs {c[i]}")
+        empty = [side for side, row in (("batch", b), ("continuous", c)) if row[0] in (None, "0")]
+        if empty:
+            notes.append(f"no rows on {' and '.join(empty)}")
+        equal = not empty and b[:2] == c[:2]
         if b[0] != c[0]:
             notes.append(f"rows {b[0]} vs {c[0]}")
-        if b[1] != c[1]:
+        if b[1] != c[1] and not empty:
             csql = column_sql(table, spec)
-            bc, cc = query(batch_cfg, csql), query(cont_cfg, csql)
+            width = len(spec.hashed)
+            bc, cc = _one(query, batch_cfg, csql, width), _one(query, cont_cfg, csql, width)
+            cols = [col for (col, _t), x, y in zip(spec.hashed, bc, cc, strict=False) if x != y]
             notes.append(
-                "columns differing: "
-                + ", ".join(col for col, x, y in zip(spec.hashed, bc, cc, strict=True) if x != y)
+                "columns differing: " + (", ".join(cols) or "none alone (rows recombined)")
             )
+        if spec.merged and not empty:
+            merged = _merged_notes(query, batch_cfg, cont_cfg, table, spec)
+            if merged:
+                equal = False
+                notes += merged
         results.append(TableResult(table, b, c, equal, notes))
     vt = tables[VERSIONS_KEY]
-    versions = (
-        query(batch_cfg, f"SELECT count(*) FROM {vt}")[0],
-        query(cont_cfg, f"SELECT count(*) FROM {vt}")[0],
-    )
-    return results, {vt: versions}
+    vb = _one(query, batch_cfg, f"SELECT count(*) FROM {vt}", 1)[0]
+    vc = _one(query, cont_cfg, f"SELECT count(*) FROM {vt}", 1)[0]
+    if vb in (None, "0") or vc in (None, "0"):
+        results.append(TableResult(vt, [vb], [vc], False, ["no batch versions on one side"]))
+    return results, {vt: (vb, vc)}
 
 
-def config_tables(config: Path) -> dict[str, str]:
-    """{table key: catalog.namespace.table} from the config (this tree)."""
-    sys.path.insert(0, str(TREE / "src"))
+def config_tables(config: Path) -> tuple[str, dict[str, str]]:
+    """(deployment name, {table key: catalog.namespace.table}) of a config."""
+    if str(TREE / "src") not in sys.path:
+        sys.path.insert(0, str(TREE / "src"))
     from lakebench.config import load_config
     from lakebench.config._load_context import LoadPurpose
 
-    cfg = load_config(config, purpose=LoadPurpose.READ, print_notes=False)
+    try:
+        cfg = load_config(config, purpose=LoadPurpose.READ, print_notes=False)
+    except Exception as e:  # noqa: BLE001 -- a config that does not load refuses
+        raise Refused(f"{config} does not load: {e}") from e
     catalog = cfg.architecture.query_engine.trino.catalog_name
     names = cfg.architecture.tables
-    return {k: f"{catalog}.{getattr(names, k)}" for k in (*SILVER_KEYS, VERSIONS_KEY)}
+    return cfg.name, {k: f"{catalog}.{getattr(names, k)}" for k in (*SILVER_KEYS, VERSIONS_KEY)}
 
 
 def main(argv: Sequence[str] | None = None, query: Querier = lakebench_query) -> int:
@@ -362,19 +506,22 @@ def main(argv: Sequence[str] | None = None, query: Querier = lakebench_query) ->
     p.add_argument("--json", type=Path, help="also write the results as JSON here")
     args = p.parse_args(argv)
     try:
-        problems = record_problems(_load(args.batch_record), _load(args.continuous_record))
+        specs = table_specs()
+        bname, tables = config_tables(args.batch_config)
+        cname, ctables = config_tables(args.continuous_config)
+        if ctables != tables:
+            raise Refused("the two configs name different silver tables")
+        problems = record_problems(
+            _load(args.batch_record), _load(args.continuous_record), (bname, cname)
+        )
         if problems:
             raise Refused("; ".join(problems))
-        specs = table_specs()
-        tables = config_tables(args.batch_config)
-        if config_tables(args.continuous_config) != tables:
-            raise Refused("the two configs name different silver tables")
     except Refused as e:
         print(f"refused: {e}", file=sys.stderr)
         return EXIT_REFUSED
     try:
         results, versions = compare(args.batch_config, args.continuous_config, tables, specs, query)
-    except RuntimeError as e:
+    except (QueryFailed, ValueError, IndexError) as e:
         print(f"query failed: {e}", file=sys.stderr)
         return EXIT_QUERY
     for r in results:

@@ -221,19 +221,32 @@ python3.11 scripts/release/silver_parity.py BATCH_CFG CONTINUOUS_CFG \
     --batch-record <batch run dir> --continuous-record <continuous run dir>
 ```
 
-It refuses (exit 2) unless the records are AML runs of one seed and scale,
-the batch record is a batch run and the continuous record shows a drained
-corpus (`pipeline_benchmark.corpus_drained` and `continuous.drain.state`
-`drained`). For each silver table it compares the row count and an
-order-insensitive Trino `checksum` over the business columns, which it
-reads from the silver DDL in `src/lakebench/deploy/financial_ddl.py`. Left
-out: the batch-version sentinels (`_batch_id`, `_stream_id`, `ingest_ts`),
+It refuses (exit 2) unless each record belongs to its config and the two
+deployments differ, both are successful AML runs of one corpus (seed,
+scale, generator image, time range, dirty-data ratio, role and
+perturbation), the batch record is a batch run, and the continuous record
+shows a drained corpus (`pipeline_benchmark.corpus_drained`,
+`continuous.drain.state` `drained`, no `continuous.gate_problems`) from a
+run with one datagen pod (`workload.datagen.parallelism: 1`): continuous
+mode numbers statement entries and running balances in arrival order,
+which equals the batch order only when bronze arrives in order.
+
+For each silver table it compares, through Trino, the row count and an
+order-insensitive `checksum` of one `xxhash64` per row over the row's
+business columns joined as text, so a value moved from one row to another
+is caught. The business columns are read from the silver DDL in
+`src/lakebench/deploy/financial_ddl.py`. Left out: the batch-version
+sentinels (`_batch_id`, `_stream_id`, `ingest_ts`) and
 `entity_profiles.profile_updated_ts` (batch stamps the data-clock date,
-continuous the latest merged transaction time), and the entity-profile
-DOUBLE columns, which continuous mode merges incrementally and which are
-compared as sums within a relative tolerance of 1e-9. The batch-versions
-table is reported by row count only. A difference names the differing
-columns; exit 1 on any difference, 4 when a query fails.
+continuous the latest merged transaction time). `counterparty_edges` is
+compared as one row per (source, target) with first and last times and
+summed amounts and counts, because continuous mode appends an edge row per
+micro-batch. The entity-profile accumulators continuous mode merges
+incrementally (`passthrough_ratio`, `avg_gap_days`, `stddev_amount_usd`,
+`avg_amount_usd`, `_m2`) are compared per entity within 1e-9, as the
+Spark-tier parity test does. Every table must hold rows on both sides; the
+batch-versions counts are reported, not compared. A difference names the
+differing columns. Exit 1 on any difference, 4 when a query fails.
 
 ### Performance baselines
 
