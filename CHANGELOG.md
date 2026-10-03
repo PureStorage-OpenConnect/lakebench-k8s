@@ -1119,10 +1119,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   record's `provenance.git_sha` names), with `-dirty` for uncommitted
   changes. A wheel install stamps the commit its build info names, marked
   `-buildinfo` (and `-dirty` for a build from a modified tree); the stamp is
-  left off when no commit can be read. It is still written only when the
-  namespace is first stamped.
-  changes, and is left off when no checkout commit can be read (a wheel
-  install). It is still written only when the namespace is first stamped.
+  left off when no commit can be read. A redeploy refreshes it (see the
+  entry above).
 - **Report numbers that misled.** Platform CPU and memory no longer count
   containers more than once: the Prometheus queries exclude cAdvisor's
   pod-level and pause-container series and take each (pod, container) once
@@ -1160,7 +1158,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Thrift or DuckDB query stage is no longer charged Trino's cores, and the
   continuous query stage's seconds are no longer shown as milliseconds and
   summed into the latency share.
-  install). A redeploy refreshes it (see the entry above).
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the
