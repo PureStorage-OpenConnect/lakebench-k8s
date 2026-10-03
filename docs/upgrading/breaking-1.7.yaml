@@ -32,8 +32,8 @@
   - version
   - description
   source: src/lakebench/config/schema.py:_removed_keys
-  text: Twenty config keys nothing read are removed; a value other than its 1.6 default is refused by
-    the commands that change data.
+  text: 'Twenty config keys nothing read are removed: at its 1.6 default each loads with a note; another
+    value is refused by the commands that change data.'
   fix: Delete the key. Each refusal names it and what to do instead; docs/configuration.md lists them.
 - id: sizing-settings-that-sized-nothing-are-removed
   title: Sizing settings that sized nothing are removed
@@ -43,8 +43,8 @@
   - platform.compute.spark.executor
   - platform.storage.scratch.size
   source: src/lakebench/config/schema.py:_removed_keys
-  text: '`platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing
-    and are refused when set.'
+  text: '`platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing:
+    set to other than their 1.6 default, they are refused.'
   fix: Delete them; set counts with `<job>_executors` and the driver with `driver_memory` and `driver_cores`.
 - id: removed-keys-are-refused-by-commands-that-change-data
   title: Removed keys are refused by commands that change data
@@ -162,11 +162,12 @@
   kind: refused-command
   subject:
   - generate --wait
+  - generate -w
   - admin release-lock --expired-only
   - deploy --include-observability
   source: src/lakebench/cli/_generate.py:generate
-  text: '`generate --wait`, `admin release-lock --expired-only` and `deploy --include-observability` are
-    unknown options (exit 2).'
+  text: '`generate --wait` / `-w`, `admin release-lock --expired-only` and `deploy --include-observability`
+    are unknown options (exit 2).'
   fix: 'Drop `--wait` and `--expired-only`; set `observability.enabled: true` in the config.'
 - id: lbrunpy-is-removed
   title: lbrun.py is removed
@@ -293,7 +294,7 @@
   title: Continuous pairs with different round counts are not like-for-like
   kind: identity
   subject: continuous rounds count
-  source: src/lakebench/metrics/experiment.py:refresh_benchmark
+  source: src/lakebench/metrics/comparability.py:_benchmark_rounds
   text: A continuous record without a stored round count reads it from its rounds; the stored C360 Trino
     vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
   fix: Compare continuous runs with the same number of in-stream rounds; no identity digest moves.
@@ -359,14 +360,14 @@
   kind: default-change
   subject: init output
   source: src/lakebench/cli/_init.py:first_day_dict
-  text: '`init` writes a 12-line config: a unique name per run, `recipe:` once, scale 1 (was 10) and `${VAR}`
-    credentials.'
+  text: '`init` writes a 12-line config: a new name per `init`, recipe `polaris-iceberg-spark-trino` (was
+    Hive), scale 1 (was 10), `${VAR}` credentials.'
   fix: Set `--scale`, `--recipe` or `--name` on `init`; `--overwrite` is the new spelling of `--force`.
 - id: a-component-that-contradicts-its-recipe-is-refused
   title: A component that contradicts its recipe is refused
   kind: default-change
   subject: recipe components
-  source: src/lakebench/config/schema.py:LakebenchConfig
+  source: src/lakebench/config/schema.py:apply_recipe_defaults
   text: A catalog, format or engine that contradicts `recipe:` is refused at load by the commands that
     change data; 1.6 let it win silently.
   fix: Remove the component keys, or change `recipe:` to the components you mean.
@@ -374,7 +375,7 @@
   title: VAR is substituted per value
   kind: default-change
   subject: variable substitution
-  source: src/lakebench/config/loader.py:load_config
+  source: src/lakebench/config/loader.py:_substitute_env_vars
   text: '`${VAR}` is substituted per value, not in the file text: an environment value is no longer parsed
     as YAML.'
   fix: Quote references inside flow syntax (`["${A}", "${B}"]`) and close every `${VAR:-default}`.
@@ -382,14 +383,14 @@
   title: A config with no recipe is deprecated
   kind: default-change
   subject: recipe required
-  source: src/lakebench/config/schema.py:LakebenchConfig
+  source: src/lakebench/config/schema.py:_is_recipe_shaped
   text: 'A config with no `recipe:`, or `recipe: default`, loads with a note; v1.8 requires `recipe:`.'
   fix: Add the recipe the note names.
 - id: flat-top-level-keys-are-deprecated
   title: Flat top-level keys are deprecated
   kind: default-change
   subject: flat keys
-  source: src/lakebench/config/schema.py:LakebenchConfig
+  source: src/lakebench/config/loader.py:_apply_flat_fields
   text: Flat top-level keys (`endpoint:`, `scale:` and the rest) load with a note naming the nested key.
   fix: Write the nested key the note names.
 - id: deploy-never-installs-a-shared-component
@@ -435,7 +436,7 @@
   title: Counts are bounded at load
   kind: default-change
   subject: count bounds
-  source: src/lakebench/config/schema.py:LakebenchConfig
+  source: src/lakebench/config/schema.py:replicas
   text: A zero, negative or out-of-range count (Trino workers, generators, ports, cores), which 1.6 accepted,
     is refused.
   fix: Set the count inside its range (docs/configuration.md).
@@ -443,7 +444,7 @@
   title: spark.conf merges over the job defaults
   kind: default-change
   subject: spark.conf
-  source: src/lakebench/modules/pipeline_engines/spark/job.py:executor_override
+  source: src/lakebench/modules/pipeline_engines/spark/conf_keys.py:LAKEBENCH_OWNED_SPARK_KEYS
   text: '`spark.conf` merges over seven job defaults, and keys Lakebench sets (including `userClassPathFirst`
     and `spark.kubernetes.*`) are refused.'
   fix: Keep only your own tuning keys in `spark.conf`; the refusal names what controls each reserved key.
@@ -455,3 +456,54 @@
   text: '`run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams`
     above 1.'
   fix: Use `lakebench benchmark --mode`, `--cold` or `--streams` for those passes.
+- id: buckets-are-stamped-with-their-cluster
+  title: Buckets are stamped with their cluster
+  kind: default-change
+  subject: bucket cluster stamp
+  source: src/lakebench/deploy/ownership.py:TAG_CLUSTER
+  text: Deploy stamps owned buckets with the cluster; a bucket 1.6 adopted is used but no longer emptied
+    or deleted by `destroy`.
+  fix: Claim such a bucket with `lakebench admin reclaim-bucket BUCKET CONFIG` (an owner action) before
+    you rely on `destroy` to empty it.
+- id: the-capacity-preflight-counts-free-capacity-and-fails-closed
+  title: The capacity preflight counts free capacity and fails closed
+  kind: default-change
+  subject: capacity preflight
+  source: src/lakebench/cli/_prerequisites.py:_check_cluster_capacity
+  text: '`run` compares its request with free capacity, not allocatable, and refuses (exit 4) when nodes
+    or pods cannot be read.'
+  fix: Run on a cluster with room, or pass `--skip-preflight` (the record then says capacity not checked).
+- id: customer-360-batch-verdicts-gate-on-sixteen-checks
+  title: Customer 360 batch verdicts gate on sixteen checks
+  kind: default-change
+  subject: c360 verdict
+  source: src/lakebench/metrics/c360_correctness.py:GATING_CHECKS
+  text: A Customer 360 batch verdict fails on sixteen exact checks only, including when they cannot be
+    evaluated; others are listed, not gating.
+  fix: Re-read a 1.6 PASS or FAIL under 1.7 rules; `verdict.qualifiers.c360_failed_not_gating` lists the
+    rest.
+- id: grafana-gets-a-generated-password
+  title: Grafana gets a generated password
+  kind: default-change
+  subject: grafana password
+  source: src/lakebench/cli/_deploy.py:lakebench-observability-grafana
+  text: A new shared observability install gets a generated Grafana password; an existing install keeps
+    `admin`/`lakebench`.
+  fix: Read it with the command `deploy` prints (Secret `lakebench-observability-grafana`).
+- id: config_snapshot-drops-the-unused-sizing-blocks
+  title: config_snapshot drops the unused sizing blocks
+  kind: default-change
+  subject: config_snapshot
+  source: src/lakebench/metrics/collector.py:build_config_snapshot
+  text: '`metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size`
+    with `scratch.size_per_job`.'
+  fix: Read executor counts from `jobs[]` and scratch from `scratch.size_per_job` in scripts that parse
+    records.
+- id: recommend-exits-3-on-a-context-conflict
+  title: recommend exits 3 on a context conflict
+  kind: exit-code
+  subject: recommend context conflict
+  source: src/lakebench/cli/_recommend.py:ContextConflictError
+  text: '`recommend` exits 3 on a cluster context conflict instead of falling back to the reference table
+    and exiting 0.'
+  fix: Use `lakebench config recommend CONFIG`, with the config's context reachable.

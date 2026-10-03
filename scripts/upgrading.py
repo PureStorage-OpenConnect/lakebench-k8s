@@ -249,14 +249,24 @@ def missing_entries(list_path: Path = LIST) -> list[dict[str, str]]:
     return out
 
 
+def slug(title: str) -> str:
+    """GitHub's heading anchor: an entry's ``id`` is the slug of its ``title``."""
+    import re
+
+    return re.sub(r"[^a-z0-9 _-]", "", title.lower()).replace(" ", "-")
+
+
 def skeleton(item: dict[str, str]) -> str:
-    slug = "".join(c if c.isalnum() else "-" for c in item["subject"].lower()).strip("-")
+    """A list entry to paste and finish: replace every TODO (and the title's
+    words, then set ``id`` to the new title's slug)."""
+    title = f"TODO {item['subject']}"
     return (
-        f"- id: {item['kind']}-{slug}\n"
+        f"- id: {slug(title)}\n"
+        f"  title: {json.dumps(title)}\n"
         f"  kind: {item['kind']}\n"
         f"  subject: {json.dumps(item['subject'])}\n"
-        f"  source: TODO\n"
-        f"  text: TODO  # {item['hint']}\n"
+        f"  source: TODO  # path:symbol of the code\n"
+        f"  text: TODO  # one line; also its CHANGELOG bullet ({item['hint']})\n"
         f"  fix: TODO\n"
     )
 

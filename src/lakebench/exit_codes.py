@@ -529,10 +529,14 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=4,
     ),
     # 10 to 14
-    ExitPath("compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict"),
-    ExitPath("compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict"),
-    ExitPath("compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict"),
-    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict"),
+    ExitPath("compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict", v16_code=1),
+    ExitPath(
+        "compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict", v16_code=0
+    ),
+    ExitPath(
+        "compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict", v16_code=0
+    ),
+    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict", v16_code=0),
     ExitPath(
         "reproduce.drift",
         _C.REQUIREMENT_UNMET,
