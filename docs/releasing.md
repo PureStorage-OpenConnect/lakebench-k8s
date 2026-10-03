@@ -210,6 +210,31 @@ SKIP too. CI's package build runs the same guard on every push, without
 `--require-all`, and the release's `build-dist` job runs it with
 `--require-all` on the very files it uploads.
 
+### AML silver parity
+
+`scripts/release/silver_parity.py` checks that a batch and a drained
+continuous AML deployment of the same corpus (seed 43, the same scale)
+build the same silver tables:
+
+```bash
+python3.11 scripts/release/silver_parity.py BATCH_CFG CONTINUOUS_CFG \
+    --batch-record <batch run dir> --continuous-record <continuous run dir>
+```
+
+It refuses (exit 2) unless the records are AML runs of one seed and scale,
+the batch record is a batch run and the continuous record shows a drained
+corpus (`pipeline_benchmark.corpus_drained` and `continuous.drain.state`
+`drained`). For each silver table it compares the row count and an
+order-insensitive Trino `checksum` over the business columns, which it
+reads from the silver DDL in `src/lakebench/deploy/financial_ddl.py`. Left
+out: the batch-version sentinels (`_batch_id`, `_stream_id`, `ingest_ts`),
+`entity_profiles.profile_updated_ts` (batch stamps the data-clock date,
+continuous the latest merged transaction time), and the entity-profile
+DOUBLE columns, which continuous mode merges incrementally and which are
+compared as sums within a relative tolerance of 1e-9. The batch-versions
+table is reported by row count only. A difference names the differing
+columns; exit 1 on any difference, 4 when a query fails.
+
 ### Performance baselines
 
 The `perf-baselines` check fails when a required pinned perf config
