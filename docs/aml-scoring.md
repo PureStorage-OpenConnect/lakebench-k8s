@@ -381,7 +381,8 @@ carries it (`alerts_by_code` then reads 0), and its false-positive rate is 1
 minus the share of the rule's alerts carrying the code that touch a payment
 of that typology, over the alerts with a related payment as the rule's
 false-positive rate counts them (an alert counts once per code it carries;
-null when no such alert carries the code).
+null when no such alert carries the code). When the target typology has no
+instances in the corpus, every code's recall is null, as the typology's is.
 Because every alert carries its base code, the base code's figures are the
 rule's own. Only rules that ran are split. When an alert carries no code, or
 the alerts predate the column, the blocks are empty and

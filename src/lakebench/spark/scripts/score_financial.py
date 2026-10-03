@@ -234,7 +234,7 @@ def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
         return out
     rules = sorted(r for r in ran if r in target_of)
     if not rules:
-        out["by_code_status"] = "scored"
+        out["by_code_status"] = "not_scored: no designated rule ran"
         return out
     targets = spark.createDataFrame(
         [(r, target_of[r]) for r in rules], "rule_id STRING, typology_type STRING"
@@ -291,7 +291,7 @@ def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
     fp: dict = {}
     counts: dict = {}
     for rule in rules:
-        seen = {c for (r, c) in n_by if r == rule}
+        seen = {c for (r, c) in n_by if r == rule and c is not None}
         vocab = list(REASON_CODES.get(rule, ())) + sorted(seen - set(REASON_CODES.get(rule, ())))
         total = n_inst.get(target_of[rule], 0)
         recall[rule] = {c: (hit_inst.get((rule, c), 0) / total if total else None) for c in vocab}
