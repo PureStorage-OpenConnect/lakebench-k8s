@@ -426,6 +426,15 @@ def compute_badge_status(
     if n_failed:
         reasons.append(f"{n_failed} benchmark queries failed")
 
+    # A request the run did not meet (requested gold strategy, executors,
+    # mode or trickle): a warning, never a failure.
+    from lakebench.metrics.requested_effective import warning_line
+
+    for key, entry in _requested_effective_mismatches(metrics).items():
+        line = warning_line(key, entry)
+        if line not in warnings:
+            warnings.append(line)
+
     # The record gates (rows per layer, AML rules, scale ratio, query
     # answers): their reasons fail the badge as they fail the verdict.
     for gate in record_gates(metrics).values():
@@ -442,6 +451,15 @@ def compute_badge_status(
 # ---------------------------------------------------------------------------
 # compute_verdict
 # ---------------------------------------------------------------------------
+
+
+def _requested_effective_mismatches(metrics: PipelineMetrics) -> dict[str, dict[str, Any]]:
+    """The requested and effective entries of the record that are
+    mismatches, by key (metrics/requested_effective.py)."""
+    from lakebench.metrics.requested_effective import stored_or_derived
+
+    entries, keys = stored_or_derived(metrics)
+    return {k: entries[k] for k in keys if k in entries}
 
 
 def _pipeline_gate_outcome(metrics: PipelineMetrics) -> str | None:
@@ -1015,6 +1033,10 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
             qualifiers["c360_failed_not_gating"] = not_gating
     for gate in gates.values():
         qualifiers.update(copy.deepcopy(gate.qualifiers))
+    mismatched = _requested_effective_mismatches(metrics)
+    if mismatched:
+        # A request the run did not meet: labelled, never a FAIL.
+        qualifiers["requested_effective"] = mismatched
     preflight = (getattr(metrics, "provenance", None) or {}).get("preflight") or {}
     if preflight.get("capacity") == "skipped":
         # --skip-preflight: nothing checked that the cluster could hold it.

@@ -653,6 +653,36 @@ although every check the run printed passed, `run` prints `Verdict:
 the strictest of the stored verdict and the one recomputed from the
 record, so a record saved by an earlier Lakebench can read failed now.
 
+### Requested and effective values
+
+A run can ask for one thing and do another, so the record keeps both for
+each decision Lakebench or a Spark job makes on the run's behalf, in
+`experiment.requested_effective` (each entry `{requested, effective,
+source, stage}`):
+
+- `gold_strategy` (Customer 360): the `spark.lb.gold.strategy` the config
+  names (`auto` when unset) against the strategy each gold-finalize job
+  reports it ran and why (`auto`, `override`, or `cycle` for cycles 2+ of a
+  multi-cycle run). With several gold jobs the keys are
+  `gold_strategy[cycle=N]`.
+- `pipeline_mode`: the mode the command asked for against the pipeline
+  that ran.
+- `executors[<job>]`: the executor override, else the job profile's count,
+  against the count the job ran with; the source names the executor cap or
+  a concurrent budget when one applied.
+- `trickle` (continuous): `max_files_per_trigger` as configured, or `auto`,
+  against the value the run resolved.
+
+The other Lakebench caps are in `experiment.limits` as configured and, when
+one bounds the run, in `limits.bound`. A request that was not met is listed
+in `experiment.requested_effective_mismatches`, as a verdict qualifier
+(`verdict.qualifiers.requested_effective`) and as a report warning such as
+"gold_strategy: requested auto, ran incremental (auto)". Incremental gold
+chosen automatically is labelled even though the request was `auto`,
+because it aggregates only part of silver; incremental gold for a
+multi-cycle cycle is by design and is not. A mismatch never fails a run and
+never enters the experiment identity.
+
 ### Batch Mode
 
 **Time to Value** is the primary score. It measures wall-clock time from when
