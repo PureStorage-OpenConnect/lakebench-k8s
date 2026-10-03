@@ -235,7 +235,7 @@ are bounded (for example `trino.worker.replicas` 1 to 256,
 least 1). A setting that belongs to the other workload,
 such as `customer360.unique_customers` or `dirty_data_ratio` under `schema:
 financial`, or `tm_operations` or `w1_max_vertices` under `schema:
-customer360`, loads with a note that the workload does not read it. Under
+customer360`, loads with a note saying the workload does not read it. Under
 `financial` the note does not ask you to delete it: the corpus id still
 hashes the `customer360` fields and `dirty_data_ratio`, so removing one
 changes the id of an otherwise identical corpus. `datagen.timestamp_*` gets

@@ -157,8 +157,8 @@ class TestNamespaceAbsent:
         _, status_str, msg = oc_reports[-1]
         assert "SUCCESS" in status_str.upper()
         assert "--force-legacy" in msg
-        # And crucially, destroy actually proceeded to the namespace
-        # delete -- the whole point of the escape hatch.
+        # Destroy went on to the namespace delete, which is what the
+        # escape hatch is for.
         # The delete carries the namespace UID read at destroy start (LB-157).
         engine.k8s.delete_namespace.assert_called_once_with(
             "lb-test", uid=str(engine.k8s.get_namespace_uid.return_value)
