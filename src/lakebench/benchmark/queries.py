@@ -365,6 +365,13 @@ _FQ4 = BenchmarkQuery(
     name="FQ4_running_balance_window",
     display_name="Running balance for high-activity accounts",
     query_class="analytics",
+    # The running balance is recomputed in ledger order (book_ts, txn_id,
+    # debit first: batch silver's own window), from the account's opening
+    # balance (its last stored bal_after less the sum of its entries), not
+    # read from the stored bal_after: continuous silver stores bal_after in
+    # arrival order, so a late statement moves every later stored balance.
+    # On batch silver the answer is the stored bal_after row for row; on
+    # continuous silver over the same corpus it is the batch answer.
     sql="""\
 WITH top_accts AS (
   SELECT account_id
@@ -372,17 +379,33 @@ WITH top_accts AS (
   GROUP BY account_id
   ORDER BY COUNT(*) DESC, account_id
   LIMIT 50
+),
+entries AS (
+  SELECT s.account_id, s.book_ts, s.txn_id, s.cdt_dbt_ind, s.amt, s.bal_after, s.entry_seq,
+         CASE WHEN s.cdt_dbt_ind = 'CRDT' THEN s.amt ELSE -s.amt END AS signed_amt,
+         CASE WHEN s.cdt_dbt_ind = 'DBIT' THEN 0 ELSE 1 END AS dbt_ord
+  FROM {catalog}.{silver_account_statements} s
+  JOIN top_accts t ON t.account_id = s.account_id
+),
+opening AS (
+  SELECT account_id, MAX_BY(bal_after, entry_seq) - SUM(signed_amt) AS opening_balance
+  FROM entries
+  GROUP BY account_id
 )
 SELECT
-  s.account_id,
-  s.book_ts,
-  s.cdt_dbt_ind,
-  s.amt,
-  s.bal_after,
-  ROW_NUMBER() OVER (PARTITION BY s.account_id ORDER BY s.book_ts, s.entry_seq) AS entry_ord
-FROM {catalog}.{silver_account_statements} s
-JOIN top_accts t ON t.account_id = s.account_id
-ORDER BY s.account_id, entry_ord""",
+  e.account_id,
+  e.book_ts,
+  e.cdt_dbt_ind,
+  e.amt,
+  CAST(o.opening_balance + SUM(e.signed_amt) OVER (
+    PARTITION BY e.account_id ORDER BY e.book_ts, e.txn_id, e.dbt_ord
+  ) AS DECIMAL(38, 2)) AS bal_after,
+  ROW_NUMBER() OVER (
+    PARTITION BY e.account_id ORDER BY e.book_ts, e.txn_id, e.dbt_ord, e.entry_seq
+  ) AS entry_ord
+FROM entries e
+JOIN opening o ON o.account_id = e.account_id
+ORDER BY e.account_id, entry_ord""",
 )
 
 _FQ5 = BenchmarkQuery(
@@ -578,6 +601,9 @@ _IQ3 = BenchmarkQuery(
     name="IQ3_counterparty_two_hop",
     display_name="Investigator: counterparties and two-hop network of the oldest open case",
     query_class="investigator",
+    # Both hops sum the edge rows per pair: batch silver holds one row per
+    # (source, target) pair, continuous silver one per pair per micro-batch,
+    # so the sums are the same answer in both modes.
     sql="""\
 WITH subject AS (
   SELECT customer_id
@@ -603,9 +629,10 @@ hop1 AS (
 ),
 hop2 AS (
   SELECT h.cp AS via_entity_id, e.target_entity_id AS hop2_entity_id,
-         e.cumulative_amount_usd AS amount_usd
+         SUM(e.cumulative_amount_usd) AS amount_usd
   FROM {catalog}.{silver_counterparty_edges} e
   JOIN hop1 h ON e.source_entity_id = h.cp
+  GROUP BY h.cp, e.target_entity_id
 ),
 alerted AS (
   SELECT DISTINCT entity_id FROM {catalog}.{gold_alert_dispositions}

@@ -946,22 +946,25 @@ it stays comparable with runs over the same SQL); older records and any other
 legacy set are `unknown`. A run of an older branch recorded after that date
 is the one case this cannot tell apart.
 
-**Queries that depend on the mode's layout.** Continuous AML writes
+**Queries that read the mode's layout.** Continuous AML writes
 `silver.counterparty_edges` as one row per (source, target) pair per
-micro-batch, where batch writes one row per pair, and it keeps
+micro-batch, where batch writes one row per pair, and it stores
 `silver.account_statements` running balances (`bal_after`) in arrival order
 (labelled `arrival_order_running_balance` when a statement arrives late).
-FQ3 sums the edge rows, so its answer is the same in both modes. IQ3's
-two-hop step reads raw edge rows and FQ4 reads the stored `bal_after`, so
-their answers on one corpus differ between batch and continuous and, in
-practice, between almost any two continuous runs: micro-batch boundaries
-and late statements depend on when datagen's files land against the
-triggers. The continuous result check then reads two continuous AML runs on
-one corpus as not comparable on those queries, so they do not compare,
-reproduce or serve as a perf-gate baseline for each other. A batch record is never compared with a
-continuous one: the mode is a workload identity key, so `compare` stops at
-"one workload on one corpus" before reading any result, and the perf gate
-and `reproduce` refuse the pair.
+The benchmark queries do not depend on either layout. FQ3 and both of IQ3's
+hops sum the edge rows per pair. FQ4 recomputes each entry's running
+balance in ledger order (book time, then transaction id, debit before
+credit, as batch silver orders it) from the account's opening balance, its
+last stored `bal_after` less the sum of its entries, instead of returning
+the stored `bal_after`. On batch silver both queries return what they did
+before, row for row; on continuous silver over the same corpus, once it has
+settled, they return the batch answer. The change moved the AML query-set
+id (12 queries and the 8 before the first TM pass), so no record from
+before it compares with one after; it is part of workload version `aml-2`.
+A batch record is still never compared with a continuous one: the mode is a
+workload identity key, so `compare` stops at "one workload on one corpus"
+before reading any result, and the perf gate and `reproduce` refuse the
+pair.
 
 ## What the AML workload deliberately does not measure
 

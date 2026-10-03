@@ -2,11 +2,10 @@
 
 Continuous AML writes silver.counterparty_edges as one row per pair per
 micro-batch (batch writes one per pair) and silver.account_statements
-running balances in arrival order (labelled ``arrival_order_running_balance``),
-so a query that reads raw edge rows (IQ3's two-hop CTE) or stored running
-balances (FQ4's ``bal_after``) can answer differently in the two modes on
-one corpus. No comparison may read such a pair as comparable: the mode is a
-workload identity key, so compare stops at step 3 (one workload on one
+running balances in arrival order. FQ4 and IQ3 no longer read either layout
+raw (tests/test_aml_queries_mode_invariant.py and the Spark tier pin that),
+but a batch/continuous pair is still never read as comparable: the mode is
+a workload identity key, so compare stops at step 3 (one workload on one
 corpus) before any result is read, and the perf gate refuses the pair on
 its identity.
 """

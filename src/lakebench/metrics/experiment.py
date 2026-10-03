@@ -46,7 +46,10 @@ nothing measured under this one):
   the one version): AML continuous in-stream rounds run the investigator
   queries (IQ1 to IQ4) once the run has a case, so the continuous query set
   changes from 8 queries to 12; a round before the first TM pass runs the 8
-  and is labelled (2026-10-02).
+  and is labelled (2026-10-02). FQ4 recomputes its running balance in
+  ledger order and IQ3 sums its second hop per pair, so continuous silver
+  answers both as batch silver does; batch answers are unchanged, and the
+  AML query-set ids move (2026-10-03).
 - ``c360-2.dev1``: a multi-cycle run's silver jobs take one data clock, the
   exclusive end of the range its cycles cover (``data_clock_source``
   ``cycle_series_end``), instead of each cycle's bronze-verify clock, so
@@ -604,12 +607,13 @@ def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
 def _continuous_results(metrics: Any) -> dict[str, Any]:
     """A continuous run's results: the fingerprints of the result check the
     CLI runs once the whole corpus has passed through the pipeline and the
-    streams have stopped (cli/_sustained.py). Most tables are then a function
-    of the corpus alone; AML's counterparty_edges rows (one per pair per
-    micro-batch) and account_statements running balances (arrival order) are
-    not, so the queries reading them raw (IQ3's two-hop step, FQ4) can differ
-    between continuous runs of one corpus. The in-stream rounds read tables
-    still being written and are never fingerprinted.
+    streams have stopped (cli/_sustained.py). The tables are then a function
+    of the corpus, except the layout of AML's counterparty_edges rows (one
+    per pair per micro-batch) and account_statements running balances
+    (arrival order), which no benchmark query reads raw: FQ3 and IQ3 sum the
+    edges per pair and FQ4 recomputes the balance in ledger order. The
+    in-stream rounds read tables still being written and are never
+    fingerprinted.
 
     An AML run also carries ``alert_set_continuous``: the alert-set
     fingerprint of gold.alerts at the scored tick's commit, computed once

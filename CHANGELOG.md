@@ -833,6 +833,20 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 
 ### Changed
+- **FQ4 and IQ3 give one answer per corpus in batch and continuous.**
+  Continuous AML stores edge rows per pair per micro-batch and statement
+  running balances in arrival order, so FQ4 (which returned the stored
+  `bal_after`) and IQ3's second hop (which returned raw edge rows) answered
+  differently from batch, and between continuous runs, on one corpus. FQ4
+  now recomputes the running balance in ledger order (book time, transaction
+  id, debit first) from each account's opening balance, and IQ3 sums its
+  second hop per pair as it already did the first. Batch answers are
+  unchanged row for row; continuous answers over a settled corpus equal
+  them. The SQL change moves the AML query-set ids (`qs12-70ccb96a1900` for
+  the 12-query set, and the 8-query set before the first TM pass), so QpH
+  from before the change is not compared with QpH after it; workload
+  version `aml-2` covers it. Batch and continuous records are still never
+  compared with each other (the mode is a workload identity key).
 - **`RELEASING.md` and `make release-check`.** One release process: the
   scripted steps run in order with `make release-check VERSION=X.Y.Z`
   (`DRY=1` for the dry run, `make rc-<step>` for one step), and the
@@ -2046,18 +2060,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   like Spark does.
 
 ### Known limitations
-- **Two AML queries read rows continuous mode lays out differently.**
-  Continuous AML writes `silver.counterparty_edges` as one row per pair per
-  micro-batch (batch writes one per pair) and stores running balances in
-  `silver.account_statements` in arrival order. IQ3's two-hop step reads raw
-  edge rows and FQ4 reads the stored `bal_after`, so on one corpus their
-  answers differ between the modes and, in practice, between almost any two
-  continuous runs (micro-batch boundaries and late arrivals depend on when
-  datagen files land), so two continuous AML runs on one corpus read not
-  comparable on results. Batch and continuous records
-  are never compared: the mode is a workload identity key, so `compare`
-  stops before any result and the perf gate refuses the pair. FQ3 sums the
-  edges and is the same in both modes.
 - **The capacity preflight sums free capacity across nodes.** Ten nodes
   with 12 cores free each read as 120 free cores, though each holds one
   8-core pod; only the largest pod is checked against a single node. The
