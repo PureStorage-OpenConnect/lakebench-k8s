@@ -618,8 +618,8 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _ALL_WL,
         (),
         description=(
-            "Multi-cycle batch: seconds of the cycles' datagen inside the time-to-value "
-            "span, left out of time_to_value_seconds"
+            "Multi-cycle Customer 360 batch: seconds of the cycles' datagen inside the "
+            "time-to-value span, left out of time_to_value_seconds"
         ),
     ),
     MetricMeta(

@@ -883,9 +883,10 @@ class PipelineBenchmark:
     total_data_processed_gb: float = 0.0
     pipeline_throughput_gb_per_second: float = 0.0
     time_to_value_seconds: float = 0.0
-    # Multi-cycle batch: seconds of the cycles' datagen inside the
-    # time-to-value span, which time_to_value_seconds leaves out. None for a
-    # run with no cycles, or whose cycle datagen times cannot be read.
+    # Multi-cycle Customer 360 batch: seconds of the cycles' datagen inside
+    # the time-to-value span, which time_to_value_seconds leaves out. None
+    # for a run with no cycles, another workload, or cycle datagen times
+    # that cannot be read.
     time_to_value_datagen_excluded_seconds: float | None = None
 
     # Pipeline-level scores (both modes)
@@ -1070,7 +1071,14 @@ class PipelineBenchmark:
             # A multi-cycle run generates cycles 2+ between one cycle's gold
             # and the next bronze, inside that span: datagen is not pipeline
             # time, so each cycle's datagen interval is left out.
-            excluded = _cycle_datagen_overlap(self.cycles, min(starts), latest_end)
+            # Customer 360 only: its workload version moved with this
+            # (c360-2.dev1); an AML record's time to value keeps its meaning
+            # under aml-1.
+            excluded = (
+                _cycle_datagen_overlap(self.cycles, min(starts), latest_end)
+                if self.config_snapshot.get("workload_schema") == "customer360"
+                else None
+            )
             if excluded is not None:
                 self.time_to_value_datagen_excluded_seconds = excluded
                 self.time_to_value_seconds = max(0.0, self.time_to_value_seconds - excluded)
