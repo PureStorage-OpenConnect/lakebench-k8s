@@ -40,8 +40,6 @@ _EXAMPLE_ENV = {
     "LAKEBENCH_S3_SECRET_KEY": "placeholder",
 }
 
-EM_DASH = "\u2014"
-
 
 @dataclass
 class Result:
@@ -185,33 +183,19 @@ def check_changelog() -> Result:
     return Result("changelog", FAIL, f"CHANGELOG.md has no '## [{version}]' section")
 
 
-def find_em_dashes(paths: Sequence[Path]) -> list[str]:
-    """Return 'path:line' for every line containing U+2014."""
-    hits = []
-    for path in paths:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
-            continue
-        for n, line in enumerate(lines, 1):
-            if EM_DASH in line:
-                hits.append(f"{path.relative_to(ROOT)}:{n}")
-    return hits
-
-
-# Everything a reader of the repository or the CLI sees. CLI help strings
-# live in the Python sources under src/lakebench/cli, so those are scanned
-# whole.
-EM_DASH_SCOPE = ("*.md", "**/*.md", ".github/**", "examples/**", "src/lakebench/cli/**/*.py")
-
-
-def check_em_dashes() -> Result:
-    paths = [p for p in _tracked(*EM_DASH_SCOPE) if p.is_file()]
-    hits = find_em_dashes(paths)
-    if hits:
-        shown = hits[:20] + ([f"... and {len(hits) - 20} more"] if len(hits) > 20 else [])
-        return Result("em-dashes", FAIL, f"{len(hits)} lines with U+2014:\n" + "\n".join(shown))
-    return Result("em-dashes", PASS, f"{len(paths)} files clean")
+def check_prose() -> Result:
+    """scripts/prose_guard.py over every tracked file: em dashes, emoji, AI
+    attribution, and allowlist entries that no longer match a hit."""
+    skipped: list[str] = []
+    problems = _load_script("prose_guard").check(skipped=skipped)
+    note = f"; {len(skipped)} not scanned: {', '.join(skipped[:10])}" if skipped else ""
+    if problems:
+        shown = problems[:20] + (
+            [f"... and {len(problems) - 20} more"] if len(problems) > 20 else []
+        )
+        detail = f"{len(problems)} prose problems{note}:\n" + "\n".join(shown)
+        return Result("prose", FAIL, detail)
+    return Result("prose", PASS, f"tracked files clean{note}")
 
 
 # UAT evidence for a release lives at this path (docs/releasing.md). The
@@ -761,6 +745,33 @@ def check_gitleaks_history() -> Result:
     )
 
 
+def check_package_guard() -> Result:
+    """scripts/package_guard.py over a fresh wheel and sdist: names, key
+    patterns, gitleaks and the held-out absence check. A SKIP (no gitleaks,
+    no hash file) or a PENDING-OA5 hit makes this check SKIP, so
+    --require-all fails on it."""
+    import tempfile
+
+    guard = _load_script("package_guard")
+    with tempfile.TemporaryDirectory(prefix="release-gate-package-") as tmp:
+        work = Path(tmp)
+        try:
+            guard.build(work / "dist")
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or b"").decode("utf-8", "replace")
+            return Result("package-guard", FAIL, f"python -m build failed\n{_tail(err)}")
+        findings = guard.guard(work / "dist", work)
+    lines = [f.render() for f in findings]
+    statuses = {f.status for f in findings}
+    if guard.FAIL in statuses:
+        bad = [f.render() for f in findings if f.status == guard.FAIL]
+        return Result("package-guard", FAIL, f"{len(bad)} failing:\n" + "\n".join(bad + lines))
+    if statuses & {guard.SKIP, guard.PENDING}:
+        open_ = [f.render() for f in findings if f.status in (guard.SKIP, guard.PENDING)]
+        return Result("package-guard", SKIP, f"{len(open_)} not passed:\n" + "\n".join(open_))
+    return Result("package-guard", PASS, "; ".join(f"{f.check} {f.detail}" for f in findings))
+
+
 def check_pre_push_hook() -> Result:
     """The pre-push hook installed in this clone is the tracked one."""
     tracked = ROOT / "scripts" / "hooks" / "pre-push"
@@ -884,11 +895,16 @@ def build_checks(tag: str | None = None, perf_runs: dict[str, str] | None = None
             check_gitleaks_history,
             "secret scan of the history beyond .gitleaksignore",
         ),
+        Check(
+            "package-guard",
+            check_package_guard,
+            "the wheel, sdist and script maps ship no local docs, keys or held-out seeds",
+        ),
         Check("pre-push-hook", check_pre_push_hook, "installed pre-push hook is the tracked one"),
         Check("examples", check_examples, "every examples/*.yaml validates"),
         Check("version", make_version_check(tag), "single version source; tag matches"),
         Check("changelog", check_changelog, "CHANGELOG.md has a section for the version"),
-        Check("em-dashes", check_em_dashes, "no U+2014 in *.md, .github/, examples/, CLI"),
+        Check("prose", check_prose, "no em dash, emoji or AI attribution in a tracked file"),
         Check("uat-results", check_uat_results, "uat/results-<version>.md exists"),
         Check("records", check_records, "every cited run record is release evidence"),
         Check(

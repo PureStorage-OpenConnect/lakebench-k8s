@@ -85,7 +85,7 @@ def test_verify_tag_checks_the_tested_sha_and_version():
 def test_gate_runs_release_only_checks_strictly():
     steps = " ".join(str(s.get("run", "")) for s in _load("release.yml")["jobs"]["gate"]["steps"])
     assert "scripts/release_gate.py" in steps and "--require-all" in steps
-    for check in ("examples", "version", "changelog", "em-dashes", "uat-results"):
+    for check in ("examples", "version", "changelog", "prose", "uat-results"):
         assert check in steps
 
 

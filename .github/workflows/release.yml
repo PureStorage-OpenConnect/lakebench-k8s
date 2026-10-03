@@ -84,10 +84,25 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      # The package guard runs gitleaks over the built members; without it
+      # that part is SKIP, which --require-all fails.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       - name: Release gate (release-only checks)
         run: >-
           python scripts/release_gate.py --tag "${GITHUB_REF_NAME}" --require-all
-          --only examples,version,changelog,em-dashes,uat-results,records,support-record,freeze,expected-results
+          --only examples,version,changelog,prose,package-guard,uat-results,records,support-record,freeze,expected-results
 
   build-dist:
     name: Build wheel and sdist
@@ -105,6 +120,24 @@ jobs:
 
       - name: Verify wheel installs
         run: pip install dist/*.whl && lakebench version
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The files this job uploads are the ones published, so they are the
+      # ones guarded; any SKIP or PENDING-OA5 stops the release here too.
+      - name: Package guard (published artifacts)
+        run: python scripts/package_guard.py --dist dist --require-all
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

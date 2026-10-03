@@ -479,6 +479,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   version pairs and gives each unverified cell's reason as a note. The
   release gate's `support-record` check requires every matrix row at its
   versions and refuses entries outside the matrix.
+- **The release gate and CI check what the package ships.**
+  `scripts/package_guard.py` reads the built wheel and sdist, and the
+  script ConfigMaps rendered from the wheel, and fails on a
+  `docs/internal/` or other maintainer-only member, a binary or link
+  member, an access key, a private key or a gitleaks finding; once the held-out hash file exists it
+  also runs the held-out absence check (a hit is `PENDING-OA5` until the
+  file says `enforce`). CI's package build runs it, the release gate gains
+  a `package-guard` check, and `release.yml` runs both on the files it
+  publishes.
+- **The release gate's `em-dashes` check is now `prose`.** It runs
+  `scripts/prose_guard.py` over every tracked file instead of the docs,
+  workflows, examples and CLI sources, and fails on emoji and AI
+  attribution lines as well as em dashes (an HTML em dash entity counts).
+  The unit tests run the same guard (`tests/test_prose_style.py`). A hit
+  that has to stay is listed in `scripts/prose_allowlist.txt` with a
+  reason. `--only em-dashes` is now an unknown check; use `--only prose`.
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with

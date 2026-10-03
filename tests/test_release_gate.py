@@ -16,8 +16,6 @@ rg = importlib.util.module_from_spec(_spec)
 sys.modules["release_gate"] = rg  # dataclasses look the module up by name
 _spec.loader.exec_module(rg)
 
-EM = chr(0x2014)
-
 
 def _check(name, status, detail=""):
     return rg.Check(name, lambda: rg.Result(name, status, detail), name)
@@ -68,13 +66,21 @@ def test_command_check_exit_codes(tmp_path):
     assert missing.status == rg.FAIL and "not found" in missing.detail
 
 
-def test_find_em_dashes(tmp_path, monkeypatch):
-    monkeypatch.setattr(rg, "ROOT", tmp_path)
-    clean = tmp_path / "a.md"
-    clean.write_text("fine -- text\n")
-    dirty = tmp_path / "b.md"
-    dirty.write_text(f"ok\nbad {EM} here\n")
-    assert rg.find_em_dashes([clean, dirty]) == ["b.md:2"]
+def test_prose_check_runs_the_prose_guard(monkeypatch):
+    # The gate's check is the guard's own check(): a hit or a stale
+    # allowlist entry fails it, with the guard's lines as the detail.
+    assert rg.check_prose().status == rg.PASS
+    real = rg._load_script
+
+    def fake(name):
+        mod = real(name)
+        if name == "prose_guard":
+            mod.check = lambda skipped=None: ["docs/a.md:2 em-dash -- use `--` or restructure"]
+        return mod
+
+    monkeypatch.setattr(rg, "_load_script", fake)
+    res = rg.check_prose()
+    assert res.status == rg.FAIL and "docs/a.md:2 em-dash" in res.detail
 
 
 def test_main_exit_code_follows_failures(monkeypatch, capsys):
@@ -109,7 +115,8 @@ def test_gate_covers_the_required_checks():
         "examples",
         "version",
         "changelog",
-        "em-dashes",
+        "prose",
+        "package-guard",
         "uat-results",
         "perf-baselines",
     } <= names
@@ -206,12 +213,6 @@ def test_uat_results_run_ids_resolve_in_checked_in_or_named_paths(tmp_path, monk
     for ref in (str(outside), rel_out):
         path.write_text(f"# UAT results {version}\n\n{rows}| u | PASS | {d} ({ref}) |\n")
         assert rg.check_uat_results().status == rg.FAIL, ref
-
-
-def test_em_dash_scope_covers_changelog_github_examples_and_cli():
-    scope = rg.EM_DASH_SCOPE
-    assert "*.md" in scope and ".github/**" in scope and "examples/**" in scope
-    assert any(s.startswith("src/lakebench/cli") for s in scope)
 
 
 def test_pythonpath_is_appended_not_replaced(monkeypatch):

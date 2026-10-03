@@ -525,6 +525,28 @@ jobs:
       - name: Verify wheel installs
         run: pip install dist/*.whl && lakebench version
 
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # What the built artifacts and the script maps rendered from the wheel
+      # carry: no local-only docs, no key patterns or gitleaks finding (the
+      # generated members, PKG-INFO, METADATA, RECORD and _build_info.py,
+      # are not in the tree the secret-scan jobs read), and no held-out seed
+      # once the hash file exists (PENDING-OA5 passes here; the release
+      # gate's --require-all refuses it).
+      - name: Package guard
+        run: python scripts/package_guard.py --dist dist
+
       # Named ci-dist, not dist: release.yml calls this workflow in the same
       # run and uploads its own dist, and artifact names are per run.
       - name: Upload the wheel for the clean-venv job
@@ -619,3 +641,67 @@ jobs:
               assert got == pins[name], f"{name} {got} installed, REFERENCE_PY_DEPS pins {pins[name]}"
               print(f"{name}=={got}")
           PY
+
+  # The quick path of CONTRIBUTING.md, run as written in a clean container
+  # (scripts/contributor_path.py turns its one clone line into a clone of
+  # the commit under test). It includes `make test-spark`, so it is outside
+  # the fast-path budgets and runs only where the path can have changed:
+  # every push to main, integrate/** and train/*, tags (so a release's call
+  # waits for it), and any other push or pull request that touches one of
+  # the script's INPUTS; otherwise its steps are skipped and the step
+  # summary says so. Do not make it a required check: a skipped run is
+  # green. Nothing here is cached, so every run downloads pyspark and the
+  # jars. The backstop is the slowest Spark pass plus check-fast and the
+  # installs; build does not wait for this job.
+  contributor-path:
+    name: Contributor path
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    container:
+      image: python:3.11-bookworm@sha256:3fd8382c50bae84184460a6e1a8ff4eeac0e3ca6a560691cb56bd84d2b6ec9ca
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Changed inputs
+        id: inputs
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # On its own line so a crash fails the step instead of skipping
+          # the quick path with a green job.
+          run="$(python3 scripts/contributor_path.py --should-run)"
+          case "$run" in
+            true) ;;
+            false) echo "Skipped: no quick-path input changed on this ref." >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo "::error::--should-run printed '$run'"; exit 1 ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Install Java 17 and make
+        if: steps.inputs.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends openjdk-17-jre-headless make git
+
+      - name: Run the quick path
+        if: steps.inputs.outputs.run == 'true'
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/contributor_path.py > "$RUNNER_TEMP/quick-path.sh"
+          cat "$RUNNER_TEMP/quick-path.sh"
+          work="$(mktemp -d)"
+          cd "$work"
+          bash -euo pipefail "$RUNNER_TEMP/quick-path.sh"
