@@ -2,7 +2,7 @@
 at AM-22's parent commit (``PARENT``), before AM-22 made their refusal texts
 seed-free. ``tests/test_aml_seed_error_verdicts.py`` runs both over a
 synthetic matrix: the edited function must refuse exactly where this one did.
-Do not edit the two functions: ``BASELINE_AST_SHA256`` pins them.
+Do not edit the two functions: ``BASELINE_SOURCE_SHA256`` pins them.
 """
 
 # ruff: noqa: E501
@@ -22,8 +22,9 @@ from lakebench.config.datagen_seed import (  # noqa: F401 -- names the copy read
 
 #: AM-22's parent: the CD-3+4 commits on integrate dfc8afa7 (local stack).
 PARENT = "64f1294a0fb3bbe6f556724498ed93017183fbf2"
-#: sha256 of ast.dump of the two functions below.
-BASELINE_AST_SHA256 = "83f00d6e0f3822b2bc3dc5f42f6f873d3d52289881ffc2615a6279bb87c4070f"
+#: sha256 of the two functions' source text below, joined by a blank line
+#: (source text, not ast.dump, whose output differs across Python versions).
+BASELINE_SOURCE_SHA256 = "ce4fa97fb8b20964b01c6b9c2d53efb5abf3c52f3c53d0832a503ed5b563d443"
 
 
 def _match_label(seed: int | None, role: str | None) -> str:
