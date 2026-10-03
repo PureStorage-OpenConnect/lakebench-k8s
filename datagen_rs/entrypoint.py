@@ -104,8 +104,9 @@ BINARY = "/app/datagen_rs"
 
 
 def main() -> int:
-    # --version is passed straight to the generator before any parsing.
-    if "--version" in sys.argv[1:]:
+    # `<image> --version` is passed straight to the generator before any
+    # parsing (only as the first argument, so a value is never read as it).
+    if sys.argv[1:2] == ["--version"]:
         os.execvp(BINARY, [BINARY, "--version"])
     # No prefix matching: an abbreviation such as --rob must not turn on
     # --robustness-perturbation (or any other flag).

@@ -506,8 +506,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   count left out) with their sha256, so an omitted flag and the same flag at
   its default hash the same. `generate --print-resolved-args` prints that
   object and writes nothing; `--version` prints the model version and build
-  commit. The image carries OCI labels for both and no longer installs
-  boto3.
+  commit. The image carries OCI labels for both, refuses to build without
+  `--build-arg LB_BUILD_COMMIT=<commit>`, and no longer installs boto3. A
+  Customer 360 `--cycle n` now needs the matching `--cycles` (Lakebench
+  always passes both), and a non-finite `--scale`, `--dirty-ratio` or
+  `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 - **The datagen generator parses its arguments strictly.** An unknown flag,
   a flag given twice, a flag without its value, a stray argument, or a value
   that does not parse now exits 2 in the entrypoint and the Rust binary

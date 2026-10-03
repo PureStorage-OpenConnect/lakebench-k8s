@@ -137,6 +137,18 @@ fn strict_arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
     }
 }
 
+/// A float flag via `strict_arg` that must also be finite: `nan` and `inf`
+/// parse as f64 but serialize as null in `corpus_args`, so two different
+/// corpora would hash alike.
+fn strict_f64(flag: &str, default: f64) -> f64 {
+    let v: f64 = strict_arg(flag, default);
+    if !v.is_finite() {
+        eprintln!("{flag} must be a finite number; got {v}");
+        std::process::exit(2);
+    }
+    v
+}
+
 /// Flags that take a value, per schema; every other `--flag` exits 2. The
 /// entrypoint renders only these (`datagen_rs/entrypoint.py`).
 const FINANCIAL_FLAGS: &[&str] = &[
@@ -188,9 +200,13 @@ const C360_BARE: &[&str] = &["--print-resolved-args", "--version"];
 /// `--print-resolved-args`: print the resolved corpus arguments (the marker's
 /// `corpus_args` and its hash) and exit 0, before any S3 client or file.
 fn print_resolved_args_requested() -> bool {
-    std::env::args()
-        .skip(1)
-        .any(|a| a == "--print-resolved-args")
+    bare_flag_given("--print-resolved-args")
+}
+
+/// A bare flag given as a flag (never as another flag's value).
+fn bare_flag_given(flag: &str) -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    !flag_values(&args, flag).is_empty()
 }
 
 /// Print the resolved arguments and exit when `--print-resolved-args` was
@@ -540,7 +556,7 @@ fn main() {
     // manifest that predates the c360 branch. `entrypoint.py` gates schema
     // choice before invoking us, but keep a defensive check here too so a
     // typo doesn't fall through to the pacs.008 path silently.
-    if std::env::args().skip(1).any(|a| a == "--version") {
+    if bare_flag_given("--version") {
         println!(
             "datagen_rs {} {}",
             datagen_rs::model::MODEL_VERSION,
@@ -587,7 +603,7 @@ fn pacs008_main() {
     let (cycle_n, cycles) = cycle_args();
     let (slice_lo, slice_hi) = cycle::mass_slice(cycle_n, cycles);
     let in_slice = move |m: f64| m >= slice_lo && m < slice_hi;
-    let scale: f64 = strict_arg("--scale", 1.0);
+    let scale: f64 = strict_f64("--scale", 1.0);
     let corpus_months: i64 = strict_arg("--corpus-months", 60);
     // Default 64 matches DatagenConfig.file_size ("64mb"), the template's
     // default(64) fallback, and entrypoint.py's default, so raw-CLI
@@ -1508,17 +1524,22 @@ fn pacs008_main() {
         build_s, 100.0 * build_s / cpu_tot, write_s, 100.0 * write_s / cpu_tot, up_s
     );
 
-    write_marker(
-        &sink,
-        &corpus_args,
-        cycle_n,
-        node_id,
-        datagen_rs::corpus::NodeTotals {
-            files_written,
-            rows_written,
-            bytes_written: total_bytes,
-        },
-    );
+    // A reference-only pod (a raw split run; Lakebench always renders
+    // --mode all) is not one of the corpus's nodes: its marker would take
+    // bronze node 0's key, so it writes none.
+    if mode != "reference" {
+        write_marker(
+            &sink,
+            &corpus_args,
+            cycle_n,
+            node_id,
+            datagen_rs::corpus::NodeTotals {
+                files_written,
+                rows_written,
+                bytes_written: total_bytes,
+            },
+        );
+    }
 
     // Machine-readable per-pod metrics line for the lakebench aggregator.
     // See datagen_rs::metrics for the schema; lakebench parses on prefix
@@ -1605,7 +1626,7 @@ fn customer360_main() {
     // Two sizing controls: --target-tb picks total file count, --file-size-mb
     // picks per-file size. --scale sizes only the customer id space (when
     // --customer-id-max is absent); target_tb drives file count.
-    let target_tb: f64 = strict_arg("--target-tb", 0.1);
+    let target_tb: f64 = strict_f64("--target-tb", 0.1);
     if !target_tb.is_finite() || target_tb <= 0.0 {
         eprintln!(
             "--target-tb must be a positive finite number; got {}",
@@ -1643,7 +1664,7 @@ fn customer360_main() {
     let mem_limit = customer360::pod_memory_limit_bytes();
     let customer_id_max: u64 = match strict_arg::<u64>("--customer-id-max", 0) {
         0 => {
-            let scale: f64 = strict_arg("--scale", 1.0);
+            let scale: f64 = strict_f64("--scale", 1.0);
             customer360::customer_id_max_for_scale_within(scale, mem_limit)
         }
         n => customer360::check_id_space_fits_memory(n, mem_limit).map(|_| n),
@@ -1662,9 +1683,9 @@ fn customer360_main() {
     let payload_kb: usize = 2;
     // Recorded in the corpus arguments; it sizes the id space only when
     // --customer-id-max is absent.
-    let c360_scale: f64 = strict_arg("--scale", 1.0);
-    let dirty_ratio: f64 = strict_arg("--dirty-ratio", 0.08);
-    let duplicate_email_pct: f64 = strict_arg("--duplicate-email-pct", 0.10);
+    let c360_scale: f64 = strict_f64("--scale", 1.0);
+    let dirty_ratio: f64 = strict_f64("--dirty-ratio", 0.08);
+    let duplicate_email_pct: f64 = strict_f64("--duplicate-email-pct", 0.10);
     // Timestamp range as YYYY-MM-DD; default 2024-01-01..2025-01-01 matching
     // the Python c360 defaults.
     let ts_start_str: String = strict_arg("--timestamp-start", "2024-01-01".to_string());
@@ -1727,9 +1748,6 @@ fn customer360_main() {
         "timestamp_start": ts_start_str,
         "timestamp_end": ts_end_str,
     });
-    maybe_print_resolved_args(&corpus_args);
-    let sink = S3Sink::from_env(&bucket, &prefix);
-
     let t0 = std::time::Instant::now();
     let file_size_bytes = (file_size_mb as usize) * 1024 * 1024;
     let bytes_per_row = customer360_bytes_per_row_default();
@@ -1757,6 +1775,10 @@ fn customer360_main() {
         );
         std::process::exit(2);
     }
+    // Every argument check is above, so a printed resolution is one the run
+    // would accept.
+    maybe_print_resolved_args(&corpus_args);
+    let sink = S3Sink::from_env(&bucket, &prefix);
 
     // Build the loyalty lookup + customer_id sampler ONCE, then share via Arc
     // across rayon workers. Same lookup used by every file so
