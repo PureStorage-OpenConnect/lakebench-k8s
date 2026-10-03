@@ -236,9 +236,7 @@ def _invoke(tmp_path, monkeypatch, *argv):
     return CliRunner().invoke(app, list(argv))
 
 
-_RESULTS_LINE = (
-    "`lakebench results` is now `lakebench report --format table`; the old name is removed in v1.8"
-)
+_RESULTS_LINE = "`lakebench results` is now `lakebench report`; the old name is removed in v1.8"
 
 
 def test_results_aliases_report(tmp_path, monkeypatch):

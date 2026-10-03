@@ -48,42 +48,72 @@ class Refusal:
 
 
 ALIASES: dict[str, Alias] = {
-    "results": Alias("report --format table"),
+    # Its --format passes through, table by default.
+    "results": Alias("report"),
     "admin install-spark-operator": Alias("admin install --component spark-operator"),
     "admin install-scratch-storage-class": Alias("admin install --component scratch-storage-class"),
 }
 
-#: Flags that still parse and do nothing but print one line.
+#: Commands hidden and marked deprecated since 1.3 (Click prints its own
+#: notice), kept as verbs in 1.7: the command each points to.
+DEPRECATED_COMMANDS: dict[str, str] = {
+    "info": "config show",
+    "recommend": "config recommend",
+}
+
+#: Flags that still parse: the line or replacement each names. init's
+#: wizard flags print their line and write the default config.
 _WIZARD_REMOVED = "the init wizard is removed; init writes a default config (see init --help)"
 ALIASED_FLAGS: dict[str, dict[str, str]] = {
     "init": dict.fromkeys(("--interactive", "-i", "--advanced"), _WIZARD_REMOVED),
+    "run": {"--sustained": "--continuous"},
+    "recommend": {"--extended": "--slow-datagen"},
 }
 
-_REGENERATE = Refusal(
-    "lakebench run CONFIG --generate --regenerate",
-    "a run regenerates its own corpus, so the corpus a record names is the one it read",
+#: Hidden on purpose, not renamed or removed: the deprecated ``-f`` short
+#: flags (cli/_helpers.py), init's ``--no-interactive`` (accepted silently:
+#: it asks for what init always does) and two flags for harnesses that only
+#: add a refusal.
+HIDDEN_FLAGS: dict[str, tuple[str, ...]] = {
+    "*": ("-f",),
+    "init": ("--no-interactive",),
+    "deploy": ("--require-new",),
+    "destroy": ("--expect-incarnation",),
+}
+
+_RECLAIM = (
+    "; on a bucket this deployment did not create, `lakebench admin reclaim-bucket` first "
+    "(an owner action)"
 )
-_EVIDENCE = Refusal(None, "evidence is not deleted by the CLI")
+_REASON_CORPUS = "a run regenerates its own corpus, so the corpus a record names is the one it read"
+_EVIDENCE = Refusal(None, "run records and journals are evidence, and the CLI does not delete them")
 
 REFUSED: dict[str, Refusal] = {
     "config upgrade": Refusal(
         "lakebench init --from OLD.yaml -o NEW.yaml",
         "it rewrote configs lossily and wrote secrets in plaintext",
     ),
-    "clean bronze": _REGENERATE,
-    "clean data": _REGENERATE,
+    "clean bronze": Refusal(
+        "lakebench run CONFIG --generate --regenerate" + _RECLAIM, _REASON_CORPUS
+    ),
+    "clean data": Refusal(
+        "lakebench clean silver CONFIG and lakebench clean gold CONFIG, then "
+        "lakebench run CONFIG --generate --regenerate" + _RECLAIM,
+        _REASON_CORPUS,
+    ),
     "clean metrics": _EVIDENCE,
     "clean journal": _EVIDENCE,
 }
 
 _COMPARE_RUNS = Refusal(
-    "lakebench run A.yaml --repeat 3; lakebench run B.yaml --repeat 3; "
+    "lakebench run A.yaml and lakebench run B.yaml (add --repeat 3), then "
     "lakebench compare A.yaml B.yaml",
     "compare reads stored records and no longer runs configs",
 )
 _INIT_CREDENTIALS = Refusal(
-    "--credentials-env PREFIX, or export LAKEBENCH_S3_ACCESS_KEY and LAKEBENCH_S3_SECRET_KEY",
-    "init writes a ${VAR} reference, never a key",
+    "export LAKEBENCH_S3_ACCESS_KEY and LAKEBENCH_S3_SECRET_KEY (or the names "
+    "--credentials-env PREFIX gives)",
+    "init writes a reference to the variable, never the key",
 )
 
 #: Refused flags of commands that remain (each command refuses its own).
@@ -102,6 +132,7 @@ REFUSED_FLAGS: dict[str, dict[str, Refusal]] = {
         _COMPARE_RUNS,
     ),
     "init": {"--access-key": _INIT_CREDENTIALS, "--secret-key": _INIT_CREDENTIALS},
+    "clean": dict.fromkeys(("--metrics-dir", "-m"), _EVIDENCE),
 }
 
 
