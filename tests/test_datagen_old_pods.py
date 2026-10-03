@@ -395,7 +395,10 @@ def test_generate_with_an_unreachable_cluster_still_exits_4(monkeypatch, tmp_pat
     assert res.exit_code == 4, res.output
 
 
-def test_multi_cycle_deployer_takes_the_gates_decision_not_the_flag(monkeypatch, tmp_path):
+@pytest.mark.parametrize("gate_allowed", [False, True])
+def test_multi_cycle_deployer_takes_the_gates_decision_not_the_flag(
+    monkeypatch, tmp_path, gate_allowed
+):
     """--allow-stale-bronze on a multi-cycle run whose cycle-0 gate found the
     prefix empty: the cycle deployers are built without it, so objects that
     land after the gate are refused (exit 3) rather than written over with no
@@ -413,7 +416,7 @@ def test_multi_cycle_deployer_takes_the_gates_decision_not_the_flag(monkeypatch,
     monkeypatch.setattr("lakebench.s3.S3Client", dg._FakeS3)
     monkeypatch.setattr(
         "lakebench.cli._run.enforce_bronze_gate",
-        lambda *a, **k: NS(stale_allowed=False, record=lambda: None),
+        lambda *a, **k: NS(stale_allowed=gate_allowed, record=lambda: None),
     )
     built: list[bool] = []
 
@@ -435,5 +438,5 @@ def test_multi_cycle_deployer_takes_the_gates_decision_not_the_flag(monkeypatch,
     monkeypatch.setattr("lakebench.deploy.DatagenDeployer", _Refusing)
     cfg = dg._write_cfg(tmp_path, architecture="{pipeline: {cycles: 2}}")
     res = CliRunner().invoke(app, ["run", str(cfg), *_RUN, "--allow-stale-bronze"])
-    assert built == [False], res.output[-2000:]
+    assert built == [gate_allowed], res.output[-2000:]  # what the gate allowed reaches cycle 0
     assert res.exit_code == 3, res.output[-2000:]
