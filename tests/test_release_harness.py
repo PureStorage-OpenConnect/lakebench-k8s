@@ -546,7 +546,7 @@ def test_aml_rows_run_the_calibration_seed():
 def test_aml_seed_problem_never_names_the_seed(monkeypatch):
     import lakebench.config.datagen_seed as ds
 
-    monkeypatch.setattr(ds, "protected_seeds", lambda: {12345: "evaluation"})
+    monkeypatch.setattr(ds, "seed_is_protected", lambda v, heldout=None: v == 12345)
     msg = H.aml_seed_problem(12345)
     assert msg and "12345" not in msg
 

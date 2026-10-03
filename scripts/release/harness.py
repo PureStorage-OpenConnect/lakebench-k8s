@@ -246,9 +246,9 @@ def missing_matrix_rows(rows: Sequence[Row]) -> list[tuple[str, str, str, float]
 def aml_seed_problem(seed: int) -> str | None:
     """An AML row must run the calibration seed and never a protected one
     (the message never names a seed value)."""
-    from lakebench.config.datagen_seed import calibration_seed, protected_seeds
+    from lakebench.config.datagen_seed import calibration_seed, seed_is_protected
 
-    if seed in protected_seeds():
+    if seed_is_protected(seed):
         return "the AML seed is a protected (held-out) seed"
     if seed != calibration_seed():
         return "the AML seed is not the pre-registered calibration seed"
