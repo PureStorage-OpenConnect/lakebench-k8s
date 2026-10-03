@@ -973,9 +973,9 @@ does not change with scale.
 
 `architecture.pipeline.cycles` (1 to 50) runs a batch run as N cycles, each
 over its own slice of the event window, to model a table that receives daily
-loads. It is refused with continuous mode, and `lakebench generate`, `run --generate`
-and `run --generate-only` are refused with it (except with `--local`), because
-each cycle generates its own slice; `run --skip-generate` reuses a finished
+loads. It is refused with continuous mode, and `run --generate` (except with
+`--local`), `run --generate-only` and `lakebench generate` are refused with
+it, because each cycle generates its own slice; `run --skip-generate` reuses a finished
 multi-cycle corpus of the same config (checked against its corpus series
 marker), except for AML. Cycle 1 creates silver
 and gold; cycles 2 and later append to silver and run gold-finalize
