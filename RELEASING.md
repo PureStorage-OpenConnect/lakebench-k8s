@@ -435,8 +435,12 @@ The release workflow runs all four with the repository's full history.
   ran a rule set other than the expected one or errored a rule; returned
   results other than `uat/expected-results-<version>.json`'s (batch: each
   query's result fingerprint and the alert set; continuous: the set of query
-  sets its rounds ran); was not run by the freeze commit from a clean tree
-  whose code did not change during the run; read a held-out corpus; is not
+  sets its rounds ran, where a round whose only failed queries are Q9, which
+  the verdict tolerates, counts for the set it listed when its executed
+  queries are the listed ones less Q9 and both recorded set ids match those
+  names); was not run by the
+  freeze commit from a clean tree whose code did not change during the run;
+  read a held-out corpus; is not
   exp2 from the release datagen image (the digest `ImagesConfig.datagen`
   pins, with that image's lineage entry); or was bound by an evaluation
   sizing profile or any Lakebench limit in `limits.bound_kinds` the row does

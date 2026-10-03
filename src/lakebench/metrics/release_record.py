@@ -197,6 +197,51 @@ def load_expected(path: Path) -> dict[str, Any]:
     return data
 
 
+def round_query_set(rnd: Mapping[str, Any]) -> str | None:
+    """The query set an in-stream round counts for in the release record:
+    the set it executed (``executed_query_set_id``), or, for a round whose
+    only failed queries are the ones the verdict tolerates in every round
+    (``verdict.TOLERATED_ROUND_FAILURE_PREFIX``, Q9), the set it listed
+    (``query_set_id``). Such a round executed the listed set less Q9, and the
+    verdict passed the run with it. It counts for the listed set only when
+    the record shows that: the failed queries are listed with ``success``
+    false and every one is a Q9, ``executed_queries`` is exactly the listed
+    queries less them, and both recorded ids are the ids of those name sets
+    (``queries.query_set_id``). A query that was never listed, any other
+    failure, or an id that does not match its names leaves the round at the
+    set it executed."""
+    from lakebench.benchmark.queries import query_set_id
+    from lakebench.metrics.verdict import TOLERATED_ROUND_FAILURE_PREFIX
+
+    executed_id = rnd.get("executed_query_set_id")
+    listed_id = rnd.get("query_set_id")
+    queries = rnd.get("queries")
+    executed = rnd.get("executed_queries")
+    if not executed_id or not listed_id or listed_id == executed_id:
+        return executed_id
+    if not isinstance(queries, list) or not isinstance(executed, list):
+        return executed_id
+    listed: set[str] = set()
+    failed: set[str] = set()
+    for q in queries:
+        if not isinstance(q, Mapping):
+            return executed_id
+        name = str(q.get("name") or q.get("query_name") or "")
+        if not name:
+            return executed_id
+        listed.add(name)
+        if not q.get("success", True):
+            failed.add(name)
+    if not failed or not all(n.startswith(TOLERATED_ROUND_FAILURE_PREFIX) for n in failed):
+        return executed_id
+    ran = set(map(str, executed))
+    if ran != listed - failed:
+        return executed_id
+    if query_set_id(listed) != listed_id or query_set_id(ran) != executed_id:
+        return executed_id
+    return str(listed_id)
+
+
 def _results_problems(
     record: Mapping[str, Any], exp: Mapping[str, Any], expected: Mapping[str, Any] | None
 ) -> list[str]:
@@ -236,7 +281,9 @@ def _results_problems(
             # The declared query_set_id says what a round was asked to run,
             # not what it ran.
             return ["rounds do not record the query set they executed"]
-        ran = {r["executed_query_set_id"] for r in rounds}
+        # A round with a tolerated Q9 failure counts for the set it listed
+        # (round_query_set): the verdict passed the run with it.
+        ran = {str(round_query_set(r)) for r in rounds}
         want = set(entry.get("query_set_ids") or [])
         if ran != want:
             missing = sorted(want - ran)

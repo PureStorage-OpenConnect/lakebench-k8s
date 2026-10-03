@@ -713,6 +713,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   generated blocks. `records`, `freeze` and `expected-results` are skipped
   until `uat/freeze-<version>` exists and `support-record` until `--tag`; the
   release workflow runs all four with `--require-all` on the full history.
+  A continuous round whose only failed queries are Q9, which the verdict
+  tolerates, counts for the query set it listed, so a C360 continuous run
+  that passed with one is not refused for running a 7-query set.
   The perf gate now refuses a run an evaluation profile or a Lakebench limit
   bound. See `RELEASING.md`, "Release evidence".
 - **Compaction by engine, and blended in-stream QpH.** A run's effective

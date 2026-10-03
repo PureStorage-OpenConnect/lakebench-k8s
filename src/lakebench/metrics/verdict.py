@@ -487,6 +487,13 @@ def _pipeline_gate_outcome(metrics: PipelineMetrics) -> str | None:
     return None
 
 
+#: Name prefix of the one benchmark query whose failure an in-stream round
+#: tolerates: Q9 reads the C360 gold table that gold refresh replaces while
+#: rounds run (``cli._sustained.tolerated_q9_results``). The release record
+#: (``release_record.round_query_set``) reads the same prefix.
+TOLERATED_ROUND_FAILURE_PREFIX = "Q9"
+
+
 def _rounds(metrics: PipelineMetrics) -> list[Any]:
     """A continuous run's in-stream benchmark rounds, in order ([] otherwise)."""
     return list(metrics.benchmark_rounds or []) if _is_sustained(metrics) else []
@@ -508,7 +515,7 @@ def _failed_queries(metrics: PipelineMetrics) -> list[str]:
                 if not isinstance(q, Mapping) or q.get("success", True):
                     continue
                 name = str(q.get("name") or q.get("query_name") or "")
-                if not name.startswith("Q9") and name not in out:
+                if not name.startswith(TOLERATED_ROUND_FAILURE_PREFIX) and name not in out:
                     out.append(name)
         return out
     if metrics.benchmark is None:
