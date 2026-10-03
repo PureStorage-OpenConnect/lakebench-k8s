@@ -604,9 +604,12 @@ def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
 def _continuous_results(metrics: Any) -> dict[str, Any]:
     """A continuous run's results: the fingerprints of the result check the
     CLI runs once the whole corpus has passed through the pipeline and the
-    streams have stopped (cli/_sustained.py), when every table is a function
-    of the corpus alone. The in-stream rounds read tables still being
-    written and are never fingerprinted.
+    streams have stopped (cli/_sustained.py). Most tables are then a function
+    of the corpus alone; AML's counterparty_edges rows (one per pair per
+    micro-batch) and account_statements running balances (arrival order) are
+    not, so the queries reading them raw (IQ3's two-hop step, FQ4) can differ
+    between continuous runs of one corpus. The in-stream rounds read tables
+    still being written and are never fingerprinted.
 
     An AML run also carries ``alert_set_continuous``: the alert-set
     fingerprint of gold.alerts at the scored tick's commit, computed once

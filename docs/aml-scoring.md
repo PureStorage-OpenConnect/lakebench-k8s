@@ -953,10 +953,12 @@ micro-batch, where batch writes one row per pair, and it keeps
 (labelled `arrival_order_running_balance` when a statement arrives late).
 FQ3 sums the edge rows, so its answer is the same in both modes. IQ3's
 two-hop step reads raw edge rows and FQ4 reads the stored `bal_after`, so
-their answers on one corpus can differ between batch and continuous, and
-between two continuous runs whose micro-batch boundaries or arrival order
-differ; the continuous result check then reads such a pair as not
-comparable on those queries. A batch record is never compared with a
+their answers on one corpus differ between batch and continuous and, in
+practice, between almost any two continuous runs: micro-batch boundaries
+and late statements depend on when datagen's files land against the
+triggers. The continuous result check then reads two continuous AML runs on
+one corpus as not comparable on those queries, so they do not compare,
+reproduce or serve as a perf-gate baseline for each other. A batch record is never compared with a
 continuous one: the mode is a workload identity key, so `compare` stops at
 "one workload on one corpus" before reading any result, and the perf gate
 and `reproduce` refuse the pair.
