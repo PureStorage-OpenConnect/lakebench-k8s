@@ -599,8 +599,8 @@ PASSED run shows:
   Continuous: bronze-ingest's output rows, silver-stream's rows after its
   transforms (the AML stream logs only the rows of its committed batches,
   which stand for them) and gold-refresh's output rows are above 0. AML
-  gold-refresh logs no row count; the alerts it wrote in the window stand
-  for it, so a window with no alerts fails. A continuous layer with no row
+  gold-refresh logs no row count; the alerts its time-to-detect lines
+  counted stand for it, so a run with no alerts fails. A continuous layer with no row
   count passes on its bytes alone, with the warning "rows not measured for
   gold; bytes > 0" and the layer listed in
   `verdict.qualifiers.layer_rows_unmeasured`; release evidence refuses that.
@@ -609,11 +609,11 @@ PASSED run shows:
   allowed skip (today only `W1_connected_components` for `giant-component`
   or `vertex-cap`; a W3 or W17 `path-cap` skip fails). A batch gold log
   with no per-rule counts is a warning, not a failure. Continuous: no rule
-  ran that the mode leaves out, and the window produced alerts; the
+  ran that the mode leaves out, and detection produced alerts; the
   continuous record carries no rule errors, so they are not judged there.
 - **The scale's data** (`scale_ratio`, batch). The bronze read is at least
-  95% of the scale's expected volume, as stored (rounded to 3 places); a
-  ratio of 0 (bronze not measured) fails. A multi-cycle run's ratio is its
+  95% of the scale's expected volume, as stored (3 places, never rounded
+  up to 0.95); a ratio of 0 (bronze not measured) fails. A multi-cycle run's ratio is its
   last bronze-verify's, which reads every cycle.
 - **Answers** (`query_answers`). No successful benchmark query returned 0
   rows unless the query is declared to allow an empty result. A continuous
