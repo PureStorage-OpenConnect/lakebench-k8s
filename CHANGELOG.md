@@ -483,6 +483,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **`compare`: outcome keys inside a side, and maintenance skipped on both
+  sides.** A side whose repeat runs differ only in in-stream rounds or
+  investigator sessions (outcomes of the runs' speed) is now one
+  experiment, and the pair is NOT LIKE-FOR-LIKE (exit 12) instead of NOT
+  COMPARABLE (exit 10): a continuous side of three runs, whose round counts
+  almost always differ, now shows its medians, though no directional row is
+  assessed. A round count of 0 (the post-stream estimator) against more than
+  0 inside a side, an outcome value that is not a count, and every other
+  difference inside a side still read NOT COMPARABLE. Two runs that each
+  skipped every maintenance operation by the user's choice under one policy
+  now have the same effective maintenance, across table formats, and their
+  maintenance settings are not compared, so an Iceberg and a Delta run with
+  `--skip-maintenance` can be LIKE-FOR-LIKE; the hint for an Iceberg-Delta
+  maintenance difference now names that remedy, and no "maintenance policy
+  differs" warning prints for such a pair. A pair whose QpH is an in-stream
+  median on one side and the post-stream benchmark on the other now says
+  so in its hint.
 - **Support is keyed by Spark minor and table format version, and the record
   is generated from run records.** A `validated_combinations.yaml` entry now
   names `spark` (the Spark minor of the image tag) and
@@ -1073,8 +1090,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the shell in another repository stamped the other repository's commit. It
   now comes from the lakebench package's own checkout (the commit the run
   record's `provenance.git_sha` names), with `-dirty` for uncommitted
-  changes, and is left off when no checkout commit can be read (a wheel
-  install). It is still written only when the namespace is first stamped.
+  changes. A wheel install stamps the commit its build info names, marked
+  `-buildinfo` (and `-dirty` for a build from a modified tree); the stamp is
+  left off when no commit can be read. It is still written only when the
+  namespace is first stamped.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the

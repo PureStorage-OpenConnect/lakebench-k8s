@@ -1009,9 +1009,9 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
                 None,
                 f"effective maintenance differs ({va} vs {vb}): {fa.capitalize()} and "
                 f"{fb.capitalize()} run different "
-                "maintenance operations. Missing: the same maintenance. No setting aligns "
-                "them (with maintenance off the two still record different operations); "
-                "compare compositions of one table format",
+                "maintenance operations. Missing: the same maintenance. Only no maintenance "
+                "aligns them (skipped on both sides counts as the same): run both with "
+                "`--skip-maintenance`, then compare",
             )
         want_a, want_b = _maintenance_setting(a), _maintenance_setting(b)
         if not continuous and want_a is not None and want_a != want_b:
@@ -1066,6 +1066,16 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
             "Re-run when the cluster can grant both requests, or set the same override on both "
             "sides",
         )
+    if key == "benchmark rounds" and isinstance(cause.a, int) and isinstance(cause.b, int):
+        if (cause.a > 0) != (cause.b > 0):
+            zero = "A" if cause.a == 0 else "B"
+            return MissingCondition(
+                "in-stream rounds on both sides",
+                None,
+                f"in-stream rounds differ ({va} vs {vb}): {zero}'s QpH is the post-stream "
+                "benchmark (no in-stream round ran), the other side's an in-stream median, "
+                "two different estimators. Missing: in-stream rounds on both sides",
+            )
     if key in cmp.OUTCOME_CONDITION_KEYS:
         what = "in-stream rounds" if key == "benchmark rounds" else key
         return MissingCondition(
@@ -1087,14 +1097,6 @@ def _side_not_one_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
     side, other = _sides(a, b, cause.side)
     lb = side.label
     key = cause.key or "identity"
-    if key in cmp.OUTCOME_CONDITION_KEYS:
-        what = "in-stream rounds" if key == "benchmark rounds" else key
-        return MissingCondition(
-            "one experiment per side",
-            None,
-            f"{what} differ inside side {lb} ({_val(cause.a)} vs {_val(cause.b)}), an outcome "
-            "of speed. Missing: one experiment per side. Compare single runs",
-        )
     if cause.a is None and cause.b is None and cause.detail:
         what = f"{key} ({cause.detail})"
     else:
@@ -1251,6 +1253,15 @@ def missing_condition(pair: cmp.PairVerdict, a: Side, b: Side) -> MissingConditi
         )
     if kind == "condition":
         return _condition_hint(c, a, b)
+    if kind == "side_outcome":
+        what = "in-stream rounds" if c.key == "benchmark rounds" else (c.key or "an outcome")
+        return MissingCondition(
+            f"equal {what}",
+            None,
+            f"{c.side}: run {c.other_run} differs from {c.run} in {what} ({_val(c.a)} vs "
+            f"{_val(c.b)}), an outcome of speed. Missing: equal {what}. No setting makes them "
+            "equal; the side's figures combine runs that differ in it",
+        )
     if kind == "pinset":
         older = _older(a, b)
         cmd = f"lakebench deploy {_cfg(older)}"
@@ -1483,6 +1494,13 @@ def _side_doc(side: Side) -> dict[str, Any]:
     }
 
 
+def _effective_id(record: Mapping[str, Any]) -> str | None:
+    exp = record.get("experiment")
+    em = exp.get("effective_maintenance") if isinstance(exp, Mapping) else None
+    ident = em.get("id") if isinstance(em, Mapping) else None
+    return ident if isinstance(ident, str) and ident else None
+
+
 def _warnings(a: Side, b: Side) -> list[str]:
     out = list(a.warnings) + list(b.warnings)
     fa, fb = _first(a), _first(b)
@@ -1492,6 +1510,12 @@ def _warnings(a: Side, b: Side) -> list[str]:
 
             problem = policy_mismatch(recorded_policy(fa), recorded_policy(fb))
         except Exception:  # noqa: BLE001 -- a policy that cannot be read is not a warning
+            problem = None
+        ids = [_effective_id(r) for r in (fa, fb)]
+        if problem and all(ids) and cmp.maintenance_equal(*ids):
+            # Both skipped every operation: the same maintenance
+            # (comparability.maintenance_equal), whatever the policy suffix
+            # says. A record whose id cannot be read keeps the warning.
             problem = None
         if problem:
             out.append(problem)

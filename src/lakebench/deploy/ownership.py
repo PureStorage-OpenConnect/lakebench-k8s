@@ -1402,9 +1402,13 @@ def build_identity_from_config(cfg: Any, context: str | None = None) -> Deployme
     package runs from (found from the package's own path, the reading the
     run record's ``provenance.git_sha`` makes in a checkout), never the
     working directory's repository, with ``-dirty`` when the package has
-    uncommitted changes or its state could not be read. It is None when no checkout commit can be read (a
-    wheel, an unknown install, git unavailable)."""
-    from lakebench.metrics.provenance import INSTALL_CHECKOUT, sample
+    uncommitted changes or its state could not be read. With no checkout,
+    a wheel's build-info commit (``_build_info.py``, written by the build
+    hook) is stamped with ``-buildinfo`` so it is never read as a checkout
+    commit, plus ``-dirty`` when the build was not from a clean tree. It is
+    None when no commit can be read (an unknown install, a wheel built
+    without the hook, git unavailable)."""
+    from lakebench.metrics.provenance import INSTALL_CHECKOUT, INSTALL_WHEEL, sample
 
     committed_sha: str | None = None
     try:
@@ -1415,6 +1419,10 @@ def build_identity_from_config(cfg: Any, context: str | None = None) -> Deployme
     if code.get("install") == INSTALL_CHECKOUT and isinstance(sha, str) and sha:
         # An unknown state (git status failed) is not proven clean.
         committed_sha = sha[:7] + ("" if code.get("git_dirty") is False else "-dirty")
+    elif code.get("install") == INSTALL_WHEEL and isinstance(sha, str) and sha:
+        committed_sha = (
+            sha[:7] + "-buildinfo" + ("" if code.get("git_dirty") is False else "-dirty")
+        )
 
     workload_schema: str | None = None
     try:

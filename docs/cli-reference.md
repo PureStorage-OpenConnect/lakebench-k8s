@@ -129,9 +129,9 @@ passed members, and the exit code is the verdict:
 | Verdict | Meaning | Exit |
 |---|---|---|
 | LIKE-FOR-LIKE | Same experiment, equal results, same execution conditions. The attribution says what differs: the architecture, the system, or nothing (a repeat) | 0 |
-| NOT COMPARABLE | Different experiments (workload, version, mode, corpus, seed, scale, generator), different results, a run that did not pass, a record without the experiment block, or a side whose runs are not one experiment | 10 |
+| NOT COMPARABLE | Different experiments (workload, version, mode, corpus, seed, scale, generator), different results, a run that did not pass, a record without the experiment block, or a side whose runs are not one experiment (a side whose runs differ only in in-stream rounds or investigator sessions is one experiment: NOT LIKE-FOR-LIKE) | 10 |
 | NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results (no benchmark, a recipe without a query engine, a continuous run without an end-of-run result check) | 11 |
-| NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs: effective maintenance or its compaction operation, maintenance settings, benchmark iterations or mode, in-stream rounds, the Lakebench limits that bound; or the only architecture difference is the dependency set | 12 |
+| NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs: effective maintenance or its compaction operation (maintenance skipped by the user on both sides counts as the same, across table formats), maintenance settings, benchmark iterations or mode, in-stream rounds (between the sides or inside one), the Lakebench limits that bound; or the only architecture difference is the dependency set | 12 |
 | CONFOUNDED | Comparable, but the architecture and the system both differ, so no difference can be put down to either | 13 |
 
 Usage errors (a ref that resolves to nothing, the same runs on both sides,
@@ -150,9 +150,11 @@ bound, a differing round count. Commands name the side's config from its
 record (`provenance.config_path`), or "the config of deployment <name>"
 for a record that does not carry it. A continuous side cannot be repeated
 with `--repeat`, so its hint says to run it again with `--continuous` and
-pass the run ids. Two continuous runs whose in-stream rounds differ are not
-one experiment when they are on one side: rounds are an outcome of speed,
-so compare single runs.
+pass the run ids. Two continuous runs on one side whose in-stream rounds
+differ are still one experiment (rounds are an outcome of speed): the pair
+is NOT LIKE-FOR-LIKE, with no command. A run with no in-stream round (its
+QpH is the post-stream benchmark) beside runs with rounds is not one
+experiment.
 
 **Metrics.** Each score is shown with the median, range and n of each side
 and the delta of the medians. No winner is named and no colour marks a
