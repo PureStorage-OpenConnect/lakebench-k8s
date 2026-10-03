@@ -76,7 +76,7 @@ HELDOUT_FILE = ROOT / "src" / "lakebench" / "spark" / "data" / "aml" / "heldout_
 HELDOUT_MOUNT = "/etc/lakebench/heldout/heldout_hashes.json"
 HELDOUT_ARGS = [
     "-v",
-    f"{HELDOUT_FILE}:{HELDOUT_MOUNT}:ro,Z",
+    f"{HELDOUT_FILE}:{HELDOUT_MOUNT}:ro,z",
     "-e",
     f"LB_HELDOUT_HASHES={HELDOUT_MOUNT}",
 ]
@@ -616,7 +616,9 @@ def cmd_compare(args) -> int:
     results = {}
     for case in CASES:
         ref = refs[case]
-        # Replay exactly what the reference ran (its argv and env), and record
+        # Replay exactly what the reference ran (its argv and env; the
+        # held-out hash file is mounted as on a pod and is no corpus input),
+        # and record
         # what the current tree would render for the case.
         run = run_case(args.image, ref["runs"], workdir, ref["env"])
         run["rendered_runs"] = render_runs(case)

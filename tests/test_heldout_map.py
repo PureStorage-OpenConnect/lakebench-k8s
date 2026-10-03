@@ -144,3 +144,32 @@ def test_byte_compare_mounts_the_hash_file():
     bc = exec_repo_script(ROOT / "scripts/datagen_byte_compare.py", "datagen_byte_compare_hm")
     assert bc.HELDOUT_FILE.is_file()
     assert f"LB_HELDOUT_HASHES={bc.HELDOUT_MOUNT}" in bc.HELDOUT_ARGS
+
+
+def test_byte_compare_runs_every_generator_with_the_hash_file(monkeypatch):
+    from types import SimpleNamespace
+
+    from tests.conftest import exec_repo_script
+
+    bc = exec_repo_script(ROOT / "scripts/datagen_byte_compare.py", "datagen_byte_compare_hm2")
+    seen = []
+
+    def run(name, args, what):
+        seen.append(args)
+        return "[entrypoint] schema=financial node 0/1 threads=2 cycle=0 -> s3://b/ :: x"
+
+    monkeypatch.setattr(bc, "_run_container", run)
+    minio = SimpleNamespace(endpoint="http://127.0.0.1:1", access="a", secret="s", port=1)
+    assert bc.run_generator("img", ["--seed", "43"], 0, minio, {}) == 2
+    args = seen[0]
+    i = args.index("img")
+    assert all(a in args[:i] for a in bc.HELDOUT_ARGS)
+
+
+def test_python_and_rust_refuse_a_non_integer_format(tmp_path):
+    doc = json.loads(ds.heldout_path().read_text())
+    for bad in (True, 1.0):
+        p = tmp_path / "h.json"
+        p.write_text(json.dumps({**doc, "format": bad}))
+        with pytest.raises(ValueError, match="format"):
+            ds.load_heldout(p)

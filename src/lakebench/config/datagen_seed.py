@@ -462,7 +462,7 @@ def _heldout_doc_problems(doc) -> list[str]:
     extra = sorted(k for k in doc if k not in _HELDOUT_KEYS and not str(k).startswith("_"))
     if extra:
         out.append(f"unknown keys {extra}")
-    if doc.get("format") != HELDOUT_FORMAT:
+    if type(doc.get("format")) is not int or doc.get("format") != HELDOUT_FORMAT:
         out.append(f"format must be {HELDOUT_FORMAT}")
     if doc.get("algorithm") != HELDOUT_ALGORITHM:
         out.append("algorithm is not the supported one")

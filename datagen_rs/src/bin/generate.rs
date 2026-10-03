@@ -162,7 +162,8 @@ fn financial_seed(held: &HeldOut) -> i64 {
             a.strip_prefix("--seed=").map(str::to_string)
         }
     });
-    let env = std::env::var(SEED_ENV).ok();
+    // Literal name, so every environment read is visible to a source scan.
+    let env = std::env::var("LB_DATAGEN_SEED").ok();
     let seed = match (raw, env) {
         (Some(_), Some(_)) => {
             eprintln!("the seed is given both as --seed and in {SEED_ENV}; pass it once");
@@ -191,9 +192,11 @@ fn financial_seed(held: &HeldOut) -> i64 {
         },
     };
     if SPENT_SEEDS.contains(&seed) || held.is_spent(seed) {
+        // Spent seeds are public, but a spent held-out seed is still never
+        // echoed into a pod log.
         eprintln!(
-            "--seed {seed} is spent in the AML pre-registration (corpora.spent_seeds); \
-             use the calibration seed or another unregistered seed"
+            "--seed names a spent seed (corpora.spent_seeds or the held-out hash file's spent \
+             list); use the calibration seed or another unregistered seed"
         );
         std::process::exit(2);
     }
@@ -206,7 +209,8 @@ fn financial_seed(held: &HeldOut) -> i64 {
 /// replace the file.
 fn heldout_or_exit() -> HeldOut {
     let env = datagen_rs::heldout::ENV;
-    let Ok(path) = std::env::var(env) else {
+    // Literal name, so every environment read is visible to a source scan.
+    let Ok(path) = std::env::var("LB_HELDOUT_HASHES") else {
         eprintln!("held-out hash file {env} is not set; refusing to generate a financial corpus");
         std::process::exit(2);
     };
