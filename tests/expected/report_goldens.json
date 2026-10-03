@@ -114,6 +114,10 @@
     {
       "text": "silver 191s 42.5% 6,102 72.9%",
       "from": "stages silver"
+    },
+    {
+      "text": "34/34 checks passed; gate: 16 gating checks passed",
+      "from": "c360_correctness.checks: 34 of 34 status pass; the 16 GATING_CHECKS ids all present and passed"
     }
   ],
   "1d17f4": [
@@ -150,6 +154,10 @@
     {
       "text": "silver 92s 30.6% 2,941",
       "from": "stages silver 91.9 s of the stage seconds; 8 x 4 x 91.9 core-seconds"
+    },
+    {
+      "text": "34/34 checks passed; gate: 16 gating checks passed",
+      "from": "c360_correctness.checks: 34 of 34 status pass; the 16 GATING_CHECKS ids all present and passed"
     }
   ]
 }

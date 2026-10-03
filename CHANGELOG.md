@@ -43,6 +43,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for every key Lakebench owns.
 
 ### Added
+- **Customer 360 results on the HTML report.** The report shows the C360
+  expected-results checks: passed out of total and the gate as the verdict
+  applies it (a gating check that failed, did not run or is absent reads
+  "fails the run"), the checks that did not pass first with observed, expected and
+  tolerance, then the passes by family (pipeline, benchmark shapes,
+  statistical). Before, the
+  34 checks a C360 run records were never shown.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock

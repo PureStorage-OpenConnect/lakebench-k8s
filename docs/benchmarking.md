@@ -1186,6 +1186,21 @@ check, and, when the record's scoring or detection data cannot be rendered,
 says "AML results could not be rendered" with the error instead of leaving
 the section out.
 
+### Expected results (Customer 360)
+
+The Customer 360 expected-results checks (`c360_correctness`): a chip with
+how many checks passed out of the checks the record holds (unchecked ones
+included) and the gate as the verdict applies it now (`GATING_CHECKS`):
+"N gating checks passed", or "fails the run" with the reason. Gating checks
+are tagged; a gating check absent from the record is listed as "not
+evaluated", since it fails the run. The checks that did not pass come first
+(those that fail the run, then other failures, then unchecked) with
+observed, expected and tolerance, then the passed checks grouped as pipeline
+(invariant and reconcile), benchmark shapes and statistical, in collapsed
+lists. A note stored with an older record (for example "reporting only"
+from before the gating checks were approved) is shown as recorded with the
+run, not as the current rule.
+
 ### Query Performance (batch and continuous)
 
 Performance table for the engine benchmark (8 queries for Customer 360,
