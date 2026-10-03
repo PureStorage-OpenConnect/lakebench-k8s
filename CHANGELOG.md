@@ -1059,6 +1059,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   batch scale ratio above 1.05 shows amber ("above the scale") instead of
   green "Complete". The continuous stability section shows the recorded
   `qph_degradation_pct` instead of a trend the page computed itself.
+- **Report: failed runs, resources, labels and provenance.** A run whose
+  verdict is not PASSED shows no headline number: the page leads with the
+  first verdict reason a reader can act on and the failed jobs' errors,
+  every score card reads "-", and the pipeline summary line withholds its
+  figures; an INTERRUPTED run reads INTERRUPTED in the front panel. "Resources as run" replaces the configuration's executor rows
+  (which showed the snapshot's unused `spark.executor` defaults): executors
+  per job as run, cores and memory from the job profile, and the scratch PVC
+  as the cluster held it. Continuous runs label the ingest ratio "bronze
+  rows / rows the trickle released" and show corpus coverage, the window and
+  the offered load; AML rules continuous mode does not run read "excluded in
+  continuous mode", not "no data". The front panel names the provenance
+  (version, commit, dirty or clean) and what limits interpretation (n=1,
+  skipped rules, in-sample AML recall, a dirty tree); AML recall is
+  labelled "uncalibrated, in-sample" unless a completed registered look
+  names the run, and the planted-subject customer check is shown. A
+  malformed AML record shows "AML results could not be rendered: <error>"
+  instead of an empty section. Throughput and efficiency say they are over
+  stage inputs (bronze + silver + gold + query reads) and show the corpus
+  size beside them (for a continuous run, the bronze bucket at run end,
+  named as landing files plus the bronze table). The bottleneck caption names requested core-seconds; a Spark
+  Thrift or DuckDB query stage is no longer charged Trino's cores, and the
+  continuous query stage's seconds are no longer shown as milliseconds and
+  summed into the latency share.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the

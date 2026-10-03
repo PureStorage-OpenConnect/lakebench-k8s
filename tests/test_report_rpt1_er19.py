@@ -298,11 +298,23 @@ def test_r7_scale_ratio_above_scale_is_amber():
     text = _text("be2b70")
     assert f"Scale Ratio: {shown} above the scale" in text
     assert f"{shown} Complete" not in text
-    assert f"{shown} ABOVE SCALE" in text
     html = render("be2b70")
     assert re.search(
         r"background: #fef3c7; color: var\(--warning\);[^>]*><strong>Scale Ratio", html
     )
+
+
+def test_r7_scale_card_above_scale_is_amber():
+    """A passed batch record whose scale ratio is above 1.05 (5105a0 edited)
+    shows the card amber; be2b70 failed, so its cards show no number."""
+    from tests.test_report_consistency import _render_dict
+
+    record = load_record("5105a0")
+    record["pipeline_benchmark"]["scores"]["scale_ratio"] = 1.10
+    record["pipeline_benchmark"]["scorecard"]["scale_ratio"] = 1.10
+    html = page_text(_render_dict(record))
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+    assert "110.0% ABOVE SCALE" in text
 
 
 def test_r7_scale_ratio_inside_band_stays_complete():

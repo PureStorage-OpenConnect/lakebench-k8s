@@ -229,7 +229,9 @@
                 <div><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1</div>
                 <div><span class="read-first-key" style="color: var(--text-muted);">Limits present:</span> 0</div>
                 <div><span class="read-first-key" style="color: var(--text-muted);">Record digest:</span> <code class="mono">2dafd7ef2b492636</code></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div>
             </div>
+            <div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li><li>AML recall is uncalibrated and in-sample: no registered look names this run</li></ul></div>
         </section>
         
 
@@ -243,44 +245,37 @@
         
 
         
+        <section class="failed-headline" style="border-left: 3px solid var(--danger);">
+            <h2 style="color: var(--danger);">Run FAILED: Pipeline crashed or was interrupted</h2>
+            <ul style='margin: 0.5rem 0 0 1.25rem;'><li><code class='mono'>lakebench-gold-finalize</code>: Job timed out after 1800s (last observed state: &#x27;RUNNING&#x27;)</li></ul>
+            <div style='margin-top: 0.5rem; font-size: 0.8rem;'>Also: Process exit intent was not OK; Batch jobs failed: lakebench-gold-finalize; Gate &#x27;pipeline&#x27; FAILED</div>
+        </section>
         <div class="cards">
             <div class="card">
                 <div class="card-label">Time to Value</div>
-                <div class="card-value">2770.9s</div>
-                <div class="card-hint">wall-clock to queryable gold</div>
-                <div class="card-hint2">&#8595; lower is better | 46m 10s</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
             </div>
             <div class="card">
                 <div class="card-label">Pipeline Throughput</div>
-                <div class="card-value">0.099 GB/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
-                <div class="card-delta" style="color: var(--text-muted);">
-                    273.5 GB total
-                </div>
-                <div class="card-hint">data volume / wall-clock time</div>
-                <div class="card-hint2">&#8593; higher is better</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">17.59 GB/core-hr</div>
-                <div class="card-hint">GB processed per core-hour requested</div>
-                <div class="card-hint2">&#8593; higher is better</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
             </div>
             <div class="card">
                 <div class="card-label">QpH</div>
-                <div class="card-value">N/A</div>
-                <div class="card-hint">queries per hour -- higher is better</div>
-                <div class="card-hint2">&#8593; higher is better</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
-                <div class="card-value"><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.scale_ratio" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">111.4%</span> <span style="color: var(--warning);">ABOVE SCALE</span></div>
-                <div class="card-hint">actual vs expected data volume</div>
-                <div class="card-hint2">1.0 = complete</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
             </div>
-        </div>
-        <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
-            <span>Total Time: 48m 15s</span>
-            <span>Jobs: <span data-lb-derived="count" data-lb-inputs="truthy(jobs[*].success)" data-lb-fmt=",d">2</span>/<span data-lb-derived="count" data-lb-inputs="count(jobs)" data-lb-fmt=",d">3</span></span>
         </div>
         
 
@@ -288,10 +283,14 @@
         <section>
             <h2>Bottleneck Identification</h2>
             <p style="margin-bottom: 1rem; color: var(--text-muted); font-style: italic;">
-                Compute is balanced across stages (no single bottleneck).
+                No single bottleneck: the stages' shares of requested core-seconds are within 10 points.
             </p>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                Bar: each stage's share of requested core-seconds (executors x cores x
+                seconds; Trino pod cores x seconds for a Trino query stage), not of time.
+            </div>
             <div style="display: flex; width: 100%; border-radius: 4px; overflow: hidden; margin-bottom: 0.75rem;">
-                <div style="flex: 0.00; background: #94a3b8; height: 28px; min-width: 0;" title="datagen: share of CPU"></div><div style="flex: 2.11; background: #f59e0b; height: 28px; min-width: 0;" title="bronze: share of CPU"></div><div style="flex: 46.40; background: #6366f1; height: 28px; min-width: 0;" title="silver: share of CPU"></div><div style="flex: 51.48; background: #eab308; height: 28px; min-width: 0;" title="gold: share of CPU"></div>
+                <div style="flex: 0.00; background: #94a3b8; height: 28px; min-width: 0;" title="datagen: share of requested core-seconds"></div><div style="flex: 2.11; background: #f59e0b; height: 28px; min-width: 0;" title="bronze: share of requested core-seconds"></div><div style="flex: 46.40; background: #6366f1; height: 28px; min-width: 0;" title="silver: share of requested core-seconds"></div><div style="flex: 51.48; background: #eab308; height: 28px; min-width: 0;" title="gold: share of requested core-seconds"></div>
             </div>
             <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">
                 <span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #94a3b8; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>datagen (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">0%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #f59e0b; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>bronze (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">2%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #6366f1; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>silver (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">46%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #eab308; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>gold (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">51%</span>)</span>
@@ -301,9 +300,9 @@
                     <tr>
                         <th>Stage</th>
                         <th>Time (s)</th>
-                        <th>% of Total</th>
-                        <th>CPU-sec</th>
-                        <th>% of CPU</th>
+                        <th>% of stage time</th>
+                        <th>Requested core-sec</th>
+                        <th>% of requested core-seconds</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -340,7 +339,7 @@
         <section>
             <h2>Pipeline Benchmark</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                Mode: batch | Time-to-Value: <strong>2770.9s</strong> | Pipeline Throughput: <strong>0.099 GB/s</strong> | Total Data: 273.5 GB
+                Mode: batch | headline figures not shown: the run is FAILED
             </div>
             <table>
                 <thead>
@@ -514,6 +513,24 @@
 
         
 
+        
+        <section>
+            <h2>Resources as run</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job</th>
+                        <th title="As recorded: batch, the executors the monitor saw (every executor that ran, replacements included), else the job profile's count; continuous, the count the stream was submitted with">Executors</th>
+                        <th>Cores per executor</th>
+                        <th>Memory per executor</th>
+                        <th>Scratch as ran</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code class='mono'>bronze-verify</code></td><td>4</td><td>2</td><td>8 GB</td><td>not recorded (this record predates it)</td></tr><tr><td><code class='mono'>silver-build</code></td><td>8</td><td>4</td><td>48 GB</td><td>not recorded (this record predates it)</td></tr><tr><td><code class='mono'>gold-finalize</code></td><td>4</td><td>4</td><td>32 GB</td><td>not recorded (this record predates it)</td></tr>
+                </tbody>
+            </table>
+        </section>
         
         <section>
             <h2>Configuration</h2>
