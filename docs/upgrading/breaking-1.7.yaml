@@ -272,13 +272,13 @@
     and 13 confounded (all were 0).'
   fix: Read the verdict from the exit code or `--format json`; the old JSON fields are replaced by the
     `cmp2` document.
-- id: customer-360-records-are-workload-version-c360-2
-  title: Customer 360 records are workload version c360-2
+- id: customer-360-records-carry-a-new-workload-version
+  title: Customer 360 records carry a new workload version
   kind: identity
-  subject: workload customer360 c360-2
+  subject: workload customer360 c360-2.dev1
   source: src/lakebench/metrics/experiment.py:WORKLOAD_VERSIONS
-  text: Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do
-    not compare with `c360-1`.
+  text: Customer 360 gold is never silently incremental and a multi-cycle run takes one data clock;
+    records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
   fix: Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental`
     is refused.
 - id: aml-records-are-workload-version-aml-2

@@ -194,9 +194,9 @@ A `run` whose datagen did not finish in time exits 1 (was 5); the record says "d
 
 ## Comparability and identity
 
-### Customer 360 records are workload version c360-2
+### Customer 360 records carry a new workload version
 
-Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do not compare with `c360-1`.
+Customer 360 gold is never silently incremental and a multi-cycle run takes one data clock; records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
 
 **What to do:** Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental` is refused.
 
