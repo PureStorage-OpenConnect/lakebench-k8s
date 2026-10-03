@@ -1435,11 +1435,12 @@ policy, not a system score (`storage_multiple_total` is diagnostic).
 
 The record holds it as `storage_multiple`. Its `buckets` list has one entry
 per bucket listed: the bucket name, the layers it serves, its physical bytes
-(every object in the listing), its unattributed bytes (objects under no
-table location, exclusion or raw datagen prefix) and the listing error when
-the listing failed, in which case both byte figures are null. A bucket name
-is a value in the record, never a key, so a record can be scrubbed into a
-test fixture.
+(every object in the listing), its unattributed bytes and the listing error
+when the listing failed, in which case both byte figures are null.
+Unattributed bytes are objects under no exclusion, no raw datagen prefix and
+no location the catalog returned for a measured table, so the objects of a
+table the catalog does not know land there. A bucket name is a value in the
+record, never a key, so a record can be scrubbed into a test fixture.
 
 ### Resources as run
 

@@ -343,6 +343,16 @@ def test_shared_bucket_is_counted_once():
     # Exclusions of every layer the bucket serves still apply.
     assert out["excluded"]["scoring outputs (scoring/)"] == 500
     assert out["excluded"]["datagen markers (_corpus/)"] == 100
+    # One bucket entry for the three layers: its bytes are counted once.
+    assert out["buckets"] == [
+        {
+            "bucket": "lb-all",
+            "layers": ["bronze", "silver", "gold"],
+            "physical_bytes": 6 * GB + 600,
+            "unattributed_bytes": 0.0,
+            "listing_error": None,
+        }
+    ]
 
 
 def test_files_registered_outside_the_location_are_not_measured():
