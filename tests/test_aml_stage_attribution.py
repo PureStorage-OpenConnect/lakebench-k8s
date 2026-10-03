@@ -24,7 +24,7 @@ def _events():
             "Job ID": jid,
             "Stage IDs": stages,
             "Properties": (
-                {"spark.jobGroup.id": group, "spark.job.description": f"{group[8:10]} run r1"}
+                {"spark.jobGroup.id": group, "spark.job.description": f"{group[8:10]} run r1-c1"}
                 if group
                 else {}
             ),
@@ -159,7 +159,7 @@ def test_attach_rewrites_the_gold_job_and_attribution(tmp_path):
         )
     )
     prof, run_ids = mod.read_events([json.dumps(e) for e in _events()])
-    assert run_ids == {"r1"}
+    assert run_ids == {"r1-c1"}  # batch cycle 1 of run r1
     block = mod.attach(rec, prof, run_ids)
     data = json.loads(rec.read_text())
     job = data["jobs"][0]
@@ -180,6 +180,6 @@ def test_attach_refuses_another_runs_log(tmp_path):
     )
     rec.write_text(original)
     prof, run_ids = mod.read_events([json.dumps(e) for e in _events()])
-    with pytest.raises(SystemExit, match="r1"):
+    with pytest.raises(SystemExit, match="r1-c1"):
         mod.attach(rec, prof, run_ids)
     assert rec.read_text() == original

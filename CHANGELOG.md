@@ -48,9 +48,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Spark stage and the TM share; `limits.headroom_pct` gives each stage's
   headroom against the per-job timeout and the timed benchmark's headroom
   against its per-query timeout, which the record now keeps as
-  `job_timeout_seconds` and `benchmark_query_timeout_seconds`. A job that
-  fails or times out now keeps its whole driver log in the record, as a
-  successful one did, so its per-rule lines are not lost. `scripts/aml_stage_attribution.py`
+  `job_timeout_seconds` and `benchmark_query_timeout_seconds`. Lakebench
+  now reads the whole driver log of a job that fails or times out, as it
+  did for a successful one, so the per-rule lines of a failed gold-finalize
+  reach its record. `scripts/aml_stage_attribution.py`
   builds the same profile from a Spark event log when the driver could not
   read its status store. Diagnostics only. See
   [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).

@@ -568,7 +568,7 @@ enters identity, a verdict or a comparison):
   as `job_timeout_seconds`); a stage that ran more than once reports its
   slowest run, and a failed stage reads null. The benchmark phase has no
   per-job timeout: its queries are bounded one by one, so
-  `benchmark_query` is `100 x (1 - slowest query / per-query timeout)`
+  `benchmark_query` is `100 x (1 - slowest timed query sample / per-query timeout)`
   (recorded as `benchmark_query_timeout_seconds`, 900 s for AML), null
   when a query failed or the benchmark was replaced afterwards by
   `lakebench benchmark`. 25 or more means at most 75% of the budget used.

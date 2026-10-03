@@ -111,7 +111,14 @@ def benchmark_query_headroom(metrics: Any) -> float | None:
         return None
     if any(not q.get("success", False) for q in queries):
         return None
-    slowest = max(float(q.get("elapsed_seconds") or 0.0) for q in queries)
+    # Every timed sample, not the per-query median: one sample near the
+    # timeout is what the timeout bounds.
+    slowest = max(
+        max(
+            [float(t) for t in (q.get("samples") or [])] or [float(q.get("elapsed_seconds") or 0.0)]
+        )
+        for q in queries
+    )
     return round(100.0 * (1.0 - slowest / float(timeout)), 1)
 
 

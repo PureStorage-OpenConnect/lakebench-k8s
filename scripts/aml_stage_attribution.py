@@ -172,7 +172,9 @@ def attach(
     from lakebench.metrics.storage import _dataclass_from_dict
 
     data = json.loads(record_path.read_text())
-    if data.get("run_id") not in run_ids:
+    record_id = str(data.get("run_id") or "")
+    # Batch cycles run gold-finalize as <run_id>-c<n>.
+    if not any(r == record_id or r.startswith(record_id + "-c") for r in run_ids if record_id):
         raise SystemExit(
             f"{record_path}: the event log's rule groups name run(s) {sorted(run_ids)}, "
             f"not this record's {data.get('run_id')!r}; attach it to that run's record"

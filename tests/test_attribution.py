@@ -89,7 +89,15 @@ def test_headroom_per_stage_and_benchmark():
     ]
     queries = [
         {"query_name": "FQ1", "elapsed_seconds": 120.0, "success": True},
+        # Median 450 s, slowest sample 450 s; another query's median hides
+        # a 630 s sample.
         {"query_name": "FQ5", "elapsed_seconds": 450.0, "success": True},
+        {
+            "query_name": "FQ6",
+            "elapsed_seconds": 300.0,
+            "samples": [300.0, 630.0, 200.0],
+            "success": True,
+        },
     ]
     m = SimpleNamespace(
         jobs=jobs,
@@ -99,7 +107,7 @@ def test_headroom_per_stage_and_benchmark():
     )
     assert headroom_pct(m) == {
         # The benchmark is bounded per query, not by the per-job timeout.
-        "benchmark_query": 50.0,
+        "benchmark_query": 30.0,
         "bronze-verify": round(100 * (1 - 4278 / 12900), 1),
         # The slower of two gold-finalize runs.
         "gold-finalize": round(100 * (1 - 9000 / 12900), 1),
