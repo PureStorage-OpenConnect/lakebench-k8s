@@ -227,4 +227,15 @@ def test_checked_in_compare_files_load():
     for f in sorted(bc.REF_DIR.glob("compare-*.json")):
         rel = str(f.relative_to(ROOT))
         assert rel in named, f"{rel} has no lineage row"
+        # Anchored to the checked-in references, not only self-consistent.
+        doc = json.loads(f.read_text())
+        assert f"compare-{doc['image_b'].split(':')[1][:12]}.json" == f.name
+        by = {c["case"]: c for c in doc["cases"]}
+        for case in bc.CASES:
+            ref = bc.load_reference(case)
+            assert doc["image_a"] == ref["image"], case
+            assert by[case]["sha256_a"] == bc.objects_sha256(ref["objects"]), case
+            assert by[case]["argv_canonical"] == ref["runs"], case
+            # One per-node marker per node and cycle, excluded by path.
+            assert by[case]["excluded_objects_b"] == ref["nodes"] * len(ref["runs"]), case
     assert ci.check_lineage_evidence(table, ROOT) == []

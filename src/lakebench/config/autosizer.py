@@ -95,6 +95,12 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
 # pod (node 0 or a worker) sets the request for all of them. Measured points
 # are in DATAGEN_MEASURED_PEAK_GIB; the model is an upper envelope of them at
 # the pod count each was measured with (tests/test_lb199_datagen_memfit.py).
+# The points were measured on the 1.6.0 generator. The a592385 generator (the
+# 1.7 default) peaks about 0.3 GiB higher on financial at scale 10 (local
+# measurement, node 0 of 4, n=1 to 2). If that delta holds at the fitted
+# points, scale 300 batch sits about 0.1 GiB above the model before the 1.25x
+# headroom, still about 1.9 GiB under the pod limit; a cluster re-measure at
+# scale 100 and 300 has not been run.
 # Each point is n=1; above scale 300 only the 40-pod scale-500 point exists,
 # which is why that range is 'unverified' in config/support.py. Batch delivery
 # buffers whole files and peaks higher than continuous (financial scale 300:
