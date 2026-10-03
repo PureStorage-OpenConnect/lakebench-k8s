@@ -205,7 +205,10 @@ def refuse_protected_corpus(manifest) -> None:
     held-out instances into a development corpus is still refused. The
     message names a role, never a seed."""
     check = _manifest_protected_reason()
-    rows = ((r["typology_id"], r["seed"]) for r in manifest.select("typology_id", "seed").collect())
+    rows = (
+        (r["typology_id"], r["seed"])
+        for r in manifest.select("typology_id", "seed").toLocalIterator()
+    )
     reason = check(rows)
     if reason is not None:
         raise SystemExit(f"refusing to score this corpus: {reason}")

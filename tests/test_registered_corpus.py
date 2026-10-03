@@ -28,6 +28,8 @@ def env(tmp_path, monkeypatch):
     held = pc.use_heldout(monkeypatch)
     monkeypatch.setenv("LB_AML_CORPORA_LEDGER", str(tmp_path / "corpora.jsonl"))
     monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "looks.jsonl"))
+    # generate sets LB_RUN_ID when it is unset; keep it out of later tests.
+    monkeypatch.setenv("LB_RUN_ID", "20261002-000000-test00")
     monkeypatch.setattr(ds, "seed_ever_recorded", lambda seed: None)
     from lakebench.metrics import provenance
 
@@ -107,6 +109,34 @@ def test_flag_needs_yes(env, cluster):
     r = _gen(cfg, "--registered-corpus")
     assert r.exit_code == 2 and "needs --yes" in r.output, r.output
     assert cluster == [] and not env.ledger.exists()
+
+
+def test_flag_refuses_writing_over_stale_bronze(env, cluster):
+    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
+    r = _gen(cfg, "--registered-corpus", "--yes", "--allow-stale-bronze")
+    assert r.exit_code == 2 and "never writes over objects" in r.output, r.output
+    assert cluster == [] and not env.ledger.exists()
+
+
+def test_a_development_generate_into_a_registered_prefix_is_refused(env, cluster):
+    from lakebench.config import LoadPurpose, load_config
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+
+    dev = pc.financial_config(env.tmp / "dev.yaml", seed=pc.CALIBRATION)
+    cfg = load_config(dev, purpose=LoadPurpose.MUTATE)
+    uri = f"s3://{cfg.platform.storage.s3.buckets.bronze}/{bronze_datagen_prefix(cfg)}/"
+    ds.append_corpus_ledger(
+        {
+            "kind": "registered_corpus",
+            "state": "generated",
+            "role": "robustness",
+            "bronze_uri": uri,
+            "attempt": "a1",
+        }
+    )
+    r = _gen(dev, "--yes", "--allow-stale-bronze")
+    assert r.exit_code == 2 and "holds a registered robustness corpus" in r.output, r.output
+    assert cluster == []
 
 
 def test_a_seed_with_a_look_is_never_generated_again(env, cluster, monkeypatch):
@@ -202,9 +232,9 @@ def test_success_appends_generated_with_the_image_digest(env, monkeypatch):
     r = _gen(_registered(env), "--registered-corpus", "--yes")
     assert r.exit_code == 0, r.output
     entries = _lines(env.ledger)
-    assert [e["state"] for e in entries] == ["attempted", "generated"]
-    assert entries[0]["attempt"] == entries[1]["attempt"]
-    assert entries[1]["image_ids"] == ["repo@sha256:" + "a" * 64]
+    assert [e["state"] for e in entries] == ["attempted", "submitting", "generated"]
+    assert len({e["attempt"] for e in entries}) == 1
+    assert entries[2]["image_ids"] == ["repo@sha256:" + "a" * 64]
     first = entries[0]
     assert first["kind"] == "registered_corpus" and first["role"] == "evaluation"
     assert first["seed_hash"] == ds.seed_hash(env.held.salt, pc.EV)
@@ -222,8 +252,8 @@ def test_a_handled_failure_after_submit_appends_failed(env, monkeypatch):
     r = _gen(_registered(env), "--registered-corpus", "--yes")
     assert r.exit_code == 1, r.output
     entries = _lines(env.ledger)
-    assert [e["state"] for e in entries] == ["attempted", "failed"]
-    assert entries[1]["submitted"] is True and "may still be writing" in entries[1]["note"]
+    assert [e["state"] for e in entries] == ["attempted", "submitting", "failed"]
+    assert entries[2]["submitted"] is True and "may still be writing" in entries[2]["note"]
 
 
 def test_a_refused_submit_appends_failed_not_submitted(env, monkeypatch):
@@ -236,7 +266,7 @@ def test_a_refused_submit_appends_failed_not_submitted(env, monkeypatch):
     )
     r = _gen(_registered(env), "--registered-corpus", "--yes")
     assert r.exit_code == 1, r.output
-    assert [e["state"] for e in _lines(env.ledger)] == ["attempted", "failed"]
+    assert [e["state"] for e in _lines(env.ledger)] == ["attempted", "submitting", "failed"]
 
 
 def test_a_crash_after_submit_leaves_only_attempted(env, monkeypatch):
@@ -246,8 +276,10 @@ def test_a_crash_after_submit_leaves_only_attempted(env, monkeypatch):
     _fake_generate(monkeypatch, env, deploy=crash)
     r = _gen(_registered(env), "--registered-corpus", "--yes")
     assert r.exit_code != 0
+    # The process "died" after the Job was created: the attempt and the
+    # submit stand, with no outcome.
     entries = _lines(env.ledger)
-    assert [e["state"] for e in entries] == ["attempted"]
+    assert [e["state"] for e in entries] == ["attempted", "submitting"]
     _no_seed(env.ledger.read_text(), r.output)
 
 
@@ -278,3 +310,45 @@ def test_look_ledger_moved_into_datagen_seed(tmp_path, monkeypatch):
     (tmp_path / "looks.jsonl").write_text((tmp_path / "looks.jsonl").read_text() + "garbage\n")
     with pytest.raises(ValueError, match="line 2 is not a look entry"):
         ds.seed_ever_recorded(6)
+
+
+def _git(repo, *args):
+    import subprocess
+
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def test_seed_ever_recorded_reads_the_git_history_without_the_seed_in_argv(tmp_path, monkeypatch):
+    """A look recorded on another branch and reverted on this one is found by
+    parsing each commit's copy; git never gets the seed as an argument."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    rec = repo / "aml_registered_looks.json"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    rec.write_text(json.dumps({"looks": []}))
+    _git(repo, "add", rec.name)
+    _git(repo, "commit", "-qm", "empty record")
+    _git(repo, "checkout", "-qb", "side")
+    rec.write_text(json.dumps({"looks": [{"role": "evaluation", "seed": pc.EV}]}))
+    _git(repo, "commit", "-qam", "a look")
+    _git(repo, "checkout", "-q", "main")
+    monkeypatch.setattr(ds, "looks_path", lambda: rec)
+    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "none.jsonl"))
+    pc.use_heldout(monkeypatch)
+    argvs = []
+    real = subprocess.run
+
+    def spy(argv, *a, **k):
+        argvs.append(list(argv))
+        return real(argv, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    msg = ds.seed_ever_recorded(pc.EV)
+    assert msg and "registered evaluation seed" in msg and "by commit" in msg
+    assert ds.seed_ever_recorded(int(str(pc.EV)[:7])) is None  # no substring match
+    assert argvs and not any(str(pc.EV)[:7] in " ".join(a) for a in argvs)
+    _no_seed(msg)

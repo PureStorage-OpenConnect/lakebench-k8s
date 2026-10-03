@@ -359,8 +359,11 @@ every command that reads or scores data (`run`, `benchmark`, `query`,
 protected corpus with exit 2 before any cluster call: its corpus is
 generated only with `lakebench generate --registered-corpus --yes`, which
 records the attempt in `~/.lakebench/aml_corpora.jsonl` first, and scored
-only by `scripts/aml_gate.py --registered`, which records the look. So
-accidentally scoring against them is not possible. The in-run scorer
+only by `scripts/aml_gate.py --registered`, which records the look. A
+financial config whose bronze prefix this host generated a registered
+corpus into is refused the same way. So accidentally scoring against them
+is not possible from Lakebench (a hand-made datagen Job is caught by the
+scorers' manifest checks below). The in-run scorer
 (`score-financial`) reads every manifest row too and refuses a corpus any
 of whose rows come from a held-out or spent seed. The reference job
 also recovers the corpus seed from every manifest row's instance seed

@@ -107,7 +107,8 @@ def generate(
             "--registered-corpus",
             help=(
                 "Generate the registered evaluation or robustness AML corpus "
-                "(the config declares the role and its seed). Needs --yes. "
+                "(the config declares the role and its seed). Needs --yes; "
+                "refuses --allow-stale-bronze. "
                 "The attempt is recorded in ~/.lakebench/aml_corpora.jsonl "
                 "(LB_AML_CORPORA_LEDGER) before the first cluster call. "
                 "Without this flag a config that names a protected corpus is "
@@ -157,7 +158,9 @@ def generate(
 
     # A protected AML corpus is generated only as the registered corpus, and
     # the attempt is on disk before the first cluster call.
-    record = _registered_corpus_record(cfg, config_file, registered_corpus, yes)
+    record = _registered_corpus_record(
+        cfg, config_file, registered_corpus, yes, allow_stale_bronze=allow_stale_bronze
+    )
     if record is None:
         _generate_loaded(cfg, config_file, timeout, yes, regenerate, allow_stale_bronze)
         return
@@ -191,6 +194,15 @@ class _CorpusRecord:
     def seed_hash(self) -> str:
         return str(self.entry["seed_hash"])
 
+    def mark_submitting(self) -> None:
+        """Append ``submitting`` before the datagen Job is created, so an
+        attempt that dies later still shows the Job may exist. Raises
+        (nothing is submitted) when the line cannot be written."""
+        from lakebench.config.datagen_seed import append_corpus_ledger
+
+        append_corpus_ledger({**self.entry, "state": "submitting", "utc": _utc()})
+        self.submitted = True
+
     def close(self, state: str, **extra: object) -> None:
         from lakebench.config.datagen_seed import append_corpus_ledger, corpora_ledger_path
 
@@ -218,7 +230,9 @@ def _utc() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _registered_corpus_record(cfg, config_file: Path, registered: bool, yes: bool):
+def _registered_corpus_record(
+    cfg, config_file: Path, registered: bool, yes: bool, *, allow_stale_bronze: bool = False
+):
     """The guard for ``generate``: None for an ordinary config; for the
     registered corpus, the ``_CorpusRecord`` whose ``attempted`` entry is
     already on disk. Every refusal is exit 2 on ``run.protected_corpus``,
@@ -250,6 +264,13 @@ def _registered_corpus_record(cfg, config_file: Path, registered: bool, yes: boo
         raise UsageError(
             "Refused: --registered-corpus needs --yes (the attempt is recorded before the "
             "first cluster call, so nothing may prompt after it).",
+            path=PATH,
+        )
+    if allow_stale_bronze:
+        raise UsageError(
+            "Refused: --registered-corpus never writes over objects already in the bronze "
+            "prefix (--allow-stale-bronze): the look would be spent on a mixed corpus. Use "
+            "--regenerate on a bucket this deployment owns, or an empty prefix.",
             path=PATH,
         )
     seed = dg.seed
@@ -444,7 +465,11 @@ def _generate_loaded(
         # Submit job
         print_info("Submitting datagen job...")
         if record is not None:
-            record.submitted = True  # from here a failure may leave a partial corpus
+            try:
+                record.mark_submitting()  # from here a failure may leave a partial corpus
+            except (OSError, ValueError) as e:
+                print_error(f"Could not record the submit in the corpus ledger: {e}")
+                raise typer.Exit(ExitCode.FAILED) from None
         result = datagen.deploy()
 
         if result.status != DeploymentStatus.SUCCESS:
