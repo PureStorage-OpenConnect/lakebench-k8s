@@ -161,10 +161,13 @@ The `package-guard` check builds the wheel and sdist (`python -m build
 rendered from the wheel: no `docs/internal/` or other maintainer-only
 member, no access key, private key or gitleaks finding, and, once the
 held-out hash file (`heldout_hashes.json` beside the pre-registration)
-exists, no integer that hashes to a held-out seed. While that file's `absence_check` is `report`, a
-held-out hit prints as `PENDING-OA5` and the check is SKIP, so the release
-gate (`--require-all`) stays red until the maintainers' commit removes the
-plaintext and sets it to `enforce`. Without the file the held-out part is
+exists, no integer that hashes to a held-out seed. A binary or link member
+fails too, since nothing could check its content: exclude it from the
+sdist. While the hash file's `absence_check` is `report`, a held-out hit,
+or a hash file that does not load yet, prints as `PENDING-OA5` and the
+check is SKIP, so the release gate (`--require-all`) stays red until the
+maintainers' commit removes the plaintext and sets it to `enforce`; once
+it says `enforce`, both are a FAIL. Without the file the held-out part is
 SKIP too. CI's package build runs the same guard on every push, without
 `--require-all`, and the release's `build-dist` job runs it with
 `--require-all` on the very files it uploads.

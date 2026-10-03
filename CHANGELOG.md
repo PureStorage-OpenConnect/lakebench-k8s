@@ -460,8 +460,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The release gate and CI check what the package ships.**
   `scripts/package_guard.py` reads the built wheel and sdist, and the
   script ConfigMaps rendered from the wheel, and fails on a
-  `docs/internal/` or other maintainer-only member, an access key, a
-  private key or a gitleaks finding; once the held-out hash file exists it
+  `docs/internal/` or other maintainer-only member, a binary or link
+  member, an access key, a private key or a gitleaks finding; once the held-out hash file exists it
   also runs the held-out absence check (a hit is `PENDING-OA5` until the
   file says `enforce`). CI's package build runs it, the release gate gains
   a `package-guard` check, and `release.yml` runs both on the files it

@@ -91,13 +91,20 @@ def _safe(name: str) -> str | None:
     return p.as_posix()
 
 
-def wheel_members(path: Path) -> dict[str, bytes]:
-    with zipfile.ZipFile(path) as z:
-        return {n: z.read(n) for n in z.namelist() if not n.endswith("/")}
-
-
 #: Marks a member that is a link, not a file; check_names fails on it.
 LINK_MARK = b"\0lakebench-package-guard: link member\0"
+
+
+def wheel_members(path: Path) -> dict[str, bytes]:
+    """File members; a symlink entry is kept with ``LINK_MARK`` as content."""
+    out: dict[str, bytes] = {}
+    with zipfile.ZipFile(path) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            is_link = (info.external_attr >> 16) & 0o170000 == 0o120000
+            out[info.filename] = LINK_MARK if is_link else z.read(info)
+    return out
 
 
 def sdist_members(path: Path) -> dict[str, bytes]:
@@ -120,7 +127,7 @@ def sdist_members(path: Path) -> dict[str, bytes]:
 
 def rendered_configmaps(wheel: dict[str, bytes], workdir: Path) -> dict[str, bytes]:
     """The script ConfigMaps rendered offline from the wheel's own files, as
-    members ``configmap/<map>/<key>``. Both workloads; no credentials."""
+    members ``configmap/<map>/<key>``; no credentials."""
     pkg = workdir / "wheel-package"
     for name, data in wheel.items():
         rel = _safe(name)
@@ -134,24 +141,24 @@ def rendered_configmaps(wheel: dict[str, bytes], workdir: Path) -> dict[str, byt
     from lakebench.config.schema import LakebenchConfig
     from lakebench.modules.pipeline_engines.spark.scripts_maps import build_script_configmaps
 
-    out: dict[str, bytes] = {}
-    for schema in ("customer360", "financial"):
-        cfg = LakebenchConfig(
-            name="package-guard",
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "http://s3.example.invalid:80",
-                        "access_key": "placeholder",
-                        "secret_key": "placeholder",
-                    }
+    # Every role's map is built whatever the workload (scripts_maps), so one
+    # render covers both; the default workload needs no AML seed to load.
+    cfg = LakebenchConfig(
+        name="package-guard",
+        platform={
+            "storage": {
+                "s3": {
+                    "endpoint": "http://s3.example.invalid:80",
+                    "access_key": "placeholder",
+                    "secret_key": "placeholder",
                 }
-            },
-            workload={"schema": schema},
-        )
-        for m in build_script_configmaps(cfg, "package-guard", package_dir=pkg / "lakebench"):
-            for key, value in m["data"].items():
-                out[f"configmap/{m['metadata']['name']}/{key}"] = value.encode("utf-8")
+            }
+        },
+    )
+    out: dict[str, bytes] = {}
+    for m in build_script_configmaps(cfg, "package-guard", package_dir=pkg / "lakebench"):
+        for key, value in m["data"].items():
+            out[f"configmap/{m['metadata']['name']}/{key}"] = value.encode("utf-8")
     return out
 
 
@@ -190,9 +197,11 @@ def gitleaks_rules(
     doc = tomllib.loads(config.read_text(encoding="utf-8"))
     rules, broken = [], []
     for r in doc.get("rules", []):
+        if "regex" not in r:
+            continue  # a path-only rule; gitleaks dir applies it
         try:
             rules.append({**r, "_re": re.compile(r["regex"], re.ASCII)})
-        except (KeyError, re.error) as exc:
+        except re.error as exc:
             broken.append(f"{r.get('id', '?')}: {exc}")
     allow = [
         re.compile(x, re.ASCII)
@@ -258,6 +267,10 @@ def check_gitleaks(tree: Path, config: Path = GITLEAKS_CONFIG) -> list[Finding]:
     exe = shutil.which("gitleaks")
     if exe is None:
         return [Finding(SKIP, "gitleaks", "gitleaks is not on PATH")]
+    # gitleaks also reads <scanned dir>/.gitleaksignore; members always land
+    # one level down, so one there would be a layout change: refuse it.
+    if (tree / ".gitleaksignore").exists():
+        return [Finding(FAIL, "gitleaks", f"{tree}/.gitleaksignore would be honoured")]
     files = sum(1 for p in tree.rglob("*") if p.is_file())
     if files == 0:
         return [Finding(FAIL, "gitleaks", f"{tree}: no files to scan")]
@@ -306,10 +319,18 @@ def _datagen_seed_absence(texts: Mapping[str, str]) -> tuple[str, list[str]]:
         )
     try:
         held = load(HELDOUT_HASHES)
-    except Exception as exc:  # noqa: BLE001 -- e.g. the floor not yet written
-        # The hash file is there but not usable yet (its compiled floor comes
-        # with the maintainers' commit): not a pass, and not CI-red either.
-        return "report", [f"the held-out hashes cannot be loaded yet: {exc}"]
+    except Exception as exc:  # noqa: BLE001 -- judged below
+        # Before the maintainers' commit (the file still says "report") the
+        # file may not load yet, for instance before its compiled floor is
+        # written: that is pending, not a pass. A file that says "enforce",
+        # or is not JSON, and does not load is broken: a failure.
+        try:
+            mode = json.loads(HELDOUT_HASHES.read_text()).get("absence_check")
+        except (OSError, ValueError, AttributeError):
+            mode = None
+        if mode == "report":
+            return "report", [f"the held-out hashes cannot be loaded yet: {exc}"]
+        raise RuntimeError(f"the held-out hashes do not load: {exc}") from exc
     return held.absence_check, absence(texts, held)
 
 
@@ -337,8 +358,9 @@ def check_heldout(
 
 
 def build(outdir: Path) -> None:
-    """``python -m build`` as CI and the release run it: the sdist, then the
-    wheel from the unpacked sdist."""
+    """``python -m build --no-isolation``: the sdist, then the wheel from the
+    unpacked sdist, with the installed hatchling (CI's and the release's
+    builds are isolated, so ``--dist`` on their output is what guards those)."""
     subprocess.run(
         [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(outdir), str(ROOT)],
         check=True,

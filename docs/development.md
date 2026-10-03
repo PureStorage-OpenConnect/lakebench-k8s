@@ -538,7 +538,8 @@ only after the lint, test, Spark, Rust and both secret-scan jobs pass; it
 does not wait for the slow AML job, which most branches skip. After the
 build it installs the pinned gitleaks and runs
 `scripts/package_guard.py --dist dist`: no `docs/internal/`
-or other maintainer-only member, no key pattern, and no held-out seed once
+or other maintainer-only member, no binary or link member, no key pattern
+or gitleaks finding, and no held-out seed once
 the hash file exists, in the wheel, the sdist and the script ConfigMaps
 rendered from the wheel.
 

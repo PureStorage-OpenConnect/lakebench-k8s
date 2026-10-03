@@ -209,7 +209,7 @@ def test_hash_file_that_cannot_load_yet_is_pending(tmp_path, monkeypatch):
     from lakebench.config import datagen_seed as ds
 
     hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text("{}")
+    hashes.write_text('{"absence_check": "report"}')
     monkeypatch.setattr(pg, "HELDOUT_HASHES", hashes)
 
     def not_yet(path=None):
@@ -219,6 +219,53 @@ def test_hash_file_that_cannot_load_yet_is_pending(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
     (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
     assert found.status == pg.PENDING and "cannot be loaded yet" in found.detail
+
+
+def test_hash_file_marked_enforce_that_does_not_load_fails(tmp_path, monkeypatch):
+    from lakebench.config import datagen_seed as ds
+
+    hashes = tmp_path / "heldout_hashes.json"
+    hashes.write_text('{"absence_check": "enforce"}')
+    monkeypatch.setattr(pg, "HELDOUT_HASHES", hashes)
+
+    def broken(path=None):
+        raise ValueError("role hash is not hex")
+
+    monkeypatch.setattr(ds, "load_heldout", broken, raising=False)
+    monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
+    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
+    assert found.status == pg.FAIL and "do not load" in found.detail
+    hashes.write_text("not json")
+    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
+    assert found.status == pg.FAIL
+
+
+def test_symlink_in_a_wheel_fails(tmp_path):
+    path = tmp_path / "x.whl"
+    with zipfile.ZipFile(path, "w") as z:
+        info = zipfile.ZipInfo("lakebench/evil")
+        info.external_attr = 0o120777 << 16
+        z.writestr(info, "/etc/passwd")
+        z.writestr("lakebench/ok.py", "x = 1\n")
+    members = pg.wheel_members(path)
+    assert members["lakebench/evil"] == pg.LINK_MARK
+    links = [n for n, d in members.items() if d == pg.LINK_MARK]
+    assert [f.detail for f in pg.check_names(members, links)] == [
+        "lakebench/evil: a link member must not ship"
+    ]
+
+
+def test_a_path_only_rule_is_left_to_gitleaks(tmp_path):
+    cfg = tmp_path / "gitleaks.toml"
+    cfg.write_text("[[rules]]\nid = 'no-pem'\npath = '[.]pem$'\n")
+    assert pg.check_content({"a.txt": b"ok"}, cfg) == []
+
+
+def test_a_baseline_at_the_scan_root_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(pg.shutil, "which", lambda name: "/bin/true")
+    (tmp_path / ".gitleaksignore").write_text("x\n")
+    (found,) = pg.check_gitleaks(tmp_path)
+    assert found.status == pg.FAIL and "would be honoured" in found.detail
 
 
 def test_hash_file_without_an_absence_check_fails(tmp_path, monkeypatch):
