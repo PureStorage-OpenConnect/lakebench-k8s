@@ -59,41 +59,51 @@ def _held_out(seed: int) -> str | None:
     return ds.heldout_role(int(seed))
 
 
-def protected_corpus_reason(cfg: Any) -> str | None:
-    """Why ``cfg`` names a protected AML corpus, or None.
-
-    A declared ``corpus_role`` of evaluation or robustness, or a
-    ``datagen.seed`` that hashes to a held-out seed, whatever the role says.
-    An unset seed resolves to the calibration seed (financial) or 42, neither
-    protected, so ``config_seed`` (which can raise) is never called. For the
-    financial schema a held-out record that cannot be read refuses (fail
-    closed); for other schemas the seed check is skipped then, since their
-    corpora are not AML data."""
-    workload = cfg.architecture.workload
-    dg = workload.datagen
-    role = getattr(dg, "corpus_role", None)
+def corpus_fields_reason(schema: str | None, seed: Any, role: Any) -> str | None:
+    """Why a corpus with this schema, ``datagen.seed`` and ``corpus_role`` is
+    a protected AML corpus, or None: a protected role, or a seed that hashes
+    to a held-out seed whatever the role says. For the financial schema a
+    held-out record that cannot be read refuses (fail closed); for other
+    schemas the seed check is skipped then, since their corpora are not AML
+    data. The one rule for configs, raw config files (the held-out audit)
+    and ``generate``."""
     if role in PROTECTED_ROLES:
         return f"corpus_role {role}"
-    financial = workload.schema_type.value == "financial"
-    if financial:
-        # Whatever the seed: the bronze prefix may hold a registered corpus.
-        at = registered_corpus_at(cfg)
-        if at is not None:
-            return at
-    seed = getattr(dg, "seed", None)
     if seed is None or isinstance(seed, bool):
         return None
     try:
-        held = _held_out(seed)
+        held = recorded_seed_role(seed)
     except Exception as e:  # noqa: BLE001 -- unreadable: refuse for AML
-        if financial:
+        if schema == "financial":
             return (
                 f"the held-out record cannot be read ({type(e).__name__}), so the seed is unchecked"
             )
         return None
-    if held is not None:
+    if held is not None and held != WITHHELD:
         return f"datagen.seed is the registered {held} seed"
     return None
+
+
+def protected_corpus_reason(cfg: Any) -> str | None:
+    """Why ``cfg`` names a protected AML corpus, or None.
+
+    ``corpus_fields_reason`` over the config's schema, seed and role. An
+    unset seed resolves to the calibration seed (financial) or 42, neither
+    protected, so ``config_seed`` (which can raise) is never called. A
+    financial config whose bronze prefix is in this host's corpus ledger is
+    refused too (``registered_corpus_at``), whatever its seed."""
+    workload = cfg.architecture.workload
+    dg = workload.datagen
+    schema = workload.schema_type.value
+    role = getattr(dg, "corpus_role", None)
+    if role in PROTECTED_ROLES:
+        return f"corpus_role {role}"
+    if schema == "financial":
+        # Whatever the seed: the bronze prefix may hold a registered corpus.
+        at = registered_corpus_at(cfg)
+        if at is not None:
+            return at
+    return corpus_fields_reason(schema, getattr(dg, "seed", None), role)
 
 
 def registered_corpus_at(cfg: Any) -> str | None:
