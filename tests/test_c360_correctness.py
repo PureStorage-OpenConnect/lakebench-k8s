@@ -198,9 +198,13 @@ def test_judged_gating_ids_matches_gating_outcome_on_stored_records():
 def test_judged_gating_ids_is_empty_where_nothing_is_judged(monkeypatch):
     bad = _gated_record(silver_to_gold_days=False)
     assert c3.judged_gating_ids(None) == set()
-    assert c3.judged_gating_ids(dict(bad, reporting_only=True, mode="continuous")) == set()
-    # Facts do not change the set: a record without facts fails on all of it.
-    assert c3.judged_gating_ids(c3.unevaluated_record("boom")) == c3.GATING_CHECKS
+    continuous = dict(bad, reporting_only=True, mode="continuous")
+    assert c3.judged_gating_ids(continuous) == set()
+    assert c3.gating_outcome(continuous) == (None, None)
+    # Facts do not change the set; a record without facts fails outright.
+    no_facts = c3.unevaluated_record("boom")
+    assert c3.judged_gating_ids(no_facts) == c3._gated_ids(None)
+    assert c3.gating_outcome(no_facts)[0] == "FAIL"
     monkeypatch.setattr(c3, "GATING_CHECKS", frozenset())
     assert c3.judged_gating_ids(bad) == set()
 

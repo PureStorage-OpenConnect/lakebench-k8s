@@ -17,9 +17,9 @@ Three kinds of check:
 
 Gating (owner decision D6, approved 2026-09-27): the checks named in
 ``GATING_CHECKS`` fail the run when they fail or do not run. The CLI reads
-``gating_problems`` and the verdict's ``c360`` gate reads ``gating_outcome``;
-both apply the same rule, and ``judged_gating_ids`` names the ids the
-verdict's gate judges on a record. Every other check is recorded in the run's metrics
+``gating_problems`` and the verdict's ``c360`` gate reads
+``gating_outcome``; both apply the same rule, and ``judged_gating_ids``
+names the ids the verdict's gate judges on a record. Every other check is recorded in the run's metrics
 and printed but does not change the run's success.
 """
 
@@ -922,7 +922,7 @@ def judged_gating_ids(record: Mapping[str, Any] | None) -> set[str]:
     the gated benchmark shapes when the record holds a benchmark shape check
     (the CLI judges shapes only after the benchmark ran). Whether the record
     has facts does not change the set: a record without facts fails the gate
-    on every id in it.
+    outright, and the set is the ids it would judge.
     """
     if not isinstance(record, Mapping) or _judges_nothing(record):
         return set()
