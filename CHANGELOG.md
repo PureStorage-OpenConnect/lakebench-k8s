@@ -843,7 +843,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `corpus_role` alone no longer fills it in. The guard's refusal messages
   name the role, never the seed, and `scripts/aml_gate.py` records an unspent held-out
   seed in its report by its salted hash. A missing or malformed hash file
-  refuses every Spark scripts deploy, Customer 360 included.
+  refuses every Spark scripts deploy, Customer 360 included. A held-out
+  seed can be retired without a look: it is recorded as `burned` in
+  `aml_registered_looks.json` and is then spent, and its replacement's hash
+  is appended to the role.
 - **The AML reference job checks every manifest row.** The corpus seed is
   recovered from each row's instance seed (it used to compare a 200-row
   sample), so a held-out seed behind any one manifest file is found, and a

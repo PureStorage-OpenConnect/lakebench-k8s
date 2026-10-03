@@ -32,7 +32,10 @@ Guard (financial schema, and the local gate ``scripts/aml_gate.py``):
   datagen freeze). The look records itself in ``aml_registered_looks.json``
   (next to the pre-registration): its seed when it starts, its report's
   sha256 before any verdict is printed. Every recorded seed is spent, so a
-  second look is refused without editing the pre-registration.
+  second look is refused without editing the pre-registration. A held-out
+  seed retired without a look (it became public, or a void needs a fresh
+  seed) is recorded there as burned (``burn_seed``), and the owner appends
+  a newly drawn seed's hash to its role in ``heldout_hashes.json``.
 
 Only the standard library is imported, so config validation stays cheap.
 """
@@ -213,6 +216,43 @@ def complete_look(
             report_path=str(report_path),
             **(meta or {}),
         )
+        return entry
+
+    return _locked_update(path, update)
+
+
+def burn_seed(
+    role: str,
+    seed: int,
+    reason: str,
+    meta: dict | None = None,
+    path: str | os.PathLike | None = None,
+) -> dict:
+    """Record that a held-out ``role`` seed is retired without a look
+    (burned: it became public, or a void needs a fresh seed). The entry has
+    state ``burned`` and the owner's ``reason``; from here the seed is spent,
+    so ``claim_look`` refuses it and heldout_hashes.json may list it in
+    ``spent`` (``heldout_history_problems``). The seed is written in
+    plaintext, which is why only a seed that is public or given up is
+    burned. Raises when the seed already has an entry or the reason is
+    empty."""
+    if role not in PROTECTED_ROLES:
+        raise ValueError(f"only {PROTECTED_ROLES} seeds are burned, not {role!r}")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("a burn needs a reason (the owner decision that retires the seed)")
+
+    def update(doc):
+        if any(int(e["seed"]) == int(seed) for e in doc["looks"]):
+            raise ValueError(f"the {role} seed already has a recorded entry")
+        entry = {
+            "role": role,
+            "seed": int(seed),
+            "state": "burned",
+            "burned_utc": _utc(),
+            "reason": reason.strip(),
+            **(meta or {}),
+        }
+        doc["looks"].append(entry)
         return entry
 
     return _locked_update(path, update)
@@ -806,10 +846,11 @@ def heldout_history_problems(old: dict | None, new: dict, looks: dict | None) ->
     appended to ``spent``, and ``absence_check`` moving from report to
     enforce. Everything else is refused. A spent append whose hash (under
     the file's salt or the floor's) is a role entry is allowed only when
-    ``looks`` (aml_registered_looks.json in the same commit) records a look
-    on that seed for that role with a report_sha256; otherwise the append
-    would publish a live look seed. ``old`` None is the file's creation.
-    Messages name the role and the list index, never a value."""
+    ``looks`` (aml_registered_looks.json in the same commit) records that
+    seed for that role as a look with a report_sha256 or as burned with a
+    reason (``burn_seed``); otherwise the append would publish a live look
+    seed. ``old`` None is the file's creation. Messages name the role and
+    the list index, never a value."""
     out = [f"new file: {p}" for p in _heldout_doc_problems(new)]
     if out:
         return out
@@ -850,7 +891,15 @@ def heldout_history_problems(old: dict | None, new: dict, looks: dict | None) ->
     recorded = {
         (e.get("role"), e.get("seed"))
         for e in ((looks or {}).get("looks") or [])
-        if isinstance(e, dict) and isinstance(e.get("report_sha256"), str) and e["report_sha256"]
+        if isinstance(e, dict)
+        and (
+            (isinstance(e.get("report_sha256"), str) and bool(e["report_sha256"]))
+            or (
+                e.get("state") == "burned"
+                and isinstance(e.get("reason"), str)
+                and bool(e["reason"].strip())
+            )
+        )
     }
     for i, s in enumerate(new["spent"][start:], start):
         fh, gh = seed_hash(new["salt"], s), seed_hash(floor_salt, s)
@@ -858,8 +907,8 @@ def heldout_history_problems(old: dict | None, new: dict, looks: dict | None) ->
             if fh in new["roles"].get(r, ()) or gh in floor.get(r, ()):
                 if (r, s) not in recorded:
                     out.append(
-                        f"spent[{i}] append matches the held-out {r} seed and no look for {r} "
-                        "is recorded"
+                        f"spent[{i}] append matches the held-out {r} seed and no look or burn "
+                        f"for {r} is recorded"
                     )
     return out
 

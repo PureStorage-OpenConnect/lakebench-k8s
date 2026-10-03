@@ -495,6 +495,60 @@ def test_spent_append_of_heldout_needs_recorded_look():
     assert ds.heldout_history_problems(old, cal, _looks()) == []
 
 
+def test_spent_append_of_heldout_allowed_beside_a_burn():
+    # A seed retired without a look (public, or voided) is burned: the spent
+    # append is allowed only beside a burn entry with a reason for its role.
+    old, new = _doc(), _doc()
+    new["spent"].append(EV)
+    burned = {"role": "evaluation", "seed": EV, "state": "burned", "reason": "public"}
+    assert ds.heldout_history_problems(old, new, _looks(burned)) == []
+    for bad in (
+        {**burned, "reason": "  "},
+        {k: v for k, v in burned.items() if k != "reason"},
+        {**burned, "reason": 1},
+        {**burned, "role": "robustness"},
+        {**burned, "state": "started"},
+        {**burned, "seed": RB},
+    ):
+        problems = ds.heldout_history_problems(old, new, _looks(bad))
+        assert len(problems) == 1 and "no look or burn" in problems[0], bad
+        assert _no_seed_in(problems[0])
+
+
+def test_burn_seed_records_a_spent_seed(tmp_path):
+    p = tmp_path / ds.LOOKS_FILENAME
+    p.write_text(json.dumps({"_doc": "x", "looks": []}))
+    entry = ds.burn_seed("evaluation", EV, " public since 09-24 ", path=p)
+    assert entry["state"] == "burned" and entry["reason"] == "public since 09-24"
+    assert entry["seed"] == EV and entry["role"] == "evaluation" and entry["burned_utc"]
+    assert ds.load_looks(p) == [entry] and EV in ds.recorded_seeds(p)
+    with pytest.raises(ValueError, match="already has a recorded entry") as e:
+        ds.burn_seed("evaluation", EV, "again", path=p)
+    assert _no_seed_in(str(e.value))
+    with pytest.raises(ValueError, match="already has a recorded look"):
+        ds.claim_look("evaluation", EV, path=p)
+    with pytest.raises(ValueError, match="already complete"):
+        ds.complete_look("evaluation", EV, "a" * 64, "r.json", path=p)
+    with pytest.raises(ValueError, match="needs a reason"):
+        ds.burn_seed("robustness", RB, " ", path=p)
+    with pytest.raises(ValueError, match="only"):
+        ds.burn_seed("calibration", 43, "x", path=p)
+    assert ds.load_looks(p) == [entry]
+    # The burn plus the spent append pass the append-only rule together.
+    old, new = _doc(), _doc()
+    new["spent"].append(EV)
+    looks = json.loads(p.read_text())
+    assert ds.heldout_history_problems(old, new, looks) == []
+
+
+def test_burned_entry_is_not_a_completed_look(tmp_path, monkeypatch):
+    from lakebench.reports import front_matter as fm
+
+    entry = {"role": "evaluation", "seed": EV, "state": "burned", "reason": "public"}
+    monkeypatch.setattr(ds, "load_looks", lambda *a, **k: [{**entry, "run_ids": ["r1"]}])
+    assert fm.look_for_run("r1") == (None, None, None)
+
+
 def test_spent_append_checked_under_the_floor_salt(monkeypatch):
     # A file re-salted so its own list misses the seed: the floor still sees it.
     floor_salt = "12" * 32
