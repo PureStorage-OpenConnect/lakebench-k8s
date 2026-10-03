@@ -329,6 +329,7 @@ def test_benchmark_record_of_a_continuous_run_drops_its_rounds(cont, tmp_path):
     storage = MetricsStorage(runs)
     parent = storage.load_run(cont)
     assert parent.benchmark_rounds, "fixture premise: the parent has in-stream rounds"
+    parent_scores_elapsed = parent.pipeline_benchmark.to_dict()["scores"]["total_elapsed_seconds"]
     path = _save_benchmark_record(storage, parent, _bench_result())
     data = json.loads(path.read_text())
     assert data.get("benchmark_rounds", []) == []
@@ -337,6 +338,8 @@ def test_benchmark_record_of_a_continuous_run_drops_its_rounds(cont, tmp_path):
     assert "in_stream_composite_qph" not in scores
     assert "qph_degradation_pct" not in scores
     assert "query_time_event_age_seconds" not in scores
+    # Continuous elapsed is the stream window, not a stage-time sum.
+    assert scores["total_elapsed_seconds"] == parent_scores_elapsed
     exp = data.get("experiment") or {}  # a 1.6 record may have no block
     assert (exp.get("limits") or {}).get("benchmark_rounds") in (None, 0)
     assert (exp.get("repetitions") or {}).get("benchmark_rounds") in (None, 0)
@@ -352,10 +355,20 @@ def test_benchmark_record_drops_the_parents_post_maintenance_qph(tmp_path):
     runs = _runs(tmp_path, PARENT)
     storage = MetricsStorage(runs)
     parent = storage.load_run(PARENT)
-    parent.pipeline_benchmark.post_compaction_qph = 999.0
+    pb = parent.pipeline_benchmark
+    pb.pre_compaction_qph, pb.post_compaction_qph = 900.0, 999.0
+    pb.maintenance_value_pct, pb.maintenance_paired_queries = 11.0, 8
+    pb.pre_compaction_benchmark = {"qph": 900.0}
     data = json.loads(_save_benchmark_record(storage, parent, _bench_result()).read_text())
     scores = data["pipeline_benchmark"]["scores"]
-    assert not scores.get("post_compaction_qph")
+    for key in (
+        "pre_compaction_qph",
+        "post_compaction_qph",
+        "maintenance_value_pct",
+        "maintenance_paired_queries",
+    ):
+        assert not scores.get(key), key
+    assert not data["pipeline_benchmark"].get("pre_compaction_benchmark")
     stages = data["pipeline_benchmark"]["stages"]
     assert scores["total_elapsed_seconds"] == round(sum(st["elapsed_seconds"] for st in stages), 2)
 
