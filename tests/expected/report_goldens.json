@@ -108,7 +108,7 @@
       "from": "scores.pre_compaction_file_count 1200 / post_compaction_file_count 1098"
     },
     {
-      "text": "Silver consumed 43% of wall-clock time and 73% of compute.",
+      "text": "Silver took 43% of stage time and 73% of requested core-seconds.",
       "from": "stages silver 191 s of 449 s; 6,102 of 8,374.5 core-seconds"
     },
     {

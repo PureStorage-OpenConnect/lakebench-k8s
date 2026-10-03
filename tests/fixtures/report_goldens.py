@@ -19,12 +19,6 @@ rewrites a golden. A change that moves a page:
    (``PYTHONPATH=src python3.11 -m tests.fixtures.report_goldens <run>``);
    a second agent reviews the golden diff against the record before the
    change is ready (SPEC section 6 rule 4).
-
-Known misleading numbers the goldens still carry (each a later RPT-1 fix):
-R21 (the bottleneck caption); the continuous bottleneck tables show the
-query stage's seconds as milliseconds and sum them into the latency share
-(ebb26f, 1d17f4), and 233b69's query CPU share counts Trino cores on a
-Spark Thrift run.
 """
 
 from __future__ import annotations

@@ -1072,6 +1072,13 @@ The header shows the deployment name, run ID, and an overall status badge:
   the interrupt as its reason; its verdict is INTERRUPTED (see
   [Interrupting a run](cli-reference.md#run)).
 
+The "Read this first" panel under the header also names the provenance (the
+Lakebench version, commit, and whether its tree was dirty) and lists what
+limits interpretation: a single run (n=1), detection rules skipped or
+errored (and, for continuous AML, the rules that mode does not run), AML recall that is uncalibrated and in-sample (every run that no
+completed registered look in `aml_registered_looks.json` names), and a dirty
+tree.
+
 A one-line context banner below the header shows pipeline mode (Batch /
 Continuous), Customer360 scale factor, the recipe string
 (`catalog-format-engine-query_engine`), and wall-clock duration.
@@ -1087,6 +1094,15 @@ Job Status (pass/fail count).
 Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
 CPU-hours.
 
+Pipeline throughput and compute efficiency are over stage inputs (bronze,
+silver, gold and the query stage each count the data they read), so the card
+shows the corpus size in bronze beside the stage-input total (for a
+continuous run, the bronze bucket at run end, which holds the landing files
+and the bronze table together). A run whose verdict
+is not PASSED shows no headline number: the page leads with the first
+verdict reason a reader can act on and each failed job's error, every card
+reads "-", and the pipeline summary line says the figures are not shown.
+
 The tag beside a QpH counts independent runs and, separately, the repetition
 inside the run: `n=1 run, 3 samples/query` for a batch power benchmark,
 `n=1 run, 4 rounds` for continuous in-stream rounds. Samples and rounds are
@@ -1094,11 +1110,14 @@ never counted as runs.
 
 ### Bottleneck Identification (batch and continuous)
 
-A stacked bar chart showing time and compute distribution across pipeline
-stages. Each stage is color-coded (bronze = amber, silver = indigo, gold =
-gold, query = cyan). The chart identifies which stage dominates elapsed time
-or compute. In continuous mode the chart uses micro-batch latency instead of
-elapsed seconds.
+A stacked bar of each stage's share of requested core-seconds (executors x
+cores x seconds; Trino pod cores x seconds for a Trino query stage). Each
+stage is color-coded (bronze = amber, silver = indigo, gold = gold, query =
+cyan). The table beside it adds each stage's share of stage time (batch) or
+of micro-batch latency (continuous). A query stage on Spark Thrift or DuckDB
+records no cores and is left out of the core-second shares; the continuous
+query stage has no micro-batch latency and is left out of the latency
+shares.
 
 ### Data Validity (batch and continuous)
 
@@ -1152,6 +1171,20 @@ resources.
 
 Per-stage matrix table. In batch mode: GB in/out, rows in/out, GB/s, rows/s.
 In continuous mode: rows/s, micro-batch latency, freshness.
+In continuous mode it is followed by the intake cards: the ingest ratio
+(bronze rows over the rows the trickle released, or over the generated
+corpus rows when the record has no released-row count), corpus coverage (the share
+of the generated corpus the window took in, `corpus_ingest_ratio`), the
+window, and the offered load (the trickle rate, a Lakebench-imposed limit,
+not a capacity). For AML, the rules continuous mode does not run are named,
+and the detection table reads "excluded in continuous mode" for them, not
+"no data".
+
+The AML detection table labels recall "uncalibrated, in-sample" unless a
+completed registered look names the run, shows the planted-subject customer
+check, and, when the record's scoring or detection data cannot be rendered,
+says "AML results could not be rendered" with the error instead of leaving
+the section out.
 
 ### Query Performance (batch and continuous)
 
@@ -1169,10 +1202,19 @@ Shows per-query times across rounds plus statistical measures (median, min,
 max). Each round header includes its QpH, gold freshness, and contention
 status.
 
+### Resources as run
+
+Per job, the executors as recorded (batch: every executor the monitor saw,
+replacements included, else the job profile's count; continuous: the count
+the stream was submitted with), cores and memory per executor from the job
+profile, and the scratch PVC size and storage class as the cluster held it
+(`provenance.scratch_as_ran`; records before 1.7 say "not recorded").
+
 ### Configuration
 
 Key configuration parameters extracted from the run: scale factor, S3 endpoint,
-executor specifications, catalog type, table format, and query engine settings.
+catalog type, table format, and query engine settings. Executor sizing is
+under Resources as run.
 
 ### Platform Metrics (when observability is enabled)
 

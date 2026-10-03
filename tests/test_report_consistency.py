@@ -435,8 +435,8 @@ _INLINE = re.compile(
 _ALLOWED: dict[str, str] = {
     # The bottleneck shares are kept as floats to pick the dominant stage;
     # the page text renders them through derived.pct.
-    'd["weight_pct"] = d["weight"] / total_weight * 100 if total_weight else 0.0': "ordering",
-    'd["cpu_pct"] = d["cpu_sec"] / total_cpu * 100 if total_cpu else 0.0': "ordering",
+    'd["weight"] / total_weight * 100': "ordering",
+    'd["cpu_sec"] / total_cpu * 100 if total_cpu and d["cpu_sec"] is not None else 0.0': "ordering",
     # A direct unit call of the TM section has no record to name.
     'return f"{float(v) * 100:.1f}%"': "no record path",
 }

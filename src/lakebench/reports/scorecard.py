@@ -16,10 +16,13 @@ path without another interface change.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from lakebench.metrics import PipelineMetrics
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -69,18 +72,29 @@ class FinancialScorecardBlock:
     domain_label = "Financial (FinServ-Crime, AML)"
 
     def render_detail_html(self, metrics: PipelineMetrics) -> str:
-        # The report generator must never crash rendering a report. This
-        # method reads best-effort, possibly hand-editable data (recall.json,
-        # driver-log-parsed dicts), so the whole body degrades to "" on any
-        # unexpected shape rather than taking down every other report section.
+        # The report generator must never crash rendering a report, and an
+        # AML run whose results cannot be shown must say so: a malformed
+        # scoring or detection record renders a visible notice naming the
+        # error (the traceback goes to the log), never an empty section.
         try:
             return self._render_detail_html(metrics)
-        except Exception:  # noqa: BLE001 -- render must never crash the report
-            return ""
+        except Exception as exc:  # noqa: BLE001 -- render must never crash the report
+            from html import escape
+
+            logger.exception("AML results could not be rendered")
+            first = (str(exc).splitlines() or [""])[0][:200]
+            return (
+                '<section class="aml-render-error" style="border-left: 3px solid var(--danger);">'
+                "<h3>Detection Scorecard</h3>"
+                '<p style="color: var(--danger);">AML results could not be rendered: '
+                f"{escape(type(exc).__name__)}: {escape(first)}</p></section>"
+            )
 
     def _render_detail_html(self, metrics: PipelineMetrics) -> str:
         if metrics is None:
             return ""
+        from html import escape
+
         from lakebench.reports import derived as dv
 
         # Detection metrics come from the gold-finalize job. gold_finalize
@@ -172,6 +186,11 @@ class FinancialScorecardBlock:
         extra = sorted((set(alerts_by_rule) | set(rules_skipped) | set(rule_errors)) - set(known))
         rules = known + extra
 
+        from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+
+        continuous_run = not source_jobs and bool(getattr(metrics, "streaming", None))
+        continuous_excluded = frozenset(AML_CONTINUOUS_SKIPPED_RULES)
+
         # A batch rule with no count ran and emitted nothing; a continuous
         # rule missing from the histogram is unknown, not zero.
         missing_alerts = "-" if continuous_alerts else "0"
@@ -205,7 +224,15 @@ class FinancialScorecardBlock:
             fp_cell = _rule_pct(fp_by_rule, "fp_rate_by_rule", rule)
             chance_cell = _rule_pct(chance_by_rule, "chance_by_rule", rule)
             txn_cell = _rule_pct(txn_prec_by_rule, "txn_precision_by_rule", rule, digits=2)
-            if rule in rule_errors:
+            if continuous_run and rule in continuous_excluded and alerts is None:
+                # Continuous mode does not run this rule (config/support.py
+                # MODE_NOTES): excluded by design, not missing data.
+                status = (
+                    '<span style="color: var(--text-muted);">excluded in continuous mode</span>'
+                )
+                recall_cell = "n/a"
+                alerts_cell = "-"
+            elif rule in rule_errors:
                 # A crashed rule is not "ran, 0 alerts".
                 status = '<span style="color: var(--danger, red);">error</span>'
                 recall_cell = "n/a"
@@ -297,6 +324,21 @@ class FinancialScorecardBlock:
             if continuous_alerts
             else '<th title="Alerts emitted by this rule">Alerts</th>'
         )
+        look_role = registered_look_role(getattr(metrics, "run_id", None))
+        if look_role:
+            recall_label = f"Recall (registered look: {escape(look_role)})"
+            recall_title = (
+                "Fraction of planted instances detected by this rule, on the "
+                f"registered {escape(look_role)} look that names this run."
+            )
+        else:
+            recall_label = "Recall (uncalibrated, in-sample)"
+            recall_title = (
+                "Fraction of planted instances detected by this rule. Uncalibrated and "
+                "in-sample: measured on this run's own corpus, which no registered look "
+                "names (docs/aml-scoring.md)."
+            )
+        footer += _subject_check_html(scoring)
         tm_html = _safe_tm_section(metrics, gold_jobs)
         return (
             tm_html
@@ -309,7 +351,7 @@ class FinancialScorecardBlock:
                         <th>Rule</th>
                         <th>Target typology</th>
                         {alerts_th}
-                        <th title="Fraction of planted instances detected by this rule. Uncalibrated: measured in-sample on this run's own corpus; v1.6 publishes no held-out result (docs/aml-scoring.md).">Recall (uncalibrated)</th>
+                        <th title="{recall_title}">{recall_label}</th>
                         <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance</th>
                         <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>
                         <th title="Share of this rule's alerts that touch none of its target typology's txns. NOT a production ops-queue false-positive rate; see docs/aml-scoring.md.">Off-target</th>
@@ -325,6 +367,61 @@ class FinancialScorecardBlock:
         </section>
         """
         )
+
+
+def registered_look_role(run_id: str | None) -> str | None:
+    """The role of a completed registered look whose ``run_ids`` names this
+    run, read from the look record (never the config); None for every other
+    run, and when the record is missing or unreadable."""
+    if not run_id:
+        return None
+    try:
+        from lakebench.config.datagen_seed import load_looks
+
+        looks = load_looks()
+    except Exception:  # noqa: BLE001 -- no readable look record means no look
+        return None
+    for entry in looks:
+        run_ids = entry.get("run_ids") if isinstance(entry, dict) else None
+        # Only a list names runs; anything else names none (fail closed).
+        if (
+            entry.get("state") == "complete"
+            and isinstance(run_ids, list)
+            and any(isinstance(r, str) and r == run_id for r in run_ids)
+        ):
+            return str(entry.get("role"))
+    return None
+
+
+def _subject_check_html(scoring) -> str:
+    """The planted-subject customer check (score_financial
+    ``subject_customer_check``): whether every planted subject is a customer
+    in silver, which customer-scoped recall depends on."""
+    from html import escape
+
+    check = (scoring or {}).get("subject_customer_check") if isinstance(scoring, dict) else None
+    if not isinstance(check, dict):
+        return ""
+    status = str(check.get("status") or "unknown")
+    colour = "success" if status == "ok" else "danger" if status == "fail" else "warning"
+    parts = [
+        f"{_fmt_n(check.get('subjects'))} planted subjects",
+        f"{_fmt_n(check.get('unmapped'))} with no silver entity",
+        f"{_fmt_n(check.get('not_customer'))} not customers",
+    ]
+    if check.get("reason"):
+        parts.append(f"reason: {check.get('reason')}")
+    failing = check.get("failing_typologies") or []
+    unresolved = check.get("unresolved_typologies") or []
+    if failing:
+        parts.append("failing: " + ", ".join(str(t) for t in failing))
+    if unresolved:
+        parts.append("unresolved: " + ", ".join(str(t) for t in unresolved))
+    return (
+        '<div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.8125rem;">'
+        f'Subject customer check: <strong style="color: var(--{colour});">'
+        f"{escape(status)}</strong> ({escape('; '.join(parts))})</div>"
+    )
 
 
 def continuous_trend_rows(pb, *, delta_limitation: bool) -> list[str]:

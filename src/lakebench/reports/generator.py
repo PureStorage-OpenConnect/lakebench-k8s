@@ -23,7 +23,6 @@ import logging
 from datetime import datetime, timezone
 from html import escape as _html_escape
 from pathlib import Path
-from typing import Any
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.metrics.bounds import binding_caps as _binding_caps
@@ -112,6 +111,138 @@ def _recorded_samples(metrics) -> int | None:
         return None
     n = (exp.get("repetitions") or {}).get("benchmark_samples_per_query")
     return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
+
+
+def _corpus_note(metrics) -> str:
+    """The data size beside a stage-input total, which counts the data once
+    per stage that read it: the corpus in bronze (batch). A continuous run's
+    bronze bucket at run end holds the landing files and the bronze table
+    together, so it is named as that, not as the corpus or the intake."""
+    bronze = float(getattr(metrics, "bronze_size_gb", 0) or 0)
+    if bronze <= 0:
+        return "corpus size not recorded"
+    pb = getattr(metrics, "pipeline_benchmark", None)
+    if pb is not None and pb.pipeline_mode in ("sustained", "continuous"):
+        return f"bronze bucket {bronze:.1f} GB at run end: landing files plus the bronze table"
+    return f"corpus {bronze:.1f} GB in bronze"
+
+
+def _stage_inputs_note(metrics) -> str:
+    pb = metrics.pipeline_benchmark
+    return f"{pb.total_data_processed_gb:.1f} GB of stage inputs; {_corpus_note(metrics)}"
+
+
+def _provenance_line(metrics) -> str:
+    """Which Lakebench produced the record: version, commit and whether the
+    tree had uncommitted changes."""
+    prov = getattr(metrics, "provenance", None)
+    if not isinstance(prov, dict) or not prov:
+        return "not recorded (this record predates provenance)"
+    version = prov.get("lakebench_version") or "version unknown"
+    sha = str(prov.get("git_sha") or "")[:7] or "commit unknown"
+    dirty = prov.get("git_dirty")
+    state = "dirty" if dirty is True else "clean" if dirty is False else "tree state unknown"
+    return f"lakebench {version}, commit {sha}, {state}"
+
+
+def _limits_interpretation(metrics) -> list[str]:
+    """What a reader must know before using this record's numbers, as HTML
+    list items (counts are derived spans)."""
+    from lakebench.reports import derived as dv
+
+    e = _html_escape
+    items: list[str] = []
+    try:
+        exp = metrics.experiment_block() or {}
+    except Exception:  # noqa: BLE001 -- a bad block must not break the render
+        exp = {}
+    runs = (exp.get("repetitions") or {}).get("runs") or 1
+    if runs == 1:
+        items.append("n=1: one run, so no figure here is a repeatability claim")
+    rules = exp.get("rules") or {}
+    skipped = dict(rules.get("skipped") or {})
+    errored = dict(rules.get("errored") or {})
+    base = "experiment.rules"
+    if not skipped and not errored:
+        # Records before the rules block: the last gold-finalize job's skips.
+        gold = [i for i, j in enumerate(metrics.jobs) if j.job_type == "gold-finalize"]
+        if gold:
+            job = metrics.jobs[gold[-1]]
+            skipped = dict(job.rules_skipped or {})
+            errored = dict(job.rule_errors or {})
+            base = f"jobs[{gold[-1]}]"
+    skipped_path = (
+        "experiment.rules.skipped" if base == "experiment.rules" else f"{base}.rules_skipped"
+    )
+    errored_path = (
+        "experiment.rules.errored" if base == "experiment.rules" else f"{base}.rule_errors"
+    )
+    if skipped:
+        names = ", ".join(f"{k} ({v})" for k, v in sorted(skipped.items()))
+        n = dv.count(len(skipped), path=skipped_path)
+        items.append(f"{n} detection rule(s) skipped: {e(names)}")
+    if errored:
+        n = dv.count(len(errored), path=errored_path)
+        items.append(f"{n} detection rule(s) errored: {e(', '.join(sorted(errored)))}")
+    if (metrics.config_snapshot or {}).get("workload_schema") == "financial":
+        from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+        from lakebench.reports.scorecard import registered_look_role
+
+        pb = metrics.pipeline_benchmark
+        if pb is not None and pb.pipeline_mode in ("sustained", "continuous"):
+            executed = set(rules.get("executed") or [])
+            not_run = [r for r in AML_CONTINUOUS_SKIPPED_RULES if r not in executed]
+            n_not_run = len(not_run)
+            if not_run:
+                ids = ", ".join(r.split("_", 1)[0] for r in not_run)
+                items.append(
+                    f"{n_not_run} detection rules not run in continuous mode ({e(ids)}): "
+                    "their typologies have no result in this run"
+                )
+
+        if not registered_look_role(metrics.run_id):
+            items.append(
+                "AML recall is uncalibrated and in-sample: no registered look names this run"
+            )
+    prov = getattr(metrics, "provenance", None)
+    if isinstance(prov, dict) and prov.get("git_dirty") is True:
+        items.append("produced from a tree with uncommitted changes (dirty)")
+    return items
+
+
+def _limits_interpretation_html(metrics) -> str:
+    items = _limits_interpretation(metrics)
+    if not items:
+        return ""
+    lis = "".join(f"<li>{i}</li>" for i in items)
+    return (
+        '<div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;">'
+        f'<strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
+    )
+
+
+# compute_verdict puts this first whenever success is False; it says
+# nothing a reader can act on, so a headline takes the next reason.
+_EXIT_INTENT_REASON = "Process exit intent was not OK"
+
+
+def _page_verdict(metrics) -> tuple[str, list[str]]:
+    """(status, reasons) the page reads, the same verdict the badge uses.
+    The loaded metrics do not carry the stored verdict block, so the
+    strictest-of-stored-and-recomputed rule waits for the verdict-from-
+    record reader."""
+    from lakebench.metrics.verdict import compute_verdict
+
+    verdict = compute_verdict(metrics)
+    return verdict.status, list(verdict.reasons)
+
+
+def _headline_reason(status: str, reasons: list[str]) -> str:
+    """The first reason a reader can act on."""
+    useful = [r for r in reasons if r != _EXIT_INTENT_REASON]
+    if useful:
+        return useful[0]
+    return reasons[0] if reasons else f"verdict {status}"
 
 
 def _runs_of(metrics) -> int:
@@ -210,35 +341,6 @@ def _qph_stop_warning(metrics) -> str:
         f'title="{escape(caveat)}">'
         f"WARNING: {escape(caveat)}, so this is not a clean measurement</span>"
     )
-
-
-# Continuous jobs whose executor count the concurrent budget can cap at
-# submit (recorded in experiment.limits).
-_STREAMING_JOBS = frozenset({"bronze-ingest", "silver-stream", "gold-refresh"})
-
-
-def _executor_rows(config: dict[str, Any]) -> list[tuple[str, Any]]:
-    """One row per job in the snapshot's job profiles: what its manifest asked for,
-    before any cluster-dependent cap (the continuous concurrent budget)."""
-    inputs = config.get("fingerprint_inputs")
-    profiles = inputs.get("job_profiles") if isinstance(inputs, dict) else None
-    if not isinstance(profiles, dict):
-        return []
-    rows: list[tuple[str, Any]] = []
-    for job, p in profiles.items():
-        if not isinstance(p, dict):
-            continue
-        rows.append(
-            (
-                f"Executors, {_html_escape(str(job))} (job profile)",
-                _html_escape(
-                    f"{p.get('executor_instances')} x {p.get('executor_cores')} cores, "
-                    f"{p.get('executor_memory')} + {p.get('executor_memory_overhead')} overhead"
-                    + (" before the concurrent budget" if str(job) in _STREAMING_JOBS else "")
-                ),
-            )
-        )
-    return rows
 
 
 class ReportGenerator:
@@ -455,7 +557,10 @@ class ReportGenerator:
             verdict_word = "WARNING"
             verdict_color = "var(--warning)"
         else:
-            verdict_word = "FAILED"
+            # INTERRUPTED and REFUSED keep their own word, as the failed-run
+            # headline below the panel does.
+            status, _ = _page_verdict(metrics)
+            verdict_word = status if status in ("INTERRUPTED", "REFUSED") else "FAILED"
             verdict_color = "var(--danger)"
 
         if fail_reasons:
@@ -487,7 +592,9 @@ class ReportGenerator:
                 <div><span class="read-first-key" style="color: var(--text-muted);">n:</span> {int(n_runs)}</div>
                 <div><span class="read-first-key" style="color: var(--text-muted);">Limits present:</span> {n_limits}</div>
                 <div><span class="read-first-key" style="color: var(--text-muted);">Record digest:</span> <code class="mono">{e(record_digest)}</code></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">{e(_provenance_line(metrics))}</code></div>
             </div>
+            {_limits_interpretation_html(metrics)}
         </section>
         """
 
@@ -518,7 +625,7 @@ class ReportGenerator:
         </div>
         """
 
-    def _generate_sustained_detail_cards(self, pb) -> str:
+    def _generate_sustained_detail_cards(self, pb, metrics: PipelineMetrics | None = None) -> str:
         """Generate detail cards for Pipeline Stages section (sustained mode only).
 
         Shows Ingest Ratio below the stage table.  Compute Efficiency and
@@ -566,6 +673,45 @@ class ReportGenerator:
             ratio_badge = '<span style="color: var(--success);">Healthy</span>'
             ratio_value = f"{pb.ingest_ratio:.2f}"
 
+        from lakebench.reports import derived as dv
+
+        e = _html_escape
+        # The collector divides by the rows the trickle released when it
+        # counted them, else by the generated corpus rows.
+        ratio_basis = (
+            "bronze rows / rows the trickle released"
+            if pb.released_rows is not None
+            else "bronze rows / generated corpus rows (released rows not recorded)"
+        )
+        coverage = pb.corpus_ingest_ratio
+        coverage_value = (
+            dv.pct(coverage, num_path="pipeline_benchmark.scores.corpus_ingest_ratio")
+            if coverage is not None
+            else "not recorded"
+        )
+        window = pb.window_seconds
+        window_value = f"{window:,.0f}s" if window else "not recorded"
+        sustained = (pb.config_snapshot or {}).get("sustained") or {}
+        if metrics is not None and not sustained:
+            sustained = (metrics.config_snapshot or {}).get("sustained") or {}
+        files = sustained.get("max_files_per_trigger")
+        trigger = sustained.get("bronze_trigger_interval")
+        offered = (
+            f"{files} file{'s' if files != 1 else ''} per {trigger} bronze trigger"
+            if files and trigger
+            else "not recorded"
+        )
+        excluded_html = ""
+        if metrics is not None:
+            from lakebench.config.support import MODE_NOTES
+
+            workload = (metrics.config_snapshot or {}).get("workload_schema")
+            note = MODE_NOTES.get((str(workload), "continuous"))
+            if note:
+                excluded_html = (
+                    '<p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.5rem;">'
+                    f"Excluded in continuous mode: {e(note)}</p>"
+                )
         return f"""
         <div class="cards" style="margin-top: 1.5rem;">
             <div class="card">
@@ -574,9 +720,25 @@ class ReportGenerator:
                 <div class="card-delta" style="color: var(--text-muted);">
                     {ratio_badge}
                 </div>
-                <div class="card-hint">bronze rows / datagen rows</div>
+                <div class="card-hint">{ratio_basis}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Corpus coverage</div>
+                <div class="card-value">{coverage_value}</div>
+                <div class="card-hint">share of the generated corpus the window took in</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Window</div>
+                <div class="card-value">{window_value}</div>
+                <div class="card-hint">measured continuous window</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Offered load (trickle)</div>
+                <div class="card-value" style="font-size: 1rem;">{e(offered)}</div>
+                <div class="card-hint">Lakebench-imposed intake rate, not a capacity</div>
             </div>
         </div>
+        {excluded_html}
         """
 
     # ------------------------------------------------------------------
@@ -594,27 +756,37 @@ class ReportGenerator:
     def _generate_bottleneck_section(self, metrics: PipelineMetrics) -> str:
         """Generate bottleneck identification section (Layer 2).
 
-        Shows time and compute distribution across stages as a stacked bar
-        with a text call-out identifying the dominant stage.
+        Shows each stage's share of stage time (batch) or of micro-batch
+        latency (continuous) and of requested core-seconds, as a stacked bar
+        of the core-seconds with a call-out naming the dominant stage.
         """
         pb = metrics.pipeline_benchmark
         if not pb or not pb.stages:
             return ""
 
         is_sustained = self._is_sustained(metrics)
+        e = _html_escape
 
-        # For sustained mode, use latency_ms as the weight (stages run
-        # concurrently so elapsed times are similar).  For batch, use
-        # elapsed_seconds.
-        #
-        # Trino CPU: the query stage has executor_count/cores == 0 because
-        # it runs on Trino, not Spark.  Pull Trino pod CPU from the config
-        # snapshot so the chart reflects actual cluster resource usage.
+        # Requested core-seconds: executors x cores x seconds for a Spark
+        # stage. The query stage runs on the query engine, which has no
+        # executors; on Trino its pod cores come from the config snapshot.
+        # Spark Thrift and DuckDB record no query-engine cores, so their
+        # query stage has no core-seconds and is left out of the shares.
         cs = metrics.config_snapshot or {}
-        trino_cfg = cs.get("trino", {})
-        trino_total_cores = float(trino_cfg.get("coordinator", {}).get("cpu", 0)) + int(
-            trino_cfg.get("worker", {}).get("replicas", 0)
-        ) * float(trino_cfg.get("worker", {}).get("cpu", 0))
+        query_engine = str(cs.get("query_engine") or "")
+        trino_cfg = cs.get("trino") or {}
+        coord = trino_cfg.get("coordinator") or {}
+        worker = trino_cfg.get("worker") or {}
+
+        def _cores(v) -> float:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        trino_total_cores = _cores(coord.get("cpu")) + int(worker.get("replicas") or 0) * _cores(
+            worker.get("cpu")
+        )
 
         from lakebench.reports import derived as dv
 
@@ -625,27 +797,30 @@ class ReportGenerator:
         for i, s in enumerate(pb.stages):
             if s.stage_name in ("datagen",) and is_sustained:
                 continue
-            if s.stage_name == "query" and trino_total_cores > 0:
-                cpu_sec = trino_total_cores * s.elapsed_seconds
-                # Only the keys the snapshot holds: a missing one counted 0.
-                coord = trino_cfg.get("coordinator") or {}
-                worker = trino_cfg.get("worker") or {}
-                cpu_terms = []
-                if "cpu" in coord:
-                    cpu_terms.append(
-                        dv.product(
-                            dv.path("config_snapshot", "trino", "coordinator", "cpu"),
-                            _sp(i, "elapsed_seconds"),
+            cpu_sec: float | None
+            if s.stage_name == "query":
+                # Records without query_engine predate the other engines' query
+                # stage, which only Trino had.
+                if query_engine in ("trino", "") and trino_total_cores > 0:
+                    cpu_sec = trino_total_cores * s.elapsed_seconds
+                    cpu_terms = []
+                    if "cpu" in coord:
+                        cpu_terms.append(
+                            dv.product(
+                                dv.path("config_snapshot", "trino", "coordinator", "cpu"),
+                                _sp(i, "elapsed_seconds"),
+                            )
                         )
-                    )
-                if "replicas" in worker and "cpu" in worker:
-                    cpu_terms.append(
-                        dv.product(
-                            dv.path("config_snapshot", "trino", "worker", "replicas"),
-                            dv.path("config_snapshot", "trino", "worker", "cpu"),
-                            _sp(i, "elapsed_seconds"),
+                    if "replicas" in worker and "cpu" in worker:
+                        cpu_terms.append(
+                            dv.product(
+                                dv.path("config_snapshot", "trino", "worker", "replicas"),
+                                dv.path("config_snapshot", "trino", "worker", "cpu"),
+                                _sp(i, "elapsed_seconds"),
+                            )
                         )
-                    )
+                else:
+                    cpu_sec, cpu_terms = None, []
             else:
                 cpu_sec = s.executor_count * s.executor_cores * s.elapsed_seconds
                 cpu_terms = [
@@ -655,33 +830,51 @@ class ReportGenerator:
                         _sp(i, "elapsed_seconds"),
                     )
                 ]
-            use_latency = is_sustained and s.latency_ms is not None and s.latency_ms > 0
-            weight = s.latency_ms if use_latency else s.elapsed_seconds
+            # Continuous: micro-batch latency in ms; a stage without one (the
+            # query stage) has no latency and is left out of the latency
+            # shares rather than adding its seconds to milliseconds.
+            weight: float | None
+            if is_sustained:
+                use = s.latency_ms is not None and s.latency_ms > 0
+                weight = s.latency_ms if use else None
+                weight_path = _sp(i, "latency_ms")
+            else:
+                weight = s.elapsed_seconds
+                weight_path = _sp(i, "elapsed_seconds")
             stage_data.append(
                 {
                     "name": s.stage_name,
                     "weight": weight,
-                    "weight_path": _sp(i, "latency_ms" if use_latency else "elapsed_seconds"),
+                    "weight_path": weight_path,
                     "cpu_sec": cpu_sec,
                     "cpu_terms": cpu_terms,
-                    "elapsed": s.elapsed_seconds,
                 }
             )
 
         if not stage_data:
             return ""
 
-        total_weight = sum(d["weight"] for d in stage_data)
-        total_cpu = sum(d["cpu_sec"] for d in stage_data)
-        weight_den = [d["weight_path"] for d in stage_data]
-        cpu_den = [t for d in stage_data for t in d["cpu_terms"]]
+        timed = [d for d in stage_data if d["weight"] is not None]
+        costed = [d for d in stage_data if d["cpu_sec"] is not None]
+        total_weight = sum(d["weight"] for d in timed)
+        total_cpu = sum(d["cpu_sec"] for d in costed)
+        weight_den = [d["weight_path"] for d in timed]
+        cpu_den = [t for d in costed for t in d["cpu_terms"]]
 
         for d in stage_data:
-            d["weight_pct"] = d["weight"] / total_weight * 100 if total_weight else 0.0
-            d["cpu_pct"] = d["cpu_sec"] / total_cpu * 100 if total_cpu else 0.0
+            d["weight_pct"] = (
+                d["weight"] / total_weight * 100
+                if total_weight and d["weight"] is not None
+                else 0.0
+            )
+            d["cpu_pct"] = (
+                d["cpu_sec"] / total_cpu * 100 if total_cpu and d["cpu_sec"] is not None else 0.0
+            )
 
         def _share(d: dict, key: str, digits: int) -> str:
             if key == "weight":
+                if d["weight"] is None:
+                    return "-"
                 return dv.pct(
                     d["weight"],
                     total_weight,
@@ -690,6 +883,8 @@ class ReportGenerator:
                     digits=digits,
                     missing="-",
                 )
+            if d["cpu_sec"] is None:
+                return "-"
             return dv.pct(
                 d["cpu_sec"],
                 total_cpu,
@@ -699,73 +894,80 @@ class ReportGenerator:
                 missing="-",
             )
 
-        # Identify bottleneck -- in sustained mode latency is the primary
-        # dimension (stages run concurrently); in batch mode use compute.
-        if is_sustained:
-            dominant = max(stage_data, key=lambda d: d["weight_pct"])
-            sorted_by = sorted(stage_data, key=lambda d: d["weight_pct"], reverse=True)
-            dim_label = "latency"
-        else:
-            dominant = max(stage_data, key=lambda d: d["cpu_pct"])
-            sorted_by = sorted(stage_data, key=lambda d: d["cpu_pct"], reverse=True)
-            dim_label = "compute"
-
-        dom_pct = dominant["weight_pct"] if is_sustained else dominant["cpu_pct"]
-        if (
-            len(sorted_by) >= 2
-            and abs(
-                sorted_by[0]["weight_pct" if is_sustained else "cpu_pct"]
-                - sorted_by[1]["weight_pct" if is_sustained else "cpu_pct"]
-            )
-            < 10
-        ):
-            callout = f"{'Latency' if is_sustained else 'Compute'} is balanced across stages (no single bottleneck)."
-        elif dom_pct >= 50:
+        time_dim = "micro-batch latency" if is_sustained else "stage time"
+        cpu_dim = "requested core-seconds"
+        # Continuous stages run at once, so latency is the dimension that
+        # names the bottleneck; batch stages run in turn, so core-seconds.
+        key = "weight_pct" if is_sustained else "cpu_pct"
+        ranked = (
+            sorted(timed if is_sustained else costed, key=lambda d: d[key], reverse=True)
+            or stage_data
+        )
+        dominant = ranked[0]
+        dim_label = time_dim if is_sustained else cpu_dim
+        dom_pct = dominant[key]
+        if is_sustained and not timed:
+            callout = "No stage recorded a micro-batch latency, so none is named the bottleneck."
+        elif len(ranked) >= 2 and abs(ranked[0][key] - ranked[1][key]) < 10:
             callout = (
-                f"{dominant['name'].capitalize()} consumed {_share(dominant, 'weight', 0)} "
-                f"of {'latency' if is_sustained else 'wall-clock time'} and "
-                f"{_share(dominant, 'cpu', 0)} of compute."
+                f"No single bottleneck: the stages' shares of {dim_label} are within 10 points."
+            )
+        elif dom_pct >= 50 and dominant["weight"] is not None and dominant["cpu_sec"] is not None:
+            callout = (
+                f"{e(dominant['name'].capitalize())} took {_share(dominant, 'weight', 0)} "
+                f"of {time_dim} and {_share(dominant, 'cpu', 0)} of {cpu_dim}."
             )
         else:
             callout = (
-                f"{dominant['name'].capitalize()} is the largest stage at "
+                f"{e(dominant['name'].capitalize())} is the largest stage at "
                 f"{_share(dominant, 'weight' if is_sustained else 'cpu', 0)} of {dim_label}."
             )
 
-        # Stacked bar -- always shows CPU share (the resource dimension
-        # common to all stages including Trino query). The flex weights are
-        # layout, not page text; the legend below carries the numbers.
+        # Stacked bar: each stage's share of requested core-seconds. The flex
+        # weights are layout, not page text; the legend carries the numbers.
         bar_segments = []
-        for d in stage_data:
+        for d in costed:
             color = self._STAGE_COLORS.get(d["name"], "#94a3b8")
             bar_segments.append(
                 f'<div style="flex: {d["cpu_pct"]:.2f}; background: {color}; '
                 f'height: 28px; min-width: 0;" '
-                f'title="{d["name"]}: share of CPU"></div>'
+                f'title="{e(d["name"])}: share of requested core-seconds"></div>'
             )
 
         legend_items = []
-        for d in stage_data:
+        for d in costed:
             color = self._STAGE_COLORS.get(d["name"], "#94a3b8")
             legend_items.append(
                 f'<span style="display: inline-flex; align-items: center; margin-right: 1rem;">'
                 f'<span style="width: 12px; height: 12px; background: {color}; '
                 f'border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>'
-                f"{d['name']} ({_share(d, 'cpu', 0)})</span>"
+                f"{e(d['name'])} ({_share(d, 'cpu', 0)})</span>"
             )
+        excluded = [d["name"] for d in stage_data if d["cpu_sec"] is None]
+        excluded_note = (
+            f" Not in the bar: {e(', '.join(excluded))} (the "
+            f"{e(query_engine + ' ' if query_engine else '')}query engine records no cores)."
+            if excluded
+            else ""
+        )
 
         weight_col = "Latency" if is_sustained else "Time (s)"
         table_rows = ""
         for d in stage_data:
-            if is_sustained:
+            if d["weight"] is None:
+                weight_str = "-"
+            elif is_sustained:
                 weight_str = _format_duration_ms(d["weight"])
             else:
                 weight_str = f"{d['weight']:,.0f}s"
+            cpu_str = (
+                dv.total(d["cpu_sec"], paths=d["cpu_terms"]) if d["cpu_sec"] is not None else "-"
+            )
             table_rows += (
-                f"<tr><td>{d['name']}</td>"
+                f"<tr><td>{e(d['name'])}</td>"
                 f"<td>{weight_str}</td>"
                 f"<td>{_share(d, 'weight', 1)}</td>"
-                f"<td>{dv.total(d['cpu_sec'], paths=d['cpu_terms'])}</td>"
+                f"<td>{cpu_str}</td>"
                 f"<td>{_share(d, 'cpu', 1)}</td></tr>"
             )
         bar_html = "".join(bar_segments)
@@ -777,6 +979,10 @@ class ReportGenerator:
             <p style="margin-bottom: 1rem; color: var(--text-muted); font-style: italic;">
                 {callout}
             </p>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                Bar: each stage's share of requested core-seconds (executors x cores x
+                seconds; Trino pod cores x seconds for a Trino query stage), not of time.{excluded_note}
+            </div>
             <div style="display: flex; width: 100%; border-radius: 4px; overflow: hidden; margin-bottom: 0.75rem;">
                 {bar_html}
             </div>
@@ -788,9 +994,9 @@ class ReportGenerator:
                     <tr>
                         <th>Stage</th>
                         <th>{weight_col}</th>
-                        <th>% of Total</th>
-                        <th>CPU-sec</th>
-                        <th>% of CPU</th>
+                        <th>% of {time_dim}</th>
+                        <th>Requested core-sec</th>
+                        <th>% of {cpu_dim}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1463,8 +1669,10 @@ class ReportGenerator:
         benchmark_rounds_html = self._generate_benchmark_rounds_section(metrics)
         pipeline_bench_html = self._generate_pipeline_benchmark_section(metrics)
         summary_html = self._generate_summary(metrics)
-        config_html = self._generate_config_section(metrics) + self._generate_experiment_section(
-            metrics
+        config_html = (
+            self._generate_resources_section(metrics)
+            + self._generate_config_section(metrics)
+            + self._generate_experiment_section(metrics)
         )
         platform_html = self._generate_platform_section(platform_metrics)
         # Layer 2: Diagnosis
@@ -1779,11 +1987,81 @@ class ReportGenerator:
         """Generate summary cards HTML.
 
         Sustained mode shows streaming-specific KPIs.
-        Batch mode shows the original batch KPIs.
+        Batch mode shows the original batch KPIs. A run whose verdict is not
+        PASSED shows no headline number: its cards read "-" beside the
+        verdict reason, and the failed jobs' errors lead.
         """
+        status, reasons = _page_verdict(metrics)
+        if status != "PASSED":
+            return self._generate_failed_summary(metrics, status, reasons)
         if self._is_sustained(metrics):
             return self._generate_sustained_summary(metrics)
         return self._generate_batch_summary(metrics)
+
+    _BATCH_CARDS = (
+        "Time to Value",
+        "Pipeline Throughput",
+        "Compute Efficiency",
+        "QpH",
+        "Scale Ratio",
+    )
+    _CONTINUOUS_CARDS = (
+        "Data Freshness",
+        "Sustained Throughput",
+        "Compute Efficiency",
+        "In-Stream QpH",
+        "Total CPU-hours",
+    )
+
+    def _generate_failed_summary(
+        self, metrics: PipelineMetrics, status: str, reasons: list[str]
+    ) -> str:
+        """The headline for a run that did not pass: the first verdict
+        reason, each failed job's error, and the score cards with no
+        number, so a failed run's partial figures are not read as results."""
+        e = _html_escape
+        first = _headline_reason(status, reasons)
+        errors = [
+            (j.job_name, j.error_message or "failed, no error recorded")
+            for j in metrics.jobs
+            if not j.success
+        ] + [
+            (s.job_name, s.error_message or "failed, no error recorded")
+            for s in metrics.streaming
+            if not s.success
+        ]
+        error_items = "".join(
+            f"<li><code class='mono'>{e(str(name))}</code>: {e(str(msg))}</li>"
+            for name, msg in errors
+        )
+        errors_html = (
+            f"<ul style='margin: 0.5rem 0 0 1.25rem;'>{error_items}</ul>" if errors else ""
+        )
+        others = "; ".join(r for r in reasons if r != first)
+        others_html = (
+            f"<div style='margin-top: 0.5rem; font-size: 0.8rem;'>Also: {e(others)}</div>"
+            if others
+            else ""
+        )
+        labels = self._CONTINUOUS_CARDS if self._is_sustained(metrics) else self._BATCH_CARDS
+        cards = "".join(
+            f"""
+            <div class="card">
+                <div class="card-label">{label}</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
+            </div>"""
+            for label in labels
+        )
+        return f"""
+        <section class="failed-headline" style="border-left: 3px solid var(--danger);">
+            <h2 style="color: var(--danger);">Run {e(status)}: {e(first)}</h2>
+            {errors_html}
+            {others_html}
+        </section>
+        <div class="cards">{cards}
+        </div>
+        """
 
     def _generate_sustained_summary(self, metrics: PipelineMetrics) -> str:
         """Generate summary cards for sustained/streaming mode.
@@ -1918,7 +2196,7 @@ class ReportGenerator:
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
                 <div class="card-value">{format_measurement(f"{efficiency:.2f} GB/core-hr", "", caps_bound=intake_caps if efficiency > 0 else None)}</div>
-                <div class="card-hint">GB processed per core-hour requested</div>
+                <div class="card-hint">stage-input GB per core-hour requested</div>
                 <div class="card-hint2">{efficiency_hint2}</div>
             </div>
             <div class="card">
@@ -1936,8 +2214,8 @@ class ReportGenerator:
         </div>
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Duration: {duration_m}m {duration_s}s</span>
-            <span>Data Processed: {data_gb:.2f} GB</span>
-            <span>Avg Pipeline Throughput: {format_measurement(f"{avg_throughput:.2f} GB/s", "", caps_bound=intake_caps if avg_throughput > 0 else None)}</span>
+            <span>Stage inputs processed: {data_gb:.2f} GB (bronze + silver + gold + query reads; {_corpus_note(metrics)})</span>
+            <span>Avg stage-input throughput: {format_measurement(f"{avg_throughput:.2f} GB/s", "", caps_bound=intake_caps if avg_throughput > 0 else None)}</span>
         </div>
         """
 
@@ -2043,15 +2321,15 @@ class ReportGenerator:
                 <div class="card-label">Pipeline Throughput</div>
                 <div class="card-value">{pipeline_throughput_display}</div>
                 <div class="card-delta" style="color: var(--text-muted);">
-                    {pb.total_data_processed_gb:.1f} GB total
+                    {_stage_inputs_note(metrics)}
                 </div>
-                <div class="card-hint">data volume / wall-clock time</div>
+                <div class="card-hint">stage inputs processed per second (bronze + silver + gold + query reads)</div>
                 <div class="card-hint2">{throughput_hint2}</div>
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
                 <div class="card-value">{pb.compute_efficiency_gb_per_core_hour:.2f} GB/core-hr</div>
-                <div class="card-hint">GB processed per core-hour requested</div>
+                <div class="card-hint">stage-input GB per core-hour requested</div>
                 <div class="card-hint2">{efficiency_hint2}</div>
             </div>
             <div class="card">
@@ -2685,59 +2963,6 @@ class ReportGenerator:
         </section>
         """
 
-    def _generate_pipeline_score_cards(self, metrics: PipelineMetrics) -> str:
-        """Generate pipeline benchmark score cards for the batch summary.
-
-        Sustained mode uses _generate_sustained_summary() and
-        _generate_sustained_detail_cards() instead -- this method is
-        only called from _generate_batch_summary().
-        """
-        from lakebench.reports.formatter import (
-            caps_bound_from,
-            format_measurement,
-            support_state_of,
-        )
-
-        pb = metrics.pipeline_benchmark
-        if not pb:
-            return ""
-
-        scale_warning = _scale_warning(pb.scale_ratio)
-        caps_bound = caps_bound_from(metrics)
-        support_state = support_state_of(metrics)
-        throughput_display = format_measurement(
-            f"{pb.pipeline_throughput_gb_per_second:.3f} GB/s",
-            "",
-            caps_bound=caps_bound if pb.pipeline_throughput_gb_per_second > 0 else None,
-            n_runs=1 if pb.pipeline_throughput_gb_per_second > 0 else None,
-            support_state=support_state if pb.pipeline_throughput_gb_per_second > 0 else None,
-        )
-        return f"""
-            <div class="card">
-                <div class="card-label">Time to Value</div>
-                <div class="card-value">{pb.time_to_value_seconds:.1f}s</div>
-                <div class="card-hint">wall-clock to queryable gold</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Pipeline Throughput</div>
-                <div class="card-value">{throughput_display}</div>
-                <div class="card-delta" style="color: var(--text-muted);">
-                    {pb.total_data_processed_gb:.1f} GB total
-                </div>
-                <div class="card-hint">data volume / wall-clock time</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{pb.compute_efficiency_gb_per_core_hour:.2f} GB/core-hr</div>
-                <div class="card-hint">GB processed per core-hour requested</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Scale Ratio</div>
-                <div class="card-value">{_scale_ratio_pct(pb.scale_ratio)}{scale_warning}</div>
-                <div class="card-hint">actual vs expected data volume</div>
-            </div>
-        """
-
     def _generate_pipeline_benchmark_section(self, metrics: PipelineMetrics) -> str:
         """Generate the pipeline benchmark stage matrix section."""
         from lakebench.reports.formatter import caps_bound_from, format_measurement
@@ -2867,6 +3092,8 @@ class ReportGenerator:
                 </tr>
                 """)
 
+        verdict_status, _reasons = _page_verdict(metrics)
+        passed = verdict_status == "PASSED"
         if is_sustained:
             section_title = "Pipeline Stages"
             freshness_str = (
@@ -2901,14 +3128,18 @@ class ReportGenerator:
                         <th title="executor_count x cores x elapsed / 3600">CPU-hours</th>
                         <th>QpH</th>
                         <th>Status</th>"""
-            detail_cards = self._generate_sustained_detail_cards(pb)
+            detail_cards = self._generate_sustained_detail_cards(pb, metrics)
+            if not passed:
+                summary = f"headline figures not shown: the run is {_html_escape(verdict_status)}"
         else:
             section_title = "Pipeline Benchmark"
             summary = (
                 f"Time-to-Value: <strong>{pb.time_to_value_seconds:.1f}s</strong> | "
-                f"Pipeline Throughput: <strong>{pb.pipeline_throughput_gb_per_second:.3f} GB/s</strong> | "
-                f"Total Data: {pb.total_data_processed_gb:.1f} GB"
+                f"Stage-input throughput: <strong>{pb.pipeline_throughput_gb_per_second:.3f} GB/s</strong> | "
+                f"Stage inputs: {pb.total_data_processed_gb:.1f} GB ({_corpus_note(metrics)})"
             )
+            if not passed:
+                summary = f"headline figures not shown: the run is {_html_escape(verdict_status)}"
             header_row = """
                         <th>Stage</th>
                         <th>Engine</th>
@@ -2954,6 +3185,83 @@ class ReportGenerator:
         </section>
         """
 
+    def _generate_resources_section(self, metrics: PipelineMetrics) -> str:
+        """Resources as run: per job, the executors it ran with (the count
+        the monitor observed, else the profile's), cores and memory per
+        executor from its job profile, and the scratch PVC as the cluster
+        held it (``provenance.scratch_as_ran``)."""
+        e = _html_escape
+        prov = metrics.provenance if isinstance(metrics.provenance, dict) else {}
+        scratch_table = prov.get("scratch_as_ran")
+
+        def _scratch(job_type: str) -> str:
+            if not isinstance(scratch_table, dict):
+                return "not recorded (this record predates it)"
+            entry = scratch_table.get(job_type)
+            if not isinstance(entry, dict):
+                return "not recorded"
+            if "not_recorded" in entry:
+                return f"not recorded ({entry['not_recorded']})"
+            size, sclass = entry.get("size_limit"), entry.get("storage_class")
+            if size is None and sclass is None:
+                return "no scratch PVC"
+            return f"{size or 'size unknown'} on {sclass or 'class unknown'}"
+
+        rows: list[str] = []
+        if metrics.jobs:
+            for j in metrics.jobs:
+                if j.executor_count <= 0 and j.executor_cores <= 0:
+                    continue
+                rows.append(
+                    f"<tr><td><code class='mono'>{e(j.job_type or j.job_name)}</code></td>"
+                    f"<td>{j.executor_count or '-'}</td>"
+                    f"<td>{j.executor_cores or '-'}</td>"
+                    f"<td>{f'{j.executor_memory_gb:.0f} GB' if j.executor_memory_gb else '-'}</td>"
+                    f"<td>{e(_scratch(j.job_type))}</td></tr>"
+                )
+        else:
+            stage_of = {
+                "bronze-ingest": "bronze",
+                "silver-stream": "silver",
+                "gold-refresh": "gold",
+            }
+            stages = {
+                st.stage_name: st
+                for st in (metrics.pipeline_benchmark.stages if metrics.pipeline_benchmark else [])
+            }
+            for sm in metrics.streaming:
+                st = stages.get(stage_of.get(sm.job_type, ""))
+                if st is None:
+                    continue
+                rows.append(
+                    f"<tr><td><code class='mono'>{e(sm.job_type or sm.job_name)}</code></td>"
+                    f"<td>{st.executor_count or '-'}</td>"
+                    f"<td>{st.executor_cores or '-'}</td>"
+                    f"<td>{f'{st.executor_memory_gb:.0f} GB' if st.executor_memory_gb else '-'}</td>"
+                    f"<td>{e(_scratch(sm.job_type))}</td></tr>"
+                )
+        if not rows:
+            return ""
+        return f"""
+        <section>
+            <h2>Resources as run</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job</th>
+                        <th title="As recorded: batch, the executors the monitor saw (every executor that ran, replacements included), else the job profile's count; continuous, the count the stream was submitted with">Executors</th>
+                        <th>Cores per executor</th>
+                        <th>Memory per executor</th>
+                        <th>Scratch as ran</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join(rows)}
+                </tbody>
+            </table>
+        </section>
+        """
+
     def _generate_config_section(self, metrics: PipelineMetrics) -> str:
         """Generate configuration section HTML.
 
@@ -2980,10 +3288,8 @@ class ReportGenerator:
                 config.get("s3", {}).get("endpoint")
                 or config.get("platform", {}).get("storage", {}).get("s3", {}).get("endpoint"),
             ),
-            # Per-job executor sizing as each job's manifest asked for it.
-            # Records before v1.7 carry spark.executor values that sized
-            # nothing, so they are not shown.
-            *_executor_rows(config),
+            # Executor sizing is in "Resources as run" (what each job ran
+            # with), not here: spark.executor in the snapshot sized nothing.
             (
                 "Catalog Type",
                 config.get("catalog")
