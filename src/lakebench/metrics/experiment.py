@@ -31,12 +31,6 @@ nothing measured under this one):
   entity never used, as batch always did, instead of 0.00. No detection
   rule, score, gold table or query reads these two columns, so no result
   changes and the version is not bumped.
-- ``aml-2``: AML continuous in-stream rounds run the investigator queries
-  (IQ1 to IQ4) once the run has a case, so the continuous query set changes
-  from 8 queries to 12; a round before the first TM pass runs the 8 and is
-  labelled (2026-10-02). The version is per workload, so AML batch records
-  move to ``aml-2`` too, and stored ``aml-1`` records (batch included) no
-  longer compare with new ones.
 - ``c360-2``: gold-finalize no longer switches to the incremental strategy
   when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
   every gold day; incremental gold runs only for multi-cycle cycles 2+, and
@@ -47,8 +41,12 @@ nothing measured under this one):
   false positives, continuous time to detect and TM alert identity for
   hubs change; W2 and the W5 rescreen gain txn_total and txns_truncated,
   and W2's beneficiary sender list is sorted before its cut (2026-10-02).
-  The first AML result change of v1.7; later ones before the release take
-  a dev suffix.
+  The first AML result change of v1.7.
+- ``aml-2`` also covers (both land before any release record, so v1.7 has
+  the one version): AML continuous in-stream rounds run the investigator
+  queries (IQ1 to IQ4) once the run has a case, so the continuous query set
+  changes from 8 queries to 12; a round before the first TM pass runs the 8
+  and is labelled (2026-10-02).
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
