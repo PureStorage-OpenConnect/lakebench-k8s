@@ -113,5 +113,12 @@ scorer's report records it as `corpus_seed`; and the run record
 run record writes the seed's salted hash instead. Do not check in the run
 output of a registered generate before its look is recorded.
 
+The corpus a look scores must be the one `lakebench generate
+--registered-corpus` wrote on the look host: `scripts/aml_gate.py
+--registered` requires a `generated` corpus-ledger entry for that role and
+seed whose corpus fingerprint matches the local copy, whose datagen pods all
+ran the `--generator-image` digest, and with no other Job submitted into
+that bronze prefix meanwhile (owner, 10-03).
+
 D8 and A6 are reported beside the result and do not gate it (#46, #47). The
 result is published pass or fail.

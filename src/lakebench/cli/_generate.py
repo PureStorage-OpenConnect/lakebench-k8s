@@ -176,8 +176,55 @@ def generate(
         record.close("failed", error=type(e).__name__)
         raise
     record.close(
-        "generated", image_ids=list((fleet or {}).get("image_ids") or []) or "not_observed"
+        "generated",
+        image_ids=list((fleet or {}).get("image_ids") or []) or "not_observed",
+        **_s3_corpus_fingerprint(cfg),
     )
+
+
+def _s3_corpus_fingerprint(cfg) -> dict:
+    """``{"corpus_fingerprint": ...}`` of the bronze datagen prefix as it is
+    now (``datagen_seed.corpus_fingerprint``): every data file's path and
+    size, and each manifest file's sha256. A registered look refuses a
+    corpus whose local copy does not match it. On a read failure the entry
+    records the error and no fingerprint, so that look is refused."""
+    import hashlib
+
+    from lakebench.config.datagen_seed import corpus_fingerprint
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+    from lakebench.s3 import S3Client
+
+    s3 = cfg.platform.storage.s3
+    bucket = s3.buckets.bronze
+    prefix = bronze_datagen_prefix(cfg).strip("/") + "/"
+    try:
+        client = S3Client(
+            endpoint=s3.endpoint,
+            access_key=s3.access_key,
+            secret_key=s3.secret_key,
+            region=s3.region,
+            path_style=s3.path_style,
+        ).raw_client
+        files, manifests = [], {}
+        token = None
+        while True:
+            kw = {"Bucket": bucket, "Prefix": prefix}
+            if token:
+                kw["ContinuationToken"] = token
+            page = client.list_objects_v2(**kw)
+            for obj in page.get("Contents") or []:
+                files.append((obj["Key"][len(prefix) :], int(obj["Size"])))
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+        for rel, _size in files:
+            if rel.startswith("manifest/") and rel.endswith(".parquet"):
+                body = client.get_object(Bucket=bucket, Key=prefix + rel)["Body"].read()
+                manifests[rel] = hashlib.sha256(body).hexdigest()
+        return {"corpus_fingerprint": corpus_fingerprint(files, manifests)}
+    except Exception as e:  # noqa: BLE001 -- recorded; the look is then refused
+        print_warning(f"Could not fingerprint the registered corpus ({type(e).__name__})")
+        return {"corpus_fingerprint": None, "fingerprint_error": type(e).__name__}
 
 
 class _CorpusRecord:
@@ -264,6 +311,12 @@ def _registered_corpus_record(
         raise UsageError(
             "Refused: --registered-corpus needs --yes (the attempt is recorded before the "
             "first cluster call, so nothing may prompt after it).",
+            path=PATH,
+        )
+    if "@sha256:" not in str(cfg.images.datagen):
+        raise UsageError(
+            "Refused: --registered-corpus needs images.datagen pinned by digest "
+            "(repo@sha256:...), so every datagen pod runs the image the look names.",
             path=PATH,
         )
     if allow_stale_bronze:
