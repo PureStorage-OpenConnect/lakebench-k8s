@@ -1906,6 +1906,17 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   like Spark does.
 
 ### Known limitations
+- **Two AML queries read rows continuous mode lays out differently.**
+  Continuous AML writes `silver.counterparty_edges` as one row per pair per
+  micro-batch (batch writes one per pair) and stores running balances in
+  `silver.account_statements` in arrival order. IQ3's two-hop step reads raw
+  edge rows and FQ4 reads the stored `bal_after`, so on one corpus their
+  answers can differ between the modes, and between two continuous runs
+  whose micro-batches or arrival order differ (the result check then reads
+  the pair as not comparable on those queries). Batch and continuous records
+  are never compared: the mode is a workload identity key, so `compare`
+  stops before any result and the perf gate refuses the pair. FQ3 sums the
+  edges and is the same in both modes.
 - **The capacity preflight sums free capacity across nodes.** Ten nodes
   with 12 cores free each read as 120 free cores, though each holds one
   8-core pod; only the largest pod is checked against a single node. The

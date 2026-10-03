@@ -904,6 +904,21 @@ it stays comparable with runs over the same SQL); older records and any other
 legacy set are `unknown`. A run of an older branch recorded after that date
 is the one case this cannot tell apart.
 
+**Queries that depend on the mode's layout.** Continuous AML writes
+`silver.counterparty_edges` as one row per (source, target) pair per
+micro-batch, where batch writes one row per pair, and it keeps
+`silver.account_statements` running balances (`bal_after`) in arrival order
+(labelled `arrival_order_running_balance` when a statement arrives late).
+FQ3 sums the edge rows, so its answer is the same in both modes. IQ3's
+two-hop step reads raw edge rows and FQ4 reads the stored `bal_after`, so
+their answers on one corpus can differ between batch and continuous, and
+between two continuous runs whose micro-batch boundaries or arrival order
+differ; the continuous result check then reads such a pair as not
+comparable on those queries. A batch record is never compared with a
+continuous one: the mode is a workload identity key, so `compare` stops at
+"one workload on one corpus" before reading any result, and the perf gate
+and `reproduce` refuse the pair.
+
 ## What the AML workload deliberately does not measure
 
 - **Real production alert queues.** The datagen has one baseline
