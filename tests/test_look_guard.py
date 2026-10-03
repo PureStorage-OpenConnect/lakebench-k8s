@@ -647,3 +647,44 @@ def test_scorer_checks_the_manifest_before_it_scores():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert lines["refuse_protected_corpus"] < lines["compute_scores"]
+
+
+# -- owner, 10-03: bronze-verify refuses a protected corpus --------------------
+
+
+def test_bronze_verify_marker_is_the_cli_marker():
+    src = (ROOT / "src/lakebench/spark/scripts/bronze_verify_financial.py").read_text()
+    assert f'PROTECTED_REFUSAL = "{lg.REFUSAL_MARKER}"' in src
+
+
+@pytest.mark.parametrize(
+    ("mode", "required_env", "required"),
+    [("1", None, True), ("0", None, True), ("schema", None, False), ("schema", "1", True)],
+)
+def test_manifest_is_required_except_while_continuous_datagen_writes(
+    load_script, monkeypatch, mode, required_env, required
+):
+    monkeypatch.setenv("LB_REGISTER_TABLE", mode)
+    if required_env is None:
+        monkeypatch.delenv("LB_MANIFEST_REQUIRED", raising=False)
+    else:
+        monkeypatch.setenv("LB_MANIFEST_REQUIRED", required_env)
+    bvf = load_script("bronze_verify_financial")
+    assert bvf.MANIFEST_REQUIRED is required
+
+
+def test_refusal_in_log_finds_the_line():
+    log = f"INFO x\nERROR: {lg.REFUSAL_MARKER}: the corpus manifest comes from a spent seed\nbye"
+    assert lg.refusal_in_log(log).startswith(lg.REFUSAL_MARKER)
+    assert lg.refusal_in_log("ordinary failure") is None and lg.refusal_in_log(None) is None
+
+
+def test_cli_maps_a_bronze_verify_refusal_to_exit_2():
+    """run's stage-failure branch and the continuous preflight read the
+    marker before the generic failure; --skip-generate requires a manifest."""
+    run_src = (ROOT / "src/lakebench/cli/_run.py").read_text()
+    sus_src = (ROOT / "src/lakebench/cli/_sustained.py").read_text()
+    for src in (run_src, sus_src):
+        i = src.index("refusal_in_log(")
+        assert "ExitCode.USAGE" in src[i : i + 600]
+    assert '"LB_MANIFEST_REQUIRED": "1" if skip_generate else "0"' in sus_src

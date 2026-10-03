@@ -43,6 +43,18 @@ __all__ = [
 
 #: The exit path every protected-corpus refusal takes (exit 2).
 PATH = "run.protected_corpus"
+#: The prefix bronze_verify_financial.py gives its protected-corpus refusal
+#: (that frozen script cannot import this module; a test keeps them equal).
+REFUSAL_MARKER = "LAKEBENCH-PROTECTED-CORPUS-REFUSED"
+
+
+def refusal_in_log(log_text: str | None) -> str | None:
+    """The protected-corpus refusal line a Spark driver log holds, or None."""
+    for line in reversed((log_text or "").splitlines()):
+        if REFUSAL_MARKER in line:
+            return line[line.index(REFUSAL_MARKER) :].strip()
+    return None
+
 
 _NEXT = (
     "Registered looks run only through `scripts/aml_gate.py --registered`, and their "

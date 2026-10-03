@@ -3376,7 +3376,11 @@ def _run_sustained(
                 JobType.BRONZE_VERIFY,
                 # Reset, not register: see bronze_verify_financial
                 # CONTINUOUS_RESET.
-                cycle_env={"LB_REGISTER_TABLE": "schema"},
+                # With --skip-generate no manifest is coming: one must exist.
+                cycle_env={
+                    "LB_REGISTER_TABLE": "schema",
+                    "LB_MANIFEST_REQUIRED": "1" if skip_generate else "0",
+                },
             )
             _interrupt.submitted(preflight_status)
             if preflight_status.state == JobState.FAILED:
@@ -3403,6 +3407,13 @@ def _run_sustained(
                 poll_interval=15,
             )
             if not preflight_result.success:
+                from lakebench.aml.look_guard import refusal_in_log
+
+                _refused = refusal_in_log(getattr(preflight_result, "driver_logs", None))
+                if _refused:
+                    print_error(f"Refused: bronze-verify found a protected AML corpus ({_refused})")
+                    pipeline_success = False
+                    raise typer.Exit(ExitCode.USAGE)
                 print_error(f"bronze-verify preflight failed: {preflight_result.message}")
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
