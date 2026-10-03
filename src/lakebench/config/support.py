@@ -234,16 +234,15 @@ _SPARK_TAG = re.compile(
 
 def spark_minor(image: object) -> str | None:
     """``"4.1"`` for ``apache/spark:4.1.1-python3``: the Spark minor of an
-    ``apache/spark`` image (under any registry prefix, with or without a
-    trailing ``@sha256:`` digest) whose tag is a plain release version
-    with the job builder's suffixes. None for anything else (another
-    repository, a custom tag such as ``4.1.1-python3-patched``, a
-    digest-only reference): its Spark build is not the one validated, so
-    a run on it is never stamped supported."""
-    if not isinstance(image, str) or not image:
+    ``apache/spark`` image (under any registry prefix) whose tag is a plain
+    release version with the job builder's suffixes. None for anything
+    else (another repository, a custom tag such as
+    ``4.1.1-python3-patched``, any digest reference, which the job builder
+    cannot read a version from either): its Spark build is not the one
+    validated, so a run on it is never stamped supported."""
+    if not isinstance(image, str) or not image or "@" in image:
         return None
-    ref = image.split("@", 1)[0]
-    repo, sep, tag = ref.rpartition(":")
+    repo, sep, tag = image.rpartition(":")
     if not sep or "/" in tag:
         return None
     if not (repo == SPARK_REPOSITORY or repo.endswith("/" + SPARK_REPOSITORY)):
@@ -737,7 +736,7 @@ def support_matrix(
 
 _BEGIN = "<!-- BEGIN GENERATED: {name} -->"
 _REGEN = (
-    "<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; "
+    "<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; "
     "do not edit by hand. -->"
 )
 _END = "<!-- END GENERATED: {name} -->"
@@ -998,7 +997,6 @@ def rows_from_records(
             refused += [(p, [f"run {rid} has different records ({where})"]) for p, _, _ in found]
             continue
         path, _raw, record = found[0]
-        duplicates += len(found) - 1
         problems = record_problems(record, tree, expected, release_digest=release_digest, root=root)
         key = validation_key_of(record)
         if key is None:
@@ -1014,6 +1012,7 @@ def rows_from_records(
             refused += [(p, problems) for p, _raw, _r in found]
             continue
         kept += 1
+        duplicates += len(found) - 1
         grouped.setdefault(key, []).append(rid)
         rkey = record_key(record)
         if rkey is not None:

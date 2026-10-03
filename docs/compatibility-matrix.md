@@ -7,7 +7,7 @@ config load. Any other catalog, table format, pipeline engine and query engine
 combination is refused at load with the reason.
 
 <!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
 |---|---|---|---|---|
@@ -72,7 +72,7 @@ local runs are at most unverified. `lakebench config show`,
 `lakebench config recipes`, the HTML report and `lakebench compare` show it. The table below is generated from the code.
 
 <!-- BEGIN GENERATED: support-states -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
 |---|---|---|---|---|

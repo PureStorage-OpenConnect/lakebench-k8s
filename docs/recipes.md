@@ -260,7 +260,7 @@ release tree), **unverified** (valid, not release-validated) or
 This table is generated from the code:
 
 <!-- BEGIN GENERATED: support-states -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
 |---|---|---|---|---|

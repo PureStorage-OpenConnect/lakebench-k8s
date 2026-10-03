@@ -139,7 +139,7 @@ for the full list. Support is judged per workload x recipe x mode:
 Every run records its state in `metrics.json`. As computed by this release:
 
 <!-- BEGIN GENERATED: support-states -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
 |---|---|---|---|---|

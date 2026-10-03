@@ -363,7 +363,7 @@ def test_spark_minor_parses_like_the_job_builder():
     assert support.spark_minor("apache/spark:4.1.1-python3") == "4.1"
     assert support.spark_minor("apache/spark:4.0.2-java17-python3") == "4.0"
     assert support.spark_minor("registry.example:5000/apache/spark:4.0.2") == "4.0"
-    assert support.spark_minor("apache/spark:4.1.1-python3@sha256:" + "a" * 64) == "4.1"
+    assert support.spark_minor("apache/spark:4.1.1-python3@sha256:" + "a" * 64) is None
     # Not the validated build: another repository, a custom tag, no tag.
     assert support.spark_minor("registry.example/spark:4.0.2") is None
     assert support.spark_minor("myreg/forked-spark:4.1.1-python3") is None

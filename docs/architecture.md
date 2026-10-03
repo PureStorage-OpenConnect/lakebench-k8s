@@ -259,7 +259,7 @@ workload: support is judged per workload x recipe x mode (see
 [Compatibility Matrix](compatibility-matrix.md#support-states)).
 
 <!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
 |---|---|---|---|---|
