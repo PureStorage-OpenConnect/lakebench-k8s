@@ -28,7 +28,12 @@ Output: ``--out audit.json`` (``paths_searched``, ``skipped`` with reasons,
 and no key is ever printed: reasons name roles and kinds only, and S3
 credentials come from each config's ``${VAR}`` substitution and are never
 logged. Exit 0 when nothing protected was found and every check ran, 1 when
-a protected scored run or corpus was found, 2 when some check could not run.
+a protected scored run or corpus was found, 2 when some check could not run
+(an unreadable record, journal, config or bucket, a corpus field set by a
+``${VAR}``, a config changed since its session). A config that no longer
+exists is listed under ``skipped`` and does not by itself make the audit
+incomplete: sessions from removed scratchpads are common, and the records
+and ledger buckets are searched independently of them.
 
 Usage::
 
@@ -201,18 +206,29 @@ class Unresolved(ValueError):
     resolve: the config cannot be checked."""
 
 
+def _has_var(value: Any) -> bool:
+    return isinstance(value, str) and "${" in value
+
+
 def _field(value: Any) -> Any:
-    """A raw config value with ``${VAR}`` substituted as the loader would;
-    an integer-looking result becomes an int. Raises Unresolved."""
-    if not isinstance(value, str) or "${" not in value:
+    """A raw config value with ``${VAR}`` substituted from this environment
+    and typed as YAML types a plain scalar (``0x..`` and ``0o..`` integers
+    included). Raises Unresolved for a variable with no value."""
+    if not _has_var(value):
         return value
+    import yaml
+
     from lakebench.config.loader import _substitute_env_vars
 
     missing: list[str] = []
     out = _substitute_env_vars(value, missing).strip()
     if missing:
         raise Unresolved(f"unresolved {', '.join(missing)}")
-    return int(out) if out.isdigit() else out
+    try:
+        typed = yaml.safe_load(out)
+    except yaml.YAMLError:
+        return out
+    return typed if isinstance(typed, int | str) and not isinstance(typed, bool) else out
 
 
 def raw_config_reason(data: dict, name: str | None = None) -> str | None:
@@ -222,17 +238,24 @@ def raw_config_reason(data: dict, name: str | None = None) -> str | None:
     name when the config sets none (a journal's ``config_name``). Raises
     Unresolved when a field it reads holds an unresolvable ``${VAR}``."""
     name = _field(data.get("name")) or name
-    for schema, seed, role in raw_corpus_candidates(data):
-        schema, seed, role = _field(schema), _field(seed), _field(role)
+    variable = False
+    for raw_fields in raw_corpus_candidates(data):
+        variable = variable or any(_has_var(v) for v in raw_fields)
+        schema, seed, role = (_field(v) for v in raw_fields)
         reason = look_guard.corpus_fields_reason(schema, seed, role)
         if reason is not None:
             return reason
         if schema == "financial":
             s3 = ((data.get("platform") or {}).get("storage") or {}).get("s3") or {}
             bronze = _field((s3.get("buckets") or {}).get("bronze")) or f"{name}-bronze"
+            variable = variable or _has_var((s3.get("buckets") or {}).get("bronze"))
             reason = look_guard.registered_prefix_reason(bronze, FINANCIAL_PREFIX)
             if reason is not None:
                 return reason
+    if variable:
+        # What a ${VAR} held when the session ran is not on record: this
+        # environment's value proves nothing either way.
+        raise Unresolved("a corpus field is set by a variable; what the run used is unknown")
     return None
 
 
@@ -248,7 +271,8 @@ def _session_configs(path: Path) -> list[dict[str, Any]]:
             except ValueError:
                 continue
             if isinstance(event, dict) and event.get("event_type") == "session.start":
-                details = event.get("details") or {}
+                details = event.get("details")
+                details = details if isinstance(details, dict) else {}
                 out.append(
                     {
                         "session": event.get("session_id"),
@@ -293,11 +317,21 @@ def audit_journals(audit: Audit, journal_dirs: Iterable[Path]) -> None:
             if not sessions:
                 audit.skip(str(path), "the journal names no session")
             for sess in sessions:
-                _audit_session(audit, d, path, sess)
+                try:
+                    _audit_session(audit, d, path, sess)
+                except Exception as e:  # noqa: BLE001 -- a malformed session entry
+                    audit.skip(
+                        f"{path} session {sess.get('session')}",
+                        f"session unreadable ({type(e).__name__})",
+                        incomplete=True,
+                    )
 
 
 def _audit_session(audit: Audit, d: Path, path: Path, sess: dict[str, Any]) -> None:
     session, config = sess["session"], sess["config"]
+    if config is not None and not isinstance(config, str):
+        audit.skip(f"session {session}", "config path is not text", incomplete=True)
+        return
     if not config:
         audit.skip(f"session {session}", "the journal names no config")
         return
