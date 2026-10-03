@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import statistics
 from collections.abc import Collection
@@ -574,6 +575,21 @@ class PipelineMetrics:
         return d
 
 
+#: The completeness threshold a stored ratio is judged against (the
+#: verdict's scale_ratio gate and the badge's ingest ratio).
+RATIO_THRESHOLD = 0.95
+
+
+def ratio_out(value: float, digits: int) -> float:
+    """*value* rounded for metrics.json, never across ``RATIO_THRESHOLD``:
+    a ratio just under it (0.9496 at 3 places) is rounded down, so the
+    verdict judged from the stored record agrees with the measurement."""
+    out = round(value, digits)
+    if value < RATIO_THRESHOLD <= out:
+        return math.floor(value * 10**digits) / 10**digits
+    return out
+
+
 @dataclass
 class BenchmarkMetrics:
     """Metrics from a Trino query benchmark run.
@@ -1080,7 +1096,8 @@ class PipelineBenchmark:
         if expected_gb > 0:
             bronze_stages = [s for s in self.stages if s.stage_name == "bronze"]
             # The last bronze-verify: in a multi-cycle run each cycle's reads
-            # every cycle so far (common.c360_bronze_run_path), so only the
+            # every cycle so far (C360: common.c360_bronze_run_path; AML: the
+            # whole pacs008 prefix, which each cycle appends to), so only the
             # last one reads the whole corpus; the first read cycle 1 alone.
             bronze_gb = (
                 bronze_stages[-1].input_size_gb if bronze_stages else self.total_data_processed_gb
@@ -1497,7 +1514,7 @@ class PipelineBenchmark:
                 ),
                 "total_core_hours": round(self.total_core_hours, 2),
                 "ingest_ratio": (
-                    round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
+                    ratio_out(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
                 ),
                 "compute_efficiency_gb_per_core_hour": round(
                     self.compute_efficiency_gb_per_core_hour, 4
@@ -1595,7 +1612,7 @@ class PipelineBenchmark:
                 self.compute_efficiency_gb_per_core_hour, 4
             ),
             "composite_qph": qph,
-            "scale_ratio": round(self.scale_ratio, 3),
+            "scale_ratio": ratio_out(self.scale_ratio, 3),
         }
         if self.query_benchmark is None:
             # No benchmark ran (no query engine, --skip-benchmark, or the run
@@ -1703,10 +1720,10 @@ class PipelineBenchmark:
         }
         # Mode-specific top-level flags (spec Section 7.1)
         if self.pipeline_mode == "batch":
-            d["scale_ratio"] = round(self.scale_ratio, 3)
+            d["scale_ratio"] = ratio_out(self.scale_ratio, 3)
         else:
             d["ingest_ratio"] = (
-                round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
+                ratio_out(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
             )
             d["pipeline_saturated"] = self.pipeline_saturated
             d["corpus_drained"] = self.corpus_drained

@@ -670,18 +670,31 @@ def test_multi_cycle_scale_ratio_reads_the_last_bronze_stage() -> None:
 
 
 def test_stored_verdict_is_the_recomputed_one_at_a_rounding_edge() -> None:
-    """A scale ratio of 0.9496 is stored as 0.95: the stored verdict, the
-    save gate and every reader judge that stored value alike."""
+    """A scale ratio of 0.9496 is stored as 0.949, never rounded up to the
+    0.95 it fails against: the stored verdict, the save gate and every
+    reader judge the stored value, and it fails as the measurement does."""
     m = sr.load_metrics(C360_BATCH)
     m.pipeline_benchmark.scale_ratio = 0.9496
     saved = m.to_dict()
-    assert saved["pipeline_benchmark"]["scale_ratio"] == 0.95
-    assert V.verdict_from_record(saved).to_dict() == saved["verdict"]
-    assert (saved["verdict"]["status"] == "PASSED") is (V.save_gate_problems(m) == [])
-    m.pipeline_benchmark.scale_ratio = 0.9494
-    saved = m.to_dict()
+    assert saved["pipeline_benchmark"]["scale_ratio"] == 0.949
     assert saved["verdict"]["status"] == "FAILED"
+    assert V.verdict_from_record(saved).to_dict() == saved["verdict"]
     assert V.save_gate_problems(m)
+    m.pipeline_benchmark.scale_ratio = 0.95004
+    saved = m.to_dict()
+    assert saved["pipeline_benchmark"]["scale_ratio"] == 0.95
+    assert saved["verdict"]["status"] == "PASSED"
+    assert V.save_gate_problems(m) == []
+
+
+def test_ratio_out_rounds_as_before_away_from_the_threshold() -> None:
+    from lakebench.metrics.collector import ratio_out
+
+    assert ratio_out(1.00888, 3) == 1.009
+    assert ratio_out(0.99149, 3) == 0.991
+    assert ratio_out(0.9496, 3) == 0.949
+    assert ratio_out(0.94996, 4) == 0.9499
+    assert ratio_out(0.5, 3) == 0.5
 
 
 def test_save_gate_reason_comes_first() -> None:
