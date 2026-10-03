@@ -133,7 +133,10 @@ class FakeCore:
     def add_ns(self, name: str, uid: str, nonce: str) -> None:
         self.namespaces[name] = {
             "uid": uid,
-            "annotations": {"lakebench.deployment/deploy-nonce": nonce},
+            "annotations": {
+                "lakebench.deployment/deploy-nonce": nonce,
+                "lakebench.deployment/name": name,
+            },
         }
 
 
@@ -159,8 +162,15 @@ class FakeS3:
     def get_paginator(self, _name):
         return self
 
-    def paginate(self, Bucket):  # noqa: N803
-        return [{"Contents": [{"Key": k} for k in self.buckets[Bucket]]}]
+    def paginate(self, Bucket, Prefix=""):  # noqa: N803
+        keys = [k for k in self.buckets[Bucket] if k.startswith(Prefix)]
+        return [
+            {
+                "Contents": [
+                    {"Key": k, "Size": len(self.buckets[Bucket][k]), "ETag": "e"} for k in keys
+                ]
+            }
+        ]
 
     def empty_bucket(self, b, keep_prefixes=()):
         self.buckets[b].clear()
@@ -208,7 +218,7 @@ class FakeRunner:
         self.on_deploy: Any = None
         self.counter = 0
 
-    def __call__(self, args, *, cwd, log, interruptible=False, on_spawn=None):
+    def __call__(self, args, *, cwd, log, interruptible=False, on_spawn=None, stdout=None):
         args = tuple(args)
         self.calls.append(args)
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -1861,3 +1871,300 @@ def test_a_legacy_bucket_left_after_terminal_rows_is_still_removed(env):
     )
     H.resume(env.h, {})
     assert "rel17-s-p5-legacy-abcdef" not in env.s3.buckets
+
+
+# -- upgrade from 1.6 ------------------------------------------------------------
+
+DATAGEN_PREFIX = "customer/interactions/"
+
+
+class FakeV16(FakeRunner):
+    """The 1.6 CLI: init writes a 1.6-style config, deploy stamps a nonce but
+    writes no local state, run generates bronze and a PASSED record."""
+
+    def __init__(self, core, s3, tables=None):
+        super().__init__(core, s3)
+        self.tables = tables or {"silver": ["customer_interactions_enriched"], "gold": ["g"]}
+
+    def __call__(self, args, *, cwd, log, interruptible=False, on_spawn=None, stdout=None):
+        args = tuple(args)
+        self.calls.append(args)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if on_spawn is not None:
+            on_spawn(os.getpid(), "0")
+        verb = args[0]
+        if verb == "init":
+            assert "--no-interactive" in args
+            return self._init(args, log)
+        cfg = Path(args[1])
+        name = yaml.safe_load(cfg.read_text())["name"]
+        if verb == "deploy":
+            self.core.add_ns(name, "u1", "n1")
+            for b in _buckets_of(cfg):
+                self.s3.create_bucket(b)
+                self.s3.owner[b] = name
+            return H.ChildResult(self.deploy_code, [], log)
+        if verb == "run":
+            assert "--generate" in args
+            self.s3.buckets[f"{name}-bronze"][DATAGEN_PREFIX + "part-0.parquet"] = b"data"
+            d = cfg.parent / "lakebench-output" / "runs" / "run-20261003-000001-a1b2c3"
+            d.mkdir(parents=True)
+            (d / "metrics.json").write_text(json.dumps({"verdict": {"status": "PASSED"}}))
+            return H.ChildResult(self.run_code, [], log)
+        if verb == "query":
+            layer = args[args.index("--sql") + 1].rsplit(".", 1)[1]
+            stdout.write_text(json.dumps({"rows": [[t] for t in self.tables[layer]]}))
+            return H.ChildResult(0, [], log)
+        raise AssertionError(f"1.6 runner got {verb}")
+
+
+class FakeV17(FakeRunner):
+    """This tree's CLI over a 1.6 deployment: init --from, deploy adopting
+    the namespace, run without --generate, query."""
+
+    def __init__(self, core, s3):
+        super().__init__(core, s3)
+        self.tables = {"silver": ["customer_interactions_enriched"], "gold": ["g", "g2"]}
+        self.run_touches_bronze = False
+
+    def __call__(self, args, *, cwd, log, interruptible=False, on_spawn=None, stdout=None):
+        args = tuple(args)
+        if args[0] == "init" and "--from" in args:
+            self.calls.append(args)
+            old = yaml.safe_load(Path(args[args.index("--from") + 1]).read_text())
+            name = old["name"]
+            new = {
+                "name": name,
+                "recipe": old.get("recipe", "hive-iceberg-spark-trino"),
+                "workload": {"schema": "customer360", "datagen": {"scale": 1.0}},
+                "platform": {
+                    "kubernetes": {"context": old["platform"]["kubernetes"]["context"]},
+                    "storage": {
+                        "s3": {
+                            **old["platform"]["storage"]["s3"],
+                            "buckets": {k: f"{name}-{k}" for k in ("bronze", "silver", "gold")},
+                        }
+                    },
+                },
+            }
+            Path(args[args.index("-o") + 1]).write_text(yaml.safe_dump(new))
+            return H.ChildResult(0, [], log)
+        if args[0] == "deploy":
+            assert "--require-new" not in args
+            self.calls.append(args)
+            cfg = Path(args[1])
+            name = yaml.safe_load(cfg.read_text())["name"]
+            ns = self.core.namespaces[name]
+            ns["annotations"]["lakebench.deployment/deploy-nonce"] = "n2"
+            write_state(cfg, name, name, [("n2", "confirmed")])
+            return H.ChildResult(self.deploy_code, [], log)
+        if args[0] == "run":
+            assert "--generate" not in args
+            if self.run_touches_bronze:
+                name = yaml.safe_load(Path(args[1]).read_text())["name"]
+                self.s3.buckets[f"{name}-bronze"][DATAGEN_PREFIX + "part-0.parquet"] = b"other"
+        if args[0] == "query":
+            self.calls.append(args)
+            layer = args[args.index("--sql") + 1].rsplit(".", 1)[1]
+            stdout.write_text(json.dumps({"rows": [[t] for t in self.tables[layer]]}))
+            return H.ChildResult(0, [], log)
+        return super().__call__(
+            args, cwd=cwd, log=log, interruptible=interruptible, on_spawn=on_spawn
+        )
+
+
+@pytest.fixture
+def uenv(env):
+    env.h.runner = FakeV17(env.core, env.s3)
+    env.runner = env.h.runner
+    env.v16 = FakeV16(env.core, env.s3)
+    env.h.v16_runner = env.v16
+    return env
+
+
+def _up(env):
+    return env.h.rowlog.latest()["UPGRADE"]
+
+
+def test_upgrade_deploys_with_16_and_runs_and_destroys_with_this_tree(uenv):
+    assert uenv.h.upgrade() == 0, uenv.said
+    st = _up(uenv)
+    assert st["status"] == "destroyed" and st["upgrade_verdict"] == "PASS"
+    assert [c[0] for c in uenv.v16.calls] == ["init", "deploy", "run", "query", "query"]
+    v17 = [c[0] for c in uenv.runner.calls]
+    assert v17 == ["init", "deploy", "run", "query", "query", "destroy"]
+    destroy = [c for c in uenv.runner.calls if c[0] == "destroy"][0]
+    assert destroy[3:5] == ("--expect-incarnation", "u1#n2")
+    assert st["v16_incarnation"] == "u1#n1"
+    assert f"closed {st['namespace']} " in uenv.ledger.read_text()
+    assert (uenv.out / "extra" / "runs").is_dir() and not (uenv.out / "uat" / "runs").exists()
+    assert "upgrade (1.6 to 1.7.0)" in (uenv.out / "results-extra.md").read_text()
+    assert "UPGRADE" not in uenv.h.write_results().read_text()
+
+
+def test_upgrade_old_config_pins_the_context_and_keeps_credentials_as_references(uenv):
+    uenv.h.upgrade()
+    old = yaml.safe_load(Path(_up(uenv)["v16_config"]).read_text())
+    assert old["platform"]["kubernetes"]["context"] == "ctx"
+    assert old["platform"]["storage"]["s3"]["access_key"] == "${LAKEBENCH_S3_ACCESS_KEY}"
+
+
+def test_upgrade_fails_when_this_tree_changes_the_16_bronze(uenv):
+    uenv.runner.run_touches_bronze = True
+    assert uenv.h.upgrade() == 1
+    assert any("bronze changed" in p for p in _up(uenv)["upgrade_problems"])
+    assert _up(uenv)["status"] == "destroyed"
+
+
+def test_upgrade_fails_when_a_16_table_is_gone(uenv):
+    uenv.runner.tables = {"silver": [], "gold": ["g"]}
+    assert uenv.h.upgrade() == 1
+    assert any("silver tables 1.6 wrote are gone" in p for p in _up(uenv)["upgrade_problems"])
+
+
+def test_upgrade_leaves_a_namespace_redeployed_before_the_17_deploy(uenv, monkeypatch):
+    real = uenv.h.datagen_listing
+
+    def listing(config):
+        name = yaml.safe_load(config.read_text())["name"]
+        uenv.core.namespaces[name]["uid"] = "someone-else"
+        return real(config)
+
+    monkeypatch.setattr(uenv.h, "datagen_listing", listing)
+    assert uenv.h.upgrade() == 1
+    assert _up(uenv)["status"] == "left"
+    assert "deploy" not in [c[0] for c in uenv.runner.calls]
+    assert "destroy" not in [c[0] for c in uenv.runner.calls]
+
+
+def test_a_failed_17_deploy_is_destroyed_by_an_incarnation_this_row_made(uenv):
+    uenv.runner.deploy_code = 1
+    assert uenv.h.upgrade() == 1
+    destroy = [c for c in uenv.runner.calls if c[0] == "destroy"]
+    assert destroy and destroy[0][4] in ("u1#n1", "u1#n2")
+    assert _up(uenv)["status"] == "destroyed"
+    assert "run" not in [c[0] for c in uenv.runner.calls]
+
+
+def test_a_failed_16_deploy_that_created_nothing_is_not_deployed(uenv):
+    uenv.v16.deploy_code = 1
+
+    def no_deploy(args, **kw):
+        uenv.v16.calls.append(tuple(args))
+        if args[0] == "deploy":
+            return H.ChildResult(1, [], kw["log"])
+        return FakeV16.__call__(uenv.v16, args, **kw)
+
+    uenv.h.v16_runner = no_deploy
+    assert uenv.h.upgrade() == 1
+    assert _up(uenv)["status"] == "not-deployed"
+    assert f"closed {_up(uenv)['namespace']} " in uenv.ledger.read_text()
+
+
+def test_upgrade_bystander_untouched_passes_and_a_damaged_one_fails(uenv, tmp_path):
+    by = H.Row("BY", "customer360", "batch", "hive-iceberg-spark-trino", 1.0, 42)
+    plan = uenv.h.plan_row(by, tmp_path / "by")
+    name = _deploy_fake(uenv, plan.config, "nb", "ub")
+    uenv.s3.buckets[f"{name}-bronze"][DATAGEN_PREFIX + "x"] = b"by"
+    assert uenv.h.upgrade(plan.config) == 0, uenv.said
+    assert _up(uenv)["bystander_checked"] is True
+
+
+def test_upgrade_bystander_damage_is_caught(uenv, tmp_path):
+    by = H.Row("BY", "customer360", "batch", "hive-iceberg-spark-trino", 1.0, 42)
+    plan = uenv.h.plan_row(by, tmp_path / "by")
+    name = _deploy_fake(uenv, plan.config, "nb", "ub")
+    uenv.s3.buckets[f"{name}-bronze"][DATAGEN_PREFIX + "x"] = b"by"
+    real = uenv.runner.__call__
+
+    def runner(args, **kw):
+        res = real(args, **kw)
+        if args[0] == "destroy":
+            uenv.s3.buckets[f"{name}-bronze"].clear()
+        return res
+
+    uenv.h.runner = runner
+    assert uenv.h.upgrade(plan.config) == 1
+    assert any("bystander lost" in p for p in _up(uenv)["upgrade_problems"])
+
+
+def test_upgrade_resume_destroys_by_the_16_incarnation_without_rerunning(uenv):
+    name = "rel17-up-abcdef"
+    v16dir = uenv.out / "upgrade" / "v16"
+    v17dir = uenv.out / "upgrade" / "v17"
+    v16dir.mkdir(parents=True)
+    v17dir.mkdir(parents=True)
+    old = v16dir / f"{name}.yaml"
+    FakeRunner._init(
+        uenv.v16,
+        (
+            "init",
+            "-n",
+            name,
+            "-r",
+            "hive-iceberg-spark-trino",
+            "-w",
+            "customer360",
+            "-s",
+            "1",
+            "--endpoint",
+            "http://10.0.1.50:80",
+            "-o",
+            str(old),
+        ),
+        uenv.out / "l.log",
+    )
+    data = yaml.safe_load(old.read_text())
+    data["platform"]["kubernetes"] = {"context": "ctx"}
+    old.write_text(yaml.safe_dump(data))
+    uenv.core.add_ns(name, "u1", "n1")
+    uenv.h.log(
+        "UPGRADE",
+        "running",
+        namespace=name,
+        config=str(v17dir / f"{name}.yaml"),
+        v16_config=str(old),
+        peak=[1, 1],
+        upgrade=True,
+        v16_incarnation="u1#n1",
+        incarnation="u1#n1",
+        child_pid=1,
+        child_start="x",
+    )
+    H.resume(uenv.h, {})
+    assert "run" not in [c[0] for c in uenv.runner.calls]
+    destroy = [c for c in uenv.runner.calls if c[0] == "destroy"]
+    assert destroy and destroy[0][4] == "u1#n1"
+    st = _up(uenv)
+    assert st["status"] == "destroyed" and st["upgrade_verdict"] == "FAIL"
+
+
+def _fake_python(tmp_path, version, where):
+    py = tmp_path / "venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text(f"#!/bin/sh\nprintf '%s\\n%s\\n' '{version}' '{where}'\n")
+    py.chmod(0o755)
+    return str(py)
+
+
+def test_v16_interpreter_must_be_16_and_isolated(tmp_path):
+    inside = tmp_path / "venv" / "lib" / "lakebench" / "__init__.py"
+    assert H.v16_python_problem(_fake_python(tmp_path, "1.6.0", inside)) is None
+
+
+def test_v16_interpreter_refuses_another_version(tmp_path):
+    inside = tmp_path / "venv" / "lib" / "lakebench" / "__init__.py"
+    assert "not 1.6" in H.v16_python_problem(_fake_python(tmp_path, "1.7.0", inside))
+
+
+def test_v16_interpreter_refuses_a_lakebench_outside_its_environment(tmp_path):
+    where = ROOT / "src" / "lakebench" / "__init__.py"
+    assert "outside its own environment" in H.v16_python_problem(
+        _fake_python(tmp_path, "1.6.0", where)
+    )
+
+
+def test_query_names_parse_list_dict_and_csv_rows(tmp_path):
+    p = tmp_path / "q.json"
+    p.write_text(json.dumps({"rows": [["a"], {"Table": "b"}, '"c",x']}))
+    assert H.parse_query_names(p) == ["a", "b", "c"]
