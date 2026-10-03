@@ -393,3 +393,47 @@ def test_generate_with_an_unreachable_cluster_still_exits_4(monkeypatch, tmp_pat
     monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", stop)
     res = CliRunner().invoke(app, ["generate", str(dg._write_cfg(tmp_path)), "--yes"])
     assert res.exit_code == 4, res.output
+
+
+def test_multi_cycle_deployer_takes_the_gates_decision_not_the_flag(monkeypatch, tmp_path):
+    """--allow-stale-bronze on a multi-cycle run whose cycle-0 gate found the
+    prefix empty: the cycle deployers are built without it, so objects that
+    land after the gate are refused (exit 3) rather than written over with no
+    stale-bronze record. --generate is refused on a multi-cycle run, so this
+    gate is the only one before the cycles."""
+    from types import SimpleNamespace as NS
+
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from tests import test_datagen_timeout_and_regenerate as dg
+
+    monkeypatch.chdir(tmp_path)
+    dg._stub_full_run(monkeypatch)
+    monkeypatch.setattr("lakebench.s3.S3Client", dg._FakeS3)
+    monkeypatch.setattr(
+        "lakebench.cli._run.enforce_bronze_gate",
+        lambda *a, **k: NS(stale_allowed=False, record=lambda: None),
+    )
+    built: list[bool] = []
+
+    class _Refusing:
+        def __init__(self, engine, allow_stale_bronze=False, **kw):
+            built.append(allow_stale_bronze)
+
+        def deploy_cycle(self, cycle_index, total_cycles):
+            from lakebench.deploy.engine import DeploymentResult
+            from lakebench.exit_codes import REFUSAL_DETAIL
+
+            return DeploymentResult(
+                component="datagen",
+                status=DeploymentStatus.FAILED,
+                message="holds objects",
+                details={REFUSAL_DETAIL: "run.bronze_nonempty"},
+            )
+
+    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", _Refusing)
+    cfg = dg._write_cfg(tmp_path, architecture="{pipeline: {cycles: 2}}")
+    res = CliRunner().invoke(app, ["run", str(cfg), *_RUN, "--allow-stale-bronze"])
+    assert built == [False], res.output[-2000:]
+    assert res.exit_code == 3, res.output[-2000:]
