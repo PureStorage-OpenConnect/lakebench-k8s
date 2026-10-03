@@ -1056,11 +1056,23 @@ def test_no_tracked_file_holds_a_heldout_seed():
         path = ROOT / rel
         if rel in _PLAINTEXT_ALLOWED or not path.is_file():
             continue
-        try:
-            texts[rel] = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-    problems = ds.absence_problems(texts, exclude=())
+        # latin-1 decodes any bytes, so a non-UTF-8 file is scanned too.
+        texts[rel] = path.read_bytes().decode("latin-1")
+    # Spent and recorded-look seeds are public: a registered look writes its
+    # seed into aml_registered_looks.json and then spent_seeds by design.
+    problems = ds.absence_problems(texts)
     assert not problems, problems
     for rel in _PLAINTEXT_ALLOWED:
         assert (ROOT / rel).is_file(), f"{rel} is gone: drop it from _PLAINTEXT_ALLOWED"
+
+
+def test_absence_refusal_text_masks_long_numbers(two_configs, monkeypatch):
+    from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
+    def broken(*a, **k):
+        raise ValueError(f"bad entry {EV}")
+
+    monkeypatch.setattr(ds, "absence_problems", broken)
+    with pytest.raises(sm.ScriptsMapError) as e:
+        sm.build_script_configmaps(two_configs[0], "ns")
+    assert _no_seed_in(str(e.value))
