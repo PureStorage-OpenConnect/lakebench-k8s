@@ -111,7 +111,12 @@ the seed from the manifest's instance seeds, by design; the reference
 scorer's report records it as `corpus_seed`; and the run record
 (`metrics.json`, `report.html`) still stores the configured seed until the
 run record writes the seed's salted hash instead. Do not check in the run
-output of a registered generate before its look is recorded.
+output of a registered generate before its look is recorded. In practice
+only `lakebench generate --registered-corpus` reaches the cluster with such
+a config: `run`, `benchmark`, `query`, `compare`, `reproduce` and the
+`financial` commands refuse it before any cluster call, so the in-cluster
+reference scorer never scores a registered corpus; the look scores the local
+copy with `scripts/aml_gate.py --registered`.
 
 The corpus a look scores must be the one `lakebench generate
 --registered-corpus` wrote on the look host: `scripts/aml_gate.py

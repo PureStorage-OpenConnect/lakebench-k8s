@@ -177,7 +177,11 @@ def _fake_generate(monkeypatch, env, *, deploy=None, complete=True):
         raise RuntimeError("no capacity read in this test")
 
     monkeypatch.setattr(gen, "get_k8s_client", first_cluster_call)
-    monkeypatch.setattr(gen, "enforce_bronze_gate", lambda *a, **k: None)
+    monkeypatch.setattr(
+        gen, "enforce_bronze_gate", lambda *a, **k: SimpleNamespace(stale_allowed=False)
+    )
+    # generate stops an earlier datagen Job before the gate (a cluster call).
+    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
     monkeypatch.setattr("lakebench.metrics.datagen_aggregator.drop_sidecar", lambda ns: None)
     monkeypatch.setattr(deploy_mod, "DeploymentEngine", lambda cfg: SimpleNamespace())
 
@@ -668,11 +672,15 @@ def test_aml_gate_registered_preflight_requires_the_entry(env, monkeypatch, caps
     looks.write_text('{"looks": []}')
     monkeypatch.setattr(ds, "looks_path", lambda: looks)
     corpus = _local_copy(env.tmp / "copy")
+    # A registered look reads a held-out seed only from an owner-only file.
+    seed_file = env.tmp / "seed"
+    seed_file.write_text(f"{pc.EV}\n")
+    seed_file.chmod(0o600)
     rc = gate.main(
         [
             str(corpus),
-            "--seed",
-            str(pc.EV),
+            "--seed-file",
+            str(seed_file),
             "--registered",
             "evaluation",
             "--out",

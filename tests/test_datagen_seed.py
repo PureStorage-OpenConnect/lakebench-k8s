@@ -441,6 +441,9 @@ def test_registered_look_claims_out_before_spark(tmp_path, looks_open, monkeypat
     # earlier look of this seed, committed predictions), so the claim decides.
     monkeypatch.setattr(g, "clean_checkout_error", lambda: None)
     monkeypatch.setattr(g, "seed_ever_recorded", lambda seed: None)
+    # The corpus is the one generate --registered-corpus wrote (its own tests
+    # are in test_registered_corpus.py).
+    monkeypatch.setattr(g, "registered_corpus_problem", lambda *a: None)
     monkeypatch.setattr(g, "predictions_error", lambda image: None)
     monkeypatch.setattr(ds, "load_predictions", lambda *a, **k: ({}, "0" * 64))
     out = tmp_path / "look.json"

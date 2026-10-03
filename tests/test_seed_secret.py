@@ -549,6 +549,14 @@ def _run_gate(monkeypatch, tmp_path, argv, stop_at="predictions"):
         return None
 
     monkeypatch.setattr(g, "seed_ever_recorded", recorded)
+
+    # The corpus-ledger check (test_registered_corpus.py) passes here, and
+    # sees the seed the gate resolved.
+    def corpus_ok(role, seed, image, corpus):
+        seen.setdefault("corpus_checks", []).append((role, seed))
+        return None
+
+    monkeypatch.setattr(g, "registered_corpus_problem", corpus_ok)
     monkeypatch.setattr(g, "predictions_error", lambda image: f"stop at {stop_at}")
     corpus = tmp_path / "c"
     corpus.mkdir(exist_ok=True)
@@ -577,6 +585,8 @@ def test_registered_look_takes_its_seed_from_the_file(monkeypatch, tmp_path, cap
     err = capsys.readouterr().err
     assert rc == 1 and "stop at predictions" in err, err
     assert seen["seed"] == EV
+    # The preflight's corpus-ledger check ran on the file's seed.
+    assert seen["corpus_checks"] == [("evaluation", EV)]
     assert _no_seed_in(err)
 
 

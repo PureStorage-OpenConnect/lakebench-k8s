@@ -893,11 +893,15 @@ def test_look_history_search_keeps_the_seed_off_the_command_line(held, monkeypat
 
     def fake_run(argv, *a, **k):
         argvs.append(argv)
+        if "rev-parse" in argv:  # the search refuses a shallow clone first
+            return Done("false\n")
         if "log" in argv:
             return Done("c0ffee\nbadc0de\n")
         if argv[-1].startswith("c0ffee:"):
             return Done(json.dumps({"looks": [{"role": "evaluation", "seed": EV}]}))
-        return Done("", 128)
+        # Every listed commit holds the record (the log filters to commits
+        # that add or change it); one without this seed.
+        return Done(json.dumps({"looks": []}))
 
     monkeypatch.setattr(g.subprocess, "run", fake_run)
     msg = g.seed_ever_recorded(EV)
@@ -1084,20 +1088,17 @@ def test_compare_redaction_uses_the_hash_record(held, monkeypatch):
 
 
 def test_reproduce_redacts_and_refuses_through_the_hash_record(held, monkeypatch):
-    from types import SimpleNamespace
-
     from lakebench.cli import _reproduce as rep
 
     text = f"seed {EV} is refused; seed 43 is fine; 12 rows"
     out = rep._redact_seed_text(text)
     assert _no_seed_in(out) and "43" in out and "12 rows" in out
 
-    def cfg(seed):
-        dg = SimpleNamespace(corpus_role=None, seed=seed)
-        wl = SimpleNamespace(datagen=dg, schema_type=SimpleNamespace(value="financial"))
-        return SimpleNamespace(architecture=SimpleNamespace(workload=wl))
+    # reproduce refuses a config through the look guard's one rule (AM-22).
+    from lakebench.aml import look_guard
 
-    assert rep._config_held_out(cfg(EV)) and not rep._config_held_out(cfg(43))
+    assert look_guard.corpus_fields_reason("financial", EV, None) is not None
+    assert look_guard.corpus_fields_reason("financial", 43, None) is None
     monkeypatch.setattr(ds, "load_looks", lambda path=None: [])
     meta = {"experiment_identity": {"workload": "financial", "seed": EV}}
     kind, why = rep._spent_look(meta)
@@ -1105,8 +1106,6 @@ def test_reproduce_redacts_and_refuses_through_the_hash_record(held, monkeypatch
 
 
 def test_reproduce_fails_closed_without_the_hash_record(monkeypatch):
-    from types import SimpleNamespace
-
     from lakebench.cli import _reproduce as rep
 
     monkeypatch.setattr(ds, "_heldout", _gone)
@@ -1118,9 +1117,9 @@ def test_reproduce_fails_closed_without_the_hash_record(monkeypatch):
         raise ValueError("record conflict")
 
     monkeypatch.setattr(ds, "heldout_role", role_broken)
-    dg = SimpleNamespace(corpus_role=None, seed=43)
-    wl = SimpleNamespace(datagen=dg, schema_type=SimpleNamespace(value="financial"))
-    assert rep._config_held_out(SimpleNamespace(architecture=SimpleNamespace(workload=wl)))
+    from lakebench.aml import look_guard
+
+    assert look_guard.corpus_fields_reason("financial", 43, None) is not None
 
 
 def test_shipped_hash_file_history_is_clean():

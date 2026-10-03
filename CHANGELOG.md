@@ -41,6 +41,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
 - Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
 - `stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
+- An AML run over a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset), or over a bucket that holds a corpus from a held-out or spent seed (such as 42), stops at bronze-verify with exit 2; 1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.
+- `run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
 - Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
 - `benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run's; `query` writes no record.
 - `run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run` in docs/cli-reference.md).
@@ -1106,7 +1108,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   value.
 - **A registered (held-out) AML corpus's seed travels through a Kubernetes
   Secret.** For a `financial` config whose `corpus_role` is `evaluation` or
-  `robustness` (or whose seed hashes to a held-out seed), `generate` writes
+  `robustness` (or whose seed hashes to a held-out seed), `generate
+  --registered-corpus` (the only command that takes such a config) writes
   the seed into an immutable Secret in the namespace,
   `lakebench-datagen-seed-<salted-hash prefix>`, and the datagen Job and the
   reference scorer read it as `LB_DATAGEN_SEED` from that Secret instead of
