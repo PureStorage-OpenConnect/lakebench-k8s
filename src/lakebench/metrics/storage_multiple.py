@@ -27,7 +27,8 @@ Incomplete multipart uploads do not appear in a listing and are not counted.
 
 Per bucket, ``buckets`` is a list of ``{bucket, layers, physical_bytes,
 unattributed_bytes, listing_error}``: a bucket name is always a value, never
-a key, so the fixture scrubber can rewrite it (LB-265).
+a key, so the fixture scrubber can rewrite it (it refuses a record that
+uses a bucket name as a key).
 """
 
 from __future__ import annotations

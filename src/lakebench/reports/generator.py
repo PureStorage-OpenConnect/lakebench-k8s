@@ -3187,9 +3187,10 @@ class ReportGenerator:
                 f"Raw datagen files in {layer}: {value / (1024**3):.2f} GiB, physical only, "
                 "outside the total."
             )
-        # One entry per bucket, the name a value (LB-265). Development
-        # builds before the fix keyed these by bucket name; that shape was
-        # never released and is not read.
+        # One entry per bucket, the name a value (never a key: the fixture
+        # scrubber refuses a record keyed by bucket name). Development builds
+        # of 1.7.0 keyed these by bucket name; that shape was never released
+        # and is not read.
         bucket_rows = sm.get("buckets")
         listing_notes = []
         for b in bucket_rows if isinstance(bucket_rows, list) else []:
