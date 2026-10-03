@@ -320,3 +320,11 @@ def test_configured_gold_strategy_is_normalised() -> None:
         spark={"conf": {"spark.lb.gold.strategy": " Two_Phase_Agg "}},
     )
     assert build_config_snapshot(cfg)["requested"] == {"gold_strategy": "two_phase_agg"}
+
+
+def test_a_malformed_stored_entry_does_not_break_the_verdict() -> None:
+    rec = sr.load_record(C360_BATCH)
+    rec["experiment"]["requested_effective"] = {
+        "gold_strategy": {"requested": ["auto"], "effective": {"x": 1}, "source": "auto"}
+    }
+    assert V.verdict_from_record(rec).status == "PASSED"

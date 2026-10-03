@@ -258,10 +258,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `experiment.requested_effective`. A request that was not met (a
   configured gold strategy the gold job did not run, an executor override
   that ran with fewer executors, a mode that did not run), or incremental
-  gold chosen automatically outside a multi-cycle cycle, is listed in
-  `experiment.requested_effective_mismatches` and labelled in the verdict
-  (`qualifiers.requested_effective`) and the report; it never fails the
-  run or enters identity. The config snapshot records the requested gold
+  gold chosen automatically outside a multi-cycle cycle, is labelled in
+  the verdict (`qualifiers.requested_effective`) and the report, decided
+  when the record is read (`experiment.requested_effective_mismatches`
+  keeps the run's own list); it never fails the run or enters identity. The config snapshot records the requested gold
   strategy (`requested.gold_strategy`).
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
