@@ -150,8 +150,23 @@ def _check(spark):
     _append(spark, 1, now - 100)
 
     # The pin: an append after the pin is not in the pinned frame.
-    txns, sid, _versions, rows, newest = g._pin_silver(spark)
+    txns, sid, _versions, rows, newest, tt = g._pin_silver(spark)
     assert sid is not None and rows == len(_rows(1)), (sid, rows)
+    # AML-9 tick record: the snapshot's own metadata counts, read from the
+    # real Iceberg summary (copy-on-write: no delete files) and its commit
+    # time in UTC.
+    assert tt["snapshot"] == sid and tt["count_source"] == "summary", tt
+    assert tt["total_records"] == len(_rows(1)), tt
+    assert tt["pos_deletes"] == 0 and tt["eq_deletes"] == 0, tt
+    assert tt["committed_at"].endswith("Z") and tt["committed_at"][:2] == "20", tt
+    want = spark.sql(
+        "SELECT CAST(unix_micros(committed_at) AS BIGINT) AS us FROM "
+        f"lakehouse.silver.transactions.snapshots WHERE snapshot_id = {sid}"
+    ).collect()[0]["us"]
+    from datetime import datetime as _dt
+
+    got = _dt.strptime(tt["committed_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+    assert round((got - _dt(1970, 1, 1)).total_seconds() * 1e6) == want, (tt, want)
     assert abs(newest - (now - 100)) < 1e-3, newest
     _append(spark, 2, now - 50)
     assert txns.count() == len(_rows(1))
@@ -202,6 +217,11 @@ def _check(spark):
         assert is_pin(rec[0][key]), (key, rec)
     assert rec[0]["pinned_txns"] == g._current_snapshot(spark, "lakehouse.silver.transactions")
     assert rec[0]["committed_alerts"] == g._current_snapshot(spark, "lakehouse.gold.alerts")
+    # The tick's time-travel record names the snapshot detection read, with
+    # its summary count (the rows re-appended after the DELETE above).
+    tt1 = rec[0]["tt"]
+    assert tt1["snapshot"] == rec[0]["pinned_txns"] and tt1["table"] == "silver.transactions"
+    assert tt1["total_records"] == len(_rows(1)) and tt1["count_source"] == "summary", tt1
     order = [
         i
         for i, ln in enumerate(lines)

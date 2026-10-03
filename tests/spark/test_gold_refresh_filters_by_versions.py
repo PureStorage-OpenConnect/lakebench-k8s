@@ -107,7 +107,7 @@ def _run(jars):
         raw_row_count = spark.table("lh.silver.transactions").count()
 
         # Pinned-snapshot path.
-        txns_pinned, _sid, versions_used, _rows, _newest = gr._pin_silver(spark)
+        txns_pinned, _sid, versions_used, _rows, _newest, _tt = gr._pin_silver(spark)
         vsid = gr._current_snapshot(spark, "lh.silver.silver_batch_versions")
         pinned_row_count = txns_pinned.count()
 
@@ -117,7 +117,7 @@ def _run(jars):
         real_current_snapshot = gr._current_snapshot
         gr._current_snapshot = lambda _s, _fq: None
         try:
-            txns_fallback, sid_fb, versions_fb, _rows_fb, _newest_fb = gr._pin_silver(spark)
+            txns_fallback, sid_fb, versions_fb, _rows_fb, _newest_fb, _tt_fb = gr._pin_silver(spark)
             fallback_row_count = txns_fallback.count()
             assert sid_fb is None, sid_fb
             assert versions_fb == "none", versions_fb

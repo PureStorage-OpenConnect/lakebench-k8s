@@ -702,6 +702,16 @@ driver that restarted leaves its earlier pod's ticks out
 `continuous.drain.log_from_driver_start` is false when log rotation trimmed
 the log's first ticks.
 
+Each tick also records the `silver.transactions` snapshot it read for the
+time-travel read after the window, from the snapshot's metadata only (no
+scan, so the tick's timings do not move): `continuous.time_travel.ticks[]`
+holds the driver start, the cycle, the snapshot id, its `committed_at` (UTC),
+and its `total_records`, `pos_deletes` and `eq_deletes` from the Iceberg
+snapshot summary, with `count_source: "summary"`. When the summary has no
+row count, `total_records` is null and `count_source` is `"unavailable"`; the
+current table's count is never recorded in its place. A tick with no
+transactions snapshot records none.
+
 After the streams stop and every gate has decided, the score job reads
 those six snapshots of the drained tick and scores **`recall_covered`** per
 typology: the designated

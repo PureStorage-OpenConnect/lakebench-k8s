@@ -2552,8 +2552,10 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     that could not be written is not (nothing was asked; scoring reads
     not_scored).
 
-    Records ``continuous.drain``, ``continuous.ticks`` and
-    ``continuous.ticks_unpinned`` from the drain's full log. Only the drain
+    Records ``continuous.drain``, ``continuous.ticks``,
+    ``continuous.ticks_unpinned`` and ``continuous.time_travel.ticks`` (each
+    tick's transactions snapshot and its metadata counts) from the drain's
+    full log. Only the drain
     log is parsed: the window's log stops before the last tick. That log is
     the current driver pod's, so an earlier pod's ticks are not in it
     (``drain.ticks_scope``), and ``drain.log_from_driver_start`` is False
@@ -2567,6 +2569,7 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
         scored_tick,
         tick_list,
         ticks_unpinned,
+        time_travel_ticks,
     )
 
     print_info(f"Draining gold-refresh: finishing its current tick (up to {DRAIN_BUDGET_S}s)...")
@@ -2576,10 +2579,12 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     reason = ""
     record = drain.record()
     ticks = None
+    tt_ticks = None
     if drain.state == "drained":
         parsed = parse_tick_records(drain.logs, run_id)
         tick, reason = scored_tick(parsed)
         ticks = tick_list(parsed["ticks"])
+        tt_ticks = time_travel_ticks(parsed["ticks"])
         # The log is the current driver pod's: an earlier pod's ticks are not
         # in it. True when it still runs from its driver's first tick (not
         # trimmed by log rotation); it does not say no restart happened.
@@ -2612,6 +2617,8 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
         if ticks is not None:
             cont["ticks"] = ticks
             cont["ticks_unpinned"] = ticks_unpinned(ticks)
+        if tt_ticks is not None:
+            cont.setdefault("time_travel", {})["ticks"] = tt_ticks
         if problem:
             cont.setdefault("gate_problems", []).append(problem)
     return drain, tick, reason, problem

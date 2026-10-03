@@ -1,11 +1,16 @@
 """Tick records of the continuous AML gold-refresh driver.
 
-``gold_refresh_financial.run_tick`` logs three lines per tick, each carrying
+``gold_refresh_financial.run_tick`` logs these lines per tick, each carrying
 the run id::
 
     Cycle N: pinned txns=<id> entities=<id> accounts=<id> versions=<id> at=<epoch_s> run=<run>
+    Cycle N: tt-record table=<t> snapshot=<id> committed_at=<iso> total_records=<n>
+        pos_deletes=<n> eq_deletes=<n> count_source=<summary|unavailable> run=<run>
     Cycle N: committed alerts=<id> status=<id> run=<run>
     Cycle N: completed run=<run>
+
+(the tt-record line is one line, logged only when the transactions snapshot
+is an id; an unknown value reads ``null``)
 
 and ``main`` logs ``Drain complete: ... last completed cycle N run=<run>``
 once the drain marker stopped the loop. An id is an Iceberg snapshot id, or
@@ -28,6 +33,11 @@ _BANNER = "Gold Refresh (Financial) -- baseline + periodic detection"
 _PINNED = re.compile(
     r"Cycle (\d+): pinned txns=(\S+) entities=(\S+) accounts=(\S+) versions=(\S+) "
     r"at=([\d.]+) run=(\S+)\s*$"
+)
+_TT_RECORD = re.compile(
+    r"Cycle (\d+): tt-record table=(\S+) snapshot=(\S+) committed_at=(\S+) "
+    r"total_records=(\S+) pos_deletes=(\S+) eq_deletes=(\S+) count_source=(\S+) "
+    r"run=(\S+)\s*$"
 )
 _COMMITTED = re.compile(r"Cycle (\d+): committed alerts=(\S+) status=(\S+) run=(\S+)\s*$")
 _COMPLETED = re.compile(r"Cycle (\d+): completed run=(\S+)\s*$")
@@ -54,6 +64,14 @@ def _token(raw: str) -> int | str:
         return raw
 
 
+def _count(raw: str) -> int | None:
+    """A logged count: the int, or None for ``null`` or anything else."""
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def is_pin(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -75,9 +93,11 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
     Returns ``{"ticks": [...], "drain_cycle": int | None, "drain_start":
     int | None}``. Each tick is ``{start, cycle, pinned_txns,
     pinned_entities, pinned_accounts, pinned_versions, pinned_at,
-    committed_alerts, committed_status, completed, completed_at}``: ``start`` numbers
+    committed_alerts, committed_status, completed, completed_at, tt}``: ``start`` numbers
     the driver start (0 for the first in the log), a field never logged is
-    None. ``drain_start`` is the driver start the drain line belongs to.
+    None. ``tt`` is the tick's time-travel record (``{table, snapshot,
+    committed_at, total_records, pos_deletes, eq_deletes, count_source}``)
+    or None. ``drain_start`` is the driver start the drain line belongs to.
     Lines of another run id are ignored.
     """
     start = -1
@@ -101,6 +121,7 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
                 "committed_status": None,
                 "completed": False,
                 "completed_at": None,
+                "tt": None,
             }
             order.append(key)
         return ticks[key]
@@ -117,6 +138,19 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
             t["pinned_accounts"] = _token(m.group(4))
             t["pinned_versions"] = _token(m.group(5))
             t["pinned_at"] = float(m.group(6))
+            continue
+        m = _TT_RECORD.search(line)
+        if m and m.group(9) == run_id:
+            committed_at = m.group(4)
+            tick(int(m.group(1)))["tt"] = {
+                "table": m.group(2),
+                "snapshot": _token(m.group(3)),
+                "committed_at": None if committed_at == "null" else committed_at,
+                "total_records": _count(m.group(5)),
+                "pos_deletes": _count(m.group(6)),
+                "eq_deletes": _count(m.group(7)),
+                "count_source": m.group(8),
+            }
             continue
         m = _COMMITTED.search(line)
         if m and m.group(4) == run_id:
@@ -194,3 +228,17 @@ def tick_list(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "start",
     )
     return [{k: t.get(k) for k in keys} for t in ticks]
+
+
+def time_travel_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``continuous.time_travel.ticks[]`` (DESIGN interfaces): one entry per
+    tick that logged a time-travel record, with its driver start and cycle.
+    A tick without one (no transactions snapshot, or a driver that predates
+    the record) is not listed."""
+    out = []
+    for t in ticks:
+        tt = t.get("tt")
+        if tt is None:
+            continue
+        out.append({"start": t["start"], "cycle": t["cycle"], **tt})
+    return out
