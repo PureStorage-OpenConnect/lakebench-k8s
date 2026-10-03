@@ -73,6 +73,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `seal_update=True`.
 
 ### Added
+- **`docs/cli-reference.md` is generated from the CLI.** Each visible
+  command's usage line, arguments, options (type, default, help) and named
+  exit paths, `run`'s refused arguments and the table of renamed, refused
+  and deprecated names come from `scripts/gen_cli_reference.py`; a unit test
+  fails on drift. A second test parses every `lakebench ...` line in the
+  README, `docs/` and `examples/` with Click and fails on an unknown command
+  or flag, or on an alias or refused name.
 - **`report` absorbs `results`.** `report [RUN|CONFIG]` takes a run id or a
   config, reads `./lakebench.yaml` when no argument is given (and says
   which deployment it shows), and prints the stage matrix with `--format
