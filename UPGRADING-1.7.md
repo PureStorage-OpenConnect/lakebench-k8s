@@ -238,6 +238,12 @@ The Hive recipes now default to Spark 4.1.1. A config that does not set `images.
 
 **What to do:** Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version: 4.0.0` keeps Spark 4.0.2.
 
+### The default datagen image is the v1.7 look image
+
+The default datagen image is `lb-datagen:a592385`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
+
+**What to do:** Nothing for most configs. A config that pins `images.datagen: docker.io/sillidata/lb-datagen:1.6.0` keeps the 1.6 image, which writes no corpus markers and refuses a registered corpus; remove the pin to take the 1.7 image.
+
 ## Changed behaviour and defaults
 
 ### Removed keys are refused by commands that change data

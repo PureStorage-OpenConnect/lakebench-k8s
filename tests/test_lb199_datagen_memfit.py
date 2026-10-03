@@ -140,9 +140,19 @@ def test_clamp_note_explains_thread_cut():
 def test_model_was_fitted_for_the_pinned_image():
     """The memory model and scale bands describe one generator build. An image
     re-pin without a re-measurement would size pods for the wrong binary (the
-    pre-LB-204 generator peaked at 18.18 GiB where this model requests 8Gi)."""
+    pre-LB-204 generator peaked at 18.18 GiB where this model requests 8Gi).
+
+    The points were measured on 1.6.0. Re-measured for the a592385 re-pin
+    (CD-8, 2026-10-03, local podman and MinIO, node 0 of 4, 8 threads, 64 MB
+    files, seed 43/42, scale 10, peak RSS of the generator process): financial
+    continuous 3.32 -> 3.59 GiB (n=1 each), financial batch 3.78 -> 4.14 and
+    4.00 GiB (n=1 vs n=2), customer360 continuous 2.00 -> 2.04 GiB. The
+    a592385 generator peaks about 0.3 GiB higher on financial at scale 10; the
+    model (5.44 GiB at scale 10, before the 1.25x headroom) still covers it,
+    and the large-scale points were not re-measured."""
     from lakebench.config.schema import ImagesConfig
 
-    assert ImagesConfig().datagen == "docker.io/sillidata/lb-datagen:1.6.0", (
-        "re-measure datagen memory (autosizer.DATAGEN_MEASURED_PEAK_GIB) before re-pinning"
-    )
+    assert ImagesConfig().datagen == (
+        "docker.io/sillidata/lb-datagen:a592385"
+        "@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1"
+    ), "re-measure datagen memory (autosizer.DATAGEN_MEASURED_PEAK_GIB) before re-pinning"
