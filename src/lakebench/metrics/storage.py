@@ -954,6 +954,8 @@ class MetricsStorage:
                 if rid in seen_ids:
                     continue
                 seen_ids.add(rid)
+                if (data.get("record_kind") or "run") != "run":
+                    continue  # a benchmark record repeats its run's pipeline numbers
 
                 from lakebench.metrics.verdict import passed as _record_passed
                 from lakebench.metrics.verdict import verdict_status as _verdict_status

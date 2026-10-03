@@ -882,6 +882,8 @@ def _find_reproduce_run(storage, deployment_name: str, start_watermark: datetime
     for row in storage.list_runs():
         if row.get("deployment_name") != deployment_name:
             continue
+        if row.get("record_kind", "run") != "run":
+            continue
         start_time = row.get("start_time")
         if not start_time:
             continue

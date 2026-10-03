@@ -147,6 +147,17 @@ def test_benchmark_writes_own_record(tmp_path, monkeypatch):
     assert data["deployment_name"] == NAME
     assert data["benchmark"]["qph"] == 2400.0
     assert "series" not in data
+    # Every place a reader takes a QpH from is this benchmark's, not the parent's.
+    pb = data["pipeline_benchmark"]
+    assert pb["run_id"] == data["run_id"]
+    assert pb["query_benchmark"]["qph"] == 2400.0
+    assert pb["scores"]["composite_qph"] == 2400.0
+    assert [st["queries_per_hour"] for st in pb["stages"] if st["stage_type"] == "query"] == [
+        2400.0
+    ]
+    # The record names the code that ran the benchmark and when.
+    bp = data["provenance"]["benchmark"]
+    assert bp["started_at"] and bp["ended_at"] and "lakebench_version" in bp
     # The copied experiment block's benchmark half follows the new benchmark.
     assert data["experiment"]["benchmark_source"].startswith("lakebench benchmark")
     out = _stderr(res)
@@ -259,8 +270,12 @@ def test_report_without_default_config_reads_the_latest_run(tmp_path, monkeypatc
 
 
 def test_report_positional_run_and_config(tmp_path, monkeypatch):
-    _runs(tmp_path, PARENT, OTHER)
+    runs = _runs(tmp_path, PARENT, OTHER)
     assert f"run {PARENT}" in _invoke(tmp_path, monkeypatch, "report", f"run-{PARENT}").output
+    by_dir = _invoke(tmp_path, monkeypatch, "report", str(runs / f"run-{PARENT}") + "/")
+    assert f"run {PARENT}" in by_dir.output, by_dir.output
+    missing = _invoke(tmp_path, monkeypatch, "report", "myconfig")
+    assert missing.exit_code == 2 and "and no file myconfig" in _stderr(missing)
     (tmp_path / "other.yaml").write_text(f"name: {NAME}\nrecipe: hive-iceberg-spark-trino\n")
     assert f"run {PARENT}" in _invoke(tmp_path, monkeypatch, "report", "other.yaml").output
 
@@ -298,3 +313,34 @@ def test_report_list_names_benchmark_records(tmp_path, monkeypatch):
     assert "is a benchmark record" not in _stderr(res)  # the summary is the run's own
     res = _invoke(tmp_path, monkeypatch, "report", "20261002-000000-abcdef")
     assert f"is a benchmark record of run {PARENT}" in _stderr(res)
+
+
+def test_benchmark_record_of_a_continuous_run_drops_its_rounds(tmp_path):
+    from lakebench.cli._query import _save_benchmark_record
+
+    cont = "20260926-215221-65567b"  # lb16-cont-c360, continuous, in-stream rounds
+    runs = _runs(tmp_path, cont)
+    storage = MetricsStorage(runs)
+    parent = storage.load_run(cont)
+    assert parent.benchmark_rounds, "fixture premise: the parent has in-stream rounds"
+    path = _save_benchmark_record(storage, parent, _bench_result())
+    data = json.loads(path.read_text())
+    assert data.get("benchmark_rounds", []) == []
+    assert data["pipeline_benchmark"]["scores"]["composite_qph"] == 2400.0
+    assert "in_stream_composite_qph" not in data["pipeline_benchmark"]["scores"]
+
+
+def test_perf_gate_and_export_skip_benchmark_records(tmp_path):
+    from lakebench.cli._query import _save_benchmark_record
+    from lakebench.metrics import perf_gate as pg
+
+    runs = _runs(tmp_path, PARENT)
+    storage = MetricsStorage(runs)
+    path = _save_benchmark_record(storage, storage.load_run(PARENT), _bench_result())
+    bench_id = path.parent.name.removeprefix("run-")
+    assert [r.run_id for r in pg.iter_runs(runs)] == [PARENT]
+    run = pg.load_run(path.parent)
+    reasons = pg.run_refusals(run, SimpleNamespace(mode=run.mode, fingerprint={}))
+    assert any(f"a benchmark record (of run {PARENT}), not a run" in r for r in reasons)
+    csv_text = storage.export_csv(tmp_path / "out.csv").read_text()
+    assert PARENT in csv_text and bench_id not in csv_text

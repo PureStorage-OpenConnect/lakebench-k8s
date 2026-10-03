@@ -543,26 +543,37 @@ def _latest_tm_run_id(cfg) -> str | None:
     return None
 
 
-def _save_benchmark_record(storage: Any, parent: Any, result: Any) -> Path:
+def _save_benchmark_record(
+    storage: Any, parent: Any, result: Any, *, started_at: str | None = None
+) -> Path:
     """Save ``lakebench benchmark``'s record and return its path.
 
     *parent* is the deployment's latest run record as loaded (a copy in
     memory; its file is never opened for writing). The new record is that
-    copy with *result* as its benchmark, the experiment block's benchmark
-    half refreshed, a new run id, ``record_kind`` "benchmark" and
-    ``parent_run_id``. Its series stamp is dropped: a benchmark is not a
-    repetition of the series. The save is a create; a run id already on disk
-    is never overwritten (a second id is tried once)."""
+    copy with *result* as its benchmark everywhere a reader takes a QpH
+    from: ``benchmark``, the pipeline benchmark's ``query_benchmark`` and
+    query stage (so its scores, ``compare`` and the HTML card show this
+    benchmark), and the experiment block's benchmark half. A continuous
+    parent's in-stream rounds are dropped from the copy: they are the run's
+    measurement, and the scores would prefer them. ``provenance.benchmark``
+    names the code that ran this benchmark and when. The record gets a new
+    run id, ``record_kind`` "benchmark" and ``parent_run_id``; its series
+    stamp is dropped (a benchmark is not a repetition). The save is a
+    create; a run id already on disk is never overwritten (a second id is
+    tried once)."""
     import uuid
     from datetime import datetime
 
+    from lakebench._clock import utc_now
     from lakebench.metrics import BenchmarkMetrics
+    from lakebench.metrics.collector import StageMetrics
     from lakebench.metrics.experiment import refresh_benchmark
+    from lakebench.metrics.provenance import run_provenance
     from lakebench.metrics.storage import RecordExistsError
 
     record = parent
     parent_run_id = parent.run_id
-    record.benchmark = BenchmarkMetrics(
+    bench = BenchmarkMetrics(
         mode=result.mode,
         cache=result.cache,
         scale=result.scale,
@@ -574,17 +585,50 @@ def _save_benchmark_record(storage: Any, parent: Any, result: Any) -> Path:
         stream_results=[s.to_dict() for s in result.stream_results],
         engine=result.engine,
     )
+    record.benchmark = bench
+    record.benchmark_rounds = []
+    pb = record.pipeline_benchmark
+    if pb is not None:
+        pb.query_benchmark = bench
+        pb.benchmark_rounds = []
+        pb.stages = [s for s in pb.stages if s.stage_type != "query"]
+        pb.stages.append(
+            StageMetrics(
+                stage_name="query",
+                stage_type="query",
+                engine=result.engine or "trino",
+                elapsed_seconds=result.total_seconds,
+                success=True,
+                input_size_gb=record.gold_size_gb,
+                queries_executed=len(result.queries),
+                queries_per_hour=result.qph,
+            )
+        )
     # The stored experiment block is never rebuilt; bring its benchmark half
     # (results, iterations, mode) in line with the benchmark it now holds.
     refresh_benchmark(record)
+    record.provenance = dict(record.provenance or {})
+    record.provenance["benchmark"] = {
+        **run_provenance(),
+        "started_at": started_at,
+        "ended_at": utc_now().isoformat(),
+    }
     record.record_kind = "benchmark"
     record.parent_run_id = parent_run_id
     record.series = None
-    record.run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+    def _new_id() -> str:
+        return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+    record.run_id = _new_id()
+    if pb is not None:
+        pb.run_id = record.run_id
     try:
         return Path(storage.save_run(record))
     except RecordExistsError:
-        record.run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        record.run_id = _new_id()
+        if pb is not None:
+            pb.run_id = record.run_id
         return Path(storage.save_run(record))
 
 
@@ -744,6 +788,9 @@ def benchmark(
         details={"mode": effective_mode, "cache": effective_cache, "scale": scale},
     )
 
+    from lakebench._clock import utc_now
+
+    benchmark_started_at = utc_now().isoformat()
     try:
         runner = BenchmarkRunner(cfg, tm_run_id=_latest_tm_run_id(cfg))
         if query_class == "investigator" and runner.tm_run_id is None:
@@ -844,7 +891,9 @@ def benchmark(
         )
     if parent is not None:
         parent_id = parent.run_id
-        record_path = _save_benchmark_record(storage, parent, primary_result)
+        record_path = _save_benchmark_record(
+            storage, parent, primary_result, started_at=benchmark_started_at
+        )
         record_id = record_path.parent.name.removeprefix("run-")
         print_info(
             f"Benchmark recorded as run {record_id} (a benchmark record of run "

@@ -1430,7 +1430,8 @@ def _report_target(
     """``report``'s positional as ``(config, run id)``.
 
     An existing file, or a name ending in .yaml or .yml, is a config; any
-    other value is a run id (a leading ``run-`` is dropped). With no
+    other value is a run id (a leading ``run-`` is dropped); a run directory
+    stands for its run id. With no
     positional and no ``--run``, ``./lakebench.yaml`` is the config when it
     exists and *use_default* is set (not for ``--list``, which lists every
     deployment)."""
@@ -1440,7 +1441,9 @@ def _report_target(
             return default, None
         return None, None
     path = Path(target)
-    if path.is_file() or path.suffix in (".yaml", ".yml"):
+    if path.is_dir() and (path / "metrics.json").is_file():
+        target = path.resolve().name  # a run directory: its id
+    elif path.is_file() or path.suffix in (".yaml", ".yml"):
         if not path.is_file():
             print_error(f"Config file not found: {target}")
             raise typer.Exit(ExitCode.USAGE)
@@ -1797,7 +1800,10 @@ def report(
         else storage.get_latest_run_for_deployment(deployment_name)
     )
     if metrics is None:
-        print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
+        if target_run is not None:
+            print_error(f"No run {run_id} in {metrics_dir}, and no file {target}")
+        else:
+            print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
         print_info("Use 'lakebench report --list' to see available runs")
         # An unknown run id is a bad argument; no runs at all is a failed lookup.
         raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
