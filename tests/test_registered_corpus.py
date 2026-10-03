@@ -553,7 +553,7 @@ def test_an_earlier_failure_after_submit_blocks(env):
     ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
     ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
     ds.append_corpus_ledger(_gen_ok(env, fp))
-    assert "empty bucket" in _gate_problem(env, corpus)
+    assert "different bucket" in _gate_problem(env, corpus)
 
 
 def test_an_earlier_generated_attempt_does_not_block(env):
