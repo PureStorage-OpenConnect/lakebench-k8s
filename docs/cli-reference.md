@@ -457,18 +457,28 @@ event-time window, the generation parameters (seed, scale, customer id
 space, file size, dirty ratio, image) and the image digest the datagen pods
 ran. A batch run that reuses the corpus (`--skip-generate`, or a
 single-cycle run without `--generate`) reads it after the prerequisite
-checks and before anything is deployed or submitted, and is refused (exit 2)
-when the marker says the generate did not finish (an interrupted generate,
-or a continuous run's corpus), or names another cycle count, window or
-generation than the config's (the image digest is not compared). A
+checks and before anything is deployed or submitted, and is refused (exit 3,
+`run.series_mismatch`) when the marker says the generate did not finish (an
+interrupted generate or clear, or a continuous run's corpus), or names
+another cycle count, window or generation than the config's (the seed,
+scale, customer id space, file size, target size per cycle, dirty ratio,
+image, window bounds and, for AML, the robustness perturbation; the image
+digest is not compared), and exits 4 when bronze cannot be read. A clear of
+the datagen prefix (`--regenerate`, or the deployer's clear before a fresh
+generate) first writes a marker that says a clear is under way and keeps it,
+so a clear that stops part way never leaves part of a corpus unmarked. A
 single-cycle run over a corpus with no marker (one from 1.6 or an older
-`generate`) proceeds and records `cycle_series.marker: "absent"`; a
-multi-cycle `--skip-generate` needs a marker. A multi-cycle run without
+`generate`) proceeds and records `cycle_series.marker: "absent"`, unless it
+holds files of cycles after the first (`part-cNNN-*`, a multi-cycle corpus);
+a multi-cycle `--skip-generate` needs a marker. A multi-cycle run without
 `--skip-generate` generates every cycle: a non-empty datagen prefix, a
 leftover marker included, is refused (exit 3) unless `--regenerate`. A
 multi-cycle financial (AML) run cannot reuse its corpus: its stages read the
 whole bronze prefix every cycle. The run records `cycle_series {marker,
-reused, cycles_total, windows}`, and each cycle `datagen_skipped`.
+reused, cycles_total, windows}` (`marker`: `read` or `absent` for a reuse;
+`begun`, `written`, `unwritten` or `conflict` for a generate), and each cycle
+`datagen_skipped`. A generate whose marker another run has replaced since it
+began stops with exit 3 (two runs in one namespace are not supported).
 
 **Refused arguments.** `run` checks every option before it makes any
 cluster call, and exits 2 (usage) naming the first refused one:

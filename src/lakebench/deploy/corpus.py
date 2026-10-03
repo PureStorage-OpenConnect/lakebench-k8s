@@ -4,9 +4,12 @@
 records the generate that made the corpus: the cycle count, the cycles whose
 datagen Job completed, every cycle's event-time window and the generation
 parameters (``generation``), with the image digest the datagen pods ran.
-It lives beside the generator's per-node markers, under the prefix the
-bronze gate clears and the listing digest covers, so the three always
-describe the same objects. ``lakebench.corpus_digest`` is the one parser;
+It lives beside the generator's per-node markers (written by images from
+the look image on; the pinned 1.6.0 image writes none), under the prefix the
+bronze gate clears and the listing digest covers. Every clear of that prefix
+first writes a marker that says a clear is under way and keeps it
+(``mark_clearing``), so a prefix never holds part of a corpus with no
+marker because of a clear that stopped. ``lakebench.corpus_digest`` is the one parser;
 this module writes the marker and applies the reuse rule.
 
 Lifecycle, all on the CLI host:
@@ -114,9 +117,11 @@ def generation_for(cfg: Any, total: int | None = None) -> dict[str, Any]:
     image digest: the parameters that change what datagen writes. The
     window bounds are the resolved ones (``config.c360_run``), so leaving a
     default unset and spelling it out are the same corpus. ``parallelism``
-    and the delivery mode are left out: rows do not depend on them
-    (``datagen_rs/tests/cycles.rs`` pins both) and the autosizer may change
-    the pod count between runs."""
+    and the delivery mode are left out: rows do not depend on them (each
+    node writes the file ids ``fid % total_nodes == node`` and a row is keyed
+    on its file id, ``generate.rs``; ``datagen_rs/tests/cycles.rs`` pins the
+    delivery mode), and the autosizer may change the pod count between
+    runs."""
     from lakebench.config.datagen_seed import config_perturbation
     from lakebench.deploy.datagen import parse_size_to_bytes
 
@@ -242,6 +247,12 @@ def series_problem(cfg: Any, read: SeriesRead) -> str | None:
         return read.problem
     series = read.series
     if series is None:
+        if cycles == 1 and read.markers.later_cycle_files:
+            return (
+                f"no series marker at {read.where}, and the corpus holds "
+                f"{read.markers.later_cycle_files} file(s) of cycles after the first "
+                "(part-cNNN-*): a multi-cycle run made it, and one cycle would read it whole"
+            )
         if cycles == 1:
             return None
         return (
@@ -407,6 +418,29 @@ def begin_series(
         ) from e
 
 
+def mark_clearing(cfg: Any, s3: Any, run_id: str) -> str:
+    """Before the datagen prefix is cleared: write a marker that says a
+    clear is under way (no cycle complete) and return its key, which the
+    clear keeps (``S3Client.delete_prefix(keep_keys=...)``). S3 lists
+    ``_corpus/`` before the part files, so a clear that deleted the marker
+    first and then stopped (an interrupt, a delete error) would leave part
+    of a corpus with no marker, which a single-cycle run would reuse
+    unchecked. Raises ``SeriesWriteError``; the caller then clears nothing."""
+    bucket, prefix = _where(cfg)
+    body = _body(cfg, run_cycles(cfg), [], run_id, None, "the corpus is being cleared", None)
+    body["clearing"] = True
+    try:
+        _put(cfg, s3, body)
+    except SeriesWriteError:
+        raise
+    except Exception as e:  # noqa: BLE001 -- the caller refuses to clear
+        raise SeriesWriteError(
+            f"could not write the series marker before clearing s3://{bucket}/{prefix}: "
+            f"{type(e).__name__}: {str(e)[:200]}"
+        ) from e
+    return series_key(datagen_scope(prefix))
+
+
 def _get(cfg: Any, s3: Any) -> dict[str, Any] | None:
     bucket, prefix = _where(cfg)
     client = s3.raw_client
@@ -449,7 +483,10 @@ def record_cycle(
     reason: str | None,
 ) -> str:
     """Add *cycle* to the marker once its datagen Job succeeded:
-    ``"written"`` or ``"unwritten"``. Never raises.
+    ``"written"``; ``"unwritten"`` when it could not be written or this
+    run's marker is missing an earlier cycle (it stays incomplete);
+    ``"conflict"`` when another generate's marker is there (the corpus is no
+    longer this run's; the caller fails). Never raises.
 
     The image digest is the first cycle's; a cycle whose pods ran another
     image, or whose image was not observed, leaves it null with the reason
@@ -458,6 +495,24 @@ def record_cycle(
     try:
         prior = _get(cfg, s3)
         builds = _builds_on(prior, cfg, cycle, total, run_id)
+        if not builds and isinstance(prior, dict):
+            if run_id and prior.get("written_by_run") == run_id:
+                # This run's marker is behind (an earlier cycle's write
+                # failed): it stays incomplete, as it should.
+                logger.warning(
+                    "series marker: cycle %d not recorded, an earlier cycle of this run is "
+                    "missing from it; the corpus reads as incomplete",
+                    cycle,
+                )
+                return "unwritten"
+            # Another generate wrote the marker since this one began: the
+            # corpus is no longer this run's.
+            logger.warning(
+                "series marker: written by run %s, not this run (%s)",
+                prior.get("written_by_run"),
+                run_id,
+            )
+            return "conflict"
         complete = list(range(cycle + 1)) if builds else [cycle]
         stale = None
         if builds and isinstance(prior, dict):
@@ -473,11 +528,9 @@ def record_cycle(
                 elif digest is not None and digest != prior_digest:
                     digest, reason = None, "cycles ran different images"
         if not builds:
-            logger.warning(
-                "series marker: cycle %d recorded alone (no complete earlier record of "
-                "this run); the corpus reads as incomplete",
-                cycle,
-            )
+            # No marker at all (the bucket did not exist when the generate
+            # began): this cycle alone.
+            logger.warning("series marker: none found; cycle %d recorded alone", cycle)
         _put(cfg, s3, _body(cfg, total, complete, run_id, digest, reason, stale))
         return "written"
     except Exception as e:  # noqa: BLE001 -- an unwritten marker refuses reuse later

@@ -97,7 +97,7 @@ cycle 0. A non-empty datagen prefix is refused (exit 3) unless
 To run the cycles again over the same corpus, add `--skip-generate`: every
 cycle runs its stages over its own slice with no datagen, provided the
 corpus series marker says the multi-cycle generate finished for this
-config's cycle count, windows and generation (exit 2 otherwise). An AML
+config's cycle count, windows and generation (exit 3 otherwise). An AML
 multi-cycle run cannot reuse its corpus this way: its stages read the whole
 bronze prefix every cycle.
 
