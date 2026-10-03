@@ -253,14 +253,19 @@ def test_without_json_nothing_changes(cluster):  # noqa: F811
             (None, [["('web', 40)"], ["('store', 2)"]], "python-repr"),
         ),
         ("trino", "", (None, [], "csv")),
-        # An empty last cell and a row holding one empty string are data.
+        # beeline's own output for an empty last cell and for SELECT '',
+        # trimmed by the executor as production trims it: both are data.
         ("spark-thrift", "a\tb\n1\t\n", (["a", "b"], [["1", ""]], "tsv2")),
-        ("spark-thrift", "c\n\n", (["c"], [[""]], "tsv2")),
+        ("spark-thrift", "_c0\n\n", (["_c0"], [[""]], "tsv2")),
+        ("spark-thrift", "_c0\na\n\n", (["_c0"], [["a"], [""]], "tsv2")),
     ],
 )
 def test_query_rows_per_engine(engine, raw, expected):
     from lakebench.cli._query import _query_json_rows
+    from lakebench.modules.query_engines.spark_thrift.executor import _drop_terminal_newline
 
+    if engine == "spark-thrift":
+        raw = _drop_terminal_newline(raw)  # what raw_output holds
     assert _query_json_rows(engine, raw) == expected
 
 
@@ -336,6 +341,18 @@ def test_json_as_a_value_or_undeclared_starts_no_document(argv, monkeypatch, tmp
     monkeypatch.chdir(tmp_path)
     res = CliRunner().invoke(app, argv)
     assert '"schema": "lb-cli/1"' not in res.stdout, argv
+
+
+def test_a_real_json_after_a_value_that_reads_json(monkeypatch, tmp_path):
+    from lakebench.cli import _json as j
+
+    group = __import__("typer").main.get_command(app)
+    j.start_from_args(group, ["query", "--sql", "--json", "--json"])
+    try:
+        assert j.active()
+    finally:
+        j.abandon()
+        j.root_done()
 
 
 def test_missing_default_config_is_an_error_in_the_document(monkeypatch, tmp_path):

@@ -241,10 +241,15 @@ def start_from_args(group: Any, args: list[str]) -> None:
         for o in getattr(p, "opts", ())
     }
     rest = args[len(words) :]
-    as_value = any(
-        tok == "--json" and i and rest[i - 1] in takes_value for i, tok in enumerate(rest)
-    )
-    if declared and not as_value:
+    flag = False
+    i = 0
+    while i < len(rest):
+        if rest[i] in takes_value:
+            i += 2  # the option and its value, whatever the value says
+            continue
+        flag = flag or rest[i] == "--json"
+        i += 1
+    if declared and flag:
         start(" ".join(words))
 
 

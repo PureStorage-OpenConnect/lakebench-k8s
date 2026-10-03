@@ -1903,7 +1903,7 @@ def report(
     _print_report_summary(metrics)
 
     # Not run_dir(): that creates the directory, and report only reads here.
-    delivered = storage.metrics_dir / f"run-{metrics.run_id}" / "report.html"
+    delivered = storage.metrics_dir / f"run-{run_id or metrics.run_id}" / "report.html"
     _json.set_data(
         _report_run_data(
             metrics, storage.metrics_dir, delivered if delivered.exists() else None, run_id

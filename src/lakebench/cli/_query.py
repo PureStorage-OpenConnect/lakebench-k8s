@@ -254,9 +254,10 @@ def _query_json_rows(engine: str, raw: str) -> tuple[list[str] | None, list[list
         payload = last_json_line((raw or "").strip()) or {}
         return None, [[str(d)] for d in payload.get("data") or []], "python-repr"
     if engine == "spark-thrift":
-        # Only the final newline goes, as the executor counts rows: an empty
-        # last cell, or a row holding one empty string, is data.
-        text = (raw or "").removesuffix("\n")
+        # raw_output is already trimmed of beeline's terminal newline
+        # (executor._drop_terminal_newline); nothing more goes, so an empty
+        # last cell, or a row holding one empty string, stays data.
+        text = raw or ""
         if not text:
             return None, [], "tsv2"
         lines = text.split("\n")
