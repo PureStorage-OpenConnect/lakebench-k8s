@@ -1,6 +1,6 @@
 """Unregister a medallion layer's tables before `clean` empties its bucket.
 
-`lakebench clean silver|gold|bronze|data` empties buckets and used to leave
+`lakebench clean silver|gold` empties buckets and used to leave
 the catalog alone, so the next run met catalog entries whose files were gone:
 a Delta table fails every read (DELTA_TABLE_NOT_FOUND), an Iceberg table on a
 Hive catalog fails to load its missing metadata file. Removing the entries

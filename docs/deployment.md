@@ -347,9 +347,11 @@ lakebench clean gold my-config.yaml
 lakebench run my-config.yaml --generate --regenerate
 ```
 
-`clean bronze` and `clean data` are refused (exit 2) with that `run`
-command: a run regenerates its own corpus, so the corpus a record names is
-the one it read. `clean metrics` and `clean journal` are refused too: run
+`clean bronze` and `clean data` are refused (exit 2) and name that `run`
+command (for `data`, after `clean silver` and `clean gold`): a run
+regenerates its own corpus, so the corpus a record names is the one it read.
+On a bucket the deployment did not create, `--regenerate` refuses too; an
+owner runs `lakebench admin reclaim-bucket` first. `clean metrics` and `clean journal` are refused too: run
 records and journals are evidence, and the CLI does not delete them.
 
 `clean` prompts for confirmation unless `--force` is passed.

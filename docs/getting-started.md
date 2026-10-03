@@ -353,7 +353,7 @@ empty bronze).
 lakebench init                                  # writes lakebench.yaml
 export LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
 lakebench run lakebench.yaml --generate --yes   # deploy + generate + pipeline + benchmark
-lakebench results lakebench.yaml                # print the scorecard
+lakebench report lakebench.yaml                 # print the scorecard
 lakebench destroy lakebench.yaml --yes          # tear down what this deployment owns
 ```
 
@@ -481,8 +481,8 @@ To list all recorded runs:
 lakebench report --list
 ```
 
-`lakebench results lakebench.yaml` prints the same scorecard in the terminal
-(`--format json` or `csv` for scripts).
+`lakebench report lakebench.yaml --format table` prints the stage matrix in
+the terminal (`--format json` or `csv` for scripts).
 
 ### 7. Compare two configurations
 

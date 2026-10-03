@@ -18,6 +18,8 @@ from lakebench.cli import app
 from lakebench.cli._aliases import (
     ALIASED_FLAGS,
     ALIASES,
+    DEPRECATED_COMMANDS,
+    HIDDEN_FLAGS,
     REFUSED,
     REFUSED_FLAGS,
     REMOVED_IN,
@@ -80,7 +82,14 @@ def test_refused_entry_exists(old):
 
 @pytest.mark.parametrize(
     ("command", "flag"),
-    sorted((c, f) for c, flags in {**REFUSED_FLAGS, **ALIASED_FLAGS}.items() for f in flags),
+    sorted(
+        {
+            (c, f)
+            for table in (REFUSED_FLAGS, ALIASED_FLAGS)
+            for c, flags in table.items()
+            for f in flags
+        }
+    ),
 )
 def test_refused_and_aliased_flags_are_declared_hidden(command, flag):
     cmd = _command(command)
@@ -170,3 +179,76 @@ def test_clean_silver_is_not_refused(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     res = CliRunner().invoke(app, ["clean", "silver", "missing.yaml", "--force"])
     assert "is removed" not in res.output
+
+
+def _walk(cmd, path=()):
+    yield path, cmd
+    for name, sub in sorted(getattr(cmd, "commands", {}).items()):
+        yield from _walk(sub, (*path, name))
+
+
+def test_every_hidden_command_and_flag_is_in_a_table():
+    """The other direction: nothing is hidden without an entry, so the doc
+    lint (which reads these tables) sees every old name."""
+    hidden_cmds, hidden_flags = [], []
+    for path, cmd in _walk(_tree()):
+        name = " ".join(path)
+        if path and cmd.hidden and name not in {**ALIASES, **REFUSED, **DEPRECATED_COMMANDS}:
+            hidden_cmds.append(name)
+        for p in getattr(cmd, "params", []):
+            if not getattr(p, "hidden", False):
+                continue
+            known = (
+                set(REFUSED_FLAGS.get(name, {}))
+                | set(ALIASED_FLAGS.get(name, {}))
+                | set(HIDDEN_FLAGS.get(name, ()))
+                | set(HIDDEN_FLAGS["*"])
+            )
+            for opt in [*p.opts, *getattr(p, "secondary_opts", [])]:
+                if opt not in known and not cmd.hidden:
+                    hidden_flags.append(f"{name} {opt}")
+    assert hidden_cmds == []
+    assert hidden_flags == []
+
+
+@pytest.mark.parametrize("old", sorted(DEPRECATED_COMMANDS))
+def test_deprecated_commands_point_at_live_commands(old):
+    assert _command(old).hidden
+    target = _command(DEPRECATED_COMMANDS[old])
+    assert target is not None and not target.hidden
+
+
+def test_compare_refusal_says_the_tables_reason(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for flag in ("--keep", "--generate", "-y"):
+        res = CliRunner().invoke(app, ["compare", "a.yaml", "b.yaml", flag])
+        assert res.exit_code == 2, res.output
+        assert REFUSED_FLAGS["compare"][flag].reason in " ".join(res.output.split())
+
+
+@pytest.mark.parametrize("flag", ["--access-key", "--secret-key"])
+def test_init_credential_refusal_says_the_tables_reason(flag, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["init", flag, SECRET])
+    assert res.exit_code == 2, res.output
+    out = " ".join(res.output.split())
+    assert REFUSED_FLAGS["init"][flag].reason in out
+    assert SECRET not in out
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("flag", ["--interactive", "-i", "--advanced"])
+def test_init_wizard_flags_print_their_line(flag, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LAKEBENCH_S3_ENDPOINT", "http://10.0.1.50:80")
+    res = CliRunner().invoke(app, ["init", flag, "--output", str(tmp_path / "c.yaml")])
+    assert ALIASED_FLAGS["init"][flag] in " ".join(res.output.split()), res.output
+
+
+@pytest.mark.parametrize("flag", ["--metrics-dir", "-m"])
+def test_clean_metrics_dir_flag_is_refused(flag, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["clean", "silver", "c.yaml", flag, SECRET])
+    assert res.exit_code == 2, res.output
+    assert SECRET not in res.output
+    assert REFUSED_FLAGS["clean"][flag].reason in " ".join(res.output.split())

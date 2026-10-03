@@ -72,6 +72,12 @@ def clean(
         bool,
         typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
     ] = False,
+    metrics_dir: Annotated[
+        str | None,
+        # The 1.6 metrics target's flag: declared so it is refused with the
+        # reason, not read as an unknown option. Any value reaches the refusal.
+        typer.Option("--metrics-dir", "-m", hidden=True, help="Refused: see clean metrics"),
+    ] = None,
     force_legacy: Annotated[
         bool,
         typer.Option(
@@ -116,6 +122,8 @@ def clean(
     if f"clean {target}" in REFUSED:
         # Before the config is read: nothing the caller passed is echoed.
         raise refusal(f"clean {target}")
+    if metrics_dir is not None:
+        raise refusal("clean metrics")
     if target not in CLEAN_TARGETS:
         print_error(f"Invalid target: '{target}'. Must be one of: {', '.join(CLEAN_TARGETS)}")
         raise typer.Exit(ExitCode.USAGE)

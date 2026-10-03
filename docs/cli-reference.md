@@ -751,9 +751,11 @@ Valid targets:
 
 `bronze` and `data` are refused (exit 2) and name `lakebench run CONFIG
 --generate --regenerate`, which clears the run's datagen prefix and
-generates afresh. `metrics` and `journal` are refused: run records and
-journals are evidence, and the CLI does not delete them. A refusal echoes
-no argument.
+generates afresh (`data` also names `clean silver` and `clean gold`; on a
+bucket the deployment did not create, `admin reclaim-bucket` comes first).
+`metrics` and `journal`, and the old `--metrics-dir`/`-m`, are refused: run
+records and journals are evidence, and the CLI does not delete them. A
+refusal echoes no argument.
 
 ### destroy
 

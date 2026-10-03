@@ -43,17 +43,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for every key Lakebench owns.
 - **`clean bronze`, `clean data`, `clean metrics` and `clean journal` are
   refused** (exit 2, `alias.refused`), without echoing any argument.
-  `bronze` and `data` name `lakebench run CONFIG --generate --regenerate`,
-  which clears the run's datagen prefix and generates afresh; `metrics` and
-  `journal` are refused because run records and journals are evidence the
-  CLI does not delete. `clean silver` and `clean gold` are unchanged;
-  `clean --metrics-dir` is removed.
+  `bronze` names `lakebench run CONFIG --generate --regenerate`, which
+  clears the run's datagen prefix and generates afresh, and `data` names
+  `clean silver` and `clean gold` before it (on a bucket the deployment did
+  not create, `admin reclaim-bucket` first). `metrics` and `journal` are
+  refused because run records and journals are evidence the CLI does not
+  delete, and so is `clean --metrics-dir`/`-m`. `clean silver` and `clean
+  gold` are unchanged.
 - **Renamed commands print one line and are removed in v1.8.** `results`
   (now `report --format table`), `admin install-spark-operator` and `admin
   install-scratch-storage-class` (now `admin install --component ...`) are
   hidden aliases that print "`lakebench OLD` is now `lakebench NEW`; the old
   name is removed in v1.8" on stderr, then run the new command. The list of
-  aliased and refused commands and flags is `lakebench.cli._aliases`.
+  aliased, refused and deprecated commands and flags is
+  `lakebench.cli._aliases`; `init` and `compare` word their flag refusals
+  from it.
 - **`benchmark` and `query` no longer write into a run's record.**
   `lakebench benchmark` saves its result as a record of its own under a new
   run id (`record_kind: "benchmark"`, `parent_run_id` the run it measured,
