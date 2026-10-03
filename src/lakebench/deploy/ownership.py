@@ -1402,7 +1402,7 @@ def build_identity_from_config(cfg: Any, context: str | None = None) -> Deployme
     package runs from (found from the package's own path, the reading the
     run record's ``provenance.git_sha`` makes in a checkout), never the
     working directory's repository, with ``-dirty`` when the package has
-    uncommitted changes. It is None when no checkout commit can be read (a
+    uncommitted changes or its state could not be read. It is None when no checkout commit can be read (a
     wheel, an unknown install, git unavailable)."""
     from lakebench.metrics.provenance import INSTALL_CHECKOUT, sample
 
@@ -1413,7 +1413,8 @@ def build_identity_from_config(cfg: Any, context: str | None = None) -> Deployme
         code = {}
     sha = code.get("git_sha")
     if code.get("install") == INSTALL_CHECKOUT and isinstance(sha, str) and sha:
-        committed_sha = sha[:7] + ("-dirty" if code.get("git_dirty") else "")
+        # An unknown state (git status failed) is not proven clean.
+        committed_sha = sha[:7] + ("" if code.get("git_dirty") is False else "-dirty")
 
     workload_schema: str | None = None
     try:
