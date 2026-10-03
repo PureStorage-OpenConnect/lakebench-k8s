@@ -693,6 +693,7 @@ def _fake_s3(monkeypatch, *, info=None, init_error=None):
     from tests import test_datagen_timeout_and_regenerate as dg
 
     monkeypatch.setattr(dg._FakeS3, "instances", [])
+    monkeypatch.setattr(dg._FakeS3, "store", {})
     monkeypatch.setattr(dg._FakeS3, "_next_info", info)
     monkeypatch.setattr(dg._FakeS3, "_next_init_error", init_error)
     monkeypatch.setattr("lakebench.s3.S3Client", dg._FakeS3)
@@ -711,6 +712,27 @@ def _scenario_run_bronze_nonempty(monkeypatch, tmp_path):
     monkeypatch.setattr("lakebench.deploy.datagen.deployment_may_empty", lambda *a, **k: False)
     cfg = dg._write_cfg(tmp_path)
     return _runner().invoke(app, ["run", str(cfg), *_RUN_GENERATE, "--yes"])
+
+
+def _scenario_generate_multi_cycle(monkeypatch, tmp_path):
+    dg = _fake_s3(monkeypatch)
+    cfg = dg._write_cfg(tmp_path, architecture="{pipeline: {mode: batch, cycles: 3}}")
+    return _runner().invoke(app, ["generate", str(cfg), "--yes"])
+
+
+def _scenario_run_series_mismatch(monkeypatch, tmp_path):
+    import json
+
+    dg = _fake_s3(monkeypatch)
+    dg._stub_full_run(monkeypatch)
+    # The marker of a generate that never finished (no cycle complete).
+    dg._FakeS3.store[("a4-datagen-bronze", "customer/interactions/_corpus/series.json")] = (
+        json.dumps(
+            {"format": 1, "schema": "customer360", "cycles_total": 1, "cycles_complete": []}
+        ).encode()
+    )
+    cfg = dg._write_cfg(tmp_path)
+    return _runner().invoke(app, ["run", str(cfg), "--skip-generate", "--skip-preflight", "--yes"])
 
 
 def _scenario_datagen_pods_live(monkeypatch, tmp_path):
@@ -1537,6 +1559,8 @@ SCENARIOS = {
     "deploy.identity_foreign": _scenario_deploy_identity_foreign,
     "run.bronze_nonempty": _scenario_run_bronze_nonempty,
     "datagen.pods_live": _scenario_datagen_pods_live,
+    "generate.multi_cycle": _scenario_generate_multi_cycle,
+    "run.series_mismatch": _scenario_run_series_mismatch,
     "run.datagen_timeout": _scenario_run_datagen_timeout,
     "run.prereq_failed": _scenario_run_prereq_failed,
     "run.deps_missing": _scenario_run_deps_missing,
@@ -1632,6 +1656,8 @@ EXPECTED_OUTPUT = {
     "repeat.no_verified_corpus": "no verified corpus to reuse",
     "series.corpus_changed": "bronze changed during or between repetitions",
     "run.args": "--force-reset only applies to a continuous run",
+    "generate.multi_cycle": "does not apply to a multi-cycle config",
+    "run.series_mismatch": "series incomplete: cycle(s) [0] missing",
     "run.namespace_gone": "was deleted mid-run; stopping",
     "config.validation": "Config error",
     "config.name_required": "config has no name, so it cannot change data",

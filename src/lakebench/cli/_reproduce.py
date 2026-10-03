@@ -1143,7 +1143,12 @@ def _run_pipeline(
     )
 
     try:
-        _generate_cmd(config_file=config_file, timeout=timeout or 14400, yes=True)
+        # A multi-cycle config generates each cycle inside the run (and
+        # `generate` refuses it); a single-cycle one generates first.
+        from lakebench.config.c360_run import run_cycles
+
+        if run_cycles(cfg) == 1:
+            _generate_cmd(config_file=config_file, timeout=timeout or 14400, yes=True)
         # Watermark just before the run, so a run another shell started on
         # this deployment during deploy or generate is not taken for ours.
         start_watermark = datetime.now(timezone.utc)

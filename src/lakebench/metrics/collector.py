@@ -274,6 +274,9 @@ class CycleMetrics:
     jobs: list[JobMetrics] = field(default_factory=list)
     benchmark: BenchmarkMetrics | None = None
     table_health: dict[str, int] = field(default_factory=dict)
+    # The cycle reused a finished corpus (``run --skip-generate``): no
+    # datagen Job ran for it.
+    datagen_skipped: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -283,6 +286,7 @@ class CycleMetrics:
             "timestamp_end": self.timestamp_end,
             "datagen_elapsed_seconds": round(self.datagen_elapsed_seconds, 2),
             "datagen_output_gb": round(self.datagen_output_gb, 3),
+            "datagen_skipped": self.datagen_skipped,
             "jobs": [j.to_dict() for j in self.jobs],
             "benchmark": self.benchmark.to_dict() if self.benchmark else None,
             "table_health": self.table_health,
@@ -513,6 +517,11 @@ class PipelineMetrics:
     # gold-finalize). The verdict's record gates then judge that stage's
     # layer only. None for a whole pipeline.
     stage_only: str | None = None
+    # The corpus series marker (deploy/corpus.py) as a batch run left or
+    # found it: {marker: written | unwritten | read | absent, reused,
+    # cycles_total, windows}. None for a run that neither generated nor
+    # checked a corpus (continuous, --local, a stage that stopped first).
+    cycle_series: dict[str, Any] | None = None
 
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
     # None on a fresh run until it is saved; experiment_block() builds it then.
@@ -594,6 +603,8 @@ class PipelineMetrics:
             d["parent_run_id"] = self.parent_run_id
         if self.stage_only is not None:
             d["stage_only"] = self.stage_only
+        if self.cycle_series is not None:
+            d["cycle_series"] = self.cycle_series
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment

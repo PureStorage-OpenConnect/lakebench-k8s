@@ -53,6 +53,6 @@ def test_silver_salted_is_gone():
 def test_cycle_datagen_failure_is_fatal():
     src = (Path(__file__).resolve().parents[1] / "src/lakebench/cli/_run.py").read_text()
     i = src.index("datagen_result = _cycle_datagen.deploy_cycle")
-    window = src[i : i + 2500]
+    window = src[i : src.index("# Cycle env vars for incremental mode", i)]
     assert 'print_warning(f"Datagen cycle' not in window
     assert window.count("pipeline_success = False") >= 3

@@ -361,8 +361,12 @@ class TestCoResidentPodsAreCounted:
             + "architecture:\n  pipeline:\n    cycles: 3\n"
         )
         seen.clear()
-        CliRunner().invoke(app, ["run", str(cycles_file), "--skip-generate", "--yes"])
+        CliRunner().invoke(app, ["run", str(cycles_file), "--yes"])
         assert seen == {"sustained": False, "datagen_runs": True}
+        # A multi-cycle --skip-generate reuses its corpus: no datagen (CD-18).
+        seen.clear()
+        CliRunner().invoke(app, ["run", str(cycles_file), "--skip-generate", "--yes"])
+        assert seen == {"sustained": False, "datagen_runs": False}
 
 
 class TestPrerequisiteWiring:

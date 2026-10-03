@@ -74,6 +74,7 @@ class RunContext:
 
     mode: str  # "batch" or "continuous"
     cycles: int = 1
+    schema: str = "customer360"
 
 
 @dataclass(frozen=True)
@@ -161,10 +162,16 @@ RUN_RULES: tuple[RunRule, ...] = (
         "`--skip-maintenance`",
     ),
     RunRule(
-        lambda a, c: a.regenerate and not (a.include_datagen or a.generate_only),
-        "--regenerate only applies with --generate or --generate-only",
-        "add --generate, or drop --regenerate",
-        "`--regenerate` without `--generate` or `--generate-only`",
+        lambda a, c: (
+            a.regenerate
+            and not (a.include_datagen or a.generate_only or _multi_cycle_generates(a, c))
+        ),
+        "--regenerate only applies when the run generates: --generate, --generate-only, "
+        "or a multi-cycle batch run without --skip-generate",
+        "add --generate on a single-cycle run (a multi-cycle run takes --regenerate alone), "
+        "or drop --regenerate",
+        "`--regenerate` on a run that does not generate (only `--generate`, "
+        "`--generate-only` or a multi-cycle batch run without `--skip-generate` take it)",
     ),
     RunRule(
         lambda a, c: a.regenerate and (a.local or (c.mode == "continuous" and not a.generate_only)),
@@ -175,12 +182,12 @@ RUN_RULES: tuple[RunRule, ...] = (
     ),
     RunRule(
         lambda a, c: a.allow_stale_bronze and not _generates_bronze(a, c),
-        "--allow-stale-bronze only applies when the run generates into bronze: --generate "
-        "or a multi-cycle run (batch, not --local), or --generate-only",
+        "--allow-stale-bronze only applies when the run generates into bronze: --generate, "
+        "a multi-cycle run without --skip-generate (batch, not --local), or --generate-only",
         "drop --allow-stale-bronze, or add --generate to a batch run that is not --local",
         "`--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, "
-        "`--generate-only` or a multi-cycle batch run take it; not `--local`, `--deploy-only` "
-        "or a continuous run other than `--generate-only`)",
+        "`--generate-only` or a multi-cycle batch run without `--skip-generate` take it; not "
+        "`--local`, `--deploy-only` or a continuous run other than `--generate-only`)",
     ),
     RunRule(
         lambda a, c: a.skip_generate and a.include_datagen,
@@ -196,11 +203,30 @@ RUN_RULES: tuple[RunRule, ...] = (
             and not a.local
             and a.repeat is None  # --repeat's own multi-cycle row names it
         ),
-        "--generate does not apply to a multi-cycle run: each cycle generates its own "
-        "slice, so a whole corpus generated first would be read again by cycle 0",
-        "drop --generate (a multi-cycle run generates without it), or set "
+        "--generate does not apply to a multi-cycle run: multi-cycle runs generate each "
+        "cycle before its stages",
+        "drop --generate (use --regenerate to replace an existing corpus), or set "
         "architecture.pipeline.cycles to 1",
         "`--generate` on a multi-cycle batch run (`cycles` above 1)",
+    ),
+    RunRule(
+        lambda a, c: a.generate_only and c.mode == "batch" and c.cycles > 1 and not a.local,
+        "--generate-only does not apply to a multi-cycle run: multi-cycle runs generate each "
+        "cycle before its stages, and a corpus generated in one go would be read as cycle 0",
+        "run `lakebench run <config>` (add --regenerate to replace an existing corpus), or "
+        "set architecture.pipeline.cycles to 1",
+        "`--generate-only` on a multi-cycle batch run (`cycles` above 1)",
+    ),
+    RunRule(
+        lambda a, c: (
+            a.skip_generate and c.mode == "batch" and c.cycles > 1 and c.schema == "financial"
+        ),
+        "--skip-generate does not apply to a multi-cycle financial (AML) run: its stages read "
+        "the whole bronze prefix every cycle, so a reused corpus would be processed whole "
+        "at cycle 0",
+        "drop --skip-generate (the run generates each cycle; add --regenerate to replace "
+        "the corpus), or set architecture.pipeline.cycles to 1",
+        "`--skip-generate` on a multi-cycle financial (AML) batch run",
     ),
     RunRule(
         lambda a, c: a.force_reset and c.mode == "batch",
@@ -277,18 +303,31 @@ def _generates_bronze(a: RunArgs, c: RunContext) -> bool:
     gate, the only place ``--allow-stale-bronze`` is read: ``--generate-only``
     (its generate), or a batch run that is not ``--local`` or
     ``--deploy-only`` and either generates (``--generate`` without
-    ``--skip-generate``) or runs more than one cycle. A continuous run's
-    datagen does not take the flag."""
+    ``--skip-generate``) or runs more than one cycle without
+    ``--skip-generate``. A continuous run's datagen does not take the flag."""
     if a.local or a.deploy_only:
         return False
     if a.generate_only:
         return True
-    return c.mode == "batch" and ((a.include_datagen and not a.skip_generate) or c.cycles > 1)
+    return c.mode == "batch" and (
+        (a.include_datagen and not a.skip_generate) or _multi_cycle_generates(a, c)
+    )
+
+
+def _multi_cycle_generates(a: RunArgs, c: RunContext) -> bool:
+    """A multi-cycle batch run generates each cycle unless ``--skip-generate``
+    reuses a finished multi-cycle corpus (not ``--local``, not
+    ``--deploy-only``)."""
+    return (
+        c.mode == "batch"
+        and c.cycles > 1
+        and not (a.skip_generate or a.local or a.deploy_only or a.generate_only)
+    )
 
 
 def run_args_problems(args: RunArgs, cfg: Any) -> list[RunRule]:
     """Every rule *args* break (empty when the run may start)."""
-    ctx = RunContext(mode=run_mode(args, cfg), cycles=_cycles(cfg))
+    ctx = RunContext(mode=run_mode(args, cfg), cycles=_cycles(cfg), schema=_schema(cfg))
     return [rule for rule in RUN_RULES if rule.broken(args, ctx)]
 
 
@@ -297,6 +336,13 @@ def _cycles(cfg: Any) -> int:
         return int(cfg.architecture.pipeline.cycles or 1)
     except (AttributeError, TypeError, ValueError):
         return 1
+
+
+def _schema(cfg: Any) -> str:
+    try:
+        return str(cfg.architecture.workload.schema_type.value)
+    except AttributeError:
+        return "customer360"
 
 
 def validate_run_args(args: RunArgs, cfg: Any) -> RunPlan:

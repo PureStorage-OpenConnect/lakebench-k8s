@@ -209,6 +209,10 @@ class MarkerSet:
     scope: str = ""
     markers: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     series: dict[str, Any] | None = None
+    #: A ``series.json`` object is listed in the scope, whether or not it
+    #: parsed: ``series`` None with this True is an unreadable marker, never
+    #: an absent one. Not persisted (``problems`` says why it is None).
+    series_present: bool = False
     bronze_listing_sha256: str | None = None
     objects: int = 0
     problems: list[str] = field(default_factory=list)
@@ -306,6 +310,7 @@ def _read_into(out: MarkerSet, client: Any, bucket: str, prefix: str) -> None:
         name = key[len(marker_dir) :]
         if name == SERIES_NAME:
             series_at = key
+            out.series_present = True
             continue
         m = MARKER_NAME.match(name)
         if m:
