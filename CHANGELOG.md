@@ -33,7 +33,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `reproduce` exits 14 (was 2) for metric drift or commit drift without `--allow-commit-drift`.
 - A `run` whose datagen did not finish in time exits 1 (was 5); the record says "datagen timed out".
 - `compare` exits 0 like-for-like, 10 not comparable (was 1), 11 not established, 12 not like-for-like and 13 confounded (all were 0).
-- Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do not compare with `c360-1`.
+- Customer 360 gold is never silently incremental and a multi-cycle run takes one data clock; records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
 - AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
 - Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
 - A continuous record without a stored round count reads it from its rounds; the stored C360 Trino vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
