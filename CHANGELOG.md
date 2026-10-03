@@ -568,6 +568,26 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   beside it. The covered continuous score uses the same
   definition. See
   [aml-scoring.md](docs/aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same).
+- **W5/W6 non-planted alerts per customer, by scale.** AML scoring records
+  two diagnostic counts, `financial_scoring.nonplanted_alerts_by_rule` and
+  `financial_scoring.customer_count`, which are not results.
+  `scripts/aml_screen_rates.py` reads stored AML batch `metrics.json`
+  records only and writes `docs/benchmarks/data/aml_screening_rates.json`
+  from four runs: seed 43 and the calibration seed, each at scale 1 and 10.
+  Per seed role (`seed-43` or `calibration`, never a seed value), scale and
+  rule it gives the non-planted alerts, the customer count, the rate, the
+  run id, corpus role, generator digest and workload version, each n=1,
+  and the ratio scale 10 over scale 1 from the raw counts. It refuses, by
+  run id, a protected-corpus record (fail closed), a verdict other than
+  PASSED, a record without the counts or in which W5 or W6 did not run, a
+  record with no observed generator digest, scale and seed, any other
+  seed or a scale other than 1 or 10, a missing one of
+  the four runs, a scale pair that differs in generator or workload
+  version, and fewer than 50 non-planted W5 plus W6 alerts at scale 1.
+  Where a Lakebench evidence cap cut a rule's alerts, the row carries
+  `evidence_capped_alerts` and its count is an upper bound; such a ratio is
+  marked `bounded_by_evidence_cap`. The file is not in the tree until the
+  four live runs exist. W5 and W6 are unchanged.
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in
