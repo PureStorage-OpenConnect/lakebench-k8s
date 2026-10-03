@@ -799,3 +799,26 @@ def test_every_purpose_refusal_has_a_refused_key_row():
     for rows in PURPOSE_VALIDATORS.values():
         if isinstance(rows, list):
             assert set(rows) <= subjects, rows
+
+
+@pytest.mark.parametrize("unset_side", ["old", "replaced"])
+def test_init_from_overwrite_guard_refuses_an_unset_reference_name(
+    tmp_path, monkeypatch, unset_side
+):
+    monkeypatch.delenv("LB_NAME", raising=False)
+    ref = FLAT_V12.replace("name: flat12", "name: ${LB_NAME}")
+    replaced = ref if unset_side == "replaced" else FLAT_V12.replace("flat12-ns", "other-ns")
+    (tmp_path / "new.yaml").write_text(replaced)
+    old_text = FLAT_V12 if unset_side == "replaced" else ref
+    old, new, r = _convert(tmp_path, monkeypatch, old_text, "--overwrite")
+    assert r.exit_code == 3, r.output
+    assert "has not set" in " ".join(r.output.split())
+    assert new.read_text() == replaced
+
+
+def test_spark_secret_references_are_not_credentials():
+    from lakebench.config.init_from import is_credential_key
+
+    assert not is_credential_key("spark.kubernetes.driver.secretKeyRef.AWS_SECRET_ACCESS_KEY")
+    assert not is_credential_key("spark.kubernetes.executor.secrets.s3-secret")
+    assert is_credential_key("spark.hadoop.fs.s3a.secret.key")

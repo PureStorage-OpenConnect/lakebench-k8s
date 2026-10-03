@@ -19,8 +19,9 @@ Two readers use the table:
 ``tests/test_init_from.py`` loads ``example`` at ``key`` for each row and
 checks that the commands in ``refused_by`` refuse it with ``fix`` in the
 message, so a row cannot drift from its validator; and it maps every
-schema validator that refuses by purpose to its rows or to a stated
-exemption, so a new refusal cannot go without a row.
+``config/schema.py`` function that reads ``CHANGES_DATA`` or
+``LoadPurpose.RUN`` to its rows or to a stated exemption, so a new
+validator of that kind cannot go without a row.
 """
 
 from __future__ import annotations

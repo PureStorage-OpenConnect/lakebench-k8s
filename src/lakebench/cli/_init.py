@@ -534,8 +534,9 @@ def init(
 def _write_atomically(output: Path, text: str, like: Path) -> Path:
     """Write *text* to a temporary file beside *output*; the caller renames it.
 
-    The file is no more readable than *like* (OLD): a config kept private
-    stays private, whatever the umask allows.
+    The file is no more readable than *like* (OLD), nor than *output* when
+    it replaces one: a config kept private stays private, whatever the
+    umask allows.
     """
     import os
     import tempfile
@@ -546,7 +547,10 @@ def _write_atomically(output: Path, text: str, like: Path) -> Path:
             f.write(text)
         mask = os.umask(0)
         os.umask(mask)
-        os.chmod(tmp, 0o666 & ~mask & (like.stat().st_mode | 0o600))
+        mode = 0o666 & ~mask & (like.stat().st_mode | 0o600)
+        if output.is_file():
+            mode &= output.stat().st_mode | 0o600
+        os.chmod(tmp, mode)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -667,6 +671,14 @@ def _refuse_if_overwrite_moves(output: Path, new_file: Path) -> None:
             f"the new file cannot be read with this shell's variables ({new_problem}), so "
             f"whether it keeps the deployment {output} names cannot be checked: set them and "
             "re-run, or write the new file elsewhere",
+            ExitCode.REFUSED,
+        )
+    if any("${" in n or _UNSET in n for n in (replaced_name, new_cfg.name)):
+        # Unset, the name says nothing; set, it may be the same deployment.
+        _refuse(
+            f"{output} or the new file names its deployment through a variable this shell "
+            "has not set, so whether the new file keeps that deployment cannot be checked: "
+            "set it and re-run, or write the new file elsewhere",
             ExitCode.REFUSED,
         )
     if replaced_name == new_cfg.name:

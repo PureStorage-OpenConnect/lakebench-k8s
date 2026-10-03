@@ -67,6 +67,8 @@ _WORD = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 
 def is_credential_key(key: str) -> bool:
     """Whether a config or ``spark.conf`` key holds a credential."""
+    if re.search(r"(?i)\.secretkeyref\.|\.secrets\.", key):
+        return False  # Spark on Kubernetes: a Secret's name or mount path
     words = [w.lower() for w in _WORD.findall(key)]
     if not words:
         return False
