@@ -470,6 +470,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **v1.7 performance re-baseline configs.** `benchmarks/perf/` pins
+  `aml-batch-s10` and `c360-batch-s10-polaris` (the Polaris twin of
+  `c360-batch-s10`); the release workflow now runs the `perf-baselines`
+  check, which fails a tag only for configs marked required (none until the
+  post-freeze data commit). See docs/perf-regression-gate.md.
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in

@@ -23,12 +23,16 @@ Pinned configs today:
 | `c360-batch-s10` | Customer 360 | batch | 10 | no (v1.6) | accepted, but poll-timed (pre-v1.6), so every current run is refused against it |
 | `c360-continuous-s10` | Customer 360 | continuous | 10 | no (v1.6) | pending first run |
 | `aml-batch-s1` | AML (financial) | batch | 1 | no | pending first run |
+| `aml-batch-s10` | AML (financial) | batch | 10 | from the v1.7 data commit | pending first run (v1.7 re-baseline) |
+| `c360-batch-s10-polaris` | Customer 360 (Polaris) | batch | 10 | from the v1.7 data commit | pending first run (v1.7 re-baseline) |
 
-v1.6 has no performance baselines. The re-baseline of the pinned configs on
-the v1.6 tree is deferred to v1.7, so no config is required and the
+v1.6 has no performance baselines. The v1.7 re-baseline records
+`aml-batch-s10`, `c360-batch-s10` and `c360-batch-s10-polaris` (n=3 each) on
+the freeze tree; the post-freeze data commit accepts their baselines and
+marks exactly these three required. Until then no config is required and the
 `perf-baselines` release check reports each config as `warn` without failing
-the release. Which configs become required again, and when AML joins them, is
-set with the v1.7 re-baseline.
+the release. `c360-batch-s10-polaris` is `c360-batch-s10` with the Polaris
+catalog and nothing else changed, so the pair compares the catalog alone.
 
 ## How "like for like" is enforced
 

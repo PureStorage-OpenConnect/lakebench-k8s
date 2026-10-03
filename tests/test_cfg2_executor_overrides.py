@@ -388,5 +388,11 @@ def test_shipped_pinned_configs_pin_the_profile_counts():
     from lakebench.metrics.perf_gate import load_pinned
 
     src = Path(__file__).resolve().parents[1] / "benchmarks" / "perf"
-    for name in ("aml-batch-s1.yaml", "c360-batch-s10.yaml", "c360-continuous-s10.yaml"):
+    for name in (
+        "aml-batch-s1.yaml",
+        "aml-batch-s10.yaml",
+        "c360-batch-s10.yaml",
+        "c360-batch-s10-polaris.yaml",
+        "c360-continuous-s10.yaml",
+    ):
         assert load_pinned(src / name)

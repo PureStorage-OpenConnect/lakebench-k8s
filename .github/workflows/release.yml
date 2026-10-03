@@ -102,7 +102,7 @@ jobs:
       - name: Release gate (release-only checks)
         run: >-
           python scripts/release_gate.py --tag "${GITHUB_REF_NAME}" --require-all
-          --only examples,version,changelog,prose,package-guard,uat-results,records,support-record,freeze,expected-results
+          --only examples,version,changelog,prose,package-guard,uat-results,records,support-record,freeze,expected-results,perf-baselines
 
   build-dist:
     name: Build wheel and sdist

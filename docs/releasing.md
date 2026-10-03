@@ -214,12 +214,20 @@ SKIP too. CI's package build runs the same guard on every push, without
 
 The `perf-baselines` check fails when a required pinned perf config
 (`benchmarks/perf/`) has no accepted baseline, has no run, or its run
-regressed or was refused. It is not in the release workflow's `--only` list
+regressed or was refused. It is in the release workflow's `--only` list
 (`release.yml` runs examples, version, changelog, prose, package-guard, uat-results,
-records, support-record, freeze and expected-results), so it does not block a tag by itself: run it locally as part
-of the whole gate above before tagging. Check in the `metrics.json` of each
-required perf run as `uat/perf/run-<id>/metrics.json` so the result can be
-reproduced from the repository. See
+records, support-record, freeze, expected-results and perf-baselines), so a
+tag with a required config that fails is refused. Check in the
+`metrics.json` of each required perf run as `uat/perf/run-<id>/metrics.json`,
+where the check finds it.
+
+The v1.7 re-baseline pins three configs: `aml-batch-s10` (AML batch scale
+10, hive-iceberg-spark-trino on Spark 4.1) and `c360-batch-s10` with its
+Polaris twin `c360-batch-s10-polaris` (Customer 360 batch scale 10; the
+two differ only in the catalog). Each is run three times on the freeze tree
+with `lakebench run --generate --repeat 3`, its baseline accepted through
+`scripts/perf_gate.py`, and the post-freeze data commit marks exactly these
+three `required: true`; until then none is required. See
 [perf-regression-gate.md](perf-regression-gate.md).
 
 ## After tagging
