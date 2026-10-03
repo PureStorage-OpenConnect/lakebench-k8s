@@ -407,7 +407,9 @@ def test_compare_machine_output_is_only_data(fmt, monkeypatch, tmp_path):
     from tests.fixtures import stored_records as sr
 
     monkeypatch.chdir(tmp_path)
-    ids = ("20260927-011123-497f02", "20260927-011355-7ad7ad")
+    # Pinned pair P3 (like-for-like); P1's records read failed since the
+    # verdict is recomputed from the record (W5 and W6 did not run).
+    ids = ("20260927-011043-e338c5", "20260927-073818-7934eb")
     for rid in ids:
         d = tmp_path / "runs" / f"run-{rid}"
         d.mkdir(parents=True)
