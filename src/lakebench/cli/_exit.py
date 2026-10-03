@@ -272,12 +272,51 @@ class LakebenchGroup(TyperGroup):
     """Root group: maps exceptions from any command to the documented codes."""
 
     def invoke(self, ctx: Any) -> Any:
+        from lakebench.cli import _json
+
         quiet_urllib3()
         try:
-            return super().invoke(ctx)
+            rv = super().invoke(ctx)
         except BaseException as exc:
             err = error_for(exc)
+            if _json.active():
+                # --json: one document on every way out, its exit_code the
+                # process's own.
+                if err is not None:
+                    _report(exc, err)
+                    _json.add_error(
+                        err.what,
+                        code=int(err.code),
+                        path=err.path,
+                        why=err.why,
+                        next=err.next,
+                        where=err.where,
+                    )
+                    _json.finish(int(err.code), keep_data=False)
+                    raise typer.Exit(int(err.code)) from exc
+                code = _exit_code_of(exc)
+                if code is None:
+                    _json.abandon()
+                    raise
+                if code and hasattr(exc, "format_message"):  # a Click usage error
+                    _json.add_error(exc.format_message(), code=code, path="click.usage")
+                _json.finish(code)
+                raise
             if err is None:
                 raise
             _report(exc, err)
             raise typer.Exit(int(err.code)) from exc
+        if _json.active():
+            _json.finish(0)
+        return rv
+
+
+def _exit_code_of(exc: BaseException) -> int | None:
+    """The exit code a pass-through exception ends the process with:
+    typer.Exit / SystemExit, or 2 for a Click usage error; None otherwise."""
+    code = getattr(exc, "exit_code", None)
+    if isinstance(code, int):
+        return code
+    if isinstance(exc, SystemExit):
+        return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    return None

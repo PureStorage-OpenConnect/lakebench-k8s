@@ -38,6 +38,7 @@ from lakebench.cli._helpers import (
 from lakebench.cli._helpers import (
     get_journal as get_journal,
 )
+from lakebench.cli._json import json_option
 from lakebench.cli._nameless import NAME_OPTION_HELP, guard_nameless
 from lakebench.config import (
     ConfigError,
@@ -859,6 +860,7 @@ def status(
         str | None,
         typer.Option("--name", help=NAME_OPTION_HELP),
     ] = None,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Show deployment status.
 
@@ -883,6 +885,9 @@ def status(
     if local:
         from lakebench.cli._local import print_local_status, status_local
 
+        if as_json:
+            print_error("--json covers cluster status; it does not combine with --local")
+            raise typer.Exit(ExitCode.USAGE)
         if cfg is None:
             print_error("Local status needs a config file")
             raise typer.Exit(ExitCode.USAGE)
@@ -994,6 +999,7 @@ def status(
     console.print(table)
 
     # Datagen job progress, while it runs (informational, never drift)
+    datagen: dict[str, int] | None = None
     try:
         batch_v1 = k8s_client.BatchV1Api()
         job = batch_v1.read_namespaced_job(
@@ -1003,6 +1009,7 @@ def status(
         succeeded = job.status.succeeded or 0
         completions = job.spec.completions or 1
         if active > 0 or succeeded < completions:
+            datagen = {"succeeded": succeeded, "completions": completions, "active": active}
             console.print()
             console.print(
                 f"[bold]Datagen:[/bold] {esc(succeeded)}/{esc(completions)} pods completed, "
@@ -1015,6 +1022,19 @@ def status(
         logger.debug("Could not check datagen job: %s", e)
 
     verdict, names = ops.status_exit(rows, config_known=cfg is not None)
+    from lakebench.cli import _json
+
+    _json.set_data(
+        {
+            "namespace": ns,
+            "exists": True,
+            "verdict": verdict,
+            "components": [
+                {"name": r.name, "kind": r.kind, "state": r.state, "detail": r.detail} for r in rows
+            ],
+            "datagen": datagen,
+        }
+    )
     if verdict == "drift":
         print_error(f"Drift: {', '.join(names)} not ready or not found")
         log_names = [ops.STATUS_LOG_COMPONENT[n] for n in names if n in ops.STATUS_LOG_COMPONENT]
@@ -1557,6 +1577,56 @@ def _print_stage_matrix(metrics, output_format: str) -> None:
     console.print()
 
 
+def _report_list_row(r: dict) -> dict:
+    """A ``report --list`` row for ``--json`` (cli/_json.ReportListRow)."""
+    from lakebench.metrics.verdict import verdict_status
+
+    return {
+        "run_id": r.get("run_id"),
+        "record_kind": r.get("record_kind") or "run",
+        "parent_run_id": r.get("parent_run_id"),
+        "deployment_name": r.get("deployment_name"),
+        "start_time": r.get("start_time"),
+        "verdict": verdict_status(r) or r.get("verdict_status"),
+        "total_elapsed_seconds": r.get("total_elapsed_seconds"),
+    }
+
+
+def _report_run_data(metrics, record_path: Path, delivered: Path | None) -> dict:
+    """The run ``report`` shows, for ``--json`` (cli/_json.ReportRun), from
+    the record as stored: its verdict and scores are never recomputed."""
+    import json as _json_mod
+
+    try:
+        record = _json_mod.loads(record_path.read_text())
+    except (OSError, ValueError):
+        record = metrics.to_dict()
+    pbd = record.get("pipeline_benchmark") or {}
+    return {
+        "run_id": metrics.run_id,
+        "record_kind": record.get("record_kind") or "run",
+        "parent_run_id": record.get("parent_run_id"),
+        "deployment_name": record.get("deployment_name"),
+        "start_time": record.get("start_time"),
+        "verdict": (record.get("verdict") or {}).get("status"),
+        "pipeline_mode": pbd.get("pipeline_mode"),
+        "scores": pbd.get("scores") or {},
+        "stages": [
+            {
+                "stage_name": st.get("stage_name"),
+                "stage_type": st.get("stage_type"),
+                "elapsed_seconds": st.get("elapsed_seconds"),
+                "input_size_gb": st.get("input_size_gb"),
+                "output_size_gb": st.get("output_size_gb"),
+                "throughput_gb_per_second": st.get("throughput_gb_per_second"),
+                "executor_count": st.get("executor_count"),
+            }
+            for st in pbd.get("stages") or []
+        ],
+        "delivered_report": str(delivered) if delivered is not None else None,
+    }
+
+
 @app.command()
 def report(
     target: Annotated[
@@ -1646,6 +1716,7 @@ def report(
             ),
         ),
     ] = None,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Report on a saved benchmark run.
 
@@ -1657,6 +1728,7 @@ def report(
     show all saved runs, and ``--format`` for the stage matrix (what
     ``results`` printed).
     """
+    from lakebench.cli import _json
     from lakebench.metrics import MetricsStorage
     from lakebench.reports import ReportGenerator
 
@@ -1668,6 +1740,9 @@ def report(
     # `report` would display it (SP-2 owns the durable deployment_id fix).
     if output_format is not None and output_format not in _REPORT_FORMATS:
         print_error(f"--format must be one of {', '.join(_REPORT_FORMATS)}, not {output_format}")
+        raise typer.Exit(ExitCode.USAGE)
+    if output_format is not None and as_json:
+        print_error("--json and --format are two outputs; pass one")
         raise typer.Exit(ExitCode.USAGE)
     if output_format is not None and (render or list_runs):
         print_error("--format prints a stage matrix; it does not combine with --render or --list")
@@ -1690,6 +1765,7 @@ def report(
     # List runs mode
     if list_runs:
         runs = storage.list_runs()
+        _json.set_data({"runs": [_report_list_row(r) for r in runs]})
         if not runs:
             print_warning(f"No runs found in {metrics_dir}")
             return
@@ -1775,6 +1851,7 @@ def report(
             # An unknown run id is a bad argument; no runs at all is a failed lookup.
             raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)  # noqa: B904
 
+        _json.set_data({"run_id": run_id, "report": str(report_path)})
         # Also print the summary when asked; keep the default quiet so
         # scripts that watch stdout for the path have a clean output.
         if summary:
@@ -1820,6 +1897,13 @@ def report(
 
     # Not run_dir(): that creates the directory, and report only reads here.
     delivered = storage.metrics_dir / f"run-{metrics.run_id}" / "report.html"
+    _json.set_data(
+        _report_run_data(
+            metrics,
+            storage.metrics_dir / f"run-{metrics.run_id}" / "metrics.json",
+            delivered if delivered.exists() else None,
+        )
+    )
     if delivered.exists():
         console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")
         console.print(

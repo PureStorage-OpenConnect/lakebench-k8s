@@ -115,7 +115,11 @@ def print_success(message: object) -> None:
 
 
 def print_error(message: object) -> None:
-    """Print an error message on stderr (text is printed verbatim)."""
+    """Print an error message on stderr (text is printed verbatim). Under
+    ``--json`` it is also kept for the document's ``errors``."""
+    from lakebench.cli import _json
+
+    _json.note_printed_error(message)
     _status_line("ERROR", "red", message)
 
 
@@ -145,8 +149,12 @@ def emit_data(text: str) -> None:
     """
     import sys
 
-    sys.stdout.write(text if text.endswith("\n") else text + "\n")
-    sys.stdout.flush()
+    from lakebench.cli import _json
+
+    # Under --json, stdout carries only the document.
+    out = sys.stderr if _json.active() else sys.stdout
+    out.write(text if text.endswith("\n") else text + "\n")
+    out.flush()
 
 
 def check_datagen_scale(cfg: object) -> None:

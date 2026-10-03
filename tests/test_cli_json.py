@@ -1,0 +1,241 @@
+"""``--json``: one lb-cli/1 document on stdout per command run (CLI-5b).
+
+Goldens in ``tests/fixtures/cli-json/`` are written by hand from the
+TypedDicts in ``cli/_json.py`` and, for ``report``, from a stored record's
+own fields; ``compare``'s data is checked to be exactly its ``--format
+json`` document. Every verb's data has its TypedDict's keys, stdout holds
+the document only, and the exit code and ``exit_code`` agree on every way
+out, errors included.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import typing
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import pytest
+from typer.testing import CliRunner
+
+from lakebench.cli import _json, app
+from tests import test_cli_cluster_ops as co
+from tests.test_cli_cluster_ops import cluster  # noqa: F401 -- the fixture
+
+ROOT = Path(__file__).resolve().parents[1]
+GOLDEN = ROOT / "tests" / "fixtures" / "cli-json"
+RECORDS = ROOT / "tests" / "fixtures" / "records"
+RUN = "20260929-212900-5105a0"
+
+
+def _doc(res) -> dict:
+    """The one document on stdout (json.loads fails on anything else)."""
+    return json.loads(res.stdout)
+
+
+def _golden(name: str) -> dict:
+    return json.loads((GOLDEN / f"{name}.json").read_text())
+
+
+def _keys(td: type) -> set[str]:
+    return set(typing.get_type_hints(td))
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_mode():
+    yield
+    assert not _json.active(), "a command left JSON mode on"
+
+
+# -- status ------------------------------------------------------------------------
+
+
+def test_status_json_golden(cluster):  # noqa: F811
+    cluster.apps.objects = dict(co._TRINO_HIVE)
+    res = CliRunner().invoke(app, ["status", str(cluster.config), "--json"])
+    assert res.exit_code == 0, res.output
+    assert _doc(res) == _golden("status")
+    assert "Every listed component is ready" in res.stderr  # human text on stderr
+
+
+def test_status_drift_json_golden(cluster):  # noqa: F811
+    cluster.apps.objects = dict(co._TRINO_HIVE, **{"lakebench-trino-worker": (1, 2)})
+    res = CliRunner().invoke(app, ["status", str(cluster.config), "--json"])
+    assert res.exit_code == 1, res.output
+    assert _doc(res) == _golden("status-drift")
+
+
+def test_json_error_envelope(cluster):  # noqa: F811
+    """A command that raises: data null, the error's path and code, and the
+    process exit code equal to the document's."""
+    cluster.core.ns_exists = False
+    res = CliRunner().invoke(app, ["status", str(cluster.config), "--json"])
+    doc = _doc(res)
+    assert res.exit_code == doc["exit_code"] == 1
+    assert doc["data"] is None
+    (err,) = doc["errors"]
+    assert (err["code"], err["path"]) == (1, "status.namespace_missing")
+    assert err["what"] == "namespace ops does not exist"
+    assert err["next"].startswith("lakebench deploy")
+
+
+# -- report ------------------------------------------------------------------------
+
+
+def _runs(tmp_path: Path) -> Path:
+    runs = tmp_path / "lakebench-output" / "runs"
+    runs.mkdir(parents=True)
+    shutil.copytree(RECORDS / f"run-{RUN}", runs / f"run-{RUN}")
+    return runs
+
+
+def test_report_json_golden(monkeypatch, tmp_path):
+    _runs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["report", RUN, "--json"])
+    assert res.exit_code == 0, res.output
+    doc = _doc(res)
+    assert doc == _golden("report")
+    assert set(doc["data"]) == _keys(_json.ReportRun)
+
+
+def test_report_list_json(monkeypatch, tmp_path):
+    _runs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    doc = _doc(CliRunner().invoke(app, ["report", "--list", "--json"]))
+    (row,) = doc["data"]["runs"]
+    assert set(row) == _keys(_json.ReportListRow)
+    assert (row["run_id"], row["record_kind"], row["verdict"]) == (RUN, "run", "PASSED")
+
+
+def test_report_unknown_run_is_an_error_document(monkeypatch, tmp_path):
+    _runs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["report", "no-such-run", "--json"])
+    doc = _doc(res)
+    assert res.exit_code == doc["exit_code"] == 2
+    assert doc["data"] is None
+    assert doc["errors"][0]["code"] == 2 and "no-such-run" in doc["errors"][0]["what"]
+
+
+def test_report_json_and_format_are_refused(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["report", "--json", "--format", "csv"])
+    doc = _doc(res)
+    assert res.exit_code == doc["exit_code"] == 2
+    assert "two outputs" in doc["errors"][0]["what"]
+
+
+# -- query -------------------------------------------------------------------------
+
+
+class _Executor:
+    def execute_query(self, sql, timeout=None):
+        return SimpleNamespace(
+            success=True,
+            raw_output="channel\tn\nweb\t40\nstore\t2",
+            rows_returned=2,
+            duration_seconds=0.25,
+            error=None,
+        )
+
+
+def test_query_json_golden(monkeypatch, tmp_path):
+    from tests.conftest import make_config
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "c.yaml").write_text("name: q\n")
+    with (
+        mock.patch("lakebench.cli._query.load_config", return_value=make_config(name="q")),
+        mock.patch("lakebench.benchmark.executor.get_executor", lambda cfg, ns: _Executor()),
+        mock.patch("lakebench.cli._query.journal_open"),
+    ):
+        res = CliRunner().invoke(app, ["query", "c.yaml", "--sql", "SELECT 1", "--json"])
+    assert res.exit_code == 0, res.output
+    assert _doc(res) == _golden("query")
+
+
+# -- config recipes ----------------------------------------------------------------
+
+
+def test_config_recipes_json_shape():
+    res = CliRunner().invoke(app, ["config", "recipes", "--json"])
+    assert res.exit_code == 0, res.output
+    doc = _doc(res)
+    assert (doc["schema"], doc["command"], doc["errors"]) == ("lb-cli/1", "config recipes", [])
+    rows = doc["data"]["recipes"]
+    assert rows and all(set(r) == _keys(_json.RecipeRow) for r in rows)
+    from lakebench.config.recipes import RECIPES
+
+    assert [r["recipe"] for r in rows] == sorted(n for n in RECIPES if n != "default")
+    assert {s for r in rows for s in r["support"].values()} <= {
+        "supported",
+        "unverified",
+        "unsupported",
+    }
+
+
+def test_config_recipe_detail_json_shape():
+    res = CliRunner().invoke(app, ["config", "recipes", "hive-iceberg-spark-trino", "--json"])
+    doc = _doc(res)
+    assert set(doc["data"]) == _keys(_json.RecipeDetailData)
+    assert (doc["data"]["catalog"], doc["data"]["table_format"], doc["data"]["query_engine"]) == (
+        "hive",
+        "iceberg",
+        "trino",
+    )
+    assert all(set(s) == _keys(_json.RecipeSupport) for s in doc["data"]["support"])
+
+
+def test_unknown_recipe_is_an_error_document():
+    res = CliRunner().invoke(app, ["config", "recipes", "no-such", "--json"])
+    doc = _doc(res)
+    assert res.exit_code == doc["exit_code"] == 2 and doc["data"] is None
+
+
+# -- compare -----------------------------------------------------------------------
+
+
+def test_compare_json_is_the_cmp2_document(monkeypatch, tmp_path):
+    runs = _runs(tmp_path)
+    other = "20260929-214442-825153"
+    shutil.copytree(RECORDS / f"run-{other}", runs / f"run-{other}")
+    monkeypatch.chdir(tmp_path)
+    plain = CliRunner().invoke(app, ["compare", RUN, other, "--format", "json"])
+    wrapped = CliRunner().invoke(app, ["compare", RUN, other, "--json"])
+    doc = _doc(wrapped)
+    assert wrapped.exit_code == plain.exit_code == doc["exit_code"]
+    assert doc["data"] == json.loads(plain.stdout)
+    assert doc["command"] == "compare"
+
+
+# -- plan --------------------------------------------------------------------------
+
+
+def test_plan_json_document(tmp_path):
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("name: p\nrecipe: hive-iceberg-spark-trino\n")
+    res = CliRunner().invoke(app, ["plan", str(cfg), "--json"])
+    doc = _doc(res)
+    assert res.exit_code == doc["exit_code"] == 0
+    assert set(doc["data"]) == _keys(_json.PlanData)
+    assert doc["data"]["plans"][0]["name"] == "p"
+
+
+# -- the envelope ------------------------------------------------------------------
+
+
+def test_document_shape():
+    doc = _json.document("x", {"a": 1}, 3, [])
+    assert set(doc) == _keys(_json.Envelope)
+    assert doc["schema"] == "lb-cli/1"
+
+
+def test_without_json_nothing_changes(cluster):  # noqa: F811
+    cluster.apps.objects = dict(co._TRINO_HIVE)
+    res = CliRunner().invoke(app, ["status", str(cluster.config)])
+    assert res.exit_code == 0
+    assert "lb-cli/1" not in res.output
+    assert "Components" in res.stdout  # the table stays on stdout

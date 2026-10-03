@@ -152,6 +152,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   the gold-finalize job when the driver's status listener lags, and none
   when it keeps up; continuous gold ticks do not profile. See
   [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **`--json` on the read verbs.** `plan`, `status`, `report`, `config
+  recipes`, `compare` and `query` write one `lb-cli/1` document to stdout
+  (`schema`, `command`, `exit_code`, `data`, `errors`) and their human
+  output to stderr; the exit code and `exit_code` always agree, and a
+  failed command's document has `data: null` and the error. `plan --json`
+  now prints this document (its old top-level `plans` and `differences`
+  are under `data`).
 - **`docs/cli-reference.md` is generated from the CLI.** Each visible
   command's usage line, arguments, options (type, default, help) and named
   exit paths, `run`'s refused arguments and the table of renamed, refused

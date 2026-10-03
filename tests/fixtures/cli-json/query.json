@@ -1,0 +1,15 @@
+{
+  "schema": "lb-cli/1",
+  "command": "query",
+  "exit_code": 0,
+  "data": {
+    "query_name": "custom",
+    "count": 2,
+    "elapsed_seconds": 0.25,
+    "rows": [
+      {"channel": "web", "n": "40"},
+      {"channel": "store", "n": "2"}
+    ]
+  },
+  "errors": []
+}

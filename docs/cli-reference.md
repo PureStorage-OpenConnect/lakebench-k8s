@@ -26,6 +26,30 @@ flag.
 
 Exit codes are listed in [Exit Codes](exit-codes.md).
 
+### Machine-readable output (`--json`)
+
+`plan`, `status`, `report`, `config recipes`, `compare` and `query` take
+`--json`. The command then writes exactly one JSON document to stdout and
+every human line to stderr:
+
+```json
+{"schema": "lb-cli/1", "command": "status", "exit_code": 1,
+ "data": {"namespace": "...", "verdict": "drift", "components": [...]},
+ "errors": [{"code": 1, "path": null, "what": "Drift: ...", "why": null,
+             "next": null, "where": null}]}
+```
+
+`exit_code` is always the process's exit code. `data` is the command's
+result, kept on a verdict exit such as `status` drift, and `null` when the
+command failed; `errors` holds each error the command reported, with its
+exit-code `path` when it has one (see [Exit Codes](exit-codes.md)). The
+shape of each command's `data` is a TypedDict in `lakebench/cli/_json.py`:
+`lb-cli/1` may gain keys, and never loses or retypes one. `compare --json`
+carries the `cmp2` document `--format json` writes; `--json` does not
+combine with `--format` on `report`, `compare` or `query`, nor with
+`status --local` or `query --interactive`. `plan --json` makes no cluster
+call, as before.
+
 ## Commands
 
 ### init
@@ -101,6 +125,7 @@ lakebench compare SIDE_A SIDE_B [OPTIONS]
 | `--runs-dir` |  | path, repeatable |  | Directory of run-<id>/ records (repeatable; default lakebench-output/runs) |
 | `--format` |  | text | `table` | Output format: table, json, csv |
 | `--output` | `-o` | path |  | Write the comparison (json, or csv) to this file |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
 
 Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
@@ -359,6 +384,7 @@ lakebench config recipes [NAME] [OPTIONS]
 | Flag | Short | Type | Default | Description |
 |---|---|---|---|---|
 | `--local` |  | flag |  | Show only recipes that run in local mode |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
 <!-- END GENERATED: cli config -->
 
 ### validate
@@ -407,7 +433,7 @@ lakebench plan CONFIG_FILES [OPTIONS]
 | `--cores` |  | integer, at least 1 |  | Cluster CPU cores to size against (implies offline) |
 | `--memory` |  | integer, at least 1 |  | Cluster memory in GB to size against (with --cores) |
 | `--name` |  | text |  | The deployment name for a config that sets none |
-| `--json` |  | flag |  | Print the plan as JSON (always offline) |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
 
 Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
@@ -853,6 +879,7 @@ lakebench query [CONFIG_FILE] [OPTIONS]
 | `--format` | `-o` | text | `table` | Output format: table (default), json, csv |
 | `--show-query` |  | flag |  | Show the SQL query before executing |
 | `--timeout` | `-t` | integer | `120` | Query timeout in seconds |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
 <!-- END GENERATED: cli query -->
 
 Specify exactly one of `--sql`, `--example`, `--sql-file`, or `--interactive`.
@@ -885,6 +912,7 @@ lakebench status [CONFIG_FILE] [OPTIONS]
 | `--local` |  | flag |  | Show local mode status instead of Kubernetes |
 | `--workdir` |  | path |  | Host directory for local mode state (default: ~/.lakebench/local/<name>) |
 | `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
 
 Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
@@ -1062,6 +1090,7 @@ lakebench report [RUN|CONFIG] [OPTIONS]
 | `--force` |  | flag |  | Allow --render to overwrite an existing file at --output. Requires both --render and --output. |
 | `--summary` | `-s` | flag |  | Also print the key scores when rendering (default action already prints them). |
 | `--format` | `-o` | text |  | Print the run's stage matrix instead of the summary: table, json or csv (json is the pipeline benchmark block) |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
 <!-- END GENERATED: cli report -->
 
 - `--format` does not combine with `--render` or `--list`.

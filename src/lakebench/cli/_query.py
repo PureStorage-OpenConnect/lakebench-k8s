@@ -25,6 +25,7 @@ from lakebench.cli._helpers import (
     print_warning,
     resolve_config_path,
 )
+from lakebench.cli._json import json_option
 from lakebench.config import (
     ConfigError,
     LoadPurpose,
@@ -227,6 +228,18 @@ def _run_query_repl(
     console.print(f"\n[dim]Executed {esc(query_count)} queries. Goodbye![/dim]")
 
 
+def _rows_as_dicts(rows: list[str]) -> list[dict[str, str]]:
+    """Tab-separated result lines as dicts: the first line names the
+    columns; one line alone is keyed by position."""
+    parsed = [row.split("\t") for row in rows if row.strip()]
+    if len(parsed) > 1:
+        headers = [h.strip().strip('"') for h in parsed[0]]
+        return [
+            dict(zip(headers, [v.strip().strip('"') for v in r], strict=False)) for r in parsed[1:]
+        ]
+    return [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
+
+
 def query(
     config_file: Annotated[
         Path | None,
@@ -296,6 +309,7 @@ def query(
             help="Query timeout in seconds",
         ),
     ] = 120,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Execute SQL queries against the configured query engine.
 
@@ -324,6 +338,10 @@ def query(
     sources = sum(1 for x in [sql, example, sql_file, interactive] if x)
     if sources > 1:
         print_error("Specify only one of: --sql, --example, --sql-file, --interactive")
+        raise typer.Exit(ExitCode.USAGE)
+
+    if as_json and (output_format != "table" or interactive):
+        print_error("--json does not combine with --format or --interactive")
         raise typer.Exit(ExitCode.USAGE)
 
     # Handle interactive mode early
@@ -440,19 +458,23 @@ def query(
     rows = output.split("\n") if output else []
     row_count = result.rows_returned
 
-    if rows:
+    if as_json:
+        from lakebench.cli import _json
+
+        data = _rows_as_dicts(rows)
+        _json.set_data(
+            {
+                "query_name": query_name,
+                "count": len(data),
+                "elapsed_seconds": round(elapsed, 3),
+                "rows": data,
+            }
+        )
+    elif rows:
         if output_format == "json":
             import json
 
-            parsed = [row.split("\t") for row in rows if row.strip()]
-            if len(parsed) > 1:
-                headers = [h.strip().strip('"') for h in parsed[0]]
-                data = [
-                    dict(zip(headers, [v.strip().strip('"') for v in r], strict=False))
-                    for r in parsed[1:]
-                ]
-            else:
-                data = [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
+            data = _rows_as_dicts(rows)
             emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
         elif output_format == "csv":
             import csv
