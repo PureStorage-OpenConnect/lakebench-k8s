@@ -67,9 +67,12 @@ The one-shot looks are already approved (#41, #42). Take them once:
 The corpus a look scores must be the one `lakebench generate
 --registered-corpus` wrote on the look host: `scripts/aml_gate.py
 --registered` requires a `generated` corpus-ledger entry for that role and
-seed whose corpus fingerprint matches the local copy, whose datagen pods all
-ran the `--generator-image` digest, and with no other Job submitted into
-that bronze prefix meanwhile (owner, 10-03).
+seed whose corpus fingerprint (data files by path and size, manifests by
+sha256) matches the local copy, that was pinned to the `--generator-image`
+digest with every datagen pod running one image, and with no other
+generation's Job in that bronze prefix meanwhile, as far as this host's
+ledger shows (owner, 10-03). So the look host is the generation host, and
+the corpus is copied from S3 unchanged.
 
 D8 and A6 are reported beside the result and do not gate it (#46, #47). The
 result is published pass or fail.

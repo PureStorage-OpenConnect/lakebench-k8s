@@ -484,6 +484,7 @@ def _base(env, **kw):
         "role": "evaluation",
         "seed_hash": ds.seed_hash(env.held.salt, pc.EV),
         "bronze_uri": "s3://b/pacs008/",
+        "image": pc.IMAGE,
         **kw,
     }
 
@@ -501,12 +502,18 @@ def test_mixed_fleet_and_unobserved_images_are_refused(env):
             image_ids=[pc.IMAGE, "repo@sha256:" + "c" * 64],
         )
     )
-    assert "digest" in _gate_problem(env, corpus)
+    assert "one image digest" in _gate_problem(env, corpus)
     ds.append_corpus_ledger(_base(env, attempt="a2", state="attempted"))
     ds.append_corpus_ledger(
         _base(env, attempt="a2", state="generated", corpus_fingerprint=fp, image_ids="not_observed")
     )
     assert "digest" in _gate_problem(env, corpus)
+
+
+def _gen_ok(env, fp, attempt="a1"):
+    return _base(
+        env, attempt=attempt, state="generated", corpus_fingerprint=fp, image_ids=[pc.IMAGE]
+    )
 
 
 def test_a_concurrent_submit_into_the_prefix_is_refused(env):
@@ -515,10 +522,114 @@ def test_a_concurrent_submit_into_the_prefix_is_refused(env):
     ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
     ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
     ds.append_corpus_ledger(_base(env, attempt="a2", state="submitting"))
-    ds.append_corpus_ledger(
-        _base(env, attempt="a1", state="generated", corpus_fingerprint=fp, image_ids=[pc.IMAGE])
-    )
+    ds.append_corpus_ledger(_gen_ok(env, fp))
     assert "same bronze prefix" in _gate_problem(env, corpus)
+
+
+def test_an_earlier_unfinished_submit_into_the_prefix_is_refused(env):
+    """An attempt that submitted before this one began and never closed may
+    still have pods writing."""
+    corpus = _local_copy(env.tmp / "copy")
+    fp = ds.local_corpus_fingerprint(corpus)
+    ds.append_corpus_ledger(_base(env, attempt="a0", state="attempted"))
+    ds.append_corpus_ledger(_base(env, attempt="a0", state="submitting"))
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
+    ds.append_corpus_ledger(_gen_ok(env, fp))
+    assert "same bronze prefix" in _gate_problem(env, corpus)
+
+
+def test_an_earlier_finished_attempt_does_not_block(env):
+    corpus = _local_copy(env.tmp / "copy")
+    fp = ds.local_corpus_fingerprint(corpus)
+    ds.append_corpus_ledger(_base(env, attempt="a0", state="attempted"))
+    ds.append_corpus_ledger(_base(env, attempt="a0", state="submitting"))
+    ds.append_corpus_ledger(_base(env, attempt="a0", state="failed", submitted=True))
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
+    ds.append_corpus_ledger(_gen_ok(env, fp))
+    assert _gate_problem(env, corpus) is None
+
+
+def test_a_generation_without_its_attempted_line_is_refused(env):
+    corpus = _local_copy(env.tmp / "copy")
+    ds.append_corpus_ledger(_gen_ok(env, ds.local_corpus_fingerprint(corpus)))
+    assert "no attempted entry" in _gate_problem(env, corpus)
+
+
+def test_a_generation_pinned_to_another_image_is_refused(env):
+    corpus = _local_copy(env.tmp / "copy")
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
+    other = "docker.io/example/lb-datagen@sha256:" + "d" * 64
+    ds.append_corpus_ledger(
+        _base(
+            env,
+            attempt="a1",
+            state="generated",
+            image=other,
+            corpus_fingerprint=ds.local_corpus_fingerprint(corpus),
+            image_ids=[other],
+        )
+    )
+    assert "pinned" in _gate_problem(env, corpus)
+
+
+def test_a_platform_digest_differing_from_the_pin_passes_when_uniform(env):
+    """For a multi-arch pin the kubelet may report the platform manifest's
+    digest: one digest across every pod is what is required."""
+    corpus = _local_copy(env.tmp / "copy")
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
+    platform = "docker.io/example/lb-datagen@sha256:" + "e" * 64
+    ds.append_corpus_ledger(
+        _base(
+            env,
+            attempt="a1",
+            state="generated",
+            corpus_fingerprint=ds.local_corpus_fingerprint(corpus),
+            image_ids=[platform, platform],
+        )
+    )
+    assert _gate_problem(env, corpus) is None
+
+
+def test_an_unfingerprinted_generation_says_so(env):
+    corpus = _local_copy(env.tmp / "copy")
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
+    ds.append_corpus_ledger(
+        _base(
+            env,
+            attempt="a1",
+            state="generated",
+            corpus_fingerprint=None,
+            fingerprint_error="ClientError",
+            image_ids=[pc.IMAGE],
+        )
+    )
+    assert "no corpus fingerprint (ClientError)" in _gate_problem(env, corpus)
+
+
+def test_a_half_synced_file_is_part_of_the_fingerprint(env):
+    corpus = _local_copy(env.tmp / "copy")
+    before = ds.local_corpus_fingerprint(corpus)
+    (corpus / "bronze" / "pacs008" / "part-00000.parquet.a1b2").write_bytes(b"p" * 100)
+    (corpus / "_corpus").mkdir(exist_ok=True)
+    (corpus / "_corpus" / "marker.json").write_bytes(b"{}")
+    after = ds.local_corpus_fingerprint(corpus)
+    assert after["files"] == before["files"] + 1 and after != before
+
+
+def test_a_failed_fingerprint_fails_generate(env, monkeypatch):
+    _fake_generate(monkeypatch, env)
+
+    class Broken:
+        def list_objects_v2(self, **kw):
+            raise RuntimeError("503")
+
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **k: SimpleNamespace(raw_client=Broken()))
+    r = _gen(_registered(env), "--registered-corpus", "--yes")
+    assert r.exit_code == 1 and "could not be fingerprinted" in r.output, r.output
+    gen = _lines(env.ledger)[-1]
+    assert gen["state"] == "generated" and gen["corpus_fingerprint"] is None
 
 
 def test_a_torn_ledger_line_refuses(env):

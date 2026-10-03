@@ -159,11 +159,20 @@ def generate(
     except (LakebenchError, ContextConflictError, K8sConnectionError) as e:
         record.close("failed", error=type(e).__name__)
         raise
+    fingerprint = _s3_corpus_fingerprint(cfg)
     record.close(
         "generated",
         image_ids=list((fleet or {}).get("image_ids") or []) or "not_observed",
-        **_s3_corpus_fingerprint(cfg),
+        **fingerprint,
     )
+    if fingerprint.get("corpus_fingerprint") is None:
+        # Generated but not identified: no registered look can take it.
+        print_error(
+            "The registered corpus was generated but could not be fingerprinted "
+            f"({fingerprint.get('fingerprint_error')}); scripts/aml_gate.py --registered "
+            "refuses it. Fix the S3 read and regenerate with --regenerate."
+        )
+        raise typer.Exit(ExitCode.FAILED)
 
 
 def _s3_corpus_fingerprint(cfg) -> dict:
@@ -174,7 +183,7 @@ def _s3_corpus_fingerprint(cfg) -> dict:
     records the error and no fingerprint, so that look is refused."""
     import hashlib
 
-    from lakebench.config.datagen_seed import corpus_fingerprint
+    from lakebench.config.datagen_seed import corpus_file, corpus_fingerprint
     from lakebench.deploy.datagen import bronze_datagen_prefix
     from lakebench.s3 import S3Client
 
@@ -188,7 +197,11 @@ def _s3_corpus_fingerprint(cfg) -> dict:
             secret_key=s3.secret_key,
             region=s3.region,
             path_style=s3.path_style,
+            ca_cert=s3.ca_cert,
+            verify_ssl=s3.verify_ssl,
         ).raw_client
+        if client is None:
+            raise RuntimeError("the S3 client could not be built")
         files, manifests = [], {}
         token = None
         while True:
@@ -202,7 +215,7 @@ def _s3_corpus_fingerprint(cfg) -> dict:
                 break
             token = page.get("NextContinuationToken")
         for rel, _size in files:
-            if rel.startswith("manifest/") and rel.endswith(".parquet"):
+            if corpus_file(rel) and rel.startswith("manifest/"):
                 body = client.get_object(Bucket=bucket, Key=prefix + rel)["Body"].read()
                 manifests[rel] = hashlib.sha256(body).hexdigest()
         return {"corpus_fingerprint": corpus_fingerprint(files, manifests)}

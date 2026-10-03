@@ -688,3 +688,51 @@ def test_cli_maps_a_bronze_verify_refusal_to_exit_2():
         i = src.index("refusal_in_log(")
         assert "ExitCode.USAGE" in src[i : i + 600]
     assert '"LB_MANIFEST_REQUIRED": "1" if skip_generate else "0"' in sus_src
+
+
+class _Job:
+    def __init__(self):
+        self.env = None
+
+    def submit_job(self, job_type, cycle_env=None, **kw):
+        from lakebench.spark.job import JobState
+
+        self.env = cycle_env
+        return SimpleNamespace(state=JobState.SUBMITTED, message="")
+
+
+@pytest.mark.parametrize(
+    ("success", "logs", "code"),
+    [
+        (True, "", None),
+        (False, f"x\nERROR: {lg.REFUSAL_MARKER}: the corpus manifest comes from a spent seed", 2),
+        (False, "LAKEBENCH-PROTECTED-CORPUS-UNCHECKED: the manifest could not be checked", 1),
+    ],
+    ids=["passes", "refused", "unchecked"],
+)
+def test_held_out_check_before_a_stage_subset(success, logs, code):
+    import typer
+
+    from lakebench.cli._run import _held_out_check_only
+
+    job = _Job()
+    monitor = SimpleNamespace(
+        wait_for_completion=lambda *a, **k: SimpleNamespace(
+            success=success, message="driver failed", driver_logs=logs
+        )
+    )
+    if code is None:
+        _held_out_check_only(job, monitor, "r1", None, 600)
+    else:
+        with pytest.raises(typer.Exit) as info:
+            _held_out_check_only(job, monitor, "r1", None, 600)
+        assert info.value.exit_code == code
+    assert job.env == {"LB_REGISTER_TABLE": "check", "LB_RUN_ID": "r1"}
+
+
+def test_a_financial_stage_subset_runs_the_check_before_its_stages():
+    src = (ROOT / "src/lakebench/cli/_run.py").read_text()
+    body = src[src.index("def _run_once(") :]
+    check = body.index("_held_out_check_only(job_manager")
+    assert body.index("stages = all_stages") < check < body.index("for cycle_idx in range")
+    assert "stages[0][0] != JobType.BRONZE_VERIFY" in body[check - 400 : check]

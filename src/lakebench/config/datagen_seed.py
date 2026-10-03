@@ -1318,22 +1318,25 @@ def append_corpus_ledger(entry: dict) -> None:
     _append_jsonl(corpora_ledger_path(), entry)
 
 
-def _fingerprinted(relpath: str) -> bool:
-    """A corpus data file: a Parquet file under the prefix, not under a
-    ``_`` or ``.`` directory (markers, checksums, temporary uploads)."""
-    parts = relpath.split("/")
-    return relpath.endswith(".parquet") and not any(p.startswith(("_", ".")) for p in parts)
+def corpus_file(relpath: str) -> bool:
+    """Whether a file under the datagen prefix is corpus data: every file
+    Spark's Parquet reader would read, whatever its extension (a ``.parquet``
+    left half-renamed by a sync is read too), so every path with no ``_`` or
+    ``.`` segment (markers, checksum and temporary files are left out)."""
+    parts = [p for p in relpath.split("/") if p]
+    return bool(parts) and not any(p.startswith(("_", ".")) for p in parts)
 
 
 def corpus_fingerprint(
     files: Iterable[tuple[str, int]], manifest_sha256: Mapping[str, str]
 ) -> dict:
-    """What a corpus is, byte for byte where it matters: every data file's
-    path (relative to the datagen prefix) and size, and the sha256 of each
-    manifest file. ``generate --registered-corpus`` records it from S3 when
+    """What a corpus is: every data file's path (relative to the datagen
+    prefix) and size, and the sha256 of each manifest file. Data files are
+    matched by path and size, not hashed (hashing a gate-scale corpus would
+    mean reading all of it back from S3). ``generate --registered-corpus`` records it from S3 when
     the generation finishes; ``registered_corpus_problem`` recomputes it over
     the corpus a registered look scores."""
-    items = sorted((str(p), int(n)) for p, n in files if _fingerprinted(str(p)))
+    items = sorted((str(p), int(n)) for p, n in files if corpus_file(str(p)))
     listing = json.dumps(items, separators=(",", ":")).encode("utf-8")
     return {
         "format": 1,
@@ -1353,7 +1356,7 @@ def local_corpus_fingerprint(root: str | os.PathLike) -> dict:
         if not path.is_file():
             continue
         rel = path.relative_to(base).as_posix()
-        if not _fingerprinted(rel):
+        if not corpus_file(rel):
             continue
         files.append((rel, path.stat().st_size))
         if rel.startswith("manifest/"):
@@ -1376,9 +1379,11 @@ def registered_corpus_problem(
     ``generate --registered-corpus`` for this role and seed (by its salted
     hash) whose corpus fingerprint equals the directory's, so the look
     scores exactly the bytes that generation wrote; every datagen pod of it
-    must have run the ``--generator-image`` digest; and no other attempt on
-    the same bronze prefix may have submitted a datagen Job while it ran. An
-    unreadable ledger refuses. Names the role, never the seed."""
+    must have run one image, the ``--generator-image`` digest it was pinned
+    to; and no other attempt on the same bronze prefix may have had a
+    datagen Job running while it ran. An unreadable ledger refuses. The
+    ledger is per host: attempts made on another host are not seen. Names
+    the role, never the seed."""
     path = corpora_ledger_path()
     if not path.is_file():
         return f"no generation of the registered {role} corpus is recorded ({path} is absent)"
@@ -1408,6 +1413,11 @@ def registered_corpus_problem(
         )
     local = local_corpus_fingerprint(corpus_dir)
     done = [(i, e) for i, e in mine if e.get("state") == "generated"]
+    if done and all(e.get("corpus_fingerprint") is None for _, e in done):
+        return (
+            f"the recorded generation of the registered {role} corpus has no corpus fingerprint "
+            f"({done[-1][1].get('fingerprint_error')}); regenerate it"
+        )
     match = [(i, e) for i, e in done if e.get("corpus_fingerprint") == local]
     if not match:
         return (
@@ -1416,32 +1426,52 @@ def registered_corpus_problem(
             "in the ledger; its files or manifest differ)"
         )
     end, gen = match[-1]
+    attempt = gen.get("attempt")
+    # The look names the image the generation was pinned to, and every pod
+    # ran one image (the kubelet may report a per-platform digest for a
+    # multi-arch pin, so the pods are compared with each other).
     want_digest = _image_digest(generator_image)
     ids = gen.get("image_ids")
+    pod_digests = {_image_digest(x) for x in ids} if isinstance(ids, list) else set()
     if (
         want_digest is None
-        or not isinstance(ids, list)
-        or not ids
-        or any(_image_digest(x) != want_digest for x in ids)
+        or want_digest != _image_digest(gen.get("image"))
+        or len(pod_digests) != 1
+        or None in pod_digests
     ):
         return (
-            f"the recorded generation (attempt {gen.get('attempt')}) did not run only the "
-            "--generator-image digest on every datagen pod"
+            f"the recorded generation (attempt {attempt}) was not pinned to the --generator-image "
+            "digest, or its datagen pods did not all run one image digest"
         )
-    attempt = gen.get("attempt")
-    start = next(
-        (i for i, e in mine if e.get("attempt") == attempt and e.get("state") == "attempted"), end
-    )
-    for e in entries[start + 1 : end]:
+    starts = [i for i, e in mine if e.get("attempt") == attempt and e.get("state") == "attempted"]
+    if not starts:
+        return f"the recorded generation (attempt {attempt}) has no attempted entry"
+    start = starts[0]
+    # Another attempt on this bronze prefix that submitted a datagen Job
+    # before this generation ended and had not finished before it began may
+    # have written into this corpus.
+    for j, e in enumerate(entries[:end]):
+        other = e.get("attempt")
         if (
-            e.get("kind") == "registered_corpus"
-            and e.get("attempt") != attempt
-            and e.get("state") == "submitting"
-            and e.get("bronze_uri") == gen.get("bronze_uri")
+            e.get("kind") != "registered_corpus"
+            or other == attempt
+            or e.get("state") != "submitting"
+            or e.get("bronze_uri") != gen.get("bronze_uri")
         ):
+            continue
+        closed = next(
+            (
+                k
+                for k in range(j + 1, len(entries))
+                if entries[k].get("attempt") == other
+                and entries[k].get("state") in ("generated", "failed")
+            ),
+            None,
+        )
+        if closed is None or closed > start:
             return (
-                f"another attempt ({e.get('attempt')}) submitted a datagen Job into the same "
-                f"bronze prefix while attempt {attempt} ran"
+                f"another attempt ({other}) had a datagen Job in the same bronze prefix while "
+                f"attempt {attempt} ran"
             )
     return None
 
