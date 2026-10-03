@@ -193,12 +193,15 @@ def test_reference_job_records_the_declared_role(monkeypatch, looks_open):
     def env(cfg):
         mgr = SparkJobManager(cfg, MagicMock())
         return {
-            e["name"]: e.get("value")
+            e["name"]: e.get("value", e.get("valueFrom"))
             for e in mgr._build_env_vars(JobType.SCORE_FINANCIAL_REFERENCE)
         }
 
     e = env(_cfg_role(EVAL, "evaluation"))
-    assert (e["LB_DATAGEN_SEED"], e["LB_DATAGEN_CORPUS_ROLE"]) == (str(EVAL), "evaluation")
+    # A registered corpus's seed comes from the seed Secret, never as a value.
+    assert e["LB_DATAGEN_SEED"] == ds.seed_secret_env()["valueFrom"]
+    assert e["LB_DATAGEN_CORPUS_ROLE"] == "evaluation"
+    assert env(_cfg("financial", 7777))["LB_DATAGEN_SEED"] == "7777"
     assert "LB_DATAGEN_CORPUS_ROLE" not in env(_cfg("financial", 7777))
 
 

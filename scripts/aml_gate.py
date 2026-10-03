@@ -32,6 +32,9 @@ hosts and never feed D8). ``--l2-sensitivity`` adds the ungated l2 refits.
 Spent seeds are refused, and so are the evaluation and robustness seeds unless
 ``--registered <role>`` marks this as the registered gate run for that role
 (the report then records the look under ``registered_look``). A registered
+evaluation or robustness look takes its seed from ``--seed-file PATH`` (one
+integer, a file only its owner can read), never from ``--seed``, so the
+held-out seed is on no command line. A registered
 look appends its seed to src/lakebench/spark/data/aml/aml_registered_looks.json
 before any model is fitted and its report sha256 before the verdict is
 printed; commit that file after the look. The manifest is
@@ -119,6 +122,33 @@ def _git_sha() -> str:
         return sha + ("-dirty" if dirty else "")
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
+
+
+def read_seed_file(path: Path) -> int:
+    """The corpus seed from an owner-only file (one integer). The file must be
+    a regular file that neither group nor others can read, so a held-out seed
+    is never on a command line or in a world-readable file. Errors never
+    print the file's content."""
+    import stat
+
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"--seed-file {path} is not a regular file")
+    if st.st_mode & 0o077:
+        raise ValueError(
+            f"--seed-file {path} is readable by group or others "
+            f"(mode {stat.S_IMODE(st.st_mode):o}); chmod 600 it"
+        )
+    text = Path(path).read_text().strip()
+    try:
+        seed = int(text)
+    except ValueError:
+        raise ValueError(
+            f"--seed-file {path} does not hold one integer (content not shown)"
+        ) from None
+    if not 0 <= seed < 1 << 63:
+        raise ValueError(f"--seed-file {path} holds a seed outside 0..2^63-1 (not shown)")
+    return seed
 
 
 def seed_guard_error(
@@ -321,6 +351,13 @@ def main(argv=None) -> int:
         return 0
     ap.add_argument("corpus", type=Path, help="corpus root (contains bronze/ and manifest/)")
     ap.add_argument("--seed", type=int, default=None, help="corpus seed (provenance only)")
+    ap.add_argument(
+        "--seed-file",
+        type=Path,
+        default=None,
+        help="a file holding the corpus seed, readable by its owner only; a registered "
+        "evaluation or robustness look takes its seed from here, never from --seed",
+    )
     ap.add_argument("--out", type=Path, default=None, help="write the JSON report here")
     ap.add_argument("--prereg", type=Path, default=None, help="pre-registration JSON path")
     ap.add_argument("--driver-memory", default="12g")
@@ -396,6 +433,17 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.seed_file is not None:
+        if args.seed is not None:
+            print("refusing: give the seed once (--seed or --seed-file)", file=sys.stderr)
+            return 1
+        try:
+            file_seed = read_seed_file(args.seed_file)
+        except (OSError, ValueError) as e:
+            print(f"refusing: {e}", file=sys.stderr)
+            return 1
+    else:
+        file_seed = None
     if args.generator_image is None and (
         args.d8_shard is not None or args.registered in ("evaluation", "robustness")
     ):
@@ -444,9 +492,21 @@ def main(argv=None) -> int:
         # The look record, the predictions and the pre-registration are read
         # from this checkout: they must be the committed ones, or a look in
         # another worktree (or a reverted record) goes unseen.
-        if args.seed is None:
-            print("refusing: a registered look needs --seed", file=sys.stderr)
+        # The held-out seed stays off the command line (owner, 10-03): it is
+        # read from an owner-only file.
+        if args.seed is not None:
+            print(
+                "refusing: a registered look takes its seed from --seed-file, never from --seed "
+                "(a command line is visible to every process on the host)",
+                file=sys.stderr,
+            )
             return 1
+        if args.seed_file is None:
+            print("refusing: a registered look needs --seed-file", file=sys.stderr)
+            return 1
+    if file_seed is not None:
+        args.seed = file_seed
+    if args.registered in ("evaluation", "robustness"):
         try:
             err = clean_checkout_error() or seed_ever_recorded(args.seed)
         except (OSError, ValueError) as e:

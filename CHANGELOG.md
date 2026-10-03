@@ -842,6 +842,22 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   A hit refuses the run (exit 1) before any job is submitted or any state
   is reset (`absence_check: enforce`), naming the map and key, never the
   value.
+- **A registered (held-out) AML corpus's seed travels through a Kubernetes
+  Secret.** For a `financial` config whose `corpus_role` is `evaluation` or
+  `robustness` (or whose seed hashes to a held-out seed), `generate` writes
+  the seed into the namespace's immutable Secret `lakebench-datagen-seed`,
+  and the datagen Job and the reference scorer read it as `LB_DATAGEN_SEED`
+  from that Secret instead of from `--seed` or a plaintext env value; no
+  Spark job of that deployment gets `LB_SEED`. A development generate in the
+  same namespace deletes the Secret, and `destroy` removes it.
+  `scripts/aml_gate.py --registered evaluation|robustness` takes the seed
+  from `--seed-file` (owner-only file) and refuses `--seed`. Development
+  configs, seed 43 included, render exactly as before. Needs the next
+  datagen image (the generator and its entrypoint read `LB_DATAGEN_SEED`); an
+  older image refuses a registered corpus with exit 2.
+- **A datagen pod whose Secret or ConfigMap is missing fails the generate
+  at once** (`CreateContainerConfigError`) instead of waiting for the
+  timeout.
 - **The pre-registration and the protocol no longer hold the held-out seeds
   in plaintext.** The pre-registration drops `corpora.evaluation_seed` and
   `corpora.robustness_seed` and names those seeds by role in its notes, and

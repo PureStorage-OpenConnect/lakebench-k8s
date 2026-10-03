@@ -142,8 +142,14 @@ fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
 /// tests/test_datagen_seed.py checks this list stays a subset of it.
 const SPENT_SEEDS: &[i64] = &[42, 50_000_042];
 
-/// --seed for the financial schema: required, strictly parsed, never a spent
-/// seed. The lenient `arg()` would turn a typo into the old default 42.
+/// Environment variable a registered (held-out) corpus's seed arrives in, from
+/// a Kubernetes Secret, so it is in no Job argument and no command line.
+const SEED_ENV: &str = "LB_DATAGEN_SEED";
+
+/// --seed for the financial schema, or `LB_DATAGEN_SEED` when --seed is
+/// absent: required, strictly parsed, never a spent seed. Both at once is
+/// refused, and a bad environment value is never echoed. The lenient `arg()`
+/// would turn a typo into the old default 42.
 fn financial_seed() -> i64 {
     let args: Vec<String> = std::env::args().collect();
     let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
@@ -153,13 +159,33 @@ fn financial_seed() -> i64 {
             a.strip_prefix("--seed=").map(str::to_string)
         }
     });
-    let Some(raw) = raw else {
-        eprintln!("--seed is required for the financial schema (AML seeds are pre-registered)");
-        std::process::exit(2);
-    };
-    let Ok(seed) = raw.parse::<i64>() else {
-        eprintln!("--seed must be an integer; got {raw:?}");
-        std::process::exit(2);
+    let env = std::env::var(SEED_ENV).ok();
+    let seed = match (raw, env) {
+        (Some(_), Some(_)) => {
+            eprintln!("the seed is given both as --seed and in {SEED_ENV}; pass it once");
+            std::process::exit(2);
+        }
+        (None, None) => {
+            eprintln!(
+                "--seed (or {SEED_ENV}) is required for the financial schema \
+                 (AML seeds are pre-registered)"
+            );
+            std::process::exit(2);
+        }
+        (Some(raw), None) => {
+            let Ok(seed) = raw.parse::<i64>() else {
+                eprintln!("--seed must be an integer; got {raw:?}");
+                std::process::exit(2);
+            };
+            seed
+        }
+        (None, Some(env)) => {
+            let Ok(seed) = env.trim().parse::<i64>() else {
+                eprintln!("{SEED_ENV} is not an integer (value not shown)");
+                std::process::exit(2);
+            };
+            seed
+        }
     };
     if SPENT_SEEDS.contains(&seed) {
         eprintln!(

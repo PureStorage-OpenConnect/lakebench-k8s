@@ -194,7 +194,36 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if args.seed is None:
+    # A registered (held-out) corpus's seed arrives in LB_DATAGEN_SEED from
+    # a Secret, never in the Job's args. It is passed on in the environment
+    # (the Rust generator reads it), so it is in no command line either; it
+    # is never printed. Given twice, or not an integer, is refused.
+    env_seed = os.environ.get("LB_DATAGEN_SEED")
+    seed_from_env = False
+    if env_seed is not None:
+        if args.seed is not None:
+            print(
+                "[entrypoint] the seed is given both as --seed and in LB_DATAGEN_SEED; "
+                "pass it once",
+                file=sys.stderr,
+            )
+            return 2
+        if args.schema != "financial":
+            print(
+                "[entrypoint] LB_DATAGEN_SEED applies to the financial schema only", file=sys.stderr
+            )
+            return 2
+        try:
+            if int(env_seed.strip()) < 0:
+                raise ValueError
+        except ValueError:
+            print(
+                "[entrypoint] LB_DATAGEN_SEED is not a non-negative integer (value not shown)",
+                file=sys.stderr,
+            )
+            return 2
+        seed_from_env = True
+    if args.seed is None and not seed_from_env:
         if args.schema == "financial":
             print(
                 "[entrypoint] --seed is required for the financial schema (AML seeds are "
@@ -264,8 +293,7 @@ def main() -> int:
         args.schema,
         "--bucket",
         args.bucket,
-        "--seed",
-        str(args.seed),
+        *([] if seed_from_env else ["--seed", str(args.seed)]),
         "--file-size-mb",
         str(args.file_size_mb),
         "--node-id",
