@@ -2773,13 +2773,25 @@ _TICK_TIMING_LINE = re.compile(
 _TICK_PHASE = re.compile(r"(\w+)=(\d+(?:\.\d+)?)s\b")
 
 
+_LB_LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
+
+
 def parse_tick_timing(line: str) -> dict[str, Any] | None:
-    """{"cycle", "silver_rows", "phases"} from a tick timing line, else None."""
+    """{"cycle", "silver_rows", "phases", "ended_at"} from a tick timing
+    line, else None. ``ended_at`` is the line's ``[lb]`` timestamp (UTC, the
+    driver's clock, when the tick logged its timings, so ``ended_at - total``
+    is when it started), None without one."""
     m = _TICK_TIMING_LINE.search(line.rstrip())
     if not m:
         return None
     phases = {k: float(v) for k, v in _TICK_PHASE.findall(m["phases"])}
-    return {"cycle": int(m["cycle"]), "silver_rows": int(m["rows"]), "phases": phases}
+    ts = _LB_LOG_TS.search(line)
+    return {
+        "cycle": int(m["cycle"]),
+        "silver_rows": int(m["rows"]),
+        "phases": phases,
+        "ended_at": ts.group(1) + "Z" if ts else None,
+    }
 
 
 def ttd_percentile(bins: dict[int, int], bin_s: int, q: float, max_s: float) -> float:

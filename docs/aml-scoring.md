@@ -979,6 +979,36 @@ workload identity key, so `compare` stops at "one workload on one corpus"
 before reading any result, and the perf gate and `reproduce` refuse the
 pair.
 
+**Investigators under load (`architecture.benchmark.investigator_sessions`).**
+Set to N (1 to 32) on an AML continuous run with TM operations on Trino or
+Spark Thrift, it adds one round right after the first in-stream round that
+included the investigator queries (that round is the baseline). N sessions
+run concurrently, each working one case of this run picked in IQ1's queue
+order (open before closed, by priority, oldest first): IQ1, IQ2 and IQ3 bound
+to that case and IQ4 unchanged, once each. The round is not a benchmark
+round, so in-stream QpH and the round count do not move; it takes window
+time, so the round count can be lower than without it. It runs only when at
+least twice the baseline round's time is left (`status: no_time`
+otherwise). `continuous.investigators` records `sessions_requested`,
+`sessions_run` (fewer when fewer cases are open, with `lowered_reason`), the
+`case_ids`, `rows_per_session`, the nearest-rank `latency` p50 and p95 per
+query over the sessions, the `baseline` round's time per query, the
+session `window` on the CLI clock, any `failed` or `empty` queries and a
+`status`: `pass`, or `fail` when a session query failed or a session's IQ1
+or IQ3 returned no rows (it fails the investigators check, not the run),
+`no_cases`, `no_time` or `case_query_failed`. It is labelled `n=1 per arm`
+and `shared S3 contention`, and `BOUNDED BY Trino query.max-memory
+(Lakebench-set)` when a session query failed on memory. After the window,
+each detection tick is placed against the session window (its end from the
+log, shifted to the CLI clock, minus its `total`): `tick_delta` gives the
+count and median tick time of the ticks with at least half their time inside
+the window and of those entirely outside, and `load_label` ("investigator
+load START-END: k of m ticks overlap") goes with time to detect and
+continuous throughput, whose values do not change. `experiment.investigators`
+holds `{requested, run}`; the identity key `investigator sessions` is the
+number that ran, an outcome condition, so two runs that ran different numbers
+compare as not like-for-like.
+
 ## What the AML workload deliberately does not measure
 
 - **Real production alert queues.** The datagen has one baseline
