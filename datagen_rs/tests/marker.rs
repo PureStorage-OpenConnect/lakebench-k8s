@@ -284,3 +284,163 @@ fn version_flag_prints_model_version() {
     );
     assert_eq!(s.split_whitespace().count(), 3, "{s}");
 }
+
+#[test]
+fn every_corpus_arg_moves_the_hash() {
+    // The printed key set is exactly the design's, and changing any
+    // included input changes the hash (a key dropped from corpus_args would
+    // let two different corpora read as one).
+    let fin_keys = [
+        "bytes_per_row",
+        "corpus_months",
+        "cycles",
+        "delivery_mode",
+        "file_size_mb",
+        "mode",
+        "model_version",
+        "robustness_perturbation",
+        "scale",
+        "schema",
+        "seed_ref",
+        "total_nodes",
+        "writer",
+    ];
+    let c360_keys = [
+        "customer_id_max",
+        "cycles",
+        "delivery_mode",
+        "dirty_ratio",
+        "duplicate_email_pct",
+        "file_size_mb",
+        "model_version",
+        "scale",
+        "schema",
+        "seed_ref",
+        "target_tb",
+        "timestamp_end",
+        "timestamp_start",
+        "total_nodes",
+        "writer",
+    ];
+    for (args, want) in [(fin(&[]), &fin_keys[..]), (c360(&[]), &c360_keys[..])] {
+        let r = resolved(&[], &args);
+        let mut got: Vec<&str> = r["corpus_args"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        got.sort();
+        assert_eq!(got, want);
+    }
+    let base = sha(&[], &fin(&[]));
+    let swap = |args: Vec<String>, flag: &str, value: &str| -> Vec<String> {
+        let mut a = args;
+        if let Some(i) = a.iter().position(|x| x == flag) {
+            a[i + 1] = value.to_string();
+        } else {
+            a.push(flag.to_string());
+            a.push(value.to_string());
+        }
+        a
+    };
+    for (flag, value) in [
+        ("--seed", "7778"),
+        ("--scale", "0.006"),
+        ("--corpus-months", "48"),
+        ("--file-size-mb", "2"),
+        ("--bytes-per-row", "400"),
+        ("--total-nodes", "2"),
+        ("--mode", "bronze"),
+        ("--cycles", "2"),
+    ] {
+        assert_ne!(base, sha(&[], &swap(fin(&[]), flag, value)), "{flag}");
+    }
+    assert_ne!(base, sha(&[], &fin(&["--robustness-perturbation"])));
+    let cbase = sha(&[], &c360(&[]));
+    for (flag, value) in [
+        ("--seed", "44"),
+        ("--target-tb", "0.00003"),
+        ("--customer-id-max", "250000"),
+        ("--scale", "2"),
+        ("--dirty-ratio", "0.1"),
+        ("--timestamp-start", "2024-02-01"),
+        ("--timestamp-end", "2024-12-01"),
+        ("--total-nodes", "2"),
+        ("--cycles", "2"),
+    ] {
+        assert_ne!(cbase, sha(&[], &swap(c360(&[]), flag, value)), "{flag}");
+    }
+}
+
+#[test]
+fn non_finite_floats_are_refused() {
+    for (args, flag) in [
+        (fin(&[]), "--scale"),
+        (c360(&[]), "--dirty-ratio"),
+        (c360(&[]), "--duplicate-email-pct"),
+    ] {
+        for bad in ["nan", "inf", "-inf"] {
+            let mut a = args.clone();
+            if let Some(i) = a.iter().position(|x| x == flag) {
+                a[i + 1] = bad.to_string();
+            } else {
+                a.push(flag.to_string());
+                a.push(bad.to_string());
+            }
+            a.push("--print-resolved-args".to_string());
+            let a: Vec<&str> = a.iter().map(String::as_str).collect();
+            let out = generate(None, &[], &a);
+            assert_eq!(out.status.code(), Some(2), "{flag} {bad}");
+        }
+    }
+}
+
+#[test]
+fn print_resolved_args_refuses_a_heldout_seed_misused() {
+    // The registered robustness seed (test fixture) without the perturbation
+    // is refused before anything is printed.
+    let fixture_path = fixture();
+    let a = fin(&[]);
+    let mut a: Vec<String> = a
+        .into_iter()
+        .map(|x| {
+            if x == "7777" {
+                "4695594915748112205".to_string()
+            } else {
+                x
+            }
+        })
+        .collect();
+    a.push("--print-resolved-args".into());
+    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+    let out = generate(
+        None,
+        &[("LB_HELDOUT_HASHES", fixture_path.to_str().unwrap())],
+        &a,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn version_as_a_value_is_not_the_version_flag() {
+    let mut a: Vec<String> = fin(&["--prefix", "--version"]);
+    a.push("--print-resolved-args".into());
+    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+    let out = generate(None, &[], &a);
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).expect("the resolved args, not a version");
+    assert!(v.get("corpus_args").is_some());
+}
+
+#[test]
+fn reference_only_pod_writes_no_marker() {
+    let dir = tmp("lb-marker-ref");
+    let mut a = fin(&[]);
+    let i = a.iter().position(|x| x == "--mode").unwrap();
+    a[i + 1] = "reference".into();
+    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+    assert!(generate(Some(&dir), &[], &a).status.success());
+    assert!(markers(&dir).is_empty());
+}

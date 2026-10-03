@@ -184,13 +184,17 @@ math library, so another base can change corpus bytes. S3 credentials come
 from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `S3_ENDPOINT` in the pod
 environment.
 
-Build with `--build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD)`: the image's
+Build with `--build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD)` (the build
+refuses to run without it): the image's
 OCI labels (`org.opencontainers.image.revision`, `.source`, `.version` and
 `io.lakebench.model-version`), `generate --version` and every per-node
 marker name that commit. `podman run <image> --version` prints
 `datagen_rs <model version> <commit>`; `--print-resolved-args` added to a
 Job's arguments prints the resolved corpus arguments and their hash as JSON
-and writes nothing.
+and writes nothing. For the financial schema it still needs what a run
+needs before writing: the held-out hash file (`LB_HELDOUT_HASHES`, mounted
+from the repository's `src/lakebench/spark/data/aml/heldout_hashes.json`)
+and a seed (`--seed`, or `LB_DATAGEN_SEED` for a registered corpus).
 
 After its last file, each pod writes
 `<prefix>/_corpus/c<cycle>-node-<node>.json`: the files, rows and bytes it

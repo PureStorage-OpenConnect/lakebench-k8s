@@ -26,7 +26,9 @@ def _prefix(tmp_path, spark):
     root.mkdir(parents=True)
     (part,) = staged.glob("part-*.parquet")
     shutil.copy(part, root / "part-000000.parquet")
-    marker = root / "_corpus" / "c000-node-0000.json"
+    from lakebench.corpus_digest import MARKER_DIR
+
+    marker = root / MARKER_DIR / "c000-node-0000.json"
     marker.parent.mkdir(parents=True)
     marker.write_text(json.dumps({"format": 1, "files_written": 1, "corpus_args": {}}))
     return root

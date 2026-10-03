@@ -1004,6 +1004,21 @@ fn reference_files_are_byte_identical_across_node_counts() {
 
 /// FNV-1a over every file under `dir` (relative path, then bytes), sorted by
 /// relative path string.
+/// The generator version every output pin below was captured under. A pin
+/// that changes needs a new MODEL_VERSION (model.rs), so readers can tell
+/// the corpora apart; changing a pin here without bumping it fails this.
+const PINNED_MODEL_VERSION: &str = "datagen-v2-rs-0.3";
+
+#[test]
+fn output_pins_are_keyed_by_model_version() {
+    assert_eq!(
+        datagen_rs::model::MODEL_VERSION,
+        PINNED_MODEL_VERSION,
+        "MODEL_VERSION moved: re-capture every output pin under the new version and \
+         update PINNED_MODEL_VERSION in the same change"
+    );
+}
+
 fn tree_digest(dir: &Path) -> (u64, usize) {
     let mut paths = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
