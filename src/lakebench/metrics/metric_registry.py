@@ -620,6 +620,19 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         description="Actual data volume / expected volume for the scale factor (1.0 = complete)",
     ),
     MetricMeta(
+        "time_to_value_datagen_excluded_seconds",
+        "s",
+        "none",
+        "diagnostic",
+        _BATCH,
+        _ALL_WL,
+        (),
+        description=(
+            "Multi-cycle batch: seconds of the cycles' datagen inside the time-to-value "
+            "span, left out of time_to_value_seconds"
+        ),
+    ),
+    MetricMeta(
         "cycle_progression",
         "struct",
         "none",
