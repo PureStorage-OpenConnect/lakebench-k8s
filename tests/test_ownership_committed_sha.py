@@ -63,14 +63,32 @@ def test_stamp_is_the_package_checkout_not_the_working_directory(tmp_path, monke
 
 
 @pytest.mark.parametrize(
+    "dirty, want",
+    [
+        (False, "aaaaaaa-buildinfo"),
+        (True, "aaaaaaa-buildinfo-dirty"),
+        (None, "aaaaaaa-buildinfo-dirty"),
+    ],
+)
+def test_a_wheel_stamps_its_build_info_commit_marked(dirty, want, tmp_path, monkeypatch):
+    # No checkout: the build hook's commit is the code's identity, marked
+    # so it is never taken for a checkout's HEAD.
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    monkeypatch.chdir(tmp_path)
+    code = {"install": provenance.INSTALL_WHEEL, "git_sha": "a" * 40, "git_dirty": dirty}
+    monkeypatch.setattr(provenance, "sample", lambda: dict(code))
+    assert ownership.build_identity_from_config(_cfg()).committed_sha == want
+
+
+@pytest.mark.parametrize(
     "code",
     [
-        {"install": provenance.INSTALL_WHEEL, "git_sha": "a" * 40},
+        {"install": provenance.INSTALL_WHEEL, "git_sha": None},
         {"install": provenance.INSTALL_UNKNOWN, "git_sha": None},
     ],
-    ids=["wheel", "unknown"],
+    ids=["hookless-wheel", "unknown"],
 )
-def test_no_stamp_outside_a_checkout(code, tmp_path, monkeypatch):
+def test_no_stamp_without_a_commit(code, tmp_path, monkeypatch):
     monkeypatch.setenv("KUBECONFIG", "/nonexistent")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(provenance, "sample", lambda: dict(code))
