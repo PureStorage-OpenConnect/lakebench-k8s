@@ -102,8 +102,6 @@ PATTERN_READERS = (("uat/results-*.md", "scripts/release_gate.py", "uat/results-
 KNOWN_ORPHANS = (
     "docs/deep-dive/datagen-metrics.md",
     "docs/design/README.md",
-    # Cited only in docstrings and comments; linked once docs/design/README.md is.
-    "docs/design/namespace-isolation.md",
     "docs/internal/design-contradictions.md",
     # Cited only in comments and docstrings, and from the Rust datagen.
     "docs/internal/observability-pushgateway.md",
