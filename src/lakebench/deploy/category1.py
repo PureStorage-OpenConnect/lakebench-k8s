@@ -225,7 +225,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         label_selector=(
             "app.kubernetes.io/component=datagen-seed,app.kubernetes.io/instance={name}"
         ),
-        owner_wi="DAT-1",
+        owner_wi="registered-seed-secret",
         step=CATEGORY1_STEP,
     ),
     *(

@@ -75,7 +75,8 @@ checks it by hash against `heldout_hashes.json`. A wrong value is refused.
 On the cluster that seed is held only in a Secret in the deployment's
 namespace, `lakebench-datagen-seed-<first 16 hex of its salted hash>`
 (written by `generate`, immutable, labelled `app.kubernetes.io/component=
-datagen-seed`, deleted by a later development generate and by `destroy`).
+datagen-seed`, replaced by a registered generate for another seed, deleted
+by `destroy`; a development generate does not touch it).
 The datagen Job and the reference scorer read it as `LB_DATAGEN_SEED` from
 that Secret, so it is in no Job argument, pod spec or SparkApplication spec,
 and no Spark job of that deployment gets `LB_SEED`. `scripts/aml_gate.py`

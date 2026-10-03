@@ -257,28 +257,13 @@ def _drop_one(core_v1: Any, name: str, namespace: str) -> None:
         ) from None
 
 
-def drop_seed_secrets(cfg: Any, core_v1: Any) -> None:
-    """Delete this deployment's seed Secrets before a generate that uses none,
-    so a registered seed does not stay in the namespace under a development
-    corpus. Best effort: a failure is logged (without the seed) and the
-    generate goes on, since nothing reads the Secrets then; destroy removes
-    them."""
-    namespace = cfg.get_namespace()
-    try:
-        for name in _own_seed_secrets(core_v1, cfg):
-            _drop_one(core_v1, name, namespace)
-    except SeedSecretError as e:
-        logger.warning("%s; destroy removes it", e)
-
-
 def prepare_seed_secret(cfg: Any, k8s: Any) -> None:
-    """``ensure_seed_secret`` for a registered corpus, ``drop_seed_secrets``
-    otherwise. Call after the previous datagen Job's pods have stopped."""
-    core_v1 = k8s._core_v1
+    """``ensure_seed_secret`` for a registered corpus; nothing for any other
+    (a development generate makes no Secret call, and an earlier registered
+    seed Secret stays until destroy). Call after the previous datagen Job's
+    pods have stopped."""
     if uses_seed_secret(cfg):
-        ensure_seed_secret(cfg, core_v1)
-    else:
-        drop_seed_secrets(cfg, core_v1)
+        ensure_seed_secret(cfg, k8s._core_v1)
 
 
 #: Label every datagen pod carries (templates/datagen/job.yaml.j2).

@@ -266,34 +266,29 @@ def test_secret_errors_never_hold_the_seed(core):
         core.store.clear()
 
 
-def test_a_development_generate_drops_this_deployments_secrets(core, caplog):
-    from lakebench.deploy.datagen import drop_seed_secrets, ensure_seed_secret
+def test_only_a_registered_generate_touches_secrets():
+    # A development generate makes no Secret call at all.
+    import lakebench.deploy.datagen as dg
 
-    ensure_seed_secret(_registered(), core)
-    core.store["lakebench-datagen-seed-other"] = _foreign("lakebench-datagen-seed-other")
-    drop_seed_secrets(_cfg(seed=43), core)
-    assert list(core.store) == ["lakebench-datagen-seed-other"]
-    # A failure is logged, not raised, and names no seed.
-    ensure_seed_secret(_registered(), core)
+    core = MagicMock()
+    dg.prepare_seed_secret(_cfg(seed=43), SimpleNamespace(_core_v1=core))
+    assert core.method_calls == []
+
+
+def test_cleanup_failure_fails_the_registered_generate(core):
+    from lakebench.deploy.datagen import SeedSecretError, ensure_seed_secret
+
+    core.store["lakebench-datagen-seed-old"] = _foreign(
+        "lakebench-datagen-seed-old", owner=_registered().name
+    )
 
     def boom(*a, **k):
         raise _ApiException(403)
 
     core.delete_namespaced_secret.side_effect = boom
-    drop_seed_secrets(_cfg(seed=43), core)
-    assert "HTTP 403" in caplog.text and _no_seed_in(caplog.text)
-
-
-def test_prepare_picks_ensure_or_drop(monkeypatch):
-    import lakebench.deploy.datagen as dg
-
-    calls = []
-    monkeypatch.setattr(dg, "ensure_seed_secret", lambda cfg, c: calls.append("ensure"))
-    monkeypatch.setattr(dg, "drop_seed_secrets", lambda cfg, c: calls.append("drop"))
-    k8s = SimpleNamespace(_core_v1=object())
-    dg.prepare_seed_secret(_registered(), k8s)
-    dg.prepare_seed_secret(_cfg(seed=43), k8s)
-    assert calls == ["ensure", "drop"]
+    with pytest.raises(SeedSecretError, match="HTTP 403") as e:
+        ensure_seed_secret(_registered(), core)
+    assert _no_seed_in(str(e.value))
 
 
 def _deployer(cfg, applied):
