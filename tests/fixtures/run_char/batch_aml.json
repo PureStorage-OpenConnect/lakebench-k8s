@@ -1302,6 +1302,9 @@
    "success"
   ],
   "jobs[0]": [
+   "alert_set",
+   "alert_set_seconds",
+   "alert_set_unavailable",
    "alerts_by_rule",
    "c360_bronze",
    "c360_check",

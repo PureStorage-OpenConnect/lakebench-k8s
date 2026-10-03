@@ -103,6 +103,15 @@ class JobMetrics:
     # ``[tm-status]`` lines by cycle: {"status", "reason"}; says whether the
     # layer ran and why not.
     tm_status: dict[str, dict[str, str]] = field(default_factory=dict)
+    # EVD-10 (AML gold-finalize only): the alert-set fingerprint from the
+    # driver's ``LB_ALERT_SET`` line (metrics/alert_set.py), copied to
+    # ``experiment.results.alert_set``; the seconds it took, Lakebench work
+    # inside this stage's elapsed time that the report labels; and the
+    # reason when the line says it could not be computed or is malformed.
+    # All None when the log has no such line.
+    alert_set: dict[str, Any] | None = None
+    alert_set_seconds: float | None = None
+    alert_set_unavailable: str | None = None
     # Customer 360 expected-result facts (metrics/c360_correctness.py): the
     # ``[c360-check]`` JSON from gold-finalize, the ``[c360-bronze]`` counts
     # from bronze-verify. None on other jobs and workloads.
@@ -3200,6 +3209,15 @@ class MetricsCollector:
         metrics.tm_invariants = {str(c): inv for c, inv in parse_tm_invariants(logs).items()}
         metrics.tm_status = {str(c): st for c, st in parse_tm_status(logs).items()}
         metrics.tm_ops = parse_tm_ops(logs)
+
+        # EVD-10: the alert-set fingerprint (AML gold-finalize).
+        from lakebench.metrics.alert_set import parse_alert_set
+
+        (
+            metrics.alert_set,
+            metrics.alert_set_seconds,
+            metrics.alert_set_unavailable,
+        ) = parse_alert_set(logs)
 
         # Customer 360 expected-result facts (reporting only, D6).
         from lakebench.metrics.c360_correctness import parse_c360_bronze, parse_c360_check

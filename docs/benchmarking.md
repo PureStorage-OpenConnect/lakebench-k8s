@@ -1427,8 +1427,8 @@ results before it shows any number, and the exit code is the verdict:
 | Verdict | When | Exit |
 |---|---|---|
 | LIKE-FOR-LIKE | Same experiment, equal benchmark results, same execution conditions | 0 |
-| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results, a run that did not pass, a record without an experiment block, or a side whose runs are not one experiment | 10 |
-| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | 11 |
+| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results or AML alert sets, a run that did not pass, a record without an experiment block, or a side whose runs are not one experiment | 10 |
+| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, a continuous run whose result check did not settle, or an AML batch record from 1.7 without its alert-set fingerprint | 11 |
 | NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs | 12 |
 | CONFOUNDED | Comparable, but the architecture and the system both differ | 13 |
 

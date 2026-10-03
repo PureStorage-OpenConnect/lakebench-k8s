@@ -470,6 +470,17 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **AML batch runs record their alert set, and `compare` checks it.**
+  After its last alert write, gold-finalize fingerprints the run's alerts
+  over `(rule_id, entity_id, alert_ts)`, per rule and in total, leaving out
+  generated ids and wall-clock times (`experiment.results.alert_set`, equal
+  on Spark 4.0 and 4.1). Two AML batch runs whose alert sets differ are NOT
+  COMPARABLE (exit 10), naming the rule; a 1.7 record with a complete
+  identity (`exp2`) and no alert set is NOT ESTABLISHED (exit 11). The
+  fingerprint runs inside the gold-finalize stage: its seconds are recorded
+  as `jobs[].alert_set_seconds` and the report labels them beside the stage
+  time. The covered continuous score uses the same definition. See
+  [aml-scoring.md](docs/aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same).
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in

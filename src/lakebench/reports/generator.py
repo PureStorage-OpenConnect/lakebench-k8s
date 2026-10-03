@@ -2287,6 +2287,12 @@ class ReportGenerator:
                     f"<br><small>incl. {job.submission_retry_seconds:.0f}s on "
                     f"{n_fail} failed submission{'s' if n_fail != 1 else ''}</small>"
                 )
+            fp_s = getattr(job, "alert_set_seconds", None)
+            if fp_s is not None:
+                # EVD-10: Lakebench's own work inside the stage, not pipeline time.
+                elapsed += (
+                    f"<br><small>includes {fp_s:.1f}s of Lakebench's alert-set fingerprint</small>"
+                )
 
             rows.append(f"""
             <tr>

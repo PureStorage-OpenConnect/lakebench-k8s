@@ -290,11 +290,16 @@ def _fingerprint_problems(results: Mapping[str, Any], entry: Mapping[str, Any]) 
         if why:
             problems.append(f"query {query} result differs from the expected result: {why}")
     if entry.get("alert_set") is not None:
+        from lakebench.metrics.alert_set import diff_alert_sets
+
         alert = results.get("alert_set")
         if alert is None:
             problems.append("no alert-set fingerprint to check against the expected one")
-        elif alert != entry["alert_set"]:
-            problems.append("alert set differs from the expected alert set")
+        else:
+            problems.extend(
+                f"{why} (against the expected alert set)"
+                for why in diff_alert_sets(alert, entry["alert_set"], "the run", "the expected set")
+            )
     return problems
 
 

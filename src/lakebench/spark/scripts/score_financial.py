@@ -594,10 +594,6 @@ COVERED_SNAPSHOTS = (
     ("status", GOLD_STATUS),
 )
 
-#: Columns of the alert-set fingerprint (the batch alert set's identity of an alert: the
-#: alert id is a uuid and the run id differs between runs).
-ALERT_SET_COLUMNS = ["rule_id", "entity_id", "alert_ts"]
-
 
 class NotScored(Exception):
     """Covered mode cannot score this run; the message is the reason."""
@@ -730,7 +726,7 @@ def score_covered(spark, manifest, ids: dict, own_run_id: str):
     the batch recall.
     """
     from aml_features import _account_id_map, check_manifest
-    from common import SealedFilterError, frame_fingerprint, sealed_txns_filter_at
+    from common import SealedFilterError, alert_set_fingerprint, sealed_txns_filter_at
 
     need = {"typology_id", "typology_type", "participant_uetrs", "participant_entity_ids"}
     missing = sorted(need - set(manifest.columns))
@@ -822,19 +818,8 @@ def score_covered(spark, manifest, ids: dict, own_run_id: str):
             }
         )
 
-    rows_all, fp_all, cols_sha = frame_fingerprint(alerts, ALERT_SET_COLUMNS)
-    by_rule = {}
-    for rid in sorted({r["rule_id"] for r in alerts.select("rule_id").distinct().collect()}):
-        n, h, _ = frame_fingerprint(alerts.where(col("rule_id") == lit(rid)), ALERT_SET_COLUMNS)
-        by_rule[rid] = {"rows": int(n), "h": str(h)}
-    alert_set = {
-        "spec": "as1",
-        "columns": list(ALERT_SET_COLUMNS),
-        "cols_sha": cols_sha,
-        "rows": int(rows_all),
-        "h": str(fp_all),
-        "by_rule": by_rule,
-    }
+    # The batch alert set's definition (gold-finalize uses the same helper).
+    alert_set = alert_set_fingerprint(alerts)
 
     # Subjects of covered instances only: an uncovered instance's subject is
     # usually not in silver yet, which would hide a real is_customer miss.

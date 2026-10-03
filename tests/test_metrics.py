@@ -692,6 +692,9 @@ class TestMetricsStorage:
             "c360_bronze": {"rows": 4},
             "silver_tables": {"silver_x_rows": 5},
             "extra_metrics": {"data_clock_source": "z"},
+            "alert_set": {"spec": "as1", "rows": 1},
+            "alert_set_seconds": 0.25,
+            "alert_set_unavailable": "u",
         }
 
         parsed = JobMetrics(job_name="p", job_type="silver-build", **parser_owned_probe)
