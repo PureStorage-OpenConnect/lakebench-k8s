@@ -497,6 +497,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...`
   to that file as it exits, so scripts can tell refusals that share exit 3
   apart without reading message text (docs/exit-codes.md).
+- **AML silver parity check.** `scripts/release/silver_parity.py` (not in the
+  wheel) compares row counts and order-insensitive checksums of the AML
+  silver tables between a batch and a drained continuous deployment of one
+  corpus, with the business columns read from the silver DDL. See
+  docs/releasing.md.
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in
