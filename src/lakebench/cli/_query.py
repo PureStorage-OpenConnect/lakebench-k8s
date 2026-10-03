@@ -248,17 +248,20 @@ def _query_json_rows(engine: str, raw: str) -> tuple[list[str] | None, list[list
     import csv
     import io
 
-    text = (raw or "").strip()
     if engine == "duckdb":
         from lakebench.benchmark.fingerprint import last_json_line
 
-        payload = last_json_line(text) or {}
+        payload = last_json_line((raw or "").strip()) or {}
         return None, [[str(d)] for d in payload.get("data") or []], "python-repr"
-    if not text:
-        return None, [], "tsv2" if engine == "spark-thrift" else "csv"
     if engine == "spark-thrift":
+        # Only the final newline goes, as the executor counts rows: an empty
+        # last cell, or a row holding one empty string, is data.
+        text = (raw or "").removesuffix("\n")
+        if not text:
+            return None, [], "tsv2"
         lines = text.split("\n")
         return lines[0].split("\t"), [ln.split("\t") for ln in lines[1:]], "tsv2"
+    text = (raw or "").strip()
     return None, [list(r) for r in csv.reader(io.StringIO(text))], "csv"
 
 

@@ -1591,7 +1591,9 @@ def _report_list_row(r: dict) -> dict:
     }
 
 
-def _report_run_data(metrics, runs_dir: Path, delivered: Path | None) -> dict:
+def _report_run_data(
+    metrics, runs_dir: Path, delivered: Path | None, requested: str | None = None
+) -> dict:
     """The run ``report`` shows, for ``--json`` (cli/_json.ReportRun), from
     the record as stored (the per-run file, else the legacy flat one, as
     ``load_run`` reads them): its verdict and scores are never recomputed;
@@ -1599,10 +1601,8 @@ def _report_run_data(metrics, runs_dir: Path, delivered: Path | None) -> dict:
     import json as _json_mod
 
     record: dict = {}
-    for path in (
-        runs_dir / f"run-{metrics.run_id}" / "metrics.json",
-        runs_dir / f"run-{metrics.run_id}.json",
-    ):
+    rid = requested or metrics.run_id  # the id load_run was given, when one was
+    for path in (runs_dir / f"run-{rid}" / "metrics.json", runs_dir / f"run-{rid}.json"):
         try:
             record = _json_mod.loads(path.read_text())
             break
@@ -1905,7 +1905,9 @@ def report(
     # Not run_dir(): that creates the directory, and report only reads here.
     delivered = storage.metrics_dir / f"run-{metrics.run_id}" / "report.html"
     _json.set_data(
-        _report_run_data(metrics, storage.metrics_dir, delivered if delivered.exists() else None)
+        _report_run_data(
+            metrics, storage.metrics_dir, delivered if delivered.exists() else None, run_id
+        )
     )
     if delivered.exists():
         console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")

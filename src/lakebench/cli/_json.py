@@ -229,7 +229,22 @@ def start_from_args(group: Any, args: list[str]) -> None:
             break
         words.append(a)
         cmd = sub
-    if words and not hasattr(cmd, "commands"):
+    if not words or hasattr(cmd, "commands"):
+        return
+    # Only a command that declares --json, and only when the token is not
+    # another option's value (``--sql --json``).
+    declared = any("--json" in getattr(p, "opts", ()) for p in cmd.params)
+    takes_value = {
+        o
+        for p in cmd.params
+        if getattr(p, "param_type_name", "") == "option" and not getattr(p, "is_flag", False)
+        for o in getattr(p, "opts", ())
+    }
+    rest = args[len(words) :]
+    as_value = any(
+        tok == "--json" and i and rest[i - 1] in takes_value for i, tok in enumerate(rest)
+    )
+    if declared and not as_value:
         start(" ".join(words))
 
 

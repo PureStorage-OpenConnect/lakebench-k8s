@@ -253,6 +253,9 @@ def test_without_json_nothing_changes(cluster):  # noqa: F811
             (None, [["('web', 40)"], ["('store', 2)"]], "python-repr"),
         ),
         ("trino", "", (None, [], "csv")),
+        # An empty last cell and a row holding one empty string are data.
+        ("spark-thrift", "a\tb\n1\t\n", (["a", "b"], [["1", ""]], "tsv2")),
+        ("spark-thrift", "c\n\n", (["c"], [[""]], "tsv2")),
     ],
 )
 def test_query_rows_per_engine(engine, raw, expected):
@@ -319,3 +322,36 @@ def test_every_stdout_console_is_redirected():
     }
     assert declared and redirected == declared
     assert cli_pkg
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["journal", "--session", "--json"],  # a value, not the flag
+        ["query", "--example", "--json"],
+        ["deploy", "--json"],  # a command with no --json
+    ],
+)
+def test_json_as_a_value_or_undeclared_starts_no_document(argv, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, argv)
+    assert '"schema": "lb-cli/1"' not in res.stdout, argv
+
+
+def test_missing_default_config_is_an_error_in_the_document(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["query", "--sql", "SELECT 1", "--json"])
+    doc = _doc(res)
+    assert res.exit_code == doc["exit_code"] == 2
+    assert "No config file specified" in doc["errors"][0]["what"]
+
+
+def test_report_reads_the_record_by_the_requested_id(monkeypatch, tmp_path):
+    """A copied run directory whose record carries another run_id: the
+    stored verdict still comes from the file load_run read."""
+    runs = tmp_path / "lakebench-output" / "runs"
+    runs.mkdir(parents=True)
+    shutil.copytree(RECORDS / f"run-{RUN}", runs / "run-copied")
+    monkeypatch.chdir(tmp_path)
+    doc = _doc(CliRunner().invoke(app, ["report", "copied", "--json"]))
+    assert doc["data"]["verdict"] == "PASSED" and doc["data"]["scores"]

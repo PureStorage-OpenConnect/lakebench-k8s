@@ -56,10 +56,8 @@ def resolve_config_path(
     if default.exists():
         return default
 
-    console.print(
-        f"[red]ERROR[/red] No config file specified and ./{esc(DEFAULT_CONFIG)} not found"
-    )
-    console.print("[blue]INFO[/blue] Create one with: lakebench init")
+    print_error(f"No config file specified and ./{DEFAULT_CONFIG} not found")
+    print_info("Create one with: lakebench init")
     raise typer.Exit(ExitCode.USAGE)
 
 
