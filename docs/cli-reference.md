@@ -642,7 +642,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `1` `run.namespace_gone`: the namespace was deleted, or deleted and deployed again, during a continuous `run`, or could not be read three times over a minute; the record names it in abort_reason
 - `1` `repeat.no_verified_corpus`: `run --repeat` found no verified corpus to reuse after repetition 1
 - `2` `run.args`: a `run` argument or combination is refused before any cluster call
-- `2` `run.protected_corpus`: a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none; or bronze-verify found the corpus manifest comes from a held-out or spent seed
+- `2` `run.protected_corpus`: a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none; or bronze-verify (or its check before a `run --stage` subset) refused the corpus: its manifest comes from a held-out or spent seed, gives back no corpus seed, is missing where one is required, or the held-out record cannot be read
 - `3` `run.deps_mismatch`: the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded
 - `3` `run.bronze_nonempty`: datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset)
 - `3` `series.corpus_changed`: the bronze corpus changed during or between repetitions of `run --repeat`
@@ -728,6 +728,14 @@ The refused arguments are listed with the flags above.
 does not support, are refused just after these, also before any cluster
 call. Benchmark settings `run` does not honour are refused when the config
 loads.
+
+A config naming a protected AML corpus (the evaluation or robustness role or
+seed) is refused before any cluster call (exit 2, `run.protected_corpus`).
+For the financial workload, bronze-verify reads every row of the corpus
+manifest first and stops (exit 2) on a corpus from a held-out or spent seed,
+on a manifest no corpus seed can be recovered from, and on a batch corpus
+with no manifest; `--stage silver-build` or `gold-finalize` runs that check
+alone first. A check that could not run (a storage error) exits 1.
 
 The run command executes 7 phases:
 

@@ -1252,6 +1252,47 @@ def _behavioural_subset() -> set[str]:
     return set(data.get("behavioural_subset", []))
 
 
+def _held_out_check_only(job_manager, monitor, run_id, interrupt, timeout) -> None:
+    """Run bronze-verify's held-out check alone (``LB_REGISTER_TABLE=check``):
+    it reads every manifest row and stops on a corpus from a held-out or
+    spent AML seed. A refusal exits 2 (``run.protected_corpus``); a check
+    that could not run exits 1."""
+    from lakebench.aml.look_guard import refusal_in_log
+    from lakebench.spark.job import JobState, JobType
+
+    app = f"lakebench-{JobType.BRONZE_VERIFY.value}"
+    console.print()
+    console.print("[bold]Held-out check: bronze-verify, check only[/bold]")
+    if interrupt is not None:
+        interrupt.creating("SparkApplication", app)
+    status = job_manager.submit_job(
+        JobType.BRONZE_VERIFY, cycle_env={"LB_REGISTER_TABLE": "check", "LB_RUN_ID": run_id}
+    )
+    if interrupt is not None:
+        interrupt.submitted(status)
+    if status.state == JobState.FAILED:
+        print_error(f"Could not submit the held-out check: {status.message}")
+        raise typer.Exit(ExitCode.FAILED)
+    result = monitor.wait_for_completion(
+        app, timeout_seconds=max(600, timeout or 0), poll_interval=15
+    )
+    if result.success:
+        if interrupt is not None:
+            interrupt.finished("SparkApplication", app)
+        print_success("Held-out check passed")
+        return
+    refused = refusal_in_log(getattr(result, "driver_logs", None))
+    if refused:
+        print_error(f"Refused: the corpus is a protected AML corpus ({refused})")
+        raise typer.Exit(ExitCode.USAGE)
+    print_error(f"The held-out check failed: {result.message}")
+    if getattr(result, "driver_logs", None):
+        console.print("[dim]Driver logs (last 20 lines):[/dim]")
+        for line in result.driver_logs.split("\n")[-20:]:
+            console.print(f"  {line}")
+    raise typer.Exit(ExitCode.FAILED)
+
+
 def no_query_engine_skip(cfg, skip_benchmark: bool) -> tuple[bool, bool]:
     """(no_query_engine, skip_benchmark) for a batch run of *cfg*.
 
@@ -2359,6 +2400,11 @@ def _run_once(
             from lakebench.cli._sustained import _stop_leftover_streams
 
             _stop_leftover_streams(job_manager, cfg.get_namespace())
+            if stages[0][0] != JobType.BRONZE_VERIFY:
+                # A stage subset runs no bronze-verify, but its stages read the
+                # corpus: its held-out check runs alone first.
+                _stage = "held-out check"
+                _held_out_check_only(job_manager, monitor, run_id, _interrupt, timeout)
 
         # B1 --force-rebuild: bump the deployment's rebuild-epoch counter
         # ONCE per `lakebench run` invocation, before the cycle loop, so
@@ -2765,6 +2811,14 @@ def _run_once(
                         # AML seed and read nothing: the protected-corpus refusal.
                         print_error(
                             f"Refused: {stage_name} found a protected AML corpus ({_refused})"
+                        )
+                        results.append((stage_name, False, job_metrics.elapsed_seconds))
+                        _journal_safe(
+                            j.record,
+                            EventType.PIPELINE_STAGE,
+                            message=f"{stage_name} refused a protected AML corpus",
+                            success=False,
+                            details={"stage": stage_name, "success": False, "refused": True},
                         )
                         pipeline_success = False
                         raise typer.Exit(ExitCode.USAGE)

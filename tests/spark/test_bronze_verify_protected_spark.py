@@ -141,3 +141,24 @@ def test_main_refuses_before_any_namespace_read_or_write(
         with pytest.raises(_Reached):
             bvf.main()
         assert reached == ["ensure_namespaces"]
+
+
+def test_check_only_mode_stops_after_the_check(spark, bvf, tmp_path, monkeypatch):
+    _write_manifest(spark, tmp_path, ts.manifest_rows(pc.CALIBRATION, 30))
+    monkeypatch.setattr(bvf, "CHECK_ONLY", True)
+    reached: list[str] = []
+    monkeypatch.setattr(bvf, "ensure_namespaces", lambda *a, **k: reached.append("ns"))
+    session = _Session(spark)
+    builder = type("B", (), {"appName": lambda self, n: self, "getOrCreate": lambda self: session})
+    monkeypatch.setattr("pyspark.sql.SparkSession.builder", builder())
+    bvf.main()
+    assert reached == [] and session.stopped == 1
+
+
+def test_an_unreadable_manifest_is_unchecked_not_refused(spark, bvf, tmp_path):
+    bad = tmp_path / "pacs008" / "manifest"
+    bad.mkdir(parents=True)
+    (bad / "manifest.parquet").write_bytes(b"not parquet")
+    with pytest.raises(SystemExit) as info:
+        bvf.refuse_protected_corpus(_Session(spark))
+    assert str(info.value).startswith(bvf.PROTECTED_UNCHECKED)
