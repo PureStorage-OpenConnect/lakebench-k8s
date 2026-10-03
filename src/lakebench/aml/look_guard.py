@@ -74,10 +74,15 @@ def protected_corpus_reason(cfg: Any) -> str | None:
     role = getattr(dg, "corpus_role", None)
     if role in PROTECTED_ROLES:
         return f"corpus_role {role}"
+    financial = workload.schema_type.value == "financial"
+    if financial:
+        # Whatever the seed: the bronze prefix may hold a registered corpus.
+        at = registered_corpus_at(cfg)
+        if at is not None:
+            return at
     seed = getattr(dg, "seed", None)
     if seed is None or isinstance(seed, bool):
         return None
-    financial = workload.schema_type.value == "financial"
     try:
         held = _held_out(seed)
     except Exception as e:  # noqa: BLE001 -- unreadable: refuse for AML
@@ -88,8 +93,6 @@ def protected_corpus_reason(cfg: Any) -> str | None:
         return None
     if held is not None:
         return f"datagen.seed is the registered {held} seed"
-    if financial:
-        return registered_corpus_at(cfg)
     return None
 
 
@@ -99,30 +102,45 @@ def registered_corpus_at(cfg: Any) -> str | None:
     --registered-corpus``), or None. A development config pointed at that
     bucket would read the registered corpus: bronze-verify, silver, gold and
     the TM operations would run on it before the scorer's manifest check. A
-    ledger that cannot be read refuses (fail closed)."""
+    ledger that cannot be read refuses (fail closed). The ledger is per host
+    (``LB_AML_CORPORA_LEDGER``): the owner takes the looks from one host."""
     path = ds.corpora_ledger_path()
     if not path.is_file():
         return None
-    try:
-        from lakebench.deploy.datagen import bronze_datagen_prefix
+    from lakebench.deploy.datagen import bronze_datagen_prefix
 
-        here = (
-            f"s3://{cfg.platform.storage.s3.buckets.bronze}/"
-            f"{bronze_datagen_prefix(cfg).rstrip('/')}/"
-        )
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            entry = json.loads(line)
-            if entry.get("kind") == "registered_corpus" and entry.get("bronze_uri") == here:
-                return (
-                    f"its bronze prefix {here} holds a registered {entry.get('role')} corpus "
-                    f"(corpus ledger {path}, attempt {entry.get('attempt')}); use another bronze "
-                    "bucket for development"
-                )
-    except Exception as e:  # noqa: BLE001 -- unreadable ledger: refuse
+    s3 = cfg.platform.storage.s3
+    here = bronze_uri(s3.buckets.bronze, bronze_datagen_prefix(cfg))
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
         return f"the corpus ledger {path} cannot be read ({type(e).__name__})"
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+            kind, uri = entry.get("kind"), entry.get("bronze_uri")
+        except (ValueError, AttributeError):
+            return (
+                f"line {n} of the corpus ledger {path} cannot be read; repair or remove that "
+                "line (the ledger is local) before any AML command runs"
+            )
+        endpoint = entry.get("s3_endpoint")
+        if endpoint is not None and endpoint != s3.endpoint:
+            continue  # the same bucket name on another object store
+        if kind == "registered_corpus" and uri == here:
+            return (
+                f"its bronze prefix {here} holds a registered {entry.get('role')} corpus "
+                f"(corpus ledger {path}, attempt {entry.get('attempt')}); use another bronze "
+                "bucket for development"
+            )
     return None
+
+
+def bronze_uri(bucket: str, prefix: str) -> str:
+    """The ledger's name for a bronze datagen prefix: ``s3://bucket/prefix/``."""
+    return f"s3://{bucket}/{prefix.strip('/')}/"
 
 
 def _hash_role(ref: str) -> str | None:
@@ -155,8 +173,8 @@ def recorded_seed_role(value: Any) -> str | None:
         r = value.get("role")
         if r in PROTECTED_ROLES:
             return str(r)
-        if "seed_ref" in value and value.get("seed_ref") is None:
-            return WITHHELD
+        if value.get("seed_ref") is None:
+            return WITHHELD  # a recorded form with no seed_ref names no seed it can show
         return recorded_seed_role(value.get("seed_ref"))
     if isinstance(value, list | tuple):
         roles = [recorded_seed_role(v) for v in value]
@@ -175,7 +193,9 @@ def recorded_seed_role(value: Any) -> str | None:
             d = Decimal(text)
         except InvalidOperation:
             return None
-        if d.is_finite() and d == d.to_integral_value():
+        # A seed has at most 19 digits; a huge exponent is not one (and int()
+        # of it would build an enormous number).
+        if d.is_finite() and d.adjusted() < 20 and d == d.to_integral_value():
             return _held_out(int(d))
     return None
 
@@ -190,8 +210,9 @@ def protected_record_reason(
     that names a held-out seed in any form ``recorded_seed_role`` reads, or
     is withheld. With ``fail_closed`` (the default), a financial record whose
     held-out check cannot run because the held-out record cannot be read is
-    refused; ``compare``, which spends nothing and hides every integer seed
-    then, passes False. With ``require_identity`` (the release gate and the
+    refused; ``compare``, which spends nothing and then hides every value that
+    reads as an integer seed, passes False. The release gate and the
+    held-out audit are to call it with the fail-closed defaults. With ``require_identity`` (the release gate and the
     audit), a financial record with no corpus block or no seed is refused as
     unidentified; ``compare`` passes False and shows such a record as not
     established instead."""

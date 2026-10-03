@@ -1251,11 +1251,14 @@ def seed_ever_recorded(seed: int) -> str | None:
 
 
 def _look_commit(rec: Path, seed: int) -> str | None:
-    """The first commit (any branch, stashes included) whose copy of the look
-    record ``rec`` lists ``seed``, or None. Each commit's copy is parsed; the
-    seed never appears in a command line (git log -S would put it in argv,
-    readable by every process on the host). Raises OSError when git cannot
-    list or read the history."""
+    """The first commit whose copy of the look record ``rec`` lists
+    ``seed``, or None: every branch and tag, every reflog entry (older
+    stashes, amended and rebased commits) and merge commits against each
+    parent. Each copy is parsed; one that is not JSON (a conflict left in it)
+    is searched as text. The seed never appears in a command line (``git log
+    -S`` would put it in argv, readable by every process on the host).
+    Raises OSError when git cannot list or read the history, or the
+    repository is shallow (its history would be cut short)."""
     import subprocess
 
     def git(*args: str) -> str:
@@ -1266,16 +1269,28 @@ def _look_commit(rec: Path, seed: int) -> str | None:
             raise OSError(f"git {args[0]} over {rec.name} failed (exit {out.returncode})")
         return out.stdout
 
-    # Commits that added or changed the file (a deleting commit has no copy).
-    for sha in git("log", "--all", "--format=%H", "--diff-filter=ACMR", "--", rec.name).split():
+    if git("rev-parse", "--is-shallow-repository").strip() != "false":
+        raise OSError(f"the repository holding {rec.name} is shallow; its look history is cut")
+    shas = git(
+        "log", "--all", "--reflog", "-m", "--format=%H", "--diff-filter=ACMR", "--", rec.name
+    ).split()
+    as_text = re.compile(r'"seed"\s*:\s*"?' + str(int(seed)) + r"(?![0-9])")
+    for sha in dict.fromkeys(shas):
+        raw = git("show", f"{sha}:./{rec.name}")
         try:
-            doc = json.loads(git("show", f"{sha}:./{rec.name}"))
+            doc = json.loads(raw)
         except ValueError:
-            raise OSError(f"{rec.name} at commit {sha} is not JSON") from None
+            if as_text.search(raw):
+                return sha
+            continue
         looks = doc.get("looks") if isinstance(doc, dict) else None
         for e in looks if isinstance(looks, list) else []:
-            s = e.get("seed") if isinstance(e, dict) else None
-            if isinstance(s, int) and not isinstance(s, bool) and s == seed:
+            v = e.get("seed") if isinstance(e, dict) else None
+            if isinstance(v, bool):
+                continue
+            if (isinstance(v, int) and v == seed) or (
+                isinstance(v, str) and v.strip().isdigit() and int(v) == seed
+            ):
                 return sha
     return None
 

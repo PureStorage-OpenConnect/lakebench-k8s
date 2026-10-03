@@ -221,7 +221,7 @@ def _registered_corpus_record(
     registered corpus, the ``_CorpusRecord`` whose ``attempted`` entry is
     already on disk. Every refusal is exit 2 on ``run.protected_corpus``,
     made before any cluster call, and names no seed."""
-    from lakebench.aml.look_guard import PATH, protected_corpus_reason
+    from lakebench.aml.look_guard import PATH, bronze_uri, protected_corpus_reason
     from lakebench.config import datagen_seed as ds
 
     reason = protected_corpus_reason(cfg)
@@ -290,8 +290,10 @@ def _registered_corpus_record(
         "seed_hash": ds.seed_hash(held.salt, seed),
         "config_sha256": hashlib.sha256(Path(config_file).read_bytes()).hexdigest(),
         "namespace": cfg.get_namespace(),
-        "bronze_uri": f"s3://{cfg.platform.storage.s3.buckets.bronze}/"
-        f"{bronze_datagen_prefix(cfg).rstrip('/')}/",
+        "bronze_uri": bronze_uri(
+            cfg.platform.storage.s3.buckets.bronze, bronze_datagen_prefix(cfg)
+        ),
+        "s3_endpoint": cfg.platform.storage.s3.endpoint,
         "image": cfg.images.datagen,
         "lakebench_commit": code.get("git_sha"),
         "lakebench_dirty": code.get("git_dirty"),

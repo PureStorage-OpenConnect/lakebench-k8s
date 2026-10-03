@@ -610,23 +610,42 @@ def _hidden_seeds() -> Hidden:
     return ProtectedSeeds()
 
 
+_SEED_TEXT = re.compile(r"[+-]?[0-9][0-9_]*(?:\.0+)?")
+
+
+def _seed_int(v: Any) -> int | None:
+    """*v* read as an integer seed: an int, an integer-valued float, or text
+    such as ``123``, ``+123``, ``1_234`` or ``123.0``; None otherwise."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v) if v.is_integer() else None
+    if isinstance(v, str) and _SEED_TEXT.fullmatch(v.strip()):
+        return int(v.strip().replace("_", "").split(".")[0])
+    return None
+
+
 def _seed_out(v: Any, hidden: Hidden) -> Any:
     """*v* as a recorded seed may be shown: a protected, spent or recorded
     look seed (or any integer seed when that list cannot be read) reads
-    ``<protected seed>``."""
+    ``<protected seed>``, in any form that reads as an integer, and inside a
+    ``{seed_ref}`` form."""
     if isinstance(v, list | tuple):
         return [_seed_out(x, hidden) for x in v]
-    if isinstance(v, str) and v.strip().isdigit():
-        return v if hidden is not None and int(v) not in hidden else "<protected seed>"
-    if isinstance(v, bool) or not isinstance(v, int):
+    if isinstance(v, Mapping):
+        return {k: (_seed_out(x, hidden) if k == "seed_ref" else x) for k, x in v.items()}
+    n = _seed_int(v)
+    if n is None:
         return v
-    if hidden is None or v in hidden:
+    if hidden is None or n in hidden:
         return "<protected seed>"
     return v
 
 
 _RUN_ID_TOKEN = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
-_INT_TOKEN = re.compile(r"(?<![\w.-])\d+(?!\w|\.\d)")
+_INT_TOKEN = re.compile(r"(?<![\w.-])\d+(?:\.0+)?(?!\w|\.\d)")
 _DIGIT_TO_LETTER = str.maketrans("0123456789", "abcdefghij")
 
 
@@ -644,7 +663,11 @@ def _scrub_text(text: str, hidden: Hidden) -> str:
 
     out = _RUN_ID_TOKEN.sub(mask, text)
     out = _INT_TOKEN.sub(
-        lambda m: "<protected seed>" if hidden is None or int(m.group(0)) in hidden else m.group(0),
+        lambda m: (
+            "<protected seed>"
+            if hidden is None or int(m.group(0).split(".")[0]) in hidden
+            else m.group(0)
+        ),
         out,
     )
     return re.sub(

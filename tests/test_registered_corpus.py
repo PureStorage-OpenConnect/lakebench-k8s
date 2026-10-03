@@ -349,6 +349,56 @@ def test_seed_ever_recorded_reads_the_git_history_without_the_seed_in_argv(tmp_p
     monkeypatch.setattr(subprocess, "run", spy)
     msg = ds.seed_ever_recorded(pc.EV)
     assert msg and "registered evaluation seed" in msg and "by commit" in msg
+    assert ds.seed_ever_recorded(pc.RB) is None
     assert ds.seed_ever_recorded(int(str(pc.EV)[:7])) is None  # no substring match
     assert argvs and not any(str(pc.EV)[:7] in " ".join(a) for a in argvs)
     _no_seed(msg)
+
+
+def _repo_with_record(tmp_path, monkeypatch, text):
+    repo = tmp_path / "repo"
+    rec = repo / "aml_registered_looks.json"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    rec.write_text(text)
+    _git(repo, "add", rec.name)
+    _git(repo, "commit", "-qm", "record")
+    monkeypatch.setattr(ds, "looks_path", lambda: rec)
+    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "none.jsonl"))
+    pc.use_heldout(monkeypatch)
+    return repo, rec
+
+
+def test_look_history_finds_amended_away_conflicted_and_text_seeds(tmp_path, monkeypatch):
+    repo, rec = _repo_with_record(tmp_path, monkeypatch, json.dumps({"looks": []}))
+    # A look committed, then amended away: only the reflog still has it.
+    rec.write_text(json.dumps({"looks": [{"role": "evaluation", "seed": pc.EV}]}))
+    _git(repo, "commit", "-qam", "look")
+    rec.write_text(json.dumps({"looks": []}))
+    _git(repo, "commit", "-q", "--amend", "--allow-empty", "-am", "no look")
+    assert ds.seed_ever_recorded(pc.EV)
+    # A copy left with conflict markers is searched as text; a seed recorded
+    # as a string is matched.
+    rec.write_text(f'<<<<<<< ours\n{{"looks": [{{"seed": "{pc.RB}"}}]}}\n>>>>>>> theirs\n')
+    _git(repo, "commit", "-qam", "conflict")
+    assert ds.seed_ever_recorded(pc.RB)
+
+
+def test_a_shallow_history_refuses(tmp_path, monkeypatch):
+    import subprocess
+
+    src, _ = _repo_with_record(tmp_path, monkeypatch, json.dumps({"looks": []}))
+    (src / "x").write_text("1")
+    _git(src, "add", "x")
+    _git(src, "commit", "-qm", "two")
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{src}", str(shallow)],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(ds, "looks_path", lambda: shallow / "aml_registered_looks.json")
+    with pytest.raises(OSError, match="shallow"):
+        ds.seed_ever_recorded(pc.EV)
