@@ -2720,6 +2720,16 @@ class SparkJobManager:
             }
         )
 
+        if job_type == JobType.REPRODUCE_FINANCIAL:
+            # One attempt: a reproduction writes one result, and a retried
+            # driver would only repeat a determined outcome or a crash.
+            # Submission retries stay (they run before the driver starts).
+            _restart_policy = {
+                "type": "OnFailure",
+                "onFailureRetries": 0,
+                "onSubmissionFailureRetries": 5,
+                "onSubmissionFailureRetryInterval": 60,
+            }
         if (
             job_type == JobType.SCORE_FINANCIAL_REFERENCE
             and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")

@@ -611,3 +611,11 @@
   source: src/lakebench/aml/look_guard.py:refuse_if_protected
   text: '`run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.'
   fix: 'Use the calibration seed or another unregistered seed. A registered look runs only through `scripts/aml_gate.py --registered`, and its corpus is generated only by `lakebench generate --registered-corpus`.'
+- id: financial-reproduce-reruns-the-alerts-rule-on-what-gold-read
+  title: financial reproduce reruns the alert's rule on what gold read
+  kind: exit-code
+  subject:
+  - financial.reproduce.snapshot_gone
+  source: src/lakebench/exit_codes.py:PATHS
+  text: '`financial reproduce` reproduces the alert from the snapshots its run''s gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 every time (it could not reproduce).'
+  fix: 'Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment''s latest.'

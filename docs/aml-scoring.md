@@ -572,10 +572,27 @@ Two operator-facing subcommands cover the retention-workload scenarios:
   catalogue that scenario is workload id W8, which is unrelated to
   detection rule W8_dormant_reactivation and is never a rule id passed
   to `--rule`.
-- **`lakebench financial reproduce CONFIG --alert-id <id>`** takes a single alert
-  from `gold.alerts` and reproduces it against the historical snapshot the
-  original rule ran on. Small, bounded work; used as a
-  supervisory-reproducibility smoke check, not as a scaling metric.
+- **`lakebench financial reproduce CONFIG --alert-id <id>`** (`--run RUN_ID`)
+  reruns one alert's rule on exactly what the run's gold-finalize read. A
+  batch gold-finalize logs the snapshot of `silver.transactions`,
+  `silver.entities` and `silver.silver_batch_versions` it reads, and the
+  batch scorer, before maintenance, fingerprints every column of each
+  (`financial_scoring.read_snapshots` in the run record: table, snapshot,
+  `total_records`, `rows`, `fp`, `cols_sha`). The command reads that record
+  (`--run`, or the deployment's latest AML batch run on this host) and
+  refuses before any cluster call when it has none (exit 4: the run
+  predates 1.7). The job reads each table at its recorded snapshot, or, when
+  that expired, the current table if its fingerprint is the same (content
+  and batch stamping equal: `basis: equivalent`); filters the transactions
+  to the batches the versions table had sealed when gold read it; runs the
+  rule with gold's parameters; and matches the alert on (rule, entity,
+  `alert_ts`) and the set of related transactions. It writes
+  `scoring/reproduce/<alert_id>/result.json` and the command exits 0 when
+  the alert is reproduced, 1 when it is not (no match, several, a different
+  set, or the rule declined to run) or the alert is not in `gold.alerts` for
+  that run, and 4 when a snapshot is gone and the content changed. W3 and
+  W17 path budgets depend on the driver's memory, so reproduce a W2 or W4
+  alert for a clean check.
 
 `CONFIG` in both cases is the same YAML you passed to `deploy`. Both
 verbs load it, assert `workload.schema=financial`, and dispatch a

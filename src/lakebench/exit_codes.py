@@ -231,12 +231,24 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "financial.reproduce.mismatch",
         _C.FAILED,
-        "`financial reproduce` ran but did not reproduce the alert",
-        planned=True,
+        "`financial reproduce` ran the alert's rule on the snapshots its run's gold read and "
+        "did not reproduce the alert (no match, several, different related transactions), "
+        "or the rule declined to run",
+    ),
+    ExitPath(
+        "financial.reproduce.not_found",
+        _C.FAILED,
+        "`financial reproduce` found no such alert in gold.alerts, or one another run wrote",
     ),
     # 2
     ExitPath("click.usage", _C.USAGE, "an unknown flag, a missing argument or a bad value"),
     ExitPath("config.validation", _C.USAGE, "the config fails to load or validate", v16_code=1),
+    ExitPath(
+        "financial.reproduce.no_record",
+        _C.USAGE,
+        "`financial reproduce` found no AML batch run record of the deployment on this host "
+        "(or none for `--run`)",
+    ),
     ExitPath(
         "config.unsupported",
         _C.USAGE,
@@ -501,8 +513,9 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "financial.reproduce.snapshot_gone",
         _C.PREREQUISITE,
-        "`financial reproduce` cannot read the snapshot the alert came from",
-        planned=True,
+        "`financial reproduce` cannot read what the alert's run read: the run recorded no "
+        "read snapshots (before 1.7), or a snapshot expired and the table's content changed",
+        v16_code=1,
     ),
     ExitPath(
         "run.deps_missing",

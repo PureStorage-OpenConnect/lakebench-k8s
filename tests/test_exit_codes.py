@@ -145,8 +145,6 @@ def test_every_exit_code_has_a_meaning():
 PLANNED_BY = {
     "admin.version_change_in_use": "SD-10",
     "admin.version_change_needs_flag": "SD-10",
-    "financial.reproduce.mismatch": "AM-18",
-    "financial.reproduce.snapshot_gone": "AM-18",
 }
 
 
@@ -549,6 +547,89 @@ def _scenario_financial_k8s_unreachable(monkeypatch, tmp_path):
     (tmp_path / "c.yaml").write_text("name: x\n")
     argv = ["financial", "score", str(tmp_path / "c.yaml"), "--manifest", "s3://m"]
     return _runner().invoke(app, [*argv, "--output", "s3://o"])
+
+
+#: The three snapshots an AML batch gold-finalize read (test values).
+_READ_SNAPSHOTS = [
+    {"table": t, "snapshot": i + 1, "total_records": 10, "rows": 10, "fp": "9", "cols_sha": "c"}
+    for i, t in enumerate(
+        ("silver.transactions", "silver.entities", "silver.silver_batch_versions")
+    )
+]
+
+
+def _reproduce_scenario(monkeypatch, tmp_path, *, record=True, snapshots=True, outcome=None):
+    """financial reproduce with a stubbed config, record, job and S3: the
+    record (or none) decides the refusals before any cluster call, the
+    job's result.json the outcome."""
+    import json as _json
+    from types import SimpleNamespace
+
+    import lakebench.cli._financial as fin
+
+    cfg = SimpleNamespace(
+        name="aml-x",
+        platform=SimpleNamespace(
+            kubernetes=SimpleNamespace(context=None),
+            storage=SimpleNamespace(s3=SimpleNamespace(buckets=SimpleNamespace(gold="g"))),
+        ),
+        get_namespace=lambda: "ns-x",
+    )
+    monkeypatch.setattr(fin, "_load_config", lambda path, verb="financial": cfg)
+    runs = tmp_path / "lakebench-output" / "runs"
+    if record:
+        d = runs / "run-20261003-120000-aaaaaa"
+        d.mkdir(parents=True)
+        rec = {
+            "run_id": "20261003-120000-aaaaaa",
+            "deployment_name": "aml-x",
+            "start_time": "2026-10-03T12:00:00+00:00",
+            "experiment": {"workload": {"name": "financial"}, "mode": "batch"},
+            "financial_scoring": {"read_snapshots": _READ_SNAPSHOTS if snapshots else []},
+        }
+        (d / "metrics.json").write_text(_json.dumps(rec))
+
+    class _Jobs:
+        def submit_job(self, *a, **k):
+            return SimpleNamespace(state="SUBMITTED", message="ok")
+
+    class _S3:
+        def __init__(self):
+            self.raw_client = self
+
+        def put_object(self, **k):
+            pass
+
+        def delete_object(self, **k):
+            pass
+
+        def get_object(self, **k):
+            body = _json.dumps({"run_id": "20261003-120000-aaaaaa", "outcome": outcome})
+            return {"Body": SimpleNamespace(read=lambda: body.encode())}
+
+    monkeypatch.setattr(fin, "_get_job_manager", lambda c: _Jobs())
+    monkeypatch.setattr(fin, "_s3", lambda c: _S3())
+    monkeypatch.setattr(fin, "_wait_for_sparkapp", lambda *a, **k: "COMPLETED")
+    (tmp_path / "c.yaml").write_text("name: aml-x\n")
+    return _runner().invoke(
+        app, ["financial", "reproduce", str(tmp_path / "c.yaml"), "--alert-id", "abc-123"]
+    )
+
+
+def _scenario_reproduce_no_record(monkeypatch, tmp_path):
+    return _reproduce_scenario(monkeypatch, tmp_path, record=False)
+
+
+def _scenario_reproduce_snapshot_gone(monkeypatch, tmp_path):
+    return _reproduce_scenario(monkeypatch, tmp_path, snapshots=False)
+
+
+def _scenario_reproduce_not_found(monkeypatch, tmp_path):
+    return _reproduce_scenario(monkeypatch, tmp_path, outcome="not_found")
+
+
+def _scenario_reproduce_mismatch(monkeypatch, tmp_path):
+    return _reproduce_scenario(monkeypatch, tmp_path, outcome="mismatch")
 
 
 def _scenario_sigint(monkeypatch, tmp_path):
@@ -1537,6 +1618,10 @@ SCENARIOS = {
     "confirm.non_tty": _scenario_confirm_non_tty,
     "sigint": _scenario_sigint,
     "financial.k8s_unreachable": _scenario_financial_k8s_unreachable,
+    "financial.reproduce.no_record": _scenario_reproduce_no_record,
+    "financial.reproduce.snapshot_gone": _scenario_reproduce_snapshot_gone,
+    "financial.reproduce.not_found": _scenario_reproduce_not_found,
+    "financial.reproduce.mismatch": _scenario_reproduce_mismatch,
     "config.validation": _scenario_config_validation,
     "config.unsupported": _scenario_config_unsupported,
     "config.name_required": _scenario_config_name_required,

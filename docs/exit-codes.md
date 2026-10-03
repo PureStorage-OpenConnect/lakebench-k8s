@@ -14,10 +14,10 @@ path yet says so.
 | Code | Name | Meaning | Produced by |
 |---|---|---|---|
 | 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass`, `compare.like_for_like`, `status.ok`, `plan.ok` |
-| 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone`, `repeat.no_verified_corpus`, `status.drift`, `status.namespace_missing`, `stop.api_error`, `logs.no_pod` |
-| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `run.protected_corpus`, `alias.refused`, `compare.equal_names`, `compare.bad_ref`, `compare.same_runs`, `compare.unreadable_record`, `compare.removed_flag`, `reproduce.report_required` |
+| 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone`, `repeat.no_verified_corpus`, `status.drift`, `status.namespace_missing`, `stop.api_error`, `logs.no_pod`, `financial.reproduce.mismatch`, `financial.reproduce.not_found` |
+| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `financial.reproduce.no_record`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `run.protected_corpus`, `alias.refused`, `compare.equal_names`, `compare.bad_ref`, `compare.same_runs`, `compare.unreadable_record`, `compare.removed_flag`, `reproduce.report_required` |
 | 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `reproduce.existing_namespace`, `reproduce.nonce_changed`, `reproduce.held_out`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `datagen.pods_live`, `series.corpus_changed`, `lease.held`, `context.changed`, `destroy.unverified_cluster` |
-| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `capacity.shortfall`, `capacity.unknown`, `plan.missing_storage_class`, `k8s.unreachable`, `k8s.api_error`, `s3.unreachable`, `financial.k8s_unreachable`, `run.deps_missing`, `run.deps_stale` |
+| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `capacity.shortfall`, `capacity.unknown`, `plan.missing_storage_class`, `k8s.unreachable`, `k8s.api_error`, `s3.unreachable`, `financial.k8s_unreachable`, `financial.reproduce.snapshot_gone`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
 | 10 | `COMPARE_NOT_COMPARABLE` | compare: NOT COMPARABLE. | `compare.not_comparable` |
@@ -39,6 +39,8 @@ the CLI down every path listed here and checks the code.
 | `run.pass` | 0 | `run` finished and its verdict passed |
 | `status.ok` | 0 | `status` finds every listed component ready |
 | `version.ok` | 0 | `lakebench version` prints the version |
+| `financial.reproduce.mismatch` | 1 | `financial reproduce` ran the alert's rule on the snapshots its run's gold read and did not reproduce the alert (no match, several, different related transactions), or the rule declined to run |
+| `financial.reproduce.not_found` | 1 | `financial reproduce` found no such alert in gold.alerts, or one another run wrote |
 | `logs.no_pod` | 1 | `logs` found no pod for the component, or none with a log to read yet (a container still starting, no previous container for `--previous`) |
 | `repeat.no_verified_corpus` | 1 | `run --repeat` found no verified corpus to reuse after repetition 1 |
 | `run.datagen_timeout` | 1 | datagen did not finish in time; the record says "datagen timed out" in verdict.reasons |
@@ -60,6 +62,7 @@ the CLI down every path listed here and checks the code.
 | `config.unsupported` | 2 | the workload, recipe and mode combination is unsupported, or the scale is above the workload's datagen ceiling |
 | `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
 | `config.validation` | 2 | the config fails to load or validate |
+| `financial.reproduce.no_record` | 2 | `financial reproduce` found no AML batch run record of the deployment on this host (or none for `--run`) |
 | `reproduce.report_required` | 2 | `reproduce` of a registered look's package without --report (a look is never rerun) |
 | `run.args` | 2 | a `run` argument or combination is refused before any cluster call |
 | `run.protected_corpus` | 2 | a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none; or bronze-verify (or its check before a `run --stage` subset) refused the corpus: its manifest comes from a held-out or spent seed, gives back no corpus seed, is missing where one is required, or the held-out record cannot be read |
@@ -89,6 +92,7 @@ the CLI down every path listed here and checks the code.
 | `capacity.unknown` | 4 | the run's capacity check could not read the nodes or pods (the check fails closed) |
 | `deploy.state_unrecordable` | 4 | `deploy` could not read the namespace or write the nonce to the directory's state |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
+| `financial.reproduce.snapshot_gone` | 4 | `financial reproduce` cannot read what the alert's run read: the run recorded no read snapshots (before 1.7), or a snapshot expired and the table's content changed |
 | `k8s.api_error` | 4 | `logs` or `status` got an API error reading the deployment, or `stop` reading its namespace (a permission gap, a server error); nothing changed |
 | `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
 | `nameless.namespace_unreadable` | 4 | a nameless config's namespace could not be read for its check |

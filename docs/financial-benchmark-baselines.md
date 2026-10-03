@@ -79,9 +79,9 @@ budget below is what the ENG-2C.4.8 verification asserts against.
 
 ## Reproduce (W10, `lakebench financial reproduce`)
 
-Reproducing a specific past alert via `FOR TIMESTAMP AS OF`. Small,
-bounded work; used as a supervisory-reproducibility smoke check rather
-than a scaling metric.
+Reproducing one batch alert from the snapshots its run's gold read (the
+run record's `financial_scoring.read_snapshots`). Small, bounded work; used
+as a supervisory-reproducibility smoke check rather than a scaling metric.
 
 | Scale | Wall-clock p50 (s) | Reproduction match rate |
 |------:|-------------------:|------------------------:|
