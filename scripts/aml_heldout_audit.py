@@ -34,7 +34,7 @@ Usage::
 
     python scripts/aml_heldout_audit.py \\
         --runs-dir lakebench-output/runs --journal-dir lakebench-output/journal \\
-        --ledger ../lakebench-k8s/dev-artifacts/EVIDENCE-v1.7.md --out audit.json
+        --ledger <deployments ledger, e.g. EVIDENCE-v1.7.md> --out audit.json
 """
 
 from __future__ import annotations
@@ -196,35 +196,75 @@ def raw_corpus_fields(path: Path) -> tuple[str | None, Any, Any]:
     return raw_corpus_candidates(_raw_config(path))[0]
 
 
-def raw_config_reason(data: dict) -> str | None:
+class Unresolved(ValueError):
+    """A field the rule reads holds a ``${VAR}`` this environment cannot
+    resolve: the config cannot be checked."""
+
+
+def _field(value: Any) -> Any:
+    """A raw config value with ``${VAR}`` substituted as the loader would;
+    an integer-looking result becomes an int. Raises Unresolved."""
+    if not isinstance(value, str) or "${" not in value:
+        return value
+    from lakebench.config.loader import _substitute_env_vars
+
+    missing: list[str] = []
+    out = _substitute_env_vars(value, missing).strip()
+    if missing:
+        raise Unresolved(f"unresolved {', '.join(missing)}")
+    return int(out) if out.isdigit() else out
+
+
+def raw_config_reason(data: dict, name: str | None = None) -> str | None:
     """``look_guard``'s config rule over a raw config: a protected role or
     held-out seed in any reading of the workload block, or (financial) a
-    bronze prefix in this host's corpus ledger."""
+    bronze prefix in this host's corpus ledger. ``name`` is the deployment
+    name when the config sets none (a journal's ``config_name``). Raises
+    Unresolved when a field it reads holds an unresolvable ``${VAR}``."""
+    name = _field(data.get("name")) or name
     for schema, seed, role in raw_corpus_candidates(data):
+        schema, seed, role = _field(schema), _field(seed), _field(role)
         reason = look_guard.corpus_fields_reason(schema, seed, role)
         if reason is not None:
             return reason
         if schema == "financial":
             s3 = ((data.get("platform") or {}).get("storage") or {}).get("s3") or {}
-            bronze = (s3.get("buckets") or {}).get("bronze") or f"{data.get('name')}-bronze"
+            bronze = _field((s3.get("buckets") or {}).get("bronze")) or f"{name}-bronze"
             reason = look_guard.registered_prefix_reason(bronze, FINANCIAL_PREFIX)
             if reason is not None:
                 return reason
     return None
 
 
-def _session_config(path: Path) -> tuple[str | None, str | None]:
-    """(session id, config path) from a journal's session.start event."""
+def _session_configs(path: Path) -> list[dict[str, Any]]:
+    """Every session.start of a journal file (one file per deployment name
+    holds each session started under it): session id, config path, config
+    name and the config hash recorded then."""
+    out = []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
                 event = json.loads(line)
             except ValueError:
                 continue
-            if event.get("event_type") == "session.start":
+            if isinstance(event, dict) and event.get("event_type") == "session.start":
                 details = event.get("details") or {}
-                return event.get("session_id"), details.get("config_file")
-    return None, None
+                out.append(
+                    {
+                        "session": event.get("session_id"),
+                        "config": details.get("config_file"),
+                        "name": details.get("config_name"),
+                        "hash": details.get("config_hash"),
+                    }
+                )
+    return out
+
+
+def _journal_hash(path: Path) -> str:
+    """journal.py's config hash: the first 16 hex of the file's sha256."""
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
 
 def audit_journals(audit: Audit, journal_dirs: Iterable[Path]) -> None:
@@ -237,7 +277,7 @@ def audit_journals(audit: Audit, journal_dirs: Iterable[Path]) -> None:
             audit.counts["journals"] += 1
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
-                session, config = _session_config(path)
+                sessions = _session_configs(path)
             except OSError as e:
                 audit.skip(str(path), f"journal unreadable ({type(e).__name__})", incomplete=True)
                 continue
@@ -250,33 +290,43 @@ def audit_journals(audit: Audit, journal_dirs: Iterable[Path]) -> None:
                 hits = []
             for hit in hits:
                 audit.findings.append({"journal": str(path), "kind": "seed_token", "reason": hit})
-            if not config:
-                audit.skip(f"session {session}", "the journal names no config")
-                continue
-            cfg_path = Path(config)
-            if not cfg_path.is_absolute():
-                # The journal stores the path as typed: relative to the
-                # directory lakebench-output/ sits in.
-                cfg_path = d.parent.parent / cfg_path
-            if not cfg_path.is_file():
-                audit.skip(f"session {session}", f"config unavailable ({config})")
-                continue
-            try:
-                reason = raw_config_reason(_raw_config(cfg_path))
-            except Exception as e:  # noqa: BLE001 -- a config that does not parse
-                audit.skip(
-                    f"session {session}", f"config unreadable ({type(e).__name__})", incomplete=True
-                )
-                continue
-            if reason is not None:
-                audit.findings.append(
-                    {
-                        "journal": str(path),
-                        "session": str(session),
-                        "kind": "protected_config",
-                        "reason": reason,
-                    }
-                )
+            if not sessions:
+                audit.skip(str(path), "the journal names no session")
+            for sess in sessions:
+                _audit_session(audit, d, path, sess)
+
+
+def _audit_session(audit: Audit, d: Path, path: Path, sess: dict[str, Any]) -> None:
+    session, config = sess["session"], sess["config"]
+    if not config:
+        audit.skip(f"session {session}", "the journal names no config")
+        return
+    cfg_path = Path(config)
+    if not cfg_path.is_absolute():
+        # The journal stores the path as typed: relative to the directory
+        # lakebench-output/ sits in.
+        cfg_path = d.parent.parent / cfg_path
+    if not cfg_path.is_file():
+        audit.skip(f"session {session}", f"config unavailable ({config})")
+        return
+    try:
+        changed = sess["hash"] not in (None, "none") and _journal_hash(cfg_path) != sess["hash"]
+        reason = raw_config_reason(_raw_config(cfg_path), name=sess.get("name"))
+    except Exception as e:  # noqa: BLE001 -- a config that does not parse
+        audit.skip(f"session {session}", f"config unreadable ({type(e).__name__})", incomplete=True)
+        return
+    if reason is not None:
+        audit.findings.append(
+            {
+                "journal": str(path),
+                "session": str(session),
+                "kind": "protected_config",
+                "reason": reason,
+            }
+        )
+    elif changed:
+        # The file is not the one the session ran: what it ran is unchecked.
+        audit.skip(f"session {session}", "config changed since the session", incomplete=True)
 
 
 # -- 3. ledger buckets --------------------------------------------------------
@@ -425,16 +475,27 @@ def audit_bucket_row(
     if cfg_path is None:
         audit.skip(what, f"config unavailable ({row.config})")
         return
+    # The config rule first, from the raw file: it needs no credentials.
+    try:
+        raw = _raw_config(cfg_path)
+        reason = raw_config_reason(raw, name=row.namespace)
+        schema = _field(raw_corpus_candidates(raw)[0][0])
+    except Exception as e:  # noqa: BLE001
+        audit.skip(what, f"config unreadable ({type(e).__name__})", incomplete=True)
+        return
+    if reason is not None:
+        audit.findings.append(
+            {"ledger_row": row.namespace, "kind": "protected_config", "reason": reason}
+        )
+    if schema != "financial":
+        audit.skip(what, "not an AML (financial) deployment")
+        return
     try:
         from lakebench.config.loader import _apply_flat_fields, load_yaml
 
         data = _apply_flat_fields(load_yaml(cfg_path))
-        schema, _seed, _role = raw_corpus_fields(cfg_path)
-    except Exception as e:  # noqa: BLE001 -- unresolved ${VAR}, bad YAML
+    except Exception as e:  # noqa: BLE001 -- unresolved ${VAR} (the keys), bad YAML
         audit.skip(what, f"config unreadable ({type(e).__name__})", incomplete=True)
-        return
-    if schema != "financial":
-        audit.skip(what, "not an AML (financial) deployment")
         return
     s3 = ((data.get("platform") or {}).get("storage") or {}).get("s3") or {}
     buckets = s3.get("buckets") or {}
@@ -590,7 +651,7 @@ def summary(audit: Audit) -> str:
     for r in audit.protected_scored_runs:
         lines.append(f"  PROTECTED {r.get('run_id') or r.get('bucket_path')}: {r['reason_kind']}")
     for f in audit.findings:
-        where = f.get("record") or f.get("journal") or f.get("bucket_path")
+        where = f.get("record") or f.get("journal") or f.get("bucket_path") or f.get("ledger_row")
         lines.append(f"  finding {f['kind']}: {where}")
     for k, v in doc["counts"].items():
         lines.append(f"  {k}: {v}")
