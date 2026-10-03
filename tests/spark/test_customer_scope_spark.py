@@ -336,3 +336,31 @@ def test_missing_customer_master_is_a_skip(spark):
         with pytest.raises(RuleSkipped) as exc:
             get_rule(rule)(txns, run_id="r")
         assert exc.value.reason == "no-customer-master", rule
+
+
+@pytest.mark.parametrize("rule", CUSTOMER_ONLY + GRAPH)
+def test_rule_alerts_have_the_alert_columns(spark, rule):
+    """AML-2: every rule's alert frame has exactly the ALERT_COLUMNS names
+    and types, in order (gold_finalize's INSERT is positional), and the
+    fixture gives every rule at least one alert, so the check is not over
+    an empty frame alone."""
+    from detection_rules import ALERT_COLUMNS
+    from pyspark.sql.types import _parse_datatype_string
+
+    txns, entities = _silver(spark)
+    df = _run(spark, rule, txns, entities)
+    got = [(f.name, f.dataType) for f in df.schema.fields]
+    want = [(name, _parse_datatype_string(ddl)) for name, ddl, _ in ALERT_COLUMNS]
+    assert got == want, rule
+    assert df.count() > 0, rule
+
+
+def test_empty_alerts_frame_has_the_alert_columns(spark):
+    from detection_rules import ALERT_COLUMNS, _empty_alerts_df
+    from pyspark.sql.types import _parse_datatype_string
+
+    df = _empty_alerts_df(spark, "r")
+    assert [(f.name, f.dataType, f.nullable) for f in df.schema.fields] == [
+        (name, _parse_datatype_string(ddl), nullable) for name, ddl, nullable in ALERT_COLUMNS
+    ]
+    assert df.count() == 0

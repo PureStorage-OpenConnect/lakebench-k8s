@@ -44,6 +44,7 @@ from common import (
     rule_stage_profile,
     sealed_txns_filter,
 )
+from detection_rules import ALERT_COLUMNS
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -103,26 +104,17 @@ DEFAULT_DETECTION_RULES = (
 )
 
 
+def _alerts_ddl_columns() -> str:
+    """The gold.alerts column list, from detection_rules.ALERT_COLUMNS."""
+    return ",\n".join(
+        f"    {name:<18} {ddl_type}{'' if nullable else ' NOT NULL'}"
+        for name, ddl_type, nullable in ALERT_COLUMNS
+    )
+
+
 DDL_ALERTS = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_ALERTS} (
-    alert_id           STRING NOT NULL,
-    rule_id            STRING NOT NULL,
-    rule_version       STRING NOT NULL,
-    model_id           STRING NOT NULL,
-    model_version      STRING NOT NULL,
-    entity_id          BIGINT NOT NULL,
-    related_txn_ids    ARRAY<STRING>,
-    related_entity_ids ARRAY<BIGINT>,
-    alert_ts           TIMESTAMP NOT NULL,
-    alert_score        DOUBLE,
-    priority           STRING,
-    status             STRING,
-    disposition        STRING,
-    alert_type         STRING,
-    run_id             STRING NOT NULL,
-    narrative          STRING,
-    evidence           MAP<STRING, STRING>,
-    detected_ts        TIMESTAMP
+{_alerts_ddl_columns()}
 ) USING iceberg PARTITIONED BY (months(alert_ts))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """

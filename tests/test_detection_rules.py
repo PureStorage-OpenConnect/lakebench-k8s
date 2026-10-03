@@ -248,7 +248,6 @@ def test_normalize_name_expr_strips_punctuation_and_suffix():
     session available), so we translate the expression into a Python
     regex and exercise the equivalent transform.
     """
-    import re
 
     def _py_normalize(s: str) -> str:
         if s is None:
@@ -962,57 +961,30 @@ def test_replay_uses_signature_not_co_varnames():
 
 
 def test_all_rules_stamp_detected_ts():
-    """LB-125: every rule's alert projection appends current_timestamp() as
-    detected_ts. AST-checked per rule so a dropped stamp fails here (the
-    gold.alerts DDL positional INSERT ... SELECT * requires all 9 rules to
-    emit the column, in last position)."""
+    """LB-125: every rule's alerts carry detected_ts = current_timestamp().
+    Since AML-2 every rule projects through _alert_frame (test_alert_frame_ast
+    checks that), so the stamp is checked once, in the helper, together with
+    the positional order: gold_finalize writes via a positional
+    `INSERT ... SELECT *`, so the helper must select in ALERT_COLUMNS order."""
     tree = _module_ast()
-    rule_fns = [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef)
-        and len(n.name) > 1
-        and n.name[0] == "w"
-        and n.name[1].isdigit()
-    ]
-    assert len(rule_fns) == 9, [f.name for f in rule_fns]
-    src = DETECTION_RULES_PATH.read_text()
-    for fn in rule_fns:
-        fn_src = ast.get_source_segment(src, fn)
-        # Ordered list of alias("X") names in the function source. The final
-        # projected column is the LAST alias in the body. detected_ts must be
-        # that last column: gold_finalize writes via a POSITIONAL
-        # `INSERT ... SELECT *`, so a same-typed reorder (all of
-        # priority/status/disposition/alert_type/narrative are STRING) would
-        # silently corrupt rows while still "containing" detected_ts. Assert
-        # POSITION, not just presence.
-        alias_names = re.findall(r'\.alias\(\s*["\'](\w+)["\']\s*\)', fn_src)
-        if not alias_names and "_screen_alerts(" in fn_src:
-            # W6 projects through the shared screening helper (W5 too, plus
-            # its own rescreen projection); check the helper instead.
-            helper = next(
-                n
-                for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "_screen_alerts"
-            )
-            fn_src = ast.get_source_segment(src, helper)
-            alias_names = re.findall(r'\.alias\(\s*["\'](\w+)["\']\s*\)', fn_src)
-        assert alias_names, f"{fn.name} has no aliased columns"
-        assert alias_names[-1] == "detected_ts", (
-            f"{fn.name} must project detected_ts LAST (positional INSERT); "
-            f"last alias is {alias_names[-1]!r}"
-        )
+    helper = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_alert_frame"
+    )
+    src = ast.get_source_segment(DETECTION_RULES_PATH.read_text(), helper)
+    assert '"detected_ts": current_timestamp()' in src
+    assert "for name, ddl_type, _ in ALERT_COLUMNS" in src
 
 
 def test_detected_ts_in_empty_schema_and_all_ddls():
-    """LB-125: detected_ts must be present (and last) in _empty_alerts_df and
-    in all three gold.alerts DDL sites, with the reused-catalog ALTER guard,
-    or a positional INSERT ... SELECT * misaligns."""
+    """LB-125: detected_ts must be present in ALERT_COLUMNS after evidence
+    (the empty-alerts schema and gold_finalize's DDL are built from it), in
+    the other gold.alerts DDL sites, with the reused-catalog ALTER guard, or
+    a positional INSERT ... SELECT * misaligns."""
     root = Path(__file__).resolve().parents[1]
+    names = [c[0] for c in _alert_columns()]
+    assert names.index("evidence") < names.index("detected_ts")
     det = (root / "src/lakebench/spark/scripts/detection_rules.py").read_text()
-    assert 'StructField("detected_ts"' in det
-    # last field in the empty-alerts schema (after evidence).
-    assert det.index('StructField("evidence"') < det.index('StructField("detected_ts"')
+    assert "for name, ddl_type, nullable in ALERT_COLUMNS" in det  # _empty_alerts_df
 
     ddl = (root / "src/lakebench/deploy/financial_ddl.py").read_text()
     assert "detected_ts" in ddl
@@ -1020,7 +992,7 @@ def test_detected_ts_in_empty_schema_and_all_ddls():
     # Upgrade guard uses a live-schema check + `ADD COLUMNS (...)`, not the
     # `ADD COLUMN IF NOT EXISTS` form (invalid for columns in Spark/Iceberg).
     gf = (root / "src/lakebench/spark/scripts/gold_finalize_financial.py").read_text()
-    assert "detected_ts" in gf
+    assert "for name, ddl_type, nullable in ALERT_COLUMNS" in gf
     assert "ADD COLUMNS (detected_ts TIMESTAMP)" in gf
     assert '"detected_ts" not in' in gf  # only ALTER when genuinely missing
 
@@ -1028,6 +1000,16 @@ def test_detected_ts_in_empty_schema_and_all_ddls():
     assert "detected_ts" in rp
     assert "ADD COLUMNS (detected_ts TIMESTAMP)" in rp
     assert '"detected_ts" not in' in rp
+
+
+def _alert_columns():
+    tree = _module_ast()
+    node = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", None) == "ALERT_COLUMNS"
+    )
+    return ast.literal_eval(node.value)
 
 
 def test_w5_w6_screen_the_corpus_watchlist_fuzzily():
